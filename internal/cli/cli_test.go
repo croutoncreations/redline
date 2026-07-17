@@ -184,6 +184,21 @@ func TestSchedulerStatusConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestSchedulerAttemptsConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/scheduler/attempts" || r.URL.Query().Get("provider") != "codex-main" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `[{"id":1,"provider_account_id":"codex-main","trigger":"automatic","outcome":"error","error":"offline","started_at":"2026-07-16T18:00:00Z","completed_at":"2026-07-16T18:00:01Z"}]`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "scheduler", "attempts", "--provider", "codex-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"outcome": "error"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunShowConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/runs/run-1" {
@@ -199,5 +214,24 @@ func TestRunShowConsumesServiceAPI(t *testing.T) {
 	)
 	if exit != 0 || !strings.Contains(stdout.String(), `"state": "completed"`) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunLogsConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/run-1/logs" ||
+			r.URL.Query().Get("stream") != "stderr" || r.URL.Query().Get("tail_bytes") != "2048" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `{"content":"agent failed\n","size_bytes":13,"truncated":false}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "run", "logs", "run-1", "--stream", "stderr", "--tail-bytes", "2048"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || stdout.String() != "agent failed\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }

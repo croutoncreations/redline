@@ -8,12 +8,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -35,6 +37,7 @@ type Server struct {
 	now         func() time.Time
 	executor    Executor
 	revision    workspace.RevisionResolver
+	artifacts   artifacts.Reader
 	scheduler   *autoscheduler.Loop
 	mux         *http.ServeMux
 	workers     sync.WaitGroup
@@ -67,7 +70,10 @@ func NewServerWithDependencies(
 	executor Executor,
 	revision workspace.RevisionResolver,
 ) *Server {
-	server := &Server{config: cfg, store: database, now: now, executor: executor, revision: revision}
+	server := &Server{
+		config: cfg, store: database, now: now, executor: executor, revision: revision,
+		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
+	}
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -89,7 +95,9 @@ func NewServerWithDependencies(
 	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
 	mux.HandleFunc("GET /v1/scheduler/status", server.schedulerStatus)
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
+	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	server.mux = mux
 	return server
@@ -295,18 +303,13 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is required"})
 		return
 	}
-	paused, err := s.store.ProviderPaused(r.Context(), request.ProviderAccountID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if paused {
-		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
-		return
-	}
 	response, admitted, err := s.dispatch(r.Context(), request, "manual")
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if response.Result.Mode == decision.ModePaused {
+		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
 		return
 	}
 	status := http.StatusOK
@@ -322,6 +325,47 @@ func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
 }
 
 func (s *Server) dispatch(
+	ctx context.Context,
+	request schedulerRequest,
+	trigger string,
+) (response schedulerResponse, admitted bool, dispatchErr error) {
+	startedAt := s.now().UTC()
+	response, admitted, dispatchErr = s.dispatchCore(ctx, request, trigger)
+	attempt := domain.DispatchAttempt{
+		ProviderAccountID: request.ProviderAccountID, Trigger: trigger,
+		StartedAt: startedAt, CompletedAt: s.now().UTC(),
+		Decision: string(response.Result.Decision), Mode: string(response.Result.Mode),
+		Reason: response.Result.Reason,
+	}
+	switch {
+	case dispatchErr != nil:
+		attempt.Outcome = domain.DispatchError
+		attempt.Error = dispatchErr.Error()
+	case admitted:
+		attempt.Outcome = domain.DispatchAdmitted
+	case response.Result.Decision == decision.Run:
+		attempt.Outcome = domain.DispatchNoTask
+	default:
+		attempt.Outcome = domain.DispatchWait
+	}
+	if response.SelectedTask != nil {
+		attempt.SelectedTaskID = response.SelectedTask.ID
+	}
+	if response.Run != nil {
+		attempt.RunID = response.Run.ID
+	}
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := s.store.RecordDispatchAttempt(recordCtx, attempt); err != nil {
+		log.Printf("redline %s dispatch attempt history failed: %v", request.ProviderAccountID, err)
+		if dispatchErr == nil && !admitted {
+			dispatchErr = err
+		}
+	}
+	return response, admitted, dispatchErr
+}
+
+func (s *Server) dispatchCore(
 	ctx context.Context,
 	request schedulerRequest,
 	trigger string,
@@ -438,6 +482,51 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, run)
 }
 
+func (s *Server) getRunLogs(w http.ResponseWriter, r *http.Request) {
+	run, err := s.store.GetRun(r.Context(), r.PathValue("run"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	stream := r.URL.Query().Get("stream")
+	if stream == "" {
+		stream = "stdout"
+	}
+	path := run.OutputFile
+	if stream == "stderr" {
+		path = run.ErrorFile
+	} else if stream != "stdout" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "stream must be stdout or stderr"})
+		return
+	}
+	if path == "" {
+		writeJSON(w, http.StatusNotFound, problem{Error: stream + " artifact is not available"})
+		return
+	}
+	tailBytes := int64(32 * 1024)
+	if configured := r.URL.Query().Get("tail_bytes"); configured != "" {
+		tailBytes, err = strconv.ParseInt(configured, 10, 64)
+		if err != nil || tailBytes <= 0 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "tail_bytes must be a positive integer"})
+			return
+		}
+	}
+	tail, err := s.artifacts.ReadTail(path, tailBytes)
+	if errors.Is(err, artifacts.ErrOutsideRoot) {
+		writeJSON(w, http.StatusForbidden, problem{Error: err.Error()})
+		return
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		writeJSON(w, http.StatusNotFound, problem{Error: "artifact file does not exist"})
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tail)
+}
+
 type decisionResponse struct {
 	Snapshot decision.UsageSnapshot `json:"snapshot"`
 	Result   decision.Result        `json:"result"`
@@ -518,6 +607,21 @@ func (s *Server) listDecisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, decisions)
+}
+
+func (s *Server) listAttempts(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	if provider == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "provider is required"})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	attempts, err := s.store.ListDispatchAttempts(r.Context(), provider, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, attempts)
 }
 
 func (s *Server) evaluateProvider(

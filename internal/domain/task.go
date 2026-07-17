@@ -71,6 +71,30 @@ type SchedulerDecision struct {
 	CreatedAt         time.Time       `json:"created_at"`
 }
 
+type DispatchOutcome string
+
+const (
+	DispatchAdmitted DispatchOutcome = "admitted"
+	DispatchWait     DispatchOutcome = "wait"
+	DispatchNoTask   DispatchOutcome = "no_task"
+	DispatchError    DispatchOutcome = "error"
+)
+
+type DispatchAttempt struct {
+	ID                int64           `json:"id"`
+	ProviderAccountID string          `json:"provider_account_id"`
+	Trigger           string          `json:"trigger"`
+	Outcome           DispatchOutcome `json:"outcome"`
+	Decision          string          `json:"decision,omitempty"`
+	Mode              string          `json:"mode,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
+	SelectedTaskID    string          `json:"selected_task_id,omitempty"`
+	RunID             string          `json:"run_id,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	StartedAt         time.Time       `json:"started_at"`
+	CompletedAt       time.Time       `json:"completed_at"`
+}
+
 type RunState string
 
 const (

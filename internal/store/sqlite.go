@@ -117,6 +117,32 @@ ON runs(provider_account_id) WHERE state IN ('preparing', 'running');
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (6)`); err != nil {
 			return fmt.Errorf("record run migration: %w", err)
 		}
+		version = 6
+	}
+	if version < 7 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE dispatch_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_account_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('admitted', 'wait', 'no_task', 'error')),
+    decision TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    selected_task_id TEXT REFERENCES tasks(id),
+    run_id TEXT REFERENCES runs(id),
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+);
+CREATE INDEX idx_dispatch_attempts_provider_completed
+ON dispatch_attempts(provider_account_id, completed_at DESC, id DESC);
+`); err != nil {
+			return fmt.Errorf("create dispatch attempt schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (7)`); err != nil {
+			return fmt.Errorf("record dispatch attempt migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

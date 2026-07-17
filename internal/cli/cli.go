@@ -10,12 +10,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/apiclient"
+	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -309,7 +311,7 @@ func runProviderControl(
 
 func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline scheduler <evaluate|execute|history|status>")
+		fmt.Fprintln(stderr, "usage: redline scheduler <evaluate|execute|history|attempts|status>")
 		return 1
 	}
 	if args[0] == "status" {
@@ -333,6 +335,20 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 			return 1
 		}
 		writeJSON(stdout, records)
+		return 0
+	}
+	if args[0] == "attempts" {
+		provider, _, ok := providerFlags("scheduler attempts", args[1:], stderr)
+		if !ok {
+			return 1
+		}
+		var attempts []domain.DispatchAttempt
+		path := "/v1/scheduler/attempts?provider=" + url.QueryEscape(provider)
+		if err := client.Do(context.Background(), http.MethodGet, path, nil, &attempts); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, attempts)
 		return 0
 	}
 	if args[0] != "evaluate" && args[0] != "execute" {
@@ -372,7 +388,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 
 func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline run <list|show>")
+		fmt.Fprintln(stderr, "usage: redline run <list|show|logs>")
 		return 1
 	}
 	switch args[0] {
@@ -395,6 +411,38 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 			return 1
 		}
 		writeJSON(stdout, run)
+		return 0
+	case "logs":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: redline run logs <id> [--stream stdout|stderr] [--tail-bytes N]")
+			return 1
+		}
+		flags := flag.NewFlagSet("run logs", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		stream := flags.String("stream", "stdout", "stdout or stderr")
+		tailBytes := flags.Int64("tail-bytes", 32*1024, "maximum bytes from the end of the log")
+		jsonOutput := flags.Bool("json", false, "emit JSON metadata and content")
+		if err := flags.Parse(args[2:]); err != nil || (*stream != "stdout" && *stream != "stderr") || *tailBytes <= 0 {
+			if *stream != "stdout" && *stream != "stderr" {
+				fmt.Fprintln(stderr, "--stream must be stdout or stderr")
+			}
+			if *tailBytes <= 0 {
+				fmt.Fprintln(stderr, "--tail-bytes must be positive")
+			}
+			return 1
+		}
+		path := "/v1/runs/" + url.PathEscape(args[1]) + "/logs?stream=" + url.QueryEscape(*stream) +
+			"&tail_bytes=" + strconv.FormatInt(*tailBytes, 10)
+		var tail artifacts.Tail
+		if err := client.Do(context.Background(), http.MethodGet, path, nil, &tail); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if *jsonOutput {
+			writeJSON(stdout, tail)
+		} else {
+			fmt.Fprint(stdout, tail.Content)
+		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown run command %q\n", args[0])

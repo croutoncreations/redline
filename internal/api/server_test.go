@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jfox/redline/internal/api"
+	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -242,6 +243,124 @@ func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T)
 	}
 }
 
+func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	delete(cfg.Providers, "claude-main")
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	ctx, cancel := context.WithCancel(context.Background())
+	handler.StartScheduler(ctx)
+	deadline := time.Now().Add(time.Second)
+	var attempts []domain.DispatchAttempt
+	for time.Now().Before(deadline) {
+		attempts, err = db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(attempts) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	handler.Wait()
+	if len(attempts) != 1 || attempts[0].Outcome != domain.DispatchError ||
+		attempts[0].Trigger != "automatic" || !strings.Contains(attempts[0].Error, "HTTP 503") {
+		t.Fatalf("attempts = %#v", attempts)
+	}
+}
+
+func TestManualExecutePersistsNoTaskAttemptAndListsIt(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[map[string]any](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	resp, err := http.Get(server.URL + "/v1/scheduler/attempts?provider=codex-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var attempts []domain.DispatchAttempt
+	if err := json.NewDecoder(resp.Body).Decode(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome != domain.DispatchNoTask || attempts[0].Trigger != "manual" {
+		t.Fatalf("attempts = %#v", attempts)
+	}
+}
+
+func TestPausedManualExecuteIsPersistedBeforeConflictResponse(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	postJSON[map[string]any](t, server.URL+"/v1/providers/codex-main/pause", map[string]any{})
+	data, _ := json.Marshal(map[string]string{"provider_account_id": "codex-main"})
+	resp, err := http.Post(server.URL+"/v1/scheduler/execute", "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 1 || attempts[0].Outcome != domain.DispatchWait || attempts[0].Mode != "paused" {
+		t.Fatalf("attempts=%#v err=%v", attempts, err)
+	}
+}
+
+func TestRunLogsRejectArtifactOutsideConfiguredRoot(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.log")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "p", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "t", Name: "Task", ExecutionProfileID: "p", Type: domain.OneOff}
+	if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(t.Context(), "r", task.ID, "codex-main", "", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(t.Context(), "r", domain.RunCompletion{
+		State: domain.RunCompleted, ExitCode: 0, OutputFile: outside,
+	}, apiNow.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(usage.URL)
+	cfg.RunArtifactsDir = root
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/v1/runs/r/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
 func TestEmptyRunListIsJSONArray(t *testing.T) {
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/runs")
@@ -363,6 +482,18 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 			data, err := os.ReadFile(run.OutputFile)
 			if err != nil || !bytes.Contains(data, []byte(`"done":true`)) {
 				t.Fatalf("output=%s err=%v", data, err)
+			}
+			resp, err := http.Get(server.URL + "/v1/runs/" + run.ID + "/logs?stream=stdout&tail_bytes=8")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var tail artifacts.Tail
+			if err := json.NewDecoder(resp.Body).Decode(&tail); err != nil {
+				t.Fatal(err)
+			}
+			if !tail.Truncated || tail.Content != "\":true}\n" {
+				t.Fatalf("tail = %#v", tail)
 			}
 			return
 		}

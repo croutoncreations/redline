@@ -48,6 +48,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Graceful service shutdown.
 - Opt-in automatic scheduling with immediate startup evaluation and configurable polling.
 - Per-provider cycle status, active-run suppression, and automatic repository revision checks.
+- Durable dispatch-attempt history, including usage/admission errors that produce no decision.
+- Bounded stdout/stderr tail inspection through the service API and CLI.
 
 ## Quick start
 
@@ -67,7 +69,9 @@ go run ./cmd/redline decision --provider codex-main
 go run ./cmd/redline scheduler evaluate --provider codex-main --json
 go run ./cmd/redline scheduler execute --provider codex-main --json
 go run ./cmd/redline scheduler status
+go run ./cmd/redline scheduler attempts --provider codex-main
 go run ./cmd/redline run list
+go run ./cmd/redline run logs <run-id> --stream stderr
 ```
 
 The default API is `http://127.0.0.1:7436`. Override it before the command:
@@ -118,8 +122,10 @@ POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
 GET  /v1/scheduler/status
+GET  /v1/scheduler/attempts?provider={account}
 GET  /v1/runs
 GET  /v1/runs/{id}
+GET  /v1/runs/{id}/logs?stream=stdout|stderr&tail_bytes={n}
 ```
 
 The service binds to loopback by default and currently has no authentication. Do not expose
@@ -159,6 +165,26 @@ automatic decisions with `"trigger":"automatic"`. Inspect the live loop with:
 
 ```bash
 go run ./cmd/redline scheduler status
+```
+
+## Operational history and run output
+
+Scheduler decisions answer “what did the budget model conclude?” Dispatch attempts answer “what
+happened operationally when Redline tried to release work?” Attempts persist `admitted`, `wait`,
+`no_task`, and `error` outcomes for both manual and automatic execution:
+
+```bash
+go run ./cmd/redline scheduler attempts --provider codex-main
+```
+
+Completed run output can be inspected without reading artifact paths directly. Responses are tail
+bounded to 64 KiB and may only resolve regular files beneath the configured `run_artifacts_dir`;
+paths and symlinks that escape that root are rejected.
+
+```bash
+go run ./cmd/redline run logs <run-id>
+go run ./cmd/redline run logs <run-id> --stream stderr --tail-bytes 8192
+go run ./cmd/redline run logs <run-id> --json
 ```
 
 ## Development
