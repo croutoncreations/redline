@@ -3,8 +3,9 @@
 Redline is a budget-aware dispatcher for deferred LLM work. It models subscription
 allowances, maintains a durable priority queue, and explains which task would be admitted.
 
-The current implementation includes the Phase 2 service and simulated scheduler. It does
-not launch agents or create workspaces yet.
+The current implementation includes the Phase 3 execution service. Simulated evaluation
+remains available, while explicit scheduler execution can prepare an isolated workspace and
+launch Codex CLI, Claude Code, or a generic command harness.
 
 ## Architecture
 
@@ -39,6 +40,11 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - `min_interval` and `require_repo_change` eligibility.
 - Task enable/disable/retry and provider pause/resume.
 - Persistent simulated scheduler decision history.
+- Existing-directory, Git worktree, DevX, and generic-command workspace providers.
+- Optional workspace setup/finalize hooks and opt-in cleanup policies.
+- Noninteractive Codex CLI, Claude Code, and generic-command harness adapters.
+- Transactional asynchronous run admission with one active run per provider.
+- Run artifacts, recurring completion/requeue, and interrupted-run recovery.
 - Graceful service shutdown.
 
 ## Quick start
@@ -57,6 +63,8 @@ go run ./cmd/redline usage refresh --provider codex-main --json
 go run ./cmd/redline status --provider codex-main
 go run ./cmd/redline decision --provider codex-main
 go run ./cmd/redline scheduler evaluate --provider codex-main --json
+go run ./cmd/redline scheduler execute --provider codex-main --json
+go run ./cmd/redline run list
 ```
 
 The default API is `http://127.0.0.1:7436`. Override it before the command:
@@ -69,6 +77,7 @@ go run ./cmd/redline --api http://127.0.0.1:8000 status --provider claude-main
 
 ```bash
 go run ./cmd/redline profile add --file examples/codex-devx-profile.yaml --json
+go run ./cmd/redline profile add --file examples/claude-worktree-profile.yaml --json
 go run ./cmd/redline task add --file examples/add-tests-task.yaml --json
 go run ./cmd/redline profile list
 go run ./cmd/redline task list
@@ -76,10 +85,14 @@ go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
 ```
 
-Simulated evaluation records the decision and selected task but does not change task state:
+Simulated evaluation records the decision and selected task but does not change task state.
+Execution atomically claims the task and returns a preparing run while work continues in the
+service:
 
 ```bash
 go run ./cmd/redline scheduler evaluate --provider codex-main --revision "$(git rev-parse HEAD)"
+go run ./cmd/redline scheduler execute --provider codex-main --revision "$(git rev-parse HEAD)"
+go run ./cmd/redline run show <run-id>
 go run ./cmd/redline scheduler history --provider codex-main
 go run ./cmd/redline pause --provider codex-main
 go run ./cmd/redline resume --provider codex-main
@@ -99,11 +112,30 @@ GET|POST /v1/profiles
 GET|POST /v1/tasks
 POST /v1/tasks/{id}/enable|disable|retry
 POST /v1/scheduler/evaluate
+POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
+GET  /v1/runs
+GET  /v1/runs/{id}
 ```
 
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.
+
+## Execution lifecycle
+
+```text
+queued task -> preparing workspace -> running harness -> finalize -> optional cleanup
+            -> completed (one-off) or requeued (recurring)
+            -> failed on workspace/harness failure
+```
+
+Redline does not impose a maximum runtime. Once admitted, the harness owns the task until it
+exits. Finalize or cleanup failure is recorded separately and does not turn a successful agent
+run into a failed run. On service startup, runs interrupted by a prior process exit are marked
+failed for explicit inspection and retry.
+
+Cleanup defaults to `never`. Supported values are `never`, `on_success`, and `always`.
+Agent instructions and lifecycle hooks remain responsible for commit, push, and PR behavior.
 
 ## Development
 
@@ -114,4 +146,3 @@ go test -cover ./...
 ```
 
 See [the observation report](docs/phase-1-observation.md) for live-provider findings.
-

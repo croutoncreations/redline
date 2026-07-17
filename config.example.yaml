@@ -1,4 +1,5 @@
 database: redline.db
+run_artifacts_dir: .redline/runs
 active_policy: standard
 max_snapshot_age: 15m
 

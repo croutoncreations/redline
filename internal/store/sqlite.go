@@ -85,6 +85,38 @@ CREATE TABLE provider_controls (
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (4)`); err != nil {
 			return fmt.Errorf("record provider controls migration: %w", err)
 		}
+		version = 4
+	}
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE execution_profiles ADD COLUMN harness_command TEXT NOT NULL DEFAULT '';
+ALTER TABLE execution_profiles ADD COLUMN harness_args_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE execution_profiles ADD COLUMN require_clean INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE execution_profiles ADD COLUMN cleanup_policy TEXT NOT NULL DEFAULT '';
+`); err != nil {
+			return fmt.Errorf("extend execution profile schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (5)`); err != nil {
+			return fmt.Errorf("record execution profile migration: %w", err)
+		}
+		version = 5
+	}
+	if version < 6 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE runs ADD COLUMN workspace_directory TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN workspace_metadata TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE runs ADD COLUMN source_revision TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN error_file TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN finalize_state TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN finalize_error TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX idx_runs_one_active_provider
+ON runs(provider_account_id) WHERE state IN ('preparing', 'running');
+`); err != nil {
+			return fmt.Errorf("extend run schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (6)`); err != nil {
+			return fmt.Errorf("record run migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

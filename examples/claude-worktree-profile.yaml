@@ -1,0 +1,11 @@
+id: claude-worktree
+provider_account_id: claude-main
+harness_type: claude-code
+model: sonnet
+harness_args:
+  - --effort
+  - high
+workspace_provider: git-worktree
+repository: /absolute/path/to/repository
+base_branch: main
+cleanup_policy: never

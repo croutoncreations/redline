@@ -1,31 +1,57 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/execution"
+	"github.com/jfox/redline/internal/harness"
 	"github.com/jfox/redline/internal/openusage"
 	"github.com/jfox/redline/internal/store"
+	"github.com/jfox/redline/internal/workspace"
 )
 
-type Server struct {
-	config config.Config
-	store  *store.DB
-	now    func() time.Time
+type Executor interface {
+	Execute(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error
 }
 
-func NewServer(cfg config.Config, database *store.DB, now func() time.Time) http.Handler {
-	server := &Server{config: cfg, store: database, now: now}
+type Server struct {
+	config   config.Config
+	store    *store.DB
+	now      func() time.Time
+	executor Executor
+	mux      *http.ServeMux
+	workers  sync.WaitGroup
+}
+
+func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
+	defaultExecutor := execution.Executor{
+		Store: database, Workspaces: workspace.Manager{}, Harness: &harness.Adapter{},
+		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
+	}
+	return NewServerWithExecutor(cfg, database, now, defaultExecutor)
+}
+
+func NewServerWithExecutor(
+	cfg config.Config,
+	database *store.DB,
+	now func() time.Time,
+	executor Executor,
+) *Server {
+	server := &Server{config: cfg, store: database, now: now, executor: executor}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
@@ -38,9 +64,17 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) http
 	mux.HandleFunc("POST /v1/tasks", server.createTask)
 	mux.HandleFunc("POST /v1/tasks/{task}/{control}", server.taskControl)
 	mux.HandleFunc("POST /v1/scheduler/evaluate", server.evaluateScheduler)
+	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
-	return mux
+	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
+	server.mux = mux
+	return server
 }
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+func (s *Server) Wait() { s.workers.Wait() }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -203,6 +237,103 @@ type schedulerResponse struct {
 	Snapshot     decision.UsageSnapshot `json:"snapshot"`
 	Result       decision.Result        `json:"result"`
 	SelectedTask *domain.Task           `json:"selected_task,omitempty"`
+	Run          *domain.Run            `json:"run,omitempty"`
+}
+
+func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
+	var request schedulerRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	if request.ProviderAccountID == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is required"})
+		return
+	}
+	paused, err := s.store.ProviderPaused(r.Context(), request.ProviderAccountID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if paused {
+		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
+		return
+	}
+	snapshot, result, err := s.evaluateProvider(r, request.ProviderAccountID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := schedulerResponse{Snapshot: snapshot, Result: result}
+	if result.Decision != decision.Run {
+		s.recordSchedulerResponse(r, request.ProviderAccountID, response)
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	task, err := s.store.NextEligibleTask(r.Context(), request.ProviderAccountID, s.now(), request.CurrentRevision)
+	if errors.Is(err, store.ErrNotFound) {
+		s.recordSchedulerResponse(r, request.ProviderAccountID, response)
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	run, err := s.store.AdmitTask(
+		r.Context(), uuid.NewString(), task.ID, request.ProviderAccountID, request.CurrentRevision, s.now(),
+	)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response.SelectedTask = &task
+	response.Run = &run
+	s.recordSchedulerResponse(r, request.ProviderAccountID, response)
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		if err := s.executor.Execute(context.Background(), run, task, profile); err != nil {
+			log.Printf("redline run %s execution bookkeeping failed: %v", run.ID, err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, response)
+}
+
+func (s *Server) recordSchedulerResponse(r *http.Request, provider string, response schedulerResponse) {
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	record := domain.SchedulerDecision{ProviderAccountID: provider, DecisionJSON: encoded}
+	if response.SelectedTask != nil {
+		record.SelectedTaskID = response.SelectedTask.ID
+	}
+	_, _ = s.store.RecordSchedulerDecision(r.Context(), record, s.now())
+}
+
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	runs, err := s.store.ListRuns(r.Context(), limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
+	run, err := s.store.GetRun(r.Context(), r.PathValue("run"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 type decisionResponse struct {
@@ -355,6 +486,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "must be") {
 		status = http.StatusBadRequest
+	} else if strings.Contains(err.Error(), "active run") || strings.Contains(err.Error(), "already has") {
+		status = http.StatusConflict
 	}
 	writeJSON(w, status, problem{Error: err.Error()})
 }

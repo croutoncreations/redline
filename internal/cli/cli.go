@@ -32,6 +32,7 @@ type schedulerResponse struct {
 	Snapshot     decision.UsageSnapshot `json:"snapshot"`
 	Result       decision.Result        `json:"result"`
 	SelectedTask *domain.Task           `json:"selected_task,omitempty"`
+	Run          *domain.Run            `json:"run,omitempty"`
 }
 
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
@@ -63,6 +64,8 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runResource(client, "profiles", remaining[1:], stdout, stderr)
 	case "scheduler":
 		return runScheduler(client, remaining[1:], stdout, stderr)
+	case "run":
+		return runRuns(client, remaining[1:], stdout, stderr)
 	case "pause", "resume":
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	default:
@@ -89,9 +92,14 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		return 1
 	}
 	defer database.Close()
+	if err := database.RecoverInterruptedRuns(context.Background(), now()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	apiServer := api.NewServer(cfg, database, now)
 	server := &http.Server{
 		Addr:              *listen,
-		Handler:           api.NewServer(cfg, database, now),
+		Handler:           apiServer,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", *listen)
@@ -112,6 +120,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
+		apiServer.Wait()
 	}
 	return 0
 }
@@ -313,11 +322,12 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 		writeJSON(stdout, records)
 		return 0
 	}
-	if args[0] != "evaluate" {
+	if args[0] != "evaluate" && args[0] != "execute" {
 		fmt.Fprintf(stderr, "unknown scheduler command %q\n", args[0])
 		return 1
 	}
-	flags := flag.NewFlagSet("scheduler evaluate", flag.ContinueOnError)
+	command := args[0]
+	flags := flag.NewFlagSet("scheduler "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	provider := flags.String("provider", "", "configured provider name")
 	revision := flags.String("revision", "", "current repository revision")
@@ -330,7 +340,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 	}
 	var response schedulerResponse
 	body := map[string]string{"provider_account_id": *provider, "current_revision": *revision}
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/scheduler/evaluate", body, &response); err != nil {
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/scheduler/"+command, body, &response); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -345,6 +355,38 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 		}
 	}
 	return 0
+}
+
+func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: redline run <list|show>")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		var runs []domain.Run
+		if err := client.Do(context.Background(), http.MethodGet, "/v1/runs", nil, &runs); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, runs)
+		return 0
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: redline run show <id>")
+			return 1
+		}
+		var run domain.Run
+		if err := client.Do(context.Background(), http.MethodGet, "/v1/runs/"+url.PathEscape(args[1]), nil, &run); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, run)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown run command %q\n", args[0])
+		return 1
+	}
 }
 
 func providerFlags(name string, args []string, stderr io.Writer) (string, bool, bool) {

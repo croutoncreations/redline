@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,30 @@ func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
 	}
 	if got.ID != "first-high" {
 		t.Fatalf("selected %q, want first-high", got.ID)
+	}
+}
+
+func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	want := domain.ExecutionProfile{
+		ID: "codex", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		Model: "gpt-5.3-codex", HarnessCommand: "custom", HarnessArgs: []string{"--strict-config"},
+		WorkspaceProvider: "git-worktree", Repository: "/repo", BaseBranch: "main",
+		RequireClean: true, CleanupPolicy: "on_success",
+		PrepareCommand: "setup", FinalizeCommand: "finalize",
+	}
+	if err := db.CreateProfile(context.Background(), want, now); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := db.ListProfiles(context.Background())
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("profiles=%#v err=%v", profiles, err)
+	}
+	got := profiles[0]
+	if got.HarnessCommand != want.HarnessCommand || strings.Join(got.HarnessArgs, " ") != "--strict-config" ||
+		!got.RequireClean || got.CleanupPolicy != "on_success" {
+		t.Fatalf("profile = %#v", got)
 	}
 }
 
@@ -148,6 +173,98 @@ func TestProviderPauseStatePersists(t *testing.T) {
 	paused, err = db.ProviderPaused(ctx, "codex-main")
 	if err != nil || paused {
 		t.Fatalf("paused=%v err=%v", paused, err)
+	}
+}
+
+func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(ctx, domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"first", "second"} {
+		if err := db.CreateTask(ctx, domain.Task{
+			ID: id, Name: id, Priority: 50, ExecutionProfileID: "profile", Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := db.AdmitTask(ctx, "run-1", "first", "codex-main", "abc", now)
+	if err != nil || run.State != domain.RunPreparing {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+	if _, err := db.AdmitTask(ctx, "run-2", "second", "codex-main", "abc", now); err == nil {
+		t.Fatal("expected active-provider admission conflict")
+	}
+	claimed, _ := db.GetTask(ctx, "first")
+	if claimed.State != domain.Running {
+		t.Fatalf("task state = %s", claimed.State)
+	}
+}
+
+func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(ctx, domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "devx",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(ctx, domain.Task{
+		ID: "repeat", Name: "repeat", Priority: 50, ExecutionProfileID: "profile", Type: domain.Recurring,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(ctx, "run-1", "repeat", "claude-main", "abc", now); err != nil {
+		t.Fatal(err)
+	}
+	workspace := domain.Workspace{Directory: "/tmp/work", SessionID: "session"}
+	if err := db.MarkRunRunning(ctx, "run-1", workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(ctx, "run-1", domain.RunCompletion{
+		State: domain.RunCompleted, ExitCode: 0, OutputFile: "/tmp/out", FinalizeState: "completed",
+	}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := db.GetTask(ctx, "repeat")
+	if task.State != domain.Queued || task.LastCompletedAt == nil || task.LastSuccessfulSourceRevision != "abc" {
+		t.Fatalf("task = %#v", task)
+	}
+	run, err := db.GetRun(ctx, "run-1")
+	if err != nil || run.State != domain.RunCompleted || run.Workspace.SessionID != "session" {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+}
+
+func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(ctx, domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(ctx, domain.Task{
+		ID: "task", Name: "task", Priority: 50, ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(ctx, "run", "task", "codex-main", "abc", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecoverInterruptedRuns(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := db.GetRun(ctx, "run")
+	task, _ := db.GetTask(ctx, "task")
+	if run.State != domain.RunFailed || task.State != domain.Failed {
+		t.Fatalf("run=%s task=%s", run.State, task.State)
 	}
 }
 

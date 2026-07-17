@@ -2,11 +2,14 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +111,20 @@ func TestServiceHealth(t *testing.T) {
 	}
 }
 
+func TestEmptyRunListIsJSONArray(t *testing.T) {
+	server, _ := newAPIServer(t, claudePayload)
+	resp, err := http.Get(server.URL + "/v1/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body bytes.Buffer
+	_, _ = body.ReadFrom(resp.Body)
+	if strings.TrimSpace(body.String()) != "[]" {
+		t.Fatalf("body = %s", body.String())
+	}
+}
+
 func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/providers/codex-main/pause", map[string]any{})
@@ -122,6 +139,107 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 	}
 }
 
+func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	executed := make(chan domain.Run, 1)
+	handler := api.NewServerWithExecutor(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(_ context.Context, run domain.Run, _ domain.Task, _ domain.ExecutionProfile) error {
+			executed <- run
+			return nil
+		},
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "codex-devx", "provider_account_id": "codex-main",
+		"harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "review", "name": "Review auth", "prompt": "review", "priority": 80,
+		"execution_profile_id": "codex-devx", "type": "one_off",
+	})
+	response := postJSON[struct {
+		Run *domain.Run `json:"run"`
+	}](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	if response.Run == nil || response.Run.State != domain.RunPreparing {
+		t.Fatalf("run = %#v", response.Run)
+	}
+	select {
+	case got := <-executed:
+		if got.ID != response.Run.ID {
+			t.Fatalf("executed run %q, want %q", got.ID, response.Run.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executor was not started")
+	}
+}
+
+func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	cfg.RunArtifactsDir = filepath.Join(t.TempDir(), "runs")
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	defer handler.Wait()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	repository := t.TempDir()
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "command-local", "provider_account_id": "codex-main",
+		"harness_type": "command", "harness_command": "printf '{\"done\":true}\\n'",
+		"workspace_provider": "existing-directory", "repository": repository,
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "command-task", "name": "Command task", "prompt": "safe prompt", "priority": 80,
+		"execution_profile_id": "command-local", "type": "one_off",
+	})
+	response := postJSON[struct {
+		Run *domain.Run `json:"run"`
+	}](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	if response.Run == nil {
+		t.Fatal("expected admitted run")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := db.GetRun(t.Context(), response.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State == domain.RunCompleted {
+			if run.OutputFile == "" {
+				t.Fatal("completed run has no output file")
+			}
+			data, err := os.ReadFile(run.OutputFile)
+			if err != nil || !bytes.Contains(data, []byte(`"done":true`)) {
+				t.Fatalf("output=%s err=%v", data, err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("run did not complete")
+}
+
 func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	t.Helper()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -133,11 +251,19 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	cfg := config.Config{
+	cfg := testConfig(usage.URL)
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server, db
+}
+
+func testConfig(usageURL string) config.Config {
+	return config.Config{
 		Database: "unused", ActivePolicy: "standard", MaxSnapshotAge: "15m",
 		Providers: map[string]config.Provider{
-			"codex-main":  {Provider: "codex", OpenUsageURL: usage.URL, WindowWeeklyCost: 0.10},
-			"claude-main": {Provider: "claude", OpenUsageURL: usage.URL, WindowWeeklyCost: 0.08},
+			"codex-main":  {Provider: "codex", OpenUsageURL: usageURL, WindowWeeklyCost: 0.10},
+			"claude-main": {Provider: "claude", OpenUsageURL: usageURL, WindowWeeklyCost: 0.08},
 		},
 		Policies: map[string]config.Policy{
 			"standard": {
@@ -146,10 +272,14 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 			},
 		},
 	}
-	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return server, db
+}
+
+type fakeExecutor struct {
+	execute func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error
+}
+
+func (f fakeExecutor) Execute(ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile) error {
+	return f.execute(ctx, run, task, profile)
 }
 
 func postJSON[T any](t *testing.T, url string, body any) T {

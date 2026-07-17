@@ -142,3 +142,44 @@ func TestTaskDisableConsumesServiceAPI(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
+
+func TestSchedulerExecuteConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/scheduler/execute" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = fmt.Fprint(w, `{
+          "snapshot":{"provider":"codex","weekly":{"remaining":0.6,"resets_at":"2026-07-18T18:00:00Z"}},
+          "result":{"decision":"RUN","mode":"pace_threshold"},
+          "run":{"id":"run-1","task_id":"task","provider_account_id":"codex-main","state":"preparing","started_at":"2026-07-16T18:00:00Z"}
+        }`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "scheduler", "execute", "--provider", "codex-main", "--json"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"state": "preparing"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunShowConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/runs/run-1" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"id":"run-1","task_id":"task","state":"completed","started_at":"2026-07-16T18:00:00Z"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "run", "show", "run-1"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"state": "completed"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}

@@ -12,11 +12,19 @@ import (
 )
 
 type Config struct {
-	Database       string              `yaml:"database"`
-	ActivePolicy   string              `yaml:"active_policy"`
-	MaxSnapshotAge string              `yaml:"max_snapshot_age"`
-	Providers      map[string]Provider `yaml:"providers"`
-	Policies       map[string]Policy   `yaml:"policies"`
+	Database        string              `yaml:"database"`
+	RunArtifactsDir string              `yaml:"run_artifacts_dir"`
+	ActivePolicy    string              `yaml:"active_policy"`
+	MaxSnapshotAge  string              `yaml:"max_snapshot_age"`
+	Providers       map[string]Provider `yaml:"providers"`
+	Policies        map[string]Policy   `yaml:"policies"`
+}
+
+func (c Config) ArtifactsDirectory() string {
+	if c.RunArtifactsDir == "" {
+		return ".redline/runs"
+	}
+	return c.RunArtifactsDir
 }
 
 type Provider struct {

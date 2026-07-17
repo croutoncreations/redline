@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,12 +15,18 @@ func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now t
 	if p.ID == "" || p.ProviderAccountID == "" || p.HarnessType == "" || p.WorkspaceProvider == "" {
 		return fmt.Errorf("profile id, provider account, harness, and workspace provider are required")
 	}
-	_, err := d.db.ExecContext(ctx, `INSERT INTO execution_profiles (
-id, provider_account_id, harness_type, model, workspace_provider, repository,
-base_branch, prepare_command, finalize_command, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.ProviderAccountID, p.HarnessType, p.Model, p.WorkspaceProvider,
-		p.Repository, p.BaseBranch, p.PrepareCommand, p.FinalizeCommand, formatTime(now),
+	argsJSON, err := json.Marshal(p.HarnessArgs)
+	if err != nil {
+		return fmt.Errorf("encode harness arguments: %w", err)
+	}
+	_, err = d.db.ExecContext(ctx, `INSERT INTO execution_profiles (
+id, provider_account_id, harness_type, model, harness_command, harness_args_json,
+workspace_provider, repository, base_branch, require_clean, cleanup_policy,
+prepare_command, finalize_command, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.ProviderAccountID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON),
+		p.WorkspaceProvider, p.Repository, p.BaseBranch, p.RequireClean, p.CleanupPolicy,
+		p.PrepareCommand, p.FinalizeCommand, formatTime(now),
 	)
 	if err != nil {
 		return fmt.Errorf("create execution profile: %w", err)
@@ -29,20 +36,24 @@ base_branch, prepare_command, finalize_command, created_at
 
 func (d *DB) ListProfiles(ctx context.Context) ([]domain.ExecutionProfile, error) {
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, harness_type, model,
-workspace_provider, repository, base_branch, prepare_command, finalize_command, created_at
+harness_command, harness_args_json, workspace_provider, repository, base_branch,
+require_clean, cleanup_policy, prepare_command, finalize_command, created_at
 FROM execution_profiles ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list execution profiles: %w", err)
 	}
 	defer rows.Close()
-	var profiles []domain.ExecutionProfile
+	profiles := make([]domain.ExecutionProfile, 0)
 	for rows.Next() {
 		var p domain.ExecutionProfile
-		var created string
+		var created, argsJSON string
 		if err := rows.Scan(&p.ID, &p.ProviderAccountID, &p.HarnessType, &p.Model,
-			&p.WorkspaceProvider, &p.Repository, &p.BaseBranch, &p.PrepareCommand,
-			&p.FinalizeCommand, &created); err != nil {
+			&p.HarnessCommand, &argsJSON, &p.WorkspaceProvider, &p.Repository, &p.BaseBranch,
+			&p.RequireClean, &p.CleanupPolicy, &p.PrepareCommand, &p.FinalizeCommand, &created); err != nil {
 			return nil, fmt.Errorf("scan execution profile: %w", err)
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &p.HarnessArgs); err != nil {
+			return nil, fmt.Errorf("decode harness arguments: %w", err)
 		}
 		p.CreatedAt, err = parseStoredTime(created)
 		if err != nil {
@@ -51,6 +62,19 @@ FROM execution_profiles ORDER BY id`)
 		profiles = append(profiles, p)
 	}
 	return profiles, rows.Err()
+}
+
+func (d *DB) GetProfile(ctx context.Context, id string) (domain.ExecutionProfile, error) {
+	profiles, err := d.ListProfiles(ctx)
+	if err != nil {
+		return domain.ExecutionProfile{}, err
+	}
+	for _, profile := range profiles {
+		if profile.ID == id {
+			return profile, nil
+		}
+	}
+	return domain.ExecutionProfile{}, ErrNotFound
 }
 
 func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) error {
@@ -169,7 +193,7 @@ func (d *DB) ListTasks(ctx context.Context) ([]domain.Task, error) {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
 	defer rows.Close()
-	var tasks []domain.Task
+	tasks := make([]domain.Task, 0)
 	for rows.Next() {
 		task, err := scanTask(rows)
 		if err != nil {
@@ -252,7 +276,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 		return nil, fmt.Errorf("list scheduler decisions: %w", err)
 	}
 	defer rows.Close()
-	var decisions []domain.SchedulerDecision
+	decisions := make([]domain.SchedulerDecision, 0)
 	for rows.Next() {
 		var item domain.SchedulerDecision
 		var selected sql.NullString
