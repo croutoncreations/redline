@@ -18,7 +18,10 @@ import (
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
-type Manager struct{ Runner redprocess.Runner }
+type Manager struct {
+	Runner          redprocess.Runner
+	OutputDirectory string
+}
 
 type FinalizeRequest struct {
 	RunID      string
@@ -82,10 +85,15 @@ func (m Manager) Finalize(ctx context.Context, request FinalizeRequest) error {
 	if request.Profile.FinalizeCommand == "" {
 		return nil
 	}
+	stdout, stderr, closeArtifacts, err := m.artifactWriters(request.RunID, "finalize")
+	if err != nil {
+		return err
+	}
+	defer closeArtifacts()
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: "/bin/sh", Args: []string{"-lc", request.Profile.FinalizeCommand},
 		Dir: request.Workspace.Directory, Env: hookEnvironment(request),
-		Stdout: io.Discard, Stderr: io.Discard,
+		Stdout: stdout, Stderr: stderr,
 	})
 	if err != nil {
 		return fmt.Errorf("run finalize hook: %w", err)
@@ -146,6 +154,11 @@ func (m Manager) runSetupHook(
 	profile domain.ExecutionProfile,
 	prepared domain.Workspace,
 ) error {
+	stdout, stderr, closeArtifacts, err := m.artifactWriters(runID, "prepare")
+	if err != nil {
+		return err
+	}
+	defer closeArtifacts()
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: "/bin/sh", Args: []string{"-lc", profile.PrepareCommand}, Dir: prepared.Directory,
 		Env: append(os.Environ(),
@@ -156,7 +169,7 @@ func (m Manager) runSetupHook(
 			"REDLINE_WORKSPACE_DIR="+prepared.Directory,
 			"REDLINE_SESSION_ID="+prepared.SessionID,
 		),
-		Stdout: io.Discard, Stderr: io.Discard,
+		Stdout: stdout, Stderr: stderr,
 	})
 	if err != nil {
 		return fmt.Errorf("run workspace setup hook: %w", err)
@@ -290,6 +303,32 @@ func (m Manager) runner() redprocess.Runner {
 		return m.Runner
 	}
 	return redprocess.ExecRunner{}
+}
+
+func ArtifactPath(outputDirectory, runID, phase, stream string) string {
+	return filepath.Join(outputDirectory, safeName(runID)+"."+phase+"."+stream+".log")
+}
+
+func (m Manager) artifactWriters(runID, phase string) (io.Writer, io.Writer, func(), error) {
+	if m.OutputDirectory == "" {
+		return io.Discard, io.Discard, func() {}, nil
+	}
+	if err := os.MkdirAll(m.OutputDirectory, 0o755); err != nil {
+		return nil, nil, nil, fmt.Errorf("create lifecycle artifact directory: %w", err)
+	}
+	stdout, err := os.Create(ArtifactPath(m.OutputDirectory, runID, phase, "stdout"))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create %s stdout artifact: %w", phase, err)
+	}
+	stderr, err := os.Create(ArtifactPath(m.OutputDirectory, runID, phase, "stderr"))
+	if err != nil {
+		_ = stdout.Close()
+		return nil, nil, nil, fmt.Errorf("create %s stderr artifact: %w", phase, err)
+	}
+	return stdout, stderr, func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+	}, nil
 }
 
 func hookEnvironment(request FinalizeRequest) []string {

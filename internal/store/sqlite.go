@@ -174,6 +174,24 @@ ON notification_deliveries(updated_at DESC, id DESC);
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (9)`); err != nil {
 			return fmt.Errorf("record workspace profile migration: %w", err)
 		}
+		version = 9
+	}
+	if version < 10 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE run_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    event_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    payload_json BLOB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_run_events_run_id ON run_events(run_id, id);
+`); err != nil {
+			return fmt.Errorf("create run event schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (10)`); err != nil {
+			return fmt.Errorf("record run event migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

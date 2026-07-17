@@ -2,6 +2,7 @@ package execution_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -33,6 +34,49 @@ func TestSuccessfulExecutionCompletesRunAndRequeuesRecurringTask(t *testing.T) {
 	}
 	if storedTask.State != domain.Queued || storedTask.LastSuccessfulSourceRevision != "abc" {
 		t.Fatalf("task = %#v", storedTask)
+	}
+}
+
+func TestSuccessfulExecutionRecordsLifecycleTimelineWithoutPrompt(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	task.Prompt = "do not copy this prompt into audit logs"
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 0}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListRunEvents(context.Background(), run.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		domain.RunEventStarted,
+		domain.RunEventWorkspacePrepare,
+		domain.RunEventWorkspacePrepared,
+		domain.RunEventHarnessStarted,
+		domain.RunEventHarnessCompleted,
+		domain.RunEventFinalizeStarted,
+		domain.RunEventFinalizeCompleted,
+		domain.RunEventCleanupStarted,
+		domain.RunEventCleanupCompleted,
+		domain.RunEventCompleted,
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v", events)
+	}
+	for index := range want {
+		if events[index].Type != want[index] {
+			t.Fatalf("event %d = %q, want %q", index, events[index].Type, want[index])
+		}
+		if !json.Valid(events[index].Payload) {
+			t.Fatalf("event %d payload is invalid: %q", index, events[index].Payload)
+		}
+		if strings.Contains(string(events[index].Payload), task.Prompt) {
+			t.Fatalf("event %d leaked task prompt: %s", index, events[index].Payload)
+		}
 	}
 }
 
@@ -240,6 +284,10 @@ func (f *failingMarkStore) MarkRunRunning(context.Context, string, domain.Worksp
 func (f *failingMarkStore) CompleteRun(_ context.Context, _ string, completion domain.RunCompletion, _ time.Time) error {
 	f.completion = completion
 	return nil
+}
+
+func (f *failingMarkStore) RecordRunEvent(context.Context, domain.RunEvent) (domain.RunEvent, error) {
+	return domain.RunEvent{}, nil
 }
 
 type fakeNotifier struct {

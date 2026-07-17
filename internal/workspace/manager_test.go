@@ -132,6 +132,52 @@ func TestFinalizeHookReceivesRunEnvironment(t *testing.T) {
 	}
 }
 
+func TestPrepareAndFinalizeHooksCaptureOutput(t *testing.T) {
+	repo := t.TempDir()
+	artifacts := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		if strings.Contains(strings.Join(command.Args, " "), "setup-workspace") {
+			_, _ = io.WriteString(command.Stdout, "prepare output\n")
+			_, _ = io.WriteString(command.Stderr, "prepare warning\n")
+			return 0, nil
+		}
+		_, _ = io.WriteString(command.Stdout, "finalize output\n")
+		_, _ = io.WriteString(command.Stderr, "finalize warning\n")
+		return 0, nil
+	}}
+	manager := workspace.Manager{Runner: runner, OutputDirectory: artifacts}
+	profile := domain.ExecutionProfile{
+		WorkspaceProvider: "existing-directory", Repository: repo,
+		PrepareCommand: "setup-workspace", FinalizeCommand: "finalize-workspace",
+	}
+	prepared, err := manager.Prepare(context.Background(), "run-logs", "Task", profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Finalize(context.Background(), workspace.FinalizeRequest{
+		RunID: "run-logs", TaskID: "task", Status: "completed", Profile: profile, Workspace: prepared,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wants := map[string]string{
+		"prepare.stdout.log":  "prepare output\n",
+		"prepare.stderr.log":  "prepare warning\n",
+		"finalize.stdout.log": "finalize output\n",
+		"finalize.stderr.log": "finalize warning\n",
+	}
+	for suffix, want := range wants {
+		path := filepath.Join(artifacts, "run-logs."+suffix)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestBuiltInWorkspaceRunsPrepareHookInsideWorkspace(t *testing.T) {
 	repo := t.TempDir()
 	called := false

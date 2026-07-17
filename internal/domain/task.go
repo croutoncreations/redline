@@ -171,3 +171,29 @@ type RunCompletion struct {
 	FinalizeState string
 	FinalizeError string
 }
+
+type RunEvent struct {
+	ID         int64           `json:"id"`
+	RunID      string          `json:"run_id"`
+	Type       string          `json:"type"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+const (
+	RunEventStarted           = "run.started"
+	RunEventWorkspacePrepare  = "workspace.prepare_started"
+	RunEventWorkspacePrepared = "workspace.prepared"
+	RunEventWorkspaceFailed   = "workspace.prepare_failed"
+	RunEventHarnessStarted    = "harness.started"
+	RunEventHarnessCompleted  = "harness.completed"
+	RunEventHarnessFailed     = "harness.failed"
+	RunEventFinalizeStarted   = "finalize.started"
+	RunEventFinalizeCompleted = "finalize.completed"
+	RunEventFinalizeFailed    = "finalize.failed"
+	RunEventCleanupStarted    = "cleanup.started"
+	RunEventCleanupCompleted  = "cleanup.completed"
+	RunEventCleanupFailed     = "cleanup.failed"
+	RunEventCompleted         = "run.completed"
+	RunEventFailed            = "run.failed"
+)

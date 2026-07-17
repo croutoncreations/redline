@@ -55,7 +55,7 @@ type Server struct {
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
 	defaultExecutor := execution.Executor{
-		Store: database, Workspaces: workspace.Manager{}, Harness: &harness.Adapter{},
+		Store: database, Workspaces: workspace.Manager{OutputDirectory: cfg.ArtifactsDirectory()}, Harness: &harness.Adapter{},
 		Notifier: notifier, OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)

@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 type Store interface {
 	MarkRunRunning(context.Context, string, domain.Workspace) error
 	CompleteRun(context.Context, string, domain.RunCompletion, time.Time) error
+	RecordRunEvent(context.Context, domain.RunEvent) (domain.RunEvent, error)
 }
 
 type WorkspaceManager interface {
@@ -47,20 +49,44 @@ func (e Executor) Execute(
 	task domain.Task,
 	profile domain.ExecutionProfile,
 ) error {
+	e.recordEvent(ctx, run.ID, domain.RunEventStarted, map[string]any{
+		"task": map[string]any{
+			"id": task.ID, "name": task.Name, "type": task.Type,
+			"priority": task.Priority, "execution_profile_id": task.ExecutionProfileID,
+		},
+		"profile": auditProfile(profile),
+	})
+	e.recordEvent(ctx, run.ID, domain.RunEventWorkspacePrepare, map[string]any{
+		"provider":          profile.WorkspaceProvider,
+		"repository":        profile.Repository,
+		"base_branch":       profile.BaseBranch,
+		"prepare_artifacts": e.lifecycleArtifacts(run.ID, "prepare"),
+	})
 	prepared, err := e.Workspaces.Prepare(ctx, run.ID, task.Name, profile)
 	if err != nil {
+		e.recordEvent(ctx, run.ID, domain.RunEventWorkspaceFailed, map[string]any{
+			"error": err.Error(), "workspace": prepared,
+		})
 		finalizeState := "skipped"
 		finalizeError := ""
 		if prepared.Directory != "" {
 			if recordErr := e.Store.MarkRunRunning(ctx, run.ID, prepared); recordErr != nil {
 				finalizeError = "record partially prepared workspace: " + recordErr.Error()
-			} else if cleanupErr := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
-				Success: false, Profile: profile, Workspace: prepared,
-			}); cleanupErr != nil {
-				finalizeState = "failed"
-				finalizeError = cleanupErr.Error()
 			} else {
-				finalizeState = "cleanup_completed"
+				e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
+					"policy": profile.CleanupPolicy, "workspace": prepared,
+				})
+				cleanupErr := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
+					Success: false, Profile: profile, Workspace: prepared,
+				})
+				if cleanupErr != nil {
+					finalizeState = "failed"
+					finalizeError = cleanupErr.Error()
+					e.recordEvent(ctx, run.ID, domain.RunEventCleanupFailed, map[string]any{"error": cleanupErr.Error()})
+				} else {
+					finalizeState = "cleanup_completed"
+					e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
+				}
 			}
 		}
 		return e.complete(ctx, run, task, domain.RunCompletion{
@@ -69,20 +95,37 @@ func (e Executor) Execute(
 		})
 	}
 	if err := e.Store.MarkRunRunning(ctx, run.ID, prepared); err != nil {
+		e.recordEvent(ctx, run.ID, domain.RunEventWorkspaceFailed, map[string]any{
+			"error": "record prepared workspace: " + err.Error(), "workspace": prepared,
+		})
 		finalizeState := "cleanup_completed"
 		finalizeError := ""
+		e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
+			"policy": profile.CleanupPolicy, "workspace": prepared,
+		})
 		if cleanupErr := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
 			Success: false, Profile: profile, Workspace: prepared,
 		}); cleanupErr != nil {
 			finalizeState = "failed"
 			finalizeError = cleanupErr.Error()
+			e.recordEvent(ctx, run.ID, domain.RunEventCleanupFailed, map[string]any{"error": cleanupErr.Error()})
+		} else {
+			e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
 		}
 		return e.complete(ctx, run, task, domain.RunCompletion{
 			State: domain.RunFailed, ExitCode: -1, Error: "record prepared workspace: " + err.Error(),
 			FinalizeState: finalizeState, FinalizeError: finalizeError,
 		})
 	}
+	e.recordEvent(ctx, run.ID, domain.RunEventWorkspacePrepared, map[string]any{
+		"workspace": prepared, "prepare_artifacts": e.lifecycleArtifacts(run.ID, "prepare"),
+	})
 
+	e.recordEvent(ctx, run.ID, domain.RunEventHarnessStarted, map[string]any{
+		"harness_type": profile.HarnessType, "harness_command": profile.HarnessCommand,
+		"harness_args": profile.HarnessArgs, "model": profile.Model,
+		"working_directory": prepared.Directory,
+	})
 	harnessResult, harnessErr := e.Harness.Run(ctx, harness.Request{
 		RunID: run.ID, OutputDirectory: e.OutputDirectory,
 		Task: task, Profile: profile, Workspace: prepared,
@@ -97,6 +140,15 @@ func (e Executor) Execute(
 		} else {
 			agentError = fmt.Sprintf("harness exited with code %d", harnessResult.ExitCode)
 		}
+		e.recordEvent(ctx, run.ID, domain.RunEventHarnessFailed, map[string]any{
+			"exit_code": harnessResult.ExitCode, "error": agentError,
+			"stdout": harnessResult.OutputFile, "stderr": harnessResult.ErrorFile,
+		})
+	} else {
+		e.recordEvent(ctx, run.ID, domain.RunEventHarnessCompleted, map[string]any{
+			"exit_code": harnessResult.ExitCode,
+			"stdout":    harnessResult.OutputFile, "stderr": harnessResult.ErrorFile,
+		})
 	}
 
 	status := "completed"
@@ -105,18 +157,34 @@ func (e Executor) Execute(
 	}
 	finalizeState := "completed"
 	var lifecycleErrors []string
+	e.recordEvent(ctx, run.ID, domain.RunEventFinalizeStarted, map[string]any{
+		"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
+	})
 	if err := e.Workspaces.Finalize(ctx, workspace.FinalizeRequest{
 		RunID: run.ID, TaskID: task.ID, Status: status, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, Profile: profile, Workspace: prepared,
 	}); err != nil {
 		finalizeState = "failed"
 		lifecycleErrors = append(lifecycleErrors, err.Error())
+		e.recordEvent(ctx, run.ID, domain.RunEventFinalizeFailed, map[string]any{
+			"error": err.Error(), "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
+		})
+	} else {
+		e.recordEvent(ctx, run.ID, domain.RunEventFinalizeCompleted, map[string]any{
+			"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
+		})
 	}
+	e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
+		"policy": profile.CleanupPolicy, "workspace": prepared,
+	})
 	if err := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
 		Success: agentSucceeded, Profile: profile, Workspace: prepared,
 	}); err != nil {
 		finalizeState = "failed"
 		lifecycleErrors = append(lifecycleErrors, err.Error())
+		e.recordEvent(ctx, run.ID, domain.RunEventCleanupFailed, map[string]any{"error": err.Error()})
+	} else {
+		e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
 	}
 
 	return e.complete(ctx, run, task, domain.RunCompletion{
@@ -137,6 +205,15 @@ func (e Executor) complete(
 	if err := e.Store.CompleteRun(ctx, run.ID, completion, completedAt); err != nil {
 		return err
 	}
+	terminalEvent := domain.RunEventCompleted
+	if completion.State == domain.RunFailed {
+		terminalEvent = domain.RunEventFailed
+	}
+	e.recordEvent(ctx, run.ID, terminalEvent, map[string]any{
+		"state": completion.State, "exit_code": completion.ExitCode,
+		"error": completion.Error, "finalize_state": completion.FinalizeState,
+		"finalize_error": completion.FinalizeError,
+	})
 	if e.Notifier == nil {
 		return nil
 	}
@@ -166,4 +243,39 @@ func (e Executor) now() time.Time {
 		return e.Now()
 	}
 	return time.Now()
+}
+
+func (e Executor) recordEvent(ctx context.Context, runID, eventType string, payload any) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("redline run %s encode %s event: %v", runID, eventType, err)
+		return
+	}
+	if _, err := e.Store.RecordRunEvent(ctx, domain.RunEvent{
+		RunID: runID, Type: eventType, OccurredAt: e.now().UTC(), Payload: encoded,
+	}); err != nil {
+		log.Printf("redline run %s record %s event: %v", runID, eventType, err)
+	}
+}
+
+func (e Executor) lifecycleArtifacts(runID, phase string) map[string]string {
+	if e.OutputDirectory == "" {
+		return nil
+	}
+	return map[string]string{
+		"stdout": workspace.ArtifactPath(e.OutputDirectory, runID, phase, "stdout"),
+		"stderr": workspace.ArtifactPath(e.OutputDirectory, runID, phase, "stderr"),
+	}
+}
+
+func auditProfile(profile domain.ExecutionProfile) map[string]any {
+	return map[string]any{
+		"id": profile.ID, "provider_account_id": profile.ProviderAccountID,
+		"harness_type": profile.HarnessType, "model": profile.Model,
+		"harness_command": profile.HarnessCommand, "harness_args": profile.HarnessArgs,
+		"workspace_provider": profile.WorkspaceProvider, "workspace_args": profile.WorkspaceArgs,
+		"repository": profile.Repository, "base_branch": profile.BaseBranch,
+		"require_clean": profile.RequireClean, "cleanup_policy": profile.CleanupPolicy,
+		"prepare_command": profile.PrepareCommand, "finalize_command": profile.FinalizeCommand,
+	}
 }
