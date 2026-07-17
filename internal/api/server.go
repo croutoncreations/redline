@@ -635,9 +635,7 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 	}
 	response := schedulerResponse{Snapshot: snapshot, Result: result}
 	if result.Decision == decision.Run {
-		task, err := s.store.NextEligibleTask(
-			r.Context(), request.ProviderAccountID, s.now(), request.CurrentRevision,
-		)
+		task, _, _, err := s.selectTask(r.Context(), request.ProviderAccountID, request.CurrentRevision)
 		if err == nil {
 			response.SelectedTask = &task
 		} else if !errors.Is(err, store.ErrNotFound) {

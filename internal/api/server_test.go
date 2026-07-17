@@ -76,6 +76,46 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	}
 }
 
+func TestSimulatedSchedulerResolvesTaskRepositoryLikeExecution(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "changed", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory", Repository: "/repo/changed"},
+		{ID: "fallback", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory", Repository: "/repo/fallback"},
+	} {
+		if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, task := range []domain.Task{
+		{ID: "repo-change", Name: "Repo change", Priority: 100, ExecutionProfileID: "changed", Type: domain.Recurring, RequireRepoChange: true, LastSuccessfulSourceRevision: "old"},
+		{ID: "fallback", Name: "Fallback", Priority: 10, ExecutionProfileID: "fallback", Type: domain.OneOff},
+	} {
+		if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := api.NewServerWithDependencies(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, fakeRevisionResolver{revisions: map[string]string{"changed": "new", "fallback": "new"}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	result := postJSON[struct {
+		SelectedTask *domain.Task `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if result.SelectedTask == nil || result.SelectedTask.ID != "repo-change" {
+		t.Fatalf("selected task = %#v, want repo-change", result.SelectedTask)
+	}
+}
+
 func TestServiceProviderStatusAndDecision(t *testing.T) {
 	server, _ := newAPIServer(t, claudePayload)
 	refresh := postJSON[decision.UsageSnapshot](
