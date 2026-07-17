@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -231,6 +233,55 @@ func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 	}
 }
 
+func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"first", "second"} {
+		if err := db.CreateTask(t.Context(), domain.Task{
+			ID: id, Name: id, ExecutionProfileID: "profile", Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	for index, taskID := range []string{"first", "second"} {
+		workers.Add(1)
+		go func(index int, taskID string) {
+			defer workers.Done()
+			<-start
+			_, err := db.AdmitTask(context.Background(), fmt.Sprintf("run-%d", index), taskID, "codex-main", "rev", now)
+			results <- err
+		}(index, taskID)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	succeeded, failed := 0, 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		} else {
+			failed++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("admissions succeeded=%d failed=%d", succeeded, failed)
+	}
+	runs, err := db.ListRuns(t.Context(), 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs=%#v err=%v", runs, err)
+	}
+}
+
 func TestHasActiveRun(t *testing.T) {
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -318,6 +369,70 @@ func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
 	task, _ := db.GetTask(ctx, "task")
 	if run.State != domain.RunFailed || task.State != domain.Failed {
 		t.Fatalf("run=%s task=%s", run.State, task.State)
+	}
+}
+
+func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "redline.db")
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	db, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "codex", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"},
+		{ID: "claude", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "devx"},
+	} {
+		if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CreateTask(t.Context(), domain.Task{
+			ID: profile.ID, Name: profile.ID, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(t.Context(), "run-"+profile.ID, profile.ID, profile.ProviderAccountID, "rev", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := domain.Workspace{Directory: "/tmp/redline-worktree", SessionID: "redline-session"}
+	if err := db.MarkRunRunning(t.Context(), "run-codex", workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	recoveredAt := now.Add(time.Minute)
+	if err := db.RecoverInterruptedRuns(t.Context(), recoveredAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecoverInterruptedRuns(t.Context(), recoveredAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	running, _ := db.GetRun(t.Context(), "run-codex")
+	preparing, _ := db.GetRun(t.Context(), "run-claude")
+	for _, run := range []domain.Run{running, preparing} {
+		task, _ := db.GetTask(t.Context(), run.TaskID)
+		if run.State != domain.RunFailed || task.State != domain.Failed || run.ExitCode == nil || *run.ExitCode != -1 {
+			t.Fatalf("run=%#v task=%#v", run, task)
+		}
+		if run.CompletedAt == nil || !run.CompletedAt.Equal(recoveredAt) {
+			t.Fatalf("completion time changed during repeated recovery: %#v", run.CompletedAt)
+		}
+	}
+	if running.Workspace.SessionID != "redline-session" || running.FinalizeState != "preserved" ||
+		!strings.Contains(running.FinalizeError, "manual recovery") {
+		t.Fatalf("running recovery = %#v", running)
+	}
+	if preparing.FinalizeState != "skipped" {
+		t.Fatalf("preparing recovery = %#v", preparing)
 	}
 }
 

@@ -214,7 +214,11 @@ func (d *DB) RecoverInterruptedRuns(ctx context.Context, now time.Time) error {
 	rows.Close()
 	for _, item := range items {
 		if _, err := tx.ExecContext(ctx, `UPDATE runs SET state = 'failed', completed_at = ?,
-error = 'service restarted while run was active' WHERE id = ?`, formatTime(now), item.runID); err != nil {
+exit_code = -1, error = 'service restarted while run was active',
+finalize_state = CASE WHEN workspace_directory <> '' THEN 'preserved' ELSE 'skipped' END,
+finalize_error = CASE WHEN workspace_directory <> ''
+    THEN 'service restarted; workspace preserved for manual recovery' ELSE '' END
+WHERE id = ?`, formatTime(now), item.runID); err != nil {
 			return fmt.Errorf("recover interrupted run: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
