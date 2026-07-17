@@ -97,6 +97,19 @@ go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
 ```
 
+For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
+activation, MCP servers, rules, and session persistence. This reduces startup variability and
+prevents a background one-word task from inheriting a large interactive environment:
+
+```bash
+go run ./cmd/redline profile add --file examples/codex-minimal-devx-profile.yaml
+go run ./cmd/redline profile add --file examples/claude-minimal-devx-profile.yaml
+```
+
+Minimal profiles deliberately omit repository instructions and disable tools. Do not use them for
+code changes, tests, reviews, or any task that needs `AGENTS.md`, `CLAUDE.md`, skills, MCP servers,
+or filesystem tools. Use a normal profile with only the customizations that task requires.
+
 Simulated evaluation records the decision and selected task but does not change task state.
 Execution atomically claims the task and returns a preparing run while work continues in the
 service:

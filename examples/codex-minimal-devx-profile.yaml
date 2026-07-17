@@ -1,0 +1,23 @@
+id: codex-minimal-devx
+provider_account_id: codex-main
+harness_type: codex-cli
+model: gpt-5.4-mini
+harness_args:
+  - --ignore-user-config
+  - --ignore-rules
+  - --disable
+  - plugins
+  - --disable
+  - hooks
+  - --disable
+  - apps
+  - --sandbox
+  - read-only
+  - --ephemeral
+workspace_provider: devx
+workspace_args:
+  - --target
+  - host
+repository: /absolute/path/to/repository
+base_branch: main
+cleanup_policy: always

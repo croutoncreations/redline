@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -54,6 +55,45 @@ func TestClaudeAdapterBuildsNoninteractiveCommand(t *testing.T) {
 	if runner.command.Name != "claude" || strings.Join(runner.command.Args, " ") != want ||
 		runner.command.Dir != "/tmp/work" || runner.stdin != "review auth" {
 		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
+	}
+}
+
+func TestAdaptersPassMinimalCustomizationFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		harnessType string
+		args        []string
+	}{
+		{
+			name: "codex", harnessType: "codex-cli",
+			args: []string{"--ignore-user-config", "--ignore-rules", "--disable", "plugins", "--disable", "hooks", "--disable", "apps", "--sandbox", "read-only", "--ephemeral"},
+		},
+		{
+			name: "claude", harnessType: "claude-code",
+			args: []string{"--safe-mode", "--tools", "", "--no-session-persistence"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &captureRunner{}
+			_, err := (harness.Adapter{Runner: runner}).Run(context.Background(), harness.Request{
+				RunID: "minimal", OutputDirectory: t.TempDir(),
+				Task:      domain.Task{ID: "task", Prompt: "reply ok"},
+				Profile:   domain.ExecutionProfile{HarnessType: test.harnessType, HarnessArgs: test.args},
+				Workspace: domain.Workspace{Directory: "/tmp/work"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]string(nil), test.args...)
+			if test.harnessType == "codex-cli" {
+				want = append(want, "-")
+			}
+			got := runner.command.Args[len(runner.command.Args)-len(want):]
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("args = %#v", runner.command.Args)
+			}
+		})
 	}
 }
 
