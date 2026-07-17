@@ -1,0 +1,177 @@
+package openusage
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/jfox/redline/internal/decision"
+)
+
+type Client struct {
+	BaseURL    string
+	HTTPClient *http.Client
+}
+
+func (c Client) Fetch(ctx context.Context, provider string) (decision.UsageSnapshot, []byte, error) {
+	base := strings.TrimRight(c.BaseURL, "/")
+	if base == "" {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("OpenUsage base URL is required")
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		base+"/v1/usage/"+url.PathEscape(provider),
+		nil,
+	)
+	if err != nil {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("build OpenUsage request: %w", err)
+	}
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("fetch OpenUsage: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("read OpenUsage response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return decision.UsageSnapshot{}, body, fmt.Errorf("OpenUsage returned HTTP %d", resp.StatusCode)
+	}
+	snapshot, err := Parse(body, provider)
+	if err != nil {
+		return decision.UsageSnapshot{}, body, err
+	}
+	return snapshot, body, nil
+}
+
+type providerPayload struct {
+	ProviderID string      `json:"providerId"`
+	FetchedAt  string      `json:"fetchedAt"`
+	Lines      []usageLine `json:"lines"`
+}
+
+type usageLine struct {
+	Type     string  `json:"type"`
+	Label    string  `json:"label"`
+	Used     float64 `json:"used"`
+	Limit    float64 `json:"limit"`
+	ResetsAt string  `json:"resetsAt"`
+}
+
+func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
+	var payloads []providerPayload
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return decision.UsageSnapshot{}, fmt.Errorf("decode OpenUsage response: empty body")
+	}
+	switch trimmed[0] {
+	case '[':
+		if err := json.Unmarshal(trimmed, &payloads); err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("decode OpenUsage response: %w", err)
+		}
+	case '{':
+		var payload providerPayload
+		if err := json.Unmarshal(trimmed, &payload); err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("decode OpenUsage response: %w", err)
+		}
+		payloads = []providerPayload{payload}
+	default:
+		return decision.UsageSnapshot{}, fmt.Errorf("decode OpenUsage response: expected object or array")
+	}
+	var selected *providerPayload
+	for i := range payloads {
+		if strings.EqualFold(payloads[i].ProviderID, provider) {
+			selected = &payloads[i]
+			break
+		}
+	}
+	if selected == nil {
+		return decision.UsageSnapshot{}, fmt.Errorf("provider %q not found in OpenUsage response", provider)
+	}
+	observedAt, err := parseTime("fetchedAt", selected.FetchedAt)
+	if err != nil {
+		return decision.UsageSnapshot{}, err
+	}
+	snapshot := decision.UsageSnapshot{
+		Provider:   strings.ToLower(selected.ProviderID),
+		ObservedAt: observedAt,
+		Source:     "openusage",
+		Confidence: "high",
+	}
+	weeklyFound := false
+	for _, line := range selected.Lines {
+		if !strings.EqualFold(line.Type, "progress") {
+			continue
+		}
+		window := normalizeLabel(line.Label)
+		if window == "" {
+			continue
+		}
+		remaining, err := remainingFraction(line)
+		if err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
+		}
+		reset, err := parseTime("resetsAt", line.ResetsAt)
+		if err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
+		}
+		switch window {
+		case "short":
+			snapshot.Short = &decision.UsageWindow{Remaining: remaining, ResetsAt: reset}
+		case "weekly":
+			snapshot.Weekly = decision.UsageWindow{Remaining: remaining, ResetsAt: reset}
+			weeklyFound = true
+		}
+	}
+	if !weeklyFound {
+		return decision.UsageSnapshot{}, fmt.Errorf(
+			"provider %q is missing required weekly usage window",
+			provider,
+		)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return decision.UsageSnapshot{}, fmt.Errorf("normalize OpenUsage snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func normalizeLabel(label string) string {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "session", "5-hour", "5 hour", "five-hour", "five hour":
+		return "short"
+	case "weekly", "7-day", "7 day", "seven-day", "seven day":
+		return "weekly"
+	default:
+		return ""
+	}
+}
+
+func remainingFraction(line usageLine) (float64, error) {
+	if line.Limit <= 0 {
+		return 0, fmt.Errorf("limit must be greater than zero")
+	}
+	if line.Used < 0 || line.Used > line.Limit {
+		return 0, fmt.Errorf("used must be between zero and limit")
+	}
+	return 1 - line.Used/line.Limit, nil
+}
+
+func parseTime(name, value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return parsed, nil
+}

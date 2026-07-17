@@ -1,0 +1,12 @@
+id: add-tests
+name: Add meaningful unit tests
+type: recurring
+priority: 60
+execution_profile_id: codex-devx
+min_interval: 7d
+require_repo_change: true
+prompt: |
+  Find one meaningful gap in the test suite, prioritizing high-risk behavior.
+  Make one cohesive improvement, run relevant tests, and summarize it.
+  If no worthwhile improvement is apparent, make no changes and explain why.
+

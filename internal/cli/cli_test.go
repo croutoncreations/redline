@@ -1,0 +1,144 @@
+package cli_test
+
+import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jfox/redline/internal/cli"
+)
+
+func TestDecisionCommandConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/decision" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+          "snapshot":{"provider":"codex","observed_at":"2026-07-16T18:00:00Z",
+            "weekly":{"remaining":0.60,"resets_at":"2026-07-18T18:00:00Z"},"source":"openusage"},
+          "result":{"decision":"RUN","mode":"pace_threshold","reason":"weekly remaining meets pace threshold"}
+        }`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+
+	exit := cli.Run(
+		[]string{"--api", server.URL, "decision", "--provider", "codex-main", "--json"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"decision": "RUN"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestSchedulerEvaluateConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/scheduler/evaluate" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{
+          "snapshot":{"provider":"codex","observed_at":"2026-07-16T18:00:00Z",
+            "weekly":{"remaining":0.60,"resets_at":"2026-07-18T18:00:00Z"},"source":"openusage"},
+          "result":{"decision":"RUN","mode":"pace_threshold","reason":"weekly remaining meets pace threshold"},
+          "selected_task":{"id":"review","name":"Review auth","state":"queued"}
+        }`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "scheduler", "evaluate", "--provider", "codex-main", "--json"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"id": "review"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTaskAddImportsYAMLThroughAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tasks" || r.Method != http.MethodPost {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprint(w, `{"id":"tests","name":"Add tests","type":"recurring","state":"queued"}`)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "task.yaml")
+	if err := os.WriteFile(path, []byte(`
+id: tests
+name: Add tests
+type: recurring
+priority: 50
+execution_profile_id: codex-devx
+min_interval: 7d
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "task", "add", "--file", path, "--json"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"state": "queued"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestAPIErrorIsReported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, `{"error":"provider not found"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "status", "--provider", "missing"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 1 || !strings.Contains(stderr.String(), "provider not found") {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
+func TestPauseCommandConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/pause" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"provider_account_id":"codex-main","paused":true}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "pause", "--provider", "codex-main"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), "paused codex-main") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTaskDisableConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tasks/review/disable" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"id":"review","name":"Review","state":"disabled"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "task", "disable", "review", "--json"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"state": "disabled"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}

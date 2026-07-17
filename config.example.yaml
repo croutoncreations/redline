@@ -1,0 +1,33 @@
+database: redline.db
+active_policy: standard
+max_snapshot_age: 15m
+
+providers:
+  codex-main:
+    provider: codex
+    openusage_url: http://127.0.0.1:6736
+    window_weekly_cost: 0.10
+  claude-main:
+    provider: claude
+    openusage_url: http://127.0.0.1:6736
+    window_weekly_cost: 0.08
+
+policies:
+  late:
+    trigger_margin: 0.05
+    rolling_reserve: 0.40
+    pace_thresholds:
+      - { time_remaining: 24h, min_weekly_remaining: 0.50 }
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+    pace_thresholds:
+      - { time_remaining: 72h, min_weekly_remaining: 0.50 }
+      - { time_remaining: 24h, min_weekly_remaining: 0.20 }
+  early:
+    trigger_margin: 0.00
+    rolling_reserve: 0.10
+    pace_thresholds:
+      - { time_remaining: 120h, min_weekly_remaining: 0.50 }
+      - { time_remaining: 72h, min_weekly_remaining: 0.30 }
+      - { time_remaining: 24h, min_weekly_remaining: 0.10 }

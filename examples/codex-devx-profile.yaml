@@ -1,0 +1,10 @@
+id: codex-devx
+provider_account_id: codex-main
+harness_type: codex-cli
+model: default
+workspace_provider: devx
+repository: /absolute/path/to/repository
+base_branch: main
+prepare_command: redline-devx-prepare
+finalize_command: redline-devx-finalize
+
