@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,5 +82,56 @@ func TestRunStartsImmediatelyAndStopsWithContext(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("loop did not stop")
+	}
+}
+
+func TestConcurrentCyclesAreSerialized(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	loop := scheduler.NewLoop(true, time.Minute, []string{"codex-main"}, func(context.Context, string) error {
+		current := active.Add(1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		active.Add(-1)
+		return nil
+	})
+	done := make(chan struct{}, 2)
+	for index := 0; index < 2; index++ {
+		go func(offset int) {
+			loop.RunCycle(context.Background(), now.Add(time.Duration(offset)*time.Minute))
+			done <- struct{}{}
+		}(index)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first cycle did not enter dispatch")
+	}
+	select {
+	case <-entered:
+		t.Fatal("second cycle overlapped the first")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second cycle did not run after first completed")
+	}
+	release <- struct{}{}
+	<-done
+	<-done
+	if maximum.Load() != 1 {
+		t.Fatalf("maximum concurrent dispatches = %d", maximum.Load())
 	}
 }

@@ -73,6 +73,31 @@ func TestFinalSlotAtWeeklyBoundaryIsIncluded(t *testing.T) {
 	assertClose(t, "final fraction", got.Slots[1].Fraction, 1.0/300.0)
 }
 
+func TestWeeklyResetBeforeShortResetProducesOnlyProratedCurrentSlot(t *testing.T) {
+	s := limitedSnapshot()
+	s.Short.ResetsAt = now.Add(4 * time.Hour)
+	s.Short.Remaining = 1
+	s.Weekly.ResetsAt = now.Add(30 * time.Minute)
+	got := decision.Evaluate(input(s))
+
+	if len(got.Slots) != 1 || !got.Slots[0].Current {
+		t.Fatalf("slots = %#v", got.Slots)
+	}
+	assertClose(t, "current fraction", got.Slots[0].Fraction, 0.1)
+}
+
+func TestAlignedWeeklyAndShortResetDoesNotCreateZeroLengthFinalSlot(t *testing.T) {
+	s := limitedSnapshot()
+	s.Short.ResetsAt = now.Add(5 * time.Hour)
+	s.Short.Remaining = 1
+	s.Weekly.ResetsAt = s.Short.ResetsAt
+	got := decision.Evaluate(input(s))
+
+	if len(got.Slots) != 1 || !got.Slots[0].Current || !got.Slots[0].EndsAt.Equal(s.Weekly.ResetsAt) {
+		t.Fatalf("slots = %#v", got.Slots)
+	}
+}
+
 func TestLimitedWindowWaitsAtRollingReserve(t *testing.T) {
 	s := limitedSnapshot()
 	s.Short.Remaining = 0.25
@@ -80,6 +105,18 @@ func TestLimitedWindowWaitsAtRollingReserve(t *testing.T) {
 
 	if got.Decision != decision.Wait || got.Reason != "current 5-hour reserve protected" {
 		t.Fatalf("got %q (%s)", got.Decision, got.Reason)
+	}
+}
+
+func TestLimitedWindowWaitsWhenOverflowEqualsTriggerMargin(t *testing.T) {
+	s := limitedSnapshot()
+	in := input(s)
+	baseline := decision.Evaluate(in)
+	s.Weekly.Remaining = baseline.MaximumConsumable + in.TriggerMargin
+	got := decision.Evaluate(input(s))
+
+	if got.Decision != decision.Wait || got.Reason != "no actionable weekly overflow" {
+		t.Fatalf("got %q (%s), overflow=%v", got.Decision, got.Reason, got.Overflow)
 	}
 }
 
@@ -118,6 +155,21 @@ func TestUnrestrictedProviderRunsWhenPaceThresholdMatches(t *testing.T) {
 	}
 }
 
+func TestUnrestrictedPaceThresholdIsInclusiveAtExactBoundaries(t *testing.T) {
+	s := limitedSnapshot()
+	s.Provider = "codex"
+	s.Short = nil
+	s.Weekly.Remaining = 0.50
+	s.Weekly.ResetsAt = now.Add(72 * time.Hour)
+	in := input(s)
+	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
+	got := decision.Evaluate(in)
+
+	if got.Decision != decision.Run || got.Mode != decision.ModePace {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestUnrestrictedProviderWaitsWithoutMatchingThreshold(t *testing.T) {
 	s := limitedSnapshot()
 	s.Provider = "codex"
@@ -152,6 +204,16 @@ func TestEvaluateFailsClosedForStaleSnapshot(t *testing.T) {
 
 	if got.Decision != decision.Unknown || got.Reason != "usage snapshot is stale" {
 		t.Fatalf("got %q (%s)", got.Decision, got.Reason)
+	}
+}
+
+func TestSnapshotExactlyAtMaximumAgeIsAccepted(t *testing.T) {
+	s := limitedSnapshot()
+	s.ObservedAt = now.Add(-15 * time.Minute)
+	got := decision.Evaluate(input(s))
+
+	if got.Decision == decision.Unknown {
+		t.Fatalf("got %#v", got)
 	}
 }
 

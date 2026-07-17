@@ -282,6 +282,50 @@ func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
 	}
 }
 
+func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	profiles := []domain.ExecutionProfile{
+		{ID: "codex", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory"},
+		{ID: "claude", ProviderAccountID: "claude-main", HarnessType: "command", WorkspaceProvider: "existing-directory"},
+	}
+	for _, profile := range profiles {
+		if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CreateTask(t.Context(), domain.Task{
+			ID: profile.ID, Name: profile.ID, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(profiles))
+	var workers sync.WaitGroup
+	for _, profile := range profiles {
+		workers.Add(1)
+		go func(profile domain.ExecutionProfile) {
+			defer workers.Done()
+			<-start
+			_, err := db.AdmitTask(context.Background(), "run-"+profile.ID, profile.ID, profile.ProviderAccountID, "rev", now)
+			results <- err
+		}(profile)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := db.ListRuns(t.Context(), 10)
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("runs=%#v err=%v", runs, err)
+	}
+}
+
 func TestHasActiveRun(t *testing.T) {
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
