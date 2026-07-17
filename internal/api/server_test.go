@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,6 +168,20 @@ func TestDetailedHealthStartsHealthy(t *testing.T) {
 	}
 	if health.Status != "healthy" || health.Window != "12h0m0s" {
 		t.Fatalf("health = %#v", health)
+	}
+}
+
+func TestDetailedHealthRejectsInvalidWindow(t *testing.T) {
+	server, _ := newAPIServer(t, claudePayload)
+	for _, configured := range []string{"invalid", "0s", "-1h"} {
+		resp, err := http.Get(server.URL + "/v1/health/details?window=" + url.QueryEscape(configured))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("window %q status = %d", configured, resp.StatusCode)
+		}
 	}
 }
 
@@ -580,6 +595,16 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 			}
 			if !tail.Truncated || tail.Content != "\":true}\n" {
 				t.Fatalf("tail = %#v", tail)
+			}
+			for _, query := range []string{"stream=combined", "stream=stdout&tail_bytes=0", "stream=stdout&tail_bytes=invalid"} {
+				invalid, err := http.Get(server.URL + "/v1/runs/" + run.ID + "/logs?" + query)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invalid.Body.Close()
+				if invalid.StatusCode != http.StatusBadRequest {
+					t.Fatalf("query %q status = %d", query, invalid.StatusCode)
+				}
 			}
 			var deliveries []domain.NotificationDelivery
 			for time.Now().Before(deadline) {
