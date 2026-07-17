@@ -48,7 +48,8 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 		ID: "codex", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
 		Model: "gpt-5.3-codex", HarnessCommand: "custom", HarnessArgs: []string{"--strict-config"},
 		WorkspaceProvider: "git-worktree", Repository: "/repo", BaseBranch: "main",
-		RequireClean: true, CleanupPolicy: "on_success",
+		WorkspaceArgs: []string{"--target", "host"},
+		RequireClean:  true, CleanupPolicy: "on_success",
 		PrepareCommand: "setup", FinalizeCommand: "finalize",
 	}
 	if err := db.CreateProfile(context.Background(), want, now); err != nil {
@@ -60,6 +61,7 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 	}
 	got := profiles[0]
 	if got.HarnessCommand != want.HarnessCommand || strings.Join(got.HarnessArgs, " ") != "--strict-config" ||
+		strings.Join(got.WorkspaceArgs, " ") != "--target host" ||
 		!got.RequireClean || got.CleanupPolicy != "on_success" {
 		t.Fatalf("profile = %#v", got)
 	}

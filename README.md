@@ -41,6 +41,7 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Task enable/disable/retry and provider pause/resume.
 - Persistent simulated scheduler decision history.
 - Existing-directory, Git worktree, DevX, and generic-command workspace providers.
+- Configurable DevX creation arguments such as `workspace_args: [--target, host]`.
 - Optional workspace setup/finalize hooks and opt-in cleanup policies.
 - Noninteractive Codex CLI, Claude Code, and generic-command harness adapters.
 - Transactional asynchronous run admission with one active run per provider.

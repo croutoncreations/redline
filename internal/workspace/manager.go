@@ -204,8 +204,10 @@ func (m Manager) prepareDevX(
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
 	session := "redline-" + safeName(runID)
+	args := []string{"session", "create", session, "--no-tmux"}
+	args = append(args, profile.WorkspaceArgs...)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
-		Name: "devx", Args: []string{"session", "create", session, "--no-tmux"},
+		Name: "devx", Args: args,
 		Dir: profile.Repository, Stdout: io.Discard, Stderr: io.Discard,
 	})
 	if err != nil {

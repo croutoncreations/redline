@@ -27,6 +27,7 @@ type ExecutionProfile struct {
 	HarnessCommand    string    `json:"harness_command,omitempty"`
 	HarnessArgs       []string  `json:"harness_args,omitempty"`
 	WorkspaceProvider string    `json:"workspace_provider"`
+	WorkspaceArgs     []string  `json:"workspace_args,omitempty"`
 	Repository        string    `json:"repository,omitempty"`
 	BaseBranch        string    `json:"base_branch,omitempty"`
 	RequireClean      bool      `json:"require_clean"`

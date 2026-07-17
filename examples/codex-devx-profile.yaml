@@ -5,7 +5,9 @@ model: default
 harness_args:
   - --strict-config
 workspace_provider: devx
+workspace_args:
+  - --target
+  - host
 repository: /absolute/path/to/repository
 base_branch: main
 cleanup_policy: never
-

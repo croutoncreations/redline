@@ -69,6 +69,23 @@ func TestDevXWorkspaceCreatesNamedSession(t *testing.T) {
 	}
 }
 
+func TestDevXWorkspacePassesConfiguredArguments(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		if got := strings.Join(command.Args, " "); got != "session create redline-run-1 --no-tmux --target host" {
+			t.Fatalf("args = %q", got)
+		}
+		return 0, os.MkdirAll(filepath.Join(repo, ".worktrees", "redline-run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	_, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "devx", Repository: repo, WorkspaceArgs: []string{"--target", "host"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommandWorkspaceConsumesJSONContract(t *testing.T) {
 	repo := t.TempDir()
 	created := filepath.Join(repo, "custom")

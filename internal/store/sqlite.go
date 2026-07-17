@@ -165,6 +165,15 @@ ON notification_deliveries(updated_at DESC, id DESC);
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (8)`); err != nil {
 			return fmt.Errorf("record notification delivery migration: %w", err)
 		}
+		version = 8
+	}
+	if version < 9 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE execution_profiles ADD COLUMN workspace_args_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("extend workspace profile schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (9)`); err != nil {
+			return fmt.Errorf("record workspace profile migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
