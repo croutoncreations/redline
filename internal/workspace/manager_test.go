@@ -173,6 +173,45 @@ func TestDevXCleanupPolicyRemovesSession(t *testing.T) {
 	}
 }
 
+func TestCleanupPoliciesControlWorkspaceRemoval(t *testing.T) {
+	tests := []struct {
+		name    string
+		policy  string
+		success bool
+		wantRun bool
+	}{
+		{name: "never after success", policy: "never", success: true},
+		{name: "never after failure", policy: "never", success: false},
+		{name: "on success after success", policy: "on_success", success: true, wantRun: true},
+		{name: "on success after failure", policy: "on_success", success: false},
+		{name: "always after success", policy: "always", success: true, wantRun: true},
+		{name: "always after failure", policy: "always", success: false, wantRun: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			runner := &fakeRunner{run: func(redprocess.Command) (int, error) {
+				called = true
+				return 0, nil
+			}}
+			manager := workspace.Manager{Runner: runner}
+			err := manager.Cleanup(context.Background(), workspace.CleanupRequest{
+				Success: test.success,
+				Profile: domain.ExecutionProfile{
+					WorkspaceProvider: "devx", Repository: t.TempDir(), CleanupPolicy: test.policy,
+				},
+				Workspace: domain.Workspace{SessionID: "redline-run-1"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called != test.wantRun {
+				t.Fatalf("cleanup command called = %v, want %v", called, test.wantRun)
+			}
+		})
+	}
+}
+
 type fakeRunner struct {
 	run func(redprocess.Command) (int, error)
 }

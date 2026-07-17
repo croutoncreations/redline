@@ -69,9 +69,17 @@ func (e Executor) Execute(
 		})
 	}
 	if err := e.Store.MarkRunRunning(ctx, run.ID, prepared); err != nil {
+		finalizeState := "cleanup_completed"
+		finalizeError := ""
+		if cleanupErr := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
+			Success: false, Profile: profile, Workspace: prepared,
+		}); cleanupErr != nil {
+			finalizeState = "failed"
+			finalizeError = cleanupErr.Error()
+		}
 		return e.complete(ctx, run, task, domain.RunCompletion{
 			State: domain.RunFailed, ExitCode: -1, Error: "record prepared workspace: " + err.Error(),
-			FinalizeState: "skipped",
+			FinalizeState: finalizeState, FinalizeError: finalizeError,
 		})
 	}
 

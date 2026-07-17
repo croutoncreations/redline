@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,46 @@ func TestPartiallyPreparedWorkspaceIsRecordedAndCleanedOnSetupFailure(t *testing
 	}
 }
 
+func TestPreparedWorkspaceIsCleanedWhenRecordingItFails(t *testing.T) {
+	workspaces := &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir(), SessionID: "prepared"}}
+	store := &failingMarkStore{}
+	executor := execution.Executor{
+		Store: store, Workspaces: workspaces, Harness: &fakeHarness{},
+		OutputDirectory: t.TempDir(), Now: time.Now,
+	}
+	run := domain.Run{ID: "run", TaskID: "task", ProviderAccountID: "codex-main", StartedAt: time.Now()}
+	task := domain.Task{ID: "task", Name: "Task", Type: domain.OneOff}
+	profile := domain.ExecutionProfile{CleanupPolicy: "always"}
+
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	if !workspaces.cleaned {
+		t.Fatal("prepared workspace was not cleaned after persistence failure")
+	}
+	if store.completion.FinalizeState != "cleanup_completed" {
+		t.Fatalf("completion = %#v", store.completion)
+	}
+}
+
+func TestCleanupFailureDoesNotChangeSuccessfulAgentOutcome(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{
+			workspace: domain.Workspace{Directory: t.TempDir()}, cleanupErr: fmt.Errorf("remove failed"),
+		},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 0}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := db.GetRun(context.Background(), run.ID)
+	if stored.State != domain.RunCompleted || stored.FinalizeState != "failed" || !strings.Contains(stored.FinalizeError, "remove failed") {
+		t.Fatalf("run = %#v", stored)
+	}
+}
+
 func admittedRun(
 	t *testing.T,
 	taskType domain.TaskType,
@@ -188,6 +229,17 @@ func (f *fakeWorkspaces) Cleanup(context.Context, workspace.CleanupRequest) erro
 type fakeHarness struct {
 	result harness.Result
 	err    error
+}
+
+type failingMarkStore struct{ completion domain.RunCompletion }
+
+func (f *failingMarkStore) MarkRunRunning(context.Context, string, domain.Workspace) error {
+	return errors.New("database unavailable")
+}
+
+func (f *failingMarkStore) CompleteRun(_ context.Context, _ string, completion domain.RunCompletion, _ time.Time) error {
+	f.completion = completion
+	return nil
 }
 
 type fakeNotifier struct {
