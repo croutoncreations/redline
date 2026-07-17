@@ -427,7 +427,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 
 func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline run <list|show|logs>")
+		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs>")
 		return 1
 	}
 	switch args[0] {
@@ -451,19 +451,41 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 		}
 		writeJSON(stdout, run)
 		return 0
+	case "events":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: redline run events <id> [--limit N]")
+			return 1
+		}
+		flags := flag.NewFlagSet("run events", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit := flags.Int("limit", 100, "maximum number of events")
+		if err := flags.Parse(args[2:]); err != nil || *limit <= 0 {
+			if *limit <= 0 {
+				fmt.Fprintln(stderr, "--limit must be positive")
+			}
+			return 1
+		}
+		path := "/v1/runs/" + url.PathEscape(args[1]) + "/events?limit=" + strconv.Itoa(*limit)
+		var events []domain.RunEvent
+		if err := client.Do(context.Background(), http.MethodGet, path, nil, &events); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, events)
+		return 0
 	case "logs":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: redline run logs <id> [--stream stdout|stderr] [--tail-bytes N]")
+			fmt.Fprintln(stderr, "usage: redline run logs <id> [--stream STREAM] [--tail-bytes N]")
 			return 1
 		}
 		flags := flag.NewFlagSet("run logs", flag.ContinueOnError)
 		flags.SetOutput(stderr)
-		stream := flags.String("stream", "stdout", "stdout or stderr")
+		stream := flags.String("stream", "stdout", "stdout, stderr, prepare_stdout, prepare_stderr, finalize_stdout, or finalize_stderr")
 		tailBytes := flags.Int64("tail-bytes", 32*1024, "maximum bytes from the end of the log")
 		jsonOutput := flags.Bool("json", false, "emit JSON metadata and content")
-		if err := flags.Parse(args[2:]); err != nil || (*stream != "stdout" && *stream != "stderr") || *tailBytes <= 0 {
-			if *stream != "stdout" && *stream != "stderr" {
-				fmt.Fprintln(stderr, "--stream must be stdout or stderr")
+		if err := flags.Parse(args[2:]); err != nil || !validRunLogStream(*stream) || *tailBytes <= 0 {
+			if !validRunLogStream(*stream) {
+				fmt.Fprintln(stderr, "--stream is not supported")
 			}
 			if *tailBytes <= 0 {
 				fmt.Fprintln(stderr, "--tail-bytes must be positive")
@@ -486,6 +508,15 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 	default:
 		fmt.Fprintf(stderr, "unknown run command %q\n", args[0])
 		return 1
+	}
+}
+
+func validRunLogStream(stream string) bool {
+	switch stream {
+	case "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr":
+		return true
+	default:
+		return false
 	}
 }
 

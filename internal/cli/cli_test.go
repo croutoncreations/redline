@@ -265,3 +265,21 @@ func TestRunLogsConsumesServiceAPI(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
+
+func TestRunEventsConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/run-1/events" || r.URL.Query().Get("limit") != "25" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `[{"id":1,"run_id":"run-1","type":"run.started","occurred_at":"2026-07-16T18:00:00Z","payload":{}}]`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "run", "events", "run-1", "--limit", "25"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"type": "run.started"`) {
+		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
+	"github.com/jfox/redline/internal/workspace"
 )
 
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -475,6 +476,40 @@ func TestEmptyRunListIsJSONArray(t *testing.T) {
 	}
 }
 
+func TestRunEventsEndpointReturnsTimeline(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	now := apiNow
+	profile := domain.ExecutionProfile{ID: "events-profile", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory"}
+	task := domain.Task{ID: "events-task", Name: "Events", ExecutionProfileID: profile.ID, Type: domain.OneOff}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), task, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(t.Context(), "events-run", task.ID, "codex-main", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordRunEvent(t.Context(), domain.RunEvent{
+		RunID: "events-run", Type: domain.RunEventStarted, OccurredAt: now,
+		Payload: json.RawMessage(`{"task_id":"events-task"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(server.URL + "/v1/runs/events-run/events?limit=5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var events []domain.RunEvent
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || len(events) != 1 || events[0].Type != domain.RunEventStarted {
+		t.Fatalf("status=%d events=%#v", resp.StatusCode, events)
+	}
+}
+
 func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/providers/codex-main/pause", map[string]any{})
@@ -625,6 +660,50 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("run did not complete")
+}
+
+func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	cfg := testConfig(usage.URL)
+	cfg.RunArtifactsDir = root
+	profile := domain.ExecutionProfile{ID: "p", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory"}
+	task := domain.Task{ID: "t", Name: "Task", ExecutionProfileID: profile.ID, Type: domain.OneOff}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(t.Context(), "run-lifecycle", task.ID, "codex-main", "", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	path := workspace.ArtifactPath(root, "run-lifecycle", "prepare", "stderr")
+	if err := os.WriteFile(path, []byte("setup warning\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/v1/runs/run-lifecycle/logs?stream=prepare_stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tail artifacts.Tail
+	if err := json.NewDecoder(resp.Body).Decode(&tail); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || tail.Content != "setup warning\n" {
+		t.Fatalf("status=%d tail=%#v", resp.StatusCode, tail)
+	}
 }
 
 func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {

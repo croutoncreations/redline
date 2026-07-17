@@ -116,6 +116,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
@@ -548,6 +549,16 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, run)
 }
 
+func (s *Server) listRunEvents(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	events, err := s.store.ListRunEvents(r.Context(), r.PathValue("run"), limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
 func (s *Server) getRunLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.GetRun(r.Context(), r.PathValue("run"))
 	if err != nil {
@@ -558,11 +569,22 @@ func (s *Server) getRunLogs(w http.ResponseWriter, r *http.Request) {
 	if stream == "" {
 		stream = "stdout"
 	}
-	path := run.OutputFile
-	if stream == "stderr" {
+	var path string
+	switch stream {
+	case "stdout":
+		path = run.OutputFile
+	case "stderr":
 		path = run.ErrorFile
-	} else if stream != "stdout" {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "stream must be stdout or stderr"})
+	case "prepare_stdout":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "prepare", "stdout")
+	case "prepare_stderr":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "prepare", "stderr")
+	case "finalize_stdout":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "finalize", "stdout")
+	case "finalize_stderr":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "finalize", "stderr")
+	default:
+		writeJSON(w, http.StatusBadRequest, problem{Error: "unsupported log stream"})
 		return
 	}
 	if path == "" {
