@@ -9,6 +9,13 @@ scheduler:
   enabled: false
   poll_interval: 5m
 
+# Notification commands are trusted local hooks. Events are sent as JSON on stdin.
+notifications:
+  enabled: false
+  command: ./scripts/redline-notify
+  timeout: 30s
+  events: [run.completed, run.failed, scheduler.error]
+
 providers:
   codex-main:
     provider: codex

@@ -114,6 +114,45 @@ func TestServiceHealth(t *testing.T) {
 	}
 }
 
+func TestDetailedHealthStartsHealthy(t *testing.T) {
+	server, _ := newAPIServer(t, claudePayload)
+	resp, err := http.Get(server.URL + "/v1/health/details?window=12h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var health domain.OperationalHealth
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Status != "healthy" || health.Window != "12h0m0s" {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
+func TestNotificationDeliveryHistoryEndpoint(t *testing.T) {
+	server, db := newAPIServer(t, claudePayload)
+	id, err := db.CreateNotificationDelivery(t.Context(), domain.EventRunFailed, json.RawMessage(`{"type":"run.failed"}`), apiNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteNotificationDelivery(t.Context(), id, "failed", "offline", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(server.URL + "/v1/notifications")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var deliveries []domain.NotificationDelivery
+	if err := json.NewDecoder(resp.Body).Decode(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 || deliveries[0].LastError != "offline" {
+		t.Fatalf("deliveries = %#v", deliveries)
+	}
+}
+
 func TestSchedulerStatusIsExposedWhenDisabled(t *testing.T) {
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/scheduler/status")
@@ -256,6 +295,7 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 	cfg := testConfig(usage.URL)
 	delete(cfg.Providers, "claude-main")
 	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	cfg.Notifications = config.Notifications{Enabled: true, Command: "true", Events: []string{domain.EventSchedulerError}}
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
 	ctx, cancel := context.WithCancel(context.Background())
 	handler.StartScheduler(ctx)
@@ -276,6 +316,11 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 	if len(attempts) != 1 || attempts[0].Outcome != domain.DispatchError ||
 		attempts[0].Trigger != "automatic" || !strings.Contains(attempts[0].Error, "HTTP 503") {
 		t.Fatalf("attempts = %#v", attempts)
+	}
+	deliveries, err := db.ListNotificationDeliveries(t.Context(), 10)
+	if err != nil || len(deliveries) != 1 || deliveries[0].Status != "delivered" ||
+		deliveries[0].EventType != domain.EventSchedulerError {
+		t.Fatalf("deliveries=%#v err=%v", deliveries, err)
 	}
 }
 
@@ -447,6 +492,7 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 	defer db.Close()
 	cfg := testConfig(usage.URL)
 	cfg.RunArtifactsDir = filepath.Join(t.TempDir(), "runs")
+	cfg.Notifications = config.Notifications{Enabled: true, Command: "true", Events: []string{domain.EventRunCompleted}}
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
 	defer handler.Wait()
 	server := httptest.NewServer(handler)
@@ -494,6 +540,20 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 			}
 			if !tail.Truncated || tail.Content != "\":true}\n" {
 				t.Fatalf("tail = %#v", tail)
+			}
+			var deliveries []domain.NotificationDelivery
+			for time.Now().Before(deadline) {
+				deliveries, err = db.ListNotificationDeliveries(t.Context(), 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(deliveries) == 1 && deliveries[0].Status != "pending" {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if len(deliveries) != 1 || deliveries[0].EventType != domain.EventRunCompleted || deliveries[0].Status != "delivered" {
+				t.Fatalf("deliveries=%#v", deliveries)
 			}
 			return
 		}

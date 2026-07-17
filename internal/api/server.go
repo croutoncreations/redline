@@ -21,6 +21,7 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
+	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
@@ -31,11 +32,16 @@ type Executor interface {
 	Execute(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error
 }
 
+type Notifier interface {
+	Notify(context.Context, domain.NotificationEvent) error
+}
+
 type Server struct {
 	config      config.Config
 	store       *store.DB
 	now         func() time.Time
 	executor    Executor
+	notifier    Notifier
 	revision    workspace.RevisionResolver
 	artifacts   artifacts.Reader
 	scheduler   *autoscheduler.Loop
@@ -47,11 +53,12 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
+	notifier := configuredNotifier(cfg, database, now)
 	defaultExecutor := execution.Executor{
 		Store: database, Workspaces: workspace.Manager{}, Harness: &harness.Adapter{},
-		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
+		Notifier: notifier, OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
-	return NewServerWithDependencies(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{})
+	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
 }
 
 func NewServerWithExecutor(
@@ -70,8 +77,19 @@ func NewServerWithDependencies(
 	executor Executor,
 	revision workspace.RevisionResolver,
 ) *Server {
+	return newServer(cfg, database, now, executor, revision, configuredNotifier(cfg, database, now))
+}
+
+func newServer(
+	cfg config.Config,
+	database *store.DB,
+	now func() time.Time,
+	executor Executor,
+	revision workspace.RevisionResolver,
+	notifier Notifier,
+) *Server {
 	server := &Server{
-		config: cfg, store: database, now: now, executor: executor, revision: revision,
+		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 	}
 	interval, _ := cfg.SchedulerInterval()
@@ -82,6 +100,7 @@ func NewServerWithDependencies(
 	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
+	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
@@ -99,8 +118,17 @@ func NewServerWithDependencies(
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
+	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	server.mux = mux
 	return server
+}
+
+func configuredNotifier(cfg config.Config, database *store.DB, now func() time.Time) notification.Service {
+	return notification.Service{
+		Enabled: cfg.Notifications.Enabled, Events: cfg.NotificationEvents(), Store: database,
+		Sink:    notification.CommandSink{Command: cfg.Notifications.Command},
+		Timeout: cfg.NotificationTimeout(), Now: now,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
@@ -130,6 +158,34 @@ func (s *Server) schedulerStatus(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) healthDetails(w http.ResponseWriter, r *http.Request) {
+	window := 24 * time.Hour
+	var err error
+	if configured := r.URL.Query().Get("window"); configured != "" {
+		window, err = parseDuration(configured)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "window must be a positive duration"})
+			return
+		}
+	}
+	health, err := s.store.OperationalHealth(r.Context(), s.now(), window)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, health)
+}
+
+func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	deliveries, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, deliveries)
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +416,16 @@ func (s *Server) dispatch(
 		log.Printf("redline %s dispatch attempt history failed: %v", request.ProviderAccountID, err)
 		if dispatchErr == nil && !admitted {
 			dispatchErr = err
+		}
+	}
+	if dispatchErr != nil && s.notifier != nil {
+		event := domain.NotificationEvent{
+			Version: 1, Type: domain.EventSchedulerError, OccurredAt: s.now().UTC(),
+			ProviderAccountID: request.ProviderAccountID, Message: "Redline scheduler dispatch failed",
+			Data: map[string]string{"trigger": trigger, "error": dispatchErr.Error()},
+		}
+		if err := s.notifier.Notify(ctx, event); err != nil {
+			log.Printf("redline %s scheduler error notification failed: %v", request.ProviderAccountID, err)
 		}
 	}
 	return response, admitted, dispatchErr

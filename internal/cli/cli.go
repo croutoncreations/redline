@@ -48,13 +48,15 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|decision|status|usage|task|profile|scheduler>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|usage|task|profile|scheduler|run|notification>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL}
 	switch remaining[0] {
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
+	case "health":
+		return runHealth(client, remaining[1:], stdout, stderr)
 	case "decision":
 		return runDecision(client, remaining[1:], stdout, stderr)
 	case "status":
@@ -69,12 +71,45 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runScheduler(client, remaining[1:], stdout, stderr)
 	case "run":
 		return runRuns(client, remaining[1:], stdout, stderr)
+	case "notification":
+		return runNotifications(client, remaining[1:], stdout, stderr)
 	case "pause", "resume":
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
 	}
+}
+
+func runHealth(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("health", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	window := flags.String("window", "24h", "summary duration")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	var health domain.OperationalHealth
+	path := "/v1/health/details?window=" + url.QueryEscape(*window)
+	if err := client.Do(context.Background(), http.MethodGet, path, nil, &health); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, health)
+	return 0
+}
+
+func runNotifications(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 || args[0] != "list" {
+		fmt.Fprintln(stderr, "usage: redline notification list")
+		return 1
+	}
+	var deliveries []domain.NotificationDelivery
+	if err := client.Do(context.Background(), http.MethodGet, "/v1/notifications", nil, &deliveries); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, deliveries)
+	return 0
 }
 
 func runServe(args []string, configPath string, stdout, stderr io.Writer, now func() time.Time) int {
@@ -96,6 +131,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	defer database.Close()
 	if err := database.RecoverInterruptedRuns(context.Background(), now()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

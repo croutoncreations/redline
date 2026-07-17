@@ -52,6 +52,51 @@ scheduler:
 	}
 }
 
+func TestNotificationsAreDisabledByDefault(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Notifications.Enabled || cfg.NotificationTimeout() != 30*time.Second {
+		t.Fatalf("notifications = %#v timeout=%s", cfg.Notifications, cfg.NotificationTimeout())
+	}
+}
+
+func TestLoadParsesNotificationCommandAndEvents(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+notifications:
+  enabled: true
+  command: ./scripts/notify
+  timeout: 10s
+  events: [run.completed, scheduler.error]`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Notifications.Enabled || cfg.Notifications.Command != "./scripts/notify" ||
+		cfg.NotificationTimeout() != 10*time.Second || len(cfg.Notifications.Events) != 2 {
+		t.Fatalf("notifications = %#v", cfg.Notifications)
+	}
+}
+
+func TestEnabledNotificationsRequireCommandAndKnownEvents(t *testing.T) {
+	missingCommand := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+notifications:
+  enabled: true
+  events: [run.completed]`, 1)
+	if _, err := config.Load(writeConfig(t, missingCommand)); err == nil {
+		t.Fatal("expected missing command error")
+	}
+	unknownEvent := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+notifications:
+  enabled: true
+  command: notify
+  events: [task.exploded]`, 1)
+	if _, err := config.Load(writeConfig(t, unknownEvent)); err == nil {
+		t.Fatal("expected unknown event error")
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	path := writeConfig(t, strings.Replace(validConfig, "rolling_reserve", "rolling_resrve", 1))
 	if _, err := config.Load(path); err == nil {

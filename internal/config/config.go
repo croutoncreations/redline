@@ -17,8 +17,40 @@ type Config struct {
 	ActivePolicy    string              `yaml:"active_policy"`
 	MaxSnapshotAge  string              `yaml:"max_snapshot_age"`
 	Scheduler       Scheduler           `yaml:"scheduler"`
+	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
+}
+
+type Notifications struct {
+	Enabled bool     `yaml:"enabled"`
+	Command string   `yaml:"command"`
+	Timeout string   `yaml:"timeout"`
+	Events  []string `yaml:"events"`
+}
+
+var knownNotificationEvents = map[string]bool{
+	"run.completed": true, "run.failed": true, "scheduler.error": true,
+}
+
+func (c Config) NotificationTimeout() time.Duration {
+	if c.Notifications.Timeout == "" {
+		return 30 * time.Second
+	}
+	timeout, _ := time.ParseDuration(c.Notifications.Timeout)
+	return timeout
+}
+
+func (c Config) NotificationEvents() map[string]bool {
+	events := c.Notifications.Events
+	if len(events) == 0 {
+		events = []string{"run.completed", "run.failed", "scheduler.error"}
+	}
+	result := make(map[string]bool, len(events))
+	for _, event := range events {
+		result[event] = true
+	}
+	return result
 }
 
 type Scheduler struct {
@@ -111,6 +143,20 @@ func Load(path string) (Config, error) {
 	}
 	if _, err := cfg.SchedulerInterval(); err != nil {
 		return Config{}, err
+	}
+	if cfg.Notifications.Timeout != "" {
+		timeout, err := time.ParseDuration(cfg.Notifications.Timeout)
+		if err != nil || timeout <= 0 {
+			return Config{}, fmt.Errorf("notifications timeout must be a positive duration")
+		}
+	}
+	if cfg.Notifications.Enabled && strings.TrimSpace(cfg.Notifications.Command) == "" {
+		return Config{}, fmt.Errorf("enabled notifications require command")
+	}
+	for _, event := range cfg.Notifications.Events {
+		if !knownNotificationEvents[event] {
+			return Config{}, fmt.Errorf("unknown notification event %q", event)
+		}
 	}
 	return cfg, nil
 }

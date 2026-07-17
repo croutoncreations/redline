@@ -184,6 +184,36 @@ func TestSchedulerStatusConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestHealthConsumesDetailedHealthAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/health/details" || r.URL.Query().Get("window") != "12h" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `{"status":"degraded","window":"12h0m0s","since":"2026-07-16T06:00:00Z","dispatch_errors":1}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "health", "--window", "12h"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"status": "degraded"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestNotificationListConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/notifications" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `[{"id":1,"event_type":"run.failed","status":"failed","payload":{},"attempts":1,"created_at":"2026-07-16T18:00:00Z","updated_at":"2026-07-16T18:00:01Z"}]`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "notification", "list"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"status": "failed"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestSchedulerAttemptsConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/scheduler/attempts" || r.URL.Query().Get("provider") != "codex-main" {

@@ -50,6 +50,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Per-provider cycle status, active-run suppression, and automatic repository revision checks.
 - Durable dispatch-attempt history, including usage/admission errors that produce no decision.
 - Bounded stdout/stderr tail inspection through the service API and CLI.
+- Opt-in command notifications for run completion/failure and scheduler errors.
+- Durable notification delivery history and 24-hour operational health summaries.
 
 ## Quick start
 
@@ -72,6 +74,8 @@ go run ./cmd/redline scheduler status
 go run ./cmd/redline scheduler attempts --provider codex-main
 go run ./cmd/redline run list
 go run ./cmd/redline run logs <run-id> --stream stderr
+go run ./cmd/redline health
+go run ./cmd/redline notification list
 ```
 
 The default API is `http://127.0.0.1:7436`. Override it before the command:
@@ -111,6 +115,7 @@ The main endpoints are:
 
 ```text
 GET  /v1/health
+GET  /v1/health/details?window={duration}
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
 POST /v1/providers/{account}/decision
@@ -126,6 +131,7 @@ GET  /v1/scheduler/attempts?provider={account}
 GET  /v1/runs
 GET  /v1/runs/{id}
 GET  /v1/runs/{id}/logs?stream=stdout|stderr&tail_bytes={n}
+GET  /v1/notifications
 ```
 
 The service binds to loopback by default and currently has no authentication. Do not expose
@@ -186,6 +192,33 @@ go run ./cmd/redline run logs <run-id>
 go run ./cmd/redline run logs <run-id> --stream stderr --tail-bytes 8192
 go run ./cmd/redline run logs <run-id> --json
 ```
+
+## Notifications and health
+
+Notifications are disabled by default. When enabled, Redline invokes a trusted local command with
+a versioned event document on stdin. Supported events are `run.completed`, `run.failed`, and
+`scheduler.error`.
+
+```yaml
+notifications:
+  enabled: true
+  command: ./scripts/redline-notify
+  timeout: 30s
+  events: [run.completed, run.failed, scheduler.error]
+```
+
+The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
+`REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
+outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
+possibly non-idempotent hook.
+
+```bash
+go run ./cmd/redline notification list
+go run ./cmd/redline health --window 24h
+```
+
+Detailed health reports active/recent run counts, dispatch errors, and notification failures.
+The lightweight `/v1/health` probe remains independent of recent operational failures.
 
 ## Development
 

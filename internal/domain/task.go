@@ -95,6 +95,46 @@ type DispatchAttempt struct {
 	CompletedAt       time.Time       `json:"completed_at"`
 }
 
+const (
+	EventRunCompleted   = "run.completed"
+	EventRunFailed      = "run.failed"
+	EventSchedulerError = "scheduler.error"
+)
+
+type NotificationEvent struct {
+	Version           int               `json:"version"`
+	Type              string            `json:"type"`
+	OccurredAt        time.Time         `json:"occurred_at"`
+	ProviderAccountID string            `json:"provider_account_id,omitempty"`
+	TaskID            string            `json:"task_id,omitempty"`
+	RunID             string            `json:"run_id,omitempty"`
+	Message           string            `json:"message"`
+	Data              map[string]string `json:"data,omitempty"`
+}
+
+type NotificationDelivery struct {
+	ID        int64           `json:"id"`
+	EventType string          `json:"event_type"`
+	Status    string          `json:"status"`
+	Payload   json.RawMessage `json:"payload"`
+	Attempts  int             `json:"attempts"`
+	LastError string          `json:"last_error,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+type OperationalHealth struct {
+	Status               string    `json:"status"`
+	Window               string    `json:"window"`
+	Since                time.Time `json:"since"`
+	ActiveRuns           int       `json:"active_runs"`
+	CompletedRuns        int       `json:"completed_runs"`
+	FailedRuns           int       `json:"failed_runs"`
+	DispatchAttempts     int       `json:"dispatch_attempts"`
+	DispatchErrors       int       `json:"dispatch_errors"`
+	NotificationFailures int       `json:"notification_failures"`
+}
+
 type RunState string
 
 const (

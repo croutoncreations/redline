@@ -3,6 +3,8 @@ package execution
 import (
 	"context"
 	"fmt"
+	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,10 +28,15 @@ type Harness interface {
 	Run(context.Context, harness.Request) (harness.Result, error)
 }
 
+type Notifier interface {
+	Notify(context.Context, domain.NotificationEvent) error
+}
+
 type Executor struct {
 	Store           Store
 	Workspaces      WorkspaceManager
 	Harness         Harness
+	Notifier        Notifier
 	OutputDirectory string
 	Now             func() time.Time
 }
@@ -56,16 +63,16 @@ func (e Executor) Execute(
 				finalizeState = "cleanup_completed"
 			}
 		}
-		return e.Store.CompleteRun(ctx, run.ID, domain.RunCompletion{
+		return e.complete(ctx, run, task, domain.RunCompletion{
 			State: domain.RunFailed, ExitCode: -1, Error: "prepare workspace: " + err.Error(),
 			FinalizeState: finalizeState, FinalizeError: finalizeError,
-		}, e.now())
+		})
 	}
 	if err := e.Store.MarkRunRunning(ctx, run.ID, prepared); err != nil {
-		return e.Store.CompleteRun(ctx, run.ID, domain.RunCompletion{
+		return e.complete(ctx, run, task, domain.RunCompletion{
 			State: domain.RunFailed, ExitCode: -1, Error: "record prepared workspace: " + err.Error(),
 			FinalizeState: "skipped",
-		}, e.now())
+		})
 	}
 
 	harnessResult, harnessErr := e.Harness.Run(ctx, harness.Request{
@@ -104,12 +111,46 @@ func (e Executor) Execute(
 		lifecycleErrors = append(lifecycleErrors, err.Error())
 	}
 
-	return e.Store.CompleteRun(ctx, run.ID, domain.RunCompletion{
+	return e.complete(ctx, run, task, domain.RunCompletion{
 		State: state, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, ErrorFile: harnessResult.ErrorFile,
 		Error: agentError, FinalizeState: finalizeState,
 		FinalizeError: strings.Join(lifecycleErrors, "; "),
-	}, e.now())
+	})
+}
+
+func (e Executor) complete(
+	ctx context.Context,
+	run domain.Run,
+	task domain.Task,
+	completion domain.RunCompletion,
+) error {
+	completedAt := e.now().UTC()
+	if err := e.Store.CompleteRun(ctx, run.ID, completion, completedAt); err != nil {
+		return err
+	}
+	if e.Notifier == nil {
+		return nil
+	}
+	eventType := domain.EventRunCompleted
+	message := "Redline run completed"
+	if completion.State == domain.RunFailed {
+		eventType = domain.EventRunFailed
+		message = "Redline run failed"
+	}
+	event := domain.NotificationEvent{
+		Version: 1, Type: eventType, OccurredAt: completedAt,
+		ProviderAccountID: run.ProviderAccountID, TaskID: task.ID, RunID: run.ID,
+		Message: message,
+		Data: map[string]string{
+			"state": string(completion.State), "exit_code": strconv.Itoa(completion.ExitCode),
+			"finalize_state": completion.FinalizeState,
+		},
+	}
+	if err := e.Notifier.Notify(ctx, event); err != nil {
+		log.Printf("redline run %s notification failed: %v", run.ID, err)
+	}
+	return nil
 }
 
 func (e Executor) now() time.Time {

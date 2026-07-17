@@ -143,6 +143,28 @@ ON dispatch_attempts(provider_account_id, completed_at DESC, id DESC);
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (7)`); err != nil {
 			return fmt.Errorf("record dispatch attempt migration: %w", err)
 		}
+		version = 7
+	}
+	if version < 8 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE notification_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'delivered', 'failed')),
+    payload_json BLOB NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_notification_deliveries_updated
+ON notification_deliveries(updated_at DESC, id DESC);
+`); err != nil {
+			return fmt.Errorf("create notification delivery schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (8)`); err != nil {
+			return fmt.Errorf("record notification delivery migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
