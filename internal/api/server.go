@@ -20,6 +20,7 @@ import (
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
 	"github.com/jfox/redline/internal/openusage"
+	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/workspace"
 )
@@ -29,12 +30,17 @@ type Executor interface {
 }
 
 type Server struct {
-	config   config.Config
-	store    *store.DB
-	now      func() time.Time
-	executor Executor
-	mux      *http.ServeMux
-	workers  sync.WaitGroup
+	config      config.Config
+	store       *store.DB
+	now         func() time.Time
+	executor    Executor
+	revision    workspace.RevisionResolver
+	scheduler   *autoscheduler.Loop
+	mux         *http.ServeMux
+	workers     sync.WaitGroup
+	loopWorkers sync.WaitGroup
+	startMu     sync.Mutex
+	started     bool
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -42,7 +48,7 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 		Store: database, Workspaces: workspace.Manager{}, Harness: &harness.Adapter{},
 		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
-	return NewServerWithExecutor(cfg, database, now, defaultExecutor)
+	return NewServerWithDependencies(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{})
 }
 
 func NewServerWithExecutor(
@@ -51,7 +57,23 @@ func NewServerWithExecutor(
 	now func() time.Time,
 	executor Executor,
 ) *Server {
-	server := &Server{config: cfg, store: database, now: now, executor: executor}
+	return NewServerWithDependencies(cfg, database, now, executor, workspace.GitRevisionResolver{})
+}
+
+func NewServerWithDependencies(
+	cfg config.Config,
+	database *store.DB,
+	now func() time.Time,
+	executor Executor,
+	revision workspace.RevisionResolver,
+) *Server {
+	server := &Server{config: cfg, store: database, now: now, executor: executor, revision: revision}
+	interval, _ := cfg.SchedulerInterval()
+	providers := make([]string, 0, len(cfg.Providers))
+	for provider := range cfg.Providers {
+		providers = append(providers, provider)
+	}
+	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
@@ -65,6 +87,7 @@ func NewServerWithExecutor(
 	mux.HandleFunc("POST /v1/tasks/{task}/{control}", server.taskControl)
 	mux.HandleFunc("POST /v1/scheduler/evaluate", server.evaluateScheduler)
 	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
+	mux.HandleFunc("GET /v1/scheduler/status", server.schedulerStatus)
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
@@ -74,14 +97,35 @@ func NewServerWithExecutor(
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
-func (s *Server) Wait() { s.workers.Wait() }
+func (s *Server) StartScheduler(ctx context.Context) {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.started {
+		return
+	}
+	s.started = true
+	s.loopWorkers.Add(1)
+	go func() {
+		defer s.loopWorkers.Done()
+		s.scheduler.Run(ctx)
+	}()
+}
+
+func (s *Server) Wait() {
+	s.loopWorkers.Wait()
+	s.workers.Wait()
+}
+
+func (s *Server) schedulerStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.scheduler.Status())
+}
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
-	snapshot, _, err := s.fetchAndStore(r, r.PathValue("provider"))
+	snapshot, _, err := s.fetchAndStore(r.Context(), r.PathValue("provider"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -104,7 +148,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {
-	snapshot, result, err := s.evaluateProvider(r, r.PathValue("provider"))
+	snapshot, result, err := s.evaluateProvider(r.Context(), r.PathValue("provider"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -236,6 +280,7 @@ type schedulerRequest struct {
 type schedulerResponse struct {
 	Snapshot     decision.UsageSnapshot `json:"snapshot"`
 	Result       decision.Result        `json:"result"`
+	Trigger      string                 `json:"trigger,omitempty"`
 	SelectedTask *domain.Task           `json:"selected_task,omitempty"`
 	Run          *domain.Run            `json:"run,omitempty"`
 }
@@ -259,42 +304,68 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
 		return
 	}
-	snapshot, result, err := s.evaluateProvider(r, request.ProviderAccountID)
+	response, admitted, err := s.dispatch(r.Context(), request, "manual")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	response := schedulerResponse{Snapshot: snapshot, Result: result}
-	if result.Decision != decision.Run {
-		s.recordSchedulerResponse(r, request.ProviderAccountID, response)
-		writeJSON(w, http.StatusOK, response)
-		return
+	status := http.StatusOK
+	if admitted {
+		status = http.StatusAccepted
 	}
-	task, err := s.store.NextEligibleTask(r.Context(), request.ProviderAccountID, s.now(), request.CurrentRevision)
+	writeJSON(w, status, response)
+}
+
+func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
+	_, _, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+	return err
+}
+
+func (s *Server) dispatch(
+	ctx context.Context,
+	request schedulerRequest,
+	trigger string,
+) (schedulerResponse, bool, error) {
+	response := schedulerResponse{Trigger: trigger}
+	paused, err := s.store.ProviderPaused(ctx, request.ProviderAccountID)
+	if err != nil {
+		return response, false, err
+	}
+	if paused {
+		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused"}
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+	}
+	active, err := s.store.HasActiveRun(ctx, request.ProviderAccountID)
+	if err != nil {
+		return response, false, err
+	}
+	if active {
+		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive, Reason: "provider already has an active run"}
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+	}
+	response.Snapshot, response.Result, err = s.evaluateProvider(ctx, request.ProviderAccountID)
+	if err != nil {
+		return response, false, err
+	}
+	if response.Result.Decision != decision.Run {
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+	}
+	task, profile, revision, err := s.selectTask(ctx, request.ProviderAccountID, request.CurrentRevision)
 	if errors.Is(err, store.ErrNotFound) {
-		s.recordSchedulerResponse(r, request.ProviderAccountID, response)
-		writeJSON(w, http.StatusOK, response)
-		return
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	if err != nil {
-		writeError(w, err)
-		return
+		return response, false, err
 	}
-	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	run, err := s.store.AdmitTask(ctx, uuid.NewString(), task.ID, request.ProviderAccountID, revision, s.now())
 	if err != nil {
-		writeError(w, err)
-		return
-	}
-	run, err := s.store.AdmitTask(
-		r.Context(), uuid.NewString(), task.ID, request.ProviderAccountID, request.CurrentRevision, s.now(),
-	)
-	if err != nil {
-		writeError(w, err)
-		return
+		return response, false, err
 	}
 	response.SelectedTask = &task
 	response.Run = &run
-	s.recordSchedulerResponse(r, request.ProviderAccountID, response)
+	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
+		log.Printf("redline run %s decision history failed: %v", run.ID, err)
+	}
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -302,19 +373,50 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("redline run %s execution bookkeeping failed: %v", run.ID, err)
 		}
 	}()
-	writeJSON(w, http.StatusAccepted, response)
+	return response, true, nil
 }
 
-func (s *Server) recordSchedulerResponse(r *http.Request, provider string, response schedulerResponse) {
+func (s *Server) selectTask(
+	ctx context.Context,
+	provider, suppliedRevision string,
+) (domain.Task, domain.ExecutionProfile, string, error) {
+	tasks, err := s.store.EligibleTasks(ctx, provider, s.now())
+	if err != nil {
+		return domain.Task{}, domain.ExecutionProfile{}, "", err
+	}
+	for _, task := range tasks {
+		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+		if err != nil {
+			return domain.Task{}, domain.ExecutionProfile{}, "", err
+		}
+		revision := suppliedRevision
+		if revision == "" && profile.Repository != "" {
+			resolved, resolveErr := s.revision.Resolve(ctx, profile)
+			if resolveErr == nil {
+				revision = resolved
+			} else if task.RequireRepoChange {
+				continue
+			}
+		}
+		if task.RequireRepoChange && (revision == "" || revision == task.LastSuccessfulSourceRevision) {
+			continue
+		}
+		return task, profile, revision, nil
+	}
+	return domain.Task{}, domain.ExecutionProfile{}, "", fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
+}
+
+func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, response schedulerResponse) error {
 	encoded, err := json.Marshal(response)
 	if err != nil {
-		return
+		return err
 	}
 	record := domain.SchedulerDecision{ProviderAccountID: provider, DecisionJSON: encoded}
 	if response.SelectedTask != nil {
 		record.SelectedTaskID = response.SelectedTask.ID
 	}
-	_, _ = s.store.RecordSchedulerDecision(r.Context(), record, s.now())
+	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
+	return err
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -371,7 +473,7 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
-	snapshot, result, err := s.evaluateProvider(r, request.ProviderAccountID)
+	snapshot, result, err := s.evaluateProvider(r.Context(), request.ProviderAccountID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -419,10 +521,10 @@ func (s *Server) listDecisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) evaluateProvider(
-	r *http.Request,
+	ctx context.Context,
 	providerID string,
 ) (decision.UsageSnapshot, decision.Result, error) {
-	snapshot, configured, err := s.fetchAndStore(r, providerID)
+	snapshot, configured, err := s.fetchAndStore(ctx, providerID)
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
@@ -444,7 +546,7 @@ func (s *Server) evaluateProvider(
 }
 
 func (s *Server) fetchAndStore(
-	r *http.Request,
+	ctx context.Context,
 	providerID string,
 ) (decision.UsageSnapshot, config.Provider, error) {
 	configured, ok := s.config.Providers[providerID]
@@ -452,11 +554,11 @@ func (s *Server) fetchAndStore(
 		return decision.UsageSnapshot{}, config.Provider{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
 	client := openusage.Client{BaseURL: configured.OpenUsageURL}
-	snapshot, raw, err := client.Fetch(r.Context(), configured.Provider)
+	snapshot, raw, err := client.Fetch(ctx, configured.Provider)
 	if err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}
-	if err := s.store.SaveSnapshot(r.Context(), snapshot, raw); err != nil {
+	if err := s.store.SaveSnapshot(ctx, snapshot, raw); err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}
 	return snapshot, configured, nil

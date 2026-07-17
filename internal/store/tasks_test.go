@@ -98,6 +98,30 @@ func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
 	}
 }
 
+func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		WorkspaceProvider: "existing-directory",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(context.Background(), domain.Task{
+		ID: "repo-task", Name: "Repo task", ExecutionProfileID: "profile", Type: domain.Recurring,
+		RequireRepoChange: true, LastSuccessfulSourceRevision: "old",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := db.EligibleTasks(context.Background(), "codex-main", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "repo-task" {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+}
+
 func TestSchedulerDecisionIsPersistedWithoutMutatingTask(t *testing.T) {
 	db := openTaskDB(t)
 	ctx := context.Background()
@@ -202,6 +226,33 @@ func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 	claimed, _ := db.GetTask(ctx, "first")
 	if claimed.State != domain.Running {
 		t.Fatalf("task state = %s", claimed.State)
+	}
+}
+
+func TestHasActiveRun(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		WorkspaceProvider: "existing-directory",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(context.Background(), domain.Task{
+		ID: "task", Name: "Task", ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	active, err := db.HasActiveRun(context.Background(), "codex-main")
+	if err != nil || active {
+		t.Fatalf("before admission active=%v err=%v", active, err)
+	}
+	if _, err := db.AdmitTask(context.Background(), "run", "task", "codex-main", "rev", now); err != nil {
+		t.Fatal(err)
+	}
+	active, err = db.HasActiveRun(context.Background(), "codex-main")
+	if err != nil || !active {
+		t.Fatalf("after admission active=%v err=%v", active, err)
 	}
 }
 

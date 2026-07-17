@@ -210,33 +210,49 @@ func (d *DB) NextEligibleTask(
 	now time.Time,
 	currentRevision string,
 ) (domain.Task, error) {
-	rows, err := d.db.QueryContext(ctx, taskSelect+`
-JOIN execution_profiles p ON p.id = t.execution_profile_id
-WHERE p.provider_account_id = ? AND t.enabled = 1 AND t.state = 'queued'
-ORDER BY t.priority DESC, t.queue_sequence ASC`, providerAccountID)
+	tasks, err := d.EligibleTasks(ctx, providerAccountID, now)
 	if err != nil {
-		return domain.Task{}, fmt.Errorf("query eligible tasks: %w", err)
+		return domain.Task{}, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		task, err := scanTask(rows)
-		if err != nil {
-			return domain.Task{}, err
-		}
-		if task.LastCompletedAt != nil && task.MinInterval > 0 &&
-			now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
-			continue
-		}
+	for _, task := range tasks {
 		if task.RequireRepoChange &&
 			(currentRevision == "" || currentRevision == task.LastSuccessfulSourceRevision) {
 			continue
 		}
 		return task, nil
 	}
-	if err := rows.Err(); err != nil {
-		return domain.Task{}, fmt.Errorf("scan eligible tasks: %w", err)
-	}
 	return domain.Task{}, fmt.Errorf("%w: no eligible task for provider %q", ErrNotFound, providerAccountID)
+}
+
+func (d *DB) EligibleTasks(
+	ctx context.Context,
+	providerAccountID string,
+	now time.Time,
+) ([]domain.Task, error) {
+	rows, err := d.db.QueryContext(ctx, taskSelect+`
+JOIN execution_profiles p ON p.id = t.execution_profile_id
+WHERE p.provider_account_id = ? AND t.enabled = 1 AND t.state = 'queued'
+ORDER BY t.priority DESC, t.queue_sequence ASC`, providerAccountID)
+	if err != nil {
+		return nil, fmt.Errorf("query eligible tasks: %w", err)
+	}
+	defer rows.Close()
+	tasks := make([]domain.Task, 0)
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		if task.LastCompletedAt != nil && task.MinInterval > 0 &&
+			now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan eligible tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 func (d *DB) RecordSchedulerDecision(

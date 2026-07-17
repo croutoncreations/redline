@@ -19,6 +19,7 @@ const (
 	ModeSlots  Mode = "window_slots"
 	ModePace   Mode = "pace_threshold"
 	ModePaused Mode = "paused"
+	ModeActive Mode = "active_run"
 )
 
 type UsageWindow struct {

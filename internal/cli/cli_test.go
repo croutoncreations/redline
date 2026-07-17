@@ -166,6 +166,24 @@ func TestSchedulerExecuteConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestSchedulerStatusConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/scheduler/status" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"enabled":true,"poll_interval":"1m0s","running":false}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "scheduler", "status"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"enabled": true`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunShowConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/runs/run-1" {

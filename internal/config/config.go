@@ -16,8 +16,14 @@ type Config struct {
 	RunArtifactsDir string              `yaml:"run_artifacts_dir"`
 	ActivePolicy    string              `yaml:"active_policy"`
 	MaxSnapshotAge  string              `yaml:"max_snapshot_age"`
+	Scheduler       Scheduler           `yaml:"scheduler"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
+}
+
+type Scheduler struct {
+	Enabled      bool   `yaml:"enabled"`
+	PollInterval string `yaml:"poll_interval"`
 }
 
 func (c Config) ArtifactsDirectory() string {
@@ -25,6 +31,17 @@ func (c Config) ArtifactsDirectory() string {
 		return ".redline/runs"
 	}
 	return c.RunArtifactsDir
+}
+
+func (c Config) SchedulerInterval() (time.Duration, error) {
+	if c.Scheduler.PollInterval == "" {
+		return 5 * time.Minute, nil
+	}
+	interval, err := time.ParseDuration(c.Scheduler.PollInterval)
+	if err != nil || interval <= 0 {
+		return 0, fmt.Errorf("scheduler poll_interval must be a positive duration")
+	}
+	return interval, nil
 }
 
 type Provider struct {
@@ -90,6 +107,9 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if _, err := cfg.SnapshotAge(); err != nil {
+		return Config{}, err
+	}
+	if _, err := cfg.SchedulerInterval(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

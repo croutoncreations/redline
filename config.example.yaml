@@ -3,6 +3,12 @@ run_artifacts_dir: .redline/runs
 active_policy: standard
 max_snapshot_age: 15m
 
+# Automatic dispatch is opt-in so installing or upgrading Redline cannot start
+# spending subscription capacity unexpectedly.
+scheduler:
+  enabled: false
+  poll_interval: 5m
+
 providers:
   codex-main:
     provider: codex

@@ -3,9 +3,9 @@
 Redline is a budget-aware dispatcher for deferred LLM work. It models subscription
 allowances, maintains a durable priority queue, and explains which task would be admitted.
 
-The current implementation includes the Phase 3 execution service. Simulated evaluation
-remains available, while explicit scheduler execution can prepare an isolated workspace and
-launch Codex CLI, Claude Code, or a generic command harness.
+The current implementation includes the Phase 4 automatic execution service. Simulated and
+explicit execution remain available, while an opt-in service loop can evaluate configured
+providers and launch eligible Codex CLI, Claude Code, or generic-command tasks unattended.
 
 ## Architecture
 
@@ -46,6 +46,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Transactional asynchronous run admission with one active run per provider.
 - Run artifacts, recurring completion/requeue, and interrupted-run recovery.
 - Graceful service shutdown.
+- Opt-in automatic scheduling with immediate startup evaluation and configurable polling.
+- Per-provider cycle status, active-run suppression, and automatic repository revision checks.
 
 ## Quick start
 
@@ -64,6 +66,7 @@ go run ./cmd/redline status --provider codex-main
 go run ./cmd/redline decision --provider codex-main
 go run ./cmd/redline scheduler evaluate --provider codex-main --json
 go run ./cmd/redline scheduler execute --provider codex-main --json
+go run ./cmd/redline scheduler status
 go run ./cmd/redline run list
 ```
 
@@ -114,6 +117,7 @@ POST /v1/tasks/{id}/enable|disable|retry
 POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
+GET  /v1/scheduler/status
 GET  /v1/runs
 GET  /v1/runs/{id}
 ```
@@ -136,6 +140,26 @@ failed for explicit inspection and retry.
 
 Cleanup defaults to `never`. Supported values are `never`, `on_success`, and `always`.
 Agent instructions and lifecycle hooks remain responsible for commit, push, and PR behavior.
+
+## Automatic dispatch
+
+Automatic execution is disabled by default. Enable it in the service configuration only after
+profiles and tasks have been reviewed:
+
+```yaml
+scheduler:
+  enabled: true
+  poll_interval: 5m
+```
+
+The service evaluates every configured provider once at startup and then at the configured
+interval. Each cycle skips paused providers and providers with an active run. It admits at most
+one task per provider, resolves each candidate task's Git revision independently, and records
+automatic decisions with `"trigger":"automatic"`. Inspect the live loop with:
+
+```bash
+go run ./cmd/redline scheduler status
+```
 
 ## Development
 

@@ -19,6 +19,7 @@ import (
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -97,6 +98,9 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		return 1
 	}
 	apiServer := api.NewServer(cfg, database, now)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	apiServer.StartScheduler(ctx)
 	server := &http.Server{
 		Addr:              *listen,
 		Handler:           apiServer,
@@ -105,10 +109,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", *listen)
 	errors := make(chan error, 1)
 	go func() { errors <- server.ListenAndServe() }()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	select {
 	case err := <-errors:
+		stop()
+		apiServer.Wait()
 		if err != nil && err != http.ErrServerClosed {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -305,8 +309,17 @@ func runProviderControl(
 
 func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline scheduler <evaluate|history>")
+		fmt.Fprintln(stderr, "usage: redline scheduler <evaluate|execute|history|status>")
 		return 1
+	}
+	if args[0] == "status" {
+		var status autoscheduler.Status
+		if err := client.Do(context.Background(), http.MethodGet, "/v1/scheduler/status", nil, &status); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, status)
+		return 0
 	}
 	if args[0] == "history" {
 		provider, _, ok := providerFlags("scheduler history", args[1:], stderr)

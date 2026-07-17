@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 )
 
@@ -108,6 +110,135 @@ func TestServiceHealth(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestSchedulerStatusIsExposedWhenDisabled(t *testing.T) {
+	server, _ := newAPIServer(t, claudePayload)
+	resp, err := http.Get(server.URL + "/v1/scheduler/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var status scheduler.Status
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Enabled || status.PollInterval != "5m0s" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "unchanged", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "/repo/a"},
+		{ID: "changed", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "/repo/b"},
+	} {
+		if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, task := range []domain.Task{
+		{ID: "skip", Name: "Skip", Priority: 100, ExecutionProfileID: "unchanged", Type: domain.Recurring, RequireRepoChange: true, LastSuccessfulSourceRevision: "same"},
+		{ID: "run", Name: "Run", Priority: 80, ExecutionProfileID: "changed", Type: domain.OneOff, RequireRepoChange: true, LastSuccessfulSourceRevision: "old"},
+	} {
+		if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executed := make(chan domain.Task, 1)
+	handler := api.NewServerWithDependencies(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+			executed <- task
+			return nil
+		},
+	}, fakeRevisionResolver{revisions: map[string]string{"unchanged": "same", "changed": "new"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	handler.StartScheduler(ctx)
+	select {
+	case task := <-executed:
+		if task.ID != "run" {
+			t.Fatalf("executed task = %#v", task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("automatic scheduler did not dispatch")
+	}
+	cancel()
+	handler.Wait()
+	decisions, err := db.ListSchedulerDecisions(t.Context(), "codex-main", 10)
+	if err != nil || len(decisions) != 1 || !bytes.Contains(decisions[0].DecisionJSON, []byte(`"trigger":"automatic"`)) {
+		t.Fatalf("decisions=%#v err=%v", decisions, err)
+	}
+}
+
+func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T) {
+	var requests atomic.Int32
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	delete(cfg.Providers, "claude-main")
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	profile := domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		WorkspaceProvider: "existing-directory",
+	}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task", Name: "Task", ExecutionProfileID: "profile", Type: domain.OneOff}
+	if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(t.Context(), "existing-run", task.ID, "codex-main", "", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	handler := api.NewServerWithExecutor(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	handler.StartScheduler(ctx)
+	deadline := time.Now().Add(time.Second)
+	found := false
+	for time.Now().Before(deadline) {
+		decisions, err := db.ListSchedulerDecisions(t.Context(), "codex-main", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(decisions) == 1 {
+			found = true
+			if !bytes.Contains(decisions[0].DecisionJSON, []byte(`"mode":"active_run"`)) {
+				t.Fatalf("decision = %s", decisions[0].DecisionJSON)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	handler.Wait()
+	if !found {
+		t.Fatal("automatic active-run decision was not recorded")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("OpenUsage requests = %d", requests.Load())
 	}
 }
 
@@ -276,6 +407,12 @@ func testConfig(usageURL string) config.Config {
 
 type fakeExecutor struct {
 	execute func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error
+}
+
+type fakeRevisionResolver struct{ revisions map[string]string }
+
+func (f fakeRevisionResolver) Resolve(_ context.Context, profile domain.ExecutionProfile) (string, error) {
+	return f.revisions[profile.ID], nil
 }
 
 func (f fakeExecutor) Execute(ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile) error {

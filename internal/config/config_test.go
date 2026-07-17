@@ -5,9 +5,52 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jfox/redline/internal/config"
 )
+
+func TestSchedulerIntervalDefaultsToFiveMinutes(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, err := cfg.SchedulerInterval()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 5*time.Minute || cfg.Scheduler.Enabled {
+		t.Fatalf("scheduler = %#v interval=%s", cfg.Scheduler, interval)
+	}
+}
+
+func TestLoadParsesAutomaticScheduler(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+scheduler:
+  enabled: true
+  poll_interval: 90s`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, err := cfg.SchedulerInterval()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Scheduler.Enabled || interval != 90*time.Second {
+		t.Fatalf("scheduler = %#v interval=%s", cfg.Scheduler, interval)
+	}
+}
+
+func TestLoadRejectsInvalidSchedulerInterval(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+scheduler:
+  enabled: true
+  poll_interval: immediately`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil {
+		t.Fatal("expected invalid scheduler interval")
+	}
+}
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	path := writeConfig(t, strings.Replace(validConfig, "rolling_reserve", "rolling_resrve", 1))

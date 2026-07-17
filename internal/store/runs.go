@@ -11,6 +11,16 @@ import (
 	"github.com/jfox/redline/internal/domain"
 )
 
+func (d *DB) HasActiveRun(ctx context.Context, providerAccountID string) (bool, error) {
+	var active bool
+	if err := d.db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM runs WHERE provider_account_id = ? AND state IN ('preparing', 'running')
+)`, providerAccountID).Scan(&active); err != nil {
+		return false, fmt.Errorf("check active provider run: %w", err)
+	}
+	return active, nil
+}
+
 func (d *DB) AdmitTask(
 	ctx context.Context,
 	runID, taskID, providerAccountID, sourceRevision string,
