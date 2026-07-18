@@ -293,14 +293,14 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase) == "" {
 		return tokenSyncResult{}, fmt.Errorf("usage_monitor gatepost_database is not configured")
 	}
-	cursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
+	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
 	// Re-read a small overlap so records sharing a timestamp with the cursor are
 	// not missed when Gatepost appends to an active session. Stable source IDs
 	// make the overlap idempotent.
-	queryAfter := cursor
+	queryAfter := directCursor
 	if !queryAfter.IsZero() {
 		queryAfter = queryAfter.Add(-time.Minute)
 	}
@@ -308,11 +308,27 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
+	piCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost-pi")
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	piAfter := piCursor
+	if !piAfter.IsZero() {
+		piAfter = piAfter.Add(-time.Minute)
+	}
+	piObservations, err := tokenlog.LoadGatepostPi(ctx, s.config.UsageMonitor.GatepostDatabase, configured.Provider, piAfter)
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	observations = append(observations, piObservations...)
 	inserted, err := s.store.SaveTokenObservations(ctx, observations)
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
-	latest := cursor
+	latest := directCursor
+	if piCursor.After(latest) {
+		latest = piCursor
+	}
 	for _, observation := range observations {
 		if observation.ObservedAt.After(latest) {
 			latest = observation.ObservedAt

@@ -33,7 +33,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Optional 5-hour limits: Codex works when its temporary short limit is absent.
 - Prorated current and final 5-hour slots for limited providers.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
-- Empirical 5-hour and weekly processed-token capacity estimates from local session logs.
+- Empirical 5-hour and weekly processed-token capacity estimates from Codex, Claude Code, and
+  explicitly mapped Pi subscription sessions.
 - Independent read-only usage monitoring while automatic dispatch remains disabled.
 - Policy-configured pace thresholds for unrestricted providers.
 - Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
@@ -230,7 +231,15 @@ temporarily absent, cannot produce paired calibration evidence and continue usin
 ### Empirical token capacity
 
 The read-only usage monitor imports Codex and Claude Code assistant-call records from Gatepost and
-refreshes OpenUsage snapshots independently from automatic scheduling:
+refreshes OpenUsage snapshots independently from automatic scheduling. It also reads Pi session
+files from Gatepost's session index and includes only explicit subscription transports:
+
+```text
+Pi anthropic-cli  -> Claude subscription allowance
+Pi openai-codex   -> Codex subscription allowance
+```
+
+Other Pi providers are excluded rather than inferred from model names.
 
 ```yaml
 usage_monitor:
@@ -242,8 +251,8 @@ usage_monitor:
 Redline accumulates local processed tokens until the provider's quantized percentage moves, then
 closes a correlation span without crossing a 5-hour or weekly reset. It reports estimated input,
 output, cache-read, cache-creation, and total capacity where the source preserves those classes.
-Gatepost's broad session index currently provides context/input-like and output tokens; the other
-classes remain zero rather than being guessed.
+Gatepost's broad Codex/Claude index currently provides context/input-like and output tokens. Pi's
+raw records preserve input, output, cache-read, and cache-creation classes.
 
 ```bash
 go run ./cmd/redline token sync --provider claude-main

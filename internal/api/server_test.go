@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -67,6 +68,41 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	}
 	if got.Short == nil || math.Abs(got.Short.EstimatedTokens.Total-100_000) > .01 || got.Weekly == nil || math.Abs(got.Weekly.EstimatedTokens.Total-250_000) > .01 {
 		t.Fatalf("capacity = %#v", got)
+	}
+}
+
+func TestTokenSyncIncludesExplicitPiSubscriptionProvider(t *testing.T) {
+	directory := t.TempDir()
+	viewerPath := filepath.Join(directory, "viewer.db")
+	piPath := filepath.Join(directory, "pi.jsonl")
+	if err := os.WriteFile(piPath, []byte(`{"type":"message","id":"m1","timestamp":"2026-07-16T18:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":30,"cacheWrite":4}}}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := sql.Open("sqlite", viewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = viewer.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, model TEXT, context_tokens INTEGER, output_tokens INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, piPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = viewer.Close()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.UsageMonitor.GatepostDatabase = viewerPath
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	if err != nil || len(observations) != 1 || observations[0].Source != "gatepost-pi" || observations[0].CacheReadTokens != 30 {
+		t.Fatalf("observations=%#v err=%v", observations, err)
 	}
 }
 
