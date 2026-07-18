@@ -167,6 +167,9 @@ GET  /v1/notifications
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.
 
+For durable macOS operation, see [the launchd guide](docs/launchd.md). The LaunchAgent template
+uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the required harness `PATH`.
+
 ## Execution lifecycle
 
 ```text

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jfox.redline</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REDLINE_BINARY__</string>
+    <string>--config</string>
+    <string>__REDLINE_CONFIG__</string>
+    <string>serve</string>
+    <string>--listen</string>
+    <string>127.0.0.1:7436</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REDLINE_REPOSITORY__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__REDLINE_PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__REDLINE_STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__REDLINE_STDERR_LOG__</string>
+</dict>
+</plist>
