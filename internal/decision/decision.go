@@ -63,13 +63,15 @@ type PaceThreshold struct {
 }
 
 type Input struct {
-	Snapshot         UsageSnapshot
-	WindowWeeklyCost float64
-	TriggerMargin    float64
-	RollingReserve   float64
-	PaceThresholds   []PaceThreshold
-	Now              time.Time
-	MaxSnapshotAge   time.Duration
+	Snapshot               UsageSnapshot
+	WindowWeeklyCost       float64
+	WindowWeeklyCostSource string
+	CalibrationConfidence  string
+	TriggerMargin          float64
+	RollingReserve         float64
+	PaceThresholds         []PaceThreshold
+	Now                    time.Time
+	MaxSnapshotAge         time.Duration
 }
 
 type Slot struct {
@@ -80,16 +82,19 @@ type Slot struct {
 }
 
 type Result struct {
-	Decision              Decision       `json:"decision"`
-	Mode                  Mode           `json:"mode"`
-	Reason                string         `json:"reason"`
-	Slots                 []Slot         `json:"slots,omitempty"`
-	FutureFullWindows     int            `json:"future_full_windows"`
-	CurrentWindowCapacity float64        `json:"current_window_capacity"`
-	MaximumConsumable     float64        `json:"maximum_consumable"`
-	Overflow              float64        `json:"overflow"`
-	RollingDispatchable   float64        `json:"rolling_dispatchable"`
-	MatchedPaceThreshold  *PaceThreshold `json:"matched_pace_threshold,omitempty"`
+	Decision               Decision       `json:"decision"`
+	Mode                   Mode           `json:"mode"`
+	Reason                 string         `json:"reason"`
+	Slots                  []Slot         `json:"slots,omitempty"`
+	FutureFullWindows      int            `json:"future_full_windows"`
+	CurrentWindowCapacity  float64        `json:"current_window_capacity"`
+	MaximumConsumable      float64        `json:"maximum_consumable"`
+	Overflow               float64        `json:"overflow"`
+	RollingDispatchable    float64        `json:"rolling_dispatchable"`
+	MatchedPaceThreshold   *PaceThreshold `json:"matched_pace_threshold,omitempty"`
+	WindowWeeklyCost       float64        `json:"window_weekly_cost,omitempty"`
+	WindowWeeklyCostSource string         `json:"window_weekly_cost_source,omitempty"`
+	CalibrationConfidence  string         `json:"calibration_confidence,omitempty"`
 }
 
 func Evaluate(in Input) Result {
@@ -135,13 +140,16 @@ func evaluateSlots(in Input) Result {
 	overflow := in.Snapshot.Weekly.Remaining - maximumConsumable
 	dispatchable := in.Snapshot.Short.Remaining - in.RollingReserve
 	result := Result{
-		Mode:                  ModeSlots,
-		Slots:                 slots,
-		FutureFullWindows:     fullWindows,
-		CurrentWindowCapacity: currentCapacity,
-		MaximumConsumable:     maximumConsumable,
-		Overflow:              overflow,
-		RollingDispatchable:   dispatchable,
+		Mode:                   ModeSlots,
+		Slots:                  slots,
+		FutureFullWindows:      fullWindows,
+		CurrentWindowCapacity:  currentCapacity,
+		MaximumConsumable:      maximumConsumable,
+		Overflow:               overflow,
+		RollingDispatchable:    dispatchable,
+		WindowWeeklyCost:       in.WindowWeeklyCost,
+		WindowWeeklyCostSource: in.WindowWeeklyCostSource,
+		CalibrationConfidence:  in.CalibrationConfidence,
 	}
 	if overflow <= in.TriggerMargin {
 		result.Decision = Wait

@@ -17,6 +17,7 @@ import (
 
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/artifacts"
+	"github.com/jfox/redline/internal/calibration"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -521,6 +522,52 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 	})
 	if result.Result.Decision != decision.Wait || result.Result.Reason != "provider is paused" {
 		t.Fatalf("result = %#v", result.Result)
+	}
+}
+
+func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
+	server, db := newAPIServer(t, claudePayload)
+	weeklyReset := time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC)
+	for _, snapshot := range []decision.UsageSnapshot{
+		calibrationSnapshot(apiNow.Add(-8*time.Hour), 1.00, 0.80, apiNow.Add(-6*time.Hour), weeklyReset),
+		calibrationSnapshot(apiNow.Add(-7*time.Hour), 0.40, 0.75, apiNow.Add(-6*time.Hour), weeklyReset.Add(300*time.Millisecond)),
+		calibrationSnapshot(apiNow.Add(-3*time.Hour), 0.90, 0.75, apiNow.Add(-time.Hour), weeklyReset),
+		calibrationSnapshot(apiNow.Add(-2*time.Hour), 0.40, 0.71, apiNow.Add(-time.Hour), weeklyReset.Add(-300*time.Millisecond)),
+	} {
+		if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resp, err := http.Get(server.URL + "/v1/providers/claude-main/calibration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var estimate calibration.Estimate
+	if err := json.NewDecoder(resp.Body).Decode(&estimate); err != nil {
+		t.Fatal(err)
+	}
+	if estimate.Source != calibration.SourceObserved || estimate.Confidence != calibration.ConfidenceMedium {
+		t.Fatalf("estimate = %#v", estimate)
+	}
+
+	result := postJSON[struct {
+		Result decision.Result `json:"result"`
+	}](t, server.URL+"/v1/providers/claude-main/decision", map[string]any{})
+	if result.Result.WindowWeeklyCostSource != string(calibration.SourceObserved) ||
+		result.Result.CalibrationConfidence != string(calibration.ConfidenceMedium) ||
+		result.Result.WindowWeeklyCost == 0.08 {
+		t.Fatalf("result = %#v", result.Result)
+	}
+}
+
+func calibrationSnapshot(observed time.Time, shortRemaining, weeklyRemaining float64, shortReset, weeklyReset time.Time) decision.UsageSnapshot {
+	return decision.UsageSnapshot{
+		Provider: "claude", ObservedAt: observed,
+		Short:  &decision.UsageWindow{Remaining: shortRemaining, ResetsAt: shortReset},
+		Weekly: decision.UsageWindow{Remaining: weeklyRemaining, ResetsAt: weeklyReset},
+		Source: "test", Confidence: "high",
 	}
 }
 

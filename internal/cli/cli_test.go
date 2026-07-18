@@ -283,3 +283,21 @@ func TestRunEventsConsumesServiceAPI(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
+
+func TestCalibrationConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/providers/claude-main/calibration" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		_, _ = fmt.Fprint(w, `{"provider":"claude","configured_cost":0.08,"observed_cost":0.082,"effective_cost":0.082,"source":"observed","confidence":"medium","informative_windows":2,"total_short_usage":1.1}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "calibration", "--provider", "claude-main"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), `"source": "observed"`) {
+		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}

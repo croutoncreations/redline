@@ -85,6 +85,33 @@ func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
 	}
 }
 
+func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 3; index++ {
+		snapshot := decision.UsageSnapshot{
+			Provider: "claude", ObservedAt: base.Add(time.Duration(index) * time.Minute),
+			Short:  &decision.UsageWindow{Remaining: 1 - float64(index)*0.1, ResetsAt: base.Add(5 * time.Hour)},
+			Weekly: decision.UsageWindow{Remaining: 1 - float64(index)*0.01, ResetsAt: base.Add(7 * 24 * time.Hour)},
+			Source: "test",
+		}
+		if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListSnapshots(context.Background(), "claude", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !got[0].ObservedAt.Equal(base.Add(time.Minute)) || !got[1].ObservedAt.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("snapshots = %#v", got)
+	}
+}
+
 func TestSQLiteReportsMissingProvider(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {

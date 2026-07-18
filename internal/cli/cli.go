@@ -18,6 +18,7 @@ import (
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/apiclient"
 	"github.com/jfox/redline/internal/artifacts"
+	"github.com/jfox/redline/internal/calibration"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -48,7 +49,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|usage|task|profile|scheduler|run|notification>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|calibration|usage|task|profile|scheduler|run|notification>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL}
@@ -61,6 +62,8 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runDecision(client, remaining[1:], stdout, stderr)
 	case "status":
 		return runStatus(client, remaining[1:], stdout, stderr)
+	case "calibration":
+		return runCalibration(client, remaining[1:], stdout, stderr)
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
@@ -79,6 +82,21 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
 	}
+}
+
+func runCalibration(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	provider, _, ok := providerFlags("calibration", args, stderr)
+	if !ok {
+		return 1
+	}
+	var estimate calibration.Estimate
+	path := "/v1/providers/" + url.PathEscape(provider) + "/calibration"
+	if err := client.Do(context.Background(), http.MethodGet, path, nil, &estimate); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, estimate)
+	return 0
 }
 
 func runHealth(client apiclient.Client, args []string, stdout, stderr io.Writer) int {

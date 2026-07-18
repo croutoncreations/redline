@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jfox/redline/internal/artifacts"
+	"github.com/jfox/redline/internal/calibration"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -103,6 +104,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
+	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
@@ -210,6 +212,15 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) providerCalibration(w http.ResponseWriter, r *http.Request) {
+	estimate, err := s.calibration(r.Context(), r.PathValue("provider"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, estimate)
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {
@@ -714,7 +725,7 @@ func (s *Server) evaluateProvider(
 	ctx context.Context,
 	providerID string,
 ) (decision.UsageSnapshot, decision.Result, error) {
-	snapshot, configured, err := s.fetchAndStore(ctx, providerID)
+	snapshot, _, err := s.fetchAndStore(ctx, providerID)
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
@@ -727,12 +738,31 @@ func (s *Server) evaluateProvider(
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
+	estimate, err := s.calibration(ctx, providerID)
+	if err != nil {
+		return decision.UsageSnapshot{}, decision.Result{}, err
+	}
 	result := decision.Evaluate(decision.Input{
-		Snapshot: snapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
+		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	})
 	return snapshot, result, nil
+}
+
+func (s *Server) calibration(ctx context.Context, providerID string) (calibration.Estimate, error) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return calibration.Estimate{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 500)
+	if err != nil {
+		return calibration.Estimate{}, err
+	}
+	return calibration.EstimateWindowWeeklyCost(
+		configured.Provider, snapshots, configured.WindowWeeklyCost, s.now(),
+	), nil
 }
 
 func (s *Server) fetchAndStore(

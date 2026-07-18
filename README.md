@@ -32,6 +32,7 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Codex and Claude usage ingestion from OpenUsage `/v1/usage/{provider}`.
 - Optional 5-hour limits: Codex works when its temporary short limit is absent.
 - Prorated current and final 5-hour slots for limited providers.
+- Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
 - Policy-configured pace thresholds for unrestricted providers.
 - Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
 - SQLite migrations, WAL mode, foreign keys, and durable snapshot history.
@@ -70,6 +71,7 @@ In another terminal, all commands use the API:
 ```bash
 go run ./cmd/redline usage refresh --provider codex-main --json
 go run ./cmd/redline status --provider codex-main
+go run ./cmd/redline calibration --provider claude-main
 go run ./cmd/redline decision --provider codex-main
 go run ./cmd/redline scheduler evaluate --provider codex-main --json
 go run ./cmd/redline scheduler execute --provider codex-main --json
@@ -135,6 +137,7 @@ GET  /v1/health
 GET  /v1/health/details?window={duration}
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
+GET  /v1/providers/{account}/calibration
 POST /v1/providers/{account}/decision
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
@@ -190,6 +193,32 @@ automatic decisions with `"trigger":"automatic"`. Inspect the live loop with:
 ```bash
 go run ./cmd/redline scheduler status
 ```
+
+### Window-cost calibration
+
+`window_weekly_cost` is the bootstrap estimate of how much weekly allowance one completely
+consumed five-hour window represents. Provider usage feeds report the two percentages but do not
+report this conversion directly. Redline learns it by grouping snapshots that share the same
+five-hour and weekly reset boundaries and aggregating:
+
+```text
+weekly usage increase / five-hour usage increase
+```
+
+The configured value remains authoritative while evidence is insufficient or low-confidence.
+An observed value becomes effective after at least two informative five-hour windows totaling at
+least one full window of consumption; four windows and two full windows of consumption are marked
+high-confidence. Sub-second reset timestamp jitter is normalized during grouping. Inspect both the
+evidence and the value currently used by the scheduler with:
+
+```bash
+go run ./cmd/redline calibration --provider claude-main
+go run ./cmd/redline decision --provider claude-main --json
+```
+
+Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
+`calibration_confidence`. Providers without a five-hour window, such as Codex while that limit is
+temporarily absent, cannot produce paired calibration evidence and continue using pace rules.
 
 ## Operational history and run output
 
