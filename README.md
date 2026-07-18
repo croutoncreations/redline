@@ -53,6 +53,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Bounded stdout/stderr tail inspection through the service API and CLI.
 - Opt-in command notifications for run completion/failure and scheduler errors.
 - Durable notification delivery history and 24-hour operational health summaries.
+- Ordered lifecycle audit events for every run, with prompt text excluded from event snapshots.
+- Captured prepare/finalize hook stdout and stderr exposed through the service API and CLI.
 
 ## Quick start
 
@@ -74,6 +76,7 @@ go run ./cmd/redline scheduler execute --provider codex-main --json
 go run ./cmd/redline scheduler status
 go run ./cmd/redline scheduler attempts --provider codex-main
 go run ./cmd/redline run list
+go run ./cmd/redline run events <run-id>
 go run ./cmd/redline run logs <run-id> --stream stderr
 go run ./cmd/redline health
 go run ./cmd/redline notification list
@@ -144,7 +147,8 @@ GET  /v1/scheduler/status
 GET  /v1/scheduler/attempts?provider={account}
 GET  /v1/runs
 GET  /v1/runs/{id}
-GET  /v1/runs/{id}/logs?stream=stdout|stderr&tail_bytes={n}
+GET  /v1/runs/{id}/events?limit={n}
+GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
 GET  /v1/notifications
 ```
 
@@ -205,6 +209,17 @@ paths and symlinks that escape that root are rejected.
 go run ./cmd/redline run logs <run-id>
 go run ./cmd/redline run logs <run-id> --stream stderr --tail-bytes 8192
 go run ./cmd/redline run logs <run-id> --json
+```
+
+The lifecycle timeline records workspace preparation, harness execution, finalization, cleanup,
+and the terminal run result. Task prompts are intentionally omitted. Execution-profile fields,
+including lifecycle commands, are retained for reproducibility, so secrets should be passed via
+the environment rather than embedded in profile command strings.
+
+```bash
+go run ./cmd/redline run events <run-id>
+go run ./cmd/redline run logs <run-id> --stream prepare_stderr
+go run ./cmd/redline run logs <run-id> --stream finalize_stdout
 ```
 
 ## Notifications and health
