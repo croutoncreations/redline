@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jfox/redline/internal/accounting"
 	"github.com/jfox/redline/internal/decision"
 )
 
@@ -63,13 +64,28 @@ func (b TokenBreakdown) scaled(scale float64) TokenBreakdown {
 }
 
 type WindowEstimate struct {
-	Window              string         `json:"window"`
-	EstimatedTokens     TokenBreakdown `json:"estimated_tokens"`
-	MeasuredTokens      TokenBreakdown `json:"measured_tokens"`
-	ObservedUsage       float64        `json:"observed_usage"`
-	ClosedSpans         int            `json:"closed_spans"`
-	Confidence          Confidence     `json:"confidence"`
-	TokensPerOnePercent float64        `json:"tokens_per_one_percent"`
+	Window              string              `json:"window"`
+	EstimatedTokens     TokenBreakdown      `json:"estimated_tokens"`
+	MeasuredTokens      TokenBreakdown      `json:"measured_tokens"`
+	ObservedUsage       float64             `json:"observed_usage"`
+	ClosedSpans         int                 `json:"closed_spans"`
+	Confidence          Confidence          `json:"confidence"`
+	TokensPerOnePercent float64             `json:"tokens_per_one_percent"`
+	Accounting          *AccountingEstimate `json:"accounting,omitempty"`
+}
+
+type AccountingEstimate struct {
+	Unit                  accounting.Unit `json:"unit"`
+	MeasuredUsageLow      float64         `json:"measured_usage_low"`
+	MeasuredUsageHigh     float64         `json:"measured_usage_high"`
+	EstimatedCapacityLow  float64         `json:"estimated_capacity_low"`
+	EstimatedCapacityHigh float64         `json:"estimated_capacity_high"`
+	PricingCoverage       float64         `json:"pricing_coverage"`
+	PricedObservations    int             `json:"priced_observations"`
+	UnpricedObservations  int             `json:"unpriced_observations"`
+	UnpricedModels        []string        `json:"unpriced_models"`
+	RateCardVersions      []string        `json:"rate_card_versions"`
+	Caveat                string          `json:"caveat"`
 }
 
 type EstimateResult struct {
@@ -141,6 +157,7 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 	var measured TokenBreakdown
 	var usage float64
 	spans := 0
+	weighted := weightedEvidence{versions: map[string]bool{}, unpricedModels: map[string]bool{}}
 	for _, points := range groups {
 		sort.Slice(points, func(i, j int) bool { return points[i].at.Before(points[j].at) })
 		if len(points) < 2 {
@@ -156,11 +173,13 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 			if drain <= 0.000001 {
 				continue
 			}
-			spanTokens := tokensBetween(observations, baseline.at, current.at)
+			spanObservations := observationsBetween(observations, baseline.at, current.at)
+			spanTokens := tokensFor(spanObservations)
 			if spanTokens.Total > 0 {
 				measured.add(spanTokens)
 				usage += drain
 				spans++
+				weighted.add(spanObservations)
 			}
 			baseline = current
 		}
@@ -186,18 +205,89 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 	if confidenceRank(confidence) > confidenceRank(sourceCap) {
 		confidence = sourceCap
 	}
-	return &WindowEstimate{Window: kind, EstimatedTokens: estimated, MeasuredTokens: measured,
+	result := &WindowEstimate{Window: kind, EstimatedTokens: estimated, MeasuredTokens: measured,
 		ObservedUsage: usage, ClosedSpans: spans, Confidence: confidence,
 		TokensPerOnePercent: estimated.Total / 100}
+	result.Accounting = weighted.estimate(usage)
+	return result
 }
 
-func tokensBetween(observations []TokenObservation, after, through time.Time) TokenBreakdown {
-	var result TokenBreakdown
+func observationsBetween(observations []TokenObservation, after, through time.Time) []TokenObservation {
+	var result []TokenObservation
 	for _, observation := range observations {
 		if observation.ObservedAt.After(after) && !observation.ObservedAt.After(through) {
-			result.add(observation.Tokens())
+			result = append(result, observation)
 		}
 	}
+	return result
+}
+
+func tokensFor(observations []TokenObservation) TokenBreakdown {
+	var result TokenBreakdown
+	for _, observation := range observations {
+		result.add(observation.Tokens())
+	}
+	return result
+}
+
+type weightedEvidence struct {
+	unit                      accounting.Unit
+	low, high                 float64
+	pricedTokens, totalTokens float64
+	priced, unpriced          int
+	versions, unpricedModels  map[string]bool
+}
+
+func (e *weightedEvidence) add(observations []TokenObservation) {
+	for _, observation := range observations {
+		tokens := observation.Tokens().Total
+		e.totalTokens += tokens
+		quote := accounting.Quote(accounting.Usage{
+			Provider: observation.Provider, Model: observation.Model, Source: observation.Source,
+			InputTokens: observation.InputTokens, OutputTokens: observation.OutputTokens,
+			CacheReadTokens: observation.CacheReadTokens, CacheCreationTokens: observation.CacheCreationTokens,
+		}, observation.ObservedAt)
+		if !quote.Priced || (e.unit != "" && e.unit != quote.Unit) {
+			e.unpriced++
+			e.unpricedModels[observation.Model] = true
+			continue
+		}
+		e.unit = quote.Unit
+		e.low += quote.Low
+		e.high += quote.High
+		e.priced++
+		e.pricedTokens += tokens
+		e.versions[quote.RateCardVersion] = true
+	}
+}
+
+func (e weightedEvidence) estimate(usage float64) *AccountingEstimate {
+	if e.priced == 0 || usage <= 0 || e.unit == "" {
+		return nil
+	}
+	coverage := 0.0
+	if e.totalTokens > 0 {
+		coverage = e.pricedTokens / e.totalTokens
+	}
+	versions := mapKeys(e.versions)
+	unpriced := mapKeys(e.unpricedModels)
+	return &AccountingEstimate{
+		Unit: e.unit, MeasuredUsageLow: e.low, MeasuredUsageHigh: e.high,
+		EstimatedCapacityLow: e.low / usage, EstimatedCapacityHigh: e.high / usage,
+		PricingCoverage: coverage, PricedObservations: e.priced, UnpricedObservations: e.unpriced,
+		UnpricedModels: unpriced, RateCardVersions: versions,
+		Caveat: "Codex uses official subscription credits; Claude uses API-dollar-equivalent pricing as a proxy. Ranges reflect collapsed cache classes or unknown cache-write duration.",
+	}
+}
+
+func mapKeys(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
 	return result
 }
 

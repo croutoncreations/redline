@@ -35,6 +35,7 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
 - Empirical 5-hour and weekly processed-token capacity estimates from Codex, Claude Code, and
   explicitly mapped Pi subscription sessions.
+- Versioned Codex-credit and Claude API-dollar-equivalent allowance estimates with pricing coverage.
 - Independent read-only usage monitoring while automatic dispatch remains disabled.
 - Policy-configured pace thresholds for unrestricted providers.
 - Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
@@ -265,6 +266,13 @@ equivalents, not provider billing ledgers or guaranteed fixed caps. Model choice
 long-context multipliers, service-side policy, partial local-log coverage, and percentage rounding
 can all change the observed relationship. Redline therefore exposes evidence counts, observed
 percentage movement, token classes, source, and confidence rather than presenting a precise quota.
+
+Weighted accounting is reported alongside raw processed tokens. Codex uses OpenAI's token-based
+subscription credit card; Claude uses current API pricing as an explicit proxy because Anthropic
+does not publish an equivalent subscription rate card. Unknown models remain unpriced and reduce
+`pricing_coverage`. Exact Pi token classes produce a narrow quote; collapsed direct-session context
+and unknown Claude cache-write duration produce low/high bounds. Raw observations are never mutated
+when a rate card changes.
 
 ## Operational history and run output
 

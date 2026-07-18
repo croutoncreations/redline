@@ -77,6 +77,45 @@ func TestEstimateRequiresTokenAndPercentageEvidence(t *testing.T) {
 	}
 }
 
+func TestEstimateReportsWeightedAllowanceAndPricingCoverage(t *testing.T) {
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	shortReset, weeklyReset := start.Add(5*time.Hour), start.Add(5*24*time.Hour)
+	snapshots := []decision.UsageSnapshot{
+		snapshot(start, 1, .8, shortReset, weeklyReset),
+		snapshot(start.Add(time.Minute), .95, .78, shortReset, weeklyReset),
+	}
+	observations := []capacity.TokenObservation{
+		{Provider: "claude", Source: "gatepost-pi", SourceID: "1", Model: "claude-fable-5", ObservedAt: start.Add(20 * time.Second), InputTokens: 1_000_000, Confidence: "high"},
+		{Provider: "claude", Source: "gatepost-pi", SourceID: "2", Model: "claude-haiku-4-5", ObservedAt: start.Add(40 * time.Second), InputTokens: 1_000_000, Confidence: "high"},
+	}
+	got := capacity.Estimate("claude", snapshots, observations, .08, start.Add(time.Hour))
+	if got.Short == nil || got.Short.Accounting == nil {
+		t.Fatalf("missing accounting estimate: %#v", got.Short)
+	}
+	weighted := got.Short.Accounting
+	if weighted.Unit != "usd_api_equivalent" || math.Abs(weighted.EstimatedCapacityLow-220) > .000001 ||
+		math.Abs(weighted.EstimatedCapacityHigh-220) > .000001 || weighted.PricingCoverage != 1 || weighted.PricedObservations != 2 {
+		t.Fatalf("weighted = %#v", weighted)
+	}
+	if got.Weekly == nil || got.Weekly.Accounting == nil || math.Abs(got.Weekly.Accounting.EstimatedCapacityLow-550) > .000001 {
+		t.Fatalf("weekly accounting = %#v", got.Weekly)
+	}
+}
+
+func TestEstimateReportsUnknownModelAsUnpricedCoverage(t *testing.T) {
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	reset, weekly := start.Add(5*time.Hour), start.Add(5*24*time.Hour)
+	got := capacity.Estimate("claude", []decision.UsageSnapshot{
+		snapshot(start, 1, 1, reset, weekly), snapshot(start.Add(time.Minute), .9, .99, reset, weekly),
+	}, []capacity.TokenObservation{
+		{Provider: "claude", Source: "gatepost-pi", SourceID: "known", Model: "claude-haiku-4-5", ObservedAt: start.Add(20 * time.Second), InputTokens: 100},
+		{Provider: "claude", Source: "gatepost-pi", SourceID: "unknown", Model: "private", ObservedAt: start.Add(30 * time.Second), InputTokens: 100},
+	}, .08, start.Add(time.Hour))
+	if got.Short.Accounting.PricingCoverage != .5 || got.Short.Accounting.UnpricedObservations != 1 || len(got.Short.Accounting.UnpricedModels) != 1 || got.Short.Accounting.UnpricedModels[0] != "private" {
+		t.Fatalf("accounting = %#v", got.Short.Accounting)
+	}
+}
+
 func snapshot(at time.Time, short, weekly float64, shortReset, weeklyReset time.Time) decision.UsageSnapshot {
 	return decision.UsageSnapshot{Provider: "claude", ObservedAt: at,
 		Short:  &decision.UsageWindow{Remaining: short, ResetsAt: shortReset},
