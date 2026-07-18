@@ -16,7 +16,7 @@ CLI / future MCP / future UI
        local HTTP service
          |           |
          v           v
-      SQLite      OpenUsage
+      SQLite      OpenUsage + Gatepost logs
          |
          v
  simulated scheduler
@@ -33,6 +33,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Optional 5-hour limits: Codex works when its temporary short limit is absent.
 - Prorated current and final 5-hour slots for limited providers.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
+- Empirical 5-hour and weekly processed-token capacity estimates from local session logs.
+- Independent read-only usage monitoring while automatic dispatch remains disabled.
 - Policy-configured pace thresholds for unrestricted providers.
 - Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
 - SQLite migrations, WAL mode, foreign keys, and durable snapshot history.
@@ -72,6 +74,8 @@ In another terminal, all commands use the API:
 go run ./cmd/redline usage refresh --provider codex-main --json
 go run ./cmd/redline status --provider codex-main
 go run ./cmd/redline calibration --provider claude-main
+go run ./cmd/redline token sync --provider claude-main
+go run ./cmd/redline capacity --provider claude-main
 go run ./cmd/redline decision --provider codex-main
 go run ./cmd/redline scheduler evaluate --provider codex-main --json
 go run ./cmd/redline scheduler execute --provider codex-main --json
@@ -138,6 +142,8 @@ GET  /v1/health/details?window={duration}
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
 GET  /v1/providers/{account}/calibration
+GET  /v1/providers/{account}/capacity
+POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
@@ -147,6 +153,7 @@ POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
 GET  /v1/scheduler/status
+GET  /v1/usage-monitor/status
 GET  /v1/scheduler/attempts?provider={account}
 GET  /v1/runs
 GET  /v1/runs/{id}
@@ -219,6 +226,36 @@ go run ./cmd/redline decision --provider claude-main --json
 Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
 `calibration_confidence`. Providers without a five-hour window, such as Codex while that limit is
 temporarily absent, cannot produce paired calibration evidence and continue using pace rules.
+
+### Empirical token capacity
+
+The read-only usage monitor imports Codex and Claude Code assistant-call records from Gatepost and
+refreshes OpenUsage snapshots independently from automatic scheduling:
+
+```yaml
+usage_monitor:
+  enabled: true
+  poll_interval: 5m
+  gatepost_database: ~/.gatepost/viewer.db
+```
+
+Redline accumulates local processed tokens until the provider's quantized percentage moves, then
+closes a correlation span without crossing a 5-hour or weekly reset. It reports estimated input,
+output, cache-read, cache-creation, and total capacity where the source preserves those classes.
+Gatepost's broad session index currently provides context/input-like and output tokens; the other
+classes remain zero rather than being guessed.
+
+```bash
+go run ./cmd/redline token sync --provider claude-main
+go run ./cmd/redline capacity --provider claude-main
+```
+
+The capacity report includes direct 5-hour and weekly estimates and a second weekly estimate derived
+from `estimated_5h_tokens / window_weekly_cost`. These are explicitly empirical processed-token
+equivalents, not provider billing ledgers or guaranteed fixed caps. Model choice, cache accounting,
+long-context multipliers, service-side policy, partial local-log coverage, and percentage rounding
+can all change the observed relationship. Redline therefore exposes evidence counts, observed
+percentage movement, token classes, source, and confidence rather than presenting a precise quota.
 
 ## Operational history and run output
 

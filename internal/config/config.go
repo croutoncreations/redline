@@ -17,6 +17,7 @@ type Config struct {
 	ActivePolicy    string              `yaml:"active_policy"`
 	MaxSnapshotAge  string              `yaml:"max_snapshot_age"`
 	Scheduler       Scheduler           `yaml:"scheduler"`
+	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
@@ -56,6 +57,23 @@ func (c Config) NotificationEvents() map[string]bool {
 type Scheduler struct {
 	Enabled      bool   `yaml:"enabled"`
 	PollInterval string `yaml:"poll_interval"`
+}
+
+type UsageMonitor struct {
+	Enabled          bool   `yaml:"enabled"`
+	PollInterval     string `yaml:"poll_interval"`
+	GatepostDatabase string `yaml:"gatepost_database"`
+}
+
+func (c Config) UsageMonitorInterval() (time.Duration, error) {
+	if c.UsageMonitor.PollInterval == "" {
+		return 5 * time.Minute, nil
+	}
+	interval, err := time.ParseDuration(c.UsageMonitor.PollInterval)
+	if err != nil || interval <= 0 {
+		return 0, fmt.Errorf("usage_monitor poll_interval must be a positive duration")
+	}
+	return interval, nil
 }
 
 func (c Config) ArtifactsDirectory() string {
@@ -143,6 +161,12 @@ func Load(path string) (Config, error) {
 	}
 	if _, err := cfg.SchedulerInterval(); err != nil {
 		return Config{}, err
+	}
+	if _, err := cfg.UsageMonitorInterval(); err != nil {
+		return Config{}, err
+	}
+	if cfg.UsageMonitor.Enabled && strings.TrimSpace(cfg.UsageMonitor.GatepostDatabase) == "" {
+		return Config{}, fmt.Errorf("enabled usage_monitor requires gatepost_database")
 	}
 	if cfg.Notifications.Timeout != "" {
 		timeout, err := time.ParseDuration(cfg.Notifications.Timeout)

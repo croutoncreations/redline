@@ -192,6 +192,32 @@ CREATE INDEX idx_run_events_run_id ON run_events(run_id, id);
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (10)`); err != nil {
 			return fmt.Errorf("record run event migration: %w", err)
 		}
+		version = 10
+	}
+	if version < 11 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE token_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0),
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_tokens >= 0),
+    confidence TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(provider, source, source_id)
+);
+CREATE INDEX idx_token_observations_provider_observed
+ON token_observations(provider, observed_at, id);`); err != nil {
+			return fmt.Errorf("create token observation schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (11)`); err != nil {
+			return fmt.Errorf("record token observation migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

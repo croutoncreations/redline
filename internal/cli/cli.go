@@ -19,6 +19,7 @@ import (
 	"github.com/jfox/redline/internal/apiclient"
 	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/calibration"
+	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -49,7 +50,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|calibration|usage|task|profile|scheduler|run|notification>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL}
@@ -64,6 +65,10 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runStatus(client, remaining[1:], stdout, stderr)
 	case "calibration":
 		return runCalibration(client, remaining[1:], stdout, stderr)
+	case "capacity":
+		return runCapacity(client, remaining[1:], stdout, stderr)
+	case "token":
+		return runToken(client, remaining[1:], stdout, stderr)
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
@@ -82,6 +87,40 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
 	}
+}
+
+func runCapacity(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	provider, _, ok := providerFlags("capacity", args, stderr)
+	if !ok {
+		return 1
+	}
+	var estimate capacity.EstimateResult
+	path := "/v1/providers/" + url.PathEscape(provider) + "/capacity"
+	if err := client.Do(context.Background(), http.MethodGet, path, nil, &estimate); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, estimate)
+	return 0
+}
+
+func runToken(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "sync" {
+		fmt.Fprintln(stderr, "usage: redline token sync --provider ID")
+		return 1
+	}
+	provider, _, ok := providerFlags("token sync", args[1:], stderr)
+	if !ok {
+		return 1
+	}
+	var result map[string]any
+	path := "/v1/providers/" + url.PathEscape(provider) + "/token-sync"
+	if err := client.Do(context.Background(), http.MethodPost, path, map[string]any{}, &result); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, result)
+	return 0
 }
 
 func runCalibration(client apiclient.Client, args []string, stdout, stderr io.Writer) int {

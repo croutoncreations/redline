@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/calibration"
+	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -26,6 +27,7 @@ import (
 	"github.com/jfox/redline/internal/openusage"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
+	"github.com/jfox/redline/internal/tokenlog"
 	"github.com/jfox/redline/internal/workspace"
 )
 
@@ -38,19 +40,20 @@ type Notifier interface {
 }
 
 type Server struct {
-	config      config.Config
-	store       *store.DB
-	now         func() time.Time
-	executor    Executor
-	notifier    Notifier
-	revision    workspace.RevisionResolver
-	artifacts   artifacts.Reader
-	scheduler   *autoscheduler.Loop
-	mux         *http.ServeMux
-	workers     sync.WaitGroup
-	loopWorkers sync.WaitGroup
-	startMu     sync.Mutex
-	started     bool
+	config       config.Config
+	store        *store.DB
+	now          func() time.Time
+	executor     Executor
+	notifier     Notifier
+	revision     workspace.RevisionResolver
+	artifacts    artifacts.Reader
+	scheduler    *autoscheduler.Loop
+	usageMonitor *autoscheduler.Loop
+	mux          *http.ServeMux
+	workers      sync.WaitGroup
+	loopWorkers  sync.WaitGroup
+	startMu      sync.Mutex
+	started      bool
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -99,12 +102,16 @@ func newServer(
 		providers = append(providers, provider)
 	}
 	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
+	monitorInterval, _ := cfg.UsageMonitorInterval()
+	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
+	mux.HandleFunc("GET /v1/providers/{provider}/capacity", server.providerCapacity)
+	mux.HandleFunc("POST /v1/providers/{provider}/token-sync", server.syncProviderTokens)
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
@@ -115,6 +122,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/scheduler/evaluate", server.evaluateScheduler)
 	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
 	mux.HandleFunc("GET /v1/scheduler/status", server.schedulerStatus)
+	mux.HandleFunc("GET /v1/usage-monitor/status", server.usageMonitorStatus)
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
@@ -148,6 +156,11 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		defer s.loopWorkers.Done()
 		s.scheduler.Run(ctx)
 	}()
+	s.loopWorkers.Add(1)
+	go func() {
+		defer s.loopWorkers.Done()
+		s.usageMonitor.Run(ctx)
+	}()
 }
 
 func (s *Server) Wait() {
@@ -157,6 +170,10 @@ func (s *Server) Wait() {
 
 func (s *Server) schedulerStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.scheduler.Status())
+}
+
+func (s *Server) usageMonitorStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.usageMonitor.Status())
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -221,6 +238,93 @@ func (s *Server) providerCalibration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, estimate)
+}
+
+func (s *Server) providerCapacity(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("provider")
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: fmt.Sprintf("provider %q is not configured", providerID)})
+		return
+	}
+	snapshots, err := s.store.ListSnapshots(r.Context(), configured.Provider, 5000)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var after time.Time
+	if len(snapshots) > 0 {
+		after = snapshots[0].ObservedAt.Add(-time.Nanosecond)
+	}
+	observations, err := s.store.ListTokenObservations(r.Context(), configured.Provider, after, time.Time{})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	calibrated, err := s.calibration(r.Context(), providerID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, capacity.Estimate(configured.Provider, snapshots, observations, calibrated.EffectiveCost, s.now()))
+}
+
+type tokenSyncResult struct {
+	Provider string    `json:"provider"`
+	Read     int       `json:"read"`
+	Inserted int       `json:"inserted"`
+	Cursor   time.Time `json:"cursor,omitempty"`
+}
+
+func (s *Server) syncProviderTokens(w http.ResponseWriter, r *http.Request) {
+	result, err := s.syncTokens(r.Context(), r.PathValue("provider"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncResult, error) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return tokenSyncResult{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	if strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase) == "" {
+		return tokenSyncResult{}, fmt.Errorf("usage_monitor gatepost_database is not configured")
+	}
+	cursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	// Re-read a small overlap so records sharing a timestamp with the cursor are
+	// not missed when Gatepost appends to an active session. Stable source IDs
+	// make the overlap idempotent.
+	queryAfter := cursor
+	if !queryAfter.IsZero() {
+		queryAfter = queryAfter.Add(-time.Minute)
+	}
+	observations, err := tokenlog.LoadGatepost(ctx, s.config.UsageMonitor.GatepostDatabase, configured.Provider, queryAfter)
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	inserted, err := s.store.SaveTokenObservations(ctx, observations)
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	latest := cursor
+	for _, observation := range observations {
+		if observation.ObservedAt.After(latest) {
+			latest = observation.ObservedAt
+		}
+	}
+	return tokenSyncResult{Provider: configured.Provider, Read: len(observations), Inserted: inserted, Cursor: latest}, nil
+}
+
+func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
+	_, _, usageErr := s.fetchAndStore(ctx, providerID)
+	_, tokenErr := s.syncTokens(ctx, providerID)
+	return errors.Join(usageErr, tokenErr)
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {

@@ -301,3 +301,33 @@ func TestCalibrationConsumesServiceAPI(t *testing.T) {
 		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
+
+func TestCapacityConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/providers/claude-main/capacity" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"provider":"claude","confidence":"low","snapshot_count":2,"token_observation_count":3,"calculated_at":"2026-07-17T00:00:00Z"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "capacity", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"provider": "claude"`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTokenSyncConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/token-sync" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"provider":"codex","read":4,"inserted":3}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "token", "sync", "--provider", "codex-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"inserted": 3`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}

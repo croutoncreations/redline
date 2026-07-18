@@ -52,6 +52,17 @@ scheduler:
 	}
 }
 
+func TestUsageMonitorDefaultsAndValidatesInterval(t *testing.T) {
+	cfg := config.Config{UsageMonitor: config.UsageMonitor{}}
+	if got, err := cfg.UsageMonitorInterval(); err != nil || got != 5*time.Minute {
+		t.Fatalf("default interval=%s err=%v", got, err)
+	}
+	cfg.UsageMonitor.PollInterval = "nope"
+	if _, err := cfg.UsageMonitorInterval(); err == nil {
+		t.Fatal("expected invalid usage monitor interval")
+	}
+}
+
 func TestNotificationsAreDisabledByDefault(t *testing.T) {
 	cfg, err := config.Load(writeConfig(t, validConfig))
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/calibration"
+	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
@@ -27,6 +29,46 @@ import (
 )
 
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+
+func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, claudePayload) }))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	shortReset, weeklyReset := apiNow.Add(5*time.Hour), apiNow.Add(5*24*time.Hour)
+	for index, remaining := range []float64{1, .98, .95} {
+		snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: apiNow.Add(time.Duration(index) * time.Minute),
+			Short:  &decision.UsageWindow{Remaining: remaining, ResetsAt: shortReset},
+			Weekly: decision.UsageWindow{Remaining: .80 - float64(index)*.01, ResetsAt: weeklyReset}, Source: "test"}
+		if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = db.SaveTokenObservations(t.Context(), []capacity.TokenObservation{
+		{Provider: "claude", Source: "gatepost", SourceID: "s:1", ObservedAt: apiNow.Add(30 * time.Second), InputTokens: 1000},
+		{Provider: "claude", Source: "gatepost", SourceID: "s:2", ObservedAt: apiNow.Add(90 * time.Second), InputTokens: 4000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api.NewServer(testConfig(usage.URL), db, func() time.Time { return apiNow.Add(time.Hour) }))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/v1/providers/claude-main/capacity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got capacity.EstimateResult
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Short == nil || math.Abs(got.Short.EstimatedTokens.Total-100_000) > .01 || got.Weekly == nil || math.Abs(got.Weekly.EstimatedTokens.Total-250_000) > .01 {
+		t.Fatalf("capacity = %#v", got)
+	}
+}
 
 func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
