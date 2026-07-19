@@ -30,6 +30,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 ## Implemented behavior
 
 - Codex and Claude usage ingestion from OpenUsage `/v1/usage/{provider}`.
+- Model-specific Claude allowance ingestion and scheduling; Fable tasks require both shared Claude
+  capacity and the Fable weekly pool, while Haiku, Sonnet, and Opus use shared pools only.
 - Optional 5-hour limits: Codex works when its temporary short limit is absent.
 - Prorated current and final 5-hour slots for limited providers.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
@@ -42,6 +44,7 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - SQLite migrations, WAL mode, foreign keys, and durable snapshot history.
 - Execution-profile and one-off/recurring-task persistence.
 - Priority-descending, oldest-first eligible task selection.
+- Pool-aware candidate scanning so an exhausted Fable task cannot starve eligible non-Fable work.
 - `min_interval` and `require_repo_change` eligibility.
 - Task enable/disable/retry and provider pause/resume.
 - Persistent simulated scheduler decision history.
@@ -96,17 +99,29 @@ The default API is `http://127.0.0.1:7436`. Override it before the command:
 go run ./cmd/redline --api http://127.0.0.1:8000 status --provider claude-main
 ```
 
+Claude status includes supplemental model pools reported by OpenUsage:
+
+```text
+claude: 5-hour 100.0% remaining, 73.0% weekly remaining (...)
+  Fable: 48.0% remaining (...)
+```
+
 ## Profiles and tasks
 
 ```bash
 go run ./cmd/redline profile add --file examples/codex-devx-profile.yaml --json
 go run ./cmd/redline profile add --file examples/claude-worktree-profile.yaml --json
+go run ./cmd/redline profile add --file examples/claude-fable-devx-profile.yaml --json
 go run ./cmd/redline task add --file examples/add-tests-task.yaml --json
 go run ./cmd/redline profile list
 go run ./cmd/redline task list
 go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
 ```
+
+Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fable`,
+`claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
+account-pool-only models.
 
 For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
 activation, MCP servers, rules, and session persistence. This reduces startup variability and

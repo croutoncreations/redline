@@ -107,6 +107,26 @@ func TestAPIErrorIsReported(t *testing.T) {
 	}
 }
 
+func TestStatusShowsSupplementalModelAllowance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+          "provider":"claude","observed_at":"2026-07-19T03:27:53Z",
+          "short":{"remaining":1,"resets_at":"2026-07-19T07:00:00Z"},
+          "weekly":{"remaining":0.73,"resets_at":"2026-07-24T17:00:00Z"},
+          "allowances":[
+            {"key":"session","source_label":"Session","scope":"account","role":"short","remaining":1,"resets_at":"2026-07-19T07:00:00Z","period_duration_seconds":18000},
+            {"key":"weekly","source_label":"Weekly","scope":"account","role":"weekly","remaining":0.73,"resets_at":"2026-07-24T17:00:00Z","period_duration_seconds":604800},
+            {"key":"model:fable:weekly","source_label":"Fable","scope":"model","role":"weekly","remaining":0.48,"resets_at":"2026-07-24T17:00:00Z","period_duration_seconds":604800}
+          ],"source":"openusage"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "status", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), "Fable: 48.0% remaining") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestPauseCommandConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/pause" {

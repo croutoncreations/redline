@@ -75,6 +75,40 @@ func TestParseAcceptsSingleProviderObject(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, 0.90)
 }
 
+func TestParsePreservesClaudeFableAllowance(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-19T03:27:53.131Z",
+      "lines":[
+        {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-07-19T06:59:59.611Z"},
+        {"type":"progress","label":"Weekly","used":27,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-24T16:59:59.611Z"},
+        {"type":"progress","label":"Fable","used":52,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-24T16:59:59.612Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fable, ok := got.Allowance("model:fable:weekly")
+	if !ok {
+		t.Fatalf("allowances = %#v", got.Allowances)
+	}
+	assertClose(t, fable.Remaining, .48)
+	if fable.Scope != "model" || fable.Role != "weekly" || fable.SourceLabel != "Fable" {
+		t.Fatalf("fable allowance = %#v", fable)
+	}
+	if fable.PeriodDurationSeconds != 7*24*60*60 {
+		t.Fatalf("period duration = %d", fable.PeriodDurationSeconds)
+	}
+	if _, ok := got.Allowance("session"); !ok {
+		t.Fatalf("session missing from %#v", got.Allowances)
+	}
+	if _, ok := got.Allowance("weekly"); !ok {
+		t.Fatalf("weekly missing from %#v", got.Allowances)
+	}
+}
+
 func TestParseAcceptsProviderWithoutShortWindow(t *testing.T) {
 	payload := `[{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[
       {"type":"progress","label":"Weekly","used":33,"limit":100,"resetsAt":"2026-07-23T04:16:35Z"}

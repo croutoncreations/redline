@@ -589,10 +589,10 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
-	if response.Result.Decision != decision.Run {
-		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
-	}
-	task, profile, revision, err := s.selectTask(ctx, request.ProviderAccountID, request.CurrentRevision)
+	task, profile, revision, selectedResult, err := s.selectTask(
+		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
+	)
+	response.Result = selectedResult
 	if errors.Is(err, store.ErrNotFound) {
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
@@ -619,17 +619,18 @@ func (s *Server) dispatchCore(
 }
 
 func (s *Server) selectTask(
-	ctx context.Context,
-	provider, suppliedRevision string,
-) (domain.Task, domain.ExecutionProfile, string, error) {
+	ctx context.Context, provider, suppliedRevision string,
+	snapshot decision.UsageSnapshot, base decision.Result,
+) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
 	tasks, err := s.store.EligibleTasks(ctx, provider, s.now())
 	if err != nil {
-		return domain.Task{}, domain.ExecutionProfile{}, "", err
+		return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 	}
+	rejections := make([]decision.CandidateRejection, 0)
 	for _, task := range tasks {
 		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
 		if err != nil {
-			return domain.Task{}, domain.ExecutionProfile{}, "", err
+			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 		}
 		revision := suppliedRevision
 		if revision == "" && profile.Repository != "" {
@@ -643,9 +644,124 @@ func (s *Server) selectTask(
 		if task.RequireRepoChange && (revision == "" || revision == task.LastSuccessfulSourceRevision) {
 			continue
 		}
-		return task, profile, revision, nil
+		result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
+		if !eligible {
+			if reason != "" && len(rejections) < 20 {
+				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID, Reason: reason})
+			}
+			continue
+		}
+		result.CandidateRejections = rejections
+		return task, profile, revision, result, nil
 	}
-	return domain.Task{}, domain.ExecutionProfile{}, "", fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
+	base.CandidateRejections = rejections
+	return domain.Task{}, domain.ExecutionProfile{}, "", base,
+		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
+}
+
+func (s *Server) evaluateCandidateBudget(
+	providerID string,
+	snapshot decision.UsageSnapshot,
+	base decision.Result,
+	profile domain.ExecutionProfile,
+) (decision.Result, bool, string) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return base, false, "provider is not configured"
+	}
+	group, routing, err := configured.ResolveModelGroup(profile.Model, profile.BudgetModelGroup)
+	if err != nil {
+		return base, false, err.Error()
+	}
+	required := []string{"weekly"}
+	if snapshot.Short != nil {
+		required = append([]string{"session"}, required...)
+	}
+	poolResults := []decision.PoolResult{{
+		Pool: "weekly", Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
+		Remaining: snapshot.Weekly.Remaining,
+	}}
+	triggering := make([]string, 0, 2)
+	if base.Decision == decision.Run {
+		triggering = append(triggering, "weekly")
+	}
+	if base.Decision == decision.Unknown {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+			"shared allowance decision is unknown: " + base.Reason
+	}
+	policy := s.config.Policies[s.config.ActivePolicy]
+	if snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+			"shared session reserve is protected"
+	}
+	if snapshot.Weekly.Remaining <= 0 {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+			"shared weekly allowance is exhausted"
+	}
+	if group != "" {
+		poolKey := "model:" + group + ":weekly"
+		required = append(required, poolKey)
+		allowance, found := snapshot.Allowance(poolKey)
+		if !found {
+			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+				poolKey + " allowance is missing"
+		}
+		if allowance.Remaining <= 0 {
+			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+				poolKey + " allowance is exhausted"
+		}
+		if !allowance.ResetsAt.After(s.now()) {
+			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+				poolKey + " reset is not in the future"
+		}
+		thresholds, thresholdErr := policy.DecisionThresholds()
+		maxAge, ageErr := s.config.SnapshotAge()
+		if thresholdErr != nil || ageErr != nil {
+			return base, false, "model-specific pace policy is invalid"
+		}
+		poolSnapshot := decision.UsageSnapshot{
+			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
+			Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
+			Source: snapshot.Source, Confidence: snapshot.Confidence,
+		}
+		poolDecision := decision.Evaluate(decision.Input{
+			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+		})
+		poolResults = append(poolResults, decision.PoolResult{
+			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
+			Reason: poolDecision.Reason, Remaining: allowance.Remaining,
+		})
+		if poolDecision.Decision == decision.Unknown {
+			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+				poolKey + " decision is unknown: " + poolDecision.Reason
+		}
+		if poolDecision.Decision == decision.Run {
+			triggering = append(triggering, poolKey)
+		}
+	}
+	if len(triggering) == 0 {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false, ""
+	}
+	result := base
+	if base.Decision != decision.Run {
+		result.Decision = decision.Run
+		result.Mode = decision.ModePace
+		result.Reason = "model-specific allowance meets pace threshold"
+	}
+	return decorateBudgetResult(result, profile.Model, routing, required, triggering, poolResults), true, ""
+}
+
+func decorateBudgetResult(
+	result decision.Result, model, routing string, required, triggering []string, pools []decision.PoolResult,
+) decision.Result {
+	result.Model = model
+	result.ModelRouting = routing
+	result.RequiredPools = append([]string(nil), required...)
+	result.TriggeringPools = append([]string(nil), triggering...)
+	result.PoolResults = append([]decision.PoolResult(nil), pools...)
+	return result
 }
 
 func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, response schedulerResponse) error {
@@ -787,14 +903,15 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := schedulerResponse{Snapshot: snapshot, Result: result}
-	if result.Decision == decision.Run {
-		task, _, _, err := s.selectTask(r.Context(), request.ProviderAccountID, request.CurrentRevision)
-		if err == nil {
-			response.SelectedTask = &task
-		} else if !errors.Is(err, store.ErrNotFound) {
-			writeError(w, err)
-			return
-		}
+	task, _, _, selectedResult, err := s.selectTask(
+		r.Context(), request.ProviderAccountID, request.CurrentRevision, snapshot, result,
+	)
+	response.Result = selectedResult
+	if err == nil {
+		response.SelectedTask = &task
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, err)
+		return
 	}
 	encoded, err := json.Marshal(response)
 	if err != nil {

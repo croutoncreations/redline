@@ -218,6 +218,58 @@ ON token_observations(provider, observed_at, id);`); err != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (11)`); err != nil {
 			return fmt.Errorf("record token observation migration: %w", err)
 		}
+		version = 11
+	}
+	if version < 12 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE usage_allowance_windows (
+    snapshot_id INTEGER NOT NULL REFERENCES usage_snapshots(id) ON DELETE CASCADE,
+    pool_key TEXT NOT NULL,
+    source_label TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('account', 'model')),
+    role TEXT NOT NULL CHECK(role IN ('short', 'weekly')),
+    remaining REAL NOT NULL CHECK(remaining >= 0 AND remaining <= 1),
+    resets_at TEXT NOT NULL,
+    period_duration_s INTEGER NOT NULL CHECK(period_duration_s > 0),
+    PRIMARY KEY(snapshot_id, pool_key)
+);
+CREATE INDEX idx_allowance_windows_pool_reset
+ON usage_allowance_windows(pool_key, resets_at);
+`); err != nil {
+			return fmt.Errorf("create allowance pool schema: %w", err)
+		}
+		hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
+		if err != nil {
+			return err
+		}
+		if hasSnapshots {
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO usage_allowance_windows (
+    snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s
+)
+SELECT id, 'session', 'Session', 'account', 'short', short_remaining, short_resets_at, 18000
+FROM usage_snapshots WHERE short_remaining IS NOT NULL AND short_resets_at IS NOT NULL;
+INSERT INTO usage_allowance_windows (
+    snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s
+)
+SELECT id, 'weekly', 'Weekly', 'account', 'weekly', weekly_remaining, weekly_resets_at, 604800
+FROM usage_snapshots;
+`); err != nil {
+				return fmt.Errorf("backfill allowance pools: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (12)`); err != nil {
+			return fmt.Errorf("record allowance pool migration: %w", err)
+		}
+		version = 12
+	}
+	if version < 13 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE execution_profiles ADD COLUMN budget_model_group TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("extend execution profile model routing: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (13)`); err != nil {
+			return fmt.Errorf("record execution profile model routing migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -358,11 +410,16 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 		shortRemaining = s.Short.Remaining
 		shortReset = s.Short.ResetsAt.Format(time.RFC3339Nano)
 	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin snapshot save: %w", err)
+	}
+	defer tx.Rollback()
 	const query = `INSERT INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.db.ExecContext(
+	result, err := tx.ExecContext(
 		ctx,
 		query,
 		s.Provider,
@@ -378,6 +435,23 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
 	}
+	snapshotID, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("read saved snapshot id: %w", err)
+	}
+	for _, allowance := range s.AllAllowances() {
+		_, err := tx.ExecContext(ctx, `INSERT INTO usage_allowance_windows (
+snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
+			allowance.Scope, allowance.Role, allowance.Remaining,
+			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds)
+		if err != nil {
+			return fmt.Errorf("save allowance %q: %w", allowance.Key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit snapshot save: %w", err)
+	}
 	return nil
 }
 
@@ -385,15 +459,17 @@ func (d *DB) LatestSnapshot(
 	ctx context.Context,
 	provider string,
 ) (decision.UsageSnapshot, []byte, error) {
-	const query = `SELECT provider, observed_at, short_remaining, short_resets_at,
+	const query = `SELECT id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 FROM usage_snapshots WHERE provider = ? ORDER BY observed_at DESC, id DESC LIMIT 1`
 	var s decision.UsageSnapshot
+	var snapshotID int64
 	var observedAt, weeklyReset string
 	var shortRemaining sql.NullFloat64
 	var shortReset sql.NullString
 	var raw []byte
 	err := d.db.QueryRowContext(ctx, query, provider).Scan(
+		&snapshotID,
 		&s.Provider,
 		&observedAt,
 		&shortRemaining,
@@ -426,5 +502,36 @@ FROM usage_snapshots WHERE provider = ? ORDER BY observed_at DESC, id DESC LIMIT
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
+	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
+	if err != nil {
+		return decision.UsageSnapshot{}, nil, err
+	}
 	return s, raw, nil
+}
+
+func (d *DB) loadAllowances(ctx context.Context, snapshotID int64) ([]decision.AllowanceWindow, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT pool_key, source_label, scope, role, remaining,
+resets_at, period_duration_s FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("list allowance windows: %w", err)
+	}
+	defer rows.Close()
+	allowances := make([]decision.AllowanceWindow, 0)
+	for rows.Next() {
+		var allowance decision.AllowanceWindow
+		var reset string
+		if err := rows.Scan(&allowance.Key, &allowance.SourceLabel, &allowance.Scope, &allowance.Role,
+			&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds); err != nil {
+			return nil, fmt.Errorf("scan allowance window: %w", err)
+		}
+		allowance.ResetsAt, err = time.Parse(time.RFC3339Nano, reset)
+		if err != nil {
+			return nil, fmt.Errorf("parse allowance reset: %w", err)
+		}
+		allowances = append(allowances, allowance)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list allowance windows: %w", err)
+	}
+	return allowances, nil
 }

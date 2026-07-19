@@ -1,0 +1,15 @@
+id: claude-fable-devx
+provider_account_id: claude-main
+harness_type: claude-code
+model: fable
+budget_model_group: fable
+harness_args:
+  - --effort
+  - high
+workspace_provider: devx
+workspace_args:
+  - --target
+  - host
+repository: /absolute/path/to/repository
+base_branch: main
+cleanup_policy: never

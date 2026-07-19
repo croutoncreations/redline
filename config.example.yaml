@@ -36,6 +36,11 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Optional explicit aliases. These are the built-in Claude defaults and may
+    # be extended when new Fable model identifiers appear.
+    model_groups:
+      fable:
+        aliases: [fable, claude-fable-5, claude-fable-latest]
 
 policies:
   late:

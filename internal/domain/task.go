@@ -24,6 +24,7 @@ type ExecutionProfile struct {
 	ProviderAccountID string    `json:"provider_account_id"`
 	HarnessType       string    `json:"harness_type"`
 	Model             string    `json:"model,omitempty"`
+	BudgetModelGroup  string    `json:"budget_model_group,omitempty"`
 	HarnessCommand    string    `json:"harness_command,omitempty"`
 	HarnessArgs       []string  `json:"harness_args,omitempty"`
 	WorkspaceProvider string    `json:"workspace_provider"`

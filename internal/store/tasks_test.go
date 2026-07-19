@@ -48,7 +48,8 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	want := domain.ExecutionProfile{
 		ID: "codex", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
-		Model: "gpt-5.3-codex", HarnessCommand: "custom", HarnessArgs: []string{"--strict-config"},
+		Model: "gpt-5.3-codex", BudgetModelGroup: "premium",
+		HarnessCommand: "custom", HarnessArgs: []string{"--strict-config"},
 		WorkspaceProvider: "git-worktree", Repository: "/repo", BaseBranch: "main",
 		WorkspaceArgs: []string{"--target", "host"},
 		RequireClean:  true, CleanupPolicy: "on_success",
@@ -62,7 +63,7 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 		t.Fatalf("profiles=%#v err=%v", profiles, err)
 	}
 	got := profiles[0]
-	if got.HarnessCommand != want.HarnessCommand || strings.Join(got.HarnessArgs, " ") != "--strict-config" ||
+	if got.BudgetModelGroup != "premium" || got.HarnessCommand != want.HarnessCommand || strings.Join(got.HarnessArgs, " ") != "--strict-config" ||
 		strings.Join(got.WorkspaceArgs, " ") != "--target host" ||
 		!got.RequireClean || got.CleanupPolicy != "on_success" {
 		t.Fatalf("profile = %#v", got)

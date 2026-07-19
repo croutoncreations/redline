@@ -27,13 +27,69 @@ type UsageWindow struct {
 	ResetsAt  time.Time `json:"resets_at"`
 }
 
+type AllowanceWindow struct {
+	Key                   string    `json:"key"`
+	SourceLabel           string    `json:"source_label"`
+	Scope                 string    `json:"scope"`
+	Role                  string    `json:"role"`
+	Remaining             float64   `json:"remaining"`
+	ResetsAt              time.Time `json:"resets_at"`
+	PeriodDurationSeconds int64     `json:"period_duration_seconds"`
+}
+
 type UsageSnapshot struct {
-	Provider   string       `json:"provider"`
-	ObservedAt time.Time    `json:"observed_at"`
-	Short      *UsageWindow `json:"short,omitempty"`
-	Weekly     UsageWindow  `json:"weekly"`
-	Source     string       `json:"source"`
-	Confidence string       `json:"confidence,omitempty"`
+	Provider   string            `json:"provider"`
+	ObservedAt time.Time         `json:"observed_at"`
+	Short      *UsageWindow      `json:"short,omitempty"`
+	Weekly     UsageWindow       `json:"weekly"`
+	Allowances []AllowanceWindow `json:"allowances,omitempty"`
+	Source     string            `json:"source"`
+	Confidence string            `json:"confidence,omitempty"`
+}
+
+func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {
+	for _, allowance := range s.Allowances {
+		if allowance.Key == key {
+			return allowance, true
+		}
+	}
+	switch key {
+	case "session":
+		if s.Short != nil {
+			return AllowanceWindow{Key: "session", SourceLabel: "Session", Scope: "account", Role: "short",
+				Remaining: s.Short.Remaining, ResetsAt: s.Short.ResetsAt,
+				PeriodDurationSeconds: int64(ShortWindowDuration / time.Second)}, true
+		}
+	case "weekly":
+		if !s.Weekly.ResetsAt.IsZero() {
+			return AllowanceWindow{Key: "weekly", SourceLabel: "Weekly", Scope: "account", Role: "weekly",
+				Remaining: s.Weekly.Remaining, ResetsAt: s.Weekly.ResetsAt,
+				PeriodDurationSeconds: int64((7 * 24 * time.Hour) / time.Second)}, true
+		}
+	}
+	return AllowanceWindow{}, false
+}
+
+func (s UsageSnapshot) AllAllowances() []AllowanceWindow {
+	result := append([]AllowanceWindow(nil), s.Allowances...)
+	for _, key := range []string{"session", "weekly"} {
+		if _, exists := findAllowance(result, key); exists {
+			continue
+		}
+		if allowance, ok := s.Allowance(key); ok {
+			result = append(result, allowance)
+		}
+	}
+	return result
+}
+
+func findAllowance(allowances []AllowanceWindow, key string) (AllowanceWindow, bool) {
+	for _, allowance := range allowances {
+		if allowance.Key == key {
+			return allowance, true
+		}
+	}
+	return AllowanceWindow{}, false
 }
 
 func (s UsageSnapshot) Validate() error {
@@ -52,6 +108,28 @@ func (s UsageSnapshot) Validate() error {
 		}
 		if err := unitFraction("short remaining", s.Short.Remaining); err != nil {
 			return err
+		}
+	}
+	seen := make(map[string]bool, len(s.Allowances))
+	for _, allowance := range s.Allowances {
+		if allowance.Key == "" || allowance.SourceLabel == "" || allowance.Scope == "" || allowance.Role == "" {
+			return fmt.Errorf("allowance key, source label, scope, and role are required")
+		}
+		if seen[allowance.Key] {
+			return fmt.Errorf("duplicate allowance %q", allowance.Key)
+		}
+		seen[allowance.Key] = true
+		if allowance.Scope != "account" && allowance.Scope != "model" {
+			return fmt.Errorf("allowance %q scope must be account or model", allowance.Key)
+		}
+		if allowance.Role != "short" && allowance.Role != "weekly" {
+			return fmt.Errorf("allowance %q role must be short or weekly", allowance.Key)
+		}
+		if allowance.ResetsAt.IsZero() || allowance.PeriodDurationSeconds <= 0 {
+			return fmt.Errorf("allowance %q reset and period duration are required", allowance.Key)
+		}
+		if err := unitFraction("allowance remaining", allowance.Remaining); err != nil {
+			return fmt.Errorf("allowance %q: %w", allowance.Key, err)
 		}
 	}
 	return nil
@@ -81,20 +159,39 @@ type Slot struct {
 	Current  bool      `json:"current"`
 }
 
+type PoolResult struct {
+	Pool      string   `json:"pool"`
+	Decision  Decision `json:"decision"`
+	Mode      Mode     `json:"mode,omitempty"`
+	Reason    string   `json:"reason"`
+	Remaining float64  `json:"remaining"`
+}
+
+type CandidateRejection struct {
+	TaskID string `json:"task_id"`
+	Reason string `json:"reason"`
+}
+
 type Result struct {
-	Decision               Decision       `json:"decision"`
-	Mode                   Mode           `json:"mode"`
-	Reason                 string         `json:"reason"`
-	Slots                  []Slot         `json:"slots,omitempty"`
-	FutureFullWindows      int            `json:"future_full_windows"`
-	CurrentWindowCapacity  float64        `json:"current_window_capacity"`
-	MaximumConsumable      float64        `json:"maximum_consumable"`
-	Overflow               float64        `json:"overflow"`
-	RollingDispatchable    float64        `json:"rolling_dispatchable"`
-	MatchedPaceThreshold   *PaceThreshold `json:"matched_pace_threshold,omitempty"`
-	WindowWeeklyCost       float64        `json:"window_weekly_cost,omitempty"`
-	WindowWeeklyCostSource string         `json:"window_weekly_cost_source,omitempty"`
-	CalibrationConfidence  string         `json:"calibration_confidence,omitempty"`
+	Decision               Decision             `json:"decision"`
+	Mode                   Mode                 `json:"mode"`
+	Reason                 string               `json:"reason"`
+	Slots                  []Slot               `json:"slots,omitempty"`
+	FutureFullWindows      int                  `json:"future_full_windows"`
+	CurrentWindowCapacity  float64              `json:"current_window_capacity"`
+	MaximumConsumable      float64              `json:"maximum_consumable"`
+	Overflow               float64              `json:"overflow"`
+	RollingDispatchable    float64              `json:"rolling_dispatchable"`
+	MatchedPaceThreshold   *PaceThreshold       `json:"matched_pace_threshold,omitempty"`
+	WindowWeeklyCost       float64              `json:"window_weekly_cost,omitempty"`
+	WindowWeeklyCostSource string               `json:"window_weekly_cost_source,omitempty"`
+	CalibrationConfidence  string               `json:"calibration_confidence,omitempty"`
+	Model                  string               `json:"model,omitempty"`
+	ModelRouting           string               `json:"model_routing,omitempty"`
+	RequiredPools          []string             `json:"required_pools,omitempty"`
+	TriggeringPools        []string             `json:"triggering_pools,omitempty"`
+	PoolResults            []PoolResult         `json:"pool_results,omitempty"`
+	CandidateRejections    []CandidateRejection `json:"candidate_rejections,omitempty"`
 }
 
 func Evaluate(in Input) Result {

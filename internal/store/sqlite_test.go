@@ -41,6 +41,39 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	snapshot := usageSnapshot(time.Date(2026, 7, 19, 3, 27, 53, 0, time.UTC), .73)
+	snapshot.Provider = "claude"
+	snapshot.Allowances = []decision.AllowanceWindow{{
+		Key: "model:fable:weekly", SourceLabel: "Fable", Scope: "model", Role: "weekly",
+		Remaining: .48, ResetsAt: snapshot.Weekly.ResetsAt, PeriodDurationSeconds: 7 * 24 * 60 * 60,
+	}}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"providerId":"claude"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(t.Context(), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fable, ok := got.Allowance("model:fable:weekly")
+	if !ok || fable.Remaining != .48 || fable.SourceLabel != "Fable" {
+		t.Fatalf("allowances = %#v", got.Allowances)
+	}
+	if _, ok := got.Allowance("session"); !ok {
+		t.Fatalf("legacy session was not normalized: %#v", got.Allowances)
+	}
+	if _, ok := got.Allowance("weekly"); !ok {
+		t.Fatalf("legacy weekly was not normalized: %#v", got.Allowances)
+	}
+}
+
 func TestOpenMigratesExistingVersionTwoDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
 	legacy, err := sql.Open("sqlite", path)

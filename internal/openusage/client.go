@@ -63,11 +63,12 @@ type providerPayload struct {
 }
 
 type usageLine struct {
-	Type     string  `json:"type"`
-	Label    string  `json:"label"`
-	Used     float64 `json:"used"`
-	Limit    float64 `json:"limit"`
-	ResetsAt string  `json:"resetsAt"`
+	Type             string  `json:"type"`
+	Label            string  `json:"label"`
+	Used             float64 `json:"used"`
+	Limit            float64 `json:"limit"`
+	ResetsAt         string  `json:"resetsAt"`
+	PeriodDurationMS int64   `json:"periodDurationMs"`
 }
 
 func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
@@ -115,8 +116,8 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if !strings.EqualFold(line.Type, "progress") {
 			continue
 		}
-		window := normalizeLabel(line.Label)
-		if window == "" {
+		key, scope, role := normalizeLabel(line.Label)
+		if key == "" {
 			continue
 		}
 		remaining, err := remainingFraction(line)
@@ -127,8 +128,19 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
-		switch window {
-		case "short":
+		periodSeconds := line.PeriodDurationMS / 1000
+		if periodSeconds == 0 {
+			if role == "short" {
+				periodSeconds = int64(decision.ShortWindowDuration / time.Second)
+			} else {
+				periodSeconds = int64((7 * 24 * time.Hour) / time.Second)
+			}
+		}
+		allowance := decision.AllowanceWindow{Key: key, SourceLabel: line.Label, Scope: scope, Role: role,
+			Remaining: remaining, ResetsAt: reset, PeriodDurationSeconds: periodSeconds}
+		snapshot.Allowances = append(snapshot.Allowances, allowance)
+		switch key {
+		case "session":
 			snapshot.Short = &decision.UsageWindow{Remaining: remaining, ResetsAt: reset}
 		case "weekly":
 			snapshot.Weekly = decision.UsageWindow{Remaining: remaining, ResetsAt: reset}
@@ -147,14 +159,16 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 	return snapshot, nil
 }
 
-func normalizeLabel(label string) string {
+func normalizeLabel(label string) (key, scope, role string) {
 	switch strings.ToLower(strings.TrimSpace(label)) {
 	case "session", "5-hour", "5 hour", "five-hour", "five hour":
-		return "short"
+		return "session", "account", "short"
 	case "weekly", "7-day", "7 day", "seven-day", "seven day":
-		return "weekly"
+		return "weekly", "account", "weekly"
+	case "fable":
+		return "model:fable:weekly", "model", "weekly"
 	default:
-		return ""
+		return "", "", ""
 	}
 }
 

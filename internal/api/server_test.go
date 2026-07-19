@@ -157,6 +157,101 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	}
 }
 
+func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
+	server, db := newAPIServer(t, claudeAllowancePayload(0, 1.0, 23*time.Hour))
+	createClaudeCandidate(t, db, "fable-profile", "fable", "fable", "fable-task", 100)
+	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 50)
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "claude-main"})
+	if result.SelectedTask == nil || result.SelectedTask.ID != "opus-task" {
+		t.Fatalf("selected task = %#v", result.SelectedTask)
+	}
+	if len(result.Result.CandidateRejections) == 0 ||
+		result.Result.CandidateRejections[0].TaskID != "fable-task" ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "exhausted") {
+		t.Fatalf("rejections = %#v", result.Result.CandidateRejections)
+	}
+	if strings.Join(result.Result.RequiredPools, ",") != "session,weekly" {
+		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
+func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
+	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))
+	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 100)
+	createClaudeCandidate(t, db, "fable-profile", "claude-fable-5", "", "fable-task", 50)
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "claude-main"})
+	if result.SelectedTask == nil || result.SelectedTask.ID != "fable-task" {
+		t.Fatalf("selected task = %#v result=%#v", result.SelectedTask, result.Result)
+	}
+	if result.Result.Decision != decision.Run ||
+		strings.Join(result.Result.TriggeringPools, ",") != "model:fable:weekly" {
+		t.Fatalf("result = %#v", result.Result)
+	}
+	if strings.Join(result.Result.RequiredPools, ",") != "session,weekly,model:fable:weekly" {
+		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
+func TestFableSignalDoesNotReleaseOpusTask(t *testing.T) {
+	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))
+	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 100)
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "claude-main"})
+	if result.SelectedTask != nil || result.Result.Decision != decision.Wait {
+		t.Fatalf("selected=%#v result=%#v", result.SelectedTask, result.Result)
+	}
+}
+
+func TestExecutionSkipsExhaustedFableAndAdmitsOpus(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, claudeAllowancePayload(0, 1.0, 23*time.Hour))
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createClaudeCandidate(t, db, "fable-profile", "fable", "fable", "fable-task", 100)
+	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 50)
+	executed := make(chan domain.Task, 1)
+	handler := api.NewServerWithDependencies(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+			executed <- task
+			return nil
+		},
+	}, fakeRevisionResolver{})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	result := postJSON[struct {
+		Result decision.Result `json:"result"`
+		Run    *domain.Run     `json:"run,omitempty"`
+	}](t, server.URL+"/v1/scheduler/execute", map[string]any{"provider_account_id": "claude-main"})
+	if result.Run == nil || result.Run.TaskID != "opus-task" {
+		t.Fatalf("run=%#v result=%#v", result.Run, result.Result)
+	}
+	select {
+	case task := <-executed:
+		if task.ID != "opus-task" {
+			t.Fatalf("executed task = %#v", task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executor was not called")
+	}
+}
+
 func TestSimulatedSchedulerResolvesTaskRepositoryLikeExecution(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
@@ -863,6 +958,40 @@ func testConfig(usageURL string) config.Config {
 			},
 		},
 	}
+}
+
+func createClaudeCandidate(
+	t *testing.T,
+	db *store.DB,
+	profileID, model, budgetGroup, taskID string,
+	priority int,
+) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: profileID, ProviderAccountID: "claude-main", HarnessType: "claude-code",
+		Model: model, BudgetModelGroup: budgetGroup, WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: taskID, Name: taskID, Priority: priority, ExecutionProfileID: profileID, Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claudeAllowancePayload(fableRemaining, sharedRemaining float64, untilReset time.Duration) string {
+	shortReset := apiNow.Add(5 * time.Hour).Format(time.RFC3339Nano)
+	weeklyReset := apiNow.Add(untilReset).Format(time.RFC3339Nano)
+	return fmt.Sprintf(`{
+  "providerId":"claude", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":%q},
+    {"type":"progress","label":"Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Fable","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), shortReset, (1-sharedRemaining)*100, weeklyReset,
+		(1-fableRemaining)*100, weeklyReset)
 }
 
 type fakeExecutor struct {

@@ -95,9 +95,46 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	Provider         string  `yaml:"provider"`
-	OpenUsageURL     string  `yaml:"openusage_url"`
-	WindowWeeklyCost float64 `yaml:"window_weekly_cost"`
+	Provider         string                `yaml:"provider"`
+	OpenUsageURL     string                `yaml:"openusage_url"`
+	WindowWeeklyCost float64               `yaml:"window_weekly_cost"`
+	ModelGroups      map[string]ModelGroup `yaml:"model_groups"`
+}
+
+type ModelGroup struct {
+	Aliases []string `yaml:"aliases"`
+}
+
+func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
+	groups := make(map[string]ModelGroup, len(p.ModelGroups)+1)
+	for name, group := range p.ModelGroups {
+		groups[strings.ToLower(strings.TrimSpace(name))] = group
+	}
+	if strings.EqualFold(p.Provider, "claude") {
+		if _, ok := groups["fable"]; !ok {
+			groups["fable"] = ModelGroup{Aliases: []string{"fable", "claude-fable-5", "claude-fable-latest"}}
+		}
+	}
+	return groups
+}
+
+func (p Provider) ResolveModelGroup(model, explicit string) (group, routing string, err error) {
+	groups := p.EffectiveModelGroups()
+	if configured := strings.ToLower(strings.TrimSpace(explicit)); configured != "" {
+		if _, ok := groups[configured]; !ok {
+			return "", "", fmt.Errorf("budget model group %q is not configured", explicit)
+		}
+		return configured, "explicit", nil
+	}
+	normalizedModel := strings.ToLower(strings.TrimSpace(model))
+	for name, configured := range groups {
+		for _, alias := range configured.Aliases {
+			if normalizedModel == strings.ToLower(strings.TrimSpace(alias)) {
+				return name, "alias", nil
+			}
+		}
+	}
+	return "", "account_only_unmatched", nil
 }
 
 type Policy struct {
@@ -143,6 +180,22 @@ func Load(path string) (Config, error) {
 		}
 		if provider.WindowWeeklyCost == 0 {
 			return Config{}, fmt.Errorf("provider %q: window_weekly_cost must be greater than zero", name)
+		}
+		aliases := make(map[string]string)
+		for groupName, group := range provider.EffectiveModelGroups() {
+			if groupName == "" {
+				return Config{}, fmt.Errorf("provider %q: model group name is required", name)
+			}
+			for _, alias := range group.Aliases {
+				normalized := strings.ToLower(strings.TrimSpace(alias))
+				if normalized == "" {
+					return Config{}, fmt.Errorf("provider %q model group %q: alias is required", name, groupName)
+				}
+				if existing, ok := aliases[normalized]; ok && existing != groupName {
+					return Config{}, fmt.Errorf("provider %q: model alias %q belongs to both %q and %q", name, alias, existing, groupName)
+				}
+				aliases[normalized] = groupName
+			}
 		}
 	}
 	for name, policy := range cfg.Policies {

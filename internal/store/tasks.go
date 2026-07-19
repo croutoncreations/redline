@@ -25,11 +25,11 @@ func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now t
 	}
 	_, err = d.db.ExecContext(ctx, `INSERT INTO execution_profiles (
 id, provider_account_id, harness_type, model, harness_command, harness_args_json,
-workspace_provider, workspace_args_json, repository, base_branch, require_clean, cleanup_policy,
+budget_model_group, workspace_provider, workspace_args_json, repository, base_branch, require_clean, cleanup_policy,
 prepare_command, finalize_command, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.ProviderAccountID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON),
-		p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean, p.CleanupPolicy,
+		p.BudgetModelGroup, p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean, p.CleanupPolicy,
 		p.PrepareCommand, p.FinalizeCommand, formatTime(now),
 	)
 	if err != nil {
@@ -40,7 +40,7 @@ prepare_command, finalize_command, created_at
 
 func (d *DB) ListProfiles(ctx context.Context) ([]domain.ExecutionProfile, error) {
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, harness_type, model,
-harness_command, harness_args_json, workspace_provider, workspace_args_json, repository, base_branch,
+harness_command, harness_args_json, budget_model_group, workspace_provider, workspace_args_json, repository, base_branch,
 require_clean, cleanup_policy, prepare_command, finalize_command, created_at
 FROM execution_profiles ORDER BY id`)
 	if err != nil {
@@ -52,7 +52,7 @@ FROM execution_profiles ORDER BY id`)
 		var p domain.ExecutionProfile
 		var created, argsJSON, workspaceArgsJSON string
 		if err := rows.Scan(&p.ID, &p.ProviderAccountID, &p.HarnessType, &p.Model,
-			&p.HarnessCommand, &argsJSON, &p.WorkspaceProvider, &workspaceArgsJSON, &p.Repository, &p.BaseBranch,
+			&p.HarnessCommand, &argsJSON, &p.BudgetModelGroup, &p.WorkspaceProvider, &workspaceArgsJSON, &p.Repository, &p.BaseBranch,
 			&p.RequireClean, &p.CleanupPolicy, &p.PrepareCommand, &p.FinalizeCommand, &created); err != nil {
 			return nil, fmt.Errorf("scan execution profile: %w", err)
 		}

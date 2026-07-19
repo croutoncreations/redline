@@ -165,6 +165,39 @@ func TestLoadRejectsInvalidPaceThreshold(t *testing.T) {
 	}
 }
 
+func TestClaudeModelRoutingDistinguishesFableFromAccountOnlyModels(t *testing.T) {
+	provider := config.Provider{Provider: "claude"}
+	for _, model := range []string{"fable", "claude-fable-5", "claude-fable-latest"} {
+		group, routing, err := provider.ResolveModelGroup(model, "")
+		if err != nil || group != "fable" || routing != "alias" {
+			t.Fatalf("model %q group=%q routing=%q err=%v", model, group, routing, err)
+		}
+	}
+	for _, model := range []string{"haiku", "sonnet", "opus", "claude-opus-4-8"} {
+		group, routing, err := provider.ResolveModelGroup(model, "")
+		if err != nil || group != "" || routing != "account_only_unmatched" {
+			t.Fatalf("model %q group=%q routing=%q err=%v", model, group, routing, err)
+		}
+	}
+}
+
+func TestExplicitBudgetModelGroupMustExist(t *testing.T) {
+	provider := config.Provider{Provider: "claude"}
+	if _, _, err := provider.ResolveModelGroup("custom", "missing"); err == nil {
+		t.Fatal("expected unknown explicit model group error")
+	}
+}
+
+func TestLoadRejectsAliasesSharedAcrossModelGroups(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    model_groups:
+      first: { aliases: [same] }
+      second: { aliases: [SAME] }`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil {
+		t.Fatal("expected duplicate model alias error")
+	}
+}
+
 const validConfig = `
 database: redline.db
 active_policy: standard

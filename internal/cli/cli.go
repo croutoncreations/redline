@@ -269,6 +269,13 @@ func runStatus(client apiclient.Client, args []string, stdout, stderr io.Writer)
 		}
 		fmt.Fprintf(stdout, "%s: 5-hour %s, %s weekly remaining (observed %s)\n",
 			snapshot.Provider, short, percent(snapshot.Weekly.Remaining), snapshot.ObservedAt.Format(time.RFC3339))
+		for _, allowance := range snapshot.Allowances {
+			if allowance.Key == "session" || allowance.Key == "weekly" {
+				continue
+			}
+			fmt.Fprintf(stdout, "  %s: %s remaining (resets %s)\n", allowance.SourceLabel,
+				percent(allowance.Remaining), allowance.ResetsAt.Format(time.RFC3339))
+		}
 	}
 	return 0
 }
