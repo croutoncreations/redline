@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,14 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), test.contentType) || !strings.Contains(body.String(), test.contains) {
 			t.Fatalf("GET %s: status=%d content-type=%q body=%q", test.path, resp.StatusCode, resp.Header.Get("Content-Type"), body.String())
 		}
+	}
+	resp, err := http.Get(server.URL + "/assets/missing.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing asset status = %d", resp.StatusCode)
 	}
 }
 
@@ -187,6 +196,40 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	if got.Tasks[0].ID != "quiet-check" || got.Tasks[0].Provider != "codex-main" || got.Tasks[0].Model != "gpt-5" || got.Tasks[0].Interval != 24*time.Hour {
 		t.Fatalf("task projection = %#v", got.Tasks[0])
 	}
+}
+
+func TestDashboardReportsStoreFailures(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Get(server.URL + "/v1/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
+func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "run-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "run-task", "name": "Run task", "execution_profile_id": "run-profile", "type": "one_off",
+	})
+	if _, err := db.AdmitTask(t.Context(), "run-detail", "run-task", "codex-main", "revision", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	var run domain.Run
+	getJSON(t, server.URL+"/v1/runs/run-detail", &run)
+	if run.ID != "run-detail" || run.TaskID != "run-task" {
+		t.Fatalf("run = %#v", run)
+	}
+	requestStatus(t, http.MethodGet, server.URL+"/v1/runs/missing", "", http.StatusNotFound)
 }
 
 func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
@@ -418,6 +461,56 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d", response.StatusCode)
 	}
+}
+
+func TestListAndTaskControlEndpoints(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "listed-profile", "provider_account_id": "codex-main", "harness_type": "pi", "model": "openai-codex/gpt-5.6-sol", "workspace_provider": "devx",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "controlled-task", "name": "Controlled", "priority": 42, "execution_profile_id": "listed-profile", "type": "one_off",
+	})
+
+	var profiles []domain.ExecutionProfile
+	getJSON(t, server.URL+"/v1/profiles", &profiles)
+	if len(profiles) != 1 || profiles[0].ID != "listed-profile" || profiles[0].HarnessType != "pi" {
+		t.Fatalf("profiles = %#v", profiles)
+	}
+	var tasks []domain.Task
+	getJSON(t, server.URL+"/v1/tasks", &tasks)
+	if len(tasks) != 1 || tasks[0].ID != "controlled-task" {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+
+	disabled := postJSON[domain.Task](t, server.URL+"/v1/tasks/controlled-task/disable", map[string]any{})
+	if disabled.Enabled || disabled.State != domain.Disabled {
+		t.Fatalf("disabled = %#v", disabled)
+	}
+	enabled := postJSON[domain.Task](t, server.URL+"/v1/tasks/controlled-task/enable", map[string]any{})
+	if !enabled.Enabled || enabled.State != domain.Queued {
+		t.Fatalf("enabled = %#v", enabled)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks/missing/disable", `{}`, http.StatusNotFound)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks/controlled-task/archive", `{}`, http.StatusInternalServerError)
+}
+
+func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", `{`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", `{"id":"bad","provider_account_id":"missing","harness_type":"pi","workspace_provider":"devx"}`, http.StatusBadRequest)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "valid", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/valid", `{"provider_account_id":"missing"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"bad-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"never"}`, http.StatusBadRequest)
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "valid-task", "name": "Valid", "execution_profile_id": "valid", "type": "one_off",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"min_interval":"never"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"execution_profile_id":"missing"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodDelete, server.URL+"/v1/profiles/valid", ``, http.StatusConflict)
 }
 
 func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
@@ -1339,6 +1432,41 @@ func postJSON[T any](t *testing.T, url string, body any) T {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func getJSON(t *testing.T, url string, result any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status=%d", url, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requestStatus(t *testing.T, method, url, body string, want int) {
+	t.Helper()
+	request, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		contents, _ := io.ReadAll(response.Body)
+		t.Fatalf("%s %s: status=%d want=%d body=%s", method, url, response.StatusCode, want, contents)
+	}
 }
 
 const codexPayload = `{

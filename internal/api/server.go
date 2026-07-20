@@ -1305,8 +1305,6 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "must be") {
 		status = http.StatusBadRequest
-	} else if strings.Contains(err.Error(), "active run") || strings.Contains(err.Error(), "already has") {
-		status = http.StatusConflict
 	}
 	writeJSON(w, status, problem{Error: err.Error()})
 }

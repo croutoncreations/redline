@@ -1,0 +1,254 @@
+const { test, expect } = require('@playwright/test');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const dashboardRoot = path.join(__dirname, '..', '..', 'internal', 'api', 'dashboard');
+const assets = {
+  '/': [fs.readFileSync(path.join(dashboardRoot, 'index.html')), 'text/html'],
+  '/assets/dashboard.js': [fs.readFileSync(path.join(dashboardRoot, 'dashboard.js')), 'text/javascript'],
+  '/assets/dashboard.css': [fs.readFileSync(path.join(dashboardRoot, 'dashboard.css')), 'text/css'],
+  '/assets/claude.svg': [fs.readFileSync(path.join(dashboardRoot, 'claude.svg')), 'image/svg+xml'],
+  '/assets/codex.svg': [fs.readFileSync(path.join(dashboardRoot, 'codex.svg')), 'image/svg+xml'],
+};
+
+function dashboardFixture() {
+  const observed = '2026-07-20T19:00:00Z';
+  return {
+    generated_at: observed,
+    active_policy: 'standard',
+    health: { status: 'degraded', window: '24h', active_runs: 0, dispatch_attempts: 8, dispatch_errors: 1 },
+    scheduler: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
+    usage_monitor: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
+    providers: [
+      { id: 'claude-main', provider: 'claude', snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [] } },
+      { id: 'codex-main', provider: 'codex', snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
+    ],
+    tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
+    runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
+    attempts: [{ id: 1, provider_account_id: 'codex-main', outcome: 'error', error: 'temporary usage source timeout', completed_at: observed }],
+  };
+}
+
+function profileFixture() {
+  return [
+    { id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', repository: '/repo/redline' },
+    { id: 'pi-custom', provider_account_id: 'claude-main', harness_type: 'pi', model: 'anthropic-cli/private-preview', workspace_provider: 'devx', repository: '/repo/redline' },
+  ];
+}
+
+function profileOptionsFixture() {
+  return {
+    generated_at: '2026-07-20T19:00:00Z',
+    harnesses: [
+      { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
+      { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
+      { id: 'pi', label: 'Pi', installed: true, version: '0.80.10', models: {
+        codex: [{ id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol', source: 'pi_config', context_window: '1M', max_output: '128K' }],
+        claude: [{ id: 'anthropic-cli/claude-fable-5', label: 'Claude Fable 5', source: 'pi_config', context_window: '200K', max_output: '32K' }, { id: 'anthropic-cli/claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }],
+      } },
+      { id: 'command', label: 'Custom command', installed: true },
+    ],
+  };
+}
+
+async function loadDashboard(page, options = {}) {
+  const state = {
+    dashboard: dashboardFixture(), profiles: profileFixture(), profileOptions: profileOptionsFixture(),
+    requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
+  };
+	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
+  state.tasks = {
+    'audit-auth': { id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', min_interval: 86400000000000, prompt: 'Inspect one bounded area.', require_repo_change: true, dispatch_tier: 'well_behind' },
+  };
+
+  await page.addInitScript(() => {
+    window.__redlineEventSources = [];
+    window.EventSource = class {
+      constructor(url) { this.url = url; this.listeners = {}; window.__redlineEventSources.push(this); queueMicrotask(() => this.onopen?.({})); }
+      addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
+      emit(name, data) { for (const listener of this.listeners[name] || []) listener({ data: JSON.stringify(data) }); }
+      fail() { this.onerror?.({}); }
+      close() {}
+    };
+  });
+
+  await page.route('http://redline.test/**', async route => {
+    const request = route.request(), url = new URL(request.url()), method = request.method();
+    if (assets[url.pathname]) {
+      const [body, contentType] = assets[url.pathname];
+      return route.fulfill({ status: 200, body, contentType });
+    }
+    const json = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    if (url.pathname === '/v1/dashboard') {
+		if (state.dashboardGate) { await state.dashboardGate; state.dashboardGate = null; }
+      return state.dashboardError ? json(500, { error: 'dashboard unavailable' }) : json(200, state.dashboard);
+    }
+    if (url.pathname === '/v1/profile-options') return json(200, state.profileOptions);
+    if (url.pathname === '/v1/profiles' && method === 'GET') return json(200, state.profiles);
+    if (url.pathname === '/v1/profiles' && method === 'POST') {
+      const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+      const profile = { ...body, created_at: '2026-07-20T19:00:00Z' }; state.profiles.push(profile); return json(201, profile);
+    }
+    const profileMatch = url.pathname.match(/^\/v1\/profiles\/([^/]+)$/);
+    if (profileMatch) {
+      const id = decodeURIComponent(profileMatch[1]), profile = state.profiles.find(item => item.id === id);
+      if (method === 'GET') return profile ? json(200, profile) : json(404, { error: 'profile not found' });
+      if (method === 'DELETE') {
+        state.requests.push({ method, path: url.pathname });
+        if (state.blockProfileDelete) return json(409, { error: 'profile is assigned to a task' });
+        state.profiles = state.profiles.filter(item => item.id !== id); return route.fulfill({ status: 204 });
+      }
+      if (method === 'PATCH') {
+        const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body }); Object.assign(profile, body); return json(200, profile);
+      }
+    }
+    if (url.pathname === '/v1/tasks' && method === 'GET') return json(200, Object.values(state.tasks));
+    if (url.pathname === '/v1/tasks' && method === 'POST') {
+      const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+		if (state.taskCreateError) return json(400, { error: state.taskCreateError });
+      const task = { ...body, id: 'created-task', enabled: true, state: 'queued' }; state.tasks[task.id] = task; return json(201, task);
+    }
+    const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(enable|disable|retry))?$/);
+    if (taskMatch) {
+      const id = decodeURIComponent(taskMatch[1]), control = taskMatch[2], task = state.tasks[id];
+      if (method === 'GET') return task ? json(200, task) : json(404, { error: 'task not found' });
+      if (method === 'POST' && control) { state.requests.push({ method, path: url.pathname }); task.enabled = control !== 'disable'; task.state = task.enabled ? 'queued' : 'disabled'; return json(200, task); }
+      if (method === 'DELETE') return json(409, { error: 'task has run history' });
+      if (method === 'PATCH') { const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body }); Object.assign(task, body); return json(200, task); }
+    }
+    const logMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/logs$/);
+    if (logMatch) return json(200, { run_id: logMatch[1], stream: url.searchParams.get('stream'), content: url.searchParams.get('stream') === 'stderr' ? 'warning from stderr' : '{"type":"result","result":"ok"}' });
+    return json(404, { error: `unhandled ${method} ${url.pathname}` });
+  });
+
+  await page.goto('http://redline.test/');
+	if (state.waitForReady) {
+		await expect(page.getByRole('heading', { name: 'Scheduled jobs' })).toBeVisible();
+		await expect(page.getByText('Audit authentication')).toBeVisible();
+	}
+  return state;
+}
+
+test('renders operational state and applies live dashboard events', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await expect(page.getByRole('button', { name: 'Recent errors' })).toBeVisible();
+  await expect(page.locator('#health-explainer')).toContainText('temporary usage source timeout');
+  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('53%');
+  await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), { ...state.dashboard, tasks: [], runs: [], attempts: [], health: { ...state.dashboard.health, status: 'ok', dispatch_errors: 0 } });
+  await expect(page.getByText('No jobs are queued yet.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'healthy' })).toBeVisible();
+  await page.evaluate(() => window.__redlineEventSources[0].fail());
+  await expect(page.getByText('reconnecting')).toBeVisible();
+});
+
+test('discovers harness versions and filters Pi models by provider', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Harness & workspace setup' });
+  await expect(dialog).toBeVisible();
+  const harness = page.locator('#profile-harness'), provider = page.locator('#profile-provider'), model = page.locator('#profile-model-choice');
+  await expect(harness.locator('option')).toContainText(['Codex CLI · v0.144.6', 'Claude Code · v2.1.211', 'Pi · v0.80.10']);
+  await provider.selectOption('codex-main'); await harness.selectOption('pi');
+  await expect(model.locator('option[value="openai-codex/gpt-5.6-sol"]')).toHaveCount(1);
+  await provider.selectOption('claude-main');
+  await expect(harness).toHaveValue('pi');
+  await expect(model.locator('option[value="anthropic-cli/claude-opus-4-8"]')).toHaveCount(1);
+  if (process.env.REDLINE_PROOF_DIR) {
+    fs.mkdirSync(process.env.REDLINE_PROOF_DIR, { recursive: true });
+    await page.screenshot({ path: path.join(process.env.REDLINE_PROOF_DIR, 'profile-discovery.png'), fullPage: true });
+  }
+
+  await page.locator('[data-profile="pi-custom"]').click();
+  await expect(model).toHaveValue('anthropic-cli/private-preview');
+  await expect(model.locator('option:checked')).toContainText('previously used');
+  await model.selectOption('__other__');
+  await expect(page.locator('#profile-model-custom')).toBeVisible();
+  await harness.selectOption('command');
+  await expect(page.locator('#profile-command-field')).toBeVisible();
+  await expect(page.locator('#profile-model-field')).toBeHidden();
+});
+
+test('creates a scheduled job with tier and recurrence settings', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New scheduled job' });
+  await expect(dialog).toBeVisible();
+  await page.locator('#task-name').fill('Review cache invalidation');
+  await page.locator('#task-profile').selectOption('codex-devx');
+  await page.locator('#task-priority').fill('82');
+  await page.locator('#task-tier').selectOption('expiring');
+  await page.locator('#task-type').selectOption('recurring');
+  await page.locator('#task-interval').fill('7d');
+  await page.locator('#task-prompt').fill('Inspect one cache invalidation path and report findings.');
+  await page.locator('#task-repo-change').check();
+  await page.getByRole('button', { name: 'Save job' }).click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => state.requests.filter(item => item.path === '/v1/tasks').length).toBe(1);
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true });
+});
+
+test('creates a Pi profile and surfaces blocked deletion errors', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await expect(page.getByRole('dialog', { name: 'Harness & workspace setup' })).toBeVisible();
+  await page.locator('#profile-id').fill('pi-codex');
+  await page.locator('#profile-provider').selectOption('codex-main');
+  await page.locator('#profile-harness').selectOption('pi');
+  await page.locator('#profile-model-choice').selectOption('openai-codex/gpt-5.6-sol');
+  await page.locator('#profile-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect.poll(() => state.requests.filter(item => item.path === '/v1/profiles').length).toBe(1);
+  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({ id: 'pi-codex', provider_account_id: 'codex-main', harness_type: 'pi', model: 'openai-codex/gpt-5.6-sol' });
+	await page.locator('#profile-base-branch').fill('main');
+	await page.getByRole('button', { name: 'Save profile' }).click();
+	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/pi-codex')).toBe(true);
+
+  state.blockProfileDelete = true;
+  page.once('dialog', confirmation => confirmation.accept());
+  await page.getByRole('button', { name: 'Delete' }).click();
+  await expect(page.locator('#profile-form-error')).toContainText('profile is assigned to a task');
+});
+
+test('loads both run log streams and controls an existing task', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: 'View logs →' }).click();
+  await expect(page.locator('#log-content')).toContainText('"result":"ok"');
+  await page.getByRole('button', { name: 'stderr' }).click();
+  await expect(page.locator('#log-content')).toContainText('warning from stderr');
+  await page.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await expect(page.getByRole('dialog', { name: 'Manage scheduled job' })).toBeVisible();
+	await page.locator('#task-priority').fill('75');
+	await page.getByRole('button', { name: 'Save job' }).click();
+	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/tasks/audit-auth')).toBe(true);
+	await page.getByRole('button', { name: 'Manage' }).click();
+	page.once('dialog', confirmation => confirmation.accept());
+	await page.getByRole('button', { name: 'Delete' }).click();
+	await expect(page.locator('#task-form-error')).toContainText('task has run history');
+  await page.getByRole('button', { name: 'Disable' }).click();
+  await expect.poll(() => state.requests.some(item => item.path === '/v1/tasks/audit-auth/disable')).toBe(true);
+});
+
+test('shows dashboard API errors and preserves the responsive queue layout', async ({ page }) => {
+  await page.setViewportSize({ width: 680, height: 800 });
+  const state = await loadDashboard(page);
+  await expect(page.getByRole('columnheader', { name: 'Route' })).toBeHidden();
+  state.dashboardError = true;
+  await page.getByRole('button', { name: 'Refresh dashboard' }).click();
+  await expect(page.locator('#error-banner')).toContainText('dashboard unavailable');
+});
+
+test('shows loading state and task save errors without closing the form', async ({ page }) => {
+	const state = await loadDashboard(page, { pauseDashboard: true, waitForReady: false, taskCreateError: 'minimum interval is invalid' });
+	await expect(page.getByText('Loading queue…')).toBeVisible();
+	state.releaseDashboard();
+	await expect(page.getByText('Audit authentication')).toBeVisible();
+	await page.getByRole('button', { name: '+ New job' }).click();
+	await page.locator('#task-name').fill('Invalid scheduled job');
+	await page.locator('#task-profile').selectOption('codex-devx');
+	await page.locator('#task-prompt').fill('Do a small thing.');
+	await page.getByRole('button', { name: 'Save job' }).click();
+	await expect(page.locator('#task-form-error')).toContainText('minimum interval is invalid');
+	await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
+});

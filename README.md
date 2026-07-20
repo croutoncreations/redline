@@ -394,6 +394,14 @@ The lightweight `/v1/health` probe remains independent of recent operational fai
 go test -race ./...
 go vet ./...
 go test -cover ./...
+npm install
+npx playwright install chromium # first run only
+npm run test:dashboard
 ```
+
+The Playwright suite runs the embedded dashboard in an isolated browser with deterministic API and
+server-sent-event fixtures. It covers task/profile workflows, dynamic harness and model selection,
+run logs, live updates, responsive layout, and loading/error states without touching a live queue or
+using provider quota.
 
 See [the observation report](docs/phase-1-observation.md) for live-provider findings.

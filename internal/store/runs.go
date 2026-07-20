@@ -40,7 +40,7 @@ WHERE provider_account_id = ? AND state IN ('preparing', 'running')`, providerAc
 		return domain.Run{}, fmt.Errorf("check active provider runs: %w", err)
 	}
 	if active > 0 {
-		return domain.Run{}, fmt.Errorf("provider %q already has an active run", providerAccountID)
+		return domain.Run{}, fmt.Errorf("%w: provider %q already has an active run", ErrConflict, providerAccountID)
 	}
 	row := tx.QueryRowContext(ctx, taskSelect+`
 JOIN execution_profiles p ON p.id = t.execution_profile_id

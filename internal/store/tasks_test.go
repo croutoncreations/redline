@@ -334,8 +334,8 @@ func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 	if err != nil || run.State != domain.RunPreparing {
 		t.Fatalf("run=%#v err=%v", run, err)
 	}
-	if _, err := db.AdmitTask(ctx, "run-2", "second", "codex-main", "abc", now); err == nil {
-		t.Fatal("expected active-provider admission conflict")
+	if _, err := db.AdmitTask(ctx, "run-2", "second", "codex-main", "abc", now); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected active-provider conflict, got %v", err)
 	}
 	claimed, _ := db.GetTask(ctx, "first")
 	if claimed.State != domain.Running {

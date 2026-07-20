@@ -1,0 +1,11 @@
+{
+  "name": "redline-dashboard-tests",
+  "private": true,
+  "scripts": {
+    "test:dashboard": "playwright test",
+    "test:dashboard:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}
