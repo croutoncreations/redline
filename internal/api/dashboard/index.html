@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Redline control room</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Redline dashboard">
+      <span class="mark" aria-hidden="true"><i></i></span>
+      <span><strong>REDLINE</strong><small>control room</small></span>
+    </a>
+    <div class="top-actions">
+      <span id="health-pill" class="pill muted"><i></i> connecting</span>
+      <span id="updated-at" class="updated">Not yet synced</span>
+      <button id="refresh" class="refresh" type="button">Refresh <span>↻</span></button>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">CAPACITY OVERVIEW</p><h1>Make the spare cycles count.</h1></div>
+      <div class="system-summary">
+        <div><span>POLICY</span><strong id="policy">—</strong></div>
+        <div><span>NEXT CHECK</span><strong id="next-check">—</strong></div>
+        <div><span>ACTIVE RUNS</span><strong id="active-runs">—</strong></div>
+      </div>
+    </section>
+
+    <div id="error-banner" class="error-banner" hidden></div>
+    <section id="usage-grid" class="usage-grid" aria-label="Provider usage">
+      <article class="usage-card skeleton"><div></div><div></div><div></div></article>
+      <article class="usage-card skeleton"><div></div><div></div><div></div></article>
+    </section>
+
+    <section class="panel queue-panel">
+      <div class="section-head">
+        <div><p class="eyebrow">DISPATCH QUEUE</p><h2>Scheduled jobs</h2></div>
+        <span id="task-count" class="count">0 tasks</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Priority</th><th>Job</th><th>Route</th><th>Recurrence</th><th>Status</th></tr></thead>
+        <tbody id="tasks-body"><tr><td colspan="5" class="empty">Loading queue…</td></tr></tbody>
+      </table></div>
+    </section>
+
+    <div class="lower-grid">
+      <section class="panel">
+        <div class="section-head"><div><p class="eyebrow">RECENT WORK</p><h2>Run history</h2></div><span id="run-count" class="count">0 runs</span></div>
+        <div id="runs-list" class="activity-list"><p class="empty">Loading runs…</p></div>
+      </section>
+      <section class="panel">
+        <div class="section-head"><div><p class="eyebrow">SCHEDULER TRACE</p><h2>Decisions</h2></div><span id="attempt-count" class="count">0 events</span></div>
+        <div id="attempts-list" class="activity-list"><p class="empty">Loading decisions…</p></div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="logs-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2></div><button id="close-logs" type="button" aria-label="Close">×</button></div>
+    <div class="log-tabs"><button class="active" data-stream="stdout">stdout</button><button data-stream="stderr">stderr</button></div>
+    <pre id="log-content">Select a stream.</pre>
+  </dialog>
+  <script src="/assets/dashboard.js" defer></script>
+</body>
+</html>

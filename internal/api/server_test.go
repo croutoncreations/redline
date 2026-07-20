@@ -31,6 +31,94 @@ import (
 
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 
+func TestDashboardPageAndAssetsAreServed(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	for _, test := range []struct {
+		path        string
+		contentType string
+		contains    string
+	}{
+		{path: "/", contentType: "text/html", contains: "Redline control room"},
+		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/dashboard"},
+	} {
+		resp, err := http.Get(server.URL + test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := new(bytes.Buffer)
+		_, _ = body.ReadFrom(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), test.contentType) || !strings.Contains(body.String(), test.contains) {
+			t.Fatalf("GET %s: status=%d content-type=%q body=%q", test.path, resp.StatusCode, resp.Header.Get("Content-Type"), body.String())
+		}
+	}
+}
+
+func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "codex-devx", ProviderAccountID: "codex-main", HarnessType: "codex-cli", Model: "gpt-5",
+		WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "quiet-check", Name: "Quiet check", Prompt: "TOP SECRET PROMPT", Priority: 90,
+		ExecutionProfileID: "codex-devx", Type: domain.Recurring, MinInterval: 24 * time.Hour,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(server.URL + "/v1/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := new(bytes.Buffer)
+	_, _ = body.ReadFrom(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body.String())
+	}
+	if strings.Contains(body.String(), "TOP SECRET PROMPT") {
+		t.Fatalf("dashboard exposed task prompt: %s", body.String())
+	}
+	var got struct {
+		ActivePolicy string `json:"active_policy"`
+		Providers    []struct {
+			ID       string                  `json:"id"`
+			Snapshot *decision.UsageSnapshot `json:"snapshot"`
+			Error    string                  `json:"error"`
+		} `json:"providers"`
+		Tasks []struct {
+			ID       string        `json:"id"`
+			Provider string        `json:"provider_account_id"`
+			Model    string        `json:"model"`
+			Interval time.Duration `json:"min_interval"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ActivePolicy != "standard" || len(got.Providers) != 2 || len(got.Tasks) != 1 {
+		t.Fatalf("dashboard = %#v", got)
+	}
+	if got.Providers[0].ID != "claude-main" || got.Providers[0].Snapshot != nil || got.Providers[0].Error == "" {
+		t.Fatalf("missing-provider state = %#v", got.Providers[0])
+	}
+	if got.Providers[1].ID != "codex-main" || got.Providers[1].Snapshot == nil || got.Providers[1].Snapshot.Weekly.Remaining != .86 {
+		t.Fatalf("codex provider = %#v", got.Providers[1])
+	}
+	if got.Tasks[0].ID != "quiet-check" || got.Tasks[0].Provider != "codex-main" || got.Tasks[0].Model != "gpt-5" || got.Tasks[0].Interval != 24*time.Hour {
+		t.Fatalf("task projection = %#v", got.Tasks[0])
+	}
+}
+
 func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, claudePayload) }))
 	defer usage.Close()

@@ -156,6 +156,7 @@ The main endpoints are:
 ```text
 GET  /v1/health
 GET  /v1/health/details?window={duration}
+GET  /v1/dashboard
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
 GET  /v1/providers/{account}/calibration
@@ -178,6 +179,11 @@ GET  /v1/runs/{id}/events?limit={n}
 GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
 GET  /v1/notifications
 ```
+
+The service includes a read-only local dashboard at
+[`http://127.0.0.1:7436/`](http://127.0.0.1:7436/). It summarizes current provider allowances,
+the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. The page refreshes
+every 30 seconds and does not expose task prompts or lifecycle commands in its aggregate API.
 
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.
