@@ -11,7 +11,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("snapshot not found")
+var (
+	ErrNotFound = errors.New("record not found")
+	ErrConflict = errors.New("record conflicts with current state")
+)
 
 type DB struct{ db *sql.DB }
 

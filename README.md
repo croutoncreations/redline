@@ -167,6 +167,7 @@ POST /v1/providers/{account}/decision
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
 GET|POST /v1/tasks
+GET|PATCH|DELETE /v1/tasks/{id}
 POST /v1/tasks/{id}/enable|disable|retry
 POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute

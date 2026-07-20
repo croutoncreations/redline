@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,58 @@ func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
 	}
 	if got.ID != "first-high" {
 		t.Fatalf("selected %q, want first-high", got.ID)
+	}
+}
+
+func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "job", Name: "Before", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
+		t.Fatal(err)
+	}
+	updated := domain.Task{ID: "job", Name: "After", Prompt: "Do the thing", Priority: 90, ExecutionProfileID: profile.ID, Type: domain.Recurring, MinInterval: 24 * time.Hour, RequireRepoChange: true}
+	if err := db.UpdateTask(t.Context(), updated, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetTask(t.Context(), "job")
+	if err != nil || got.Name != "After" || got.Priority != 90 || got.Type != domain.Recurring || got.MinInterval != 24*time.Hour || !got.RequireRepoChange || got.State != domain.Queued {
+		t.Fatalf("task=%#v err=%v", got, err)
+	}
+	if err := db.DeleteTask(t.Context(), "job"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetTask(t.Context(), "job"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted task error = %v", err)
+	}
+}
+
+func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"running", "historical"} {
+		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.AdmitTask(t.Context(), "run-1", "running", "codex-main", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(t.Context(), "running"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("running delete error = %v", err)
+	}
+	if _, err := db.RecordSchedulerDecision(t.Context(), domain.SchedulerDecision{ProviderAccountID: "codex-main", SelectedTaskID: "historical", DecisionJSON: []byte(`{}`)}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(t.Context(), "historical"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("historical delete error = %v", err)
 	}
 }
 

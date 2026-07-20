@@ -16,7 +16,7 @@ const duration = (nanos) => {
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 
-let currentRun = null;
+let currentRun = null, profiles = [];
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -44,7 +44,8 @@ function wireProviderDetails() {
 }
 function renderTasks(tasks) {
   $('#task-count').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No jobs are queued yet.</td></tr>';
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',() => openTask(button.dataset.task)));
 }
 function renderRuns(runs) {
   $('#run-count').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
@@ -92,6 +93,73 @@ async function loadLog(stream) {
     output.textContent = data.content || '(empty log)';
   } catch (error) { output.textContent = `Log unavailable: ${error.message}`; }
 }
+function durationInput(nanos) {
+  if (!nanos) return '';
+  const hours = nanos / 3.6e12;
+  if (hours >= 24 && hours % 24 === 0) return `${hours/24}d`;
+  if (hours >= 1) return `${hours}h`;
+  return `${nanos/6e10}m`;
+}
+async function apiRequest(path,options={}) {
+  const response = await fetch(path,{...options,headers:{Accept:'application/json','Content-Type':'application/json',...(options.headers || {})}});
+  if (response.status === 204) return null;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+async function loadProfiles() {
+  if (!profiles.length) profiles = await apiRequest('/v1/profiles');
+  $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
+}
+function showTaskError(message) {
+  $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
+}
+async function openTask(id='') {
+  try {
+    await loadProfiles(); showTaskError(''); $('#task-form').reset(); $('#task-id').value = id;
+    let task = null;
+    if (id) task = await apiRequest(`/v1/tasks/${encodeURIComponent(id)}`);
+    $('#task-dialog-title').textContent = task ? 'Manage scheduled job' : 'New scheduled job';
+    $('#task-name').value = task?.name || '';
+    $('#task-profile').value = task?.execution_profile_id || profiles[0]?.id || '';
+    $('#task-priority').value = task?.priority ?? 50;
+    $('#task-type').value = task?.type || 'one_off';
+    $('#task-interval').value = durationInput(task?.min_interval || 0);
+    $('#task-prompt').value = task?.prompt || '';
+    $('#task-prompt-file').value = task?.prompt_file || '';
+    $('#task-repo-change').checked = !!task?.require_repo_change;
+    $('#delete-task').hidden = !task || task.state === 'running';
+    $('#toggle-task').hidden = !task || task.state === 'running';
+    $('#toggle-task').textContent = task?.enabled ? 'Disable' : 'Enable';
+    $('#toggle-task').dataset.action = task?.enabled ? 'disable' : 'enable';
+    $('#task-dialog').showModal();
+  } catch (error) { $('#error-banner').hidden = false; $('#error-banner').textContent = `Could not open job: ${error.message}`; }
+}
+async function saveTask(event) {
+  event.preventDefault(); showTaskError('');
+  const id = $('#task-id').value, payload = {
+    name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
+    priority:Number($('#task-priority').value), type:$('#task-type').value,
+    min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
+    prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
+  };
+  const save = $('#save-task'); save.disabled = true;
+  try {
+    await apiRequest(id ? `/v1/tasks/${encodeURIComponent(id)}` : '/v1/tasks',{method:id ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
+    $('#task-dialog').close(); await refresh();
+  } catch (error) { showTaskError(error.message); } finally { save.disabled = false; }
+}
+async function toggleTask() {
+  const id = $('#task-id').value, action = $('#toggle-task').dataset.action;
+  try { await apiRequest(`/v1/tasks/${encodeURIComponent(id)}/${action}`,{method:'POST',body:'{}'}); $('#task-dialog').close(); await refresh(); }
+  catch (error) { showTaskError(error.message); }
+}
+async function deleteTask() {
+  const id = $('#task-id').value;
+  if (!confirm(`Delete “${$('#task-name').value}”? Jobs with run history cannot be deleted.`)) return;
+  try { await apiRequest(`/v1/tasks/${encodeURIComponent(id)}`,{method:'DELETE'}); $('#task-dialog').close(); await refresh(); }
+  catch (error) { showTaskError(error.message); }
+}
 async function refresh() {
   const button = $('#refresh'); button.disabled = true;
   try {
@@ -110,6 +178,12 @@ function connectLive() {
 }
 
 $('#refresh').addEventListener('click',refresh);
+$('#new-task').addEventListener('click',() => openTask());
+$('#task-form').addEventListener('submit',saveTask);
+$('#close-task').addEventListener('click',() => $('#task-dialog').close());
+$('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
+$('#toggle-task').addEventListener('click',toggleTask);
+$('#delete-task').addEventListener('click',deleteTask);
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
 document.querySelectorAll('.log-tabs button').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
 document.addEventListener('click',() => document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')));

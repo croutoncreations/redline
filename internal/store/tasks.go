@@ -85,14 +85,8 @@ func (d *DB) GetProfile(ctx context.Context, id string) (domain.ExecutionProfile
 }
 
 func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) error {
-	if task.ID == "" || task.Name == "" || task.ExecutionProfileID == "" {
-		return fmt.Errorf("task id, name, and execution profile are required")
-	}
-	if task.Type != domain.OneOff && task.Type != domain.Recurring {
-		return fmt.Errorf("task type must be one_off or recurring")
-	}
-	if task.MinInterval < 0 {
-		return fmt.Errorf("minimum interval cannot be negative")
+	if err := validateTaskDefinition(task); err != nil {
+		return err
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -122,6 +116,92 @@ last_started_at, last_completed_at, last_successful_source_revision, created_at,
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit task creation: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) error {
+	if err := validateTaskDefinition(task); err != nil {
+		return err
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin task update: %w", err)
+	}
+	defer tx.Rollback()
+	var state domain.TaskState
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id = ?`, task.ID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
+	} else if err != nil {
+		return fmt.Errorf("read task state: %w", err)
+	}
+	if state == domain.Running {
+		return fmt.Errorf("%w: running task %q cannot be edited", ErrConflict, task.ID)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET name = ?, prompt = ?, prompt_file = ?, priority = ?,
+execution_profile_id = ?, task_type = ?, min_interval_ns = ?, require_repo_change = ?, updated_at = ?
+WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.ExecutionProfileID,
+		task.Type, int64(task.MinInterval), task.RequireRepoChange, formatTime(now), task.ID)
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read task update result: %w", err)
+	} else if rows == 0 {
+		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit task update: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) DeleteTask(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("task id is required")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin task deletion: %w", err)
+	}
+	defer tx.Rollback()
+	var state domain.TaskState
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id = ?`, id).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: task %q", ErrNotFound, id)
+	} else if err != nil {
+		return fmt.Errorf("read task state: %w", err)
+	}
+	if state == domain.Running {
+		return fmt.Errorf("%w: running task %q cannot be deleted", ErrConflict, id)
+	}
+	var references int
+	if err := tx.QueryRowContext(ctx, `SELECT
+(SELECT COUNT(*) FROM runs WHERE task_id = ?) +
+(SELECT COUNT(*) FROM scheduler_decisions WHERE selected_task_id = ?) +
+(SELECT COUNT(*) FROM dispatch_attempts WHERE selected_task_id = ?)`, id, id, id).Scan(&references); err != nil {
+		return fmt.Errorf("check task history: %w", err)
+	}
+	if references > 0 {
+		return fmt.Errorf("%w: task %q has run or scheduler history; disable it instead", ErrConflict, id)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit task deletion: %w", err)
+	}
+	return nil
+}
+
+func validateTaskDefinition(task domain.Task) error {
+	if task.ID == "" || task.Name == "" || task.ExecutionProfileID == "" {
+		return fmt.Errorf("task id, name, and execution profile are required")
+	}
+	if task.Type != domain.OneOff && task.Type != domain.Recurring {
+		return fmt.Errorf("task type must be one_off or recurring")
+	}
+	if task.MinInterval < 0 {
+		return fmt.Errorf("minimum interval cannot be negative")
 	}
 	return nil
 }

@@ -43,11 +43,11 @@
     <section class="panel queue-panel">
       <div class="section-head">
         <div><p class="eyebrow">DISPATCH QUEUE</p><h1>Scheduled jobs</h1></div>
-        <span id="task-count" class="count">0 tasks</span>
+        <div class="section-actions"><span id="task-count" class="count">0 tasks</span><button id="new-task" class="primary-button" type="button">+ New job</button></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Priority</th><th>Job</th><th>Route</th><th>Recurrence</th><th>Status</th></tr></thead>
-        <tbody id="tasks-body"><tr><td colspan="5" class="empty">Loading queue…</td></tr></tbody>
+        <thead><tr><th>Priority</th><th>Job</th><th>Route</th><th>Recurrence</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody id="tasks-body"><tr><td colspan="6" class="empty">Loading queue…</td></tr></tbody>
       </table></div>
     </section>
 
@@ -62,6 +62,25 @@
       </section>
     </div>
   </main>
+
+  <dialog id="task-dialog" class="task-dialog">
+    <form id="task-form">
+      <div class="dialog-head"><div><p class="eyebrow">JOB DEFINITION</p><h2 id="task-dialog-title">New scheduled job</h2></div><button id="close-task" type="button" aria-label="Close">×</button></div>
+      <div class="form-body">
+        <div id="task-form-error" class="form-error" hidden></div>
+        <input id="task-id" type="hidden">
+        <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
+        <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
+        <label class="field"><span>Priority</span><input id="task-priority" type="number" value="50" required></label>
+        <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
+        <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"></label>
+        <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
+        <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="tasks/review-auth.md"></label>
+        <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>
+      </div>
+      <div class="form-footer"><div><button id="delete-task" class="danger-button" type="button" hidden>Delete</button><button id="toggle-task" class="quiet-button" type="button" hidden>Disable</button></div><div><button id="cancel-task" class="quiet-button" type="button">Cancel</button><button id="save-task" class="primary-button" type="submit">Save job</button></div></div>
+    </form>
+  </dialog>
 
   <dialog id="logs-dialog">
     <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2></div><button id="close-logs" type="button" aria-label="Close">×</button></div>

@@ -39,8 +39,10 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		contains    string
 	}{
 		{path: "/", contentType: "text/html", contains: "gas-gauge"},
+		{path: "/", contentType: "text/html", contains: "+ New job"},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {
@@ -272,6 +274,68 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	}
 	if len(history) != 1 || !bytes.Contains(history[0].DecisionJSON, []byte(`"decision":"RUN"`)) {
 		t.Fatalf("history = %#v", history)
+	}
+}
+
+func TestTaskCRUDOverServiceAPI(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "editable", "name": "Before", "priority": 10, "execution_profile_id": "codex-devx", "type": "one_off",
+	})
+
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/tasks/editable", strings.NewReader(`{
+		"name":"After", "prompt":"Do useful work", "priority":80, "type":"recurring",
+		"min_interval":"2d", "require_repo_change":true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated domain.Task
+	if err := json.NewDecoder(response.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || updated.Name != "After" || updated.Prompt != "Do useful work" || updated.MinInterval != 48*time.Hour || !updated.RequireRepoChange {
+		t.Fatalf("status=%d task=%#v", response.StatusCode, updated)
+	}
+
+	response, err = http.Get(server.URL + "/v1/tasks/editable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fetched domain.Task
+	if err := json.NewDecoder(response.Body).Decode(&fetched); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || fetched.Priority != 80 || fetched.Type != domain.Recurring {
+		t.Fatalf("status=%d task=%#v", response.StatusCode, fetched)
+	}
+
+	request, _ = http.NewRequest(http.MethodDelete, server.URL+"/v1/tasks/editable", nil)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d", response.StatusCode)
+	}
+	response, err = http.Get(server.URL + "/v1/tasks/editable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted GET status = %d", response.StatusCode)
 	}
 }
 
