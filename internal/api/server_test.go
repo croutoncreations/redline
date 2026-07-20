@@ -38,9 +38,9 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		contentType string
 		contains    string
 	}{
-		{path: "/", contentType: "text/html", contains: "Redline control room"},
+		{path: "/", contentType: "text/html", contains: "gas-gauge"},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
-		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/dashboard"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {

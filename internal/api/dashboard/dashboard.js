@@ -33,7 +33,7 @@ function providerCompact(item) {
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => windows.push(meter(window.source_label || title(window.key),window.remaining,window.resets_at)));
     details = `<div class="meters">${windows.join('')}</div>`;
   }
-  return `<div class="provider-compact" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-copy"><strong>${escapeHTML(title(provider))}</strong><span>${weekly ? 'weekly' : 'no sample'}</span></span><span class="compact-meter"><b>${weekly ? `${value}%` : '—'}</b><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${details}</span></div>`;
+  return `<div class="provider-compact" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${details}</span></div>`;
 }
 function wireProviderDetails() {
   document.querySelectorAll('.provider-compact').forEach(card => card.addEventListener('click', event => {
@@ -55,14 +55,19 @@ function renderAttempts(attempts) {
   $('#attempt-count').textContent = `${attempts.length} event${attempts.length === 1 ? '' : 's'}`;
   $('#attempts-list').innerHTML = attempts.length ? attempts.slice(0,12).map(a => `<div class="activity"><i class="activity-dot ${escapeHTML(a.outcome)}"></i><div><strong>${escapeHTML(title(a.outcome))} · ${escapeHTML(a.provider_account_id)}</strong><p>${escapeHTML(a.reason || a.error || a.mode || 'Scheduler evaluated capacity')}</p></div><time>${escapeHTML(relative(a.completed_at))}</time></div>`).join('') : '<p class="empty">No scheduler decisions recorded yet.</p>';
 }
-function renderHealth(health) {
+function renderHealth(health, attempts) {
   const healthy = health.status === 'ok' || health.status === 'healthy';
   $('#health-pill').className = `health-pill ${healthy ? '' : 'bad'}`;
-  $('#health-pill').innerHTML = `<i></i><span>${escapeHTML(health.status)}</span>`;
+  $('#health-pill').innerHTML = `<i></i><span>${healthy ? 'healthy' : 'Recent errors'}</span>`;
+  const latest = attempts[0], recentError = attempts.find(attempt => attempt.outcome === 'error');
+  const latestState = latest
+    ? `The newest scheduler check was ${latest.outcome}${latest.completed_at ? ` ${relative(latest.completed_at)}` : ''}.`
+    : 'No recent scheduler check is available.';
+  const cause = recentError ? ` Latest sampled cause: ${recentError.error || recentError.reason}.` : '';
   const detail = healthy
     ? `No run, dispatch, or notification failures were recorded during the last ${health.window}.`
-    : `“Degraded” means Redline recorded failures during the last ${health.window}; the service can still be online. Current window: ${health.dispatch_errors} dispatch errors, ${health.failed_runs} failed runs, and ${health.notification_failures} notification failures.`;
-  $('#health-explainer').innerHTML = `<strong>Operational health: ${escapeHTML(title(health.status))}</strong><p>${escapeHTML(detail)}</p>`;
+    : `${health.dispatch_errors} of ${health.dispatch_attempts} dispatch checks failed during the rolling ${health.window}; this does not mean the service is currently offline. ${latestState}${cause}`;
+  $('#health-explainer').innerHTML = `<strong>${healthy ? 'Operational health' : 'Recent scheduler errors'}</strong><p>${escapeHTML(detail)}</p>`;
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
@@ -71,7 +76,7 @@ function render(data) {
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
-  renderHealth(data.health); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
+  renderHealth(data.health,data.attempts); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
 }
 async function openLogs(run) {
