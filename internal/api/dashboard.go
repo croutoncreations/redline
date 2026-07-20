@@ -1,8 +1,11 @@
 package api
 
 import (
+	"context"
 	"embed"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -65,6 +68,10 @@ func (s *Server) dashboardAsset(w http.ResponseWriter, r *http.Request) {
 		s.serveDashboardFile(w, "dashboard/dashboard.css", "text/css; charset=utf-8")
 	case "dashboard.js":
 		s.serveDashboardFile(w, "dashboard/dashboard.js", "text/javascript; charset=utf-8")
+	case "claude.svg":
+		s.serveDashboardFile(w, "dashboard/claude.svg", "image/svg+xml")
+	case "codex.svg":
+		s.serveDashboardFile(w, "dashboard/codex.svg", "image/svg+xml")
 	default:
 		http.NotFound(w, r)
 	}
@@ -82,7 +89,57 @@ func (s *Server) serveDashboardFile(w http.ResponseWriter, name, contentType str
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	result, err := s.dashboardData(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, problem{Error: "streaming is unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	send := func() error {
+		result, err := s.dashboardData(r.Context())
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "event: dashboard\ndata: %s\n\n", payload); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	if err := send(); err != nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if err := send(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	result := dashboardResponse{
 		GeneratedAt: s.now(), ActivePolicy: s.config.ActivePolicy,
 		Scheduler: s.scheduler.Status(), UsageMonitor: s.usageMonitor.Status(),
@@ -92,8 +149,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	var err error
 	result.Health, err = s.store.OperationalHealth(ctx, s.now(), 24*time.Hour)
 	if err != nil {
-		writeError(w, err)
-		return
+		return dashboardResponse{}, err
 	}
 
 	providerIDs := make([]string, 0, len(s.config.Providers))
@@ -118,8 +174,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)
 		if attemptsErr != nil {
-			writeError(w, attemptsErr)
-			return
+			return dashboardResponse{}, attemptsErr
 		}
 		result.Attempts = append(result.Attempts, attempts...)
 	}
@@ -127,14 +182,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 
 	tasks, err := s.store.ListTasks(ctx)
 	if err != nil {
-		writeError(w, err)
-		return
+		return dashboardResponse{}, err
 	}
 	for _, task := range tasks {
 		profile, profileErr := s.store.GetProfile(ctx, task.ExecutionProfileID)
 		if profileErr != nil {
-			writeError(w, profileErr)
-			return
+			return dashboardResponse{}, profileErr
 		}
 		result.Tasks = append(result.Tasks, dashboardTask{
 			ID: task.ID, Name: task.Name, Priority: task.Priority, Type: task.Type, State: task.State, Enabled: task.Enabled,
@@ -146,8 +199,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	result.Runs, err = s.store.ListRuns(ctx, 20)
 	if err != nil {
-		writeError(w, err)
-		return
+		return dashboardResponse{}, err
 	}
-	writeJSON(w, http.StatusOK, result)
+	return result, nil
 }

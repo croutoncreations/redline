@@ -14,31 +14,35 @@
       <span><strong>REDLINE</strong><small>control room</small></span>
     </a>
     <div class="top-actions">
-      <span id="health-pill" class="pill muted"><i></i> connecting</span>
+      <span id="live-pill" class="live-pill connecting"><i></i><span>connecting</span></span>
+      <div class="health-wrap">
+        <button id="health-pill" class="health-pill muted" type="button" aria-describedby="health-explainer"><i></i><span>checking</span></button>
+        <div id="health-explainer" class="health-explainer" role="tooltip">
+          <strong>Operational health</strong><p>Waiting for the first service snapshot.</p>
+        </div>
+      </div>
       <span id="updated-at" class="updated">Not yet synced</span>
-      <button id="refresh" class="refresh" type="button">Refresh <span>↻</span></button>
+      <button id="refresh" class="refresh" type="button" aria-label="Refresh dashboard">↻</button>
     </div>
   </header>
 
   <main>
-    <section class="intro">
-      <div><p class="eyebrow">CAPACITY OVERVIEW</p><h1>Make the spare cycles count.</h1></div>
-      <div class="system-summary">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section class="summary-rail" aria-label="Current capacity">
+      <div id="usage-strip" class="usage-strip">
+        <div class="provider-compact skeleton-line"></div><div class="provider-compact skeleton-line"></div>
+      </div>
+      <div class="rail-meta">
         <div><span>POLICY</span><strong id="policy">—</strong></div>
         <div><span>NEXT CHECK</span><strong id="next-check">—</strong></div>
-        <div><span>ACTIVE RUNS</span><strong id="active-runs">—</strong></div>
+        <div><span>RUNNING</span><strong id="active-runs">—</strong></div>
       </div>
-    </section>
-
-    <div id="error-banner" class="error-banner" hidden></div>
-    <section id="usage-grid" class="usage-grid" aria-label="Provider usage">
-      <article class="usage-card skeleton"><div></div><div></div><div></div></article>
-      <article class="usage-card skeleton"><div></div><div></div><div></div></article>
     </section>
 
     <section class="panel queue-panel">
       <div class="section-head">
-        <div><p class="eyebrow">DISPATCH QUEUE</p><h2>Scheduled jobs</h2></div>
+        <div><p class="eyebrow">DISPATCH QUEUE</p><h1>Scheduled jobs</h1></div>
         <span id="task-count" class="count">0 tasks</span>
       </div>
       <div class="table-wrap"><table>

@@ -108,6 +108,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
+	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)

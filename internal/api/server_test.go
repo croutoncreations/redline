@@ -41,6 +41,8 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/", contentType: "text/html", contains: "Redline control room"},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/dashboard"},
+		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
+		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {
 		resp, err := http.Get(server.URL + test.path)
 		if err != nil {
@@ -52,6 +54,34 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), test.contentType) || !strings.Contains(body.String(), test.contains) {
 			t.Fatalf("GET %s: status=%d content-type=%q body=%q", test.path, resp.StatusCode, resp.Header.Get("Content-Type"), body.String())
 		}
+	}
+}
+
+func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/dashboard/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buffer := make([]byte, 8192)
+	n, err := resp.Body.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	body := string(buffer[:n])
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("status=%d content-type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(body, "event: dashboard\n") || !strings.Contains(body, `"active_policy":"standard"`) {
+		t.Fatalf("unexpected event: %q", body)
 	}
 }
 
