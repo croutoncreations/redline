@@ -5,7 +5,9 @@ Redline can run as a per-user macOS LaunchAgent. The example at
 paths, and local tool locations are not committed.
 
 The service needs an absolute binary path, config path, working directory, log paths, and a `PATH`
-that includes every configured workspace and harness executable (`devx`, `codex`, and `claude`).
+that includes every configured workspace and harness executable (`devx`, `codex`, `claude`, and
+`pi`). If Gatepost captures harness traffic, put its shim directory first and retain the directory
+containing each real binary later in `PATH`; discovery and execution then follow the same routing.
 After rendering the template to `~/Library/LaunchAgents/com.jfox.redline.plist`:
 
 ```bash

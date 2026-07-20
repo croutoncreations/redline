@@ -16,12 +16,7 @@ const duration = (nanos) => {
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 
-let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], editingProfile = '';
-const modelOptionsForHarness = {
-  'codex-cli': [{value:'default',label:'Default model'},{value:'gpt-5.4-mini',label:'GPT-5.4 mini'},{value:'gpt-5.3-codex',label:'GPT-5.3 Codex'}],
-  'claude-code': [{value:'default',label:'Default model'},{value:'haiku',label:'Haiku'},{value:'sonnet',label:'Sonnet'},{value:'opus',label:'Opus'},{value:'fable',label:'Fable'}],
-  'command': []
-};
+let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '';
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -118,6 +113,12 @@ async function loadProfiles(force=false) {
   if (force || !profiles.length) profiles = await apiRequest('/v1/profiles');
   $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
 }
+async function loadProfileOptions(force=false) {
+  const catalog = await apiRequest(`/v1/profile-options${force ? '?refresh=true' : ''}`);
+  harnessCatalog = catalog.harnesses || [];
+  const installed = harnessCatalog.filter(harness => harness.installed && harness.id !== 'command').length;
+  $('#profile-discovery-status').textContent = `${installed} agent CLI${installed === 1 ? '' : 's'} found · checked ${relative(catalog.generated_at)}`;
+}
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
 }
@@ -167,13 +168,32 @@ function renderProfiles() {
   $('#profiles-list').innerHTML = profiles.length ? profiles.map(profile => `<button type="button" class="profile-card ${profile.id === editingProfile ? 'active' : ''}" data-profile="${escapeHTML(profile.id)}"><strong>${escapeHTML(profile.id)}</strong><span>${escapeHTML(profile.provider_account_id)} · ${escapeHTML(profile.model || profile.harness_type)}</span><small>${escapeHTML(title(profile.workspace_provider))}</small></button>`).join('') : '<p class="empty">No profiles yet.</p>';
   document.querySelectorAll('[data-profile]').forEach(button => button.addEventListener('click',() => editProfile(button.dataset.profile)));
 }
+function providerKind() {
+  return providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider || '';
+}
+function modelLabel(model) {
+  const detail = [model.context_window ? `${model.context_window} context` : '', model.max_output ? `${model.max_output} output` : ''].filter(Boolean).join(' · ');
+  const identity = model.label && model.label !== model.id ? `${model.label} — ${model.id}` : model.id;
+  return detail ? `${identity} · ${detail}` : identity;
+}
 function suggestedModels(harness) {
-  const known = [...(modelOptionsForHarness[harness] || [])];
+  const discovered = harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()] || [];
+  const known = [{value:'default',label:'Default model (harness decides)'}, ...discovered.map(model => ({value:model.id,label:modelLabel(model)}))];
   const values = new Set(known.map(option => option.value));
   profiles.filter(profile => profile.harness_type === harness && profile.model && !values.has(profile.model)).forEach(profile => {
     values.add(profile.model); known.push({value:profile.model,label:`${profile.model} · previously used`});
   });
   return known;
+}
+function setHarnessControl(selected='') {
+  const options = harnessCatalog.length ? harnessCatalog : [{id:'command',label:'Custom command',installed:true}];
+  const hasSelected = options.some(option => option.id === selected);
+  $('#profile-harness').innerHTML = options.map(option => {
+    const version = option.version ? ` · v${option.version}` : '', unavailable = !option.installed ? ' · not found' : '';
+    return `<option value="${escapeHTML(option.id)}" ${!option.installed && option.id !== selected ? 'disabled' : ''}>${escapeHTML(option.label + version + unavailable)}</option>`;
+  }).join('') + (!hasSelected && selected ? `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} · unavailable</option>` : '');
+  $('#profile-harness').value = selected || preferredHarness();
+  if (!$('#profile-harness').value) $('#profile-harness').value = 'command';
 }
 function setModelControl(harness, selected='default') {
   const options = suggestedModels(harness), known = options.some(option => option.value === selected);
@@ -201,11 +221,11 @@ function updateHarnessFields(selectedModelValue) {
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
   $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
-  $('#profile-harness').value = preferredHarness(); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = '';
+  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = '';
   updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
-  try { await loadProfiles(true); resetProfileForm(); $('#profiles-dialog').showModal(); }
+  try { await Promise.all([loadProfiles(true),loadProfileOptions()]); resetProfileForm(); $('#profiles-dialog').showModal(); }
   catch (error) { $('#error-banner').hidden = false; $('#error-banner').textContent = `Could not load profiles: ${error.message}`; }
 }
 async function editProfile(id) {
@@ -213,7 +233,7 @@ async function editProfile(id) {
     const profile = await apiRequest(`/v1/profiles/${encodeURIComponent(id)}`); editingProfile = id; showProfileError('');
     $('#profile-provider').innerHTML = providerAccounts.map(account => `<option value="${escapeHTML(account)}">${escapeHTML(account)}</option>`).join('');
     $('#profile-id').value = profile.id; $('#profile-id').disabled = true; $('#profile-provider').value = profile.provider_account_id;
-    $('#profile-harness').value = profile.harness_type || preferredHarness(); updateHarnessFields(profile.model || 'default'); $('#profile-budget-group').value = profile.budget_model_group || '';
+    setHarnessControl(profile.harness_type || preferredHarness()); updateHarnessFields(profile.model || 'default'); $('#profile-budget-group').value = profile.budget_model_group || '';
     $('#profile-workspace').value = profile.workspace_provider || 'devx'; $('#profile-repository').value = profile.repository || ''; $('#profile-base-branch').value = profile.base_branch || '';
     populateRepositoryChoices(profile.repository || '');
     $('#profile-cleanup').value = profile.cleanup_policy || ''; $('#profile-require-clean').checked = !!profile.require_clean;
@@ -277,8 +297,9 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
-$('#profile-provider').addEventListener('change',() => { if (!editingProfile) { $('#profile-harness').value = preferredHarness(); updateHarnessFields('default'); } });
+$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : 'default'); });
 $('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
+$('#refresh-profile-options').addEventListener('click',async () => { const button=$('#refresh-profile-options'), selected=$('#profile-harness').value, model=selectedModel(); button.disabled=true; try { await loadProfileOptions(true); setHarnessControl(selected); updateHarnessFields(model); } catch(error) { showProfileError(`Discovery failed: ${error.message}`); } finally { button.disabled=false; } });
 $('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
 $('#profile-repository-recent').addEventListener('change',() => { if ($('#profile-repository-recent').value) $('#profile-repository').value = $('#profile-repository-recent').value; });
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());

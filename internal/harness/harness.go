@@ -96,6 +96,14 @@ func buildCommand(
 		}
 		base.Args = append(base.Args, request.Profile.HarnessArgs...)
 		base.Stdin = strings.NewReader(prompt)
+	case "pi":
+		base.Name = "pi"
+		base.Args = []string{"--print", "--mode", "json", "--name", "redline-" + request.RunID}
+		if request.Profile.Model != "" && request.Profile.Model != "default" {
+			base.Args = append(base.Args, "--model", request.Profile.Model)
+		}
+		base.Args = append(base.Args, request.Profile.HarnessArgs...)
+		base.Stdin = strings.NewReader(prompt)
 	case "command":
 		if request.Profile.HarnessCommand == "" {
 			return redprocess.Command{}, fmt.Errorf("command harness requires harness_command")

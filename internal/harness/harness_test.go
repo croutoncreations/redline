@@ -58,6 +58,23 @@ func TestClaudeAdapterBuildsNoninteractiveCommand(t *testing.T) {
 	}
 }
 
+func TestPiAdapterBuildsNoninteractiveNamedSession(t *testing.T) {
+	runner := &captureRunner{}
+	_, err := (harness.Adapter{Runner: runner}).Run(context.Background(), harness.Request{
+		RunID: "run-pi", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "reply with ok"},
+		Profile:   domain.ExecutionProfile{HarnessType: "pi", Model: "openai-codex/gpt-5.6-sol", HarnessArgs: []string{"--thinking", "low"}},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--print --mode json --name redline-run-pi --model openai-codex/gpt-5.6-sol --thinking low"
+	if runner.command.Name != "pi" || strings.Join(runner.command.Args, " ") != want || runner.stdin != "reply with ok" {
+		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
+	}
+}
+
 func TestAdaptersPassMinimalCustomizationFlags(t *testing.T) {
 	tests := []struct {
 		name        string

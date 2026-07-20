@@ -136,12 +136,19 @@ Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fab
 `claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
 account-pool-only models.
 
-In the dashboard, harness and model choices are guided but not restrictive: Codex CLI and Claude
-Code expose common model presets, while **Other model** and **Custom command** preserve arbitrary
-local integrations. Repository paths previously used by profiles are remembered as suggestions and
-can always be typed directly. The advanced **Allowance routing override** corresponds to
-`budget_model_group`; leave it automatic unless a provider exposes a separate model-specific pool
-that model-name inference cannot identify.
+The dashboard discovers installed Codex CLI, Claude Code, and Pi harnesses, shows each CLI version,
+and builds model choices from local, refreshable catalogs rather than hardcoded presets. Codex uses
+its own model cache. Pi uses its offline model listing; those subscription-backed Pi models also
+supply Claude Code's versioned choices because Claude Code accepts full model names but does not
+provide a model-list command. Pi profiles retain provider-qualified model IDs such as
+`openai-codex/gpt-5.6-sol` and `anthropic-cli/claude-opus-4-8`, keeping the model tied to the usage
+pool Redline monitors. **Other model** and **Custom command** remain available when discovery is
+incomplete or a local integration is not built in.
+
+Repository paths previously used by profiles are remembered as suggestions and can always be typed
+directly. The advanced **Allowance routing override** corresponds to `budget_model_group`; leave it
+automatic unless a provider exposes a separate model-specific pool that model-name inference cannot
+identify. Provider-qualified Pi Fable IDs are inferred automatically.
 
 For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
 activation, MCP servers, rules, and session persistence. This reduces startup variability and
@@ -186,6 +193,7 @@ POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
+GET  /v1/profile-options?refresh={true|false}
 GET|PATCH|DELETE /v1/profiles/{id}
 GET|POST /v1/tasks
 GET|PATCH|DELETE /v1/tasks/{id}

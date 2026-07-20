@@ -23,6 +23,7 @@ import (
 	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
+	"github.com/jfox/redline/internal/discovery"
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
@@ -48,7 +49,7 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
-		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "modelOptionsForHarness"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/profile-options"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {
@@ -90,6 +91,37 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: dashboard\n") || !strings.Contains(body, `"active_policy":"standard"`) {
 		t.Fatalf("unexpected event: %q", body)
+	}
+}
+
+func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	discoverer := &fakeHarnessDiscoverer{catalog: discovery.Catalog{GeneratedAt: apiNow, Harnesses: []discovery.Harness{{
+		ID: "pi", Label: "Pi", Installed: true, Version: "0.80.10",
+		Models: map[string][]discovery.Model{"codex": {{ID: "openai-codex/gpt-5.6-sol", Source: "pi_catalog"}}},
+	}}}}
+	server := httptest.NewServer(api.NewServerWithHarnessDiscoverer(testConfig("http://unused"), db, func() time.Time { return apiNow }, discoverer))
+	defer server.Close()
+	for _, path := range []string{"/v1/profile-options", "/v1/profile-options", "/v1/profile-options?refresh=true"} {
+		resp, getErr := http.Get(server.URL + path)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		var catalog discovery.Catalog
+		if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || catalog.Harnesses[0].ID != "pi" {
+			t.Fatalf("status=%d catalog=%#v", resp.StatusCode, catalog)
+		}
+	}
+	if discoverer.calls.Load() != 2 {
+		t.Fatalf("discovery calls = %d", discoverer.calls.Load())
 	}
 }
 
@@ -1264,6 +1296,16 @@ func claudeAllowancePayload(fableRemaining, sharedRemaining float64, untilReset 
 
 type fakeExecutor struct {
 	execute func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error
+}
+
+type fakeHarnessDiscoverer struct {
+	catalog discovery.Catalog
+	calls   atomic.Int32
+}
+
+func (f *fakeHarnessDiscoverer) Discover(context.Context) discovery.Catalog {
+	f.calls.Add(1)
+	return f.catalog
 }
 
 type fakeRevisionResolver struct{ revisions map[string]string }

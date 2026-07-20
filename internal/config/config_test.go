@@ -181,6 +181,17 @@ func TestClaudeModelRoutingDistinguishesFableFromAccountOnlyModels(t *testing.T)
 	}
 }
 
+func TestClaudeModelRoutingAcceptsProviderQualifiedPiModel(t *testing.T) {
+	provider := config.Provider{Provider: "claude"}
+	group, routing, err := provider.ResolveModelGroup("anthropic-cli/claude-fable-5", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group != "fable" || routing != "alias" {
+		t.Fatalf("group=%q routing=%q", group, routing)
+	}
+}
+
 func TestExplicitBudgetModelGroupMustExist(t *testing.T) {
 	provider := config.Provider{Provider: "claude"}
 	if _, _, err := provider.ResolveModelGroup("custom", "missing"); err == nil {

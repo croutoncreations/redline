@@ -20,6 +20,7 @@ import (
 	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
+	"github.com/jfox/redline/internal/discovery"
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
@@ -39,6 +40,10 @@ type Notifier interface {
 	Notify(context.Context, domain.NotificationEvent) error
 }
 
+type HarnessDiscoverer interface {
+	Discover(context.Context) discovery.Catalog
+}
+
 type Server struct {
 	config       config.Config
 	store        *store.DB
@@ -49,6 +54,10 @@ type Server struct {
 	artifacts    artifacts.Reader
 	scheduler    *autoscheduler.Loop
 	usageMonitor *autoscheduler.Loop
+	discovery    HarnessDiscoverer
+	catalogMu    sync.Mutex
+	catalog      discovery.Catalog
+	catalogAt    time.Time
 	mux          *http.ServeMux
 	workers      sync.WaitGroup
 	loopWorkers  sync.WaitGroup
@@ -63,6 +72,12 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 		Notifier: notifier, OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
+}
+
+func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
+	server := NewServer(cfg, database, now)
+	server.discovery = discoverer
+	return server
 }
 
 func NewServerWithExecutor(
@@ -95,6 +110,7 @@ func newServer(
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
+		discovery: discovery.Service{Now: now},
 	}
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
@@ -117,6 +133,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
+	mux.HandleFunc("GET /v1/profile-options", server.profileOptions)
 	mux.HandleFunc("POST /v1/profiles", server.createProfile)
 	mux.HandleFunc("GET /v1/profiles/{profile}", server.getProfile)
 	mux.HandleFunc("PATCH /v1/profiles/{profile}", server.updateProfile)

@@ -127,6 +127,9 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 		return configured, "explicit", nil
 	}
 	normalizedModel := strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(normalizedModel, "/"); slash >= 0 {
+		normalizedModel = normalizedModel[slash+1:]
+	}
 	for name, configured := range groups {
 		for _, alias := range configured.Aliases {
 			if normalizedModel == strings.ToLower(strings.TrimSpace(alias)) {
