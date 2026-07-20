@@ -16,7 +16,12 @@ const duration = (nanos) => {
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 
-let currentRun = null, profiles = [], providerAccounts = [], editingProfile = '';
+let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], editingProfile = '';
+const modelOptionsForHarness = {
+  'codex-cli': [{value:'default',label:'Default model'},{value:'gpt-5.4-mini',label:'GPT-5.4 mini'},{value:'gpt-5.3-codex',label:'GPT-5.3 Codex'}],
+  'claude-code': [{value:'default',label:'Default model'},{value:'haiku',label:'Haiku'},{value:'sonnet',label:'Sonnet'},{value:'opus',label:'Opus'},{value:'fable',label:'Fable'}],
+  'command': []
+};
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -72,7 +77,8 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
-  providerAccounts = data.providers.map(provider => provider.id);
+  providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));
+  providerAccounts = providerCatalog.map(provider => provider.id);
   $('#usage-strip').innerHTML = data.providers.map(providerCompact).join(''); wireProviderDetails();
   $('#policy').textContent = data.active_policy || '—';
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
@@ -161,10 +167,42 @@ function renderProfiles() {
   $('#profiles-list').innerHTML = profiles.length ? profiles.map(profile => `<button type="button" class="profile-card ${profile.id === editingProfile ? 'active' : ''}" data-profile="${escapeHTML(profile.id)}"><strong>${escapeHTML(profile.id)}</strong><span>${escapeHTML(profile.provider_account_id)} · ${escapeHTML(profile.model || profile.harness_type)}</span><small>${escapeHTML(title(profile.workspace_provider))}</small></button>`).join('') : '<p class="empty">No profiles yet.</p>';
   document.querySelectorAll('[data-profile]').forEach(button => button.addEventListener('click',() => editProfile(button.dataset.profile)));
 }
+function suggestedModels(harness) {
+  const known = [...(modelOptionsForHarness[harness] || [])];
+  const values = new Set(known.map(option => option.value));
+  profiles.filter(profile => profile.harness_type === harness && profile.model && !values.has(profile.model)).forEach(profile => {
+    values.add(profile.model); known.push({value:profile.model,label:`${profile.model} · previously used`});
+  });
+  return known;
+}
+function setModelControl(harness, selected='default') {
+  const options = suggestedModels(harness), known = options.some(option => option.value === selected);
+  $('#profile-model-choice').innerHTML = options.map(option => `<option value="${escapeHTML(option.value)}">${escapeHTML(option.label)}</option>`).join('') + '<option value="__other__">Other model…</option>';
+  $('#profile-model-choice').value = known ? selected : '__other__';
+  $('#profile-model-custom').hidden = known; $('#profile-model-custom').value = known ? '' : selected;
+}
+function selectedModel() {
+  return $('#profile-model-choice').value === '__other__' ? $('#profile-model-custom').value.trim() : $('#profile-model-choice').value;
+}
+function populateRepositoryChoices(selected='') {
+  const repositories = [...new Set(profiles.map(profile => profile.repository).filter(Boolean))];
+  $('#profile-repository-recent').innerHTML = '<option value="">Recently used repositories…</option>' + repositories.map(repository => `<option value="${escapeHTML(repository)}">${escapeHTML(repository)}</option>`).join('');
+  $('#profile-repository-recent').value = repositories.includes(selected) ? selected : '';
+}
+function preferredHarness() {
+  const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
+  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'command';
+}
+function updateHarnessFields(selectedModelValue) {
+  const harness = $('#profile-harness').value, custom = harness === 'command';
+  $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
+  setModelControl(harness, selectedModelValue || 'default');
+}
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
   $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
-  $('#profile-workspace').value = 'devx'; $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
+  $('#profile-harness').value = preferredHarness(); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = '';
+  updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
   try { await loadProfiles(true); resetProfileForm(); $('#profiles-dialog').showModal(); }
@@ -175,8 +213,9 @@ async function editProfile(id) {
     const profile = await apiRequest(`/v1/profiles/${encodeURIComponent(id)}`); editingProfile = id; showProfileError('');
     $('#profile-provider').innerHTML = providerAccounts.map(account => `<option value="${escapeHTML(account)}">${escapeHTML(account)}</option>`).join('');
     $('#profile-id').value = profile.id; $('#profile-id').disabled = true; $('#profile-provider').value = profile.provider_account_id;
-    $('#profile-harness').value = profile.harness_type || ''; $('#profile-model').value = profile.model || ''; $('#profile-budget-group').value = profile.budget_model_group || '';
+    $('#profile-harness').value = profile.harness_type || preferredHarness(); updateHarnessFields(profile.model || 'default'); $('#profile-budget-group').value = profile.budget_model_group || '';
     $('#profile-workspace').value = profile.workspace_provider || 'devx'; $('#profile-repository').value = profile.repository || ''; $('#profile-base-branch').value = profile.base_branch || '';
+    populateRepositoryChoices(profile.repository || '');
     $('#profile-cleanup').value = profile.cleanup_policy || ''; $('#profile-require-clean').checked = !!profile.require_clean;
     $('#profile-harness-command').value = profile.harness_command || ''; $('#profile-harness-args').value = (profile.harness_args || []).join('\n'); $('#profile-workspace-args').value = (profile.workspace_args || []).join('\n');
     $('#profile-prepare').value = profile.prepare_command || ''; $('#profile-finalize').value = profile.finalize_command || ''; $('#delete-profile').hidden = false; renderProfiles();
@@ -184,7 +223,7 @@ async function editProfile(id) {
 }
 async function saveProfile(event) {
   event.preventDefault(); showProfileError('');
-  const payload = {id:$('#profile-id').value.trim(),provider_account_id:$('#profile-provider').value,harness_type:$('#profile-harness').value.trim(),model:$('#profile-model').value.trim(),budget_model_group:$('#profile-budget-group').value.trim(),workspace_provider:$('#profile-workspace').value,repository:$('#profile-repository').value.trim(),base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:$('#profile-prepare').value,finalize_command:$('#profile-finalize').value};
+  const payload = {id:$('#profile-id').value.trim(),provider_account_id:$('#profile-provider').value,harness_type:$('#profile-harness').value,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:$('#profile-workspace').value,repository:$('#profile-repository').value.trim(),base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:$('#profile-prepare').value,finalize_command:$('#profile-finalize').value};
   $('#save-profile').disabled = true;
   try {
     if (editingProfile) delete payload.id;
@@ -238,6 +277,10 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
+$('#profile-provider').addEventListener('change',() => { if (!editingProfile) { $('#profile-harness').value = preferredHarness(); updateHarnessFields('default'); } });
+$('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
+$('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
+$('#profile-repository-recent').addEventListener('change',() => { if ($('#profile-repository-recent').value) $('#profile-repository').value = $('#profile-repository-recent').value; });
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
 document.querySelectorAll('.log-tabs button').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
 document.addEventListener('click',() => document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')));

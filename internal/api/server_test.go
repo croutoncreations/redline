@@ -42,9 +42,13 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/", contentType: "text/html", contains: "+ New job"},
 		{path: "/", contentType: "text/html", contains: "Run when"},
 		{path: "/", contentType: "text/html", contains: "EXECUTION PROFILES"},
+		{path: "/", contentType: "text/html", contains: "Custom command"},
+		{path: "/", contentType: "text/html", contains: "Recently used repositories"},
+		{path: "/", contentType: "text/html", contains: "Allowance routing override"},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "modelOptionsForHarness"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {

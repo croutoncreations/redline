@@ -136,6 +136,13 @@ Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fab
 `claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
 account-pool-only models.
 
+In the dashboard, harness and model choices are guided but not restrictive: Codex CLI and Claude
+Code expose common model presets, while **Other model** and **Custom command** preserve arbitrary
+local integrations. Repository paths previously used by profiles are remembered as suggestions and
+can always be typed directly. The advanced **Allowance routing override** corresponds to
+`budget_model_group`; leave it automatic unless a provider exposes a separate model-specific pool
+that model-name inference cannot identify.
+
 For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
 activation, MCP servers, rules, and session persistence. This reduces startup variability and
 prevents a background one-word task from inheriting a large interactive environment:
