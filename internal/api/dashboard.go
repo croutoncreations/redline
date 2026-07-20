@@ -41,21 +41,22 @@ type dashboardProvider struct {
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
 // operational telemetry, not a second task-definition API.
 type dashboardTask struct {
-	ID                 string           `json:"id"`
-	Name               string           `json:"name"`
-	Priority           int              `json:"priority"`
-	Type               domain.TaskType  `json:"type"`
-	State              domain.TaskState `json:"state"`
-	Enabled            bool             `json:"enabled"`
-	ExecutionProfileID string           `json:"execution_profile_id"`
-	ProviderAccountID  string           `json:"provider_account_id"`
-	HarnessType        string           `json:"harness_type"`
-	Model              string           `json:"model,omitempty"`
-	WorkspaceProvider  string           `json:"workspace_provider"`
-	MinInterval        time.Duration    `json:"min_interval"`
-	RequireRepoChange  bool             `json:"require_repo_change"`
-	LastStartedAt      *time.Time       `json:"last_started_at,omitempty"`
-	LastCompletedAt    *time.Time       `json:"last_completed_at,omitempty"`
+	ID                 string              `json:"id"`
+	Name               string              `json:"name"`
+	Priority           int                 `json:"priority"`
+	Type               domain.TaskType     `json:"type"`
+	State              domain.TaskState    `json:"state"`
+	Enabled            bool                `json:"enabled"`
+	ExecutionProfileID string              `json:"execution_profile_id"`
+	ProviderAccountID  string              `json:"provider_account_id"`
+	HarnessType        string              `json:"harness_type"`
+	Model              string              `json:"model,omitempty"`
+	WorkspaceProvider  string              `json:"workspace_provider"`
+	MinInterval        time.Duration       `json:"min_interval"`
+	RequireRepoChange  bool                `json:"require_repo_change"`
+	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
+	LastStartedAt      *time.Time          `json:"last_started_at,omitempty"`
+	LastCompletedAt    *time.Time          `json:"last_completed_at,omitempty"`
 }
 
 func (s *Server) dashboardPage(w http.ResponseWriter, _ *http.Request) {
@@ -194,6 +195,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			ExecutionProfileID: task.ExecutionProfileID, ProviderAccountID: profile.ProviderAccountID,
 			HarnessType: profile.HarnessType, Model: profile.Model, WorkspaceProvider: profile.WorkspaceProvider,
 			MinInterval: task.MinInterval, RequireRepoChange: task.RequireRepoChange,
+			DispatchTier:  task.DispatchTier,
 			LastStartedAt: task.LastStartedAt, LastCompletedAt: task.LastCompletedAt,
 		})
 	}

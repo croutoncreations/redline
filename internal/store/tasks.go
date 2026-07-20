@@ -12,8 +12,8 @@ import (
 )
 
 func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now time.Time) error {
-	if p.ID == "" || p.ProviderAccountID == "" || p.HarnessType == "" || p.WorkspaceProvider == "" {
-		return fmt.Errorf("profile id, provider account, harness, and workspace provider are required")
+	if err := validateProfile(p); err != nil {
+		return err
 	}
 	argsJSON, err := json.Marshal(p.HarnessArgs)
 	if err != nil {
@@ -34,6 +34,89 @@ prepare_command, finalize_command, created_at
 	)
 	if err != nil {
 		return fmt.Errorf("create execution profile: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) UpdateProfile(ctx context.Context, p domain.ExecutionProfile) error {
+	if err := validateProfile(p); err != nil {
+		return err
+	}
+	argsJSON, err := json.Marshal(p.HarnessArgs)
+	if err != nil {
+		return fmt.Errorf("encode harness arguments: %w", err)
+	}
+	workspaceArgsJSON, err := json.Marshal(p.WorkspaceArgs)
+	if err != nil {
+		return fmt.Errorf("encode workspace arguments: %w", err)
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin execution profile update: %w", err)
+	}
+	defer tx.Rollback()
+	var running int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE execution_profile_id = ? AND state = 'running'`, p.ID).Scan(&running); err != nil {
+		return fmt.Errorf("check execution profile use: %w", err)
+	}
+	if running > 0 {
+		return fmt.Errorf("%w: execution profile %q is used by a running task", ErrConflict, p.ID)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE execution_profiles SET
+provider_account_id = ?, harness_type = ?, model = ?, harness_command = ?, harness_args_json = ?,
+budget_model_group = ?, workspace_provider = ?, workspace_args_json = ?, repository = ?, base_branch = ?,
+require_clean = ?, cleanup_policy = ?, prepare_command = ?, finalize_command = ? WHERE id = ?`,
+		p.ProviderAccountID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON), p.BudgetModelGroup,
+		p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean,
+		p.CleanupPolicy, p.PrepareCommand, p.FinalizeCommand, p.ID)
+	if err != nil {
+		return fmt.Errorf("update execution profile: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read execution profile update result: %w", err)
+	} else if rows == 0 {
+		return fmt.Errorf("%w: execution profile %q", ErrNotFound, p.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit execution profile update: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) DeleteProfile(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("execution profile id is required")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin execution profile deletion: %w", err)
+	}
+	defer tx.Rollback()
+	var references int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE execution_profile_id = ?`, id).Scan(&references); err != nil {
+		return fmt.Errorf("check execution profile references: %w", err)
+	}
+	if references > 0 {
+		return fmt.Errorf("%w: execution profile %q has tasks; reassign or delete them first", ErrConflict, id)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM execution_profiles WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete execution profile: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read execution profile deletion result: %w", err)
+	} else if rows == 0 {
+		return fmt.Errorf("%w: execution profile %q", ErrNotFound, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit execution profile deletion: %w", err)
+	}
+	return nil
+}
+
+func validateProfile(p domain.ExecutionProfile) error {
+	if p.ID == "" || p.ProviderAccountID == "" || p.HarnessType == "" || p.WorkspaceProvider == "" {
+		return fmt.Errorf("profile id, provider account, harness, and workspace provider are required")
 	}
 	return nil
 }
@@ -85,6 +168,9 @@ func (d *DB) GetProfile(ctx context.Context, id string) (domain.ExecutionProfile
 }
 
 func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) error {
+	if task.DispatchTier == "" {
+		task.DispatchTier = domain.DispatchBehind
+	}
 	if err := validateTaskDefinition(task); err != nil {
 		return err
 	}
@@ -103,11 +189,11 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (
 id, name, prompt, prompt_file, priority, queue_sequence, execution_profile_id,
-task_type, min_interval_ns, require_repo_change, enabled, state,
+task_type, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
 last_started_at, last_completed_at, last_successful_source_revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Prompt, task.PromptFile, task.Priority, sequence,
-		task.ExecutionProfileID, task.Type, int64(task.MinInterval), task.RequireRepoChange,
+		task.ExecutionProfileID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
 		state, nullableTime(task.LastStartedAt), nullableTime(task.LastCompletedAt),
 		task.LastSuccessfulSourceRevision, formatTime(now), formatTime(now),
 	)
@@ -121,6 +207,9 @@ last_started_at, last_completed_at, last_successful_source_revision, created_at,
 }
 
 func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) error {
+	if task.DispatchTier == "" {
+		task.DispatchTier = domain.DispatchBehind
+	}
 	if err := validateTaskDefinition(task); err != nil {
 		return err
 	}
@@ -139,9 +228,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("%w: running task %q cannot be edited", ErrConflict, task.ID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET name = ?, prompt = ?, prompt_file = ?, priority = ?,
-execution_profile_id = ?, task_type = ?, min_interval_ns = ?, require_repo_change = ?, updated_at = ?
+execution_profile_id = ?, task_type = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
 WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.ExecutionProfileID,
-		task.Type, int64(task.MinInterval), task.RequireRepoChange, formatTime(now), task.ID)
+		task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -202,6 +291,9 @@ func validateTaskDefinition(task domain.Task) error {
 	}
 	if task.MinInterval < 0 {
 		return fmt.Errorf("minimum interval cannot be negative")
+	}
+	if task.DispatchTier != domain.DispatchBehind && task.DispatchTier != domain.DispatchWellBehind && task.DispatchTier != domain.DispatchExpiring {
+		return fmt.Errorf("dispatch tier must be behind, well_behind, or expiring")
 	}
 	return nil
 }
@@ -398,7 +490,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 }
 
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
-t.queue_sequence, t.execution_profile_id, t.task_type, t.min_interval_ns,
+t.queue_sequence, t.execution_profile_id, t.task_type, t.min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
 t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
 
@@ -412,7 +504,7 @@ func scanTask(row scanner) (domain.Task, error) {
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
-		&task.QueueSequence, &task.ExecutionProfileID, &task.Type, &minInterval,
+		&task.QueueSequence, &task.ExecutionProfileID, &task.Type, &minInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
 		&task.LastSuccessfulSourceRevision, &created, &updated,
 	)

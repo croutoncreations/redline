@@ -40,6 +40,8 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	}{
 		{path: "/", contentType: "text/html", contains: "gas-gauge"},
 		{path: "/", contentType: "text/html", contains: "+ New job"},
+		{path: "/", contentType: "text/html", contains: "Run when"},
+		{path: "/", contentType: "text/html", contains: "EXECUTION PROFILES"},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
@@ -288,7 +290,7 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 
 	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/tasks/editable", strings.NewReader(`{
 		"name":"After", "prompt":"Do useful work", "priority":80, "type":"recurring",
-		"min_interval":"2d", "require_repo_change":true
+		"min_interval":"2d", "require_repo_change":true, "dispatch_tier":"well_behind"
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +305,7 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || updated.Name != "After" || updated.Prompt != "Do useful work" || updated.MinInterval != 48*time.Hour || !updated.RequireRepoChange {
+	if response.StatusCode != http.StatusOK || updated.Name != "After" || updated.Prompt != "Do useful work" || updated.MinInterval != 48*time.Hour || !updated.RequireRepoChange || updated.DispatchTier != domain.DispatchWellBehind {
 		t.Fatalf("status=%d task=%#v", response.StatusCode, updated)
 	}
 
@@ -336,6 +338,86 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("deleted GET status = %d", response.StatusCode)
+	}
+}
+
+func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "editable-profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(`{
+		"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":"/repo"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated domain.ExecutionProfile
+	if err := json.NewDecoder(response.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != "/repo" {
+		t.Fatalf("status=%d profile=%#v", response.StatusCode, updated)
+	}
+	response, err = http.Get(server.URL + "/v1/profiles/editable-profile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d", response.StatusCode)
+	}
+	request, _ = http.NewRequest(http.MethodDelete, server.URL+"/v1/profiles/editable-profile", nil)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d", response.StatusCode)
+	}
+}
+
+func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	task := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "filler", "name": "Filler", "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+	})
+	if task.DispatchTier != domain.DispatchExpiring {
+		t.Fatalf("task = %#v", task)
+	}
+}
+
+func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) {
+	payload := `{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[{"type":"progress","label":"Weekly","used":50,"limit":100,"resetsAt":"2026-07-18T18:00:00Z"}]}`
+	server, _ := newAPIServer(t, payload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "deep-filler", "name": "Deep filler", "priority": 100, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "useful-work", "name": "Useful work", "priority": 20, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "behind",
+	})
+	response := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if response.Result.UnlockedTier != domain.DispatchWellBehind || response.SelectedTask == nil || response.SelectedTask.ID != "useful-work" {
+		t.Fatalf("response = %#v", response)
+	}
+	if len(response.Result.CandidateRejections) == 0 || response.Result.CandidateRejections[0].TaskID != "deep-filler" {
+		t.Fatalf("rejections = %#v", response.Result.CandidateRejections)
 	}
 }
 

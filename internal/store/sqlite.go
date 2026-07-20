@@ -273,6 +273,15 @@ FROM usage_snapshots;
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (13)`); err != nil {
 			return fmt.Errorf("record execution profile model routing migration: %w", err)
 		}
+		version = 13
+	}
+	if version < 14 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN dispatch_tier TEXT NOT NULL DEFAULT 'behind' CHECK(dispatch_tier IN ('behind', 'well_behind', 'expiring'))`); err != nil {
+			return fmt.Errorf("extend task dispatch policy: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (14)`); err != nil {
+			return fmt.Errorf("record task dispatch policy migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

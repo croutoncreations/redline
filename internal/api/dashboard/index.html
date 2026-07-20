@@ -43,11 +43,11 @@
     <section class="panel queue-panel">
       <div class="section-head">
         <div><p class="eyebrow">DISPATCH QUEUE</p><h1>Scheduled jobs</h1></div>
-        <div class="section-actions"><span id="task-count" class="count">0 tasks</span><button id="new-task" class="primary-button" type="button">+ New job</button></div>
+        <div class="section-actions"><span id="task-count" class="count">0 tasks</span><button id="manage-profiles" class="quiet-button" type="button">Profiles</button><button id="new-task" class="primary-button" type="button">+ New job</button></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Priority</th><th>Job</th><th>Route</th><th>Recurrence</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
-        <tbody id="tasks-body"><tr><td colspan="6" class="empty">Loading queue…</td></tr></tbody>
+        <thead><tr><th>Priority</th><th>Job</th><th>Run when</th><th>Route</th><th>Recurrence</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody id="tasks-body"><tr><td colspan="7" class="empty">Loading queue…</td></tr></tbody>
       </table></div>
     </section>
 
@@ -72,6 +72,7 @@
         <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
         <label class="field"><span>Priority</span><input id="task-priority" type="number" value="50" required></label>
+        <label class="field"><span>Run when</span><select id="task-tier"><option value="behind">Behind pace</option><option value="well_behind">Well behind pace</option><option value="expiring">Capacity likely to expire</option></select></label>
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
         <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"></label>
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
@@ -80,6 +81,36 @@
       </div>
       <div class="form-footer"><div><button id="delete-task" class="danger-button" type="button" hidden>Delete</button><button id="toggle-task" class="quiet-button" type="button" hidden>Disable</button></div><div><button id="cancel-task" class="quiet-button" type="button">Cancel</button><button id="save-task" class="primary-button" type="submit">Save job</button></div></div>
     </form>
+  </dialog>
+
+  <dialog id="profiles-dialog" class="profiles-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">EXECUTION PROFILES</p><h2>Harness & workspace setup</h2></div><div class="dialog-actions"><button id="new-profile" class="quiet-button" type="button">+ New profile</button><button id="close-profiles" class="close-button" type="button" aria-label="Close">×</button></div></div>
+    <div class="profile-layout">
+      <aside id="profiles-list" class="profiles-list"></aside>
+      <form id="profile-form" class="profile-form">
+        <div id="profile-form-error" class="form-error" hidden></div>
+        <div class="form-body">
+          <label class="field"><span>Profile ID</span><input id="profile-id" required autocomplete="off" placeholder="codex-devx"></label>
+          <label class="field"><span>Provider account</span><select id="profile-provider" required></select></label>
+          <label class="field"><span>Harness</span><input id="profile-harness" required autocomplete="off" placeholder="codex-cli"></label>
+          <label class="field"><span>Model <small>optional</small></span><input id="profile-model" autocomplete="off" placeholder="default"></label>
+          <label class="field"><span>Budget model group <small>optional</small></span><input id="profile-budget-group" autocomplete="off" placeholder="fable"></label>
+          <label class="field"><span>Workspace provider</span><select id="profile-workspace" required><option value="devx">DevX</option><option value="git-worktree">Git worktree</option><option value="existing-directory">Existing directory</option><option value="command">Command</option></select></label>
+          <label class="field field-wide"><span>Repository</span><input id="profile-repository" autocomplete="off" placeholder="/Users/me/projects/example"></label>
+          <label class="field"><span>Base branch</span><input id="profile-base-branch" autocomplete="off" placeholder="main"></label>
+          <label class="field"><span>Cleanup policy</span><select id="profile-cleanup"><option value="">Default / preserve</option><option value="never">Never</option><option value="on_success">On success</option><option value="always">Always</option></select></label>
+          <label class="check-field field-wide"><input id="profile-require-clean" type="checkbox"><span>Require a clean existing checkout</span></label>
+          <details class="advanced-fields field-wide"><summary>Advanced commands and arguments</summary><div class="advanced-grid">
+            <label class="field field-wide"><span>Harness command</span><input id="profile-harness-command" autocomplete="off"></label>
+            <label class="field"><span>Harness args <small>one per line</small></span><textarea id="profile-harness-args" rows="4"></textarea></label>
+            <label class="field"><span>Workspace args <small>one per line</small></span><textarea id="profile-workspace-args" rows="4"></textarea></label>
+            <label class="field field-wide"><span>Prepare command</span><textarea id="profile-prepare" rows="3"></textarea></label>
+            <label class="field field-wide"><span>Finalize command</span><textarea id="profile-finalize" rows="3"></textarea></label>
+          </div></details>
+        </div>
+        <div class="form-footer"><button id="delete-profile" class="danger-button" type="button" hidden>Delete</button><div><button id="reset-profile" class="quiet-button" type="button">Reset</button><button id="save-profile" class="primary-button" type="submit">Save profile</button></div></div>
+      </form>
+    </div>
   </dialog>
 
   <dialog id="logs-dialog">

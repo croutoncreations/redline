@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/jfox/redline/internal/domain"
 )
 
 const ShortWindowDuration = 5 * time.Hour
@@ -160,11 +162,12 @@ type Slot struct {
 }
 
 type PoolResult struct {
-	Pool      string   `json:"pool"`
-	Decision  Decision `json:"decision"`
-	Mode      Mode     `json:"mode,omitempty"`
-	Reason    string   `json:"reason"`
-	Remaining float64  `json:"remaining"`
+	Pool         string              `json:"pool"`
+	Decision     Decision            `json:"decision"`
+	Mode         Mode                `json:"mode,omitempty"`
+	Reason       string              `json:"reason"`
+	Remaining    float64             `json:"remaining"`
+	UnlockedTier domain.DispatchTier `json:"unlocked_tier,omitempty"`
 }
 
 type CandidateRejection struct {
@@ -192,6 +195,8 @@ type Result struct {
 	TriggeringPools        []string             `json:"triggering_pools,omitempty"`
 	PoolResults            []PoolResult         `json:"pool_results,omitempty"`
 	CandidateRejections    []CandidateRejection `json:"candidate_rejections,omitempty"`
+	PaceGap                float64              `json:"pace_gap"`
+	UnlockedTier           domain.DispatchTier  `json:"unlocked_tier,omitempty"`
 }
 
 func Evaluate(in Input) Result {
@@ -236,6 +241,7 @@ func evaluateSlots(in Input) Result {
 	maximumConsumable = math.Min(1, maximumConsumable)
 	overflow := in.Snapshot.Weekly.Remaining - maximumConsumable
 	dispatchable := in.Snapshot.Short.Remaining - in.RollingReserve
+	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
 	result := Result{
 		Mode:                   ModeSlots,
 		Slots:                  slots,
@@ -247,19 +253,28 @@ func evaluateSlots(in Input) Result {
 		WindowWeeklyCost:       in.WindowWeeklyCost,
 		WindowWeeklyCostSource: in.WindowWeeklyCostSource,
 		CalibrationConfidence:  in.CalibrationConfidence,
-	}
-	if overflow <= in.TriggerMargin {
-		result.Decision = Wait
-		result.Reason = "no actionable weekly overflow"
-		return result
+		PaceGap:                paceGap,
 	}
 	if dispatchable <= 0 {
 		result.Decision = Wait
 		result.Reason = "current 5-hour reserve protected"
 		return result
 	}
-	result.Decision = Run
-	result.Reason = "weekly remaining exceeds prorated short-window throughput"
+	if overflow > in.TriggerMargin {
+		result.Decision = Run
+		result.Reason = "weekly remaining exceeds prorated short-window throughput"
+		result.UnlockedTier = domain.DispatchExpiring
+		return result
+	}
+	if threshold := matchingPaceThreshold(in); threshold != nil {
+		result.Decision = Run
+		result.Reason = "weekly remaining is behind configured pace"
+		result.MatchedPaceThreshold = threshold
+		result.UnlockedTier = tierForPaceGap(paceGap)
+		return result
+	}
+	result.Decision = Wait
+	result.Reason = "no actionable weekly overflow"
 	return result
 }
 
@@ -267,21 +282,46 @@ func evaluatePace(in Input) Result {
 	if len(in.PaceThresholds) == 0 {
 		return unknown("unrestricted provider has no pace thresholds")
 	}
-	timeRemaining := in.Snapshot.Weekly.ResetsAt.Sub(in.Now)
-	result := Result{Mode: ModePace}
-	for i := range in.PaceThresholds {
-		threshold := in.PaceThresholds[i]
-		if timeRemaining <= threshold.TimeRemaining &&
-			in.Snapshot.Weekly.Remaining >= threshold.MinWeeklyRemaining {
-			result.Decision = Run
-			result.Reason = "weekly remaining meets pace threshold"
-			result.MatchedPaceThreshold = &threshold
-			return result
-		}
+	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
+	result := Result{Mode: ModePace, PaceGap: paceGap}
+	if threshold := matchingPaceThreshold(in); threshold != nil {
+		result.Decision = Run
+		result.Reason = "weekly remaining meets pace threshold"
+		result.MatchedPaceThreshold = threshold
+		result.UnlockedTier = tierForPaceGap(paceGap)
+		return result
 	}
 	result.Decision = Wait
 	result.Reason = "no pace threshold matched"
 	return result
+}
+
+func matchingPaceThreshold(in Input) *PaceThreshold {
+	timeRemaining := in.Snapshot.Weekly.ResetsAt.Sub(in.Now)
+	for i := range in.PaceThresholds {
+		threshold := in.PaceThresholds[i]
+		if timeRemaining <= threshold.TimeRemaining && in.Snapshot.Weekly.Remaining >= threshold.MinWeeklyRemaining {
+			matched := threshold
+			return &matched
+		}
+	}
+	return nil
+}
+
+func weeklyPaceGap(weekly UsageWindow, now time.Time) float64 {
+	timeRemaining := weekly.ResetsAt.Sub(now).Seconds() / (7 * 24 * time.Hour).Seconds()
+	return weekly.Remaining - clampFraction(timeRemaining)
+}
+
+func tierForPaceGap(gap float64) domain.DispatchTier {
+	switch {
+	case gap >= 0.30:
+		return domain.DispatchExpiring
+	case gap >= 0.15:
+		return domain.DispatchWellBehind
+	default:
+		return domain.DispatchBehind
+	}
 }
 
 func buildSlots(now time.Time, short UsageWindow, weeklyReset time.Time) []Slot {

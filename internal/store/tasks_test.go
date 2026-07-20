@@ -54,12 +54,12 @@ func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
 	if err := db.CreateTask(t.Context(), domain.Task{ID: "job", Name: "Before", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
 		t.Fatal(err)
 	}
-	updated := domain.Task{ID: "job", Name: "After", Prompt: "Do the thing", Priority: 90, ExecutionProfileID: profile.ID, Type: domain.Recurring, MinInterval: 24 * time.Hour, RequireRepoChange: true}
+	updated := domain.Task{ID: "job", Name: "After", Prompt: "Do the thing", Priority: 90, ExecutionProfileID: profile.ID, Type: domain.Recurring, MinInterval: 24 * time.Hour, RequireRepoChange: true, DispatchTier: domain.DispatchWellBehind}
 	if err := db.UpdateTask(t.Context(), updated, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.GetTask(t.Context(), "job")
-	if err != nil || got.Name != "After" || got.Priority != 90 || got.Type != domain.Recurring || got.MinInterval != 24*time.Hour || !got.RequireRepoChange || got.State != domain.Queued {
+	if err != nil || got.Name != "After" || got.Priority != 90 || got.Type != domain.Recurring || got.MinInterval != 24*time.Hour || !got.RequireRepoChange || got.DispatchTier != domain.DispatchWellBehind || got.State != domain.Queued {
 		t.Fatalf("task=%#v err=%v", got, err)
 	}
 	if err := db.DeleteTask(t.Context(), "job"); err != nil {
@@ -123,6 +123,47 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 	}
 }
 
+func TestExecutionProfileCanBeUpdatedAndDeletedWhenUnused(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "editable", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	profile.Model = "gpt-5.4-mini"
+	profile.WorkspaceProvider = "git-worktree"
+	profile.Repository = "/repo"
+	profile.HarnessArgs = []string{"--json"}
+	if err := db.UpdateProfile(t.Context(), profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetProfile(t.Context(), profile.ID)
+	if err != nil || got.Model != profile.Model || got.WorkspaceProvider != "git-worktree" || got.Repository != "/repo" || strings.Join(got.HarnessArgs, " ") != "--json" {
+		t.Fatalf("profile=%#v err=%v", got, err)
+	}
+	if err := db.DeleteProfile(t.Context(), profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetProfile(t.Context(), profile.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted profile error = %v", err)
+	}
+}
+
+func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "in-use", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "job", Name: "Job", ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteProfile(t.Context(), profile.ID); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("delete error = %v", err)
+	}
+}
+
 func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
 	db := openTaskDB(t)
 	ctx := context.Background()
@@ -153,6 +194,21 @@ func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
 	got, err := db.NextEligibleTask(ctx, "claude-main", eligibleAt, "def")
 	if err != nil || got.ID != "recurring" {
 		t.Fatalf("got %#v err=%v", got, err)
+	}
+}
+
+func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "filler", Name: "Filler", ExecutionProfileID: "profile", Type: domain.OneOff, DispatchTier: domain.DispatchExpiring}, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetTask(t.Context(), "filler")
+	if err != nil || got.DispatchTier != domain.DispatchExpiring {
+		t.Fatalf("task=%#v err=%v", got, err)
 	}
 }
 

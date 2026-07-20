@@ -118,6 +118,9 @@ func newServer(
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
 	mux.HandleFunc("POST /v1/profiles", server.createProfile)
+	mux.HandleFunc("GET /v1/profiles/{profile}", server.getProfile)
+	mux.HandleFunc("PATCH /v1/profiles/{profile}", server.updateProfile)
+	mux.HandleFunc("DELETE /v1/profiles/{profile}", server.deleteProfile)
 	mux.HandleFunc("GET /v1/tasks", server.listTasks)
 	mux.HandleFunc("POST /v1/tasks", server.createTask)
 	mux.HandleFunc("GET /v1/tasks/{task}", server.getTask)
@@ -388,12 +391,119 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 	if profile.ID == "" {
 		profile.ID = uuid.NewString()
 	}
+	if _, ok := s.config.Providers[profile.ProviderAccountID]; !ok {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
+		return
+	}
 	profile.CreatedAt = s.now().UTC()
 	if err := s.store.CreateProfile(r.Context(), profile, profile.CreatedAt); err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, profile)
+}
+
+type profileUpdateRequest struct {
+	ProviderAccountID *string   `json:"provider_account_id"`
+	HarnessType       *string   `json:"harness_type"`
+	Model             *string   `json:"model"`
+	BudgetModelGroup  *string   `json:"budget_model_group"`
+	HarnessCommand    *string   `json:"harness_command"`
+	HarnessArgs       *[]string `json:"harness_args"`
+	WorkspaceProvider *string   `json:"workspace_provider"`
+	WorkspaceArgs     *[]string `json:"workspace_args"`
+	Repository        *string   `json:"repository"`
+	BaseBranch        *string   `json:"base_branch"`
+	RequireClean      *bool     `json:"require_clean"`
+	CleanupPolicy     *string   `json:"cleanup_policy"`
+	PrepareCommand    *string   `json:"prepare_command"`
+	FinalizeCommand   *string   `json:"finalize_command"`
+}
+
+func (s *Server) getProfile(w http.ResponseWriter, r *http.Request) {
+	profile, err := s.store.GetProfile(r.Context(), r.PathValue("profile"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
+	var request profileUpdateRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	profile, err := s.store.GetProfile(r.Context(), r.PathValue("profile"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if request.ProviderAccountID != nil {
+		profile.ProviderAccountID = *request.ProviderAccountID
+	}
+	if request.HarnessType != nil {
+		profile.HarnessType = *request.HarnessType
+	}
+	if request.Model != nil {
+		profile.Model = *request.Model
+	}
+	if request.BudgetModelGroup != nil {
+		profile.BudgetModelGroup = *request.BudgetModelGroup
+	}
+	if request.HarnessCommand != nil {
+		profile.HarnessCommand = *request.HarnessCommand
+	}
+	if request.HarnessArgs != nil {
+		profile.HarnessArgs = *request.HarnessArgs
+	}
+	if request.WorkspaceProvider != nil {
+		profile.WorkspaceProvider = *request.WorkspaceProvider
+	}
+	if request.WorkspaceArgs != nil {
+		profile.WorkspaceArgs = *request.WorkspaceArgs
+	}
+	if request.Repository != nil {
+		profile.Repository = *request.Repository
+	}
+	if request.BaseBranch != nil {
+		profile.BaseBranch = *request.BaseBranch
+	}
+	if request.RequireClean != nil {
+		profile.RequireClean = *request.RequireClean
+	}
+	if request.CleanupPolicy != nil {
+		profile.CleanupPolicy = *request.CleanupPolicy
+	}
+	if request.PrepareCommand != nil {
+		profile.PrepareCommand = *request.PrepareCommand
+	}
+	if request.FinalizeCommand != nil {
+		profile.FinalizeCommand = *request.FinalizeCommand
+	}
+	if _, ok := s.config.Providers[profile.ProviderAccountID]; !ok {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
+		return
+	}
+	if err := s.store.UpdateProfile(r.Context(), profile); err != nil {
+		writeError(w, err)
+		return
+	}
+	updated, err := s.store.GetProfile(r.Context(), profile.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteProfile(r.Context(), r.PathValue("profile")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
@@ -406,26 +516,28 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskRequest struct {
-	ID                 string          `json:"id"`
-	Name               string          `json:"name"`
-	Prompt             string          `json:"prompt"`
-	PromptFile         string          `json:"prompt_file"`
-	Priority           int             `json:"priority"`
-	ExecutionProfileID string          `json:"execution_profile_id"`
-	Type               domain.TaskType `json:"type"`
-	MinInterval        string          `json:"min_interval"`
-	RequireRepoChange  bool            `json:"require_repo_change"`
+	ID                 string              `json:"id"`
+	Name               string              `json:"name"`
+	Prompt             string              `json:"prompt"`
+	PromptFile         string              `json:"prompt_file"`
+	Priority           int                 `json:"priority"`
+	ExecutionProfileID string              `json:"execution_profile_id"`
+	Type               domain.TaskType     `json:"type"`
+	MinInterval        string              `json:"min_interval"`
+	RequireRepoChange  bool                `json:"require_repo_change"`
+	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
 }
 
 type taskUpdateRequest struct {
-	Name               *string          `json:"name"`
-	Prompt             *string          `json:"prompt"`
-	PromptFile         *string          `json:"prompt_file"`
-	Priority           *int             `json:"priority"`
-	ExecutionProfileID *string          `json:"execution_profile_id"`
-	Type               *domain.TaskType `json:"type"`
-	MinInterval        *string          `json:"min_interval"`
-	RequireRepoChange  *bool            `json:"require_repo_change"`
+	Name               *string              `json:"name"`
+	Prompt             *string              `json:"prompt"`
+	PromptFile         *string              `json:"prompt_file"`
+	Priority           *int                 `json:"priority"`
+	ExecutionProfileID *string              `json:"execution_profile_id"`
+	Type               *domain.TaskType     `json:"type"`
+	MinInterval        *string              `json:"min_interval"`
+	RequireRepoChange  *bool                `json:"require_repo_change"`
+	DispatchTier       *domain.DispatchTier `json:"dispatch_tier"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -450,7 +562,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	task := domain.Task{
 		ID: id, Name: request.Name, Prompt: request.Prompt, PromptFile: request.PromptFile,
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
-		Type: request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange,
+		Type: request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
 	if err := s.store.CreateTask(r.Context(), task, s.now()); err != nil {
 		writeError(w, err)
@@ -523,6 +635,9 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.RequireRepoChange != nil {
 		task.RequireRepoChange = *request.RequireRepoChange
+	}
+	if request.DispatchTier != nil {
+		task.DispatchTier = *request.DispatchTier
 	}
 	if _, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
@@ -745,6 +860,13 @@ func (s *Server) selectTask(
 			}
 			continue
 		}
+		if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
+			if len(rejections) < 20 {
+				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID,
+					Reason: fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)})
+			}
+			continue
+		}
 		result.CandidateRejections = rejections
 		return task, profile, revision, result, nil
 	}
@@ -773,7 +895,7 @@ func (s *Server) evaluateCandidateBudget(
 	}
 	poolResults := []decision.PoolResult{{
 		Pool: "weekly", Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
-		Remaining: snapshot.Weekly.Remaining,
+		Remaining: snapshot.Weekly.Remaining, UnlockedTier: base.UnlockedTier,
 	}}
 	triggering := make([]string, 0, 2)
 	if base.Decision == decision.Run {
@@ -825,7 +947,7 @@ func (s *Server) evaluateCandidateBudget(
 		})
 		poolResults = append(poolResults, decision.PoolResult{
 			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
-			Reason: poolDecision.Reason, Remaining: allowance.Remaining,
+			Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
 		})
 		if poolDecision.Decision == decision.Unknown {
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
@@ -844,7 +966,32 @@ func (s *Server) evaluateCandidateBudget(
 		result.Mode = decision.ModePace
 		result.Reason = "model-specific allowance meets pace threshold"
 	}
+	for _, pool := range poolResults {
+		if dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
+			result.UnlockedTier = pool.UnlockedTier
+		}
+	}
 	return decorateBudgetResult(result, profile.Model, routing, required, triggering, poolResults), true, ""
+}
+
+func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
+	if required == "" {
+		required = domain.DispatchBehind
+	}
+	return dispatchTierRank(unlocked) >= dispatchTierRank(required)
+}
+
+func dispatchTierRank(tier domain.DispatchTier) int {
+	switch tier {
+	case domain.DispatchExpiring:
+		return 3
+	case domain.DispatchWellBehind:
+		return 2
+	case domain.DispatchBehind:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func decorateBudgetResult(

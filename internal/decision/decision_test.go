@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
+	"github.com/jfox/redline/internal/domain"
 )
 
 var now = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -51,6 +52,24 @@ func TestEvaluateProratesCurrentAndFinalSlots(t *testing.T) {
 	}
 	assertClose(t, "maximum consumable", got.MaximumConsumable, 0.22)
 	assertClose(t, "overflow", got.Overflow, 0.25)
+	if got.UnlockedTier != domain.DispatchExpiring {
+		t.Fatalf("unlocked tier = %q", got.UnlockedTier)
+	}
+}
+
+func TestLimitedWindowCanRunBehindPaceBeforeOverflow(t *testing.T) {
+	s := limitedSnapshot()
+	s.Weekly.Remaining = 0.50
+	s.Weekly.ResetsAt = now.Add(48 * time.Hour)
+	s.Short.ResetsAt = now.Add(2 * time.Hour)
+	in := input(s)
+	in.WindowWeeklyCost = 0.10
+	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
+	got := decision.Evaluate(in)
+
+	if got.Decision != decision.Run || got.Overflow > in.TriggerMargin || got.UnlockedTier != domain.DispatchWellBehind {
+		t.Fatalf("got %#v", got)
+	}
 }
 
 func TestCurrentSlotUsesLowerOfTimeAndRemainingAllowance(t *testing.T) {
@@ -152,6 +171,9 @@ func TestUnrestrictedProviderRunsWhenPaceThresholdMatches(t *testing.T) {
 	}
 	if got.MatchedPaceThreshold == nil || got.MatchedPaceThreshold.MinWeeklyRemaining != 0.50 {
 		t.Fatalf("matched threshold = %#v", got.MatchedPaceThreshold)
+	}
+	if got.UnlockedTier != domain.DispatchExpiring {
+		t.Fatalf("unlocked tier = %q", got.UnlockedTier)
 	}
 }
 

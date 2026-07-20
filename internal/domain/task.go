@@ -7,6 +7,7 @@ import (
 
 type TaskType string
 type TaskState string
+type DispatchTier string
 
 const (
 	OneOff    TaskType = "one_off"
@@ -17,6 +18,10 @@ const (
 	Completed TaskState = "completed"
 	Failed    TaskState = "failed"
 	Disabled  TaskState = "disabled"
+
+	DispatchBehind     DispatchTier = "behind"
+	DispatchWellBehind DispatchTier = "well_behind"
+	DispatchExpiring   DispatchTier = "expiring"
 )
 
 type ExecutionProfile struct {
@@ -54,6 +59,7 @@ type Task struct {
 	QueueSequence                int64         `json:"queue_sequence"`
 	ExecutionProfileID           string        `json:"execution_profile_id"`
 	Type                         TaskType      `json:"type"`
+	DispatchTier                 DispatchTier  `json:"dispatch_tier"`
 	MinInterval                  time.Duration `json:"min_interval"`
 	RequireRepoChange            bool          `json:"require_repo_change"`
 	Enabled                      bool          `json:"enabled"`

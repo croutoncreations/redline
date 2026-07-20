@@ -119,6 +119,19 @@ go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
 ```
 
+Each task has a `dispatch_tier` that controls when it becomes eligible:
+
+```yaml
+dispatch_tier: behind # behind, well_behind, or expiring
+priority: 60
+```
+
+The active provider policy first decides whether background work is safe. Redline then derives the
+currently unlocked tier from the weekly pace gap, or from unavoidable throughput overflow when a
+five-hour window exists. `priority` only orders tasks whose tiers are already unlocked. Recurrence
+intervals, repository-change checks, and enable/disable state remain independent eligibility gates.
+Existing databases migrate tasks to `behind`, preserving the prior default behavior.
+
 Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fable`,
 `claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
 account-pool-only models.
@@ -166,6 +179,7 @@ POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
+GET|PATCH|DELETE /v1/profiles/{id}
 GET|POST /v1/tasks
 GET|PATCH|DELETE /v1/tasks/{id}
 POST /v1/tasks/{id}/enable|disable|retry
@@ -182,11 +196,11 @@ GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
 GET  /v1/notifications
 ```
 
-The service includes a read-only local dashboard at
+The service includes a local dashboard at
 [`http://127.0.0.1:7436/`](http://127.0.0.1:7436/). It summarizes current provider allowances,
-the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. A server-sent event
-stream keeps the page current while it is open; the aggregate API does not expose task prompts or
-lifecycle commands.
+the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. Jobs and execution
+profiles can be created and managed there. A server-sent event stream keeps the page current while
+it is open; the aggregate API does not expose task prompts or lifecycle commands.
 
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.

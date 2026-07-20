@@ -16,7 +16,7 @@ const duration = (nanos) => {
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 
-let currentRun = null, profiles = [];
+let currentRun = null, profiles = [], providerAccounts = [], editingProfile = '';
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -44,7 +44,7 @@ function wireProviderDetails() {
 }
 function renderTasks(tasks) {
   $('#task-count').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(title(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',() => openTask(button.dataset.task)));
 }
 function renderRuns(runs) {
@@ -72,6 +72,7 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
+  providerAccounts = data.providers.map(provider => provider.id);
   $('#usage-strip').innerHTML = data.providers.map(providerCompact).join(''); wireProviderDetails();
   $('#policy').textContent = data.active_policy || '—';
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
@@ -107,8 +108,8 @@ async function apiRequest(path,options={}) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
-async function loadProfiles() {
-  if (!profiles.length) profiles = await apiRequest('/v1/profiles');
+async function loadProfiles(force=false) {
+  if (force || !profiles.length) profiles = await apiRequest('/v1/profiles');
   $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
 }
 function showTaskError(message) {
@@ -123,6 +124,7 @@ async function openTask(id='') {
     $('#task-name').value = task?.name || '';
     $('#task-profile').value = task?.execution_profile_id || profiles[0]?.id || '';
     $('#task-priority').value = task?.priority ?? 50;
+    $('#task-tier').value = task?.dispatch_tier || 'behind';
     $('#task-type').value = task?.type || 'one_off';
     $('#task-interval').value = durationInput(task?.min_interval || 0);
     $('#task-prompt').value = task?.prompt || '';
@@ -140,6 +142,7 @@ async function saveTask(event) {
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     priority:Number($('#task-priority').value), type:$('#task-type').value,
+    dispatch_tier:$('#task-tier').value,
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
   };
@@ -148,6 +151,51 @@ async function saveTask(event) {
     await apiRequest(id ? `/v1/tasks/${encodeURIComponent(id)}` : '/v1/tasks',{method:id ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
     $('#task-dialog').close(); await refresh();
   } catch (error) { showTaskError(error.message); } finally { save.disabled = false; }
+}
+
+const lines = (value) => String(value || '').split('\n').map(item => item.trim()).filter(Boolean);
+function showProfileError(message) {
+  $('#profile-form-error').hidden = !message; $('#profile-form-error').textContent = message || '';
+}
+function renderProfiles() {
+  $('#profiles-list').innerHTML = profiles.length ? profiles.map(profile => `<button type="button" class="profile-card ${profile.id === editingProfile ? 'active' : ''}" data-profile="${escapeHTML(profile.id)}"><strong>${escapeHTML(profile.id)}</strong><span>${escapeHTML(profile.provider_account_id)} · ${escapeHTML(profile.model || profile.harness_type)}</span><small>${escapeHTML(title(profile.workspace_provider))}</small></button>`).join('') : '<p class="empty">No profiles yet.</p>';
+  document.querySelectorAll('[data-profile]').forEach(button => button.addEventListener('click',() => editProfile(button.dataset.profile)));
+}
+function resetProfileForm() {
+  editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
+  $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
+  $('#profile-workspace').value = 'devx'; $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
+}
+async function openProfiles() {
+  try { await loadProfiles(true); resetProfileForm(); $('#profiles-dialog').showModal(); }
+  catch (error) { $('#error-banner').hidden = false; $('#error-banner').textContent = `Could not load profiles: ${error.message}`; }
+}
+async function editProfile(id) {
+  try {
+    const profile = await apiRequest(`/v1/profiles/${encodeURIComponent(id)}`); editingProfile = id; showProfileError('');
+    $('#profile-provider').innerHTML = providerAccounts.map(account => `<option value="${escapeHTML(account)}">${escapeHTML(account)}</option>`).join('');
+    $('#profile-id').value = profile.id; $('#profile-id').disabled = true; $('#profile-provider').value = profile.provider_account_id;
+    $('#profile-harness').value = profile.harness_type || ''; $('#profile-model').value = profile.model || ''; $('#profile-budget-group').value = profile.budget_model_group || '';
+    $('#profile-workspace').value = profile.workspace_provider || 'devx'; $('#profile-repository').value = profile.repository || ''; $('#profile-base-branch').value = profile.base_branch || '';
+    $('#profile-cleanup').value = profile.cleanup_policy || ''; $('#profile-require-clean').checked = !!profile.require_clean;
+    $('#profile-harness-command').value = profile.harness_command || ''; $('#profile-harness-args').value = (profile.harness_args || []).join('\n'); $('#profile-workspace-args').value = (profile.workspace_args || []).join('\n');
+    $('#profile-prepare').value = profile.prepare_command || ''; $('#profile-finalize').value = profile.finalize_command || ''; $('#delete-profile').hidden = false; renderProfiles();
+  } catch (error) { showProfileError(error.message); }
+}
+async function saveProfile(event) {
+  event.preventDefault(); showProfileError('');
+  const payload = {id:$('#profile-id').value.trim(),provider_account_id:$('#profile-provider').value,harness_type:$('#profile-harness').value.trim(),model:$('#profile-model').value.trim(),budget_model_group:$('#profile-budget-group').value.trim(),workspace_provider:$('#profile-workspace').value,repository:$('#profile-repository').value.trim(),base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:$('#profile-prepare').value,finalize_command:$('#profile-finalize').value};
+  $('#save-profile').disabled = true;
+  try {
+    if (editingProfile) delete payload.id;
+    const saved = await apiRequest(editingProfile ? `/v1/profiles/${encodeURIComponent(editingProfile)}` : '/v1/profiles',{method:editingProfile ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
+    await loadProfiles(true); await editProfile(saved.id); await refresh();
+  } catch (error) { showProfileError(error.message); } finally { $('#save-profile').disabled = false; }
+}
+async function deleteProfile() {
+  if (!editingProfile || !confirm(`Delete profile “${editingProfile}”? Profiles assigned to jobs cannot be deleted.`)) return;
+  try { await apiRequest(`/v1/profiles/${encodeURIComponent(editingProfile)}`,{method:'DELETE'}); await loadProfiles(true); resetProfileForm(); await refresh(); }
+  catch (error) { showProfileError(error.message); }
 }
 async function toggleTask() {
   const id = $('#task-id').value, action = $('#toggle-task').dataset.action;
@@ -179,11 +227,17 @@ function connectLive() {
 
 $('#refresh').addEventListener('click',refresh);
 $('#new-task').addEventListener('click',() => openTask());
+$('#manage-profiles').addEventListener('click',openProfiles);
 $('#task-form').addEventListener('submit',saveTask);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);
 $('#delete-task').addEventListener('click',deleteTask);
+$('#profile-form').addEventListener('submit',saveProfile);
+$('#new-profile').addEventListener('click',resetProfileForm);
+$('#reset-profile').addEventListener('click',resetProfileForm);
+$('#delete-profile').addEventListener('click',deleteProfile);
+$('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
 document.querySelectorAll('.log-tabs button').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
 document.addEventListener('click',() => document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')));
