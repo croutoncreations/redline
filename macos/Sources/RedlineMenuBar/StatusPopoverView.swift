@@ -105,8 +105,7 @@ struct StatusPopoverView: View {
                 }
             }
             .font(.system(size: 10, weight: .medium))
-            .buttonStyle(.plain)
-            .foregroundStyle(provider.paused ? .green : .secondary)
+            .buttonStyle(HoverActionButtonStyle(tint: provider.paused ? .green : .red))
             .disabled(model.providersBeingControlled.contains(provider.id))
         }
         .padding(12)
@@ -327,6 +326,41 @@ struct StatusPopoverView: View {
         case "codex": 0
         case "claude": 1
         default: 2
+        }
+    }
+}
+
+private struct HoverActionButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        HoverActionButton(configuration: configuration, tint: tint)
+    }
+
+    private struct HoverActionButton: View {
+        let configuration: ButtonStyleConfiguration
+        let tint: Color
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovering = false
+
+        var body: some View {
+            configuration.label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .foregroundStyle(isHovering ? tint : .secondary)
+                .background(
+                    tint.opacity(configuration.isPressed ? 0.2 : isHovering ? 0.11 : 0),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(tint.opacity(isHovering ? 0.45 : 0), lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.55)
+                .animation(.easeOut(duration: 0.12), value: isHovering)
+                .onHover { isHovering = $0 }
         }
     }
 }
