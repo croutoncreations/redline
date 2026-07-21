@@ -408,12 +408,34 @@ func (d *DB) EligibleTasks(
 	providerAccountID string,
 	now time.Time,
 ) ([]domain.Task, error) {
+	tasks, err := d.DispatchCandidates(ctx, providerAccountID)
+	if err != nil {
+		return nil, err
+	}
+	eligible := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.LastCompletedAt != nil && task.MinInterval > 0 &&
+			now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
+			continue
+		}
+		eligible = append(eligible, task)
+	}
+	return eligible, nil
+}
+
+// DispatchCandidates returns queued tasks in selection order before dynamic
+// eligibility gates such as cooldowns and repository revisions are applied.
+// Keeping those candidates visible lets the scheduler explain every skip.
+func (d *DB) DispatchCandidates(
+	ctx context.Context,
+	providerAccountID string,
+) ([]domain.Task, error) {
 	rows, err := d.db.QueryContext(ctx, taskSelect+`
 JOIN execution_profiles p ON p.id = t.execution_profile_id
 WHERE p.provider_account_id = ? AND t.enabled = 1 AND t.state = 'queued'
 ORDER BY t.priority DESC, t.queue_sequence ASC`, providerAccountID)
 	if err != nil {
-		return nil, fmt.Errorf("query eligible tasks: %w", err)
+		return nil, fmt.Errorf("query dispatch candidates: %w", err)
 	}
 	defer rows.Close()
 	tasks := make([]domain.Task, 0)
@@ -422,14 +444,10 @@ ORDER BY t.priority DESC, t.queue_sequence ASC`, providerAccountID)
 		if err != nil {
 			return nil, err
 		}
-		if task.LastCompletedAt != nil && task.MinInterval > 0 &&
-			now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
-			continue
-		}
 		tasks = append(tasks, task)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scan eligible tasks: %w", err)
+		return nil, fmt.Errorf("scan dispatch candidates: %w", err)
 	}
 	return tasks, nil
 }

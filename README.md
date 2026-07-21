@@ -58,10 +58,13 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Opt-in automatic scheduling with immediate startup evaluation and configurable polling.
 - Per-provider cycle status, active-run suppression, and automatic repository revision checks.
 - Durable dispatch-attempt history, including usage/admission errors that produce no decision.
+- Explainable task-selection rejections for cooldowns, repository state, budget pools, and dispatch tiers.
+- Admission contention is recorded as a normal `WAIT`, not a false scheduler failure.
 - Bounded stdout/stderr tail inspection through the service API and CLI.
 - Opt-in command notifications for run completion/failure and scheduler errors.
 - Durable notification delivery history and 24-hour operational health summaries.
 - Ordered lifecycle audit events for every run, with prompt text excluded from event snapshots.
+- Interrupted-run recovery appends a terminal lifecycle event and records whether its workspace was preserved.
 - Captured prepare/finalize hook stdout and stderr exposed through the service API and CLI.
 
 ## Quick start
@@ -356,6 +359,12 @@ happened operationally when Redline tried to release work?” Attempts persist `
 ```bash
 go run ./cmd/redline scheduler attempts --provider codex-main
 ```
+
+When budget permits work but no job can be admitted, `task_selection_reason` and bounded
+`candidate_rejections` explain cooldown deadlines, unchanged or unreadable repositories,
+model-pool exhaustion, and locked dispatch tiers. Concurrent scheduler requests for the same
+provider are serialized at admission; the loser records an `active_run` WAIT rather than degrading
+operational health. Different providers may still run concurrently.
 
 Completed run output can be inspected without reading artifact paths directly. Responses are tail
 bounded to 64 KiB and may only resolve regular files beneath the configured `run_artifacts_dir`;

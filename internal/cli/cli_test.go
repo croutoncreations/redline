@@ -61,6 +61,31 @@ func TestSchedulerEvaluateConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestSchedulerEvaluateExplainsRejectedTasks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+          "snapshot":{"provider":"codex","observed_at":"2026-07-16T18:00:00Z",
+            "weekly":{"remaining":0.60,"resets_at":"2026-07-18T18:00:00Z"},"source":"openusage"},
+          "result":{"decision":"RUN","mode":"pace_threshold","reason":"weekly remaining meets pace threshold",
+            "task_selection_reason":"no queued tasks are eligible",
+            "candidate_rejections":[{"task_id":"tests","reason":"cooldown until 2026-07-17T18:00:00Z"}]}
+        }`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+
+	exit := cli.Run(
+		[]string{"--api", server.URL, "scheduler", "evaluate", "--provider", "codex-main"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || !strings.Contains(stdout.String(), "Task selection:") ||
+		!strings.Contains(stdout.String(), "no queued tasks are eligible") ||
+		!strings.Contains(stdout.String(), "Rejected tests:") ||
+		!strings.Contains(stdout.String(), "cooldown until") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestTaskAddImportsYAMLThroughAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/tasks" || r.Method != http.MethodPost {

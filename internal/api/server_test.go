@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -550,6 +551,74 @@ func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) 
 	}
 }
 
+func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	lastCompleted := apiNow.Add(-time.Hour)
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "cooling-down", Name: "Cooling down", Priority: 100, ExecutionProfileID: "profile",
+		Type: domain.Recurring, MinInterval: 24 * time.Hour, LastCompletedAt: &lastCompleted,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+
+	response := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if response.Result.Decision != decision.Run || response.SelectedTask != nil {
+		t.Fatalf("response = %#v", response)
+	}
+	if len(response.Result.CandidateRejections) != 1 ||
+		response.Result.CandidateRejections[0].TaskID != "cooling-down" ||
+		!strings.Contains(response.Result.CandidateRejections[0].Reason, "cooldown until") {
+		t.Fatalf("rejections = %#v", response.Result.CandidateRejections)
+	}
+}
+
+func TestSchedulerExplainsRepositoryRevisionFailure(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	profile := domain.ExecutionProfile{
+		ID: "missing-repo", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		WorkspaceProvider: "git-worktree", Repository: "/missing/repository",
+	}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "repo-task", Name: "Repository task", Priority: 100, ExecutionProfileID: profile.ID,
+		Type: domain.Recurring, RequireRepoChange: true,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	handler := api.NewServerWithDependencies(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, fakeRevisionResolver{failures: map[string]error{"missing-repo": fmt.Errorf("repository is unavailable")}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response := postJSON[struct {
+		Result decision.Result `json:"result"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if len(response.Result.CandidateRejections) != 1 ||
+		!strings.Contains(response.Result.CandidateRejections[0].Reason, "repository revision could not be read") ||
+		!strings.Contains(response.Result.CandidateRejections[0].Reason, "repository is unavailable") {
+		t.Fatalf("rejections = %#v", response.Result.CandidateRejections)
+	}
+}
+
 func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 	server, db := newAPIServer(t, claudeAllowancePayload(0, 1.0, 23*time.Hour))
 	createClaudeCandidate(t, db, "fable-profile", "fable", "fable", "fable-task", 100)
@@ -843,6 +912,9 @@ func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testin
 	if err != nil || len(decisions) != 1 || !bytes.Contains(decisions[0].DecisionJSON, []byte(`"trigger":"automatic"`)) {
 		t.Fatalf("decisions=%#v err=%v", decisions, err)
 	}
+	if !bytes.Contains(decisions[0].DecisionJSON, []byte("repository has not changed since the last successful run")) {
+		t.Fatalf("unchanged repository rejection missing from decision: %s", decisions[0].DecisionJSON)
+	}
 }
 
 func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T) {
@@ -961,7 +1033,8 @@ func TestManualExecutePersistsNoTaskAttemptAndListsIt(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].Outcome != domain.DispatchNoTask || attempts[0].Trigger != "manual" {
+	if len(attempts) != 1 || attempts[0].Outcome != domain.DispatchNoTask || attempts[0].Trigger != "manual" ||
+		attempts[0].Reason != "no queued tasks are eligible" {
 		t.Fatalf("attempts = %#v", attempts)
 	}
 }
@@ -1183,6 +1256,84 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 	}
 }
 
+func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
+	var usageRequests atomic.Int32
+	usageBarrier := make(chan struct{})
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if usageRequests.Add(1) == 2 {
+			close(usageBarrier)
+		}
+		select {
+		case <-usageBarrier:
+		case <-time.After(time.Second):
+			t.Error("concurrent usage requests did not reach barrier")
+		}
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	releaseExecutor := make(chan struct{})
+	handler := api.NewServerWithExecutor(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error {
+			<-releaseExecutor
+			return nil
+		},
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "profile", "provider_account_id": "codex-main",
+		"harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	for _, id := range []string{"first", "second"} {
+		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+			"id": id, "name": id, "priority": 50,
+			"execution_profile_id": "profile", "type": "one_off",
+		})
+	}
+
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	for range 2 {
+		go func() {
+			<-start
+			body := bytes.NewBufferString(`{"provider_account_id":"codex-main"}`)
+			resp, requestErr := http.Post(server.URL+"/v1/scheduler/execute", "application/json", body)
+			if requestErr != nil {
+				statuses <- 0
+				return
+			}
+			_ = resp.Body.Close()
+			statuses <- resp.StatusCode
+		}()
+	}
+	close(start)
+	gotStatuses := []int{<-statuses, <-statuses}
+	close(releaseExecutor)
+	slices.Sort(gotStatuses)
+	if !slices.Equal(gotStatuses, []int{http.StatusOK, http.StatusAccepted}) {
+		t.Fatalf("statuses = %v", gotStatuses)
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("attempts=%#v err=%v", attempts, err)
+	}
+	outcomes := []domain.DispatchOutcome{attempts[0].Outcome, attempts[1].Outcome}
+	slices.Sort(outcomes)
+	if !slices.Equal(outcomes, []domain.DispatchOutcome{domain.DispatchAdmitted, domain.DispatchWait}) {
+		t.Fatalf("outcomes = %v; attempts=%#v", outcomes, attempts)
+	}
+	for _, attempt := range attempts {
+		if attempt.Outcome == domain.DispatchError {
+			t.Fatalf("normal admission contention recorded as error: %#v", attempt)
+		}
+	}
+}
+
 func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
@@ -1401,9 +1552,15 @@ func (f *fakeHarnessDiscoverer) Discover(context.Context) discovery.Catalog {
 	return f.catalog
 }
 
-type fakeRevisionResolver struct{ revisions map[string]string }
+type fakeRevisionResolver struct {
+	revisions map[string]string
+	failures  map[string]error
+}
 
 func (f fakeRevisionResolver) Resolve(_ context.Context, profile domain.ExecutionProfile) (string, error) {
+	if err := f.failures[profile.ID]; err != nil {
+		return "", err
+	}
 	return f.revisions[profile.ID], nil
 }
 

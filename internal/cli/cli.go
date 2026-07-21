@@ -639,6 +639,12 @@ func writeDecisionText(w io.Writer, response decisionResponse) {
 		[2]string{"Calculated overflow", percent(r.Overflow)},
 		[2]string{"Decision", string(r.Decision)}, [2]string{"Reason", r.Reason},
 	)
+	if r.TaskSelectionReason != "" {
+		rows = append(rows, [2]string{"Task selection", r.TaskSelectionReason})
+	}
+	for _, rejection := range r.CandidateRejections {
+		rows = append(rows, [2]string{"Rejected " + rejection.TaskID, rejection.Reason})
+	}
 	for _, row := range rows {
 		fmt.Fprintf(w, "%-29s %s\n", row[0]+":", row[1])
 	}

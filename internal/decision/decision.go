@@ -195,6 +195,7 @@ type Result struct {
 	TriggeringPools        []string             `json:"triggering_pools,omitempty"`
 	PoolResults            []PoolResult         `json:"pool_results,omitempty"`
 	CandidateRejections    []CandidateRejection `json:"candidate_rejections,omitempty"`
+	TaskSelectionReason    string               `json:"task_selection_reason,omitempty"`
 	PaceGap                float64              `json:"pace_gap"`
 	UnlockedTier           domain.DispatchTier  `json:"unlocked_tier,omitempty"`
 }

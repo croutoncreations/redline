@@ -588,6 +588,13 @@ func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
 	if preparing.FinalizeState != "skipped" {
 		t.Fatalf("preparing recovery = %#v", preparing)
 	}
+	for _, run := range []domain.Run{running, preparing} {
+		events, err := db.ListRunEvents(t.Context(), run.ID, 10)
+		if err != nil || len(events) != 1 || events[0].Type != domain.RunEventFailed ||
+			!strings.Contains(string(events[0].Payload), `"recovery":"service_restart"`) {
+			t.Fatalf("recovery events for %s = %#v err=%v", run.ID, events, err)
+		}
+	}
 }
 
 func openTaskDB(t *testing.T) *store.DB {

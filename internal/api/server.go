@@ -759,6 +759,9 @@ func (s *Server) dispatch(
 		attempt.Outcome = domain.DispatchAdmitted
 	case response.Result.Decision == decision.Run:
 		attempt.Outcome = domain.DispatchNoTask
+		if response.Result.TaskSelectionReason != "" {
+			attempt.Reason = response.Result.TaskSelectionReason
+		}
 	default:
 		attempt.Outcome = domain.DispatchWait
 	}
@@ -827,6 +830,15 @@ func (s *Server) dispatchCore(
 	}
 	run, err := s.store.AdmitTask(ctx, uuid.NewString(), task.ID, request.ProviderAccountID, revision, s.now())
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			response.Result = decision.Result{
+				Decision:            decision.Wait,
+				Mode:                decision.ModeActive,
+				Reason:              "provider became active during admission",
+				TaskSelectionReason: "another scheduler request admitted work first",
+			}
+			return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+		}
 		return response, false, err
 	}
 	response.SelectedTask = &task
@@ -848,12 +860,21 @@ func (s *Server) selectTask(
 	ctx context.Context, provider, suppliedRevision string,
 	snapshot decision.UsageSnapshot, base decision.Result,
 ) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
-	tasks, err := s.store.EligibleTasks(ctx, provider, s.now())
+	now := s.now()
+	tasks, err := s.store.DispatchCandidates(ctx, provider)
 	if err != nil {
 		return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 	}
 	rejections := make([]decision.CandidateRejection, 0)
 	for _, task := range tasks {
+		if task.LastCompletedAt != nil && task.MinInterval > 0 {
+			eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
+			if now.Before(eligibleAt) {
+				rejections = appendCandidateRejection(rejections, task.ID,
+					"cooldown until "+eligibleAt.UTC().Format(time.RFC3339))
+				continue
+			}
+		}
 		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
 		if err != nil {
 			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
@@ -864,11 +885,21 @@ func (s *Server) selectTask(
 			if resolveErr == nil {
 				revision = resolved
 			} else if task.RequireRepoChange {
+				rejections = appendCandidateRejection(rejections, task.ID,
+					"repository revision could not be read: "+resolveErr.Error())
 				continue
 			}
 		}
-		if task.RequireRepoChange && (revision == "" || revision == task.LastSuccessfulSourceRevision) {
-			continue
+		if task.RequireRepoChange {
+			if revision == "" {
+				rejections = appendCandidateRejection(rejections, task.ID, "repository revision is unavailable")
+				continue
+			}
+			if revision == task.LastSuccessfulSourceRevision {
+				rejections = appendCandidateRejection(rejections, task.ID,
+					"repository has not changed since the last successful run")
+				continue
+			}
 		}
 		result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
 		if !eligible {
@@ -885,11 +916,23 @@ func (s *Server) selectTask(
 			continue
 		}
 		result.CandidateRejections = rejections
+		result.TaskSelectionReason = "selected highest-priority eligible task"
 		return task, profile, revision, result, nil
 	}
 	base.CandidateRejections = rejections
+	base.TaskSelectionReason = "no queued tasks are eligible"
 	return domain.Task{}, domain.ExecutionProfile{}, "", base,
 		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
+}
+
+func appendCandidateRejection(
+	rejections []decision.CandidateRejection,
+	taskID, reason string,
+) []decision.CandidateRejection {
+	if reason == "" || len(rejections) >= 20 {
+		return rejections
+	}
+	return append(rejections, decision.CandidateRejection{TaskID: taskID, Reason: reason})
 }
 
 func (s *Server) evaluateCandidateBudget(

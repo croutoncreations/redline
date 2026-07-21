@@ -197,19 +197,26 @@ func (d *DB) RecoverInterruptedRuns(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("begin interrupted-run recovery: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, task_id FROM runs WHERE state IN ('preparing', 'running')`)
+	rows, err := tx.QueryContext(ctx, `SELECT id, task_id, workspace_directory
+FROM runs WHERE state IN ('preparing', 'running')`)
 	if err != nil {
 		return fmt.Errorf("find interrupted runs: %w", err)
 	}
-	type interrupted struct{ runID, taskID string }
+	type interrupted struct {
+		runID, taskID, workspaceDirectory string
+	}
 	var items []interrupted
 	for rows.Next() {
 		var item interrupted
-		if err := rows.Scan(&item.runID, &item.taskID); err != nil {
+		if err := rows.Scan(&item.runID, &item.taskID, &item.workspaceDirectory); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan interrupted run: %w", err)
 		}
 		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("scan interrupted runs: %w", err)
 	}
 	rows.Close()
 	for _, item := range items {
@@ -224,6 +231,21 @@ WHERE id = ?`, formatTime(now), item.runID); err != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
 			formatTime(now), item.taskID); err != nil {
 			return fmt.Errorf("recover interrupted task: %w", err)
+		}
+		payload, err := json.Marshal(map[string]any{
+			"state":               domain.RunFailed,
+			"exit_code":           -1,
+			"error":               "service restarted while run was active",
+			"recovery":            "service_restart",
+			"workspace_preserved": item.workspaceDirectory != "",
+		})
+		if err != nil {
+			return fmt.Errorf("encode interrupted-run event: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO run_events (
+run_id, event_type, occurred_at, payload_json
+) VALUES (?, ?, ?, ?)`, item.runID, domain.RunEventFailed, formatTime(now), payload); err != nil {
+			return fmt.Errorf("record interrupted-run event: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
