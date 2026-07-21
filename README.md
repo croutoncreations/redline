@@ -223,6 +223,22 @@ it to an untrusted network.
 For durable macOS operation, see [the launchd guide](docs/launchd.md). The LaunchAgent template
 uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the required harness `PATH`.
 
+## Native macOS menu bar
+
+The first native shell lives under `macos/`. It shows provider allowance, scheduler, active-run,
+and operational-health state in the menu bar and opens the full local dashboard for management.
+It adopts an already-running Redline service or starts the Go service embedded in its app bundle,
+so the eventual install remains a single application rather than separate UI and daemon packages.
+
+```bash
+swift test --package-path macos
+./scripts/build-macos-app.sh
+open dist/Redline.app
+```
+
+See [the native macOS design](docs/native-macos.md) for service ownership, packaging, and the next
+native phases.
+
 ## Execution lifecycle
 
 ```text

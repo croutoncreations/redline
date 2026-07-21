@@ -6,3 +6,5 @@ bin/
 node_modules/
 playwright-report/
 test-results/
+macos/.build/
+dist/
