@@ -30,6 +30,8 @@ fi
 mkdir -p "${app_path}/Contents/MacOS" "${app_path}/Contents/Resources/bin"
 cp "${swift_bin_path}/RedlineMenuBar" "${app_path}/Contents/MacOS/RedlineMenuBar"
 cp "${temporary_root}/redline" "${app_path}/Contents/Resources/bin/redline"
+cp "${repository_root}/macos/Sources/RedlineMenuBar/Resources/claude.svg" "${app_path}/Contents/Resources/claude.svg"
+cp "${repository_root}/macos/Sources/RedlineMenuBar/Resources/codex.svg" "${app_path}/Contents/Resources/codex.svg"
 
 swift_arch="$(lipo -archs "${app_path}/Contents/MacOS/RedlineMenuBar")"
 service_arch="$(lipo -archs "${app_path}/Contents/Resources/bin/redline")"

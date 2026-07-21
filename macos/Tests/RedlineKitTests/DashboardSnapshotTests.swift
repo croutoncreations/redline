@@ -10,7 +10,10 @@ import Testing
       "providers": [
         {"id":"claude-main","provider":"claude","snapshot":{"short":{"remaining":0.96},"weekly":{"remaining":0.53},"allowances":[{"key":"model:fable:weekly","source_label":"Fable","remaining":0.12}],"source":"openusage"}},
         {"id":"codex-main","provider":"codex","snapshot":{"weekly":{"remaining":0.32},"source":"builtin"}}
-      ]
+      ],
+      "tasks": [{"id":"tests","name":"Add focused tests","priority":60,"state":"queued","provider_account_id":"codex-main","model":"gpt-5","dispatch_tier":"behind"}],
+      "runs": [],
+      "attempts": [{"id":8,"provider_account_id":"claude-main","outcome":"wait","decision":"WAIT","reason":"no actionable weekly overflow","started_at":"2026-07-20T23:50:00Z"}]
     }
     """#.utf8)
 
@@ -26,6 +29,10 @@ import Testing
     #expect(snapshot.providers[0].modelAllowances.first?.displayName == "Fable")
     #expect(snapshot.providers[1].displayName == "Codex")
     #expect(snapshot.providers[1].shortPercent == nil)
+    #expect(snapshot.tasks.first?.name == "Add focused tests")
+    #expect(snapshot.tasks.first?.dispatchTier == "behind")
+    #expect(snapshot.latestAttempt?.decision == "WAIT")
+    #expect(snapshot.latestAttempt?.reason == "no actionable weekly overflow")
 }
 
 @Test func trayStateUsesWorstRelevantSignal() throws {
@@ -58,6 +65,7 @@ import Testing
     )
 
     #expect(TrayState(snapshot: snapshot).menuBarTitle == "WAIT  Codex 32% · Claude 53% · Other —")
+    #expect(TrayState(snapshot: snapshot).providerBadges.map(\.displayName) == ["Codex", "Claude", "Other"])
 }
 
 private extension DashboardSnapshot {

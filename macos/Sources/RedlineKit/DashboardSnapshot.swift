@@ -4,15 +4,89 @@ public struct DashboardSnapshot: Codable, Sendable {
     public let health: HealthSummary
     public let scheduler: SchedulerSummary
     public let providers: [ProviderSummary]
+    public let tasks: [TaskSummary]
+    public let runs: [RunSummary]
+    public let attempts: [AttemptSummary]
 
-    public init(health: HealthSummary, scheduler: SchedulerSummary, providers: [ProviderSummary]) {
+    public init(
+        health: HealthSummary,
+        scheduler: SchedulerSummary,
+        providers: [ProviderSummary],
+        tasks: [TaskSummary] = [],
+        runs: [RunSummary] = [],
+        attempts: [AttemptSummary] = []
+    ) {
         self.health = health
         self.scheduler = scheduler
         self.providers = providers
+        self.tasks = tasks
+        self.runs = runs
+        self.attempts = attempts
     }
 
     public static func decode(_ data: Data) throws -> DashboardSnapshot {
         try JSONDecoder().decode(DashboardSnapshot.self, from: data)
+    }
+
+    public var latestAttempt: AttemptSummary? { attempts.first }
+
+    enum CodingKeys: String, CodingKey { case health, scheduler, providers, tasks, runs, attempts }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        health = try container.decode(HealthSummary.self, forKey: .health)
+        scheduler = try container.decode(SchedulerSummary.self, forKey: .scheduler)
+        providers = try container.decodeIfPresent([ProviderSummary].self, forKey: .providers) ?? []
+        tasks = try container.decodeIfPresent([TaskSummary].self, forKey: .tasks) ?? []
+        runs = try container.decodeIfPresent([RunSummary].self, forKey: .runs) ?? []
+        attempts = try container.decodeIfPresent([AttemptSummary].self, forKey: .attempts) ?? []
+    }
+}
+
+public struct TaskSummary: Codable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let priority: Int
+    public let state: String
+    public let providerAccountID: String
+    public let model: String?
+    public let dispatchTier: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, priority, state, model
+        case providerAccountID = "provider_account_id"
+        case dispatchTier = "dispatch_tier"
+    }
+}
+
+public struct RunSummary: Codable, Sendable, Identifiable {
+    public let id: String
+    public let taskID: String
+    public let providerAccountID: String
+    public let state: String
+    public let startedAt: String
+    public let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, state, error
+        case taskID = "task_id"
+        case providerAccountID = "provider_account_id"
+        case startedAt = "started_at"
+    }
+}
+
+public struct AttemptSummary: Codable, Sendable, Identifiable {
+    public let id: Int
+    public let providerAccountID: String
+    public let outcome: String
+    public let decision: String?
+    public let reason: String?
+    public let startedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, outcome, decision, reason
+        case providerAccountID = "provider_account_id"
+        case startedAt = "started_at"
     }
 }
 
@@ -109,9 +183,16 @@ public struct UsageSnapshot: Codable, Sendable {
 
 public struct UsageWindow: Codable, Sendable {
     public let remaining: Double
+    public let resetsAt: String?
 
-    public init(remaining: Double) {
+    enum CodingKeys: String, CodingKey {
+        case remaining
+        case resetsAt = "resets_at"
+    }
+
+    public init(remaining: Double, resetsAt: String? = nil) {
         self.remaining = remaining
+        self.resetsAt = resetsAt
     }
 }
 
@@ -138,6 +219,7 @@ public struct TrayState: Sendable {
     public let lowestWeeklyPercent: Int?
     public let iconDescription: String
     public let menuBarTitle: String
+    public let providerBadges: [ProviderBadge]
 
     public init(snapshot: DashboardSnapshot) {
         let percentages = snapshot.providers.compactMap(\.snapshot?.weekly?.remaining)
@@ -171,7 +253,7 @@ public struct TrayState: Sendable {
         case .running: "RUN"
         case .attention: "ATTN"
         }
-        let providers = snapshot.providers
+        providerBadges = snapshot.providers
             .sorted { left, right in
                 let leftRank = Self.providerRank(left.provider)
                 let rightRank = Self.providerRank(right.provider)
@@ -179,9 +261,9 @@ public struct TrayState: Sendable {
                 return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
             }
             .map { provider in
-                let percent = provider.weeklyPercent.map { "\($0)%" } ?? "—"
-                return "\(provider.displayName) \(percent)"
+                ProviderBadge(provider: provider.provider, displayName: provider.displayName, percent: provider.weeklyPercent)
             }
+        let providers = providerBadges.map { "\($0.displayName) \($0.percent.map { "\($0)%" } ?? "—")" }
         menuBarTitle = activityLabel + (providers.isEmpty ? "" : "  " + providers.joined(separator: " · "))
     }
 
@@ -192,4 +274,10 @@ public struct TrayState: Sendable {
         default: 2
         }
     }
+}
+
+public struct ProviderBadge: Sendable, Equatable {
+    public let provider: String
+    public let displayName: String
+    public let percent: Int?
 }

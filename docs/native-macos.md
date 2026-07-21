@@ -24,13 +24,16 @@ is shown as an unavailable state rather than silently creating an unsafe or inco
 ## Current menu
 
 - Gauge-style status icon with a red limit segment and a state indicator.
-- Compact menu-bar text for `WAIT`, `RUN`, `ATTN`, or `OFFLINE` plus each provider's weekly
-  availability.
+- A state-colored gauge with a usage-sensitive needle plus compact provider logos and weekly
+  availability; the full `WAIT`, `RUN`, `ATTN`, or `OFFLINE` description remains in accessibility
+  text and the quick panel.
 - Current weekly and five-hour availability for Codex and Claude.
 - Model-specific allowances such as Fable in a provider submenu.
 - Active-run, scheduler, operational-health, and service-ownership summaries.
 - A native dashboard window backed by `WKWebView`, with connection status, refresh, and an optional
   Open in Browser action.
+- A native quick-status popover with provider capacity, scheduler and run state, the next queued
+  tasks, the latest dispatch decision, and a link to the full dashboard.
 - Show Dashboard, refresh, and quit actions.
 - Automatic refresh every 20 seconds.
 

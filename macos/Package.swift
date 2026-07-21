@@ -11,7 +11,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "RedlineKit"),
-        .executableTarget(name: "RedlineMenuBar", dependencies: ["RedlineKit"]),
+        .executableTarget(name: "RedlineMenuBar", dependencies: ["RedlineKit"], exclude: ["Resources"]),
         .testTarget(name: "RedlineKitTests", dependencies: ["RedlineKit"]),
     ]
 )

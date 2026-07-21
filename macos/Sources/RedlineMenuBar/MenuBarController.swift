@@ -7,23 +7,37 @@ final class MenuBarController: NSObject {
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let statusItem: NSStatusItem
+    private let popoverModel: PopoverViewModel
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
-    private let menu = NSMenu()
+    private lazy var popoverController = StatusPopoverController(
+        model: popoverModel,
+        actions: StatusPopoverActions(
+            showDashboard: { [weak self] in self?.showDashboard() },
+            openBrowser: { [weak self] in self?.openDashboardInBrowser() },
+            quit: { NSApplication.shared.terminate(nil) }
+        )
+    )
     private var refreshTimer: Timer?
-    private var lastSnapshot: DashboardSnapshot?
 
     init(apiURL: URL, supervisor: ServiceSupervisor) {
         self.apiURL = apiURL
         client = RedlineAPIClient(baseURL: apiURL)
         self.supervisor = supervisor
+        popoverModel = PopoverViewModel(client: client)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
-        statusItem.menu = menu
-        statusItem.button?.image = GaugeIcon.image(for: nil)
-        statusItem.button?.title = " STARTING"
-        statusItem.button?.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        statusItem.button?.toolTip = "Redline is starting"
-        render(message: "Connecting to Redline…")
+
+        popoverModel.onSnapshot = { [weak self] snapshot in self?.render(snapshot) }
+        popoverModel.onError = { [weak self] message in self?.renderOffline(message) }
+
+        guard let button = statusItem.button else { return }
+        button.image = GaugeIcon.image(activity: nil, remainingPercent: nil)
+        button.attributedTitle = providerSummary([])
+        button.toolTip = "Redline is starting"
+        button.target = self
+        button.action = #selector(togglePopover)
+        button.sendAction(on: [.leftMouseUp])
+        button.setAccessibilityLabel("Redline is starting")
     }
 
     func start() {
@@ -45,141 +59,69 @@ final class MenuBarController: NSObject {
         dashboardWindow.showDashboard()
     }
 
-    @objc private func refreshFromMenu() {
-        Task { await refresh() }
+    func showPopover() {
+        guard let button = statusItem.button else { return }
+        popoverController.show(relativeTo: button)
+    }
+
+    func showPopoverPreview() {
+        popoverController.showPreviewWindow()
     }
 
     private func refresh() async {
         do {
             let snapshot = try await client.dashboard()
-            lastSnapshot = snapshot
-            render(snapshot)
+            popoverModel.apply(snapshot)
         } catch {
-            render(message: "Service unavailable", detail: error.localizedDescription)
+            let message = error.localizedDescription
+            popoverModel.apply(error: message)
         }
     }
 
     private func render(_ snapshot: DashboardSnapshot) {
-        menu.removeAllItems()
         let trayState = TrayState(snapshot: snapshot)
-        statusItem.button?.image = GaugeIcon.image(for: trayState.level)
-        statusItem.button?.title = " \(trayState.menuBarTitle)"
-        statusItem.button?.toolTip = trayState.iconDescription
-
-        let title = NSMenuItem(title: "Redline", action: nil, keyEquivalent: "")
-        title.attributedTitle = NSAttributedString(
-            string: "REDLINE",
-            attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)]
+        guard let button = statusItem.button else { return }
+        button.image = GaugeIcon.image(
+            activity: trayState.activity,
+            remainingPercent: trayState.lowestWeeklyPercent
         )
-        menu.addItem(title)
-        menu.addItem(.separator())
+        button.attributedTitle = providerSummary(trayState.providerBadges)
+        button.toolTip = trayState.menuBarTitle
+        button.setAccessibilityLabel("Redline \(trayState.menuBarTitle)")
+    }
 
-        for provider in snapshot.providers {
-            let usage = providerUsageTitle(provider)
-            let item = NSMenuItem(title: usage, action: nil, keyEquivalent: "")
-            item.image = providerImage(provider.provider)
-            item.isEnabled = false
-            if !provider.modelAllowances.isEmpty {
-                let submenu = NSMenu()
-                for allowance in provider.modelAllowances {
-                    submenu.addItem(withTitle: "\(allowance.displayName): \(allowance.percent)% remaining", action: nil, keyEquivalent: "")
-                }
-                item.submenu = submenu
-                item.isEnabled = true
-            }
-            menu.addItem(item)
+    private func renderOffline(_ detail: String) {
+        guard let button = statusItem.button else { return }
+        button.image = GaugeIcon.image(activity: nil, remainingPercent: nil, offline: true)
+        button.attributedTitle = providerSummary([])
+        button.toolTip = "Redline offline: \(detail)"
+        button.setAccessibilityLabel("Redline is offline")
+    }
+
+    private func providerSummary(_ badges: [ProviderBadge]) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for (index, badge) in badges.enumerated() {
+            if index > 0 { result.append(NSAttributedString(string: "  ")) }
+            let attachment = NSTextAttachment()
+            attachment.attachmentCell = NSTextAttachmentCell(
+                imageCell: ProviderArtwork.image(for: badge.provider, template: true, size: 12)
+            )
+            result.append(NSAttributedString(attachment: attachment))
+            let value = badge.percent.map { " \($0)%" } ?? " —"
+            result.append(NSAttributedString(
+                string: value,
+                attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)]
+            ))
         }
-
-        menu.addItem(.separator())
-        let healthTitle = snapshot.health.status == "healthy"
-            ? "Healthy"
-            : "Recent errors · \(snapshot.health.dispatchErrors) dispatch"
-        menu.addItem(disabledItem(healthTitle, symbol: snapshot.health.status == "healthy" ? "checkmark.circle" : "exclamationmark.triangle"))
-        let schedulerTitle = snapshot.scheduler.enabled
-            ? "Scheduler on\(snapshot.scheduler.running ? " · checking now" : "")"
-            : "Scheduler off"
-        menu.addItem(disabledItem(schedulerTitle, symbol: "clock.arrow.circlepath"))
-        if snapshot.health.activeRuns > 0 {
-            menu.addItem(disabledItem("\(snapshot.health.activeRuns) active run\(snapshot.health.activeRuns == 1 ? "" : "s")", symbol: "bolt.fill"))
-        }
-        menu.addItem(disabledItem(serviceTitle, symbol: "server.rack"))
-        addActions()
+        return result
     }
 
-    private func render(message: String, detail: String? = nil) {
-        menu.removeAllItems()
-        statusItem.button?.image = GaugeIcon.image(for: .degraded)
-        statusItem.button?.title = " OFFLINE"
-        statusItem.button?.toolTip = detail.map { "\(message): \($0)" } ?? message
-        menu.addItem(disabledItem(message, symbol: "exclamationmark.circle"))
-        if let detail {
-            let item = disabledItem(detail, symbol: nil)
-            item.toolTip = detail
-            menu.addItem(item)
-        }
-        menu.addItem(disabledItem(serviceTitle, symbol: "server.rack"))
-        addActions()
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        popoverController.toggle(relativeTo: button)
     }
 
-    private func addActions() {
-        menu.addItem(.separator())
-        let dashboard = NSMenuItem(title: "Show Dashboard…", action: #selector(openDashboard), keyEquivalent: "d")
-        dashboard.target = self
-        dashboard.image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: nil)
-        menu.addItem(dashboard)
-
-        let browser = NSMenuItem(title: "Open Dashboard in Browser", action: #selector(openDashboardInBrowser), keyEquivalent: "")
-        browser.target = self
-        browser.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
-        menu.addItem(browser)
-
-        let refresh = NSMenuItem(title: "Refresh", action: #selector(refreshFromMenu), keyEquivalent: "r")
-        refresh.target = self
-        refresh.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        menu.addItem(refresh)
-        menu.addItem(.separator())
-
-        let quit = NSMenuItem(title: "Quit Redline", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-    }
-
-    private func providerUsageTitle(_ provider: ProviderSummary) -> String {
-        let weekly = provider.weeklyPercent.map { "Weekly \($0)%" } ?? "Weekly —"
-        let short = provider.shortPercent.map { "5h \($0)%" }
-        return ([provider.displayName, weekly] + (short.map { [$0] } ?? [])).joined(separator: "  ·  ")
-    }
-
-    private func providerImage(_ provider: String) -> NSImage? {
-        let symbol = provider.lowercased() == "claude" ? "sparkles" : "terminal"
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: provider)
-    }
-
-    private func disabledItem(_ title: String, symbol: String?) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
-        return item
-    }
-
-    private var serviceTitle: String {
-        switch supervisor.state {
-        case .checking: "Checking service"
-        case .connectedToExistingService: "Using existing local service"
-        case .runningBundledService: "Using bundled service"
-        case .unavailable(let reason): "Service unavailable · \(reason)"
-        }
-    }
-
-    @objc private func openDashboard() {
-        dashboardWindow.showDashboard()
-    }
-
-    @objc private func openDashboardInBrowser() {
+    private func openDashboardInBrowser() {
         NSWorkspace.shared.open(apiURL)
-    }
-
-    @objc private func quit() {
-        NSApplication.shared.terminate(nil)
     }
 }

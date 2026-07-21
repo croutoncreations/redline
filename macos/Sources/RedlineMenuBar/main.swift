@@ -18,6 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controller.showDashboard()
             }
         }
+        if ProcessInfo.processInfo.arguments.contains("--show-popover") {
+            Task {
+                try? await Task.sleep(for: .milliseconds(700))
+                controller.showPopover()
+            }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--show-popover-preview") {
+            Task {
+                try? await Task.sleep(for: .milliseconds(700))
+                controller.showPopoverPreview()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

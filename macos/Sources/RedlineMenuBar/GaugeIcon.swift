@@ -2,7 +2,11 @@ import AppKit
 import RedlineKit
 
 enum GaugeIcon {
-    static func image(for level: TrayState.Level?) -> NSImage {
+    static func image(
+        activity: TrayState.Activity?,
+        remainingPercent: Int?,
+        offline: Bool = false
+    ) -> NSImage {
         let image = NSImage(size: NSSize(width: 19, height: 19))
         image.lockFocus()
         defer { image.unlockFocus() }
@@ -20,9 +24,12 @@ enum GaugeIcon {
         NSColor.systemRed.setStroke()
         redline.stroke()
 
+        let usedFraction = 1 - (Double(remainingPercent ?? 100) / 100)
+        let angle = 155 + ((25 - 155) * min(max(usedFraction, 0), 1))
+        let radians = angle * .pi / 180
         let needle = NSBezierPath()
         needle.move(to: center)
-        needle.line(to: NSPoint(x: 14.6, y: 12.1))
+        needle.line(to: NSPoint(x: center.x + 6.3 * cos(radians), y: center.y + 6.3 * sin(radians)))
         needle.lineWidth = 1.6
         needle.lineCapStyle = .round
         NSColor.labelColor.setStroke()
@@ -32,18 +39,18 @@ enum GaugeIcon {
         NSColor.labelColor.setFill()
         hub.fill()
 
-        statusColor(for: level).setFill()
+        statusColor(activity: activity, offline: offline).setFill()
         NSBezierPath(ovalIn: NSRect(x: 1.5, y: 1.5, width: 4, height: 4)).fill()
         image.isTemplate = false
         return image
     }
 
-    private static func statusColor(for level: TrayState.Level?) -> NSColor {
-        switch level {
-        case .comfortable: .systemGreen
-        case .constrained: .systemOrange
-        case .critical, .degraded: .systemRed
+    private static func statusColor(activity: TrayState.Activity?, offline: Bool) -> NSColor {
+        if offline { return .systemRed }
+        return switch activity {
+        case .waiting: .systemGreen
         case .running: .systemBlue
+        case .attention: .systemOrange
         case nil: .tertiaryLabelColor
         }
     }
