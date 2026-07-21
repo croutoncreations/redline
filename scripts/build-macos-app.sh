@@ -51,6 +51,7 @@ plutil -insert CFBundleShortVersionString -string 0.1.0 "${info_plist}"
 plutil -insert CFBundleVersion -string 1 "${info_plist}"
 plutil -insert LSMinimumSystemVersion -string 13.0 "${info_plist}"
 plutil -insert LSUIElement -bool true "${info_plist}"
+plutil -insert NSAppTransportSecurity -xml '<dict><key>NSAllowsLocalNetworking</key><true/></dict>' "${info_plist}"
 plutil -insert NSHumanReadableCopyright -string "Copyright © 2026 Redline" "${info_plist}"
 
 codesign --force --deep --sign "${REDLINE_SIGN_IDENTITY:--}" "${app_path}"

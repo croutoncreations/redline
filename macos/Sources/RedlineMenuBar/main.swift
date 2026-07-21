@@ -12,6 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = MenuBarController(apiURL: apiURL, supervisor: supervisor)
         menuBarController = controller
         controller.start()
+        if ProcessInfo.processInfo.arguments.contains("--show-dashboard") {
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                controller.showDashboard()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

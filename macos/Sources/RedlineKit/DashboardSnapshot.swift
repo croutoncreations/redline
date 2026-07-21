@@ -131,31 +131,65 @@ public struct AllowanceSummary: Codable, Sendable {
 
 public struct TrayState: Sendable {
     public enum Level: Sendable { case comfortable, constrained, critical, running, degraded }
+    public enum Activity: Sendable { case waiting, running, attention }
 
     public let level: Level
+    public let activity: Activity
     public let lowestWeeklyPercent: Int?
     public let iconDescription: String
+    public let menuBarTitle: String
 
     public init(snapshot: DashboardSnapshot) {
         let percentages = snapshot.providers.compactMap(\.snapshot?.weekly?.remaining)
         lowestWeeklyPercent = percentages.min().map { Int(($0 * 100).rounded()) }
 
-        if snapshot.health.status != "healthy" && snapshot.health.status != "ok" {
-            level = .degraded
-        } else if snapshot.health.activeRuns > 0 || snapshot.scheduler.running {
+        if snapshot.health.activeRuns > 0 || snapshot.scheduler.running {
             level = .running
+            activity = .running
+        } else if snapshot.health.status != "healthy" && snapshot.health.status != "ok" {
+            level = .degraded
+            activity = .attention
         } else if let percent = lowestWeeklyPercent, percent <= 20 {
             level = .critical
+            activity = .waiting
         } else if let percent = lowestWeeklyPercent, percent <= 40 {
             level = .constrained
+            activity = .waiting
         } else {
             level = .comfortable
+            activity = .waiting
         }
 
         if let percent = lowestWeeklyPercent {
             iconDescription = "Redline: \(percent)% weekly usage remaining"
         } else {
             iconDescription = "Redline: usage unavailable"
+        }
+
+        let activityLabel = switch activity {
+        case .waiting: "WAIT"
+        case .running: "RUN"
+        case .attention: "ATTN"
+        }
+        let providers = snapshot.providers
+            .sorted { left, right in
+                let leftRank = Self.providerRank(left.provider)
+                let rightRank = Self.providerRank(right.provider)
+                if leftRank != rightRank { return leftRank < rightRank }
+                return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
+            }
+            .map { provider in
+                let percent = provider.weeklyPercent.map { "\($0)%" } ?? "—"
+                return "\(provider.displayName) \(percent)"
+            }
+        menuBarTitle = activityLabel + (providers.isEmpty ? "" : "  " + providers.joined(separator: " · "))
+    }
+
+    private static func providerRank(_ provider: String) -> Int {
+        switch provider.lowercased() {
+        case "codex": 0
+        case "claude": 1
+        default: 2
         }
     }
 }

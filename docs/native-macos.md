@@ -24,14 +24,19 @@ is shown as an unavailable state rather than silently creating an unsafe or inco
 ## Current menu
 
 - Gauge-style status icon with a red limit segment and a state indicator.
+- Compact menu-bar text for `WAIT`, `RUN`, `ATTN`, or `OFFLINE` plus each provider's weekly
+  availability.
 - Current weekly and five-hour availability for Codex and Claude.
 - Model-specific allowances such as Fable in a provider submenu.
 - Active-run, scheduler, operational-health, and service-ownership summaries.
-- Open Dashboard, refresh, and quit actions.
+- A native dashboard window backed by `WKWebView`, with connection status, refresh, and an optional
+  Open in Browser action.
+- Show Dashboard, refresh, and quit actions.
 - Automatic refresh every 20 seconds.
 
-The menu intentionally reuses the web dashboard for full task/profile CRUD. A native dashboard
-would duplicate a working interface without improving the install or background experience yet.
+The native window intentionally reuses the live web dashboard for full task/profile CRUD. This
+keeps one implementation of the management interface while giving it normal app-window behavior
+instead of sending the user to a browser tab.
 
 ## Build
 

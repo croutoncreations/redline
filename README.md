@@ -226,7 +226,8 @@ uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the requ
 ## Native macOS menu bar
 
 The first native shell lives under `macos/`. It shows provider allowance, scheduler, active-run,
-and operational-health state in the menu bar and opens the full local dashboard for management.
+and operational-health state directly in the menu bar and embeds the full local dashboard in a
+native app window for management.
 It adopts an already-running Redline service or starts the Go service embedded in its app bundle,
 so the eventual install remains a single application rather than separate UI and daemon packages.
 

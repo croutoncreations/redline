@@ -7,6 +7,7 @@ final class MenuBarController: NSObject {
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let statusItem: NSStatusItem
+    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
     private let menu = NSMenu()
     private var refreshTimer: Timer?
     private var lastSnapshot: DashboardSnapshot?
@@ -15,10 +16,12 @@ final class MenuBarController: NSObject {
         self.apiURL = apiURL
         client = RedlineAPIClient(baseURL: apiURL)
         self.supervisor = supervisor
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         statusItem.menu = menu
         statusItem.button?.image = GaugeIcon.image(for: nil)
+        statusItem.button?.title = " STARTING"
+        statusItem.button?.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         statusItem.button?.toolTip = "Redline is starting"
         render(message: "Connecting to Redline…")
     }
@@ -36,6 +39,10 @@ final class MenuBarController: NSObject {
     func stop() {
         refreshTimer?.invalidate()
         supervisor.stopOwnedService()
+    }
+
+    func showDashboard() {
+        dashboardWindow.showDashboard()
     }
 
     @objc private func refreshFromMenu() {
@@ -56,6 +63,7 @@ final class MenuBarController: NSObject {
         menu.removeAllItems()
         let trayState = TrayState(snapshot: snapshot)
         statusItem.button?.image = GaugeIcon.image(for: trayState.level)
+        statusItem.button?.title = " \(trayState.menuBarTitle)"
         statusItem.button?.toolTip = trayState.iconDescription
 
         let title = NSMenuItem(title: "Redline", action: nil, keyEquivalent: "")
@@ -101,6 +109,7 @@ final class MenuBarController: NSObject {
     private func render(message: String, detail: String? = nil) {
         menu.removeAllItems()
         statusItem.button?.image = GaugeIcon.image(for: .degraded)
+        statusItem.button?.title = " OFFLINE"
         statusItem.button?.toolTip = detail.map { "\(message): \($0)" } ?? message
         menu.addItem(disabledItem(message, symbol: "exclamationmark.circle"))
         if let detail {
@@ -114,10 +123,15 @@ final class MenuBarController: NSObject {
 
     private func addActions() {
         menu.addItem(.separator())
-        let dashboard = NSMenuItem(title: "Open Dashboard…", action: #selector(openDashboard), keyEquivalent: "d")
+        let dashboard = NSMenuItem(title: "Show Dashboard…", action: #selector(openDashboard), keyEquivalent: "d")
         dashboard.target = self
         dashboard.image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: nil)
         menu.addItem(dashboard)
+
+        let browser = NSMenuItem(title: "Open Dashboard in Browser", action: #selector(openDashboardInBrowser), keyEquivalent: "")
+        browser.target = self
+        browser.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
+        menu.addItem(browser)
 
         let refresh = NSMenuItem(title: "Refresh", action: #selector(refreshFromMenu), keyEquivalent: "r")
         refresh.target = self
@@ -158,6 +172,10 @@ final class MenuBarController: NSObject {
     }
 
     @objc private func openDashboard() {
+        dashboardWindow.showDashboard()
+    }
+
+    @objc private func openDashboardInBrowser() {
         NSWorkspace.shared.open(apiURL)
     }
 
