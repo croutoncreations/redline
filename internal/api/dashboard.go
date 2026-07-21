@@ -34,6 +34,7 @@ type dashboardResponse struct {
 type dashboardProvider struct {
 	ID       string                  `json:"id"`
 	Provider string                  `json:"provider"`
+	Paused   bool                    `json:"paused"`
 	Snapshot *decision.UsageSnapshot `json:"snapshot,omitempty"`
 	Error    string                  `json:"error,omitempty"`
 }
@@ -161,6 +162,10 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
 		item := dashboardProvider{ID: id, Provider: configured.Provider}
+		item.Paused, err = s.store.ProviderPaused(ctx, id)
+		if err != nil {
+			return dashboardResponse{}, err
+		}
 		snapshot, _, snapshotErr := s.store.LatestSnapshot(ctx, configured.Provider)
 		if snapshotErr != nil {
 			if errors.Is(snapshotErr, store.ErrNotFound) {

@@ -9,7 +9,7 @@ import Testing
       "scheduler": {"enabled":true,"running":false,"next_cycle_at":"2026-07-20T23:58:51Z"},
       "providers": [
         {"id":"claude-main","provider":"claude","snapshot":{"short":{"remaining":0.96,"resets_at":"2026-07-21T04:00:00Z"},"weekly":{"remaining":0.53,"resets_at":"2026-07-24T17:00:00Z"},"allowances":[{"key":"model:fable:weekly","source_label":"Fable","remaining":0.12}],"source":"openusage"}},
-        {"id":"codex-main","provider":"codex","snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-07-25T03:24:11Z"},"source":"builtin"}}
+        {"id":"codex-main","provider":"codex","paused":true,"snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-07-25T03:24:11Z"},"source":"builtin"}}
       ],
       "tasks": [{"id":"tests","name":"Add focused tests","priority":60,"state":"queued","provider_account_id":"codex-main","model":"gpt-5","dispatch_tier":"behind"}],
       "runs": [],
@@ -27,16 +27,41 @@ import Testing
     #expect(snapshot.scheduler.enabled)
     #expect(snapshot.providers.count == 2)
     #expect(snapshot.providers[0].displayName == "Claude")
+    #expect(!snapshot.providers[0].paused)
     #expect(snapshot.providers[0].weeklyPercent == 53)
     #expect(snapshot.providers[0].shortPercent == 96)
     #expect(snapshot.providers[0].modelAllowances.first?.displayName == "Fable")
     #expect(snapshot.providers[1].displayName == "Codex")
+    #expect(snapshot.providers[1].paused)
     #expect(snapshot.providers[1].shortPercent == nil)
     #expect(snapshot.providers[1].snapshot?.weekly?.resetsAt == "2026-07-25T03:24:11Z")
     #expect(snapshot.tasks.first?.name == "Add focused tests")
     #expect(snapshot.tasks.first?.dispatchTier == "behind")
     #expect(snapshot.latestAttempt?.decision == "WAIT")
     #expect(snapshot.latestAttemptsByProvider.map(\.providerAccountID) == ["codex-main", "claude-main"])
+}
+
+@Test func terminalRunTrackerBaselinesHistoryAndReportsOnlyNewTerminalRuns() throws {
+    let initial = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"old","task_id":"task-old","provider_account_id":"codex-main","state":"completed","started_at":"2026-07-20T01:00:00Z"},
+      {"id":"active","task_id":"task-active","provider_account_id":"claude-main","state":"running","started_at":"2026-07-21T01:00:00Z"}
+    ]}
+    """#.utf8))
+    var tracker = TerminalRunTracker()
+    #expect(tracker.observe(initial.runs).isEmpty)
+
+    let update = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"new-failure","task_id":"task-new","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T02:00:00Z","error":"boom"},
+      {"id":"active","task_id":"task-active","provider_account_id":"claude-main","state":"completed","started_at":"2026-07-21T01:00:00Z"},
+      {"id":"old","task_id":"task-old","provider_account_id":"codex-main","state":"completed","started_at":"2026-07-20T01:00:00Z"}
+    ]}
+    """#.utf8))
+    let events = tracker.observe(update.runs)
+    #expect(events.map(\.runID) == ["new-failure", "active"])
+    #expect(events.first?.state == "failed")
+    #expect(tracker.observe(update.runs).isEmpty)
 }
 
 @Test func trayStateUsesWorstRelevantSignal() throws {

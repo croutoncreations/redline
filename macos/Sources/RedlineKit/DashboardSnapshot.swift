@@ -69,6 +69,7 @@ public struct RunSummary: Codable, Sendable, Identifiable {
     public let providerAccountID: String
     public let state: String
     public let startedAt: String
+    public let completedAt: String?
     public let error: String?
 
     enum CodingKeys: String, CodingKey {
@@ -76,6 +77,7 @@ public struct RunSummary: Codable, Sendable, Identifiable {
         case taskID = "task_id"
         case providerAccountID = "provider_account_id"
         case startedAt = "started_at"
+        case completedAt = "completed_at"
     }
 }
 
@@ -134,12 +136,24 @@ public struct SchedulerSummary: Codable, Sendable {
 public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let id: String
     public let provider: String
+    public let paused: Bool
     public let snapshot: UsageSnapshot?
 
-    public init(id: String, provider: String, snapshot: UsageSnapshot?) {
+    public init(id: String, provider: String, paused: Bool = false, snapshot: UsageSnapshot?) {
         self.id = id
         self.provider = provider
+        self.paused = paused
         self.snapshot = snapshot
+    }
+
+    enum CodingKeys: String, CodingKey { case id, provider, paused, snapshot }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        provider = try container.decode(String.self, forKey: .provider)
+        paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        snapshot = try container.decodeIfPresent(UsageSnapshot.self, forKey: .snapshot)
     }
 
     public var displayName: String {
@@ -158,6 +172,40 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
 
     private static func percent(_ window: UsageWindow) -> Int {
         Int((min(max(window.remaining, 0), 1) * 100).rounded())
+    }
+}
+
+public struct TerminalRunEvent: Sendable, Equatable {
+    public let runID: String
+    public let taskID: String
+    public let providerAccountID: String
+    public let state: String
+    public let error: String?
+}
+
+public struct TerminalRunTracker: Sendable {
+    private var observedRunIDs = Set<String>()
+    private var hasEstablishedBaseline = false
+
+    public init() {}
+
+    public mutating func observe(_ runs: [RunSummary]) -> [TerminalRunEvent] {
+        let terminal = runs.filter { $0.state == "completed" || $0.state == "failed" }
+        defer {
+            observedRunIDs.formUnion(terminal.map(\.id))
+            hasEstablishedBaseline = true
+        }
+        guard hasEstablishedBaseline else { return [] }
+        return terminal.compactMap { run in
+            guard !observedRunIDs.contains(run.id) else { return nil }
+            return TerminalRunEvent(
+                runID: run.id,
+                taskID: run.taskID,
+                providerAccountID: run.providerAccountID,
+                state: run.state,
+                error: run.error
+            )
+        }
     }
 }
 

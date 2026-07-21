@@ -5,7 +5,9 @@ import RedlineKit
 final class PopoverViewModel: ObservableObject {
     @Published private(set) var snapshot: DashboardSnapshot?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var actionError: String?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var providersBeingControlled = Set<String>()
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -18,6 +20,7 @@ final class PopoverViewModel: ObservableObject {
     func apply(_ snapshot: DashboardSnapshot) {
         self.snapshot = snapshot
         errorMessage = nil
+        actionError = nil
         onSnapshot?(snapshot)
     }
 
@@ -34,6 +37,19 @@ final class PopoverViewModel: ObservableObject {
             apply(try await client.dashboard())
         } catch {
             apply(error: error.localizedDescription)
+        }
+    }
+
+    func setPaused(_ paused: Bool, providerID: String) async {
+        guard providersBeingControlled.insert(providerID).inserted else { return }
+        actionError = nil
+        defer { providersBeingControlled.remove(providerID) }
+        do {
+            if paused { _ = try await client.pauseProvider(providerID) }
+            else { _ = try await client.resumeProvider(providerID) }
+            apply(try await client.dashboard())
+        } catch {
+            actionError = error.localizedDescription
         }
     }
 }

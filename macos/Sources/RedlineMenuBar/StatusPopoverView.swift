@@ -4,6 +4,8 @@ import SwiftUI
 struct StatusPopoverActions {
     let showDashboard: @MainActor () -> Void
     let openBrowser: @MainActor () -> Void
+    let showRunLogs: @MainActor (RunSummary) -> Void
+    let enableNotifications: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
@@ -24,6 +26,7 @@ struct StatusPopoverView: View {
                     providerGrid
                     activitySection
                     queueSection
+                    recentRunsSection
                     latestDecision
                 }
                 .padding(18)
@@ -31,7 +34,7 @@ struct StatusPopoverView: View {
             Divider()
             footer
         }
-        .frame(width: 420, height: 560)
+        .frame(width: 420, height: 640)
         .background(.ultraThinMaterial)
     }
 
@@ -92,6 +95,19 @@ struct StatusPopoverView: View {
                 if let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }
             .font(.system(size: 10))
+            Button {
+                Task { await model.setPaused(!provider.paused, providerID: provider.id) }
+            } label: {
+                if model.providersBeingControlled.contains(provider.id) {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Label(provider.paused ? "Resume scheduling" : "Pause scheduling", systemImage: provider.paused ? "play.fill" : "pause.fill")
+                }
+            }
+            .font(.system(size: 10, weight: .medium))
+            .buttonStyle(.plain)
+            .foregroundStyle(provider.paused ? .green : .secondary)
+            .disabled(model.providersBeingControlled.contains(provider.id))
         }
         .padding(12)
         .frame(maxWidth: .infinity)
@@ -119,6 +135,32 @@ struct StatusPopoverView: View {
                 )
                 .font(.system(size: 11))
                 .foregroundStyle(currentFailure ? .red : .orange)
+            }
+            if let error = model.actionError {
+                Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder private var recentRunsSection: some View {
+        let runs = Array((snapshot?.runs ?? []).prefix(3))
+        if !runs.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionLabel("RECENT RUNS")
+                ForEach(runs) { run in
+                    HStack(spacing: 9) {
+                        Image(systemName: runSymbol(run.state))
+                            .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
+                            .frame(width: 14)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Text("\(run.providerAccountID) · \(run.state)").font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Logs") { actions.showRunLogs(run) }
+                            .font(.system(size: 10)).buttonStyle(.borderless)
+                    }
+                }
             }
         }
     }
@@ -185,6 +227,7 @@ struct StatusPopoverView: View {
             Spacer()
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
+                Button("Enable Notifications…", action: actions.enableNotifications)
                 Button("App Setup…", action: actions.showAppSetup)
                 Divider()
                 Button("Quit Redline", action: actions.quit)
@@ -194,6 +237,18 @@ struct StatusPopoverView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    private func taskName(_ taskID: String) -> String {
+        snapshot?.tasks.first { $0.id == taskID }?.name ?? taskID
+    }
+
+    private func runSymbol(_ state: String) -> String {
+        switch state {
+        case "completed": "checkmark.circle.fill"
+        case "failed": "xmark.circle.fill"
+        default: "bolt.circle.fill"
+        }
     }
 
     private func sectionLabel(_ text: String) -> some View {

@@ -53,7 +53,11 @@ available from the quick panel for migration later.
   Open in Browser action.
 - A native quick-status popover with provider capacity, scheduler and run state, the next queued
   tasks, the latest dispatch decision, and a link to the full dashboard.
-- Show Dashboard, refresh, and quit actions.
+- Per-provider pause/resume controls and direct native access to recent stdout/stderr and lifecycle
+  hook logs.
+- User-enabled macOS notifications when a run completes or fails. Existing run history is treated
+  as a baseline, so enabling notifications does not replay stale alerts.
+- Show Dashboard, notification setup, refresh, and quit actions.
 - App Setup for launch-at-login status and recoverable legacy-service migration.
 - Automatic refresh every 20 seconds.
 
@@ -74,6 +78,5 @@ distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directo
 
 ## Next native phases
 
-1. Native notifications and quick controls such as pause/resume and run-log access.
-2. Hardened Runtime, Developer ID signing, notarization, Sparkle or another update path, and a DMG.
-3. A richer native popover only if tray workflows outgrow the menu and local dashboard split.
+1. Hardened Runtime, Developer ID signing, notarization, Sparkle or another update path, and a DMG.
+2. A richer native popover only if tray workflows outgrow the menu and local dashboard split.

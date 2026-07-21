@@ -137,6 +137,9 @@ func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.
 
 func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
+	if err := db.SetProviderPaused(t.Context(), "codex-main", true); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
 		Provider: "codex", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
 	}, nil); err != nil {
@@ -174,6 +177,7 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 			ID       string                  `json:"id"`
 			Snapshot *decision.UsageSnapshot `json:"snapshot"`
 			Error    string                  `json:"error"`
+			Paused   bool                    `json:"paused"`
 		} `json:"providers"`
 		Tasks []struct {
 			ID       string        `json:"id"`
@@ -191,7 +195,7 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	if got.Providers[0].ID != "claude-main" || got.Providers[0].Snapshot != nil || got.Providers[0].Error == "" {
 		t.Fatalf("missing-provider state = %#v", got.Providers[0])
 	}
-	if got.Providers[1].ID != "codex-main" || got.Providers[1].Snapshot == nil || got.Providers[1].Snapshot.Weekly.Remaining != .86 {
+	if got.Providers[1].ID != "codex-main" || got.Providers[1].Snapshot == nil || got.Providers[1].Snapshot.Weekly.Remaining != .86 || !got.Providers[1].Paused {
 		t.Fatalf("codex provider = %#v", got.Providers[1])
 	}
 	if got.Tasks[0].ID != "quiet-check" || got.Tasks[0].Provider != "codex-main" || got.Tasks[0].Model != "gpt-5" || got.Tasks[0].Interval != 24*time.Hour {

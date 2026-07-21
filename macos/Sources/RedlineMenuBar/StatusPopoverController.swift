@@ -13,7 +13,7 @@ final class StatusPopoverController {
         self.actions = actions
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 420, height: 560)
+        popover.contentSize = NSSize(width: 420, height: 640)
         popover.contentViewController = NSHostingController(rootView: StatusPopoverView(model: model, actions: actions))
     }
 
@@ -35,7 +35,7 @@ final class StatusPopoverController {
     func showPreviewWindow() {
         if previewWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+                contentRect: NSRect(x: 0, y: 0, width: 420, height: 640),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false

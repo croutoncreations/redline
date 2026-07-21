@@ -10,11 +10,15 @@ final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
+    private lazy var runLogWindow = RunLogWindowController(client: client)
+    private lazy var notifications = NativeNotificationController()
     private lazy var popoverController = StatusPopoverController(
         model: popoverModel,
         actions: StatusPopoverActions(
             showDashboard: { [weak self] in self?.showDashboard() },
             openBrowser: { [weak self] in self?.openDashboardInBrowser() },
+            showRunLogs: { [weak self] run in self?.runLogWindow.show(run: run) },
+            enableNotifications: { [weak self] in self?.notifications.enable() },
             showAppSetup: showAppSetup,
             quit: { NSApplication.shared.terminate(nil) }
         )
@@ -91,6 +95,7 @@ final class MenuBarController: NSObject {
     }
 
     private func render(_ snapshot: DashboardSnapshot) {
+        notifications.observe(snapshot)
         let trayState = TrayState(snapshot: snapshot)
         guard let button = statusItem.button else { return }
         button.image = GaugeIcon.image(
