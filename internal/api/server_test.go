@@ -271,6 +271,10 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	if got.Short == nil || math.Abs(got.Short.EstimatedTokens.Total-100_000) > .01 || got.Weekly == nil || math.Abs(got.Weekly.EstimatedTokens.Total-250_000) > .01 {
 		t.Fatalf("capacity = %#v", got)
 	}
+	if got.Short.AttributionCoverage != 1 || len(got.Short.Sources) != 1 || got.Short.Sources[0].Key != "gatepost" ||
+		got.RatioDerivedDifference == nil {
+		t.Fatalf("capacity evidence = %#v", got)
+	}
 }
 
 func TestTokenSyncIncludesExplicitPiSubscriptionProvider(t *testing.T) {

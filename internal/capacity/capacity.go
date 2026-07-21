@@ -68,10 +68,24 @@ type WindowEstimate struct {
 	EstimatedTokens     TokenBreakdown      `json:"estimated_tokens"`
 	MeasuredTokens      TokenBreakdown      `json:"measured_tokens"`
 	ObservedUsage       float64             `json:"observed_usage"`
+	TotalObservedUsage  float64             `json:"total_observed_usage"`
+	UnattributedUsage   float64             `json:"unattributed_usage"`
+	AttributionCoverage float64             `json:"attribution_coverage"`
 	ClosedSpans         int                 `json:"closed_spans"`
+	ObservedSpans       int                 `json:"observed_spans"`
+	UnattributedSpans   int                 `json:"unattributed_spans"`
 	Confidence          Confidence          `json:"confidence"`
 	TokensPerOnePercent float64             `json:"tokens_per_one_percent"`
+	Sources             []EvidenceBreakdown `json:"sources"`
+	Models              []EvidenceBreakdown `json:"models"`
 	Accounting          *AccountingEstimate `json:"accounting,omitempty"`
+}
+
+type EvidenceBreakdown struct {
+	Key                      string         `json:"key"`
+	Observations             int            `json:"observations"`
+	Tokens                   TokenBreakdown `json:"tokens"`
+	FractionOfMeasuredTokens float64        `json:"fraction_of_measured_tokens"`
 }
 
 type AccountingEstimate struct {
@@ -94,6 +108,7 @@ type EstimateResult struct {
 	Weekly                   *WindowEstimate `json:"weekly,omitempty"`
 	WindowWeeklyCost         float64         `json:"window_weekly_cost"`
 	RatioDerivedWeeklyTokens *float64        `json:"ratio_derived_weekly_tokens,omitempty"`
+	RatioDerivedDifference   *float64        `json:"ratio_derived_difference,omitempty"`
 	Confidence               Confidence      `json:"confidence"`
 	SnapshotCount            int             `json:"snapshot_count"`
 	TokenObservationCount    int             `json:"token_observation_count"`
@@ -122,6 +137,10 @@ func Estimate(provider string, snapshots []decision.UsageSnapshot, observations 
 		derived := result.Short.EstimatedTokens.Total / windowWeeklyCost
 		if finitePositive(derived) {
 			result.RatioDerivedWeeklyTokens = &derived
+			if result.Weekly != nil && finitePositive(result.Weekly.EstimatedTokens.Total) {
+				difference := math.Abs(derived-result.Weekly.EstimatedTokens.Total) / result.Weekly.EstimatedTokens.Total
+				result.RatioDerivedDifference = &difference
+			}
 		}
 	}
 	result.Confidence = combinedConfidence(result.Short, result.Weekly)
@@ -155,8 +174,9 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 	}
 
 	var measured TokenBreakdown
-	var usage float64
-	spans := 0
+	var usage, totalUsage float64
+	spans, observedSpans, unattributedSpans := 0, 0, 0
+	usedObservations := make([]TokenObservation, 0)
 	weighted := weightedEvidence{versions: map[string]bool{}, unpricedModels: map[string]bool{}}
 	for _, points := range groups {
 		sort.Slice(points, func(i, j int) bool { return points[i].at.Before(points[j].at) })
@@ -173,13 +193,18 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 			if drain <= 0.000001 {
 				continue
 			}
+			totalUsage += drain
+			observedSpans++
 			spanObservations := observationsBetween(observations, baseline.at, current.at)
 			spanTokens := tokensFor(spanObservations)
 			if spanTokens.Total > 0 {
 				measured.add(spanTokens)
 				usage += drain
 				spans++
+				usedObservations = append(usedObservations, spanObservations...)
 				weighted.add(spanObservations)
+			} else {
+				unattributedSpans++
 			}
 			baseline = current
 		}
@@ -201,14 +226,57 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 	// A statistical sample cannot be more trustworthy than its local source.
 	// Gatepost's normalized session index is medium confidence because it is
 	// machine-local and collapses cached context into input-like tokens.
-	sourceCap := observationConfidenceCap(observations)
+	sourceCap := observationConfidenceCap(usedObservations)
 	if confidenceRank(confidence) > confidenceRank(sourceCap) {
 		confidence = sourceCap
 	}
+	attributionCoverage := usage / totalUsage
+	attributionCap := attributionConfidenceCap(attributionCoverage)
+	if confidenceRank(confidence) > confidenceRank(attributionCap) {
+		confidence = attributionCap
+	}
 	result := &WindowEstimate{Window: kind, EstimatedTokens: estimated, MeasuredTokens: measured,
-		ObservedUsage: usage, ClosedSpans: spans, Confidence: confidence,
-		TokensPerOnePercent: estimated.Total / 100}
+		ObservedUsage: usage, TotalObservedUsage: totalUsage, UnattributedUsage: totalUsage - usage,
+		AttributionCoverage: attributionCoverage, ClosedSpans: spans, ObservedSpans: observedSpans,
+		UnattributedSpans: unattributedSpans, Confidence: confidence,
+		TokensPerOnePercent: estimated.Total / 100,
+		Sources:             evidenceBreakdowns(usedObservations, func(o TokenObservation) string { return o.Source }),
+		Models:              evidenceBreakdowns(usedObservations, func(o TokenObservation) string { return o.Model })}
 	result.Accounting = weighted.estimate(usage)
+	return result
+}
+
+func evidenceBreakdowns(observations []TokenObservation, key func(TokenObservation) string) []EvidenceBreakdown {
+	byKey := make(map[string]*EvidenceBreakdown)
+	var total float64
+	for _, observation := range observations {
+		name := key(observation)
+		if name == "" {
+			name = "(unknown)"
+		}
+		item := byKey[name]
+		if item == nil {
+			item = &EvidenceBreakdown{Key: name}
+			byKey[name] = item
+		}
+		tokens := observation.Tokens()
+		item.Observations++
+		item.Tokens.add(tokens)
+		total += tokens.Total
+	}
+	result := make([]EvidenceBreakdown, 0, len(byKey))
+	for _, item := range byKey {
+		if total > 0 {
+			item.FractionOfMeasuredTokens = item.Tokens.Total / total
+		}
+		result = append(result, *item)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Tokens.Total == result[j].Tokens.Total {
+			return result[i].Key < result[j].Key
+		}
+		return result[i].Tokens.Total > result[j].Tokens.Total
+	})
 	return result
 }
 
@@ -292,13 +360,18 @@ func mapKeys(values map[string]bool) []string {
 }
 
 func combinedConfidence(short, weekly *WindowEstimate) Confidence {
-	best := ConfidenceInsufficient
+	combined := ConfidenceInsufficient
+	found := false
 	for _, estimate := range []*WindowEstimate{short, weekly} {
-		if estimate != nil && confidenceRank(estimate.Confidence) > confidenceRank(best) {
-			best = estimate.Confidence
+		if estimate == nil {
+			continue
+		}
+		if !found || confidenceRank(estimate.Confidence) < confidenceRank(combined) {
+			combined = estimate.Confidence
+			found = true
 		}
 	}
-	return best
+	return combined
 }
 
 func confidenceRank(c Confidence) int {
@@ -331,6 +404,17 @@ func observationConfidenceCap(observations []TokenObservation) Confidence {
 		}
 	}
 	return cap
+}
+
+func attributionConfidenceCap(coverage float64) Confidence {
+	switch {
+	case coverage >= .90:
+		return ConfidenceHigh
+	case coverage >= .75:
+		return ConfidenceMedium
+	default:
+		return ConfidenceLow
+	}
 }
 
 func finitePositive(value float64) bool {

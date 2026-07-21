@@ -51,6 +51,24 @@ function profileOptionsFixture() {
   };
 }
 
+function capacityFixture(provider) {
+  return {
+    provider,
+    confidence: 'low',
+    snapshot_count: 120,
+    token_observation_count: 42,
+    weekly: {
+      window: 'weekly', confidence: 'low', estimated_tokens: { input: 25000000, output: 2000000, cache_read: 73000000, cache_creation: 0, total: 100000000 },
+      measured_tokens: { input: 250000, output: 20000, cache_read: 730000, cache_creation: 0, total: 1000000 },
+      observed_usage: .01, total_observed_usage: .02, unattributed_usage: .01, attribution_coverage: .5,
+      closed_spans: 1, observed_spans: 2, unattributed_spans: 1,
+      sources: [{ key: 'gatepost-pi', observations: 30, tokens: { total: 800000 }, fraction_of_measured_tokens: .8 }, { key: 'gatepost', observations: 12, tokens: { total: 200000 }, fraction_of_measured_tokens: .2 }],
+      models: [{ key: provider === 'claude' ? 'claude-opus-4-8' : 'gpt-5.6-sol', observations: 42, tokens: { total: 1000000 }, fraction_of_measured_tokens: 1 }],
+      accounting: { unit: provider === 'claude' ? 'usd_api_equivalent' : 'codex_credits', estimated_capacity_low: 120, estimated_capacity_high: 180, pricing_coverage: 1 },
+    },
+  };
+}
+
 async function loadDashboard(page, options = {}) {
   const state = {
     dashboard: dashboardFixture(), profiles: profileFixture(), profileOptions: profileOptionsFixture(),
@@ -84,6 +102,11 @@ async function loadDashboard(page, options = {}) {
       return state.dashboardError ? json(500, { error: 'dashboard unavailable' }) : json(200, state.dashboard);
     }
     if (url.pathname === '/v1/profile-options') return json(200, state.profileOptions);
+		const capacityMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/capacity$/);
+		if (capacityMatch) {
+			const provider = decodeURIComponent(capacityMatch[1]).startsWith('claude') ? 'claude' : 'codex';
+			return json(200, capacityFixture(provider));
+		}
     if (url.pathname === '/v1/profiles' && method === 'GET') return json(200, state.profiles);
     if (url.pathname === '/v1/profiles' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
@@ -139,6 +162,21 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByRole('button', { name: 'healthy' })).toBeVisible();
   await page.evaluate(() => window.__redlineEventSources[0].fail());
   await expect(page.getByText('reconnecting')).toBeVisible();
+});
+
+test('loads capacity attribution and model evidence on demand', async ({ page }) => {
+	const state = await loadDashboard(page);
+	const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+	await claude.hover();
+	await expect(claude).toContainText('Empirical weekly capacity');
+	await expect(claude).toContainText('100M processed tokens');
+	await expect(claude).toContainText('50% attributed');
+	await expect(claude).toContainText('$120–$180 API-dollar equivalent');
+	await expect(claude).toContainText('gatepost-pi');
+	await expect(claude).toContainText('claude-opus-4-8');
+	await claude.click();
+	await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), state.dashboard);
+	await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Empirical weekly capacity');
 });
 
 test('discovers harness versions and filters Pi models by provider', async ({ page }) => {

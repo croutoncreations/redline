@@ -1,6 +1,7 @@
 package capacity_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -42,6 +43,9 @@ func TestEstimateCorrelatesTokenUsageWithQuantizedWindowDrain(t *testing.T) {
 	}
 	if math.Abs(*got.RatioDerivedWeeklyTokens-1_000_000) > .01 {
 		t.Fatalf("ratio-derived weekly = %f", *got.RatioDerivedWeeklyTokens)
+	}
+	if got.RatioDerivedDifference == nil || math.Abs(*got.RatioDerivedDifference-3) > .01 {
+		t.Fatalf("ratio-derived difference = %#v", got.RatioDerivedDifference)
 	}
 }
 
@@ -113,6 +117,93 @@ func TestEstimateReportsUnknownModelAsUnpricedCoverage(t *testing.T) {
 	}, .08, start.Add(time.Hour))
 	if got.Short.Accounting.PricingCoverage != .5 || got.Short.Accounting.UnpricedObservations != 1 || len(got.Short.Accounting.UnpricedModels) != 1 || got.Short.Accounting.UnpricedModels[0] != "private" {
 		t.Fatalf("accounting = %#v", got.Short.Accounting)
+	}
+}
+
+func TestEstimateReportsAttributionCoverageAndEvidenceComposition(t *testing.T) {
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	reset, weekly := start.Add(5*time.Hour), start.Add(5*24*time.Hour)
+	got := capacity.Estimate("claude", []decision.UsageSnapshot{
+		snapshot(start, 1, 1, reset, weekly),
+		snapshot(start.Add(time.Minute), .99, .99, reset, weekly),
+		snapshot(start.Add(2*time.Minute), .98, .98, reset, weekly),
+	}, []capacity.TokenObservation{
+		{Provider: "claude", Source: "gatepost-pi", SourceID: "pi-1", Model: "claude-opus-4-8",
+			ObservedAt: start.Add(20 * time.Second), InputTokens: 10, OutputTokens: 5, CacheReadTokens: 60,
+			CacheCreationTokens: 5, Confidence: "high"},
+		{Provider: "claude", Source: "gatepost", SourceID: "direct-1", Model: "claude-sonnet-5",
+			ObservedAt: start.Add(40 * time.Second), InputTokens: 15, OutputTokens: 5, Confidence: "medium"},
+	}, .08, start.Add(time.Hour))
+
+	if got.Short == nil {
+		t.Fatal("missing short estimate")
+	}
+	if math.Abs(got.Short.TotalObservedUsage-.02) > 1e-9 ||
+		math.Abs(got.Short.UnattributedUsage-.01) > 1e-9 ||
+		math.Abs(got.Short.AttributionCoverage-.5) > 1e-9 || got.Short.UnattributedSpans != 1 {
+		t.Fatalf("attribution = %#v", got.Short)
+	}
+	if got.Short.Confidence != capacity.ConfidenceLow {
+		t.Fatalf("confidence = %q", got.Short.Confidence)
+	}
+	if len(got.Short.Sources) != 2 || got.Short.Sources[0].Key != "gatepost-pi" ||
+		got.Short.Sources[0].Tokens.Total != 80 || got.Short.Sources[0].FractionOfMeasuredTokens != .8 {
+		t.Fatalf("sources = %#v", got.Short.Sources)
+	}
+	if len(got.Short.Models) != 2 || got.Short.Models[0].Key != "claude-opus-4-8" ||
+		got.Short.Models[0].Observations != 1 || got.Short.Models[0].Tokens.CacheRead != 60 {
+		t.Fatalf("models = %#v", got.Short.Models)
+	}
+}
+
+func TestAttributionCoverageCapsOtherwiseHighConfidence(t *testing.T) {
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	reset, weekly := start.Add(5*time.Hour), start.Add(5*24*time.Hour)
+	snapshots := make([]decision.UsageSnapshot, 0, 14)
+	observations := make([]capacity.TokenObservation, 0, 12)
+	for index := range 14 {
+		remaining := 1 - float64(index)*.02
+		snapshots = append(snapshots, snapshot(start.Add(time.Duration(index)*time.Minute), remaining, remaining, reset, weekly))
+		if index > 0 && index <= 8 {
+			observations = append(observations, capacity.TokenObservation{
+				Provider: "claude", Source: "gatepost-pi", SourceID: fmt.Sprintf("%d", index),
+				Model: "claude-opus-4-8", ObservedAt: start.Add(time.Duration(index)*time.Minute - time.Second),
+				InputTokens: 1_000, Confidence: "high",
+			})
+		}
+	}
+	got := capacity.Estimate("claude", snapshots, observations, .08, start.Add(time.Hour))
+	if got.Short == nil || got.Short.ClosedSpans != 8 || got.Short.ObservedSpans != 13 ||
+		got.Short.Confidence != capacity.ConfidenceLow {
+		t.Fatalf("short = %#v", got.Short)
+	}
+}
+
+func TestOverallConfidenceUsesWeakestAvailableWindow(t *testing.T) {
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	reset, weeklyReset := start.Add(5*time.Hour), start.Add(5*24*time.Hour)
+	var snapshots []decision.UsageSnapshot
+	var observations []capacity.TokenObservation
+	for index := range 14 {
+		snapshots = append(snapshots, snapshot(
+			start.Add(time.Duration(index)*time.Minute),
+			1-float64(index)*.03,
+			1-float64(index)*.005,
+			reset, weeklyReset,
+		))
+		if index > 0 {
+			observations = append(observations, capacity.TokenObservation{
+				Provider: "claude", Source: "gatepost-pi", SourceID: fmt.Sprintf("%d", index),
+				Model: "claude-opus-4-8", ObservedAt: start.Add(time.Duration(index)*time.Minute - time.Second),
+				InputTokens: 1_000, Confidence: "high",
+			})
+		}
+	}
+	got := capacity.Estimate("claude", snapshots, observations, .08, start.Add(time.Hour))
+	if got.Short == nil || got.Short.Confidence != capacity.ConfidenceHigh ||
+		got.Weekly == nil || got.Weekly.Confidence != capacity.ConfidenceLow ||
+		got.Confidence != capacity.ConfidenceLow {
+		t.Fatalf("estimate = %#v", got)
 	}
 }
 

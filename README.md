@@ -343,6 +343,13 @@ long-context multipliers, service-side policy, partial local-log coverage, and p
 can all change the observed relationship. Redline therefore exposes evidence counts, observed
 percentage movement, token classes, source, and confidence rather than presenting a precise quota.
 
+Each window also reports attribution coverage: total provider-reported drain, the fraction with
+matching local token observations, unattributed spans, and evidence composition by harness source
+and model. Incomplete attribution caps confidence even when many spans exist. Overall report
+confidence is the weaker available window, and `ratio_derived_difference` quantifies disagreement
+between the direct weekly estimate and the 5-hour-derived cross-check. The dashboard loads this
+evidence on demand from a provider's expanded usage card so routine live updates remain inexpensive.
+
 Weighted accounting is reported alongside raw processed tokens. Codex uses OpenAI's token-based
 subscription credit card; Claude uses current API pricing as an explicit proxy because Anthropic
 does not publish an equivalent subscription rate card. Unknown models remain unpriced and reduce

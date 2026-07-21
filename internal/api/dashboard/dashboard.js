@@ -15,8 +15,10 @@ const duration = (nanos) => {
 };
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
+const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 
 let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '';
+const capacityCache = new Map();
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -33,14 +35,60 @@ function providerCompact(item) {
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => windows.push(meter(window.source_label || title(window.key),window.remaining,window.resets_at)));
     details = `<div class="meters">${windows.join('')}</div>`;
   }
-  return `<div class="provider-compact" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${details}</span></div>`;
+  const cached = capacityCache.get(item.id);
+  const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
+  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {
-  document.querySelectorAll('.provider-compact').forEach(card => card.addEventListener('click', event => {
-    event.stopPropagation();
-    document.querySelectorAll('.provider-compact.open').forEach(open => { if (open !== card) open.classList.remove('open'); });
-    card.classList.toggle('open');
-  }));
+  document.querySelectorAll('.provider-compact').forEach(card => {
+    card.addEventListener('mouseenter', () => loadCapacityEvidence(card));
+    card.addEventListener('focus', () => loadCapacityEvidence(card));
+    card.addEventListener('click', event => {
+      event.stopPropagation();
+      document.querySelectorAll('.provider-compact.open').forEach(open => { if (open !== card) open.classList.remove('open'); });
+      card.classList.toggle('open');
+      if (card.classList.contains('open')) loadCapacityEvidence(card);
+    });
+  });
+}
+function evidenceRows(items = []) {
+  return items.slice(0,4).map(item => `<span><b>${escapeHTML(item.key)}</b><i>${percent(item.fraction_of_measured_tokens)}%</i></span>`).join('') || '<em>No classified evidence</em>';
+}
+function accountingSummary(accounting) {
+  if (!accounting) return 'No weighted accounting estimate';
+  const low = compactNumber(accounting.estimated_capacity_low), high = compactNumber(accounting.estimated_capacity_high);
+  const amount = accounting.unit === 'usd_api_equivalent' ? `$${low}–$${high}` : `${low}–${high}`;
+  const unit = accounting.unit === 'usd_api_equivalent' ? 'API-dollar equivalent' : title(accounting.unit);
+  return `${amount} ${unit} · ${percent(accounting.pricing_coverage)}% priced`;
+}
+function renderCapacityEvidence(data) {
+  const estimate = data.weekly || data.short;
+  if (!estimate) return '<span class="capacity-loading">Not enough correlated usage evidence yet.</span>';
+  const measured = estimate.measured_tokens || {}, total = measured.total || 0;
+  const mix = [['uncached',measured.input],['cached',measured.cache_read],['output',measured.output],['cache write',measured.cache_creation]]
+    .filter(([,tokens]) => tokens > 0)
+    .map(([label,tokens]) => `<span>${escapeHTML(label)} <b>${total ? Math.round(tokens/total*100) : 0}%</b></span>`).join('');
+  const crossCheck = data.ratio_derived_weekly_tokens ? ` · 5h cross-check ${compactNumber(data.ratio_derived_weekly_tokens)}${data.ratio_derived_difference != null ? ` (${Math.round(data.ratio_derived_difference*100)}% apart)` : ''}` : '';
+  return `<span class="capacity-card"><span class="capacity-title"><strong>Empirical ${escapeHTML(estimate.window)} capacity</strong><i class="confidence ${escapeHTML(estimate.confidence)}">${escapeHTML(estimate.confidence)}</i></span><b class="capacity-total">${escapeHTML(compactNumber(estimate.estimated_tokens?.total))} processed tokens</b><span class="capacity-meta">${percent(estimate.attribution_coverage)}% attributed · ${estimate.closed_spans || 0}/${estimate.observed_spans || 0} drain spans${escapeHTML(crossCheck)} · ${escapeHTML(accountingSummary(estimate.accounting))}</span><span class="token-mix">${mix}</span><span class="evidence-label">Sources</span><span class="evidence-rows">${evidenceRows(estimate.sources)}</span><span class="evidence-label">Models</span><span class="evidence-rows">${evidenceRows(estimate.models)}</span></span>`;
+}
+async function loadCapacityEvidence(card) {
+  const target = card.querySelector('[data-capacity-evidence]');
+  if (!target || target.dataset.loaded === 'true' || target.dataset.loading === 'true') return;
+  const providerID = card.dataset.providerId;
+  if (capacityCache.has(providerID)) {
+    target.innerHTML = renderCapacityEvidence(capacityCache.get(providerID)); target.dataset.loaded = 'true';
+    return;
+  }
+  target.dataset.loading = 'true';
+  target.innerHTML = '<span class="capacity-loading">Loading empirical capacity evidence…</span>';
+  try {
+    const response = await fetch(`/v1/providers/${encodeURIComponent(providerID)}/capacity`), data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    capacityCache.set(providerID, data);
+    target.innerHTML = renderCapacityEvidence(data); target.dataset.loaded = 'true';
+  } catch (error) {
+    target.innerHTML = `<span class="capacity-loading error">Capacity evidence unavailable: ${escapeHTML(error.message)}</span>`;
+  } finally { target.dataset.loading = 'false'; }
 }
 function renderTasks(tasks) {
   $('#task-count').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
@@ -74,7 +122,13 @@ function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
   providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));
   providerAccounts = providerCatalog.map(provider => provider.id);
+  const openProviderID = document.querySelector('.provider-compact.open')?.dataset.providerId;
   $('#usage-strip').innerHTML = data.providers.map(providerCompact).join(''); wireProviderDetails();
+  if (openProviderID) {
+    document.querySelectorAll('.provider-compact').forEach(card => {
+      if (card.dataset.providerId === openProviderID) { card.classList.add('open'); loadCapacityEvidence(card); }
+    });
+  }
   $('#policy').textContent = data.active_policy || '—';
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#active-runs').textContent = data.health.active_runs;
