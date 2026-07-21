@@ -76,7 +76,43 @@ The build creates one ad-hoc-signed `Redline.app` containing the Swift menu proc
 and safe starter configuration. Set `REDLINE_SIGN_IDENTITY` to a Developer ID identity for
 distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directory.
 
+Every build signs the menu process and nested Go service separately with Hardened Runtime enabled.
+Local builds use an ad-hoc identity and no timestamp. Version metadata is configurable:
+
+```bash
+REDLINE_VERSION=0.2.0 REDLINE_BUILD_NUMBER=2 ./scripts/build-macos-app.sh
+```
+
+## Release DMG and notarization
+
+The release packager creates an architecture-labelled drag-to-Applications DMG. A distributable
+build fails closed unless both a Developer ID Application identity and a `notarytool` Keychain
+profile are supplied. Create that profile interactively once:
+
+```bash
+xcrun notarytool store-credentials redline-notary \
+  --apple-id "you@example.com" \
+  --team-id YOUR_TEAM_ID \
+  --password YOUR_APP_SPECIFIC_PASSWORD
+```
+
+Then build the release:
+
+```bash
+REDLINE_VERSION=0.2.0 \
+REDLINE_BUILD_NUMBER=2 \
+REDLINE_SIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" \
+REDLINE_NOTARY_PROFILE=redline-notary \
+./scripts/package-macos-release.sh
+```
+
+The script signs with a secure timestamp, notarizes and staples the app, builds and signs the DMG,
+notarizes and staples the DMG, validates it with Gatekeeper, and retains Apple’s result and issue
+logs plus a SHA-256 checksum beside the release. For a local packaging test only, set `REDLINE_SIGN_IDENTITY=-` and
+`REDLINE_ALLOW_UNNOTARIZED=1`; the resulting DMG is clearly reported as non-distributable.
+
 ## Next native phases
 
-1. Hardened Runtime, Developer ID signing, notarization, Sparkle or another update path, and a DMG.
-2. A richer native popover only if tray workflows outgrow the menu and local dashboard split.
+1. Choose and integrate an update mechanism such as Sparkle, including signed appcast generation.
+2. Add a universal binary build when Intel distribution becomes a product requirement.
+3. A richer native popover only if tray workflows outgrow the menu and local dashboard split.
