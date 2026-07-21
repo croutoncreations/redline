@@ -100,17 +100,24 @@ final class MenuBarController: NSObject {
 
     private func providerSummary(_ badges: [ProviderBadge]) -> NSAttributedString {
         let result = NSMutableAttributedString()
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         for (index, badge) in badges.enumerated() {
             if index > 0 { result.append(NSAttributedString(string: "  ")) }
             let attachment = NSTextAttachment()
             attachment.attachmentCell = NSTextAttachmentCell(
-                imageCell: ProviderArtwork.image(for: badge.provider, template: true, size: 12)
+                imageCell: ProviderArtwork.image(for: badge.provider, template: true, size: 14)
             )
-            result.append(NSAttributedString(attachment: attachment))
+            let artwork = NSMutableAttributedString(attachment: attachment)
+            artwork.addAttribute(
+                .baselineOffset,
+                value: -2.0,
+                range: NSRange(location: 0, length: artwork.length)
+            )
+            result.append(artwork)
             let value = badge.percent.map { " \($0)%" } ?? " —"
             result.append(NSAttributedString(
                 string: value,
-                attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)]
+                attributes: [.font: font]
             ))
         }
         return result
