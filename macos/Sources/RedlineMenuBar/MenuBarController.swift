@@ -6,6 +6,7 @@ final class MenuBarController: NSObject {
     private let apiURL: URL
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
+    private let showAppSetup: @MainActor () -> Void
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
@@ -14,15 +15,21 @@ final class MenuBarController: NSObject {
         actions: StatusPopoverActions(
             showDashboard: { [weak self] in self?.showDashboard() },
             openBrowser: { [weak self] in self?.openDashboardInBrowser() },
+            showAppSetup: showAppSetup,
             quit: { NSApplication.shared.terminate(nil) }
         )
     )
     private var refreshTimer: Timer?
 
-    init(apiURL: URL, supervisor: ServiceSupervisor) {
+    init(
+        apiURL: URL,
+        supervisor: ServiceSupervisor,
+        showAppSetup: @escaping @MainActor () -> Void = {}
+    ) {
         self.apiURL = apiURL
         client = RedlineAPIClient(baseURL: apiURL)
         self.supervisor = supervisor
+        self.showAppSetup = showAppSetup
         popoverModel = PopoverViewModel(client: client)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -66,6 +73,11 @@ final class MenuBarController: NSObject {
 
     func showPopoverPreview() {
         popoverController.showPreviewWindow()
+    }
+
+    func reconnectAfterServiceMigration() async {
+        await supervisor.ensureRunning()
+        await refresh()
     }
 
     private func refresh() async {

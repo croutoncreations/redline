@@ -233,6 +233,10 @@ and operational-health state through a compact menu-bar summary and native quick
 It embeds the full local dashboard in a native app window for management.
 It adopts an already-running Redline service or starts the Go service embedded in its app bundle,
 so the eventual install remains a single application rather than separate UI and daemon packages.
+On first run it can create a safe starter configuration with automatic dispatch disabled. Its
+**App Setup…** flow can enable launch at login and replace an existing `com.jfox.redline`
+LaunchAgent without moving the configured database, queue, history, or run artifacts; the old plist
+is retained as a recoverable backup.
 
 ```bash
 swift test --package-path macos

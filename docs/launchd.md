@@ -4,6 +4,11 @@ Redline can run as a per-user macOS LaunchAgent. The example at
 `deploy/com.jfox.redline.plist.example` deliberately uses placeholders so credentials, account
 paths, and local tool locations are not committed.
 
+The native app now supersedes this manual setup for new installations. Its **App Setup…** flow can
+adopt an existing configuration, register the app at login, stop this LaunchAgent, and retain the
+plist as a recoverable backup. Keep using the instructions below for headless installations or when
+you deliberately want launchd—not the menu-bar app—to own the service.
+
 The service needs an absolute binary path, config path, working directory, log paths, and a `PATH`
 that includes every configured workspace and harness executable (`devx`, `codex`, `claude`, and
 `pi`). If Gatepost captures harness traffic, put its shim directory first and retain the directory

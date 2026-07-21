@@ -11,15 +11,34 @@ availability and API compatibility:
 
 1. If a compatible Redline service is already healthy, the app adopts it and does not start a
    second process. This supports existing launchd installs and prevents duplicate OpenUsage polling.
-2. Otherwise, the app starts the Go binary embedded at `Contents/Resources/bin/redline` using
-   `~/Library/Application Support/Redline/redline.yaml`.
+2. Otherwise, the app starts the Go binary embedded at `Contents/Resources/bin/redline` using the
+   persisted configuration selection or `~/Library/Application Support/Redline/redline.yaml`.
 3. A bundled service is owned by the app and stopped when the app quits. An externally managed
    service is left running.
 
 App-owned service output is retained under `~/Library/Logs/Redline/app-service.*.log`.
 
-The app never exposes the service beyond its configured loopback address. A missing configuration
-is shown as an unavailable state rather than silently creating an unsafe or incomplete setup.
+The app never exposes the service beyond its configured loopback address. On a fresh install it
+copies the bundled starter configuration into Application Support with mode `0600`. The starter
+enables read-only monitoring but leaves automatic dispatch disabled, so merely installing the app
+cannot spend subscription capacity.
+
+## First run and legacy migration
+
+The first-run setup resolves configuration in this order: an explicitly persisted path, an
+existing launchd configuration path, the standard Application Support path, then a new starter
+configuration. This preserves a legacy service's exact storage locations and never overwrites an
+existing file.
+
+When `~/Library/LaunchAgents/com.jfox.redline.plist` exists, **App Setup…** offers an explicit
+migration. Redline first refuses migration while a task is active, enables the main app as a macOS
+login item, and only then stops the legacy service. The old plist is moved into
+`~/Library/Application Support/Redline/Legacy LaunchAgents/`; the config, SQLite database, run
+history, queue, and artifacts remain in their existing locations. If macOS requires login-item
+approval, Redline opens System Settings and leaves the legacy service untouched until approval.
+
+Choosing **Keep Existing Service** preserves the current adoption behavior. App Setup remains
+available from the quick panel for migration later.
 
 ## Current menu
 
@@ -35,6 +54,7 @@ is shown as an unavailable state rather than silently creating an unsafe or inco
 - A native quick-status popover with provider capacity, scheduler and run state, the next queued
   tasks, the latest dispatch decision, and a link to the full dashboard.
 - Show Dashboard, refresh, and quit actions.
+- App Setup for launch-at-login status and recoverable legacy-service migration.
 - Automatic refresh every 20 seconds.
 
 The native window intentionally reuses the live web dashboard for full task/profile CRUD. This
@@ -48,14 +68,12 @@ instead of sending the user to a browser tab.
 open dist/Redline.app
 ```
 
-The build creates one ad-hoc-signed `Redline.app` containing both the Swift menu process and Go
-service. Set `REDLINE_SIGN_IDENTITY` to a Developer ID identity for distributable signing, and
-`REDLINE_APP_OUTPUT_DIR` to change the output directory.
+The build creates one ad-hoc-signed `Redline.app` containing the Swift menu process, Go service,
+and safe starter configuration. Set `REDLINE_SIGN_IDENTITY` to a Developer ID identity for
+distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directory.
 
 ## Next native phases
 
-1. First-run configuration and migration from an existing launchd installation.
-2. Launch-at-login using `SMAppService`, with the app as the only user-facing install.
-3. Native notifications and quick controls such as pause/resume and run-log access.
-4. Hardened Runtime, Developer ID signing, notarization, Sparkle or another update path, and a DMG.
-5. A richer native popover only if tray workflows outgrow the menu and local dashboard split.
+1. Native notifications and quick controls such as pause/resume and run-log access.
+2. Hardened Runtime, Developer ID signing, notarization, Sparkle or another update path, and a DMG.
+3. A richer native popover only if tray workflows outgrow the menu and local dashboard split.

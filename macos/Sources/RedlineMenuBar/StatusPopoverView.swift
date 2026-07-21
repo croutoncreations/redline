@@ -4,6 +4,7 @@ import SwiftUI
 struct StatusPopoverActions {
     let showDashboard: @MainActor () -> Void
     let openBrowser: @MainActor () -> Void
+    let showAppSetup: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
 
@@ -184,6 +185,7 @@ struct StatusPopoverView: View {
             Spacer()
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
+                Button("App Setup…", action: actions.showAppSetup)
                 Divider()
                 Button("Quit Redline", action: actions.quit)
             } label: { Image(systemName: "ellipsis.circle") }
