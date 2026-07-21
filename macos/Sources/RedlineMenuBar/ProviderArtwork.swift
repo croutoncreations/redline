@@ -2,7 +2,7 @@ import AppKit
 
 enum ProviderArtwork {
     static func image(for provider: String, template: Bool, size: CGFloat) -> NSImage {
-        let resource = provider.lowercased() == "claude" ? "claude" : "codex"
+        let resource = provider.lowercased() == "claude" ? "claude" : "chatgpt"
         let developmentURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appending(path: "Resources/\(resource).svg")

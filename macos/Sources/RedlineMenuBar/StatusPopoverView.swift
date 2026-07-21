@@ -88,7 +88,7 @@ struct StatusPopoverView: View {
             HStack {
                 Text("Weekly").foregroundStyle(.secondary)
                 Spacer()
-                if let short = provider.shortPercent { Text("5h \(short)%").foregroundStyle(.secondary) }
+                if let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }
             .font(.system(size: 10))
         }
@@ -109,8 +109,15 @@ struct StatusPopoverView: View {
             if let error = model.errorMessage {
                 Label(error, systemImage: "wifi.exclamationmark").font(.system(size: 11)).foregroundStyle(.red)
             } else if let health = snapshot?.health, health.status != "healthy" {
-                Label("\(health.dispatchErrors) dispatch errors in the last \(health.window)", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11)).foregroundStyle(.orange)
+                let currentFailure = snapshot?.latestAttemptsByProvider.contains { $0.outcome == "error" } == true
+                Label(
+                    currentFailure
+                        ? "A provider's latest dispatch check failed"
+                        : "\(health.dispatchErrors) earlier dispatch errors; latest checks are succeeding",
+                    systemImage: currentFailure ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark"
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(currentFailure ? .red : .orange)
             }
         }
     }
@@ -118,13 +125,20 @@ struct StatusPopoverView: View {
     @ViewBuilder private var queueSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionLabel("NEXT IN QUEUE")
-            let tasks = Array((snapshot?.tasks ?? []).filter { $0.state == "queued" }.prefix(3))
+            let tasks = Array(
+                (snapshot?.tasks ?? [])
+                    .filter { $0.state == "queued" }
+                    .prefix(3)
+            )
             if tasks.isEmpty {
                 emptyRow("No queued jobs", symbol: "checkmark.circle")
             } else {
-                ForEach(tasks) { task in
+                ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                     HStack(spacing: 9) {
-                        Text("P\(task.priority)").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(.red)
+                        Text("\(index + 1).")
+                            .frame(width: 16, alignment: .trailing)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(task.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                             Text("\(task.providerAccountID) · \(task.dispatchTier.replacingOccurrences(of: "_", with: " "))")
@@ -139,16 +153,23 @@ struct StatusPopoverView: View {
     }
 
     @ViewBuilder private var latestDecision: some View {
-        if let attempt = snapshot?.latestAttempt {
+        let decisions = latestProviderDecisions
+        if !decisions.isEmpty {
             VStack(alignment: .leading, spacing: 7) {
-                sectionLabel("LATEST DECISION")
-                HStack(alignment: .top, spacing: 9) {
-                    Image(systemName: attempt.outcome == "error" ? "xmark.circle.fill" : "pause.circle.fill")
-                        .foregroundStyle(attempt.outcome == "error" ? .red : .orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(attempt.decision ?? attempt.outcome.uppercased()) · \(attempt.providerAccountID)")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(attempt.reason ?? "No reason reported").font(.system(size: 10)).foregroundStyle(.secondary)
+                sectionLabel("LATEST DECISIONS")
+                ForEach(decisions, id: \.attempt.id) { item in
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(nsImage: ProviderArtwork.image(
+                            for: item.provider.provider,
+                            template: item.provider.provider.lowercased() != "claude",
+                            size: 13
+                        ))
+                        .resizable().frame(width: 13, height: 13)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(item.provider.displayName) · \(item.attempt.decision ?? item.attempt.outcome.uppercased())")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(item.attempt.reason ?? "No reason reported").font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -213,6 +234,35 @@ struct StatusPopoverView: View {
         if percent <= 20 { return .red }
         if percent <= 40 { return .orange }
         return .green
+    }
+
+    private var latestProviderDecisions: [(provider: ProviderSummary, attempt: AttemptSummary)] {
+        let attempts = snapshot?.latestAttemptsByProvider ?? []
+        return (snapshot?.providers ?? [])
+            .sorted { providerRank($0.provider) < providerRank($1.provider) }
+            .compactMap { provider in
+                attempts.first { $0.providerAccountID == provider.id }.map { (provider, $0) }
+            }
+    }
+
+    private func resetSummary(_ provider: ProviderSummary) -> String? {
+        if let short = provider.shortPercent {
+            let reset = relativeReset(provider.snapshot?.short?.resetsAt).map { " · \($0)" } ?? ""
+            return "5h \(short)%\(reset)"
+        }
+        return relativeReset(provider.snapshot?.weekly?.resetsAt).map { "Resets \($0)" }
+    }
+
+    private func relativeReset(_ timestamp: String?) -> String? {
+        guard let timestamp else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        guard let date = fractional.date(from: timestamp) ?? plain.date(from: timestamp) else { return nil }
+        let seconds = max(0, date.timeIntervalSinceNow)
+        if seconds < 3600 { return "in \(max(1, Int(ceil(seconds / 60))))m" }
+        if seconds < 86400 { return "in \(Int(ceil(seconds / 3600)))h" }
+        return "in \(Int(ceil(seconds / 86400)))d"
     }
 
     private func providerRank(_ provider: String) -> Int {

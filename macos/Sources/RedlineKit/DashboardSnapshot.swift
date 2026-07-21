@@ -29,6 +29,10 @@ public struct DashboardSnapshot: Codable, Sendable {
     }
 
     public var latestAttempt: AttemptSummary? { attempts.first }
+    public var latestAttemptsByProvider: [AttemptSummary] {
+        var seen = Set<String>()
+        return attempts.filter { seen.insert($0.providerAccountID).inserted }
+    }
 
     enum CodingKeys: String, CodingKey { case health, scheduler, providers, tasks, runs, attempts }
 
@@ -228,7 +232,7 @@ public struct TrayState: Sendable {
         if snapshot.health.activeRuns > 0 || snapshot.scheduler.running {
             level = .running
             activity = .running
-        } else if snapshot.health.status != "healthy" && snapshot.health.status != "ok" {
+        } else if snapshot.latestAttemptsByProvider.contains(where: { $0.outcome == "error" }) {
             level = .degraded
             activity = .attention
         } else if let percent = lowestWeeklyPercent, percent <= 20 {
