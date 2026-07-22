@@ -24,11 +24,13 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
+	"github.com/jfox/redline/internal/nativeusage"
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/tokenlog"
+	"github.com/jfox/redline/internal/usage"
 	"github.com/jfox/redline/internal/workspace"
 )
 
@@ -55,6 +57,7 @@ type Server struct {
 	scheduler    *autoscheduler.Loop
 	usageMonitor *autoscheduler.Loop
 	discovery    HarnessDiscoverer
+	usageSources *usage.Manager
 	catalogMu    sync.Mutex
 	catalog      discovery.Catalog
 	catalogAt    time.Time
@@ -113,6 +116,11 @@ func newServer(
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 	}
+	server.usageSources = usage.NewManager(
+		openusage.Source{},
+		nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now},
+		now,
+	)
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -252,7 +260,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
 		return
 	}
-	snapshot, _, err := s.store.LatestSnapshot(r.Context(), configured.Provider)
+	snapshot, _, err := s.store.LatestSnapshotFromSource(r.Context(), configured.Provider, s.usageSources.Status(r.PathValue("provider")).Active)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1362,8 +1370,7 @@ func (s *Server) fetchAndStore(
 	if !ok {
 		return decision.UsageSnapshot{}, config.Provider{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	client := openusage.Client{BaseURL: configured.OpenUsageURL}
-	snapshot, raw, err := client.Fetch(ctx, configured.Provider)
+	snapshot, raw, err := s.usageSources.Fetch(ctx, providerID, configured)
 	if err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}

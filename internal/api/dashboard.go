@@ -14,6 +14,7 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
+	"github.com/jfox/redline/internal/usage"
 )
 
 //go:embed dashboard/*
@@ -32,11 +33,12 @@ type dashboardResponse struct {
 }
 
 type dashboardProvider struct {
-	ID       string                  `json:"id"`
-	Provider string                  `json:"provider"`
-	Paused   bool                    `json:"paused"`
-	Snapshot *decision.UsageSnapshot `json:"snapshot,omitempty"`
-	Error    string                  `json:"error,omitempty"`
+	ID          string                  `json:"id"`
+	Provider    string                  `json:"provider"`
+	Paused      bool                    `json:"paused"`
+	Snapshot    *decision.UsageSnapshot `json:"snapshot,omitempty"`
+	Error       string                  `json:"error,omitempty"`
+	UsageSource usage.Status            `json:"usage_source"`
 }
 
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
@@ -161,12 +163,12 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	sort.Strings(providerIDs)
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
-		item := dashboardProvider{ID: id, Provider: configured.Provider}
+		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id)}
 		item.Paused, err = s.store.ProviderPaused(ctx, id)
 		if err != nil {
 			return dashboardResponse{}, err
 		}
-		snapshot, _, snapshotErr := s.store.LatestSnapshot(ctx, configured.Provider)
+		snapshot, _, snapshotErr := s.store.LatestSnapshotFromSource(ctx, configured.Provider, item.UsageSource.Active)
 		if snapshotErr != nil {
 			if errors.Is(snapshotErr, store.ErrNotFound) {
 				item.Error = "No usage snapshot has been collected yet."

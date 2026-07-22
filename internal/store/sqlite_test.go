@@ -60,6 +60,28 @@ func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	}
 }
 
+func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	older := usageSnapshot(time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC), .52)
+	older.Source = "openusage"
+	newer := usageSnapshot(older.ObservedAt.Add(time.Minute), .51)
+	newer.Source = "native"
+	if err := db.SaveSnapshot(t.Context(), older, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(t.Context(), newer, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := db.LatestSnapshotFromSource(t.Context(), older.Provider, "openusage")
+	if err != nil || got.Source != "openusage" || got.Weekly.Remaining != .52 {
+		t.Fatalf("snapshot=%#v err=%v", got, err)
+	}
+}
+
 func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
 	db, err := store.Open(path)

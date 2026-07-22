@@ -11,12 +11,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 )
 
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+}
+
+// Source adapts the OpenUsage loopback API to the shared usage-source contract.
+// An empty URL in auto mode probes the conventional local endpoint.
+type Source struct{ HTTPClient *http.Client }
+
+func (Source) Name() string { return "openusage" }
+
+func (s Source) Fetch(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	baseURL := strings.TrimSpace(provider.OpenUsageURL)
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:6736"
+	}
+	return (Client{BaseURL: baseURL, HTTPClient: s.HTTPClient}).Fetch(ctx, provider.Provider)
 }
 
 func (c Client) Fetch(ctx context.Context, provider string) (decision.UsageSnapshot, []byte, error) {

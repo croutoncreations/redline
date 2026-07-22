@@ -96,9 +96,17 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 
 type Provider struct {
 	Provider         string                `yaml:"provider"`
+	UsageSource      string                `yaml:"usage_source"`
 	OpenUsageURL     string                `yaml:"openusage_url"`
 	WindowWeeklyCost float64               `yaml:"window_weekly_cost"`
 	ModelGroups      map[string]ModelGroup `yaml:"model_groups"`
+}
+
+func (p Provider) EffectiveUsageSource() string {
+	if source := strings.ToLower(strings.TrimSpace(p.UsageSource)); source != "" {
+		return source
+	}
+	return "auto"
 }
 
 type ModelGroup struct {
@@ -175,8 +183,15 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("at least one provider is required")
 	}
 	for name, provider := range cfg.Providers {
-		if provider.Provider == "" || provider.OpenUsageURL == "" {
-			return Config{}, fmt.Errorf("provider %q requires provider and openusage_url", name)
+		if provider.Provider == "" {
+			return Config{}, fmt.Errorf("provider %q requires provider", name)
+		}
+		source := provider.EffectiveUsageSource()
+		if source != "auto" && source != "openusage" && source != "native" {
+			return Config{}, fmt.Errorf("provider %q usage_source must be auto, openusage, or native", name)
+		}
+		if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
+			return Config{}, fmt.Errorf("provider %q openusage source requires openusage_url", name)
 		}
 		if err := fraction("window_weekly_cost", provider.WindowWeeklyCost); err != nil {
 			return Config{}, fmt.Errorf("provider %q: %w", name, err)

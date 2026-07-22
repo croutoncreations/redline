@@ -16,7 +16,7 @@ CLI / future MCP / future UI
        local HTTP service
          |           |
          v           v
-      SQLite      OpenUsage + Gatepost logs
+      SQLite      OpenUsage/native + Gatepost logs
          |
          v
  simulated scheduler
@@ -29,7 +29,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 
 ## Implemented behavior
 
-- Codex and Claude usage ingestion from OpenUsage `/v1/usage/{provider}`.
+- Sticky per-provider allowance-source selection: reuse a healthy OpenUsage loopback API, then
+  fall back to native Codex and Claude collectors after repeated failures.
 - Model-specific Claude allowance ingestion and scheduling; Fable tasks require both shared Claude
   capacity and the Fable weekly pool, while Haiku, Sonnet, and Opus use shared pools only.
 - Optional 5-hour limits: Codex works when its temporary short limit is absent.
@@ -69,7 +70,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 
 ## Quick start
 
-Install and run OpenUsage, then copy and adjust the example config:
+Copy and adjust the example config. Redline reuses OpenUsage when it is running, but can collect
+Codex and Claude subscription windows natively when it is unavailable:
 
 ```bash
 cp config.example.yaml redline.yaml
@@ -442,3 +444,6 @@ run logs, live updates, responsive layout, and loading/error states without touc
 using provider quota.
 
 See [the observation report](docs/phase-1-observation.md) for live-provider findings.
+
+Ongoing release-hardening and deferred product work is tracked in
+[the remaining-work checklist](docs/remaining-work.md).

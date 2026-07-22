@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
@@ -502,16 +503,33 @@ func (d *DB) LatestSnapshot(
 	ctx context.Context,
 	provider string,
 ) (decision.UsageSnapshot, []byte, error) {
-	const query = `SELECT id, provider, observed_at, short_remaining, short_resets_at,
+	return d.latestSnapshot(ctx, provider, "")
+}
+
+func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
+	if strings.TrimSpace(source) == "" {
+		return d.LatestSnapshot(ctx, provider)
+	}
+	return d.latestSnapshot(ctx, provider, source)
+}
+
+func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
+	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload
-FROM usage_snapshots WHERE provider = ? ORDER BY observed_at DESC, id DESC LIMIT 1`
+FROM usage_snapshots WHERE provider = ?`
+	args := []any{provider}
+	if source != "" {
+		query += ` AND source = ?`
+		args = append(args, source)
+	}
+	query += ` ORDER BY observed_at DESC, id DESC LIMIT 1`
 	var s decision.UsageSnapshot
 	var snapshotID int64
 	var observedAt, weeklyReset string
 	var shortRemaining sql.NullFloat64
 	var shortReset sql.NullString
 	var raw []byte
-	err := d.db.QueryRowContext(ctx, query, provider).Scan(
+	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Provider,
 		&observedAt,

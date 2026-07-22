@@ -27,12 +27,16 @@ notifications:
 providers:
   codex-main:
     provider: codex
+    # auto prefers a healthy local OpenUsage API and falls back to Redline's
+    # native collector after repeated failures. Use openusage or native to pin.
+    usage_source: auto
     openusage_url: http://127.0.0.1:6736
     # Bootstrap fallback. Redline learns an observed ratio when a 5-hour
     # window is present and enough paired snapshot history is available.
     window_weekly_cost: 0.10
   claude-main:
     provider: claude
+    usage_source: auto
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08

@@ -25,6 +25,7 @@ function meter(label, remaining, reset) {
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
+  const source = item.usage_source?.active || snap?.source || 'unknown';
   const icon = provider === 'claude' ? 'claude.svg' : 'codex.svg';
   const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0, tone = value < 35 ? 'warn' : '';
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
@@ -37,7 +38,8 @@ function providerCompact(item) {
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
-  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
+  const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
+  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {
   document.querySelectorAll('.provider-compact').forEach(card => {

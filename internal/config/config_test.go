@@ -115,6 +115,32 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestUsageSourceDefaultsToAutoAndAllowsNativeWithoutOpenUsageURL(t *testing.T) {
+	configured := strings.Replace(validConfig, "    openusage_url: http://127.0.0.1:6736\n", "    usage_source: native\n", 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["codex-main"].EffectiveUsageSource() != "native" ||
+		(config.Provider{}).EffectiveUsageSource() != "auto" {
+		t.Fatalf("providers=%#v", cfg.Providers)
+	}
+}
+
+func TestExplicitOpenUsageSourceRequiresURL(t *testing.T) {
+	configured := strings.Replace(validConfig, "    openusage_url: http://127.0.0.1:6736\n", "    usage_source: openusage\n", 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil {
+		t.Fatal("expected explicit OpenUsage URL error")
+	}
+}
+
+func TestLoadRejectsUnknownUsageSource(t *testing.T) {
+	configured := strings.Replace(validConfig, "    openusage_url: http://127.0.0.1:6736", "    usage_source: random\n    openusage_url: http://127.0.0.1:6736", 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil {
+		t.Fatal("expected invalid usage source error")
+	}
+}
+
 func TestLoadRejectsInvalidFractions(t *testing.T) {
 	path := writeConfig(t, strings.Replace(validConfig, "window_weekly_cost: 0.10", "window_weekly_cost: 1.10", 1))
 	if _, err := config.Load(path); err == nil {
