@@ -69,7 +69,8 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 	notifier := configuredNotifier(cfg, database, now)
 	defaultExecutor := execution.Executor{
 		Store: database, Workspaces: workspace.Manager{OutputDirectory: cfg.ArtifactsDirectory()}, Harness: &harness.Adapter{},
-		Notifier: notifier, OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
+		Notifier: notifier, UsageRecorder: tokenlog.RunUsageRecorder{Store: database},
+		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
 }
@@ -298,10 +299,11 @@ func (s *Server) providerCapacity(w http.ResponseWriter, r *http.Request) {
 }
 
 type tokenSyncResult struct {
-	Provider string    `json:"provider"`
-	Read     int       `json:"read"`
-	Inserted int       `json:"inserted"`
-	Cursor   time.Time `json:"cursor,omitempty"`
+	Provider          string    `json:"provider"`
+	Read              int       `json:"read"`
+	Inserted          int       `json:"inserted"`
+	OwnedRunsInserted int       `json:"owned_runs_inserted,omitempty"`
+	Cursor            time.Time `json:"cursor,omitempty"`
 }
 
 func (s *Server) syncProviderTokens(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +319,10 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	configured, ok := s.config.Providers[providerID]
 	if !ok {
 		return tokenSyncResult{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	ownedInserted, err := s.syncOwnedRunTokens(ctx, providerID)
+	if err != nil {
+		return tokenSyncResult{}, err
 	}
 	if strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase) == "" {
 		return tokenSyncResult{}, fmt.Errorf("usage_monitor gatepost_database is not configured")
@@ -362,7 +368,48 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 			latest = observation.ObservedAt
 		}
 	}
-	return tokenSyncResult{Provider: configured.Provider, Read: len(observations), Inserted: inserted, Cursor: latest}, nil
+	return tokenSyncResult{
+		Provider: configured.Provider, Read: len(observations), Inserted: inserted,
+		OwnedRunsInserted: ownedInserted, Cursor: latest,
+	}, nil
+}
+
+// syncOwnedRunTokens recovers usage from completed Redline runs. The stable
+// redline-run source IDs make this safe to repeat on every monitor cycle and
+// ensure a service restart cannot permanently lose an owned run's accounting.
+func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int, error) {
+	runs, err := s.store.ListRuns(ctx, 1000)
+	if err != nil {
+		return 0, err
+	}
+	recorder := tokenlog.RunUsageRecorder{Store: s.store}
+	inserted := 0
+	for _, run := range runs {
+		if run.ProviderAccountID != providerID || run.CompletedAt == nil || run.OutputFile == "" ||
+			(run.State != domain.RunCompleted && run.State != domain.RunFailed) {
+			continue
+		}
+		if _, err := os.Stat(run.OutputFile); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return inserted, fmt.Errorf("inspect run %q usage artifact: %w", run.ID, err)
+		}
+		task, err := s.store.GetTask(ctx, run.TaskID)
+		if err != nil {
+			return inserted, fmt.Errorf("load run %q task for usage recovery: %w", run.ID, err)
+		}
+		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+		if err != nil {
+			return inserted, fmt.Errorf("load run %q profile for usage recovery: %w", run.ID, err)
+		}
+		count, err := recorder.RecordRunUsage(ctx, run, profile, run.OutputFile, *run.CompletedAt)
+		if err != nil {
+			return inserted, fmt.Errorf("recover run %q usage: %w", run.ID, err)
+		}
+		inserted += count
+	}
+	return inserted, nil
 }
 
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
@@ -1153,6 +1200,10 @@ func (s *Server) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, os.ErrNotExist) {
+		if stream != "stdout" && stream != "stderr" {
+			writeJSON(w, http.StatusOK, artifacts.Tail{})
+			return
+		}
 		writeJSON(w, http.StatusNotFound, problem{Error: "artifact file does not exist"})
 		return
 	}

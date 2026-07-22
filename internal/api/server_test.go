@@ -316,6 +316,69 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 	}
 }
 
+func TestTokenSyncBackfillsCompletedOwnedRun(t *testing.T) {
+	directory := t.TempDir()
+	viewerPath := filepath.Join(directory, "viewer.db")
+	viewer, err := sql.Open("sqlite", viewerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = viewer.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, model TEXT, context_tokens INTEGER, output_tokens INTEGER);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = viewer.Close()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "claude-profile", ProviderAccountID: "claude-main", HarnessType: "claude-code",
+		Model: "claude-haiku", WorkspaceProvider: "existing-directory",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "owned-task", Name: "Owned task", ExecutionProfileID: "claude-profile", Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.AdmitTask(t.Context(), "owned-run", "owned-task", "claude-main", "", apiNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkRunRunning(t.Context(), run.ID, domain.Workspace{Directory: directory}); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(directory, "stdout.jsonl")
+	if err := os.WriteFile(output, []byte(`{"type":"result","modelUsage":{"claude-haiku":{"inputTokens":12,"outputTokens":3,"cacheReadInputTokens":4,"cacheCreationInputTokens":1}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completedAt := apiNow.Add(time.Minute)
+	if err := db.CompleteRun(t.Context(), run.ID, domain.RunCompletion{
+		State: domain.RunCompleted, ExitCode: 0, OutputFile: output,
+	}, completedAt); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.UsageMonitor.GatepostDatabase = viewerPath
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return completedAt }))
+	defer server.Close()
+	result := postJSON[struct {
+		OwnedRunsInserted int `json:"owned_runs_inserted"`
+	}](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	if result.OwnedRunsInserted != 1 {
+		t.Fatalf("owned_runs_inserted = %d", result.OwnedRunsInserted)
+	}
+	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	if err != nil || len(observations) != 1 || observations[0].Source != "redline-run" || observations[0].CacheReadTokens != 4 {
+		t.Fatalf("observations=%#v err=%v", observations, err)
+	}
+}
+
 func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
 	profile := postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
@@ -1107,6 +1170,31 @@ func TestRunLogsRejectArtifactOutsideConfiguredRoot(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestMissingOptionalLifecycleLogIsAnEmptySuccessfulTail(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "logs-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "logs-task", "name": "Logs task", "execution_profile_id": "logs-profile", "type": "one_off",
+	})
+	if _, err := db.AdmitTask(t.Context(), "logs-run", "logs-task", "codex-main", "revision", apiNow); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(server.URL + "/v1/runs/logs-run/logs?stream=finalize_stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tail artifacts.Tail
+	if err := json.NewDecoder(resp.Body).Decode(&tail); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || tail.Content != "" || tail.SizeBytes != 0 || tail.Truncated {
+		t.Fatalf("status=%d tail=%#v", resp.StatusCode, tail)
 	}
 }
 

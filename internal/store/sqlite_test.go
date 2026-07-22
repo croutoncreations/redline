@@ -41,6 +41,65 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := usageSnapshot(time.Date(2026, 7, 21, 17, 4, 35, 201000000, time.UTC), .52)
+	snapshot.Provider = "claude"
+	for range 2 {
+		if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"same":true}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListSnapshots(t.Context(), "claude", 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("snapshots=%#v err=%v", got, err)
+	}
+}
+
+func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := usageSnapshot(time.Date(2026, 7, 21, 17, 4, 35, 0, time.UTC), .52)
+	if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP INDEX idx_usage_snapshots_identity;
+DELETE FROM schema_migrations WHERE version = 15;
+INSERT INTO usage_snapshots (
+    provider, observed_at, short_remaining, short_resets_at,
+    weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+)
+SELECT provider, observed_at, short_remaining, short_resets_at,
+       weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+FROM usage_snapshots LIMIT 1;`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, err := db.ListSnapshots(t.Context(), "codex", 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("snapshots=%#v err=%v", got, err)
+	}
+}
+
 func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {

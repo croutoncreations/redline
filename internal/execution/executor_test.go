@@ -97,6 +97,34 @@ func TestExecutionEmitsCompletedNotification(t *testing.T) {
 	}
 }
 
+func TestExecutionRecordsOwnedRunUsageWithoutChangingOutcome(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	recorder := &fakeUsageRecorder{err: errors.New("malformed usage")}
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}},
+		Harness:       &fakeHarness{result: harness.Result{ExitCode: 0, OutputFile: "/tmp/out"}},
+		UsageRecorder: recorder, OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := db.GetRun(context.Background(), run.ID)
+	if stored.State != domain.RunCompleted || recorder.calls != 1 {
+		t.Fatalf("run=%#v recorder=%#v", stored, recorder)
+	}
+	events, err := db.ListRunEvents(t.Context(), run.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		found = found || event.Type == domain.RunEventUsageFailed
+	}
+	if !found {
+		t.Fatalf("usage failure missing from events: %#v", events)
+	}
+}
+
 func TestNotificationFailureDoesNotChangeRunResult(t *testing.T) {
 	db, run, task, profile := admittedRun(t, domain.OneOff)
 	executor := execution.Executor{
@@ -293,6 +321,16 @@ func (f *failingMarkStore) RecordRunEvent(context.Context, domain.RunEvent) (dom
 type fakeNotifier struct {
 	events []domain.NotificationEvent
 	err    error
+}
+
+type fakeUsageRecorder struct {
+	calls int
+	err   error
+}
+
+func (r *fakeUsageRecorder) RecordRunUsage(context.Context, domain.Run, domain.ExecutionProfile, string, time.Time) (int, error) {
+	r.calls++
+	return 0, r.err
 }
 
 func (n *fakeNotifier) Notify(_ context.Context, event domain.NotificationEvent) error {

@@ -34,11 +34,16 @@ type Notifier interface {
 	Notify(context.Context, domain.NotificationEvent) error
 }
 
+type UsageRecorder interface {
+	RecordRunUsage(context.Context, domain.Run, domain.ExecutionProfile, string, time.Time) (int, error)
+}
+
 type Executor struct {
 	Store           Store
 	Workspaces      WorkspaceManager
 	Harness         Harness
 	Notifier        Notifier
+	UsageRecorder   UsageRecorder
 	OutputDirectory string
 	Now             func() time.Time
 }
@@ -130,6 +135,15 @@ func (e Executor) Execute(
 		RunID: run.ID, OutputDirectory: e.OutputDirectory,
 		Task: task, Profile: profile, Workspace: prepared,
 	})
+	if e.UsageRecorder != nil && harnessResult.OutputFile != "" {
+		inserted, usageErr := e.UsageRecorder.RecordRunUsage(ctx, run, profile, harnessResult.OutputFile, e.now().UTC())
+		if usageErr != nil {
+			log.Printf("redline run %s usage accounting failed: %v", run.ID, usageErr)
+			e.recordEvent(ctx, run.ID, domain.RunEventUsageFailed, map[string]any{"error": usageErr.Error()})
+		} else {
+			e.recordEvent(ctx, run.ID, domain.RunEventUsageRecorded, map[string]any{"inserted": inserted})
+		}
+	}
 	agentSucceeded := harnessErr == nil && harnessResult.ExitCode == 0
 	state := domain.RunCompleted
 	agentError := ""

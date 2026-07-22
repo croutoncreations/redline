@@ -282,6 +282,27 @@ FROM usage_snapshots;
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (14)`); err != nil {
 			return fmt.Errorf("record task dispatch policy migration: %w", err)
 		}
+		version = 14
+	}
+	if version < 15 {
+		hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
+		if err != nil {
+			return err
+		}
+		if hasSnapshots {
+			if _, err := tx.ExecContext(ctx, `
+DELETE FROM usage_snapshots
+WHERE id NOT IN (
+    SELECT MAX(id) FROM usage_snapshots GROUP BY provider, observed_at, source
+);
+CREATE UNIQUE INDEX idx_usage_snapshots_identity
+ON usage_snapshots(provider, observed_at, source);`); err != nil {
+				return fmt.Errorf("deduplicate usage snapshots: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (15)`); err != nil {
+			return fmt.Errorf("record usage snapshot identity migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -427,7 +448,7 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 		return fmt.Errorf("begin snapshot save: %w", err)
 	}
 	defer tx.Rollback()
-	const query = `INSERT INTO usage_snapshots (
+	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -446,6 +467,16 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count saved usage snapshot: %w", err)
+	}
+	if inserted == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit duplicate snapshot save: %w", err)
+		}
+		return nil
 	}
 	snapshotID, err := result.LastInsertId()
 	if err != nil {

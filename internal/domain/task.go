@@ -195,6 +195,8 @@ const (
 	RunEventHarnessStarted    = "harness.started"
 	RunEventHarnessCompleted  = "harness.completed"
 	RunEventHarnessFailed     = "harness.failed"
+	RunEventUsageRecorded     = "usage.recorded"
+	RunEventUsageFailed       = "usage.failed"
 	RunEventFinalizeStarted   = "finalize.started"
 	RunEventFinalizeCompleted = "finalize.completed"
 	RunEventFinalizeFailed    = "finalize.failed"
