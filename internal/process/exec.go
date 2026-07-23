@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 type ExecRunner struct{}
@@ -12,10 +13,22 @@ type ExecRunner struct{}
 func (ExecRunner) Run(ctx context.Context, command Command) (int, error) {
 	cmd := exec.CommandContext(ctx, command.Name, command.Args...)
 	cmd.Dir = command.Dir
+	environment := command.Env
 	if command.Env != nil {
-		cmd.Env = command.Env
+		environment = append([]string(nil), command.Env...)
 	} else {
-		cmd.Env = os.Environ()
+		environment = os.Environ()
+	}
+	if command.Dir != "" {
+		filtered := environment[:0]
+		for _, variable := range environment {
+			if !strings.HasPrefix(variable, "PWD=") {
+				filtered = append(filtered, variable)
+			}
+		}
+		cmd.Env = append(filtered, "PWD="+command.Dir)
+	} else {
+		cmd.Env = environment
 	}
 	cmd.Stdin = command.Stdin
 	cmd.Stdout = command.Stdout

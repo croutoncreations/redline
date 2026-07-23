@@ -69,6 +69,28 @@ func TestExplicitNativeNeverCallsOpenUsage(t *testing.T) {
 	}
 }
 
+func TestExplicitOpenUsageNeverCallsNative(t *testing.T) {
+	now := time.Now()
+	open := &fakeSource{name: "openusage", results: []sourceResult{{snapshot: snapshot("openusage", now)}}}
+	native := &fakeSource{name: "native"}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	got, _, err := manager.Fetch(context.Background(), "codex-main", config.Provider{Provider: "codex", UsageSource: "openusage"})
+	if err != nil || got.Source != "openusage" || native.calls != 0 {
+		t.Fatalf("snapshot=%#v err=%v native_calls=%d", got, err, native.calls)
+	}
+}
+
+func TestExplicitNativeFailureNeverCallsOpenUsage(t *testing.T) {
+	now := time.Now()
+	open := &fakeSource{name: "openusage"}
+	native := &fakeSource{name: "native", results: []sourceResult{{err: errors.New("native error")}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	_, _, err := manager.Fetch(context.Background(), "codex-main", config.Provider{Provider: "codex", UsageSource: "native"})
+	if err == nil || open.calls != 0 {
+		t.Fatalf("err=%v open_calls=%d (expected error and no open calls)", err, open.calls)
+	}
+}
+
 type sourceResult struct {
 	snapshot decision.UsageSnapshot
 	raw      []byte

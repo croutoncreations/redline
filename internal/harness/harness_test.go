@@ -51,10 +51,15 @@ func TestClaudeAdapterBuildsNoninteractiveCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "--print --output-format stream-json --verbose --permission-mode auto --model sonnet --effort high"
-	if runner.command.Name != "claude" || strings.Join(runner.command.Args, " ") != want ||
+	wantPrefix := "--print --output-format stream-json --verbose --permission-mode auto --model sonnet --effort high --append-system-prompt"
+	if runner.command.Name != "claude" || !strings.HasPrefix(strings.Join(runner.command.Args, " "), wantPrefix) ||
 		runner.command.Dir != "/tmp/work" || runner.stdin != "review auth" {
 		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
+	}
+	systemPrompt := runner.command.Args[len(runner.command.Args)-1]
+	if !strings.Contains(systemPrompt, `"/tmp/work"`) ||
+		!strings.Contains(systemPrompt, "Do not read or modify a parent checkout") {
+		t.Fatalf("workspace system prompt = %q", systemPrompt)
 	}
 }
 
@@ -106,7 +111,12 @@ func TestAdaptersPassMinimalCustomizationFlags(t *testing.T) {
 			if test.harnessType == "codex-cli" {
 				want = append(want, "-")
 			}
-			got := runner.command.Args[len(runner.command.Args)-len(want):]
+			got := runner.command.Args
+			if test.harnessType == "codex-cli" {
+				got = got[len(got)-len(want):]
+			} else {
+				got = got[len(got)-len(want)-2 : len(got)-2]
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("args = %#v", runner.command.Args)
 			}

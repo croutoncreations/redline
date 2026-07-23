@@ -95,6 +95,7 @@ func buildCommand(
 			base.Args = append(base.Args, "--model", request.Profile.Model)
 		}
 		base.Args = append(base.Args, request.Profile.HarnessArgs...)
+		base.Args = append(base.Args, "--append-system-prompt", claudeWorkspaceBoundary(request.Workspace.Directory))
 		base.Stdin = strings.NewReader(prompt)
 	case "pi":
 		base.Name = "pi"
@@ -122,6 +123,15 @@ func buildCommand(
 		return redprocess.Command{}, fmt.Errorf("unsupported harness %q", request.Profile.HarnessType)
 	}
 	return base, nil
+}
+
+func claudeWorkspaceBoundary(directory string) string {
+	return fmt.Sprintf(
+		`Your exact workspace directory is %q. Perform all task work inside that directory. `+
+			`Resolve every relative path from that directory, and use that directory—not another checkout—as the project root. `+
+			`Do not read or modify a parent checkout or another worktree.`,
+		directory,
+	)
 }
 
 func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
