@@ -462,6 +462,154 @@ func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
 	}
 }
 
+func TestAdmissionAllowsConfiguredProviderConcurrency(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	createAdmissionTasks(t, db, now, "first", "second", "third")
+	limits := store.AdmissionLimits{Provider: 2}
+	for index, taskID := range []string{"first", "second"} {
+		if _, err := db.AdmitTaskWithLimits(t.Context(), fmt.Sprintf("run-%d", index), taskID,
+			"codex-main", "rev", []string{"weekly"}, limits, now); err != nil {
+			t.Fatalf("admit %s: %v", taskID, err)
+		}
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-3", "third", "codex-main", "rev",
+		[]string{"weekly"}, limits, now); !errors.Is(err, store.ErrConflict) ||
+		!strings.Contains(err.Error(), "provider concurrency limit 2") {
+		t.Fatalf("expected provider concurrency conflict, got %v", err)
+	}
+}
+
+func TestAdmissionEnforcesOnlyConfiguredPoolLimits(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
+	limits := store.AdmissionLimits{Provider: 3, Pools: map[string]int{"model:fable:weekly": 1}}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-fable-one", "fable-one", "claude-main", "rev",
+		[]string{"session", "weekly", "model:fable:weekly"}, limits, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-fable-two", "fable-two", "claude-main", "rev",
+		[]string{"session", "weekly", "model:fable:weekly"}, limits, now); !errors.Is(err, store.ErrConflict) ||
+		!strings.Contains(err.Error(), `allowance pool "model:fable:weekly" concurrency limit 1`) {
+		t.Fatalf("expected Fable pool conflict, got %v", err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-opus", "opus", "claude-main", "rev",
+		[]string{"session", "weekly"}, limits, now); err != nil {
+		t.Fatalf("unlimited shared pools should admit Opus: %v", err)
+	}
+}
+
+func TestConcurrentAdmissionHonorsConfiguredProviderLimit(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	createAdmissionTasks(t, db, now, "first", "second", "third")
+	start := make(chan struct{})
+	results := make(chan error, 3)
+	var workers sync.WaitGroup
+	for index, taskID := range []string{"first", "second", "third"} {
+		workers.Add(1)
+		go func(index int, taskID string) {
+			defer workers.Done()
+			<-start
+			_, err := db.AdmitTaskWithLimits(context.Background(), fmt.Sprintf("parallel-%d", index),
+				taskID, "codex-main", "rev", []string{"weekly"}, store.AdmissionLimits{Provider: 2}, now)
+			results <- err
+		}(index, taskID)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	succeeded, conflicted := 0, 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		} else if errors.Is(err, store.ErrConflict) {
+			conflicted++
+		} else {
+			t.Fatalf("unexpected admission error: %v", err)
+		}
+	}
+	if succeeded != 2 || conflicted != 1 {
+		t.Fatalf("admissions succeeded=%d conflicted=%d", succeeded, conflicted)
+	}
+}
+
+func TestConcurrentAdmissionHonorsConfiguredPoolLimit(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
+	start := make(chan struct{})
+	type admission struct {
+		taskID string
+		err    error
+	}
+	results := make(chan admission, 3)
+	var workers sync.WaitGroup
+	for index, candidate := range []struct {
+		taskID string
+		pools  []string
+	}{
+		{taskID: "fable-one", pools: []string{"weekly", "model:fable:weekly"}},
+		{taskID: "fable-two", pools: []string{"weekly", "model:fable:weekly"}},
+		{taskID: "opus", pools: []string{"weekly"}},
+	} {
+		workers.Add(1)
+		go func(index int, candidate struct {
+			taskID string
+			pools  []string
+		}) {
+			defer workers.Done()
+			<-start
+			_, err := db.AdmitTaskWithLimits(context.Background(), fmt.Sprintf("pool-parallel-%d", index),
+				candidate.taskID, "claude-main", "rev", candidate.pools,
+				store.AdmissionLimits{Provider: 3, Pools: map[string]int{"model:fable:weekly": 1}}, now)
+			results <- admission{taskID: candidate.taskID, err: err}
+		}(index, candidate)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	fableSucceeded, fableConflicted, opusSucceeded := 0, 0, false
+	for result := range results {
+		switch {
+		case result.taskID == "opus" && result.err == nil:
+			opusSucceeded = true
+		case strings.HasPrefix(result.taskID, "fable") && result.err == nil:
+			fableSucceeded++
+		case strings.HasPrefix(result.taskID, "fable") && errors.Is(result.err, store.ErrConflict):
+			fableConflicted++
+		default:
+			t.Fatalf("unexpected admission result: %#v", result)
+		}
+	}
+	if fableSucceeded != 1 || fableConflicted != 1 || !opusSucceeded {
+		t.Fatalf("fable succeeded=%d conflicted=%d opus_succeeded=%t",
+			fableSucceeded, fableConflicted, opusSucceeded)
+	}
+}
+
+func createAdmissionTasks(t *testing.T, db *store.DB, now time.Time, taskIDs ...string) {
+	t.Helper()
+	provider := "codex-main"
+	if strings.HasPrefix(taskIDs[0], "fable") {
+		provider = "claude-main"
+	}
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "concurrent-profile", ProviderAccountID: provider, HarnessType: "command",
+		WorkspaceProvider: "existing-directory",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range taskIDs {
+		if err := db.CreateTask(t.Context(), domain.Task{
+			ID: taskID, Name: taskID, ExecutionProfileID: "concurrent-profile", Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestHasActiveRun(t *testing.T) {
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)

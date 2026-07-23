@@ -6,19 +6,41 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/domain"
 )
 
 func (d *DB) HasActiveRun(ctx context.Context, providerAccountID string) (bool, error) {
-	var active bool
-	if err := d.db.QueryRowContext(ctx, `SELECT EXISTS(
-SELECT 1 FROM runs WHERE provider_account_id = ? AND state IN ('preparing', 'running')
-)`, providerAccountID).Scan(&active); err != nil {
-		return false, fmt.Errorf("check active provider run: %w", err)
+	count, err := d.ActiveRunCount(ctx, providerAccountID)
+	return count > 0, err
+}
+
+func (d *DB) ActiveRunCount(ctx context.Context, providerAccountID string) (int, error) {
+	var active int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
+WHERE provider_account_id = ? AND state IN ('preparing', 'running')`, providerAccountID).Scan(&active); err != nil {
+		return 0, fmt.Errorf("count active provider runs: %w", err)
 	}
 	return active, nil
+}
+
+func (d *DB) ActivePoolClaimCount(ctx context.Context, providerAccountID, pool string) (int, error) {
+	var active int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_allowance_pool_claims c
+JOIN runs r ON r.id = c.run_id
+WHERE c.provider_account_id = ? AND c.pool_key = ?
+AND r.state IN ('preparing', 'running')`, providerAccountID, pool).Scan(&active); err != nil {
+		return 0, fmt.Errorf("count active allowance pool %q claims: %w", pool, err)
+	}
+	return active, nil
+}
+
+type AdmissionLimits struct {
+	Provider int
+	Pools    map[string]int
 }
 
 func (d *DB) AdmitTask(
@@ -26,9 +48,24 @@ func (d *DB) AdmitTask(
 	runID, taskID, providerAccountID, sourceRevision string,
 	now time.Time,
 ) (domain.Run, error) {
+	return d.AdmitTaskWithLimits(ctx, runID, taskID, providerAccountID, sourceRevision, nil,
+		AdmissionLimits{Provider: 1}, now)
+}
+
+func (d *DB) AdmitTaskWithLimits(
+	ctx context.Context,
+	runID, taskID, providerAccountID, sourceRevision string,
+	requiredPools []string,
+	limits AdmissionLimits,
+	now time.Time,
+) (domain.Run, error) {
 	if runID == "" || taskID == "" || providerAccountID == "" {
 		return domain.Run{}, fmt.Errorf("run, task, and provider ids are required")
 	}
+	if limits.Provider <= 0 {
+		limits.Provider = 1
+	}
+	pools := normalizedPools(requiredPools)
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("begin run admission: %w", err)
@@ -39,8 +76,26 @@ func (d *DB) AdmitTask(
 WHERE provider_account_id = ? AND state IN ('preparing', 'running')`, providerAccountID).Scan(&active); err != nil {
 		return domain.Run{}, fmt.Errorf("check active provider runs: %w", err)
 	}
-	if active > 0 {
-		return domain.Run{}, fmt.Errorf("%w: provider %q already has an active run", ErrConflict, providerAccountID)
+	if active >= limits.Provider {
+		return domain.Run{}, fmt.Errorf("%w: provider concurrency limit %d reached for %q",
+			ErrConflict, limits.Provider, providerAccountID)
+	}
+	for _, pool := range pools {
+		limit, configured := limits.Pools[pool]
+		if !configured {
+			continue
+		}
+		var claimed int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_allowance_pool_claims c
+JOIN runs r ON r.id = c.run_id
+WHERE c.provider_account_id = ? AND c.pool_key = ?
+AND r.state IN ('preparing', 'running')`, providerAccountID, pool).Scan(&claimed); err != nil {
+			return domain.Run{}, fmt.Errorf("check allowance pool %q claims: %w", pool, err)
+		}
+		if claimed >= limit {
+			return domain.Run{}, fmt.Errorf("%w: allowance pool %q concurrency limit %d reached",
+				ErrConflict, pool, limit)
+		}
 	}
 	row := tx.QueryRowContext(ctx, taskSelect+`
 JOIN execution_profiles p ON p.id = t.execution_profile_id
@@ -79,10 +134,32 @@ id, task_id, provider_account_id, state, source_revision, started_at
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("create run: %w", err)
 	}
+	for _, pool := range pools {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO run_allowance_pool_claims (
+run_id, provider_account_id, pool_key
+) VALUES (?, ?, ?)`, run.ID, run.ProviderAccountID, pool); err != nil {
+			return domain.Run{}, fmt.Errorf("claim allowance pool %q: %w", pool, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.Run{}, fmt.Errorf("commit run admission: %w", err)
 	}
 	return run, nil
+}
+
+func normalizedPools(pools []string) []string {
+	seen := make(map[string]bool, len(pools))
+	result := make([]string, 0, len(pools))
+	for _, pool := range pools {
+		pool = strings.TrimSpace(pool)
+		if pool == "" || seen[pool] {
+			continue
+		}
+		seen[pool] = true
+		result = append(result, pool)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (d *DB) MarkRunRunning(ctx context.Context, runID string, workspace domain.Workspace) error {

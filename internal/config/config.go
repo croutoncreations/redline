@@ -95,12 +95,21 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	Provider         string                `yaml:"provider"`
-	UsageSource      string                `yaml:"usage_source"`
-	OpenUsageURL     string                `yaml:"openusage_url"`
-	WindowWeeklyCost float64               `yaml:"window_weekly_cost"`
-	Policy           string                `yaml:"policy"`
-	ModelGroups      map[string]ModelGroup `yaml:"model_groups"`
+	Provider          string                `yaml:"provider"`
+	UsageSource       string                `yaml:"usage_source"`
+	OpenUsageURL      string                `yaml:"openusage_url"`
+	WindowWeeklyCost  float64               `yaml:"window_weekly_cost"`
+	Policy            string                `yaml:"policy"`
+	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
+	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
+	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
+}
+
+func (p Provider) EffectiveMaxConcurrentRuns() int {
+	if p.MaxConcurrentRuns <= 0 {
+		return 1
+	}
+	return p.MaxConcurrentRuns
 }
 
 func (p Provider) EffectiveUsageSource() string {
@@ -203,6 +212,17 @@ func Load(path string) (Config, error) {
 		if provider.Policy != "" {
 			if _, ok := cfg.Policies[provider.Policy]; !ok {
 				return Config{}, fmt.Errorf("provider %q: policy %q is not defined", name, provider.Policy)
+			}
+		}
+		if provider.MaxConcurrentRuns < 0 {
+			return Config{}, fmt.Errorf("provider %q: max_concurrent_runs must be greater than zero", name)
+		}
+		for pool, limit := range provider.PoolConcurrency {
+			if strings.TrimSpace(pool) == "" {
+				return Config{}, fmt.Errorf("provider %q: pool_concurrency key is required", name)
+			}
+			if limit <= 0 {
+				return Config{}, fmt.Errorf("provider %q: pool_concurrency %q must be greater than zero", name, pool)
 			}
 		}
 		aliases := make(map[string]string)

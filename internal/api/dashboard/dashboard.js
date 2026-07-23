@@ -33,6 +33,13 @@ function policyControl(item, provider) {
   const reserve = configured.rolling_reserve == null ? '' : ` · preserves ${percent(configured.rolling_reserve)}% of the current window`;
   return `<span class="policy-control"><label><span>Dispatch policy <i class="help" tabindex="0" data-help="Policies control how early Redline admits background work and how much short-window capacity it protects. Choose Default to follow YAML configuration.">?</i></span><select data-provider-policy="${escapeHTML(item.id)}" aria-label="${escapeHTML(title(provider))} dispatch policy"><option value=""${selected === '' ? ' selected' : ''}>Default · ${escapeHTML(title(defaultPolicy))}</option>${options}</select></label><small>Using ${escapeHTML(title(item.policy))} via ${escapeHTML(item.policy_source)}${escapeHTML(reserve)}</small></span>`;
 }
+function concurrencyStatus(item) {
+  const active = item.active_runs || 0, maximum = item.max_concurrent_runs || 1;
+  const pools = Object.entries(item.pool_concurrency || {}).sort(([left],[right]) => left.localeCompare(right)).map(([pool,limit]) =>
+    `<span><b>${escapeHTML(title(pool))}</b><i>${item.active_pool_claims?.[pool] || 0}/${limit}</i></span>`
+  ).join('');
+  return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Optional allowance-pool limits independently protect shared or model-specific capacity.">?</i></b><i>${active}/${maximum} active</i></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
+}
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
   const source = item.usage_source?.active || snap?.source || 'unknown';
@@ -44,7 +51,7 @@ function providerCompact(item) {
     if (snap.short) windows.push(meter('5-hour window',snap.short.remaining,snap.short.resets_at));
     windows.push(meter('Weekly allowance',snap.weekly.remaining,snap.weekly.resets_at));
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => windows.push(meter(window.source_label || title(window.key),window.remaining,window.resets_at)));
-    details = `${policyControl(item, provider)}<div class="meters">${windows.join('')}</div>`;
+    details = `${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';

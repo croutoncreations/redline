@@ -53,7 +53,7 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Configurable DevX creation arguments such as `workspace_args: [--target, host]`.
 - Optional workspace setup/finalize hooks and opt-in cleanup policies.
 - Noninteractive Codex CLI, Claude Code, and generic-command harness adapters.
-- Transactional asynchronous run admission with one active run per provider.
+- Transactional asynchronous run admission with configurable provider and allowance-pool limits.
 - Run artifacts, recurring completion/requeue, and interrupted-run recovery.
 - Graceful service shutdown.
 - Opt-in automatic scheduling with immediate startup evaluation and configurable polling.
@@ -282,9 +282,11 @@ scheduler:
 ```
 
 The service evaluates every configured provider once at startup and then at the configured
-interval. Each cycle skips paused providers and providers with an active run. It admits at most
-one task per provider, resolves each candidate task's Git revision independently, and records
-automatic decisions with `"trigger":"automatic"`. Inspect the live loop with:
+interval. Each cycle skips paused providers, then fills available capacity up to
+`max_concurrent_runs` (default `1`). Optional `pool_concurrency` entries independently cap
+overlap within allowance pools such as `model:fable:weekly`. Each candidate task's Git revision
+is resolved independently, and automatic decisions are recorded with `"trigger":"automatic"`.
+Inspect the live loop with:
 
 ```bash
 go run ./cmd/redline scheduler status
@@ -380,9 +382,10 @@ go run ./cmd/redline scheduler attempts --provider codex-main
 
 When budget permits work but no job can be admitted, `task_selection_reason` and bounded
 `candidate_rejections` explain cooldown deadlines, unchanged or unreadable repositories,
-model-pool exhaustion, and locked dispatch tiers. Concurrent scheduler requests for the same
-provider are serialized at admission; the loser records an `active_run` WAIT rather than degrading
-operational health. Different providers may still run concurrently.
+model-pool exhaustion, saturated concurrency pools, and locked dispatch tiers. Concurrent
+scheduler requests are serialized at admission; requests exceeding a configured provider or pool
+limit record an `active_run` WAIT rather than degrading operational health. Different providers
+always have independent capacity.
 
 Completed run output can be inspected without reading artifact paths directly. Responses are tail
 bounded to 64 KiB and may only resolve regular files beneath the configured `run_artifacts_dir`;

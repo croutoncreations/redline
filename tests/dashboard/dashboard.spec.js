@@ -24,8 +24,8 @@ function dashboardFixture() {
     scheduler: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     usage_monitor: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     providers: [
-      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [] } },
-      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', usage_source: { active: 'openusage' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
+      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [] } },
+      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
     ],
     tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
     runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
@@ -205,6 +205,9 @@ test('changes a provider policy and shows per-provider summary', async ({ page }
   const policy = page.getByLabel('Codex dispatch policy');
   await expect(policy).toHaveValue('');
   await expect(policy.locator('option[value=""]')).toContainText('Default · Standard');
+  await expect(page.locator('[data-provider-id="codex-main"] .concurrency-status')).toContainText('1/2 active');
+  await expect(page.locator('[data-provider-id="codex-main"] .concurrency-status')).toContainText('Weekly');
+  await expect(page.locator('[data-provider-id="codex-main"] .concurrency-status')).toContainText('1/2');
   await policy.selectOption('late');
   await expect.poll(() => state.requests.some(item =>
     item.method === 'PATCH' && item.path === '/v1/providers/codex-main/policy' && item.body.policy === 'late'

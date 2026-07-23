@@ -854,8 +854,17 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
-	_, _, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
-	return err
+	configured := s.config.Providers[provider]
+	for range configured.EffectiveMaxConcurrentRuns() {
+		_, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+		if err != nil {
+			return err
+		}
+		if !admitted {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Server) dispatch(
@@ -926,12 +935,18 @@ func (s *Server) dispatchCore(
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused"}
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
-	active, err := s.store.HasActiveRun(ctx, request.ProviderAccountID)
+	configuredProvider, configured := s.config.Providers[request.ProviderAccountID]
+	if !configured {
+		return response, false, fmt.Errorf("provider %q is not configured", request.ProviderAccountID)
+	}
+	active, err := s.store.ActiveRunCount(ctx, request.ProviderAccountID)
 	if err != nil {
 		return response, false, err
 	}
-	if active {
-		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive, Reason: "provider already has an active run"}
+	maxConcurrent := configuredProvider.EffectiveMaxConcurrentRuns()
+	if active >= maxConcurrent {
+		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive,
+			Reason: fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)}
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	response.Snapshot, response.Result, err = s.evaluateProvider(ctx, request.ProviderAccountID)
@@ -948,15 +963,16 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
-	run, err := s.store.AdmitTask(ctx, uuid.NewString(), task.ID, request.ProviderAccountID, revision, s.now())
+	run, err := s.store.AdmitTaskWithLimits(
+		ctx, uuid.NewString(), task.ID, request.ProviderAccountID, revision, response.Result.RequiredPools,
+		store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}, s.now(),
+	)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			response.Result = decision.Result{
-				Decision:            decision.Wait,
-				Mode:                decision.ModeActive,
-				Reason:              "provider became active during admission",
-				TaskSelectionReason: "another scheduler request admitted work first",
-			}
+			response.Result.Decision = decision.Wait
+			response.Result.Mode = decision.ModeActive
+			response.Result.Reason = err.Error()
+			response.Result.TaskSelectionReason = "another scheduler request consumed concurrency first"
 			return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 		}
 		return response, false, err
@@ -1028,6 +1044,12 @@ func (s *Server) selectTask(
 			}
 			continue
 		}
+		if reason, err := s.concurrencyRejection(ctx, provider, result.RequiredPools); err != nil {
+			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
+		} else if reason != "" {
+			rejections = appendCandidateRejection(rejections, task.ID, reason)
+			continue
+		}
 		if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
 			if len(rejections) < 20 {
 				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID,
@@ -1043,6 +1065,24 @@ func (s *Server) selectTask(
 	base.TaskSelectionReason = "no queued tasks are eligible"
 	return domain.Task{}, domain.ExecutionProfile{}, "", base,
 		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
+}
+
+func (s *Server) concurrencyRejection(ctx context.Context, providerID string, pools []string) (string, error) {
+	configured := s.config.Providers[providerID]
+	for _, pool := range pools {
+		limit, limited := configured.PoolConcurrency[pool]
+		if !limited {
+			continue
+		}
+		active, err := s.store.ActivePoolClaimCount(ctx, providerID, pool)
+		if err != nil {
+			return "", err
+		}
+		if active >= limit {
+			return fmt.Sprintf("allowance pool %q concurrency limit %d reached", pool, limit), nil
+		}
+	}
+	return "", nil
 }
 
 func appendCandidateRejection(

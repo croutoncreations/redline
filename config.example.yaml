@@ -30,6 +30,11 @@ providers:
     # Optional provider default. If omitted, active_policy is used. A dashboard
     # override takes precedence and is persisted in SQLite until reset.
     # policy: standard
+    # Safe default is one active run. Raise this to admit independent jobs in
+    # parallel; optional pool limits can be stricter than the provider cap.
+    # max_concurrent_runs: 2
+    # pool_concurrency:
+    #   weekly: 2
     # auto prefers a healthy local OpenUsage API and falls back to Redline's
     # native collector after repeated failures. Use openusage or native to pin.
     usage_source: auto
@@ -43,6 +48,10 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Example: allow two Claude runs, but never overlap two Fable runs.
+    # max_concurrent_runs: 2
+    # pool_concurrency:
+    #   model:fable:weekly: 1
     # Optional explicit aliases. These are the built-in Claude defaults and may
     # be extended when new Fable model identifiers appear.
     model_groups:

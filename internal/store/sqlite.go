@@ -313,6 +313,24 @@ ON usage_snapshots(provider, observed_at, source);`); err != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (16)`); err != nil {
 			return fmt.Errorf("record provider policy migration: %w", err)
 		}
+		version = 16
+	}
+	if version < 17 {
+		if _, err := tx.ExecContext(ctx, `
+DROP INDEX idx_runs_one_active_provider;
+CREATE TABLE run_allowance_pool_claims (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    provider_account_id TEXT NOT NULL,
+    pool_key TEXT NOT NULL,
+    PRIMARY KEY(run_id, pool_key)
+);
+CREATE INDEX idx_run_pool_claims_provider_pool
+ON run_allowance_pool_claims(provider_account_id, pool_key);`); err != nil {
+			return fmt.Errorf("add concurrent run pool claims: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (17)`); err != nil {
+			return fmt.Errorf("record concurrent run migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

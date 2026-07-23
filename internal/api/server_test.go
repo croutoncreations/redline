@@ -988,6 +988,69 @@ func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testin
 	}
 }
 
+func TestAutomaticSchedulerFillsConfiguredProviderConcurrency(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	delete(cfg.Providers, "claude-main")
+	provider := cfg.Providers["codex-main"]
+	provider.MaxConcurrentRuns = 2
+	cfg.Providers["codex-main"] = provider
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "command",
+		WorkspaceProvider: "existing-directory",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []domain.Task{
+		{ID: "first", Name: "First", Priority: 100, ExecutionProfileID: "profile", Type: domain.OneOff},
+		{ID: "second", Name: "Second", Priority: 90, ExecutionProfileID: "profile", Type: domain.OneOff},
+	} {
+		if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	handler := api.NewServerWithExecutor(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+			started <- task.ID
+			<-release
+			return nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	handler.StartScheduler(ctx)
+	got := make([]string, 0, 2)
+	for len(got) < 2 {
+		select {
+		case taskID := <-started:
+			got = append(got, taskID)
+		case <-time.After(time.Second):
+			t.Fatalf("started = %v; automatic scheduler did not fill concurrency", got)
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"first", "second"}) {
+		t.Fatalf("started = %v", got)
+	}
+	active, err := db.ActiveRunCount(t.Context(), "codex-main")
+	if err != nil || active != 2 {
+		t.Fatalf("active=%d err=%v", active, err)
+	}
+	close(release)
+	cancel()
+	handler.Wait()
+}
+
 func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T) {
 	var requests atomic.Int32
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1511,6 +1574,106 @@ func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 	}
 }
 
+func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, claudeAllowancePayload(1, 1, 24*time.Hour))
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	claude := cfg.Providers["claude-main"]
+	claude.MaxConcurrentRuns = 2
+	claude.PoolConcurrency = map[string]int{"model:fable:weekly": 1}
+	cfg.Providers["claude-main"] = claude
+	releaseExecutor := make(chan struct{})
+	handler := api.NewServerWithExecutor(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error {
+			<-releaseExecutor
+			return nil
+		},
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	defer close(releaseExecutor)
+	for _, profile := range []map[string]any{
+		{"id": "fable-profile", "provider_account_id": "claude-main", "harness_type": "claude-code",
+			"model": "fable", "workspace_provider": "devx"},
+		{"id": "opus-profile", "provider_account_id": "claude-main", "harness_type": "claude-code",
+			"model": "opus", "workspace_provider": "devx"},
+	} {
+		postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", profile)
+	}
+	for _, task := range []map[string]any{
+		{"id": "fable-one", "name": "Fable one", "priority": 100, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "fable-two", "name": "Fable two", "priority": 90, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "opus", "name": "Opus", "priority": 50, "execution_profile_id": "opus-profile", "type": "one_off"},
+	} {
+		postJSON[domain.Task](t, server.URL+"/v1/tasks", task)
+	}
+	first := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "claude-main",
+	})
+	if first.SelectedTask == nil || first.SelectedTask.ID != "fable-one" {
+		t.Fatalf("first response = %#v", first)
+	}
+	second := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "claude-main",
+	})
+	if second.SelectedTask == nil || second.SelectedTask.ID != "opus" ||
+		len(second.Result.CandidateRejections) == 0 ||
+		!strings.Contains(second.Result.CandidateRejections[0].Reason, `model:fable:weekly`) {
+		t.Fatalf("second response = %#v", second)
+	}
+	third := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "claude-main",
+	})
+	if third.Run != nil || third.Result.Mode != decision.ModeActive ||
+		!strings.Contains(third.Result.Reason, "provider concurrency limit 2") {
+		t.Fatalf("third response = %#v", third)
+	}
+	active, err := db.ActiveRunCount(t.Context(), "claude-main")
+	if err != nil || active != 2 {
+		t.Fatalf("active=%d err=%v", active, err)
+	}
+	fableClaims, err := db.ActivePoolClaimCount(t.Context(), "claude-main", "model:fable:weekly")
+	if err != nil || fableClaims != 1 {
+		t.Fatalf("fable_claims=%d err=%v", fableClaims, err)
+	}
+	resp, err := http.Get(server.URL + "/v1/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var dashboard struct {
+		Providers []struct {
+			ID                string         `json:"id"`
+			MaxConcurrentRuns int            `json:"max_concurrent_runs"`
+			ActiveRuns        int            `json:"active_runs"`
+			PoolConcurrency   map[string]int `json:"pool_concurrency"`
+			ActivePoolClaims  map[string]int `json:"active_pool_claims"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&dashboard); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, provider := range dashboard.Providers {
+		if provider.ID != "claude-main" {
+			continue
+		}
+		found = provider.MaxConcurrentRuns == 2 && provider.ActiveRuns == 2 &&
+			provider.PoolConcurrency["model:fable:weekly"] == 1 &&
+			provider.ActivePoolClaims["model:fable:weekly"] == 1
+	}
+	if !found {
+		t.Fatalf("dashboard providers = %#v", dashboard.Providers)
+	}
+}
+
 func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
@@ -1688,6 +1851,12 @@ func testConfig(usageURL string) config.Config {
 type decisionResponseForTest struct {
 	Snapshot decision.UsageSnapshot `json:"snapshot"`
 	Result   decision.Result        `json:"result"`
+}
+
+type schedulerResponseForTest struct {
+	Result       decision.Result `json:"result"`
+	SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	Run          *domain.Run     `json:"run,omitempty"`
 }
 
 func createClaudeCandidate(

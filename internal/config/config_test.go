@@ -261,6 +261,44 @@ func TestLoadRejectsUnknownProviderSpecificPolicy(t *testing.T) {
 	}
 }
 
+func TestProviderConcurrencyDefaultsAndValidation(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := cfg.Providers["codex-main"]
+	if provider.EffectiveMaxConcurrentRuns() != 1 || len(provider.PoolConcurrency) != 0 {
+		t.Fatalf("provider = %#v", provider)
+	}
+
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    max_concurrent_runs: 3
+    pool_concurrency:
+      weekly: 2
+      model:fable:weekly: 1`, 1)
+	cfg, err = config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider = cfg.Providers["codex-main"]
+	if provider.EffectiveMaxConcurrentRuns() != 3 || provider.PoolConcurrency["weekly"] != 2 ||
+		provider.PoolConcurrency["model:fable:weekly"] != 1 {
+		t.Fatalf("provider = %#v", provider)
+	}
+
+	for _, invalid := range []string{
+		"    max_concurrent_runs: -1\n",
+		"    pool_concurrency: {weekly: 0}\n",
+		"    pool_concurrency: {'': 1}\n",
+	} {
+		candidate := strings.Replace(validConfig, "    window_weekly_cost: 0.10\n",
+			"    window_weekly_cost: 0.10\n"+invalid, 1)
+		if _, err := config.Load(writeConfig(t, candidate)); err == nil {
+			t.Fatalf("expected invalid concurrency error for %q", invalid)
+		}
+	}
+}
+
 const validConfig = `
 database: redline.db
 active_policy: standard
