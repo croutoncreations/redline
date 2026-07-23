@@ -366,6 +366,29 @@ func (d *DB) ProviderPaused(ctx context.Context, provider string) (bool, error) 
 	return paused, nil
 }
 
+func (d *DB) SetProviderPolicy(ctx context.Context, provider, policy string) error {
+	_, err := d.db.ExecContext(ctx, `INSERT INTO provider_controls(provider_account_id, paused, policy_name, updated_at)
+VALUES (?, 0, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(provider_account_id) DO UPDATE SET policy_name = excluded.policy_name, updated_at = CURRENT_TIMESTAMP`,
+		provider, policy)
+	if err != nil {
+		return fmt.Errorf("set provider policy: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) ProviderPolicy(ctx context.Context, provider string) (string, error) {
+	var policy string
+	err := d.db.QueryRowContext(ctx, `SELECT policy_name FROM provider_controls WHERE provider_account_id = ?`, provider).Scan(&policy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read provider policy: %w", err)
+	}
+	return policy, nil
+}
+
 func (d *DB) ListTasks(ctx context.Context) ([]domain.Task, error) {
 	rows, err := d.db.QueryContext(ctx, taskSelect+` ORDER BY t.priority DESC, t.queue_sequence ASC`)
 	if err != nil {

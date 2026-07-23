@@ -196,6 +196,7 @@ GET  /v1/providers/{account}/calibration
 GET  /v1/providers/{account}/capacity
 POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
+PATCH /v1/providers/{account}/policy
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
 GET  /v1/profile-options?refresh={true|false}
@@ -221,6 +222,10 @@ The service includes a local dashboard at
 the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. Jobs and execution
 profiles can be created and managed there. A server-sent event stream keeps the page current while
 it is open; the aggregate API does not expose task prompts or lifecycle commands.
+
+Each provider's usage detail includes a dispatch-policy selector. Selecting a named policy stores
+an override in SQLite; selecting **Default** returns to the provider-level YAML policy when present,
+or to `active_policy` otherwise.
 
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.

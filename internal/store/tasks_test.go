@@ -314,6 +314,32 @@ func TestProviderPauseStatePersists(t *testing.T) {
 	}
 }
 
+func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProviderPolicy(ctx, "codex-main", "early"); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := db.ProviderPolicy(ctx, "codex-main")
+	if err != nil || policy != "early" {
+		t.Fatalf("policy=%q err=%v", policy, err)
+	}
+	paused, err := db.ProviderPaused(ctx, "codex-main")
+	if err != nil || !paused {
+		t.Fatalf("paused=%v err=%v", paused, err)
+	}
+	if err := db.SetProviderPolicy(ctx, "codex-main", ""); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = db.ProviderPolicy(ctx, "codex-main")
+	if err != nil || policy != "" {
+		t.Fatalf("cleared policy=%q err=%v", policy, err)
+	}
+}
+
 func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 	db := openTaskDB(t)
 	ctx := context.Background()

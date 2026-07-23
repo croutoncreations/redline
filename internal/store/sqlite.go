@@ -304,6 +304,15 @@ ON usage_snapshots(provider, observed_at, source);`); err != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (15)`); err != nil {
 			return fmt.Errorf("record usage snapshot identity migration: %w", err)
 		}
+		version = 15
+	}
+	if version < 16 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE provider_controls ADD COLUMN policy_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("extend provider controls policy selection: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (16)`); err != nil {
+			return fmt.Errorf("record provider policy migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

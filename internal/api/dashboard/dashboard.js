@@ -17,11 +17,21 @@ const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 
-let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '';
+let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
+}
+function policyControl(item, provider) {
+  const defaultPolicy = item.default_policy || item.policy || 'default';
+  const selected = item.policy_source === 'override' ? item.policy : '';
+  const options = Object.keys(policyCatalog).sort().map(name =>
+    `<option value="${escapeHTML(name)}"${selected === name ? ' selected' : ''}>${escapeHTML(title(name))}</option>`
+  ).join('');
+  const configured = policyCatalog[item.policy] || {};
+  const reserve = configured.rolling_reserve == null ? '' : ` · preserves ${percent(configured.rolling_reserve)}% of the current window`;
+  return `<span class="policy-control"><label><span>Dispatch policy <i class="help" tabindex="0" data-help="Policies control how early Redline admits background work and how much short-window capacity it protects. Choose Default to follow YAML configuration.">?</i></span><select data-provider-policy="${escapeHTML(item.id)}" aria-label="${escapeHTML(title(provider))} dispatch policy"><option value=""${selected === '' ? ' selected' : ''}>Default · ${escapeHTML(title(defaultPolicy))}</option>${options}</select></label><small>Using ${escapeHTML(title(item.policy))} via ${escapeHTML(item.policy_source)}${escapeHTML(reserve)}</small></span>`;
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
@@ -34,22 +44,41 @@ function providerCompact(item) {
     if (snap.short) windows.push(meter('5-hour window',snap.short.remaining,snap.short.resets_at));
     windows.push(meter('Weekly allowance',snap.weekly.remaining,snap.weekly.resets_at));
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => windows.push(meter(window.source_label || title(window.key),window.remaining,window.resets_at)));
-    details = `<div class="meters">${windows.join('')}</div>`;
+    details = `${policyControl(item, provider)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
   const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}" tabindex="0" role="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
+  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span></button><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {
   document.querySelectorAll('.provider-compact').forEach(card => {
+    const trigger = card.querySelector('.provider-trigger');
     card.addEventListener('mouseenter', () => loadCapacityEvidence(card));
-    card.addEventListener('focus', () => loadCapacityEvidence(card));
-    card.addEventListener('click', event => {
+    trigger.addEventListener('focus', () => loadCapacityEvidence(card));
+    trigger.addEventListener('click', event => {
       event.stopPropagation();
       document.querySelectorAll('.provider-compact.open').forEach(open => { if (open !== card) open.classList.remove('open'); });
       card.classList.toggle('open');
       if (card.classList.contains('open')) loadCapacityEvidence(card);
+    });
+  });
+  document.querySelectorAll('[data-provider-policy]').forEach(select => {
+    select.addEventListener('click', event => event.stopPropagation());
+    select.addEventListener('change', async event => {
+      event.stopPropagation();
+      const control = event.currentTarget, providerID = control.dataset.providerPolicy;
+      control.disabled = true;
+      try {
+        await apiRequest(`/v1/providers/${encodeURIComponent(providerID)}/policy`, {
+          method: 'PATCH', body: JSON.stringify({policy: control.value})
+        });
+        await refresh();
+      } catch (error) {
+        $('#error-banner').hidden = false;
+        $('#error-banner').textContent = `Could not update provider policy: ${error.message}`;
+        control.disabled = false;
+      }
     });
   });
 }
@@ -122,6 +151,7 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
+  policyCatalog = data.policies || {};
   providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));
   providerAccounts = providerCatalog.map(provider => provider.id);
   const openProviderID = document.querySelector('.provider-compact.open')?.dataset.providerId;
@@ -131,7 +161,8 @@ function render(data) {
       if (card.dataset.providerId === openProviderID) { card.classList.add('open'); loadCapacityEvidence(card); }
     });
   }
-  $('#policy').textContent = data.active_policy || '—';
+  const policies = new Set(data.providers.map(provider => provider.policy).filter(Boolean));
+  $('#policy').textContent = policies.size > 1 ? 'per provider' : ([...policies][0] || data.active_policy || '—');
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;

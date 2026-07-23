@@ -177,6 +177,7 @@ type CandidateRejection struct {
 
 type Result struct {
 	Decision               Decision             `json:"decision"`
+	Policy                 string               `json:"policy,omitempty"`
 	Mode                   Mode                 `json:"mode"`
 	Reason                 string               `json:"reason"`
 	Slots                  []Slot               `json:"slots,omitempty"`

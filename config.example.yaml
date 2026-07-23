@@ -27,6 +27,9 @@ notifications:
 providers:
   codex-main:
     provider: codex
+    # Optional provider default. If omitted, active_policy is used. A dashboard
+    # override takes precedence and is persisted in SQLite until reset.
+    # policy: standard
     # auto prefers a healthy local OpenUsage API and falls back to Redline's
     # native collector after repeated failures. Use openusage or native to pin.
     usage_source: auto

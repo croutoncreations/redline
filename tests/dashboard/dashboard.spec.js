@@ -16,12 +16,16 @@ function dashboardFixture() {
   return {
     generated_at: observed,
     active_policy: 'standard',
+    policies: {
+      late: { trigger_margin: .04, rolling_reserve: .40, pace_thresholds: [{ time_remaining: '24h', min_weekly_remaining: .80 }] },
+      standard: { trigger_margin: .02, rolling_reserve: .25, pace_thresholds: [{ time_remaining: '72h', min_weekly_remaining: .50 }] },
+    },
     health: { status: 'degraded', window: '24h', active_runs: 0, dispatch_attempts: 8, dispatch_errors: 1 },
     scheduler: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     usage_monitor: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     providers: [
-      { id: 'claude-main', provider: 'claude', usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [] } },
-      { id: 'codex-main', provider: 'codex', usage_source: { active: 'openusage' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
+      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [] } },
+      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', usage_source: { active: 'openusage' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
     ],
     tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
     runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
@@ -107,6 +111,17 @@ async function loadDashboard(page, options = {}) {
 			const provider = decodeURIComponent(capacityMatch[1]).startsWith('claude') ? 'claude' : 'codex';
 			return json(200, capacityFixture(provider));
 		}
+    const providerPolicyMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/policy$/);
+    if (providerPolicyMatch && method === 'PATCH') {
+      const id = decodeURIComponent(providerPolicyMatch[1]), body = request.postDataJSON();
+      const provider = state.dashboard.providers.find(item => item.id === id);
+      state.requests.push({ method, path: url.pathname, body });
+      if (!provider) return json(404, { error: 'provider is not configured' });
+      if (body.policy && !state.dashboard.policies[body.policy]) return json(400, { error: 'policy is not configured' });
+      provider.policy = body.policy || provider.default_policy;
+      provider.policy_source = body.policy ? 'override' : 'global';
+      return json(200, { policy: provider.policy, source: provider.policy_source });
+    }
     if (url.pathname === '/v1/profiles' && method === 'GET') return json(200, state.profiles);
     if (url.pathname === '/v1/profiles' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
@@ -170,16 +185,36 @@ test('renders operational state and applies live dashboard events', async ({ pag
 test('loads capacity attribution and model evidence on demand', async ({ page }) => {
 	const state = await loadDashboard(page);
 	const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+	const claudeCard = page.locator('[data-provider-id="claude-main"]');
 	await claude.hover();
-	await expect(claude).toContainText('Empirical weekly capacity');
-	await expect(claude).toContainText('100M processed tokens');
-	await expect(claude).toContainText('50% attributed');
-	await expect(claude).toContainText('$120–$180 API-dollar equivalent');
-	await expect(claude).toContainText('gatepost-pi');
-	await expect(claude).toContainText('claude-opus-4-8');
+	await expect(claudeCard).toContainText('Empirical weekly capacity');
+	await expect(claudeCard).toContainText('100M processed tokens');
+	await expect(claudeCard).toContainText('50% attributed');
+	await expect(claudeCard).toContainText('$120–$180 API-dollar equivalent');
+	await expect(claudeCard).toContainText('gatepost-pi');
+	await expect(claudeCard).toContainText('claude-opus-4-8');
 	await claude.click();
 	await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), state.dashboard);
-	await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Empirical weekly capacity');
+	await expect(page.locator('[data-provider-id="claude-main"]')).toContainText('Empirical weekly capacity');
+});
+
+test('changes a provider policy and shows per-provider summary', async ({ page }) => {
+  const state = await loadDashboard(page);
+  const codex = page.getByRole('button', { name: 'Show Codex usage details' });
+  await codex.click();
+  const policy = page.getByLabel('Codex dispatch policy');
+  await expect(policy).toHaveValue('');
+  await expect(policy.locator('option[value=""]')).toContainText('Default · Standard');
+  await policy.selectOption('late');
+  await expect.poll(() => state.requests.some(item =>
+    item.method === 'PATCH' && item.path === '/v1/providers/codex-main/policy' && item.body.policy === 'late'
+  )).toBe(true);
+  await expect(page.locator('#policy')).toHaveText('per provider');
+  await expect(page.getByLabel('Codex dispatch policy')).toHaveValue('late');
+  if (process.env.REDLINE_PROOF_DIR) {
+    fs.mkdirSync(process.env.REDLINE_PROOF_DIR, { recursive: true });
+    await page.screenshot({ path: path.join(process.env.REDLINE_PROOF_DIR, 'provider-policy-control.png'), fullPage: true });
+  }
 });
 
 test('discovers harness versions and filters Pi models by provider', async ({ page }) => {

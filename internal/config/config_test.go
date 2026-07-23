@@ -235,6 +235,32 @@ func TestLoadRejectsAliasesSharedAcrossModelGroups(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsProviderSpecificPolicy(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    policy: early`, 1)
+	configured = strings.Replace(configured, "policies:\n  standard:", `policies:
+  early:
+    trigger_margin: 0.01
+    rolling_reserve: 0.10
+  standard:`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["codex-main"].Policy != "early" {
+		t.Fatalf("provider = %#v", cfg.Providers["codex-main"])
+	}
+}
+
+func TestLoadRejectsUnknownProviderSpecificPolicy(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    policy: missing`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil ||
+		!strings.Contains(err.Error(), `policy "missing" is not defined`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 const validConfig = `
 database: redline.db
 active_policy: standard

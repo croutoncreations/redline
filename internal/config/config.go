@@ -99,6 +99,7 @@ type Provider struct {
 	UsageSource      string                `yaml:"usage_source"`
 	OpenUsageURL     string                `yaml:"openusage_url"`
 	WindowWeeklyCost float64               `yaml:"window_weekly_cost"`
+	Policy           string                `yaml:"policy"`
 	ModelGroups      map[string]ModelGroup `yaml:"model_groups"`
 }
 
@@ -149,14 +150,14 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 }
 
 type Policy struct {
-	TriggerMargin  float64         `yaml:"trigger_margin"`
-	RollingReserve float64         `yaml:"rolling_reserve"`
-	PaceThresholds []PaceThreshold `yaml:"pace_thresholds"`
+	TriggerMargin  float64         `yaml:"trigger_margin" json:"trigger_margin"`
+	RollingReserve float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
+	PaceThresholds []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
 }
 
 type PaceThreshold struct {
-	TimeRemaining      string  `yaml:"time_remaining"`
-	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining"`
+	TimeRemaining      string  `yaml:"time_remaining" json:"time_remaining"`
+	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining" json:"min_weekly_remaining"`
 }
 
 func Load(path string) (Config, error) {
@@ -198,6 +199,11 @@ func Load(path string) (Config, error) {
 		}
 		if provider.WindowWeeklyCost == 0 {
 			return Config{}, fmt.Errorf("provider %q: window_weekly_cost must be greater than zero", name)
+		}
+		if provider.Policy != "" {
+			if _, ok := cfg.Policies[provider.Policy]; !ok {
+				return Config{}, fmt.Errorf("provider %q: policy %q is not defined", name, provider.Policy)
+			}
 		}
 		aliases := make(map[string]string)
 		for groupName, group := range provider.EffectiveModelGroups() {

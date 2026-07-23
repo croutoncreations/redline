@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/scheduler"
@@ -23,6 +24,7 @@ var dashboardFiles embed.FS
 type dashboardResponse struct {
 	GeneratedAt  time.Time                `json:"generated_at"`
 	ActivePolicy string                   `json:"active_policy"`
+	Policies     map[string]config.Policy `json:"policies"`
 	Health       domain.OperationalHealth `json:"health"`
 	Scheduler    scheduler.Status         `json:"scheduler"`
 	UsageMonitor scheduler.Status         `json:"usage_monitor"`
@@ -33,12 +35,15 @@ type dashboardResponse struct {
 }
 
 type dashboardProvider struct {
-	ID          string                  `json:"id"`
-	Provider    string                  `json:"provider"`
-	Paused      bool                    `json:"paused"`
-	Snapshot    *decision.UsageSnapshot `json:"snapshot,omitempty"`
-	Error       string                  `json:"error,omitempty"`
-	UsageSource usage.Status            `json:"usage_source"`
+	ID            string                  `json:"id"`
+	Provider      string                  `json:"provider"`
+	Paused        bool                    `json:"paused"`
+	Snapshot      *decision.UsageSnapshot `json:"snapshot,omitempty"`
+	Error         string                  `json:"error,omitempty"`
+	UsageSource   usage.Status            `json:"usage_source"`
+	Policy        string                  `json:"policy"`
+	PolicySource  string                  `json:"policy_source"`
+	DefaultPolicy string                  `json:"default_policy"`
 }
 
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
@@ -146,6 +151,7 @@ func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	result := dashboardResponse{
 		GeneratedAt: s.now(), ActivePolicy: s.config.ActivePolicy,
+		Policies:  s.config.Policies,
 		Scheduler: s.scheduler.Status(), UsageMonitor: s.usageMonitor.Status(),
 		Providers: make([]dashboardProvider, 0, len(s.config.Providers)),
 		Tasks:     make([]dashboardTask, 0), Runs: make([]domain.Run, 0), Attempts: make([]domain.DispatchAttempt, 0),
@@ -164,6 +170,15 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
 		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id)}
+		selection, selectionErr := s.effectiveProviderPolicy(ctx, id)
+		if selectionErr != nil {
+			return dashboardResponse{}, selectionErr
+		}
+		item.Policy, item.PolicySource = selection.Policy, selection.Source
+		item.DefaultPolicy = configured.Policy
+		if item.DefaultPolicy == "" {
+			item.DefaultPolicy = s.config.ActivePolicy
+		}
 		item.Paused, err = s.store.ProviderPaused(ctx, id)
 		if err != nil {
 			return dashboardResponse{}, err

@@ -1260,6 +1260,87 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 	}
 }
 
+func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	initial := postJSON[decisionResponseForTest](t, server.URL+"/v1/providers/codex-main/decision", map[string]any{})
+	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Run {
+		t.Fatalf("initial result = %#v", initial.Result)
+	}
+
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/providers/codex-main/policy",
+		strings.NewReader(`{"policy":"late"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selection struct {
+		Policy string `json:"policy"`
+		Source string `json:"source"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&selection); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || selection.Policy != "late" || selection.Source != "override" {
+		t.Fatalf("status=%d selection=%#v", response.StatusCode, selection)
+	}
+
+	overridden := postJSON[decisionResponseForTest](t, server.URL+"/v1/providers/codex-main/decision", map[string]any{})
+	if overridden.Result.Policy != "late" || overridden.Result.Decision != decision.Wait {
+		t.Fatalf("overridden result = %#v", overridden.Result)
+	}
+	postJSON[map[string]any](t, server.URL+"/v1/scheduler/evaluate", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	decisions, err := db.ListSchedulerDecisions(t.Context(), "codex-main", 1)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("decisions=%#v err=%v", decisions, err)
+	}
+	var persisted struct {
+		Result decision.Result `json:"result"`
+	}
+	if err := json.Unmarshal(decisions[0].DecisionJSON, &persisted); err != nil ||
+		persisted.Result.Policy != "late" {
+		t.Fatalf("persisted=%#v err=%v", persisted, err)
+	}
+	var dashboard struct {
+		Policies  map[string]config.Policy `json:"policies"`
+		Providers []struct {
+			ID           string `json:"id"`
+			Policy       string `json:"policy"`
+			PolicySource string `json:"policy_source"`
+		} `json:"providers"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	if _, ok := dashboard.Policies["late"]; !ok {
+		t.Fatalf("policy catalog = %#v", dashboard.Policies)
+	}
+	var codexProvider struct {
+		ID           string
+		Policy       string
+		PolicySource string
+	}
+	for _, provider := range dashboard.Providers {
+		if provider.ID == "codex-main" {
+			codexProvider.ID = provider.ID
+			codexProvider.Policy = provider.Policy
+			codexProvider.PolicySource = provider.PolicySource
+		}
+	}
+	if codexProvider.Policy != "late" || codexProvider.PolicySource != "override" {
+		t.Fatalf("codex provider = %#v", codexProvider)
+	}
+
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/providers/codex-main/policy",
+		`{"policy":"missing"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/providers/missing/policy",
+		`{"policy":"late"}`, http.StatusNotFound)
+}
+
 func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
 	server, db := newAPIServer(t, claudePayload)
 	weeklyReset := time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC)
@@ -1592,12 +1673,21 @@ func testConfig(usageURL string) config.Config {
 			"claude-main": {Provider: "claude", OpenUsageURL: usageURL, WindowWeeklyCost: 0.08},
 		},
 		Policies: map[string]config.Policy{
+			"late": {
+				TriggerMargin: 0.02, RollingReserve: 0.25,
+				PaceThresholds: []config.PaceThreshold{{TimeRemaining: "24h", MinWeeklyRemaining: 0.90}},
+			},
 			"standard": {
 				TriggerMargin: 0.02, RollingReserve: 0.25,
 				PaceThresholds: []config.PaceThreshold{{TimeRemaining: "72h", MinWeeklyRemaining: 0.50}},
 			},
 		},
 	}
+}
+
+type decisionResponseForTest struct {
+	Snapshot decision.UsageSnapshot `json:"snapshot"`
+	Result   decision.Result        `json:"result"`
 }
 
 func createClaudeCandidate(

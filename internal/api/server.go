@@ -140,6 +140,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/providers/{provider}/capacity", server.providerCapacity)
 	mux.HandleFunc("POST /v1/providers/{provider}/token-sync", server.syncProviderTokens)
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
+	mux.HandleFunc("PATCH /v1/providers/{provider}/policy", server.updateProviderPolicy)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
 	mux.HandleFunc("GET /v1/profile-options", server.profileOptions)
@@ -452,6 +453,70 @@ func (s *Server) providerControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"provider_account_id": provider, "paused": paused})
+}
+
+type providerPolicySelection struct {
+	Policy     string        `json:"policy"`
+	Source     string        `json:"source"`
+	Definition config.Policy `json:"-"`
+}
+
+func (s *Server) effectiveProviderPolicy(ctx context.Context, providerID string) (providerPolicySelection, error) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return providerPolicySelection{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	name, source := configured.Policy, "provider"
+	override, err := s.store.ProviderPolicy(ctx, providerID)
+	if err != nil {
+		return providerPolicySelection{}, err
+	}
+	if override != "" {
+		name, source = override, "override"
+	} else if name == "" {
+		name, source = s.config.ActivePolicy, "global"
+	}
+	policy, ok := s.config.Policies[name]
+	if !ok {
+		return providerPolicySelection{}, fmt.Errorf("policy %q is not configured", name)
+	}
+	return providerPolicySelection{Policy: name, Source: source, Definition: policy}, nil
+}
+
+func (s *Server) updateProviderPolicy(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+	if _, ok := s.config.Providers[provider]; !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
+		return
+	}
+	var request struct {
+		Policy *string `json:"policy"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	if request.Policy == nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "policy is required"})
+		return
+	}
+	name := strings.TrimSpace(*request.Policy)
+	if name != "" {
+		if _, ok := s.config.Policies[name]; !ok {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "policy is not configured"})
+			return
+		}
+	}
+	if err := s.store.SetProviderPolicy(r.Context(), provider, name); err != nil {
+		writeError(w, err)
+		return
+	}
+	selection, err := s.effectiveProviderPolicy(r.Context(), provider)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, selection)
 }
 
 func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
@@ -1020,7 +1085,7 @@ func (s *Server) evaluateCandidateBudget(
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared allowance decision is unknown: " + base.Reason
 	}
-	policy := s.config.Policies[s.config.ActivePolicy]
+	policy := s.config.Policies[base.Policy]
 	if snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared session reserve is protected"
@@ -1326,8 +1391,11 @@ func (s *Server) evaluateProvider(
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
-	policy := s.config.Policies[s.config.ActivePolicy]
-	thresholds, err := policy.DecisionThresholds()
+	selection, err := s.effectiveProviderPolicy(ctx, providerID)
+	if err != nil {
+		return decision.UsageSnapshot{}, decision.Result{}, err
+	}
+	thresholds, err := selection.Definition.DecisionThresholds()
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
@@ -1342,9 +1410,10 @@ func (s *Server) evaluateProvider(
 	result := decision.Evaluate(decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
-		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	})
+	result.Policy = selection.Policy
 	return snapshot, result, nil
 }
 

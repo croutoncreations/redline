@@ -100,7 +100,8 @@ func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`DROP INDEX idx_usage_snapshots_identity;
-DELETE FROM schema_migrations WHERE version = 15;
+DELETE FROM schema_migrations WHERE version >= 15;
+ALTER TABLE provider_controls DROP COLUMN policy_name;
 INSERT INTO usage_snapshots (
     provider, observed_at, short_remaining, short_resets_at,
     weekly_remaining, weekly_resets_at, source, confidence, raw_payload
