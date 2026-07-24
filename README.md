@@ -10,7 +10,7 @@ generic-command tasks unattended.
 ## Architecture
 
 ```text
-CLI / dashboard / native app
+CLI / MCP / dashboard / native app
               |
               v
        local HTTP service
@@ -67,6 +67,8 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Ordered lifecycle audit events for every run, with prompt text excluded from event snapshots.
 - Interrupted-run recovery appends a terminal lifecycle event and records whether its workspace was preserved.
 - Captured prepare/finalize hook stdout and stderr exposed through the service API and CLI.
+- API-backed stdio MCP server with bounded operational reads, explicit task/provider controls,
+  and a separately annotated scheduler-dispatch tool.
 
 ## Quick start
 
@@ -229,6 +231,20 @@ or to `active_policy` otherwise.
 
 The service binds to loopback by default and currently has no authentication. Do not expose
 it to an untrusted network.
+
+## MCP and agent access
+
+Run `redline mcp` as a local stdio MCP server. It delegates every operation to the running
+loopback service; it never opens SQLite or starts a second scheduler:
+
+```bash
+go run ./cmd/redline --api http://127.0.0.1:7436 mcp
+```
+
+The MCP surface provides compact usage/capacity summaries, bounded task/profile/run inspection,
+task and provider controls, dry scheduler evaluation, and an explicitly mutating dispatch tool.
+See [the MCP and agent guide](docs/mcp.md) for tool semantics, Codex and Claude Code setup, Pi
+bridges, and a suggested agent instruction.
 
 For durable macOS operation, see [the launchd guide](docs/launchd.md). The LaunchAgent template
 uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the required harness `PATH`.

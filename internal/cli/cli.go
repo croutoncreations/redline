@@ -23,6 +23,7 @@ import (
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/mcpserver"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"gopkg.in/yaml.v3"
@@ -50,13 +51,15 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL}
 	switch remaining[0] {
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
+	case "mcp":
+		return runMCP(client, remaining[1:], stderr)
 	case "health":
 		return runHealth(client, remaining[1:], stdout, stderr)
 	case "decision":
@@ -87,6 +90,20 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
 	}
+}
+
+func runMCP(client apiclient.Client, args []string, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "usage: redline [--api URL] mcp")
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := mcpserver.RunStdio(ctx, client); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(stderr, "run Redline MCP server: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runCapacity(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
