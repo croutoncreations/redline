@@ -163,11 +163,14 @@ func newServer(
 	mux.HandleFunc("GET /v1/runtime-connections", server.listRuntimeConnections)
 	mux.HandleFunc("POST /v1/runtime-connections", server.createRuntimeConnection)
 	mux.HandleFunc("GET /v1/runtime-connections/{connection}", server.getRuntimeConnection)
+	mux.HandleFunc("PATCH /v1/runtime-connections/{connection}", server.updateRuntimeConnection)
+	mux.HandleFunc("DELETE /v1/runtime-connections/{connection}", server.deleteRuntimeConnection)
 	mux.HandleFunc("POST /v1/runtime-connections/{connection}/discover", server.discoverRuntimeConnection)
 	mux.HandleFunc("GET /v1/agent-contexts", server.listAgentContexts)
 	mux.HandleFunc("POST /v1/agent-contexts", server.createAgentContext)
 	mux.HandleFunc("GET /v1/agent-contexts/{context}", server.getAgentContext)
 	mux.HandleFunc("PATCH /v1/agent-contexts/{context}", server.updateAgentContext)
+	mux.HandleFunc("DELETE /v1/agent-contexts/{context}", server.deleteAgentContext)
 	mux.HandleFunc("GET /v1/tasks", server.listTasks)
 	mux.HandleFunc("POST /v1/tasks", server.createTask)
 	mux.HandleFunc("GET /v1/tasks/{task}", server.getTask)
@@ -1566,7 +1569,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	} else if strings.Contains(err.Error(), "not configured") {
 		status = http.StatusNotFound
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "must be") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "must be") ||
+		strings.Contains(err.Error(), "unsupported") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, problem{Error: err.Error()})

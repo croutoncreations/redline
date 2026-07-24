@@ -94,7 +94,7 @@
           <label class="field"><span>Provider account <i class="help" tabindex="0" data-help="The subscription allowance Redline should monitor for jobs using this profile.">?</i></span><select id="profile-provider" required></select></label>
           <label class="field"><span>Harness <i class="help" tabindex="0" data-help="Redline detects supported agent CLIs on this machine and displays their installed versions. Choose Custom command for another CLI or wrapper.">?</i></span><select id="profile-harness" required></select><small id="profile-discovery-status" class="field-note">Discovering local harnesses…</small><button id="refresh-profile-options" class="inline-button" type="button">Refresh discovery</button></label>
           <div id="profile-hermes-fields" class="advanced-grid field-wide" hidden>
-            <label class="field"><span>Hermes connection <i class="help" tabindex="0" data-help="Where Hermes runs. Redline can import the remote Gateway already configured in Hermes Desktop without copying its password.">?</i></span><select id="profile-runtime-connection"></select><button id="import-hermes-desktop" class="inline-button" type="button">Import Hermes Desktop</button></label>
+            <label class="field"><span>Hermes connection <i class="help" tabindex="0" data-help="Where Hermes runs. Secrets stay in Hermes Desktop, an environment variable, or a protected JSON file; Redline stores only the reference.">?</i></span><select id="profile-runtime-connection"></select><span><button id="new-runtime-connection" class="inline-button" type="button">+ Connection</button> <button id="edit-runtime-connection" class="inline-button" type="button">Edit</button> <button id="import-hermes-desktop" class="inline-button" type="button">Import Desktop</button></span></label>
             <label class="field"><span>Hermes profile <i class="help" tabindex="0" data-help="A separate Hermes identity with its own configuration, memory, credentials, skills, and sessions.">?</i></span><select id="profile-runtime-profile"></select></label>
             <label class="field"><span>Project / context <i class="help" tabindex="0" data-help="The Hermes project supplies the working directory and project context files. Profile default uses the profile home when no projects exist.">?</i></span><select id="profile-runtime-project"></select></label>
             <label class="field"><span>Session behavior</span><select id="profile-session-mode"><option value="isolated">New isolated session per run</option></select></label>
@@ -118,6 +118,22 @@
         <div class="form-footer"><button id="delete-profile" class="danger-button" type="button" hidden>Delete</button><div><button id="reset-profile" class="quiet-button" type="button">Reset</button><button id="save-profile" class="primary-button" type="submit">Save profile</button></div></div>
       </form>
     </div>
+  </dialog>
+
+  <dialog id="runtime-dialog" class="task-dialog" aria-labelledby="runtime-dialog-title">
+    <form id="runtime-form">
+      <div class="dialog-head"><div><p class="eyebrow">REMOTE RUNTIME</p><h2 id="runtime-dialog-title">Hermes connection</h2></div><button id="close-runtime" type="button" aria-label="Close">×</button></div>
+      <div class="form-body">
+        <div id="runtime-form-error" class="form-error" hidden></div>
+        <label class="field"><span>Connection ID</span><input id="runtime-id" required autocomplete="off" placeholder="hermes-remote"></label>
+        <label class="field"><span>Gateway URL</span><input id="runtime-url" required type="url" autocomplete="off" placeholder="https://hermes.example"></label>
+        <label class="field"><span>Credential source <i class="help" tabindex="0" data-help="Environment and file credentials are JSON containing either session_token, or provider/username/password. Redline stores only the variable name or file path.">?</i></span><select id="runtime-credential-source"><option value="">No authentication</option><option value="environment">Environment variable</option><option value="file">Protected JSON file</option><option value="hermes_desktop">Hermes Desktop session</option></select></label>
+        <label class="field"><span>Credential reference</span><input id="runtime-credential-ref" autocomplete="off" placeholder="HERMES_GATEWAY_CREDENTIAL or /path/credential.json"></label>
+        <label class="field"><span>Maximum concurrent runs</span><input id="runtime-concurrency" type="number" min="1" value="1"></label>
+        <div class="field field-wide"><small class="field-note">Credential JSON: <code>{"session_token":"…"}</code> or <code>{"provider":"basic","username":"…","password":"…"}</code>.</small></div>
+      </div>
+      <div class="form-footer"><button id="delete-runtime" class="danger-button" type="button" hidden>Delete connection</button><div><button id="cancel-runtime" class="quiet-button" type="button">Cancel</button><button id="save-runtime" class="primary-button" type="submit">Save connection</button></div></div>
+    </form>
   </dialog>
 
   <dialog id="logs-dialog" aria-labelledby="log-title">

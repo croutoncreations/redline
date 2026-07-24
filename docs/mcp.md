@@ -65,6 +65,8 @@ Read-only tools:
 | `redline_provider_capacity` | Learned token-capacity evidence and confidence |
 | `redline_tasks_list` / `redline_task_get` | Bounded queue and task inspection |
 | `redline_profiles_list` / `redline_profile_get` | Available harness/model/workspace profiles |
+| `redline_runtime_connections_list` / `redline_runtime_connection_get` | Remote runtime endpoints and credential references |
+| `redline_agent_contexts_list` / `redline_agent_context_get` | Runtime profiles, projects, and working directories |
 | `redline_runs_list` / `redline_run_get` | Bounded run history and one run |
 | `redline_run_events` | Bounded lifecycle audit trail |
 | `redline_run_logs` | At most 32 KiB from one supported log stream |
@@ -79,6 +81,11 @@ State-changing tools:
 | `redline_profile_create` | Create a harness/model/workspace execution profile |
 | `redline_profile_update` | Change profile routing, commands, or lifecycle hooks |
 | `redline_profile_delete` | Delete an unreferenced execution profile |
+| `redline_runtime_connection_create` / `redline_runtime_connection_update` | Configure a Hermes endpoint using a credential reference |
+| `redline_runtime_connection_delete` | Delete a runtime connection with no agent contexts |
+| `redline_runtime_connection_discover` | Discover remote profiles, projects, providers, and models |
+| `redline_agent_context_create` / `redline_agent_context_update` | Configure a selected remote execution context |
+| `redline_agent_context_delete` | Delete a context with no execution profiles |
 | `redline_provider_control` | Pause or resume provider dispatch |
 | `redline_scheduler_evaluate` | Record a fresh decision without launching work |
 | `redline_scheduler_dispatch` | Evaluate and potentially launch one eligible task |
@@ -91,6 +98,10 @@ Profile updates and deletion are also annotated as potentially destructive. Dele
 while any task references the profile. Profile commands and lifecycle hooks are trusted local code
 that can execute when a task is later admitted, so agents should change them only at the user's
 request.
+
+Runtime credentials are references, not inline secrets. `credential_source` may be
+`hermes_desktop`, `environment`, or `file`; `credential_ref` is the environment-variable name or
+protected JSON file path. Never pass a password or session token directly in an MCP tool argument.
 
 List results default to 20 items and cap at 100. Task prompts are omitted from lists and capped at
 8 KiB on detailed responses. Event and log tools also enforce server-side response bounds.

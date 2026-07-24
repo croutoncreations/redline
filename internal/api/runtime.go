@@ -53,6 +53,66 @@ func (s *Server) getRuntimeConnection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+type runtimeConnectionUpdate struct {
+	Runtime           *string `json:"runtime"`
+	Transport         *string `json:"transport"`
+	URL               *string `json:"url"`
+	CredentialSource  *string `json:"credential_source"`
+	CredentialRef     *string `json:"credential_ref"`
+	DesktopConfigPath *string `json:"desktop_config_path"`
+	MaxConcurrentRuns *int    `json:"max_concurrent_runs"`
+}
+
+func (s *Server) updateRuntimeConnection(w http.ResponseWriter, r *http.Request) {
+	var request runtimeConnectionUpdate
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	item, err := s.store.GetRuntimeConnection(r.Context(), r.PathValue("connection"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if request.Runtime != nil {
+		item.Runtime = *request.Runtime
+	}
+	if request.Transport != nil {
+		item.Transport = *request.Transport
+	}
+	if request.URL != nil {
+		item.URL = *request.URL
+	}
+	if request.CredentialSource != nil {
+		item.CredentialSource = *request.CredentialSource
+	}
+	if request.CredentialRef != nil {
+		item.CredentialRef = *request.CredentialRef
+	}
+	if request.DesktopConfigPath != nil {
+		item.DesktopConfigPath = *request.DesktopConfigPath
+	}
+	if request.MaxConcurrentRuns != nil {
+		item.MaxConcurrentRuns = *request.MaxConcurrentRuns
+	}
+	if item.MaxConcurrentRuns == 0 {
+		item.MaxConcurrentRuns = 1
+	}
+	if err := s.store.UpdateRuntimeConnection(r.Context(), item); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) deleteRuntimeConnection(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteRuntimeConnection(r.Context(), r.PathValue("connection")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) discoverRuntimeConnection(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetRuntimeConnection(r.Context(), r.PathValue("connection"))
 	if err != nil {
@@ -155,6 +215,9 @@ func (s *Server) updateAgentContext(w http.ResponseWriter, r *http.Request) {
 	if request.MaxConcurrentRuns != nil {
 		item.MaxConcurrentRuns = *request.MaxConcurrentRuns
 	}
+	if item.MaxConcurrentRuns == 0 {
+		item.MaxConcurrentRuns = 1
+	}
 	if _, err := s.store.GetRuntimeConnection(r.Context(), item.RuntimeConnectionID); err != nil {
 		writeError(w, err)
 		return
@@ -164,4 +227,12 @@ func (s *Server) updateAgentContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) deleteAgentContext(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteAgentContext(r.Context(), r.PathValue("context")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

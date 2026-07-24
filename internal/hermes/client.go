@@ -1,6 +1,7 @@
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -118,7 +119,7 @@ func (c Client) Discover(ctx context.Context, connection domain.RuntimeConnectio
 		AuthProviders: status.AuthProviders, Profiles: profiles.Profiles,
 	}
 	for _, profile := range profiles.Profiles {
-		gateway, err := dialGateway(ctx, httpClient, baseURL, profile.Name)
+		gateway, err := dialGateway(ctx, httpClient, baseURL, profile.Name, connection)
 		if err != nil {
 			return Discovery{}, fmt.Errorf("connect Hermes profile %q: %w", profile.Name, err)
 		}
@@ -155,7 +156,7 @@ func (c Client) Run(ctx context.Context, request RunRequest) (RunResult, error) 
 	if err != nil {
 		return RunResult{}, err
 	}
-	gateway, err := dialGateway(ctx, httpClient, baseURL, request.Context.Profile)
+	gateway, err := dialGateway(ctx, httpClient, baseURL, request.Context.Profile, request.Connection)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -245,6 +246,58 @@ type desktopConnectionFile struct {
 	} `json:"remote"`
 }
 
+type credentialDocument struct {
+	SessionToken string `json:"session_token"`
+	Provider     string `json:"provider"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+}
+
+func loadCredential(connection domain.RuntimeConnection) (credentialDocument, error) {
+	var data []byte
+	switch connection.CredentialSource {
+	case "", "hermes_desktop":
+		return credentialDocument{}, nil
+	case "environment":
+		value, ok := os.LookupEnv(connection.CredentialRef)
+		if !ok || strings.TrimSpace(value) == "" {
+			return credentialDocument{}, fmt.Errorf("Hermes credential environment variable %q is empty", connection.CredentialRef)
+		}
+		data = []byte(value)
+	case "file":
+		var err error
+		info, statErr := os.Stat(connection.CredentialRef)
+		if statErr != nil {
+			return credentialDocument{}, fmt.Errorf("read Hermes credential file: %w", statErr)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return credentialDocument{}, fmt.Errorf("Hermes credential file permissions must not allow group or other access")
+		}
+		if info.Size() > 64*1024 {
+			return credentialDocument{}, fmt.Errorf("Hermes credential file exceeds 64 KiB")
+		}
+		data, err = os.ReadFile(connection.CredentialRef)
+		if err != nil {
+			return credentialDocument{}, fmt.Errorf("read Hermes credential file: %w", err)
+		}
+	default:
+		return credentialDocument{}, fmt.Errorf("unsupported Hermes credential source %q", connection.CredentialSource)
+	}
+	var credential credentialDocument
+	if err := json.Unmarshal(data, &credential); err != nil {
+		return credentialDocument{}, fmt.Errorf("decode Hermes credential: %w", err)
+	}
+	hasToken := strings.TrimSpace(credential.SessionToken) != ""
+	hasPassword := strings.TrimSpace(credential.Username) != "" && credential.Password != ""
+	if hasToken == hasPassword {
+		return credentialDocument{}, fmt.Errorf("Hermes credential must contain either session_token or username and password")
+	}
+	if hasPassword && credential.Provider == "" {
+		credential.Provider = "basic"
+	}
+	return credential, nil
+}
+
 func DiscoverDesktopConnection() (domain.RuntimeConnection, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -275,7 +328,7 @@ func LoadDesktopConnection(path string) (domain.RuntimeConnection, error) {
 	}, nil
 }
 
-func DesktopHTTPClient(_ context.Context, connection domain.RuntimeConnection) (*http.Client, string, error) {
+func DesktopHTTPClient(ctx context.Context, connection domain.RuntimeConnection) (*http.Client, string, error) {
 	baseURL := connection.URL
 	configPath := connection.DesktopConfigPath
 	if connection.CredentialSource == "hermes_desktop" {
@@ -310,7 +363,41 @@ func DesktopHTTPClient(_ context.Context, connection domain.RuntimeConnection) (
 			return nil, "", err
 		}
 	}
+	credential, err := loadCredential(connection)
+	if err != nil {
+		return nil, "", err
+	}
+	if credential.SessionToken != "" {
+		client.Transport = sessionTokenTransport{token: credential.SessionToken, base: http.DefaultTransport}
+	}
+	if credential.Username != "" {
+		payload, _ := json.Marshal(map[string]string{
+			"provider": credential.Provider, "username": credential.Username,
+			"password": credential.Password,
+		})
+		request, _ := http.NewRequestWithContext(ctx, http.MethodPost, normalized+"/auth/password-login", bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		response, loginErr := client.Do(request)
+		if loginErr != nil {
+			return nil, "", fmt.Errorf("authenticate to Hermes Gateway: %w", loginErr)
+		}
+		defer response.Body.Close()
+		if response.StatusCode/100 != 2 {
+			return nil, "", fmt.Errorf("authenticate to Hermes Gateway: HTTP %d", response.StatusCode)
+		}
+	}
 	return client, normalized, nil
+}
+
+type sessionTokenTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t sessionTokenTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header.Set("X-Hermes-Session-Token", t.token)
+	return t.base.RoundTrip(cloned)
 }
 
 func seedDesktopCookies(path, baseURL string, jar http.CookieJar) error {
@@ -396,21 +483,36 @@ type gatewayClient struct {
 	errs    chan error
 }
 
-func dialGateway(ctx context.Context, client *http.Client, baseURL, profile string) (*gatewayClient, error) {
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/ws-ticket", nil)
-	response, err := client.Do(request)
+func dialGateway(
+	ctx context.Context,
+	client *http.Client,
+	baseURL, profile string,
+	connection domain.RuntimeConnection,
+) (*gatewayClient, error) {
+	queryKey, queryValue := "ticket", ""
+	credential, err := loadCredential(connection)
 	if err != nil {
-		return nil, fmt.Errorf("mint Hermes WebSocket ticket: %w", err)
+		return nil, err
 	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("mint Hermes WebSocket ticket: HTTP %d", response.StatusCode)
-	}
-	var ticket struct {
-		Ticket string `json:"ticket"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&ticket); err != nil || ticket.Ticket == "" {
-		return nil, fmt.Errorf("decode Hermes WebSocket ticket")
+	if credential.SessionToken != "" {
+		queryKey, queryValue = "token", credential.SessionToken
+	} else {
+		request, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/ws-ticket", nil)
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			return nil, fmt.Errorf("mint Hermes WebSocket ticket: %w", requestErr)
+		}
+		defer response.Body.Close()
+		if response.StatusCode/100 != 2 {
+			return nil, fmt.Errorf("mint Hermes WebSocket ticket: HTTP %d", response.StatusCode)
+		}
+		var ticket struct {
+			Ticket string `json:"ticket"`
+		}
+		if decodeErr := json.NewDecoder(response.Body).Decode(&ticket); decodeErr != nil || ticket.Ticket == "" {
+			return nil, fmt.Errorf("decode Hermes WebSocket ticket")
+		}
+		queryValue = ticket.Ticket
 	}
 	parsed, _ := url.Parse(baseURL)
 	if parsed.Scheme == "https" {
@@ -420,14 +522,15 @@ func dialGateway(ctx context.Context, client *http.Client, baseURL, profile stri
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/api/ws"
 	query := parsed.Query()
-	query.Set("ticket", ticket.Ticket)
+	query.Set(queryKey, queryValue)
 	if profile != "" {
 		query.Set("profile", profile)
 	}
 	parsed.RawQuery = query.Encode()
 	socket, _, err := websocket.Dial(ctx, parsed.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("open Hermes WebSocket: %w", err)
+		message := strings.ReplaceAll(err.Error(), queryValue, "[REDACTED]")
+		return nil, fmt.Errorf("open Hermes WebSocket: %s", message)
 	}
 	socket.SetReadLimit(4 << 20)
 	readCtx, cancel := context.WithCancel(context.Background())

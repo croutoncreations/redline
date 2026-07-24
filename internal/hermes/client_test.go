@@ -86,6 +86,89 @@ func TestRunPersistsExternalIdentityBeforeWaitingAndCollectsUsage(t *testing.T) 
 	}
 }
 
+func TestEnvironmentSessionTokenAuthenticatesHTTPAndWebSocket(t *testing.T) {
+	const variable = "REDLINE_TEST_HERMES_CREDENTIAL"
+	t.Setenv(variable, `{"session_token":"secret-token"}`)
+	server := tokenGateway(t, "secret-token")
+	defer server.Close()
+
+	discovery, err := (hermes.Client{}).Discover(t.Context(), domain.RuntimeConnection{
+		ID: "token", Runtime: "hermes", Transport: "gateway", URL: server.URL,
+		CredentialSource: "environment", CredentialRef: variable,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discovery.Version != "0.17.0" || len(discovery.Profiles) != 1 {
+		t.Fatalf("discovery = %#v", discovery)
+	}
+}
+
+func TestFilePasswordCredentialLogsInWithoutPersistingSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes-credential.json")
+	if err := os.WriteFile(path, []byte(`{
+		"provider":"basic","username":"redline","password":"correct horse"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := passwordGateway(t, "redline", "correct horse")
+	defer server.Close()
+
+	discovery, err := (hermes.Client{}).Discover(t.Context(), domain.RuntimeConnection{
+		ID: "password", Runtime: "hermes", Transport: "gateway", URL: server.URL,
+		CredentialSource: "file", CredentialRef: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discovery.Version != "0.17.0" {
+		t.Fatalf("discovery = %#v", discovery)
+	}
+}
+
+func TestCredentialFileRejectsGroupReadableSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes-credential.json")
+	if err := os.WriteFile(path, []byte(`{"session_token":"secret"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (hermes.Client{}).Discover(t.Context(), domain.RuntimeConnection{
+		ID: "file", Runtime: "hermes", Transport: "gateway", URL: "https://gateway.invalid",
+		CredentialSource: "file", CredentialRef: path,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not allow group or other access") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWebSocketFailureDoesNotExposeSessionToken(t *testing.T) {
+	const variable = "REDLINE_TEST_HERMES_REDACT"
+	const secret = "do-not-log-this-token"
+	t.Setenv(variable, `{"session_token":"`+secret+`"}`)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"version": "0.17.0"})
+	})
+	mux.HandleFunc("GET /api/profiles", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"profiles": []map[string]any{{"name": "default"}}})
+	})
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	_, err := (hermes.Client{}).Discover(t.Context(), domain.RuntimeConnection{
+		ID: "token", Runtime: "hermes", Transport: "gateway", URL: server.URL,
+		CredentialSource: "environment", CredentialRef: variable,
+	})
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked secret: %v", err)
+	}
+}
+
 func authenticatedClient(baseURL string) hermes.HTTPClientFactory {
 	return func(context.Context, domain.RuntimeConnection) (*http.Client, string, error) {
 		jar, _ := cookiejar.New(nil)
@@ -169,6 +252,115 @@ func fakeGateway(t *testing.T) *httptest.Server {
 		}
 	})
 	return httptest.NewServer(mux)
+}
+
+func tokenGateway(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hermes-Session-Token") != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]any{"version": "0.17.0"})
+	})
+	mux.HandleFunc("GET /api/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hermes-Session-Token") != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]any{"profiles": []map[string]any{{
+			"name": "default", "path": "/srv/hermes", "is_default": true,
+		}}})
+	})
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		serveDiscoveryWebSocket(t, w, r)
+	})
+	return httptest.NewServer(mux)
+}
+
+func passwordGateway(t *testing.T, username, password string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	authenticated := func(r *http.Request) bool {
+		cookie, err := r.Cookie("hermes_session_at")
+		return err == nil && cookie.Value == "access-token"
+	}
+	mux.HandleFunc("POST /auth/password-login", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Provider string `json:"provider"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body.Provider != "basic" ||
+			body.Username != username || body.Password != password {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "hermes_session_at", Value: "access-token", Path: "/"})
+		writeJSON(w, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		if !authenticated(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]any{"version": "0.17.0"})
+	})
+	mux.HandleFunc("GET /api/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if !authenticated(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]any{"profiles": []map[string]any{{
+			"name": "default", "path": "/srv/hermes", "is_default": true,
+		}}})
+	})
+	mux.HandleFunc("POST /api/auth/ws-ticket", func(w http.ResponseWriter, r *http.Request) {
+		if !authenticated(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]any{"ticket": "password-ticket"})
+	})
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ticket") != "password-ticket" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		serveDiscoveryWebSocket(t, w, r)
+	})
+	return httptest.NewServer(mux)
+}
+
+func serveDiscoveryWebSocket(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	socket, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer socket.CloseNow()
+	for {
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := wsjson.Read(r.Context(), socket, &request); err != nil {
+			return
+		}
+		result := map[string]any{}
+		if request.Method == "projects.list" {
+			result = map[string]any{"projects": []any{}}
+		}
+		if request.Method == "model.options" {
+			result = map[string]any{"providers": []any{}}
+		}
+		writeRPC(t, r.Context(), socket, request.ID, result)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

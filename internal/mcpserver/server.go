@@ -115,6 +115,7 @@ type schedulerInput struct {
 type profileCreateInput struct {
 	ID                string   `json:"id,omitempty" jsonschema:"optional stable profile ID"`
 	ProviderAccountID string   `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
+	AgentContextID    string   `json:"agent_context_id,omitempty" jsonschema:"Hermes agent context ID when harness_type is hermes"`
 	HarnessType       string   `json:"harness_type" jsonschema:"codex-cli, claude-code, pi, command, or another supported harness"`
 	Model             string   `json:"model,omitempty" jsonschema:"model identifier passed to the harness"`
 	BudgetModelGroup  string   `json:"budget_model_group,omitempty" jsonschema:"optional model-specific allowance routing override such as fable"`
@@ -133,6 +134,7 @@ type profileCreateInput struct {
 type profileUpdateInput struct {
 	ID                string    `json:"id" jsonschema:"execution profile ID"`
 	ProviderAccountID *string   `json:"provider_account_id,omitempty" jsonschema:"new configured provider account ID"`
+	AgentContextID    *string   `json:"agent_context_id,omitempty" jsonschema:"new Hermes agent context ID"`
 	HarnessType       *string   `json:"harness_type,omitempty" jsonschema:"new harness type"`
 	Model             *string   `json:"model,omitempty" jsonschema:"new model identifier; an empty string clears it"`
 	BudgetModelGroup  *string   `json:"budget_model_group,omitempty" jsonschema:"new allowance routing override; an empty string clears it"`
@@ -146,6 +148,50 @@ type profileUpdateInput struct {
 	CleanupPolicy     *string   `json:"cleanup_policy,omitempty" jsonschema:"new cleanup policy; an empty string clears it"`
 	PrepareCommand    *string   `json:"prepare_command,omitempty" jsonschema:"new prepare command; an empty string clears it"`
 	FinalizeCommand   *string   `json:"finalize_command,omitempty" jsonschema:"new finalize command; an empty string clears it"`
+}
+
+type runtimeConnectionCreateInput struct {
+	ID                string `json:"id" jsonschema:"stable runtime connection ID"`
+	Runtime           string `json:"runtime" jsonschema:"runtime type; currently hermes"`
+	Transport         string `json:"transport" jsonschema:"gateway or local"`
+	URL               string `json:"url,omitempty" jsonschema:"Hermes Gateway base URL"`
+	CredentialSource  string `json:"credential_source,omitempty" jsonschema:"hermes_desktop, environment, file, or empty for an ungated endpoint"`
+	CredentialRef     string `json:"credential_ref,omitempty" jsonschema:"environment variable name or credential JSON file path; never the secret itself"`
+	DesktopConfigPath string `json:"desktop_config_path,omitempty" jsonschema:"optional Hermes Desktop connection.json path"`
+	MaxConcurrentRuns int    `json:"max_concurrent_runs,omitempty" jsonschema:"maximum simultaneous runs through this connection; defaults to 1"`
+}
+
+type runtimeConnectionUpdateInput struct {
+	ID                string  `json:"id" jsonschema:"runtime connection ID"`
+	Runtime           *string `json:"runtime,omitempty" jsonschema:"new runtime type"`
+	Transport         *string `json:"transport,omitempty" jsonschema:"new transport"`
+	URL               *string `json:"url,omitempty" jsonschema:"new Gateway base URL"`
+	CredentialSource  *string `json:"credential_source,omitempty" jsonschema:"new credential source"`
+	CredentialRef     *string `json:"credential_ref,omitempty" jsonschema:"new environment variable name or credential file path"`
+	DesktopConfigPath *string `json:"desktop_config_path,omitempty" jsonschema:"new Hermes Desktop config path"`
+	MaxConcurrentRuns *int    `json:"max_concurrent_runs,omitempty" jsonschema:"new concurrency limit"`
+}
+
+type agentContextCreateInput struct {
+	ID                  string `json:"id" jsonschema:"stable agent context ID"`
+	RuntimeConnectionID string `json:"runtime_connection_id" jsonschema:"existing runtime connection ID"`
+	Profile             string `json:"profile,omitempty" jsonschema:"Hermes profile name"`
+	Agent               string `json:"agent,omitempty" jsonschema:"runtime-specific agent identifier when supported"`
+	Project             string `json:"project,omitempty" jsonschema:"Hermes project identifier"`
+	WorkingDirectory    string `json:"working_directory,omitempty" jsonschema:"working directory on the Hermes host"`
+	SessionMode         string `json:"session_mode,omitempty" jsonschema:"isolated or persistent; isolated is recommended"`
+	MaxConcurrentRuns   int    `json:"max_concurrent_runs,omitempty" jsonschema:"maximum simultaneous runs in this context; defaults to 1"`
+}
+
+type agentContextUpdateInput struct {
+	ID                  string  `json:"id" jsonschema:"agent context ID"`
+	RuntimeConnectionID *string `json:"runtime_connection_id,omitempty" jsonschema:"new runtime connection ID"`
+	Profile             *string `json:"profile,omitempty" jsonschema:"new Hermes profile name"`
+	Agent               *string `json:"agent,omitempty" jsonschema:"new runtime-specific agent identifier"`
+	Project             *string `json:"project,omitempty" jsonschema:"new Hermes project identifier"`
+	WorkingDirectory    *string `json:"working_directory,omitempty" jsonschema:"new remote working directory"`
+	SessionMode         *string `json:"session_mode,omitempty" jsonschema:"isolated or persistent"`
+	MaxConcurrentRuns   *int    `json:"max_concurrent_runs,omitempty" jsonschema:"new context concurrency limit"`
 }
 
 type taskView struct {
@@ -214,6 +260,14 @@ func New(client apiclient.Client) *mcp.Server {
 		"List the configured harness, model, repository, and workspace execution profiles."), s.profilesList)
 	mcp.AddTool(result, readTool("redline_profile_get", "Get execution profile",
 		"Get one execution profile, including harness, model, repository, workspace, and lifecycle hooks."), s.profileGet)
+	mcp.AddTool(result, readTool("redline_runtime_connections_list", "List runtime connections",
+		"List configured remote runtime connections without exposing credential contents."), s.runtimeConnectionsList)
+	mcp.AddTool(result, readTool("redline_runtime_connection_get", "Get runtime connection",
+		"Get one runtime connection and its credential reference, never the referenced secret."), s.runtimeConnectionGet)
+	mcp.AddTool(result, readTool("redline_agent_contexts_list", "List agent contexts",
+		"List configured runtime profiles, projects, and remote working directories."), s.agentContextsList)
+	mcp.AddTool(result, readTool("redline_agent_context_get", "Get agent context",
+		"Get one configured remote agent context."), s.agentContextGet)
 	mcp.AddTool(result, readTool("redline_runs_list", "List runs",
 		"List recent Redline run lifecycles with a bounded response."), s.runsList)
 	mcp.AddTool(result, readTool("redline_run_get", "Get run",
@@ -235,6 +289,20 @@ func New(client apiclient.Client) *mcp.Server {
 		"Update harness, model, workspace, repository, or lifecycle-hook fields on an execution profile.", true, true, false), s.profileUpdate)
 	mcp.AddTool(result, mutationTool("redline_profile_delete", "Delete execution profile",
 		"Delete an execution profile. The service rejects deletion while a task references it.", true, false, false), s.profileDelete)
+	mcp.AddTool(result, mutationTool("redline_runtime_connection_create", "Create runtime connection",
+		"Create a Hermes runtime connection using only a credential reference, never an inline secret.", false, false, true), s.runtimeConnectionCreate)
+	mcp.AddTool(result, mutationTool("redline_runtime_connection_update", "Update runtime connection",
+		"Update a runtime endpoint, credential reference, or concurrency setting.", true, true, true), s.runtimeConnectionUpdate)
+	mcp.AddTool(result, mutationTool("redline_runtime_connection_delete", "Delete runtime connection",
+		"Delete an unreferenced runtime connection.", true, false, false), s.runtimeConnectionDelete)
+	mcp.AddTool(result, mutationTool("redline_runtime_connection_discover", "Discover runtime options",
+		"Connect to a runtime and discover its profiles, projects, providers, and models.", false, false, true), s.runtimeConnectionDiscover)
+	mcp.AddTool(result, mutationTool("redline_agent_context_create", "Create agent context",
+		"Create a runtime profile, project, and working-directory selection.", false, false, false), s.agentContextCreate)
+	mcp.AddTool(result, mutationTool("redline_agent_context_update", "Update agent context",
+		"Update a runtime profile, project, working directory, session mode, or concurrency setting.", true, true, false), s.agentContextUpdate)
+	mcp.AddTool(result, mutationTool("redline_agent_context_delete", "Delete agent context",
+		"Delete an agent context that is not referenced by an execution profile.", true, false, false), s.agentContextDelete)
 	mcp.AddTool(result, mutationTool("redline_provider_control", "Control provider",
 		"Pause or resume automatic dispatch for a configured provider account.", false, true, false), s.providerControl)
 	mcp.AddTool(result, mutationTool("redline_scheduler_evaluate", "Evaluate scheduler",
@@ -454,6 +522,7 @@ func (s *server) profileCreate(ctx context.Context, _ *mcp.CallToolRequest, inpu
 func (s *server) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, input profileUpdateInput) (*mcp.CallToolResult, Output, error) {
 	body := map[string]any{}
 	putOptional(body, "provider_account_id", input.ProviderAccountID)
+	putOptional(body, "agent_context_id", input.AgentContextID)
 	putOptional(body, "harness_type", input.HarnessType)
 	putOptional(body, "model", input.Model)
 	putOptional(body, "budget_model_group", input.BudgetModelGroup)
@@ -472,6 +541,108 @@ func (s *server) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		return nil, Output{}, err
 	}
 	return nil, Output{Summary: fmt.Sprintf("Updated execution profile %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) runtimeConnectionsList(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, Output, error) {
+	var items []domain.RuntimeConnection
+	if err := s.client.Do(ctx, http.MethodGet, "/v1/runtime-connections", nil, &items); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Found %d runtime connections.", len(items)), Count: len(items), Data: items}, nil
+}
+
+func (s *server) runtimeConnectionGet(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.RuntimeConnection
+	if err := s.client.Do(ctx, http.MethodGet, "/v1/runtime-connections/"+url.PathEscape(input.ID), nil, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Loaded runtime connection %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) runtimeConnectionCreate(ctx context.Context, _ *mcp.CallToolRequest, input runtimeConnectionCreateInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.RuntimeConnection
+	if err := s.client.Do(ctx, http.MethodPost, "/v1/runtime-connections", input, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Created runtime connection %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) runtimeConnectionUpdate(ctx context.Context, _ *mcp.CallToolRequest, input runtimeConnectionUpdateInput) (*mcp.CallToolResult, Output, error) {
+	body := map[string]any{}
+	putOptional(body, "runtime", input.Runtime)
+	putOptional(body, "transport", input.Transport)
+	putOptional(body, "url", input.URL)
+	putOptional(body, "credential_source", input.CredentialSource)
+	putOptional(body, "credential_ref", input.CredentialRef)
+	putOptional(body, "desktop_config_path", input.DesktopConfigPath)
+	putOptional(body, "max_concurrent_runs", input.MaxConcurrentRuns)
+	var item domain.RuntimeConnection
+	if err := s.client.Do(ctx, http.MethodPatch, "/v1/runtime-connections/"+url.PathEscape(input.ID), body, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Updated runtime connection %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) runtimeConnectionDelete(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	if err := s.client.Do(ctx, http.MethodDelete, "/v1/runtime-connections/"+url.PathEscape(input.ID), nil, nil); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Deleted runtime connection %s.", input.ID), Data: map[string]any{"id": input.ID, "deleted": true}}, nil
+}
+
+func (s *server) runtimeConnectionDiscover(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	var result map[string]any
+	if err := s.client.Do(ctx, http.MethodPost, "/v1/runtime-connections/"+url.PathEscape(input.ID)+"/discover", map[string]any{}, &result); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Discovered runtime connection %s.", input.ID), Data: result}, nil
+}
+
+func (s *server) agentContextsList(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, Output, error) {
+	var items []domain.AgentContext
+	if err := s.client.Do(ctx, http.MethodGet, "/v1/agent-contexts", nil, &items); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Found %d agent contexts.", len(items)), Count: len(items), Data: items}, nil
+}
+
+func (s *server) agentContextGet(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.AgentContext
+	if err := s.client.Do(ctx, http.MethodGet, "/v1/agent-contexts/"+url.PathEscape(input.ID), nil, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Loaded agent context %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) agentContextCreate(ctx context.Context, _ *mcp.CallToolRequest, input agentContextCreateInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.AgentContext
+	if err := s.client.Do(ctx, http.MethodPost, "/v1/agent-contexts", input, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Created agent context %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) agentContextUpdate(ctx context.Context, _ *mcp.CallToolRequest, input agentContextUpdateInput) (*mcp.CallToolResult, Output, error) {
+	body := map[string]any{}
+	putOptional(body, "runtime_connection_id", input.RuntimeConnectionID)
+	putOptional(body, "profile", input.Profile)
+	putOptional(body, "agent", input.Agent)
+	putOptional(body, "project", input.Project)
+	putOptional(body, "working_directory", input.WorkingDirectory)
+	putOptional(body, "session_mode", input.SessionMode)
+	putOptional(body, "max_concurrent_runs", input.MaxConcurrentRuns)
+	var item domain.AgentContext
+	if err := s.client.Do(ctx, http.MethodPatch, "/v1/agent-contexts/"+url.PathEscape(input.ID), body, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Updated agent context %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) agentContextDelete(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	if err := s.client.Do(ctx, http.MethodDelete, "/v1/agent-contexts/"+url.PathEscape(input.ID), nil, nil); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Deleted agent context %s.", input.ID), Data: map[string]any{"id": input.ID, "deleted": true}}, nil
 }
 
 func (s *server) profileDelete(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {

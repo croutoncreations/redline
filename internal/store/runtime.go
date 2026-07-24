@@ -24,6 +24,15 @@ func validateRuntimeConnection(item domain.RuntimeConnection) error {
 	if item.Transport == "gateway" && strings.TrimSpace(item.URL) == "" && item.CredentialSource != "hermes_desktop" {
 		return fmt.Errorf("gateway runtime connection requires a URL or Hermes Desktop import")
 	}
+	switch item.CredentialSource {
+	case "", "hermes_desktop":
+	case "environment", "file":
+		if strings.TrimSpace(item.CredentialRef) == "" {
+			return fmt.Errorf("credential_ref is required for %s credentials", item.CredentialSource)
+		}
+	default:
+		return fmt.Errorf("unsupported credential source %q", item.CredentialSource)
+	}
 	if item.MaxConcurrentRuns < 0 {
 		return fmt.Errorf("runtime connection max_concurrent_runs cannot be negative")
 	}
@@ -86,6 +95,46 @@ FROM runtime_connections WHERE id = ?`, id))
 		return domain.RuntimeConnection{}, ErrNotFound
 	}
 	return item, err
+}
+
+func (d *DB) UpdateRuntimeConnection(ctx context.Context, item domain.RuntimeConnection) error {
+	if err := validateRuntimeConnection(item); err != nil {
+		return err
+	}
+	if item.MaxConcurrentRuns == 0 {
+		item.MaxConcurrentRuns = 1
+	}
+	result, err := d.db.ExecContext(ctx, `UPDATE runtime_connections SET runtime = ?, transport = ?,
+url = ?, credential_source = ?, credential_ref = ?, desktop_config_path = ?,
+max_concurrent_runs = ? WHERE id = ?`, item.Runtime, item.Transport, item.URL,
+		item.CredentialSource, item.CredentialRef, item.DesktopConfigPath, item.MaxConcurrentRuns, item.ID)
+	if err != nil {
+		return fmt.Errorf("update runtime connection: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("%w: runtime connection %q", ErrNotFound, item.ID)
+	}
+	return nil
+}
+
+func (d *DB) DeleteRuntimeConnection(ctx context.Context, id string) error {
+	var references int
+	if err := d.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_contexts WHERE runtime_connection_id = ?`, id,
+	).Scan(&references); err != nil {
+		return fmt.Errorf("check runtime connection references: %w", err)
+	}
+	if references > 0 {
+		return fmt.Errorf("%w: runtime connection %q has agent contexts", ErrConflict, id)
+	}
+	result, err := d.db.ExecContext(ctx, `DELETE FROM runtime_connections WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete runtime connection: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("%w: runtime connection %q", ErrNotFound, id)
+	}
+	return nil
 }
 
 func validateAgentContext(item domain.AgentContext) error {
@@ -178,6 +227,26 @@ max_concurrent_runs = ? WHERE id = ?`, item.RuntimeConnectionID, item.Profile, i
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		return fmt.Errorf("%w: agent context %q", ErrNotFound, item.ID)
+	}
+	return nil
+}
+
+func (d *DB) DeleteAgentContext(ctx context.Context, id string) error {
+	var references int
+	if err := d.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM execution_profiles WHERE agent_context_id = ?`, id,
+	).Scan(&references); err != nil {
+		return fmt.Errorf("check agent context references: %w", err)
+	}
+	if references > 0 {
+		return fmt.Errorf("%w: agent context %q has execution profiles", ErrConflict, id)
+	}
+	result, err := d.db.ExecContext(ctx, `DELETE FROM agent_contexts WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete agent context: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("%w: agent context %q", ErrNotFound, id)
 	}
 	return nil
 }

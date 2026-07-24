@@ -113,11 +113,26 @@ async function loadDashboard(page, options = {}) {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
       state.runtimeConnections.push(body); return json(201, body);
     }
+    const runtimeMatch = url.pathname.match(/^\/v1\/runtime-connections\/([^/]+)$/);
+    if (runtimeMatch && runtimeMatch[1] !== 'imports') {
+      const id = decodeURIComponent(runtimeMatch[1]), item = state.runtimeConnections.find(connection => connection.id === id);
+      if (method === 'GET') return item ? json(200, item) : json(404, { error: 'runtime connection not found' });
+      if (method === 'PATCH') {
+        const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+        Object.assign(item, body); return json(200, item);
+      }
+      if (method === 'DELETE') {
+        state.requests.push({ method, path: url.pathname });
+        if (state.agentContexts.some(context => context.runtime_connection_id === id)) return json(409, { error: 'runtime connection has agent contexts' });
+        state.runtimeConnections = state.runtimeConnections.filter(connection => connection.id !== id);
+        return route.fulfill({ status: 204 });
+      }
+    }
     if (url.pathname === '/v1/runtime-connections/imports') return json(200, [{
       id: 'hermes-desktop', runtime: 'hermes', transport: 'gateway',
       url: 'http://hermes.test:9119', credential_source: 'hermes_desktop', max_concurrent_runs: 1,
     }]);
-    if (url.pathname === '/v1/runtime-connections/hermes-desktop/discover' && method === 'POST') return json(200, {
+    if (/^\/v1\/runtime-connections\/[^/]+\/discover$/.test(url.pathname) && method === 'POST') return json(200, {
       version: '0.17.0', profiles: [{ name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' }],
       profile_options: [{
         profile: { name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' },
@@ -135,6 +150,11 @@ async function loadDashboard(page, options = {}) {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
       Object.assign(state.agentContexts.find(item => item.id === decodeURIComponent(contextMatch[1])), body);
       return json(200, body);
+    }
+    if (contextMatch && method === 'DELETE') {
+      state.requests.push({ method, path: url.pathname });
+      state.agentContexts = state.agentContexts.filter(item => item.id !== decodeURIComponent(contextMatch[1]));
+      return route.fulfill({ status: 204 });
     }
 		const capacityMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/capacity$/);
 		if (capacityMatch) {
@@ -326,7 +346,7 @@ test('imports Hermes Desktop and creates a remote profile from discovered contex
   await page.locator('#profile-provider').selectOption('codex-main');
   await page.locator('#profile-harness').selectOption('hermes');
   await expect(page.locator('#profile-hermes-fields')).toBeVisible();
-  await page.getByRole('button', { name: 'Import Hermes Desktop' }).click();
+  await page.getByRole('button', { name: 'Import Desktop' }).click();
   await expect(page.locator('#profile-hermes-status')).toContainText('1 profile discovered');
   await expect(page.locator('#profile-runtime-profile')).toHaveValue('default');
   await page.locator('#profile-runtime-project').selectOption('scout');
@@ -347,6 +367,36 @@ test('imports Hermes Desktop and creates a remote profile from discovered contex
     model: 'openai-codex/gpt-5.6-sol', workspace_provider: 'runtime-owned',
     repository: '/home/jon/projects/scout',
   });
+});
+
+test('creates edits and deletes a standalone Hermes runtime connection', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await page.locator('#profile-harness').selectOption('hermes');
+  await page.getByRole('button', { name: '+ Connection' }).click();
+  await expect(page.getByRole('dialog', { name: 'New Hermes connection' })).toBeVisible();
+  await page.locator('#runtime-id').fill('hermes-remote');
+  await page.locator('#runtime-url').fill('https://hermes.example');
+  await page.locator('#runtime-credential-source').selectOption('environment');
+  await page.locator('#runtime-credential-ref').fill('HERMES_GATEWAY_CREDENTIAL');
+  await page.getByRole('button', { name: 'Save connection' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/runtime-connections')).toBe(true);
+  expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/runtime-connections').body).toMatchObject({
+    id:'hermes-remote',runtime:'hermes',transport:'gateway',url:'https://hermes.example',
+    credential_source:'environment',credential_ref:'HERMES_GATEWAY_CREDENTIAL',
+  });
+  await expect(page.locator('#profile-runtime-connection')).toHaveValue('hermes-remote');
+
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('#runtime-concurrency').fill('3');
+  await page.getByRole('button', { name: 'Save connection' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/runtime-connections/hermes-remote')).toBe(true);
+
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  page.once('dialog', confirmation => confirmation.accept());
+  await page.getByRole('button', { name: 'Delete connection' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'DELETE' && item.path === '/v1/runtime-connections/hermes-remote')).toBe(true);
 });
 
 test('loads both run log streams and controls an existing task', async ({ page }) => {

@@ -162,6 +162,24 @@ actual provider/model, terminal output, and reported token totals are retained w
 The Gateway owns the remote filesystem; local prepare/finalize commands are therefore disabled for
 runtime-owned workspaces.
 
+Hermes connections can also reference standalone credentials without storing their contents in
+Redline. Choose an environment-variable name or a protected JSON file (`0600`) containing one of:
+
+```json
+{"session_token":"the Hermes dashboard session token"}
+```
+
+```json
+{"provider":"basic","username":"redline","password":"a strong password"}
+```
+
+Session-token connections use Hermes' `X-Hermes-Session-Token` HTTP contract and authenticated
+WebSocket query. Basic credentials are exchanged through `/auth/password-login`; Redline retains
+only the resulting in-memory cookie jar for that operation. Environment variables must be present
+in the service process—launchd installations will usually find a protected credential file simpler.
+Connection and agent-context records can be created, edited, and removed through the dashboard,
+HTTP API, or MCP. Referenced records cannot be deleted.
+
 Repository paths previously used by profiles are remembered as suggestions and can always be typed
 directly. The advanced **Allowance routing override** corresponds to `budget_model_group`; leave it
 automatic unless a provider exposes a separate model-specific pool that model-name inference cannot
@@ -252,8 +270,8 @@ go run ./cmd/redline --api http://127.0.0.1:7436 mcp
 ```
 
 The MCP surface provides compact usage/capacity summaries, bounded task/profile/run inspection,
-task and execution-profile management, provider controls, dry scheduler evaluation, and an
-explicitly mutating dispatch tool.
+task, execution-profile, runtime-connection, and agent-context management, provider controls,
+runtime discovery, dry scheduler evaluation, and an explicitly mutating dispatch tool.
 See [the MCP and agent guide](docs/mcp.md) for tool semantics, Codex and Claude Code setup, Pi
 bridges, and a suggested agent instruction.
 

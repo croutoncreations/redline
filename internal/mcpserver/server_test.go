@@ -54,6 +54,10 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_task_get",
 		"redline_profiles_list",
 		"redline_profile_get",
+		"redline_runtime_connections_list",
+		"redline_runtime_connection_get",
+		"redline_agent_contexts_list",
+		"redline_agent_context_get",
 		"redline_runs_list",
 		"redline_run_get",
 		"redline_run_events",
@@ -64,6 +68,13 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_profile_create",
 		"redline_profile_update",
 		"redline_profile_delete",
+		"redline_runtime_connection_create",
+		"redline_runtime_connection_update",
+		"redline_runtime_connection_delete",
+		"redline_runtime_connection_discover",
+		"redline_agent_context_create",
+		"redline_agent_context_update",
+		"redline_agent_context_delete",
 		"redline_provider_control",
 		"redline_scheduler_evaluate",
 		"redline_scheduler_dispatch",
@@ -82,7 +93,8 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	readOnly := []string{
 		"redline_overview", "redline_provider_status", "redline_provider_capacity",
 		"redline_tasks_list", "redline_task_get", "redline_profiles_list",
-		"redline_profile_get",
+		"redline_profile_get", "redline_runtime_connections_list", "redline_runtime_connection_get",
+		"redline_agent_contexts_list", "redline_agent_context_get",
 		"redline_runs_list", "redline_run_get", "redline_run_events", "redline_run_logs",
 	}
 	for _, name := range readOnly {
@@ -119,6 +131,59 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	}
 	if tools["redline_profile_delete"].Annotations.IdempotentHint {
 		t.Fatal("profile delete should not be annotated idempotent because a repeated delete returns not found")
+	}
+	if tools["redline_runtime_connection_delete"].Annotations == nil ||
+		tools["redline_runtime_connection_delete"].Annotations.DestructiveHint == nil ||
+		!*tools["redline_runtime_connection_delete"].Annotations.DestructiveHint {
+		t.Fatal("runtime connection delete should be annotated destructive")
+	}
+}
+
+func TestHermesRuntimeAndContextToolsUseServiceAPI(t *testing.T) {
+	var createdConnection, createdContext bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runtime-connections", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"id":"hermes-remote","runtime":"hermes","transport":"gateway","url":"https://gateway.example","max_concurrent_runs":1}]`)
+	})
+	mux.HandleFunc("POST /v1/runtime-connections", func(w http.ResponseWriter, r *http.Request) {
+		createdConnection = true
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	mux.HandleFunc("POST /v1/runtime-connections/hermes-remote/discover", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"version":"0.18.2","profiles":[{"name":"default"}],"profile_options":[]}`)
+	})
+	mux.HandleFunc("POST /v1/agent-contexts", func(w http.ResponseWriter, r *http.Request) {
+		createdContext = true
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	session := connect(t, mux)
+
+	list := callTool(t, session, "redline_runtime_connections_list", map[string]any{})
+	if list.IsError {
+		t.Fatalf("list error: %s", contentText(list))
+	}
+	create := callTool(t, session, "redline_runtime_connection_create", map[string]any{
+		"id": "hermes-remote", "runtime": "hermes", "transport": "gateway",
+		"url": "https://gateway.example", "credential_source": "environment",
+		"credential_ref": "HERMES_GATEWAY_CREDENTIAL",
+	})
+	if create.IsError || !createdConnection {
+		t.Fatalf("create=%s called=%t", contentText(create), createdConnection)
+	}
+	discover := callTool(t, session, "redline_runtime_connection_discover", map[string]any{"id": "hermes-remote"})
+	if discover.IsError {
+		t.Fatalf("discover error: %s", contentText(discover))
+	}
+	contextResult := callTool(t, session, "redline_agent_context_create", map[string]any{
+		"id": "hermes-default", "runtime_connection_id": "hermes-remote",
+		"profile": "default", "working_directory": "/srv/project", "session_mode": "isolated",
+	})
+	if contextResult.IsError || !createdContext {
+		t.Fatalf("context=%s called=%t", contentText(contextResult), createdContext)
 	}
 }
 

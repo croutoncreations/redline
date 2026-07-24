@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/calibration"
@@ -1153,6 +1155,178 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 	}
 }
 
+func TestAutomaticSchedulerCompletesHermesRemoteRunAndRecordsUsage(t *testing.T) {
+	const credentialVariable = "REDLINE_TEST_HERMES_SESSION"
+	t.Setenv(credentialVariable, `{"session_token":"scheduler-token"}`)
+	gateway := hermesSchedulerGateway(t, "scheduler-token")
+	defer gateway.Close()
+	handler, db := automaticHermesServer(t, gateway.URL, credentialVariable)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.StartScheduler(ctx)
+	run := waitForTaskRun(t, db, "hermes-auto", domain.RunCompleted)
+	cancel()
+	handler.Wait()
+	if run.External.SessionID != "stored-hermes-session" || run.External.RuntimeConnectionID != "hermes-auto-runtime" {
+		t.Fatalf("run = %#v", run)
+	}
+	task, err := db.GetTask(t.Context(), "hermes-auto")
+	if err != nil || task.State != domain.Completed {
+		t.Fatalf("task=%#v err=%v", task, err)
+	}
+	observations, err := db.ListTokenObservations(t.Context(), "codex", time.Time{}, time.Time{})
+	if err != nil || len(observations) != 1 || observations[0].SourceID != run.ID ||
+		observations[0].InputTokens != 12 || observations[0].OutputTokens != 2 {
+		t.Fatalf("observations=%#v err=%v", observations, err)
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 1 || attempts[0].Trigger != "automatic" ||
+		attempts[0].Outcome != domain.DispatchAdmitted {
+		t.Fatalf("attempts=%#v err=%v", attempts, err)
+	}
+}
+
+func TestAutomaticHermesCredentialFailureLeavesAuditableFailedRun(t *testing.T) {
+	handler, db := automaticHermesServer(t, "https://gateway.invalid", "REDLINE_MISSING_HERMES_CREDENTIAL")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler.StartScheduler(ctx)
+	run := waitForTaskRun(t, db, "hermes-auto", domain.RunFailed)
+	cancel()
+	handler.Wait()
+	if !strings.Contains(run.Error, `environment variable "REDLINE_MISSING_HERMES_CREDENTIAL" is empty`) {
+		t.Fatalf("run error = %q", run.Error)
+	}
+	task, err := db.GetTask(t.Context(), "hermes-auto")
+	if err != nil || task.State != domain.Failed {
+		t.Fatalf("task=%#v err=%v", task, err)
+	}
+	events, err := db.ListRunEvents(t.Context(), run.ID, 100)
+	if err != nil || len(events) == 0 || events[len(events)-1].Type != "run.failed" {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+}
+
+func automaticHermesServer(
+	t *testing.T,
+	gatewayURL, credentialVariable string,
+) (*api.Server, *store.DB) {
+	t.Helper()
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	t.Cleanup(usage.Close)
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := testConfig(usage.URL)
+	delete(cfg.Providers, "claude-main")
+	cfg.RunArtifactsDir = t.TempDir()
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	connection := domain.RuntimeConnection{
+		ID: "hermes-auto-runtime", Runtime: "hermes", Transport: "gateway", URL: gatewayURL,
+		CredentialSource: "environment", CredentialRef: credentialVariable, MaxConcurrentRuns: 1,
+	}
+	if err := db.CreateRuntimeConnection(t.Context(), connection, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	agentContext := domain.AgentContext{
+		ID: "hermes-auto-context", RuntimeConnectionID: connection.ID,
+		Profile: "default", WorkingDirectory: "/srv/project", SessionMode: "isolated",
+	}
+	if err := db.CreateAgentContext(t.Context(), agentContext, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{
+		ID: "hermes-auto-profile", ProviderAccountID: "codex-main",
+		AgentContextID: agentContext.ID, HarnessType: "hermes",
+		Model: "openai-codex/gpt-test", WorkspaceProvider: "runtime-owned", Repository: "/srv/project",
+	}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{
+		ID: "hermes-auto", Name: "Hermes automatic smoke", Prompt: "Reply OK.",
+		Priority: 100, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+	}
+	if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	return api.NewServer(cfg, db, func() time.Time { return apiNow }), db
+}
+
+func waitForTaskRun(t *testing.T, db *store.DB, taskID string, state domain.RunState) domain.Run {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := db.ListRuns(t.Context(), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range runs {
+			if run.TaskID == taskID && run.State == state {
+				return run
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach run state %s", taskID, state)
+	return domain.Run{}
+}
+
+func hermesSchedulerGateway(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		socket, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer socket.CloseNow()
+		for {
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if wsjson.Read(r.Context(), socket, &request) != nil {
+				return
+			}
+			result := map[string]any{}
+			switch request.Method {
+			case "session.create":
+				result = map[string]any{
+					"session_id": "live-hermes-session", "stored_session_id": "stored-hermes-session",
+					"info": map[string]any{"model": "gpt-test", "provider": "openai-codex"},
+				}
+			case "session.usage":
+				result = map[string]any{"calls": 1, "input": 12, "output": 2, "total": 14}
+			case "session.status":
+				result = map[string]any{"model": "gpt-test", "provider": "openai-codex"}
+			}
+			_ = wsjson.Write(r.Context(), socket, map[string]any{
+				"jsonrpc": "2.0", "id": request.ID, "result": result,
+			})
+			if request.Method == "prompt.submit" {
+				_ = wsjson.Write(r.Context(), socket, map[string]any{
+					"jsonrpc": "2.0", "method": "event", "params": map[string]any{
+						"type": "message.complete", "session_id": "live-hermes-session",
+						"payload": map[string]any{"text": "OK"},
+					},
+				})
+			}
+		}
+	})
+	return httptest.NewServer(mux)
+}
+
 func TestManualExecutePersistsNoTaskAttemptAndListsIt(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/scheduler/execute", map[string]any{
@@ -1861,6 +2035,29 @@ func TestRuntimeConnectionAndAgentContextConfigurationAPI(t *testing.T) {
 	if len(connections) != 1 || len(contexts) != 1 {
 		t.Fatalf("connections=%#v contexts=%#v", connections, contexts)
 	}
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/runtime-connections/"+connection.ID, `{
+		"url":"https://gateway.example","credential_source":"environment",
+		"credential_ref":"HERMES_GATEWAY_CREDENTIAL","max_concurrent_runs":2
+	}`, http.StatusOK)
+	var updatedConnection domain.RuntimeConnection
+	getJSON(t, server.URL+"/v1/runtime-connections/"+connection.ID, &updatedConnection)
+	if updatedConnection.URL != "https://gateway.example" ||
+		updatedConnection.CredentialSource != "environment" || updatedConnection.MaxConcurrentRuns != 2 {
+		t.Fatalf("updated connection = %#v", updatedConnection)
+	}
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/agent-contexts/"+agentContext.ID, `{
+		"working_directory":"/srv/new-redline","max_concurrent_runs":2
+	}`, http.StatusOK)
+	var updatedContext domain.AgentContext
+	getJSON(t, server.URL+"/v1/agent-contexts/"+agentContext.ID, &updatedContext)
+	if updatedContext.WorkingDirectory != "/srv/new-redline" || updatedContext.MaxConcurrentRuns != 2 {
+		t.Fatalf("updated context = %#v", updatedContext)
+	}
+
+	requestStatus(t, http.MethodDelete, server.URL+"/v1/agent-contexts/"+agentContext.ID, "", http.StatusConflict)
+	requestStatus(t, http.MethodDelete, server.URL+"/v1/profiles/"+profile.ID, "", http.StatusNoContent)
+	requestStatus(t, http.MethodDelete, server.URL+"/v1/agent-contexts/"+agentContext.ID, "", http.StatusNoContent)
+	requestStatus(t, http.MethodDelete, server.URL+"/v1/runtime-connections/"+connection.ID, "", http.StatusNoContent)
 }
 
 func TestRuntimeConfigurationAPIUsesEmptyArraysAndRejectsIncompleteHermesProfile(t *testing.T) {

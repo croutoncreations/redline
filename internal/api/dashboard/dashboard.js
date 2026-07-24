@@ -18,7 +18,7 @@ const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 
 let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
-let runtimeConnections = [], agentContexts = [], hermesDiscovery = null;
+let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
@@ -225,6 +225,7 @@ async function loadRuntimeConfiguration() {
   $('#profile-runtime-connection').innerHTML = runtimeConnections.length
     ? runtimeConnections.filter(item => item.runtime === 'hermes').map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.id)} · ${escapeHTML(item.url || item.transport)}</option>`).join('')
     : '<option value="">No Hermes connections configured</option>';
+  $('#edit-runtime-connection').disabled = !$('#profile-runtime-connection').value;
 }
 function selectedHermesProfileOptions() {
   const profile = $('#profile-runtime-profile').value;
@@ -279,6 +280,48 @@ async function importHermesDesktop() {
   await loadRuntimeConfiguration();
   $('#profile-runtime-connection').value = candidate.id;
   await discoverSelectedHermes();
+}
+function showRuntimeError(message) {
+  $('#runtime-form-error').hidden = !message; $('#runtime-form-error').textContent = message || '';
+}
+function openRuntimeConnection(id='') {
+  const item = runtimeConnections.find(connection => connection.id === id);
+  editingRuntimeConnection = item?.id || '';
+  $('#runtime-form').reset(); showRuntimeError('');
+  $('#runtime-id').value = item?.id || ''; $('#runtime-id').disabled = !!item;
+  $('#runtime-url').value = item?.url || '';
+  $('#runtime-credential-source').value = item?.credential_source || '';
+  $('#runtime-credential-ref').value = item?.credential_ref || '';
+  $('#runtime-concurrency').value = item?.max_concurrent_runs || 1;
+  $('#delete-runtime').hidden = !item;
+  $('#runtime-dialog-title').textContent = item ? `Edit ${item.id}` : 'New Hermes connection';
+  $('#runtime-dialog').showModal();
+}
+async function saveRuntimeConnection(event) {
+  event.preventDefault(); showRuntimeError('');
+  const payload = {
+    id:$('#runtime-id').value.trim(),runtime:'hermes',transport:'gateway',
+    url:$('#runtime-url').value.trim(),credential_source:$('#runtime-credential-source').value,
+    credential_ref:$('#runtime-credential-ref').value.trim(),
+    max_concurrent_runs:Number($('#runtime-concurrency').value || 1)
+  };
+  if (editingRuntimeConnection) delete payload.id;
+  $('#save-runtime').disabled = true;
+  try {
+    const path=editingRuntimeConnection ? `/v1/runtime-connections/${encodeURIComponent(editingRuntimeConnection)}` : '/v1/runtime-connections';
+    const saved=await apiRequest(path,{method:editingRuntimeConnection ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
+    await loadRuntimeConfiguration(); $('#profile-runtime-connection').value=saved.id;
+    $('#runtime-dialog').close(); await discoverSelectedHermes();
+  } catch(error) { showRuntimeError(error.message); } finally { $('#save-runtime').disabled=false; }
+}
+async function deleteRuntimeConnection() {
+  if (!editingRuntimeConnection || !confirm(`Delete connection “${editingRuntimeConnection}”? Remove its execution profiles first.`)) return;
+  try {
+    await apiRequest(`/v1/runtime-connections/${encodeURIComponent(editingRuntimeConnection)}`,{method:'DELETE'});
+    $('#runtime-dialog').close(); await loadRuntimeConfiguration(); hermesDiscovery=null;
+    $('#profile-runtime-profile').innerHTML=''; $('#profile-runtime-project').innerHTML='';
+    $('#profile-hermes-status').textContent='Choose or import a connection to discover profiles, projects, and models.';
+  } catch(error) { showRuntimeError(error.message); }
 }
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
@@ -435,7 +478,15 @@ async function saveProfile(event) {
 }
 async function deleteProfile() {
   if (!editingProfile || !confirm(`Delete profile “${editingProfile}”? Profiles assigned to jobs cannot be deleted.`)) return;
-  try { await apiRequest(`/v1/profiles/${encodeURIComponent(editingProfile)}`,{method:'DELETE'}); await loadProfiles(true); resetProfileForm(); await refresh(); }
+  try {
+    const profile=profiles.find(item => item.id === editingProfile), contextID=profile?.agent_context_id || '';
+    await apiRequest(`/v1/profiles/${encodeURIComponent(editingProfile)}`,{method:'DELETE'});
+    if (contextID) {
+      await apiRequest(`/v1/agent-contexts/${encodeURIComponent(contextID)}`,{method:'DELETE'});
+      agentContexts=agentContexts.filter(item => item.id !== contextID);
+    }
+    await loadProfiles(true); resetProfileForm(); await refresh();
+  }
   catch (error) { showProfileError(error.message); }
 }
 async function toggleTask() {
@@ -481,9 +532,15 @@ $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
 $('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : 'default'); });
 $('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
-$('#profile-runtime-connection').addEventListener('change',() => discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)));
+$('#profile-runtime-connection').addEventListener('change',() => { $('#edit-runtime-connection').disabled=!$('#profile-runtime-connection').value; discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)); });
 $('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });
 $('#import-hermes-desktop').addEventListener('click',() => importHermesDesktop().catch(error => showProfileError(`Hermes import failed: ${error.message}`)));
+$('#new-runtime-connection').addEventListener('click',() => openRuntimeConnection());
+$('#edit-runtime-connection').addEventListener('click',() => openRuntimeConnection($('#profile-runtime-connection').value));
+$('#runtime-form').addEventListener('submit',saveRuntimeConnection);
+$('#delete-runtime').addEventListener('click',deleteRuntimeConnection);
+$('#close-runtime').addEventListener('click',() => $('#runtime-dialog').close());
+$('#cancel-runtime').addEventListener('click',() => $('#runtime-dialog').close());
 $('#refresh-hermes-options').addEventListener('click',() => discoverSelectedHermes($('#profile-runtime-profile').value,$('#profile-runtime-project').value,selectedModel()).catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)));
 $('#refresh-profile-options').addEventListener('click',async () => { const button=$('#refresh-profile-options'), selected=$('#profile-harness').value, model=selectedModel(); button.disabled=true; try { await loadProfileOptions(true); setHarnessControl(selected); updateHarnessFields(model); } catch(error) { showProfileError(`Discovery failed: ${error.message}`); } finally { button.disabled=false; } });
 $('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
