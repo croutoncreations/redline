@@ -53,6 +53,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_tasks_list",
 		"redline_task_get",
 		"redline_profiles_list",
+		"redline_profile_get",
 		"redline_runs_list",
 		"redline_run_get",
 		"redline_run_events",
@@ -60,6 +61,9 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_task_create",
 		"redline_task_update",
 		"redline_task_control",
+		"redline_profile_create",
+		"redline_profile_update",
+		"redline_profile_delete",
 		"redline_provider_control",
 		"redline_scheduler_evaluate",
 		"redline_scheduler_dispatch",
@@ -78,6 +82,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	readOnly := []string{
 		"redline_overview", "redline_provider_status", "redline_provider_capacity",
 		"redline_tasks_list", "redline_task_get", "redline_profiles_list",
+		"redline_profile_get",
 		"redline_runs_list", "redline_run_get", "redline_run_events", "redline_run_logs",
 	}
 	for _, name := range readOnly {
@@ -103,6 +108,17 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	}
 	if tools["redline_task_control"].Annotations.IdempotentHint {
 		t.Fatal("task control should not be annotated idempotent because retry can requeue work")
+	}
+	if tools["redline_profile_update"].Annotations.DestructiveHint == nil ||
+		!*tools["redline_profile_update"].Annotations.DestructiveHint {
+		t.Fatal("profile update should be annotated as potentially destructive")
+	}
+	if tools["redline_profile_delete"].Annotations.DestructiveHint == nil ||
+		!*tools["redline_profile_delete"].Annotations.DestructiveHint {
+		t.Fatal("profile delete should be annotated as destructive")
+	}
+	if tools["redline_profile_delete"].Annotations.IdempotentHint {
+		t.Fatal("profile delete should not be annotated idempotent because a repeated delete returns not found")
 	}
 }
 
@@ -250,6 +266,89 @@ func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	}
 }
 
+func TestProfileCRUDToolsUseExistingAPIValidation(t *testing.T) {
+	var created map[string]any
+	var updated map[string]any
+	var deleted bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{
+			"id":"agent-profile","provider_account_id":"codex-main",
+			"harness_type":"pi","model":"openai-codex/gpt-5.6-sol",
+			"harness_args":["--mode","json"],"workspace_provider":"devx",
+			"repository":"/repo","base_branch":"main","require_clean":true
+		}`)
+	})
+	mux.HandleFunc("GET /v1/profiles/agent-profile", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"id":"agent-profile","provider_account_id":"codex-main",
+			"harness_type":"pi","model":"openai-codex/gpt-5.6-sol",
+			"workspace_provider":"devx","repository":"/repo"
+		}`)
+	})
+	mux.HandleFunc("PATCH /v1/profiles/agent-profile", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprint(w, `{
+			"id":"agent-profile","provider_account_id":"codex-main",
+			"harness_type":"pi","model":"openai-codex/gpt-5.6-terra",
+			"workspace_provider":"git-worktree","repository":"/repo"
+		}`)
+	})
+	mux.HandleFunc("DELETE /v1/profiles/agent-profile", func(w http.ResponseWriter, _ *http.Request) {
+		deleted = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	session := connect(t, mux)
+
+	createResult := callTool(t, session, "redline_profile_create", map[string]any{
+		"id": "agent-profile", "provider_account_id": "codex-main",
+		"harness_type": "pi", "model": "openai-codex/gpt-5.6-sol",
+		"harness_args": []string{"--mode", "json"}, "workspace_provider": "devx",
+		"repository": "/repo", "base_branch": "main", "require_clean": true,
+	})
+	if createResult.IsError {
+		t.Fatalf("create profile error: %s", contentText(createResult))
+	}
+	if created["provider_account_id"] != "codex-main" ||
+		created["workspace_provider"] != "devx" {
+		t.Fatalf("created profile body = %#v", created)
+	}
+	if args, ok := created["harness_args"].([]any); !ok || len(args) != 2 {
+		t.Fatalf("created harness args = %#v", created["harness_args"])
+	}
+
+	getResult := callTool(t, session, "redline_profile_get", map[string]any{"id": "agent-profile"})
+	if getResult.IsError {
+		t.Fatalf("get profile error: %s", contentText(getResult))
+	}
+
+	updateResult := callTool(t, session, "redline_profile_update", map[string]any{
+		"id": "agent-profile", "model": "openai-codex/gpt-5.6-terra",
+		"workspace_provider": "git-worktree",
+	})
+	if updateResult.IsError {
+		t.Fatalf("update profile error: %s", contentText(updateResult))
+	}
+	if updated["model"] != "openai-codex/gpt-5.6-terra" ||
+		updated["workspace_provider"] != "git-worktree" {
+		t.Fatalf("updated profile body = %#v", updated)
+	}
+
+	deleteResult := callTool(t, session, "redline_profile_delete", map[string]any{"id": "agent-profile"})
+	if deleteResult.IsError {
+		t.Fatalf("delete profile error: %s", contentText(deleteResult))
+	}
+	if !deleted {
+		t.Fatal("profile delete endpoint was not called")
+	}
+}
+
 func TestAPIErrorsBecomeVisibleToolErrors(t *testing.T) {
 	session := connect(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -263,6 +362,23 @@ func TestAPIErrorsBecomeVisibleToolErrors(t *testing.T) {
 	}
 	text := contentText(result)
 	if !strings.Contains(text, "provider is paused") {
+		t.Fatalf("error content = %s", text)
+	}
+}
+
+func TestProfileDeleteConflictBecomesVisibleToolError(t *testing.T) {
+	session := connect(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/profiles/in-use" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":"execution profile is referenced by a task"}`)
+	}))
+	result := callTool(t, session, "redline_profile_delete", map[string]any{"id": "in-use"})
+	if !result.IsError {
+		t.Fatal("expected an MCP tool error")
+	}
+	if text := contentText(result); !strings.Contains(text, "referenced by a task") {
 		t.Fatalf("error content = %s", text)
 	}
 }

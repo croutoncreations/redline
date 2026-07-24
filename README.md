@@ -242,7 +242,8 @@ go run ./cmd/redline --api http://127.0.0.1:7436 mcp
 ```
 
 The MCP surface provides compact usage/capacity summaries, bounded task/profile/run inspection,
-task and provider controls, dry scheduler evaluation, and an explicitly mutating dispatch tool.
+task and execution-profile management, provider controls, dry scheduler evaluation, and an
+explicitly mutating dispatch tool.
 See [the MCP and agent guide](docs/mcp.md) for tool semantics, Codex and Claude Code setup, Pi
 bridges, and a suggested agent instruction.
 

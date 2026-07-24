@@ -112,6 +112,42 @@ type schedulerInput struct {
 	CurrentRevision   string `json:"current_revision,omitempty" jsonschema:"current repository commit SHA for repo-change eligibility"`
 }
 
+type profileCreateInput struct {
+	ID                string   `json:"id,omitempty" jsonschema:"optional stable profile ID"`
+	ProviderAccountID string   `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
+	HarnessType       string   `json:"harness_type" jsonschema:"codex-cli, claude-code, pi, command, or another supported harness"`
+	Model             string   `json:"model,omitempty" jsonschema:"model identifier passed to the harness"`
+	BudgetModelGroup  string   `json:"budget_model_group,omitempty" jsonschema:"optional model-specific allowance routing override such as fable"`
+	HarnessCommand    string   `json:"harness_command,omitempty" jsonschema:"custom harness command when harness_type is command"`
+	HarnessArgs       []string `json:"harness_args,omitempty" jsonschema:"additional harness command arguments"`
+	WorkspaceProvider string   `json:"workspace_provider" jsonschema:"devx, git-worktree, existing-directory, or command"`
+	WorkspaceArgs     []string `json:"workspace_args,omitempty" jsonschema:"additional workspace-provider arguments"`
+	Repository        string   `json:"repository,omitempty" jsonschema:"absolute repository or working-directory path"`
+	BaseBranch        string   `json:"base_branch,omitempty" jsonschema:"base branch used for isolated workspaces"`
+	RequireClean      bool     `json:"require_clean,omitempty" jsonschema:"require a clean existing checkout"`
+	CleanupPolicy     string   `json:"cleanup_policy,omitempty" jsonschema:"never, on_success, always, or empty for the default"`
+	PrepareCommand    string   `json:"prepare_command,omitempty" jsonschema:"optional shell command run before the harness"`
+	FinalizeCommand   string   `json:"finalize_command,omitempty" jsonschema:"optional shell command run after the harness"`
+}
+
+type profileUpdateInput struct {
+	ID                string    `json:"id" jsonschema:"execution profile ID"`
+	ProviderAccountID *string   `json:"provider_account_id,omitempty" jsonschema:"new configured provider account ID"`
+	HarnessType       *string   `json:"harness_type,omitempty" jsonschema:"new harness type"`
+	Model             *string   `json:"model,omitempty" jsonschema:"new model identifier; an empty string clears it"`
+	BudgetModelGroup  *string   `json:"budget_model_group,omitempty" jsonschema:"new allowance routing override; an empty string clears it"`
+	HarnessCommand    *string   `json:"harness_command,omitempty" jsonschema:"new custom harness command; an empty string clears it"`
+	HarnessArgs       *[]string `json:"harness_args,omitempty" jsonschema:"replacement harness argument list"`
+	WorkspaceProvider *string   `json:"workspace_provider,omitempty" jsonschema:"new workspace provider"`
+	WorkspaceArgs     *[]string `json:"workspace_args,omitempty" jsonschema:"replacement workspace-provider argument list"`
+	Repository        *string   `json:"repository,omitempty" jsonschema:"new repository path; an empty string clears it"`
+	BaseBranch        *string   `json:"base_branch,omitempty" jsonschema:"new base branch; an empty string clears it"`
+	RequireClean      *bool     `json:"require_clean,omitempty" jsonschema:"whether a clean existing checkout is required"`
+	CleanupPolicy     *string   `json:"cleanup_policy,omitempty" jsonschema:"new cleanup policy; an empty string clears it"`
+	PrepareCommand    *string   `json:"prepare_command,omitempty" jsonschema:"new prepare command; an empty string clears it"`
+	FinalizeCommand   *string   `json:"finalize_command,omitempty" jsonschema:"new finalize command; an empty string clears it"`
+}
+
 type taskView struct {
 	ID                           string              `json:"id"`
 	Name                         string              `json:"name"`
@@ -176,6 +212,8 @@ func New(client apiclient.Client) *mcp.Server {
 		"Get one Redline task definition by ID."), s.taskGet)
 	mcp.AddTool(result, readTool("redline_profiles_list", "List execution profiles",
 		"List the configured harness, model, repository, and workspace execution profiles."), s.profilesList)
+	mcp.AddTool(result, readTool("redline_profile_get", "Get execution profile",
+		"Get one execution profile, including harness, model, repository, workspace, and lifecycle hooks."), s.profileGet)
 	mcp.AddTool(result, readTool("redline_runs_list", "List runs",
 		"List recent Redline run lifecycles with a bounded response."), s.runsList)
 	mcp.AddTool(result, readTool("redline_run_get", "Get run",
@@ -191,6 +229,12 @@ func New(client apiclient.Client) *mcp.Server {
 		"Update scheduling or instruction fields on an existing task.", true, true, false), s.taskUpdate)
 	mcp.AddTool(result, mutationTool("redline_task_control", "Control task",
 		"Enable, disable, or retry an existing task.", false, false, false), s.taskControl)
+	mcp.AddTool(result, mutationTool("redline_profile_create", "Create execution profile",
+		"Create a harness, model, workspace, and lifecycle-hook execution profile.", false, false, false), s.profileCreate)
+	mcp.AddTool(result, mutationTool("redline_profile_update", "Update execution profile",
+		"Update harness, model, workspace, repository, or lifecycle-hook fields on an execution profile.", true, true, false), s.profileUpdate)
+	mcp.AddTool(result, mutationTool("redline_profile_delete", "Delete execution profile",
+		"Delete an execution profile. The service rejects deletion while a task references it.", true, false, false), s.profileDelete)
 	mcp.AddTool(result, mutationTool("redline_provider_control", "Control provider",
 		"Pause or resume automatic dispatch for a configured provider account.", false, true, false), s.providerControl)
 	mcp.AddTool(result, mutationTool("redline_scheduler_evaluate", "Evaluate scheduler",
@@ -294,6 +338,15 @@ func (s *server) profilesList(ctx context.Context, _ *mcp.CallToolRequest, input
 	return listOutput("execution profile", items, input.Limit)
 }
 
+func (s *server) profileGet(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.ExecutionProfile
+	if err := s.client.Do(ctx, http.MethodGet, "/v1/profiles/"+url.PathEscape(input.ID), nil, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Execution profile %s uses %s with %s.",
+		item.ID, item.HarnessType, item.WorkspaceProvider), Data: item}, nil
+}
+
 func (s *server) runsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
 	var items []domain.Run
 	if err := s.client.Do(ctx, http.MethodGet, "/v1/runs", nil, &items); err != nil {
@@ -388,6 +441,45 @@ func (s *server) taskControl(ctx context.Context, _ *mcp.CallToolRequest, input 
 		return nil, Output{}, err
 	}
 	return nil, Output{Summary: fmt.Sprintf("%s applied to task %s.", input.Control, item.ID), Data: viewTask(item, false)}, nil
+}
+
+func (s *server) profileCreate(ctx context.Context, _ *mcp.CallToolRequest, input profileCreateInput) (*mcp.CallToolResult, Output, error) {
+	var item domain.ExecutionProfile
+	if err := s.client.Do(ctx, http.MethodPost, "/v1/profiles", input, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Created execution profile %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, input profileUpdateInput) (*mcp.CallToolResult, Output, error) {
+	body := map[string]any{}
+	putOptional(body, "provider_account_id", input.ProviderAccountID)
+	putOptional(body, "harness_type", input.HarnessType)
+	putOptional(body, "model", input.Model)
+	putOptional(body, "budget_model_group", input.BudgetModelGroup)
+	putOptional(body, "harness_command", input.HarnessCommand)
+	putOptional(body, "harness_args", input.HarnessArgs)
+	putOptional(body, "workspace_provider", input.WorkspaceProvider)
+	putOptional(body, "workspace_args", input.WorkspaceArgs)
+	putOptional(body, "repository", input.Repository)
+	putOptional(body, "base_branch", input.BaseBranch)
+	putOptional(body, "require_clean", input.RequireClean)
+	putOptional(body, "cleanup_policy", input.CleanupPolicy)
+	putOptional(body, "prepare_command", input.PrepareCommand)
+	putOptional(body, "finalize_command", input.FinalizeCommand)
+	var item domain.ExecutionProfile
+	if err := s.client.Do(ctx, http.MethodPatch, "/v1/profiles/"+url.PathEscape(input.ID), body, &item); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Updated execution profile %s.", item.ID), Data: item}, nil
+}
+
+func (s *server) profileDelete(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	if err := s.client.Do(ctx, http.MethodDelete, "/v1/profiles/"+url.PathEscape(input.ID), nil, nil); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Deleted execution profile %s.", input.ID),
+		Data: map[string]any{"id": input.ID, "deleted": true}}, nil
 }
 
 func (s *server) providerControl(ctx context.Context, _ *mcp.CallToolRequest, input providerControlInput) (*mcp.CallToolResult, Output, error) {

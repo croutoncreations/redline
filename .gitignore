@@ -3,6 +3,8 @@
 bin/
 /redline
 .artifacts/
+.devx/
+.redline/
 node_modules/
 playwright-report/
 test-results/

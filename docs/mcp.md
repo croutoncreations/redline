@@ -64,7 +64,7 @@ Read-only tools:
 | `redline_provider_status` | Latest usage windows and model allowances |
 | `redline_provider_capacity` | Learned token-capacity evidence and confidence |
 | `redline_tasks_list` / `redline_task_get` | Bounded queue and task inspection |
-| `redline_profiles_list` | Available harness/model/workspace profiles |
+| `redline_profiles_list` / `redline_profile_get` | Available harness/model/workspace profiles |
 | `redline_runs_list` / `redline_run_get` | Bounded run history and one run |
 | `redline_run_events` | Bounded lifecycle audit trail |
 | `redline_run_logs` | At most 32 KiB from one supported log stream |
@@ -76,6 +76,9 @@ State-changing tools:
 | `redline_task_create` | Queue a one-off or recurring task |
 | `redline_task_update` | Change task instructions or eligibility |
 | `redline_task_control` | Enable, disable, or retry a task |
+| `redline_profile_create` | Create a harness/model/workspace execution profile |
+| `redline_profile_update` | Change profile routing, commands, or lifecycle hooks |
+| `redline_profile_delete` | Delete an unreferenced execution profile |
 | `redline_provider_control` | Pause or resume provider dispatch |
 | `redline_scheduler_evaluate` | Record a fresh decision without launching work |
 | `redline_scheduler_dispatch` | Evaluate and potentially launch one eligible task |
@@ -83,6 +86,11 @@ State-changing tools:
 `redline_scheduler_dispatch` is intentionally separate and annotated as potentially destructive:
 once a task is admitted, its harness is trusted to run to completion. Tool annotations are hints,
 not an authorization boundary; use the approval controls of the MCP host.
+
+Profile updates and deletion are also annotated as potentially destructive. Deletion is rejected
+while any task references the profile. Profile commands and lifecycle hooks are trusted local code
+that can execute when a task is later admitted, so agents should change them only at the user's
+request.
 
 List results default to 20 items and cap at 100. Task prompts are omitted from lists and capped at
 8 KiB on detailed responses. Event and log tools also enforce server-side response bounds.
@@ -96,9 +104,9 @@ Before beginning substantial optional work, call `redline_overview` and the rele
 `redline_provider_status` tool. When availability is constrained or Redline is waiting, defer
 nonessential work. When Redline reports surplus capacity, useful deferred work is encouraged.
 
-Use Redline queue mutation tools only when the user has asked to schedule or manage background
-work. Do not call `redline_scheduler_dispatch` merely to inspect eligibility; use
-`redline_scheduler_evaluate` instead.
+Use Redline queue and execution-profile mutation tools only when the user has asked to schedule or
+manage background work. Do not call `redline_scheduler_dispatch` merely to inspect eligibility;
+use `redline_scheduler_evaluate` instead.
 ```
 
 This is guidance for interactive agents, not adaptive task depth. Redline still decides only
