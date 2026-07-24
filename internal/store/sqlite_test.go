@@ -102,9 +102,15 @@ func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 	if _, err := raw.Exec(`DROP INDEX idx_usage_snapshots_identity;
 DELETE FROM schema_migrations WHERE version >= 15;
 DROP TABLE run_allowance_pool_claims;
+DROP TABLE agent_contexts;
+DROP TABLE runtime_connections;
 CREATE UNIQUE INDEX idx_runs_one_active_provider
 ON runs(provider_account_id) WHERE state IN ('preparing', 'running');
 ALTER TABLE provider_controls DROP COLUMN policy_name;
+ALTER TABLE execution_profiles DROP COLUMN agent_context_id;
+ALTER TABLE runs DROP COLUMN runtime_connection_id;
+ALTER TABLE runs DROP COLUMN external_run_id;
+ALTER TABLE runs DROP COLUMN external_session_id;
 INSERT INTO usage_snapshots (
     provider, observed_at, short_remaining, short_resets_at,
     weekly_remaining, weekly_resets_at, source, confidence, raw_payload

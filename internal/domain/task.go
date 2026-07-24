@@ -27,6 +27,7 @@ const (
 type ExecutionProfile struct {
 	ID                string    `json:"id"`
 	ProviderAccountID string    `json:"provider_account_id"`
+	AgentContextID    string    `json:"agent_context_id,omitempty"`
 	HarnessType       string    `json:"harness_type"`
 	Model             string    `json:"model,omitempty"`
 	BudgetModelGroup  string    `json:"budget_model_group,omitempty"`
@@ -41,6 +42,36 @@ type ExecutionProfile struct {
 	PrepareCommand    string    `json:"prepare_command,omitempty"`
 	FinalizeCommand   string    `json:"finalize_command,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
+}
+
+type RuntimeConnection struct {
+	ID                string    `json:"id"`
+	Runtime           string    `json:"runtime"`
+	Transport         string    `json:"transport"`
+	URL               string    `json:"url,omitempty"`
+	CredentialSource  string    `json:"credential_source,omitempty"`
+	CredentialRef     string    `json:"credential_ref,omitempty"`
+	DesktopConfigPath string    `json:"desktop_config_path,omitempty"`
+	MaxConcurrentRuns int       `json:"max_concurrent_runs"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type AgentContext struct {
+	ID                  string    `json:"id"`
+	RuntimeConnectionID string    `json:"runtime_connection_id"`
+	Profile             string    `json:"profile,omitempty"`
+	Agent               string    `json:"agent,omitempty"`
+	Project             string    `json:"project,omitempty"`
+	WorkingDirectory    string    `json:"working_directory,omitempty"`
+	SessionMode         string    `json:"session_mode"`
+	MaxConcurrentRuns   int       `json:"max_concurrent_runs"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type ExternalRun struct {
+	RuntimeConnectionID string `json:"runtime_connection_id,omitempty"`
+	RunID               string `json:"run_id,omitempty"`
+	SessionID           string `json:"session_id,omitempty"`
 }
 
 type Workspace struct {
@@ -153,20 +184,21 @@ const (
 )
 
 type Run struct {
-	ID                string     `json:"id"`
-	TaskID            string     `json:"task_id"`
-	ProviderAccountID string     `json:"provider_account_id"`
-	State             RunState   `json:"state"`
-	Workspace         Workspace  `json:"workspace"`
-	SourceRevision    string     `json:"source_revision,omitempty"`
-	StartedAt         time.Time  `json:"started_at"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
-	ExitCode          *int       `json:"exit_code,omitempty"`
-	OutputFile        string     `json:"output_file,omitempty"`
-	ErrorFile         string     `json:"error_file,omitempty"`
-	Error             string     `json:"error,omitempty"`
-	FinalizeState     string     `json:"finalize_state,omitempty"`
-	FinalizeError     string     `json:"finalize_error,omitempty"`
+	ID                string      `json:"id"`
+	TaskID            string      `json:"task_id"`
+	ProviderAccountID string      `json:"provider_account_id"`
+	State             RunState    `json:"state"`
+	Workspace         Workspace   `json:"workspace"`
+	SourceRevision    string      `json:"source_revision,omitempty"`
+	StartedAt         time.Time   `json:"started_at"`
+	CompletedAt       *time.Time  `json:"completed_at,omitempty"`
+	ExitCode          *int        `json:"exit_code,omitempty"`
+	OutputFile        string      `json:"output_file,omitempty"`
+	ErrorFile         string      `json:"error_file,omitempty"`
+	Error             string      `json:"error,omitempty"`
+	FinalizeState     string      `json:"finalize_state,omitempty"`
+	FinalizeError     string      `json:"finalize_error,omitempty"`
+	External          ExternalRun `json:"external,omitempty"`
 }
 
 type RunCompletion struct {
@@ -193,6 +225,7 @@ const (
 	RunEventWorkspacePrepared = "workspace.prepared"
 	RunEventWorkspaceFailed   = "workspace.prepare_failed"
 	RunEventHarnessStarted    = "harness.started"
+	RunEventExternalStarted   = "runtime.external_started"
 	RunEventHarnessCompleted  = "harness.completed"
 	RunEventHarnessFailed     = "harness.failed"
 	RunEventUsageRecorded     = "usage.recorded"

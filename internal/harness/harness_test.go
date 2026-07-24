@@ -11,6 +11,7 @@ import (
 
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/harness"
+	"github.com/jfox/redline/internal/hermes"
 	redprocess "github.com/jfox/redline/internal/process"
 )
 
@@ -188,9 +189,84 @@ func TestPromptFileIsReadRelativeToWorkspace(t *testing.T) {
 	}
 }
 
+func TestHermesHarnessUsesAgentContextAndPersistsExternalSession(t *testing.T) {
+	contexts := fakeContexts{
+		context: domain.AgentContext{
+			ID: "hermes-default", RuntimeConnectionID: "hermes-pi",
+			Profile: "default", WorkingDirectory: "/srv/redline",
+		},
+		connection: domain.RuntimeConnection{
+			ID: "hermes-pi", Runtime: "hermes", Transport: "gateway", URL: "http://gateway.test",
+		},
+	}
+	runner := &fakeHermesRunner{result: hermes.RunResult{
+		SessionID: "session-1", Output: "OK", Model: "gpt-5.5", Provider: "openai-codex",
+		Usage: map[string]any{"input": 8, "output": 1},
+	}}
+	var external domain.ExternalRun
+	result, err := (harness.Adapter{Contexts: contexts, Hermes: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-hermes", OutputDirectory: t.TempDir(),
+		Task: domain.Task{ID: "task", Prompt: "Reply OK."},
+		Profile: domain.ExecutionProfile{
+			AgentContextID: contexts.context.ID, HarnessType: "hermes",
+			Model: "openai-codex/gpt-5.5",
+		},
+		Workspace: domain.Workspace{Directory: "/srv/redline"},
+		OnExternalStarted: func(value domain.ExternalRun) error {
+			external = value
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.request.Connection.ID != "hermes-pi" || runner.request.Context.Profile != "default" ||
+		runner.request.Provider != "openai-codex" || runner.request.Model != "gpt-5.5" {
+		t.Fatalf("request = %#v", runner.request)
+	}
+	if result.ExitCode != 0 || result.Metadata["external_session_id"] != "session-1" {
+		t.Fatalf("result = %#v", result)
+	}
+	if external.SessionID != "session-1" {
+		t.Fatalf("external = %#v", external)
+	}
+	data, err := os.ReadFile(result.OutputFile)
+	if err != nil || !strings.Contains(string(data), `"output":"OK"`) {
+		t.Fatalf("artifact=%s err=%v", data, err)
+	}
+}
+
 type captureRunner struct {
 	command redprocess.Command
 	stdin   string
+}
+
+type fakeContexts struct {
+	context    domain.AgentContext
+	connection domain.RuntimeConnection
+}
+
+func (f fakeContexts) GetAgentContext(context.Context, string) (domain.AgentContext, error) {
+	return f.context, nil
+}
+
+func (f fakeContexts) GetRuntimeConnection(context.Context, string) (domain.RuntimeConnection, error) {
+	return f.connection, nil
+}
+
+type fakeHermesRunner struct {
+	request hermes.RunRequest
+	result  hermes.RunResult
+}
+
+func (f *fakeHermesRunner) Run(_ context.Context, request hermes.RunRequest) (hermes.RunResult, error) {
+	f.request = request
+	if request.OnExternalStarted != nil {
+		_ = request.OnExternalStarted(domain.ExternalRun{
+			RuntimeConnectionID: request.Connection.ID, RunID: request.RunID, SessionID: f.result.SessionID,
+		})
+	}
+	return f.result, nil
 }
 
 func (r *captureRunner) Run(_ context.Context, command redprocess.Command) (int, error) {

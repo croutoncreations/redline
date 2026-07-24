@@ -21,6 +21,8 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 				return []byte("2.1.211 (Claude Code)\n"), nil
 			case "/bin/pi --version":
 				return []byte("0.80.10\n"), nil
+			case "/bin/hermes --version":
+				return []byte("Hermes Agent v0.18.2 (2026.7.7.2)\nInstall directory: /opt/hermes\nUpdate available\n"), nil
 			case "/bin/pi --offline --list-models openai-codex":
 				return []byte(piCodexModels), nil
 			case "/bin/pi --offline --list-models anthropic-cli":
@@ -39,13 +41,17 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 	}
 
 	catalog := service.Discover(t.Context())
-	if len(catalog.Harnesses) != 4 {
+	if len(catalog.Harnesses) != 5 {
 		t.Fatalf("harnesses = %#v", catalog.Harnesses)
 	}
 	assertHarness(t, catalog, "codex-cli", true, "0.144.6", "codex", "gpt-5.5")
 	assertHarness(t, catalog, "claude-code", true, "2.1.211", "claude", "claude-opus-4-8")
 	assertHarness(t, catalog, "pi", true, "0.80.10", "codex", "openai-codex/gpt-5.6-sol")
 	assertHarness(t, catalog, "pi", true, "0.80.10", "claude", "anthropic-cli/claude-fable-5")
+	hermesHarness := findHarness(t, catalog, "hermes")
+	if !hermesHarness.Installed || hermesHarness.Version != "0.18.2" {
+		t.Fatalf("hermes = %#v", hermesHarness)
+	}
 }
 
 func TestCatalogToleratesMissingHarnessesAndDiscoveryFailures(t *testing.T) {

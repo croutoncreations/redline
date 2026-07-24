@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -9,23 +10,39 @@ import (
 	"strings"
 
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/hermes"
 	redprocess "github.com/jfox/redline/internal/process"
 )
 
-type Adapter struct{ Runner redprocess.Runner }
+type ContextStore interface {
+	GetAgentContext(context.Context, string) (domain.AgentContext, error)
+	GetRuntimeConnection(context.Context, string) (domain.RuntimeConnection, error)
+}
+
+type HermesRunner interface {
+	Run(context.Context, hermes.RunRequest) (hermes.RunResult, error)
+}
+
+type Adapter struct {
+	Runner   redprocess.Runner
+	Contexts ContextStore
+	Hermes   HermesRunner
+}
 
 type Request struct {
-	RunID           string
-	OutputDirectory string
-	Task            domain.Task
-	Profile         domain.ExecutionProfile
-	Workspace       domain.Workspace
+	RunID             string
+	OutputDirectory   string
+	Task              domain.Task
+	Profile           domain.ExecutionProfile
+	Workspace         domain.Workspace
+	OnExternalStarted func(domain.ExternalRun) error
 }
 
 type Result struct {
-	ExitCode   int    `json:"exit_code"`
-	OutputFile string `json:"output_file"`
-	ErrorFile  string `json:"error_file"`
+	ExitCode   int            `json:"exit_code"`
+	OutputFile string         `json:"output_file"`
+	ErrorFile  string         `json:"error_file"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
@@ -58,6 +75,9 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	}
 	defer stderr.Close()
 
+	if request.Profile.HarnessType == "hermes" {
+		return a.runHermes(ctx, request, prompt, stdout, result)
+	}
 	command, err := buildCommand(request, prompt, stdout, stderr)
 	if err != nil {
 		return Result{}, err
@@ -68,6 +88,62 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		return result, fmt.Errorf("launch %s harness: %w", request.Profile.HarnessType, err)
 	}
 	return result, nil
+}
+
+func (a Adapter) runHermes(
+	ctx context.Context,
+	request Request,
+	prompt string,
+	stdout io.Writer,
+	result Result,
+) (Result, error) {
+	if a.Contexts == nil {
+		return result, fmt.Errorf("Hermes harness requires an agent context store")
+	}
+	if a.Hermes == nil {
+		a.Hermes = hermes.Client{}
+	}
+	agentContext, err := a.Contexts.GetAgentContext(ctx, request.Profile.AgentContextID)
+	if err != nil {
+		return result, fmt.Errorf("load Hermes agent context: %w", err)
+	}
+	connection, err := a.Contexts.GetRuntimeConnection(ctx, agentContext.RuntimeConnectionID)
+	if err != nil {
+		return result, fmt.Errorf("load Hermes runtime connection: %w", err)
+	}
+	provider, model := splitHermesModel(request.Profile.Model)
+	runResult, err := a.Hermes.Run(ctx, hermes.RunRequest{
+		RunID: request.RunID, Prompt: prompt, Connection: connection, Context: agentContext,
+		Model: model, Provider: provider, OnExternalStarted: request.OnExternalStarted,
+	})
+	if err != nil {
+		result.ExitCode = 1
+		return result, fmt.Errorf("run Hermes agent: %w", err)
+	}
+	record := map[string]any{
+		"type": "hermes.result", "session_id": runResult.SessionID, "output": runResult.Output,
+		"usage": runResult.Usage, "model": runResult.Model, "provider": runResult.Provider,
+	}
+	if err := json.NewEncoder(stdout).Encode(record); err != nil {
+		return result, fmt.Errorf("write Hermes result: %w", err)
+	}
+	result.ExitCode = 0
+	result.Metadata = map[string]any{
+		"external_session_id": runResult.SessionID, "usage": runResult.Usage,
+		"actual_model": runResult.Model, "actual_provider": runResult.Provider,
+	}
+	return result, nil
+}
+
+func splitHermesModel(value string) (provider, model string) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "default" {
+		return "", ""
+	}
+	if before, after, found := strings.Cut(value, "/"); found {
+		return before, after
+	}
+	return "", value
 }
 
 func buildCommand(

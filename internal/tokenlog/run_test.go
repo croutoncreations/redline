@@ -75,3 +75,20 @@ func TestLoadRunArtifactReadsCodexTurnUsageAndSeparatesCachedInput(t *testing.T)
 		t.Fatalf("observation=%#v", item)
 	}
 }
+
+func TestLoadRunArtifactReadsHermesUsageAndMapsSubscriptionProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes.jsonl")
+	data := `{"type":"hermes.result","model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":12,"cache_read":40}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-hermes", "openai-codex/gpt-5.5", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	item := got[0]
+	if item.Provider != "codex" || item.SourceID != "run-hermes" || item.Model != "gpt-5.5" ||
+		item.InputTokens != 100 || item.CacheReadTokens != 40 || item.OutputTokens != 12 {
+		t.Fatalf("observation=%#v", item)
+	}
+}

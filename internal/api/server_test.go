@@ -1828,6 +1828,58 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	return server, db
 }
 
+func TestRuntimeConnectionAndAgentContextConfigurationAPI(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes-pi", "runtime": "hermes", "transport": "gateway",
+		"url": "http://gateway.test:9119", "credential_source": "hermes_desktop",
+	})
+	if connection.ID != "hermes-pi" || connection.MaxConcurrentRuns != 1 {
+		t.Fatalf("connection = %#v", connection)
+	}
+	agentContext := postJSON[domain.AgentContext](t, server.URL+"/v1/agent-contexts", map[string]any{
+		"id": "hermes-default", "runtime_connection_id": connection.ID,
+		"profile": "default", "project": "redline", "working_directory": "/srv/redline",
+		"session_mode": "isolated",
+	})
+	if agentContext.RuntimeConnectionID != connection.ID {
+		t.Fatalf("agent context = %#v", agentContext)
+	}
+	profile := postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "hermes-redline", "provider_account_id": "codex-main",
+		"agent_context_id": agentContext.ID, "harness_type": "hermes",
+		"model": "openai-codex/gpt-5.5", "workspace_provider": "runtime-owned",
+		"repository": "/srv/redline",
+	})
+	if profile.AgentContextID != agentContext.ID {
+		t.Fatalf("profile = %#v", profile)
+	}
+	var connections []domain.RuntimeConnection
+	getJSON(t, server.URL+"/v1/runtime-connections", &connections)
+	var contexts []domain.AgentContext
+	getJSON(t, server.URL+"/v1/agent-contexts", &contexts)
+	if len(connections) != 1 || len(contexts) != 1 {
+		t.Fatalf("connections=%#v contexts=%#v", connections, contexts)
+	}
+}
+
+func TestRuntimeConfigurationAPIUsesEmptyArraysAndRejectsIncompleteHermesProfile(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	var connections []domain.RuntimeConnection
+	getJSON(t, server.URL+"/v1/runtime-connections", &connections)
+	var contexts []domain.AgentContext
+	getJSON(t, server.URL+"/v1/agent-contexts", &contexts)
+	var imports []domain.RuntimeConnection
+	getJSON(t, server.URL+"/v1/runtime-connections/imports", &imports)
+	if connections == nil || contexts == nil || imports == nil {
+		t.Fatalf("empty collections must be JSON arrays: connections=%#v contexts=%#v imports=%#v", connections, contexts, imports)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", `{
+		"id":"incomplete-hermes","provider_account_id":"codex-main",
+		"harness_type":"hermes","workspace_provider":"runtime-owned","repository":"/srv/redline"
+	}`, http.StatusBadRequest)
+}
+
 func testConfig(usageURL string) config.Config {
 	return config.Config{
 		Database: "unused", ActivePolicy: "standard", MaxSnapshotAge: "15m",

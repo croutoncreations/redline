@@ -24,6 +24,7 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
+	"github.com/jfox/redline/internal/hermes"
 	"github.com/jfox/redline/internal/nativeusage"
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
@@ -46,6 +47,10 @@ type HarnessDiscoverer interface {
 	Discover(context.Context) discovery.Catalog
 }
 
+type HermesDiscoverer interface {
+	Discover(context.Context, domain.RuntimeConnection) (hermes.Discovery, error)
+}
+
 type Server struct {
 	config       config.Config
 	store        *store.DB
@@ -57,6 +62,7 @@ type Server struct {
 	scheduler    *autoscheduler.Loop
 	usageMonitor *autoscheduler.Loop
 	discovery    HarnessDiscoverer
+	hermes       HermesDiscoverer
 	usageSources *usage.Manager
 	catalogMu    sync.Mutex
 	catalog      discovery.Catalog
@@ -71,7 +77,8 @@ type Server struct {
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
 	defaultExecutor := execution.Executor{
-		Store: database, Workspaces: workspace.Manager{OutputDirectory: cfg.ArtifactsDirectory()}, Harness: &harness.Adapter{},
+		Store: database, Workspaces: workspace.Manager{OutputDirectory: cfg.ArtifactsDirectory()},
+		Harness:  &harness.Adapter{Contexts: database},
 		Notifier: notifier, UsageRecorder: tokenlog.RunUsageRecorder{Store: database},
 		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
@@ -115,6 +122,7 @@ func newServer(
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
+		hermes:    hermes.Client{},
 	}
 	server.usageSources = usage.NewManager(
 		openusage.Source{},
@@ -148,6 +156,15 @@ func newServer(
 	mux.HandleFunc("GET /v1/profiles/{profile}", server.getProfile)
 	mux.HandleFunc("PATCH /v1/profiles/{profile}", server.updateProfile)
 	mux.HandleFunc("DELETE /v1/profiles/{profile}", server.deleteProfile)
+	mux.HandleFunc("GET /v1/runtime-connections/imports", server.discoverRuntimeImports)
+	mux.HandleFunc("GET /v1/runtime-connections", server.listRuntimeConnections)
+	mux.HandleFunc("POST /v1/runtime-connections", server.createRuntimeConnection)
+	mux.HandleFunc("GET /v1/runtime-connections/{connection}", server.getRuntimeConnection)
+	mux.HandleFunc("POST /v1/runtime-connections/{connection}/discover", server.discoverRuntimeConnection)
+	mux.HandleFunc("GET /v1/agent-contexts", server.listAgentContexts)
+	mux.HandleFunc("POST /v1/agent-contexts", server.createAgentContext)
+	mux.HandleFunc("GET /v1/agent-contexts/{context}", server.getAgentContext)
+	mux.HandleFunc("PATCH /v1/agent-contexts/{context}", server.updateAgentContext)
 	mux.HandleFunc("GET /v1/tasks", server.listTasks)
 	mux.HandleFunc("POST /v1/tasks", server.createTask)
 	mux.HandleFunc("GET /v1/tasks/{task}", server.getTask)
@@ -532,6 +549,10 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
+		writeError(w, err)
+		return
+	}
 	profile.CreatedAt = s.now().UTC()
 	if err := s.store.CreateProfile(r.Context(), profile, profile.CreatedAt); err != nil {
 		writeError(w, err)
@@ -542,6 +563,7 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 
 type profileUpdateRequest struct {
 	ProviderAccountID *string   `json:"provider_account_id"`
+	AgentContextID    *string   `json:"agent_context_id"`
 	HarnessType       *string   `json:"harness_type"`
 	Model             *string   `json:"model"`
 	BudgetModelGroup  *string   `json:"budget_model_group"`
@@ -579,6 +601,9 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.ProviderAccountID != nil {
 		profile.ProviderAccountID = *request.ProviderAccountID
+	}
+	if request.AgentContextID != nil {
+		profile.AgentContextID = *request.AgentContextID
 	}
 	if request.HarnessType != nil {
 		profile.HarnessType = *request.HarnessType
@@ -623,6 +648,10 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
+		writeError(w, err)
+		return
+	}
 	if err := s.store.UpdateProfile(r.Context(), profile); err != nil {
 		writeError(w, err)
 		return
@@ -633,6 +662,27 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if profile.HarnessType == "hermes" && profile.AgentContextID == "" {
+		return fmt.Errorf("agent_context_id is required for a Hermes execution profile")
+	}
+	if profile.AgentContextID == "" {
+		return nil
+	}
+	agentContext, err := s.store.GetAgentContext(ctx, profile.AgentContextID)
+	if err != nil {
+		return err
+	}
+	connection, err := s.store.GetRuntimeConnection(ctx, agentContext.RuntimeConnectionID)
+	if err != nil {
+		return err
+	}
+	if profile.HarnessType == "hermes" && connection.Runtime != "hermes" {
+		return fmt.Errorf("a Hermes runtime connection is required for a Hermes execution profile")
+	}
+	return nil
 }
 
 func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,10 @@ type runUsage struct {
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	Input                    int64 `json:"input"`
+	Output                   int64 `json:"output"`
+	CacheRead                int64 `json:"cache_read"`
+	CacheWrite               int64 `json:"cache_write"`
 }
 
 type claudeModelUsage struct {
@@ -32,6 +36,8 @@ type runRecord struct {
 	Type       string                      `json:"type"`
 	Usage      runUsage                    `json:"usage"`
 	ModelUsage map[string]claudeModelUsage `json:"modelUsage"`
+	Model      string                      `json:"model"`
+	Provider   string                      `json:"provider"`
 }
 
 // LoadRunArtifact reads the terminal usage record emitted by a Redline-owned
@@ -71,12 +77,57 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 				OutputTokens: record.Usage.OutputTokens, CacheReadTokens: record.Usage.CachedInputTokens,
 				Confidence: "high",
 			}}
+		case "hermes":
+			if record.Type != "hermes.result" {
+				continue
+			}
+			provider := normalizeHermesProvider(record.Provider)
+			model := record.Model
+			if model == "" {
+				model = configuredModel
+			}
+			input := record.Usage.InputTokens
+			if record.Usage.Input > 0 {
+				input = record.Usage.Input
+			}
+			output := record.Usage.OutputTokens
+			if record.Usage.Output > 0 {
+				output = record.Usage.Output
+			}
+			cacheRead := record.Usage.CacheReadInputTokens
+			if record.Usage.CachedInputTokens > cacheRead {
+				cacheRead = record.Usage.CachedInputTokens
+			}
+			if record.Usage.CacheRead > cacheRead {
+				cacheRead = record.Usage.CacheRead
+			}
+			cacheWrite := record.Usage.CacheCreationInputTokens
+			if record.Usage.CacheWrite > cacheWrite {
+				cacheWrite = record.Usage.CacheWrite
+			}
+			result = []capacity.TokenObservation{{
+				Provider: provider, Source: "redline-run", SourceID: runID,
+				ObservedAt: observedAt.UTC(), Model: model, InputTokens: input,
+				OutputTokens: output, CacheReadTokens: cacheRead,
+				CacheCreationTokens: cacheWrite, Confidence: "high",
+			}}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read run artifact: %w", err)
 	}
 	return nonzeroObservations(result), nil
+}
+
+func normalizeHermesProvider(provider string) string {
+	switch provider {
+	case "openai-codex":
+		return "codex"
+	case "anthropic", "anthropic-cli":
+		return "claude"
+	default:
+		return provider
+	}
 }
 
 func claudeRunObservations(record runRecord, runID, configuredModel string, observedAt time.Time) []capacity.TokenObservation {
@@ -130,7 +181,8 @@ func (r RunUsageRecorder) RecordRunUsage(
 	outputFile string,
 	observedAt time.Time,
 ) (int, error) {
-	if r.Store == nil || outputFile == "" || (profile.HarnessType != "claude-code" && profile.HarnessType != "codex-cli") {
+	if r.Store == nil || outputFile == "" ||
+		(profile.HarnessType != "claude-code" && profile.HarnessType != "codex-cli" && profile.HarnessType != "hermes") {
 		return 0, nil
 	}
 	observations, err := LoadRunArtifact(outputFile, profile.HarnessType, run.ID, profile.Model, observedAt)

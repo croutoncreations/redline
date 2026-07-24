@@ -18,6 +18,7 @@ const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 
 let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
+let runtimeConnections = [], agentContexts = [], hermesDiscovery = null;
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
@@ -213,6 +214,69 @@ async function loadProfileOptions(force=false) {
   const installed = harnessCatalog.filter(harness => harness.installed && harness.id !== 'command').length;
   $('#profile-discovery-status').textContent = `${installed} agent CLI${installed === 1 ? '' : 's'} found · checked ${relative(catalog.generated_at)}`;
 }
+async function loadRuntimeConfiguration() {
+  [runtimeConnections,agentContexts] = await Promise.all([
+    apiRequest('/v1/runtime-connections'), apiRequest('/v1/agent-contexts')
+  ]);
+  runtimeConnections ||= []; agentContexts ||= [];
+  $('#profile-runtime-connection').innerHTML = runtimeConnections.length
+    ? runtimeConnections.filter(item => item.runtime === 'hermes').map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.id)} · ${escapeHTML(item.url || item.transport)}</option>`).join('')
+    : '<option value="">No Hermes connections configured</option>';
+}
+function selectedHermesProfileOptions() {
+  const profile = $('#profile-runtime-profile').value;
+  return (hermesDiscovery?.profile_options || []).find(item => item.profile?.name === profile);
+}
+function renderHermesProjects(selected='') {
+  const options = selectedHermesProfileOptions(), profile = options?.profile;
+  const projects = options?.projects || [];
+  const choices = [{id:'',name:'Profile default',path:profile?.path || ''}, ...projects.map(project => ({
+    id:project.id || project.name,name:project.name || project.id,
+    path:project.primary_path || project.folders?.[0] || ''
+  }))];
+  $('#profile-runtime-project').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}" data-path="${escapeHTML(item.path)}">${escapeHTML(item.name)}${item.path ? ` · ${escapeHTML(item.path)}` : ''}</option>`).join('');
+  $('#profile-runtime-project').value = choices.some(item => item.id === selected) ? selected : '';
+}
+function installHermesModels() {
+  const options = selectedHermesProfileOptions(), provider = providerKind();
+  const matching = (options?.providers || []).filter(item => item.authenticated && (
+    (provider === 'codex' && item.slug === 'openai-codex') ||
+    (provider === 'claude' && item.slug === 'anthropic')
+  ));
+  const models = matching.flatMap(item => (item.models || []).map(model => ({
+    id:`${item.slug}/${model}`,label:model,source:'hermes_gateway',thinking:!!item.capabilities?.[model]?.reasoning
+  })));
+  const harness = harnessCatalog.find(item => item.id === 'hermes');
+  if (harness) harness.models = {...(harness.models || {}),[provider]:models};
+}
+async function discoverSelectedHermes(selectedProfile='',selectedProject='',selectedModel='default') {
+  const connection = $('#profile-runtime-connection').value;
+  if (!connection) {
+    $('#profile-hermes-status').textContent = 'Import Hermes Desktop or configure a connection first.';
+    return;
+  }
+  $('#profile-hermes-status').textContent = 'Connecting to Hermes Gateway…';
+  hermesDiscovery = await apiRequest(`/v1/runtime-connections/${encodeURIComponent(connection)}/discover`,{method:'POST',body:'{}'});
+  $('#profile-runtime-profile').innerHTML = (hermesDiscovery.profiles || []).map(item =>
+    `<option value="${escapeHTML(item.name)}">${escapeHTML(item.name)} · ${escapeHTML(item.provider || 'provider')} / ${escapeHTML(item.model || 'default')}</option>`
+  ).join('');
+  $('#profile-runtime-profile').value = (hermesDiscovery.profiles || []).some(item => item.name === selectedProfile) ? selectedProfile : hermesDiscovery.profiles?.[0]?.name || '';
+  renderHermesProjects(selectedProject);
+  installHermesModels();
+  setModelControl('hermes',selectedModel);
+  $('#profile-hermes-status').textContent = `Hermes ${hermesDiscovery.version || ''} · ${(hermesDiscovery.profiles || []).length} profile${(hermesDiscovery.profiles || []).length === 1 ? '' : 's'} discovered`;
+}
+async function importHermesDesktop() {
+  const imports = (await apiRequest('/v1/runtime-connections/imports')) || [];
+  if (!imports.length) throw new Error('Hermes Desktop does not have a remote Gateway configured.');
+  const candidate = imports[0];
+  if (!runtimeConnections.some(item => item.id === candidate.id)) {
+    await apiRequest('/v1/runtime-connections',{method:'POST',body:JSON.stringify(candidate)});
+  }
+  await loadRuntimeConfiguration();
+  $('#profile-runtime-connection').value = candidate.id;
+  await discoverSelectedHermes();
+}
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
 }
@@ -309,6 +373,7 @@ function preferredHarness() {
 }
 function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
+  $('#profile-hermes-fields').hidden = harness !== 'hermes';
   $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
   setModelControl(harness, selectedModelValue || 'default');
 }
@@ -319,7 +384,7 @@ function resetProfileForm() {
   updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
-  try { await Promise.all([loadProfiles(true),loadProfileOptions()]); resetProfileForm(); $('#profiles-dialog').showModal(); }
+  try { await Promise.all([loadProfiles(true),loadProfileOptions(),loadRuntimeConfiguration()]); resetProfileForm(); $('#profiles-dialog').showModal(); }
   catch (error) { $('#error-banner').hidden = false; $('#error-banner').textContent = `Could not load profiles: ${error.message}`; }
 }
 async function editProfile(id) {
@@ -328,6 +393,14 @@ async function editProfile(id) {
     $('#profile-provider').innerHTML = providerAccounts.map(account => `<option value="${escapeHTML(account)}">${escapeHTML(account)}</option>`).join('');
     $('#profile-id').value = profile.id; $('#profile-id').disabled = true; $('#profile-provider').value = profile.provider_account_id;
     setHarnessControl(profile.harness_type || preferredHarness()); updateHarnessFields(profile.model || 'default'); $('#profile-budget-group').value = profile.budget_model_group || '';
+    if (profile.harness_type === 'hermes') {
+      const context = agentContexts.find(item => item.id === profile.agent_context_id);
+      if (context) {
+        $('#profile-runtime-connection').value = context.runtime_connection_id;
+        $('#profile-session-mode').value = context.session_mode || 'isolated';
+        await discoverSelectedHermes(context.profile,context.project,profile.model || 'default');
+      }
+    }
     $('#profile-workspace').value = profile.workspace_provider || 'devx'; $('#profile-repository').value = profile.repository || ''; $('#profile-base-branch').value = profile.base_branch || '';
     populateRepositoryChoices(profile.repository || '');
     $('#profile-cleanup').value = profile.cleanup_policy || ''; $('#profile-require-clean').checked = !!profile.require_clean;
@@ -337,9 +410,21 @@ async function editProfile(id) {
 }
 async function saveProfile(event) {
   event.preventDefault(); showProfileError('');
-  const payload = {id:$('#profile-id').value.trim(),provider_account_id:$('#profile-provider').value,harness_type:$('#profile-harness').value,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:$('#profile-workspace').value,repository:$('#profile-repository').value.trim(),base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:$('#profile-prepare').value,finalize_command:$('#profile-finalize').value};
   $('#save-profile').disabled = true;
   try {
+    const id=$('#profile-id').value.trim(), harness=$('#profile-harness').value;
+    let agentContextID='', repository=$('#profile-repository').value.trim(), workspaceProvider=$('#profile-workspace').value;
+    if (harness === 'hermes') {
+      const existing=profiles.find(item => item.id === editingProfile), context=agentContexts.find(item => item.id === existing?.agent_context_id);
+      agentContextID=context?.id || `${id}-context`;
+      const projectOption=$('#profile-runtime-project').selectedOptions[0];
+      repository=projectOption?.dataset.path || '';
+      if (!repository) throw new Error('The selected Hermes context does not provide a working directory.');
+      const contextPayload={id:agentContextID,runtime_connection_id:$('#profile-runtime-connection').value,profile:$('#profile-runtime-profile').value,project:$('#profile-runtime-project').value,working_directory:repository,session_mode:$('#profile-session-mode').value,max_concurrent_runs:1};
+      await apiRequest(context ? `/v1/agent-contexts/${encodeURIComponent(agentContextID)}` : '/v1/agent-contexts',{method:context ? 'PATCH' : 'POST',body:JSON.stringify(contextPayload)});
+      workspaceProvider='runtime-owned';
+    }
+    const payload = {id,provider_account_id:$('#profile-provider').value,agent_context_id:agentContextID,harness_type:harness,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:workspaceProvider,repository,base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:harness === 'hermes' ? '' : $('#profile-prepare').value,finalize_command:harness === 'hermes' ? '' : $('#profile-finalize').value};
     if (editingProfile) delete payload.id;
     const saved = await apiRequest(editingProfile ? `/v1/profiles/${encodeURIComponent(editingProfile)}` : '/v1/profiles',{method:editingProfile ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
     await loadProfiles(true); await editProfile(saved.id); await refresh();
@@ -393,6 +478,10 @@ $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
 $('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : 'default'); });
 $('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
+$('#profile-runtime-connection').addEventListener('change',() => discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)));
+$('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });
+$('#import-hermes-desktop').addEventListener('click',() => importHermesDesktop().catch(error => showProfileError(`Hermes import failed: ${error.message}`)));
+$('#refresh-hermes-options').addEventListener('click',() => discoverSelectedHermes($('#profile-runtime-profile').value,$('#profile-runtime-project').value,selectedModel()).catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)));
 $('#refresh-profile-options').addEventListener('click',async () => { const button=$('#refresh-profile-options'), selected=$('#profile-harness').value, model=selectedModel(); button.disabled=true; try { await loadProfileOptions(true); setHarnessControl(selected); updateHarnessFields(model); } catch(error) { showProfileError(`Discovery failed: ${error.message}`); } finally { button.disabled=false; } });
 $('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
 $('#profile-repository-recent').addEventListener('change',() => { if ($('#profile-repository-recent').value) $('#profile-repository').value = $('#profile-repository-recent').value; });

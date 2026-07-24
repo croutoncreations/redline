@@ -48,7 +48,12 @@ type Service struct {
 }
 
 func (s Service) Discover(ctx context.Context) Catalog {
-	specs := []struct{ id, label, binary string }{{"codex-cli", "Codex CLI", "codex"}, {"claude-code", "Claude Code", "claude"}, {"pi", "Pi", "pi"}}
+	specs := []struct{ id, label, binary string }{
+		{"codex-cli", "Codex CLI", "codex"},
+		{"claude-code", "Claude Code", "claude"},
+		{"pi", "Pi", "pi"},
+		{"hermes", "Hermes", "hermes"},
+	}
 	catalog := Catalog{GeneratedAt: s.now(), Harnesses: make([]Harness, len(specs)+1)}
 	var versions sync.WaitGroup
 	for index, spec := range specs {
@@ -244,7 +249,19 @@ func catalogHarness(catalog Catalog, id string) *Harness {
 }
 
 func cleanVersion(output string) string {
-	value := strings.TrimSpace(output)
+	value := ""
+	for _, line := range strings.Split(stripANSI(output), "\n") {
+		if strings.TrimSpace(line) != "" {
+			value = strings.TrimSpace(line)
+			break
+		}
+	}
+	if strings.HasPrefix(value, "Hermes Agent v") {
+		fields := strings.Fields(value)
+		if len(fields) >= 3 {
+			return strings.TrimPrefix(fields[2], "v")
+		}
+	}
 	value = strings.TrimPrefix(value, "codex-cli ")
 	value = strings.TrimSuffix(value, " (Claude Code)")
 	return strings.TrimSpace(value)

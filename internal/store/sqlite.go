@@ -331,6 +331,42 @@ ON run_allowance_pool_claims(provider_account_id, pool_key);`); err != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (17)`); err != nil {
 			return fmt.Errorf("record concurrent run migration: %w", err)
 		}
+		version = 17
+	}
+	if version < 18 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE runtime_connections (
+    id TEXT PRIMARY KEY,
+    runtime TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    credential_source TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT '',
+    desktop_config_path TEXT NOT NULL DEFAULT '',
+    max_concurrent_runs INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE agent_contexts (
+    id TEXT PRIMARY KEY,
+    runtime_connection_id TEXT NOT NULL REFERENCES runtime_connections(id),
+    profile TEXT NOT NULL DEFAULT '',
+    agent TEXT NOT NULL DEFAULT '',
+    project TEXT NOT NULL DEFAULT '',
+    working_directory TEXT NOT NULL DEFAULT '',
+    session_mode TEXT NOT NULL DEFAULT 'isolated',
+    max_concurrent_runs INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+ALTER TABLE execution_profiles ADD COLUMN agent_context_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN runtime_connection_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN external_run_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN external_session_id TEXT NOT NULL DEFAULT '';
+`); err != nil {
+			return fmt.Errorf("add runtime connection schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (18)`); err != nil {
+			return fmt.Errorf("record runtime connection migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

@@ -45,6 +45,15 @@ func (m Manager) Prepare(
 	taskName string,
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
+	if profile.WorkspaceProvider == "runtime-owned" {
+		if profile.Repository == "" {
+			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace directory is required")
+		}
+		if profile.PrepareCommand != "" {
+			return domain.Workspace{}, fmt.Errorf("runtime-owned workspaces do not support local prepare commands")
+		}
+		return domain.Workspace{Directory: profile.Repository}, nil
+	}
 	if profile.Repository == "" {
 		return domain.Workspace{}, fmt.Errorf("workspace repository is required")
 	}
@@ -132,7 +141,7 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 			Name: "git", Args: []string{"-C", request.Profile.Repository, "worktree", "remove", "--force", request.Workspace.Directory},
 			Stdout: io.Discard, Stderr: io.Discard,
 		}
-	case "existing-directory", "command":
+	case "existing-directory", "command", "runtime-owned":
 		return nil
 	default:
 		return fmt.Errorf("unsupported workspace provider %q", request.Profile.WorkspaceProvider)

@@ -52,7 +52,9 @@ and profile/task import; large run artifacts will remain on the filesystem.
 - Existing-directory, Git worktree, DevX, and generic-command workspace providers.
 - Configurable DevX creation arguments such as `workspace_args: [--target, host]`.
 - Optional workspace setup/finalize hooks and opt-in cleanup policies.
-- Noninteractive Codex CLI, Claude Code, and generic-command harness adapters.
+- Noninteractive Codex CLI, Claude Code, Hermes Gateway, and generic-command harness adapters.
+- Local/remote runtime connections and agent contexts for selecting runtime-owned profiles,
+  projects, working directories, and isolated sessions.
 - Transactional asynchronous run admission with configurable provider and allowance-pool limits.
 - Run artifacts, recurring completion/requeue, and interrupted-run recovery.
 - Graceful service shutdown.
@@ -143,7 +145,7 @@ Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fab
 `claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
 account-pool-only models.
 
-The dashboard discovers installed Codex CLI, Claude Code, and Pi harnesses, shows each CLI version,
+The dashboard discovers installed Codex CLI, Claude Code, Pi, and Hermes harnesses, shows each CLI version,
 and builds model choices from local, refreshable catalogs rather than hardcoded presets. Codex uses
 its own model cache. Pi uses its offline model listing; those subscription-backed Pi models also
 supply Claude Code's versioned choices because Claude Code accepts full model names but does not
@@ -151,6 +153,14 @@ provide a model-list command. Pi profiles retain provider-qualified model IDs su
 `openai-codex/gpt-5.6-sol` and `anthropic-cli/claude-opus-4-8`, keeping the model tied to the usage
 pool Redline monitors. **Other model** and **Custom command** remain available when discovery is
 incomplete or a local integration is not built in.
+
+For Hermes, choose **Hermes** as the harness and import the current Hermes Desktop connection.
+Redline reuses the Desktop-authenticated remote Gateway session, discovers its profiles, projects,
+and authenticated model catalogs, and persists the selection as an agent context. Each admitted
+task creates a new isolated Hermes session in the selected remote context. The external session ID,
+actual provider/model, terminal output, and reported token totals are retained with the Redline run.
+The Gateway owns the remote filesystem; local prepare/finalize commands are therefore disabled for
+runtime-owned workspaces.
 
 Repository paths previously used by profiles are remembered as suggestions and can always be typed
 directly. The advanced **Allowance routing override** corresponds to `budget_model_group`; leave it

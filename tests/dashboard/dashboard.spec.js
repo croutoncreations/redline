@@ -50,6 +50,7 @@ function profileOptionsFixture() {
         codex: [{ id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol', source: 'pi_config', context_window: '1M', max_output: '128K' }],
         claude: [{ id: 'anthropic-cli/claude-fable-5', label: 'Claude Fable 5', source: 'pi_config', context_window: '200K', max_output: '32K' }, { id: 'anthropic-cli/claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }],
       } },
+      { id: 'hermes', label: 'Hermes', installed: true, version: '0.18.2', models: {} },
       { id: 'command', label: 'Custom command', installed: true },
     ],
   };
@@ -76,6 +77,7 @@ function capacityFixture(provider) {
 async function loadDashboard(page, options = {}) {
   const state = {
     dashboard: dashboardFixture(), profiles: profileFixture(), profileOptions: profileOptionsFixture(),
+    runtimeConnections: [], agentContexts: [],
     requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
   };
 	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
@@ -106,6 +108,34 @@ async function loadDashboard(page, options = {}) {
       return state.dashboardError ? json(500, { error: 'dashboard unavailable' }) : json(200, state.dashboard);
     }
     if (url.pathname === '/v1/profile-options') return json(200, state.profileOptions);
+    if (url.pathname === '/v1/runtime-connections' && method === 'GET') return json(200, state.runtimeConnections);
+    if (url.pathname === '/v1/runtime-connections' && method === 'POST') {
+      const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+      state.runtimeConnections.push(body); return json(201, body);
+    }
+    if (url.pathname === '/v1/runtime-connections/imports') return json(200, [{
+      id: 'hermes-desktop', runtime: 'hermes', transport: 'gateway',
+      url: 'http://hermes.test:9119', credential_source: 'hermes_desktop', max_concurrent_runs: 1,
+    }]);
+    if (url.pathname === '/v1/runtime-connections/hermes-desktop/discover' && method === 'POST') return json(200, {
+      version: '0.17.0', profiles: [{ name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' }],
+      profile_options: [{
+        profile: { name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' },
+        projects: [{ id: 'scout', name: 'Scout', primary_path: '/home/jon/projects/scout' }],
+        providers: [{ slug: 'openai-codex', authenticated: true, models: ['gpt-5.5', 'gpt-5.6-sol'] }],
+      }],
+    });
+    if (url.pathname === '/v1/agent-contexts' && method === 'GET') return json(200, state.agentContexts);
+    if (url.pathname === '/v1/agent-contexts' && method === 'POST') {
+      const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+      state.agentContexts.push(body); return json(201, body);
+    }
+    const contextMatch = url.pathname.match(/^\/v1\/agent-contexts\/([^/]+)$/);
+    if (contextMatch && method === 'PATCH') {
+      const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+      Object.assign(state.agentContexts.find(item => item.id === decodeURIComponent(contextMatch[1])), body);
+      return json(200, body);
+    }
 		const capacityMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/capacity$/);
 		if (capacityMatch) {
 			const provider = decodeURIComponent(capacityMatch[1]).startsWith('claude') ? 'claude' : 'codex';
@@ -286,6 +316,36 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
   page.once('dialog', confirmation => confirmation.accept());
   await page.getByRole('button', { name: 'Delete' }).click();
   await expect(page.locator('#profile-form-error')).toContainText('profile is assigned to a task');
+});
+
+test('imports Hermes Desktop and creates a remote profile from discovered context', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await page.locator('#profile-id').fill('hermes-scout');
+  await page.locator('#profile-provider').selectOption('codex-main');
+  await page.locator('#profile-harness').selectOption('hermes');
+  await expect(page.locator('#profile-hermes-fields')).toBeVisible();
+  await page.getByRole('button', { name: 'Import Hermes Desktop' }).click();
+  await expect(page.locator('#profile-hermes-status')).toContainText('1 profile discovered');
+  await expect(page.locator('#profile-runtime-profile')).toHaveValue('default');
+  await page.locator('#profile-runtime-project').selectOption('scout');
+  await expect(page.locator('#profile-model-choice')).toHaveValue('default');
+  await page.locator('#profile-model-choice').selectOption('openai-codex/gpt-5.6-sol');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.path === '/v1/agent-contexts')).toBe(true);
+  await expect.poll(() => state.requests.some(item => item.path === '/v1/profiles')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/agent-contexts').body).toMatchObject({
+    id: 'hermes-scout-context', runtime_connection_id: 'hermes-desktop',
+    profile: 'default', project: 'scout', working_directory: '/home/jon/projects/scout',
+    session_mode: 'isolated',
+  });
+  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({
+    id: 'hermes-scout', provider_account_id: 'codex-main',
+    agent_context_id: 'hermes-scout-context', harness_type: 'hermes',
+    model: 'openai-codex/gpt-5.6-sol', workspace_provider: 'runtime-owned',
+    repository: '/home/jon/projects/scout',
+  });
 });
 
 test('loads both run log streams and controls an existing task', async ({ page }) => {

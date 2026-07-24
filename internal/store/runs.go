@@ -333,7 +333,8 @@ run_id, event_type, occurred_at, payload_json
 
 const runSelect = `SELECT id, task_id, provider_account_id, state,
 workspace_directory, workspace_metadata, source_revision, started_at, completed_at,
-exit_code, output_file, error_file, error, finalize_state, finalize_error FROM runs`
+exit_code, output_file, error_file, error, finalize_state, finalize_error,
+runtime_connection_id, external_run_id, external_session_id FROM runs`
 
 func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
@@ -344,6 +345,7 @@ func scanRun(row scanner) (domain.Run, error) {
 		&run.ID, &run.TaskID, &run.ProviderAccountID, &run.State,
 		&run.Workspace.Directory, &workspaceJSON, &run.SourceRevision, &started, &completed,
 		&exitCode, &run.OutputFile, &run.ErrorFile, &run.Error, &run.FinalizeState, &run.FinalizeError,
+		&run.External.RuntimeConnectionID, &run.External.RunID, &run.External.SessionID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound

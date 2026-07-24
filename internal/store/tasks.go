@@ -24,11 +24,11 @@ func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now t
 		return fmt.Errorf("encode workspace arguments: %w", err)
 	}
 	_, err = d.db.ExecContext(ctx, `INSERT INTO execution_profiles (
-id, provider_account_id, harness_type, model, harness_command, harness_args_json,
+id, provider_account_id, agent_context_id, harness_type, model, harness_command, harness_args_json,
 budget_model_group, workspace_provider, workspace_args_json, repository, base_branch, require_clean, cleanup_policy,
 prepare_command, finalize_command, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.ProviderAccountID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.ProviderAccountID, p.AgentContextID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON),
 		p.BudgetModelGroup, p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean, p.CleanupPolicy,
 		p.PrepareCommand, p.FinalizeCommand, formatTime(now),
 	)
@@ -63,10 +63,10 @@ func (d *DB) UpdateProfile(ctx context.Context, p domain.ExecutionProfile) error
 		return fmt.Errorf("%w: execution profile %q is used by a running task", ErrConflict, p.ID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE execution_profiles SET
-provider_account_id = ?, harness_type = ?, model = ?, harness_command = ?, harness_args_json = ?,
+provider_account_id = ?, agent_context_id = ?, harness_type = ?, model = ?, harness_command = ?, harness_args_json = ?,
 budget_model_group = ?, workspace_provider = ?, workspace_args_json = ?, repository = ?, base_branch = ?,
 require_clean = ?, cleanup_policy = ?, prepare_command = ?, finalize_command = ? WHERE id = ?`,
-		p.ProviderAccountID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON), p.BudgetModelGroup,
+		p.ProviderAccountID, p.AgentContextID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON), p.BudgetModelGroup,
 		p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean,
 		p.CleanupPolicy, p.PrepareCommand, p.FinalizeCommand, p.ID)
 	if err != nil {
@@ -122,7 +122,7 @@ func validateProfile(p domain.ExecutionProfile) error {
 }
 
 func (d *DB) ListProfiles(ctx context.Context) ([]domain.ExecutionProfile, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, harness_type, model,
+	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, agent_context_id, harness_type, model,
 harness_command, harness_args_json, budget_model_group, workspace_provider, workspace_args_json, repository, base_branch,
 require_clean, cleanup_policy, prepare_command, finalize_command, created_at
 FROM execution_profiles ORDER BY id`)
@@ -134,7 +134,7 @@ FROM execution_profiles ORDER BY id`)
 	for rows.Next() {
 		var p domain.ExecutionProfile
 		var created, argsJSON, workspaceArgsJSON string
-		if err := rows.Scan(&p.ID, &p.ProviderAccountID, &p.HarnessType, &p.Model,
+		if err := rows.Scan(&p.ID, &p.ProviderAccountID, &p.AgentContextID, &p.HarnessType, &p.Model,
 			&p.HarnessCommand, &argsJSON, &p.BudgetModelGroup, &p.WorkspaceProvider, &workspaceArgsJSON, &p.Repository, &p.BaseBranch,
 			&p.RequireClean, &p.CleanupPolicy, &p.PrepareCommand, &p.FinalizeCommand, &created); err != nil {
 			return nil, fmt.Errorf("scan execution profile: %w", err)

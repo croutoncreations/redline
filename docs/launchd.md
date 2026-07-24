@@ -10,8 +10,8 @@ plist as a recoverable backup. Keep using the instructions below for headless in
 you deliberately want launchd—not the menu-bar app—to own the service.
 
 The service needs an absolute binary path, config path, working directory, log paths, and a `PATH`
-that includes every configured workspace and harness executable (`devx`, `codex`, `claude`, and
-`pi`). If Gatepost captures harness traffic, put its shim directory first and retain the directory
+that includes every configured workspace and harness executable (`devx`, `codex`, `claude`, `pi`,
+and `hermes`). If Gatepost captures harness traffic, put its shim directory first and retain the directory
 containing each real binary later in `PATH`; discovery and execution then follow the same routing.
 After rendering the template to `~/Library/LaunchAgents/com.jfox.redline.plist`:
 

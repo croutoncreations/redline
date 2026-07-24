@@ -134,6 +134,17 @@ func (e Executor) Execute(
 	harnessResult, harnessErr := e.Harness.Run(ctx, harness.Request{
 		RunID: run.ID, OutputDirectory: e.OutputDirectory,
 		Task: task, Profile: profile, Workspace: prepared,
+		OnExternalStarted: func(external domain.ExternalRun) error {
+			if externalStore, ok := e.Store.(interface {
+				UpdateRunExternal(context.Context, string, domain.ExternalRun) error
+			}); ok {
+				if err := externalStore.UpdateRunExternal(ctx, run.ID, external); err != nil {
+					return err
+				}
+			}
+			e.recordEvent(ctx, run.ID, domain.RunEventExternalStarted, external)
+			return nil
+		},
 	})
 	if e.UsageRecorder != nil && harnessResult.OutputFile != "" {
 		inserted, usageErr := e.UsageRecorder.RecordRunUsage(ctx, run, profile, harnessResult.OutputFile, e.now().UTC())
@@ -162,6 +173,7 @@ func (e Executor) Execute(
 		e.recordEvent(ctx, run.ID, domain.RunEventHarnessCompleted, map[string]any{
 			"exit_code": harnessResult.ExitCode,
 			"stdout":    harnessResult.OutputFile, "stderr": harnessResult.ErrorFile,
+			"metadata": harnessResult.Metadata,
 		})
 	}
 
@@ -285,7 +297,8 @@ func (e Executor) lifecycleArtifacts(runID, phase string) map[string]string {
 func auditProfile(profile domain.ExecutionProfile) map[string]any {
 	return map[string]any{
 		"id": profile.ID, "provider_account_id": profile.ProviderAccountID,
-		"harness_type": profile.HarnessType, "model": profile.Model,
+		"agent_context_id": profile.AgentContextID,
+		"harness_type":     profile.HarnessType, "model": profile.Model,
 		"harness_command": profile.HarnessCommand, "harness_args": profile.HarnessArgs,
 		"workspace_provider": profile.WorkspaceProvider, "workspace_args": profile.WorkspaceArgs,
 		"repository": profile.Repository, "base_branch": profile.BaseBranch,
