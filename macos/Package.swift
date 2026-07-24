@@ -29,5 +29,6 @@ let package = Package(
             ]
         ),
         .testTarget(name: "RedlineKitTests", dependencies: ["RedlineKit"]),
+        .testTarget(name: "RedlineMenuBarTests", dependencies: ["RedlineMenuBar"]),
     ]
 )

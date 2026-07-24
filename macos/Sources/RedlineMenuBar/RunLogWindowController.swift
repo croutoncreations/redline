@@ -3,11 +3,14 @@ import RedlineKit
 import SwiftUI
 
 @MainActor
-final class RunLogWindowController {
+final class RunLogWindowController: NSObject, NSWindowDelegate {
     private let client: RedlineAPIClient
-    private var windows: [String: NSWindowController] = [:]
+    var windows: [String: NSWindowController] = [:]
 
-    init(client: RedlineAPIClient) { self.client = client }
+    init(client: RedlineAPIClient) {
+        self.client = client
+        super.init()
+    }
 
     func show(run: RunSummary) {
         if let existing = windows[run.id] {
@@ -26,11 +29,17 @@ final class RunLogWindowController {
         window.minSize = NSSize(width: 560, height: 360)
         window.contentViewController = NSHostingController(rootView: RunLogView(client: client, run: run))
         window.center()
+        window.delegate = self
         let controller = NSWindowController(window: window)
         windows[run.id] = controller
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closedWindow = notification.object as? NSWindow else { return }
+        windows = windows.filter { $0.value.window !== closedWindow }
     }
 }
 
