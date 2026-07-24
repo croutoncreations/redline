@@ -8,6 +8,8 @@ download_url_prefix="${REDLINE_SPARKLE_DOWNLOAD_URL_PREFIX:-${feed_url%/*}/}"
 key_account="${REDLINE_SPARKLE_KEY_ACCOUNT:-ed25519}"
 private_key_file="${REDLINE_SPARKLE_PRIVATE_KEY_FILE:-}"
 generate_appcast="${REDLINE_SPARKLE_GENERATE_APPCAST:-${repository_root}/macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast}"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/redline-appcast.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
 
 if [[ "${feed_url}" != https://* ]]; then
   printf 'REDLINE_SPARKLE_FEED_URL must be an HTTPS appcast URL.\n' >&2
@@ -43,6 +45,17 @@ arguments=(
 if [[ -n "${private_key_file}" ]]; then
   if [[ ! -f "${private_key_file}" ]]; then
     printf 'Sparkle private key file does not exist: %s\n' "${private_key_file}" >&2
+    exit 1
+  fi
+  decoded_private_key="${temporary_root}/private-key"
+  modern_key_valid=0
+  if base64 -D <"${private_key_file}" >"${decoded_private_key}" 2>/dev/null &&
+     [[ "$(wc -c <"${decoded_private_key}" | tr -d ' ')" == "32" ]]; then
+    modern_key_valid=1
+  fi
+  if [[ "${modern_key_valid}" != "1" ]] &&
+     ! grep -Eq '^[[:xdigit:]]{128}$' "${private_key_file}"; then
+    printf 'Sparkle private key file must contain a base64-encoded 32-byte Ed25519 private seed or a legacy 128-character key.\n' >&2
     exit 1
   fi
   arguments+=(--ed-key-file "${private_key_file}")

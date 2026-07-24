@@ -118,11 +118,13 @@ REDLINE_SPARKLE_KEY_ACCOUNT="redline-release" \
 ./scripts/package-macos-release.sh
 ```
 
-For isolated CI, `REDLINE_SPARKLE_PRIVATE_KEY_FILE` may point to an exported Sparkle private-key
-file. Treat that file like a password: keep it out of the repository and update host. The generated
-appcast is rejected unless it contains an Ed25519 signature and the configured HTTPS download
-prefix. Sparkle compares the incrementing `CFBundleVersion`, while `CFBundleShortVersionString`
-remains the human-facing release version.
+For isolated CI, `REDLINE_SPARKLE_PRIVATE_KEY_FILE` may point to a Sparkle-exported private-key
+file containing the base64 encoding of the 32-byte Ed25519 private seed. Treat that file like a
+password: keep it out of the repository and update host. Redline validates the exported format
+before invoking Sparkle and retains compatibility with Sparkle’s legacy 128-character key format.
+The generated appcast is rejected unless it contains an Ed25519 signature and the configured HTTPS
+download prefix. Sparkle compares the incrementing `CFBundleVersion`, while
+`CFBundleShortVersionString` remains the human-facing release version.
 
 ## Release DMG and notarization
 
@@ -157,6 +159,10 @@ logs, a SHA-256 checksum, and a signed Sparkle appcast beside the release. For a
 test only, set `REDLINE_SIGN_IDENTITY=-` and `REDLINE_ALLOW_UNNOTARIZED=1`; the resulting DMG is
 clearly reported as non-distributable. Set `REDLINE_GENERATE_APPCAST=1` only when that local test
 also supplies an isolated signing key.
+
+`tests/macos/release-packaging.sh` exercises the complete local archive path with two configured
+versions. It verifies both appcast entries, the generated binary delta, and the Ed25519 signatures
+on the new archive and delta. This test uses a published Ed25519 test vector, not a production key.
 
 ## Next native phases
 
