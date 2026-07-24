@@ -3,14 +3,14 @@
 Redline is a budget-aware dispatcher for deferred LLM work. It models subscription
 allowances, maintains a durable priority queue, and explains which task would be admitted.
 
-The current implementation includes the Phase 4 automatic execution service. Simulated and
-explicit execution remain available, while an opt-in service loop can evaluate configured
-providers and launch eligible Codex CLI, Claude Code, or generic-command tasks unattended.
+Redline includes a local service, CLI, web dashboard, and native macOS menu-bar app. An opt-in
+scheduler evaluates configured providers and launches eligible Codex CLI, Claude Code, Pi, or
+generic-command tasks unattended.
 
 ## Architecture
 
 ```text
-CLI / future MCP / future UI
+CLI / dashboard / native app
               |
               v
        local HTTP service
@@ -253,8 +253,8 @@ swift test --package-path macos
 open dist/Redline.app
 ```
 
-See [the native macOS design](docs/native-macos.md) for service ownership, packaging, and the next
-native phases.
+See [the native macOS guide](docs/native-macos.md) for service ownership, packaging, and release
+configuration.
 
 ## Execution lifecycle
 
@@ -452,8 +452,3 @@ The Playwright suite runs the embedded dashboard in an isolated browser with det
 server-sent-event fixtures. It covers task/profile workflows, dynamic harness and model selection,
 run logs, live updates, responsive layout, and loading/error states without touching a live queue or
 using provider quota.
-
-See [the observation report](docs/phase-1-observation.md) for live-provider findings.
-
-Ongoing release-hardening and deferred product work is tracked in
-[the remaining-work checklist](docs/remaining-work.md).

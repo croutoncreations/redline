@@ -1,8 +1,7 @@
 # Native macOS app
 
-Redline's first native shell is a menu-bar app built with AppKit. It keeps the existing local HTTP
-service as the process boundary, so the web dashboard, CLI, future MCP interface, and native UI all
-observe the same durable state.
+Redline's native shell is a menu-bar app built with AppKit. It keeps the local HTTP service as the
+process boundary, so the web dashboard, CLI, and native UI all observe the same durable state.
 
 ## Service ownership
 
@@ -163,10 +162,3 @@ also supplies an isolated signing key.
 `tests/macos/release-packaging.sh` exercises the complete local archive path with two configured
 versions. It verifies both appcast entries, the generated binary delta, and the Ed25519 signatures
 on the new archive and delta. This test uses a published Ed25519 test vector, not a production key.
-
-## Next native phases
-
-1. Notarize two real release versions and verify a complete Sparkle upgrade through the hosted
-   HTTPS appcast.
-2. Add a universal binary build when Intel distribution becomes a product requirement.
-3. A richer native popover only if tray workflows outgrow the menu and local dashboard split.
