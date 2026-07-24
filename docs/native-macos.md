@@ -57,7 +57,9 @@ available from the quick panel for migration later.
   hook logs.
 - User-enabled macOS notifications when a run completes or fails. Existing run history is treated
   as a baseline, so enabling notifications does not replay stale alerts.
-- Show Dashboard, notification setup, refresh, and quit actions.
+- Sparkle-backed automatic update checks in configured release builds, plus a manual
+  **Check for Updates…** action.
+- Show Dashboard, update and notification setup, refresh, and quit actions.
 - App Setup for launch-at-login status and recoverable legacy-service migration.
 - Automatic refresh every 20 seconds.
 
@@ -73,8 +75,10 @@ open dist/Redline.app
 ```
 
 The build creates one ad-hoc-signed `Redline.app` containing the Swift menu process, Go service,
-and safe starter configuration. Set `REDLINE_SIGN_IDENTITY` to a Developer ID identity for
-distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directory.
+Sparkle framework, and safe starter configuration. Set `REDLINE_SIGN_IDENTITY` to a Developer ID
+identity for distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directory.
+Local builds omit Sparkle feed settings and show a clear informational message when update checks
+are requested.
 
 Every build signs the menu process and nested Go service separately with Hardened Runtime enabled.
 Local builds use an ad-hoc identity and no timestamp. Version metadata is configurable:
@@ -82,6 +86,43 @@ Local builds use an ad-hoc identity and no timestamp. Version metadata is config
 ```bash
 REDLINE_VERSION=0.2.0 REDLINE_BUILD_NUMBER=2 ./scripts/build-macos-app.sh
 ```
+
+## Sparkle updates
+
+Redline pins Sparkle 2.9.2 through Swift Package Manager. Release builds enable it only when both an
+HTTPS appcast URL and a valid base64-encoded 32-byte Ed25519 public key are supplied:
+
+```bash
+REDLINE_SPARKLE_FEED_URL="https://updates.example.com/redline/appcast.xml" \
+REDLINE_SPARKLE_PUBLIC_KEY="BASE64_PUBLIC_KEY" \
+./scripts/build-macos-app.sh
+```
+
+Generate the signing key once with Sparkle’s bundled tool. By default the private key remains in
+the login Keychain and only the public key is copied into release configuration:
+
+```bash
+macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys \
+  --account redline-release
+```
+
+The release packager runs `scripts/generate-sparkle-appcast.sh` after the notarized DMG is complete.
+It signs the update archive with the Keychain identity and writes `appcast.xml` alongside the
+release:
+
+```bash
+REDLINE_SPARKLE_FEED_URL="https://updates.example.com/redline/appcast.xml" \
+REDLINE_SPARKLE_DOWNLOAD_URL_PREFIX="https://updates.example.com/redline/releases/" \
+REDLINE_SPARKLE_PUBLIC_KEY="BASE64_PUBLIC_KEY" \
+REDLINE_SPARKLE_KEY_ACCOUNT="redline-release" \
+./scripts/package-macos-release.sh
+```
+
+For isolated CI, `REDLINE_SPARKLE_PRIVATE_KEY_FILE` may point to an exported Sparkle private-key
+file. Treat that file like a password: keep it out of the repository and update host. The generated
+appcast is rejected unless it contains an Ed25519 signature and the configured HTTPS download
+prefix. Sparkle compares the incrementing `CFBundleVersion`, while `CFBundleShortVersionString`
+remains the human-facing release version.
 
 ## Release DMG and notarization
 
@@ -103,16 +144,23 @@ REDLINE_VERSION=0.2.0 \
 REDLINE_BUILD_NUMBER=2 \
 REDLINE_SIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" \
 REDLINE_NOTARY_PROFILE=redline-notary \
+REDLINE_SPARKLE_FEED_URL="https://updates.example.com/redline/appcast.xml" \
+REDLINE_SPARKLE_DOWNLOAD_URL_PREFIX="https://updates.example.com/redline/releases/" \
+REDLINE_SPARKLE_PUBLIC_KEY="BASE64_PUBLIC_KEY" \
+REDLINE_SPARKLE_KEY_ACCOUNT="redline-release" \
 ./scripts/package-macos-release.sh
 ```
 
 The script signs with a secure timestamp, notarizes and staples the app, builds and signs the DMG,
 notarizes and staples the DMG, validates it with Gatekeeper, and retains Apple’s result and issue
-logs plus a SHA-256 checksum beside the release. For a local packaging test only, set `REDLINE_SIGN_IDENTITY=-` and
-`REDLINE_ALLOW_UNNOTARIZED=1`; the resulting DMG is clearly reported as non-distributable.
+logs, a SHA-256 checksum, and a signed Sparkle appcast beside the release. For a local packaging
+test only, set `REDLINE_SIGN_IDENTITY=-` and `REDLINE_ALLOW_UNNOTARIZED=1`; the resulting DMG is
+clearly reported as non-distributable. Set `REDLINE_GENERATE_APPCAST=1` only when that local test
+also supplies an isolated signing key.
 
 ## Next native phases
 
-1. Choose and integrate an update mechanism such as Sparkle, including signed appcast generation.
+1. Notarize two real release versions and verify a complete Sparkle upgrade through the hosted
+   HTTPS appcast.
 2. Add a universal binary build when Intel distribution becomes a product requirement.
 3. A richer native popover only if tray workflows outgrow the menu and local dashboard split.

@@ -5,6 +5,7 @@ struct StatusPopoverActions {
     let showDashboard: @MainActor () -> Void
     let openBrowser: @MainActor () -> Void
     let showRunLogs: @MainActor (RunSummary) -> Void
+    let checkForUpdates: @MainActor () -> Void
     let enableNotifications: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
     let quit: @MainActor () -> Void
@@ -226,6 +227,7 @@ struct StatusPopoverView: View {
             Spacer()
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
+                Button("Check for Updates…", action: actions.checkForUpdates)
                 Button("Enable Notifications…", action: actions.enableNotifications)
                 Button("App Setup…", action: actions.showAppSetup)
                 Divider()

@@ -9,6 +9,7 @@ final class MenuBarController: NSObject {
     private let showAppSetup: @MainActor () -> Void
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
+    private let updates: NativeUpdateController
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
     private lazy var runLogWindow = RunLogWindowController(client: client)
     private lazy var notifications = NativeNotificationController()
@@ -18,6 +19,7 @@ final class MenuBarController: NSObject {
             showDashboard: { [weak self] in self?.showDashboard() },
             openBrowser: { [weak self] in self?.openDashboardInBrowser() },
             showRunLogs: { [weak self] run in self?.runLogWindow.show(run: run) },
+            checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAppSetup: showAppSetup,
             quit: { NSApplication.shared.terminate(nil) }
@@ -35,6 +37,7 @@ final class MenuBarController: NSObject {
         self.supervisor = supervisor
         self.showAppSetup = showAppSetup
         popoverModel = PopoverViewModel(client: client)
+        updates = NativeUpdateController()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 

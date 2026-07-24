@@ -6,6 +6,9 @@ version="${REDLINE_VERSION:-0.1.0}"
 sign_identity="${REDLINE_SIGN_IDENTITY:--}"
 notary_profile="${REDLINE_NOTARY_PROFILE:-}"
 allow_unnotarized="${REDLINE_ALLOW_UNNOTARIZED:-0}"
+sparkle_feed_url="${REDLINE_SPARKLE_FEED_URL:-}"
+sparkle_public_key="${REDLINE_SPARKLE_PUBLIC_KEY:-}"
+generate_appcast="${REDLINE_GENERATE_APPCAST:-0}"
 app_output_root="${REDLINE_APP_OUTPUT_DIR:-${repository_root}/dist}"
 release_output_root="${REDLINE_RELEASE_OUTPUT_DIR:-${repository_root}/dist/releases}"
 
@@ -19,6 +22,10 @@ if [[ "${allow_unnotarized}" != "1" && "${sign_identity}" != "Developer ID Appli
 fi
 if [[ -z "${notary_profile}" && "${allow_unnotarized}" != "1" ]]; then
   printf 'REDLINE_NOTARY_PROFILE is required for a distributable release.\n' >&2
+  exit 1
+fi
+if [[ "${allow_unnotarized}" != "1" && ( -z "${sparkle_feed_url}" || -z "${sparkle_public_key}" ) ]]; then
+  printf 'REDLINE_SPARKLE_FEED_URL and REDLINE_SPARKLE_PUBLIC_KEY are required for a distributable release.\n' >&2
   exit 1
 fi
 
@@ -81,3 +88,7 @@ fi
 
 (cd "${release_output_root}" && shasum -a 256 "$(basename "${dmg_path}")" > "$(basename "${dmg_path}").sha256")
 printf 'SHA-256: %s.sha256\n' "${dmg_path}"
+
+if [[ "${allow_unnotarized}" != "1" || "${generate_appcast}" == "1" ]]; then
+  "${repository_root}/scripts/generate-sparkle-appcast.sh"
+fi

@@ -2,6 +2,34 @@ import Foundation
 import Testing
 @testable import RedlineKit
 
+@Test func updateConfigurationRequiresSecureFeedAndEd25519Key() {
+    let validKey = Data(repeating: 7, count: 32).base64EncodedString()
+    let configured = UpdateConfiguration(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml",
+        "SUPublicEDKey": validKey,
+    ])
+    #expect(configured?.feedURL.absoluteString == "https://updates.redline.example/appcast.xml")
+    #expect(configured?.publicEDKey == validKey)
+
+    #expect(UpdateConfiguration(infoDictionary: [:]) == nil)
+    #expect(UpdateConfiguration(infoDictionary: [
+        "SUFeedURL": "http://updates.redline.example/appcast.xml",
+        "SUPublicEDKey": validKey,
+    ]) == nil)
+    #expect(UpdateConfiguration(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml?channel=stable",
+        "SUPublicEDKey": validKey,
+    ]) == nil)
+    #expect(UpdateConfiguration(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml",
+        "SUPublicEDKey": "",
+    ]) == nil)
+    #expect(UpdateConfiguration(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml",
+        "SUPublicEDKey": Data(repeating: 7, count: 31).base64EncodedString(),
+    ]) == nil)
+}
+
 @Test func installationResolutionPrefersPersistedThenLegacyThenDefaultConfig() throws {
     let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

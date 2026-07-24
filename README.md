@@ -238,6 +238,8 @@ uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the requ
 The first native shell lives under `macos/`. It shows provider allowance, scheduler, active-run,
 and operational-health state through a compact menu-bar summary and native quick-status popover.
 It embeds the full local dashboard in a native app window for management.
+Configured release builds use Sparkle 2 for automatic and manual signed update checks; local builds
+remain update-disabled unless an HTTPS appcast and Ed25519 public key are explicitly supplied.
 It adopts an already-running Redline service or starts the Go service embedded in its app bundle,
 so the eventual install remains a single application rather than separate UI and daemon packages.
 On first run it can create a safe starter configuration with automatic dispatch disabled. Its
