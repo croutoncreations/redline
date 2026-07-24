@@ -33,6 +33,28 @@ func TestClaudeNativeSnapshotMatchesProviderWindows(t *testing.T) {
 	}
 }
 
+func TestClaudeNativeInfersMissingFableResetFromAccountWeeklyWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0,"resets_at":"2026-07-24T22:00:00Z"},"seven_day":{"utilization":0,"resets_at":"2026-07-31T17:00:00Z"},"limits":[{"kind":"weekly_scoped","percent":0,"scope":{"model":{"display_name":"Fable"}}}]}`))
+	}))
+	defer server.Close()
+	client := nativeusage.Client{
+		HTTPClient: server.Client(), Credentials: staticCredentials{token: "claude-token"},
+		ClaudeUsageURL: server.URL, Now: func() time.Time { return time.Date(2026, 7, 24, 18, 0, 0, 0, time.UTC) },
+	}
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fable, ok := got.Allowance("model:fable:weekly")
+	if !ok || fable.Remaining != 1 || !fable.ResetsAt.Equal(got.Weekly.ResetsAt) || !fable.ResetInferred {
+		t.Fatalf("fable=%#v weekly=%#v ok=%v", fable, got.Weekly, ok)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q", got.Confidence)
+	}
+}
+
 func TestCodexNativeClassifiesWeeklyOnlyPrimaryWindowByDuration(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("ChatGPT-Account-Id") != "acct" {

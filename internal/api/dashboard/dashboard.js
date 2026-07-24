@@ -51,7 +51,10 @@ function providerCompact(item) {
     const windows = [];
     if (snap.short) windows.push(meter('5-hour window',snap.short.remaining,snap.short.resets_at));
     windows.push(meter('Weekly allowance',snap.weekly.remaining,snap.weekly.resets_at));
-    (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => windows.push(meter(window.source_label || title(window.key),window.remaining,window.resets_at)));
+    (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => {
+      const label = `${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
+      windows.push(meter(label,window.remaining,window.resets_at));
+    });
     details = `${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);

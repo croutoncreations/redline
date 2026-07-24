@@ -109,6 +109,30 @@ func TestParsePreservesClaudeFableAllowance(t *testing.T) {
 	}
 }
 
+func TestParseInfersMissingClaudeFableResetFromAccountWeeklyWindow(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-24T18:16:33.134Z",
+      "lines":[
+        {"type":"progress","label":"Fable","used":0,"limit":100,"periodDurationMs":604800000},
+        {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-07-24T22:00:00.306Z"},
+        {"type":"progress","label":"Weekly","used":0,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00.306Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fable, ok := got.Allowance("model:fable:weekly")
+	if !ok || fable.Remaining != 1 || !fable.ResetsAt.Equal(got.Weekly.ResetsAt) || !fable.ResetInferred {
+		t.Fatalf("fable=%#v weekly=%#v ok=%v", fable, got.Weekly, ok)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q", got.Confidence)
+	}
+}
+
 func TestParseAcceptsProviderWithoutShortWindow(t *testing.T) {
 	payload := `[{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[
       {"type":"progress","label":"Weekly","used":33,"limit":100,"resetsAt":"2026-07-23T04:16:35Z"}

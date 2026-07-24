@@ -367,6 +367,18 @@ ALTER TABLE runs ADD COLUMN external_session_id TEXT NOT NULL DEFAULT '';
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (18)`); err != nil {
 			return fmt.Errorf("record runtime connection migration: %w", err)
 		}
+		version = 18
+	}
+	if version < 19 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE usage_allowance_windows
+ADD COLUMN reset_inferred INTEGER NOT NULL DEFAULT 0;
+`); err != nil {
+			return fmt.Errorf("extend allowance reset metadata: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (19)`); err != nil {
+			return fmt.Errorf("record allowance reset metadata migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -548,10 +560,10 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 	}
 	for _, allowance := range s.AllAllowances() {
 		_, err := tx.ExecContext(ctx, `INSERT INTO usage_allowance_windows (
-snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
+snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
 			allowance.Scope, allowance.Role, allowance.Remaining,
-			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds)
+			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds, allowance.ResetInferred)
 		if err != nil {
 			return fmt.Errorf("save allowance %q: %w", allowance.Key, err)
 		}
@@ -635,7 +647,8 @@ FROM usage_snapshots WHERE provider = ?`
 
 func (d *DB) loadAllowances(ctx context.Context, snapshotID int64) ([]decision.AllowanceWindow, error) {
 	rows, err := d.db.QueryContext(ctx, `SELECT pool_key, source_label, scope, role, remaining,
-resets_at, period_duration_s FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotID)
+resets_at, period_duration_s, reset_inferred
+FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("list allowance windows: %w", err)
 	}
@@ -645,7 +658,7 @@ resets_at, period_duration_s FROM usage_allowance_windows WHERE snapshot_id = ? 
 		var allowance decision.AllowanceWindow
 		var reset string
 		if err := rows.Scan(&allowance.Key, &allowance.SourceLabel, &allowance.Scope, &allowance.Role,
-			&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds); err != nil {
+			&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds, &allowance.ResetInferred); err != nil {
 			return nil, fmt.Errorf("scan allowance window: %w", err)
 		}
 		allowance.ResetsAt, err = time.Parse(time.RFC3339Nano, reset)

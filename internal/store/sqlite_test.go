@@ -111,6 +111,7 @@ ALTER TABLE execution_profiles DROP COLUMN agent_context_id;
 ALTER TABLE runs DROP COLUMN runtime_connection_id;
 ALTER TABLE runs DROP COLUMN external_run_id;
 ALTER TABLE runs DROP COLUMN external_session_id;
+ALTER TABLE usage_allowance_windows DROP COLUMN reset_inferred;
 INSERT INTO usage_snapshots (
     provider, observed_at, short_remaining, short_resets_at,
     weekly_remaining, weekly_resets_at, source, confidence, raw_payload
@@ -144,6 +145,7 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 	snapshot.Allowances = []decision.AllowanceWindow{{
 		Key: "model:fable:weekly", SourceLabel: "Fable", Scope: "model", Role: "weekly",
 		Remaining: .48, ResetsAt: snapshot.Weekly.ResetsAt, PeriodDurationSeconds: 7 * 24 * 60 * 60,
+		ResetInferred: true,
 	}}
 	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"providerId":"claude"}`)); err != nil {
 		t.Fatal(err)
@@ -154,7 +156,7 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 		t.Fatal(err)
 	}
 	fable, ok := got.Allowance("model:fable:weekly")
-	if !ok || fable.Remaining != .48 || fable.SourceLabel != "Fable" {
+	if !ok || fable.Remaining != .48 || fable.SourceLabel != "Fable" || !fable.ResetInferred {
 		t.Fatalf("allowances = %#v", got.Allowances)
 	}
 	if _, ok := got.Allowance("session"); !ok {

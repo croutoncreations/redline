@@ -33,6 +33,7 @@ type Manager struct {
 	Native          Source
 	FailureLimit    int
 	ReprobeInterval time.Duration
+	MaxSnapshotAge  time.Duration
 	Now             func() time.Time
 	mu              sync.Mutex
 	states          map[string]sourceState
@@ -67,30 +68,40 @@ func (m *Manager) Fetch(ctx context.Context, accountID string, provider config.P
 
 	if active == "openusage" || shouldProbe {
 		snapshot, raw, err := m.OpenUsage.Fetch(ctx, provider)
+		fetchedAt := m.Now().UTC()
+		freshnessFailure := false
 		if err == nil {
-			m.success(accountID, "openusage", now)
+			err = m.snapshotError(snapshot, fetchedAt)
+			freshnessFailure = err != nil
+		}
+		if err == nil {
+			m.success(accountID, "openusage", fetchedAt)
 			return snapshot, raw, nil
 		}
 		if active == "openusage" {
 			failures := m.failure(accountID, err)
-			if failures < m.failureLimit() {
+			if !freshnessFailure && failures < m.failureLimit() {
 				return decision.UsageSnapshot{}, nil, fmt.Errorf("openusage usage source: %w", err)
 			}
 		} else {
-			m.probeFailure(accountID, err, now)
+			m.probeFailure(accountID, err, fetchedAt)
 		}
 	}
 
 	snapshot, raw, err := m.Native.Fetch(ctx, provider)
+	fetchedAt := m.Now().UTC()
+	if err == nil {
+		err = m.snapshotError(snapshot, fetchedAt)
+	}
 	if err != nil {
 		m.nativeFailure(accountID, err)
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("native usage source: %w", err)
 	}
-	m.success(accountID, "native", now)
+	m.success(accountID, "native", fetchedAt)
 	if active != "native" {
 		m.mu.Lock()
 		state = m.states[accountID]
-		state.nextProbe = now.Add(m.reprobeInterval())
+		state.nextProbe = fetchedAt.Add(m.reprobeInterval())
 		m.states[accountID] = state
 		m.mu.Unlock()
 	}
@@ -106,12 +117,28 @@ func (m *Manager) Status(accountID string) Status {
 func (m *Manager) fetch(ctx context.Context, accountID string, provider config.Provider, source Source) (decision.UsageSnapshot, []byte, error) {
 	snapshot, raw, err := source.Fetch(ctx, provider)
 	now := m.Now().UTC()
+	if err == nil {
+		err = m.snapshotError(snapshot, now)
+	}
 	if err != nil {
 		m.nativeFailure(accountID, err)
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%s usage source: %w", source.Name(), err)
 	}
 	m.success(accountID, source.Name(), now)
 	return snapshot, raw, nil
+}
+
+func (m *Manager) snapshotError(snapshot decision.UsageSnapshot, now time.Time) error {
+	if snapshot.ObservedAt.IsZero() {
+		return fmt.Errorf("usage snapshot has no observation timestamp")
+	}
+	if snapshot.ObservedAt.After(now) {
+		return fmt.Errorf("usage snapshot is from the future")
+	}
+	if now.Sub(snapshot.ObservedAt) > m.maxSnapshotAge() {
+		return fmt.Errorf("usage snapshot is stale")
+	}
+	return nil
 }
 
 func (m *Manager) success(accountID, active string, now time.Time) {
@@ -171,4 +198,11 @@ func (m *Manager) reprobeInterval() time.Duration {
 		return 15 * time.Minute
 	}
 	return m.ReprobeInterval
+}
+
+func (m *Manager) maxSnapshotAge() time.Duration {
+	if m.MaxSnapshotAge <= 0 {
+		return 15 * time.Minute
+	}
+	return m.MaxSnapshotAge
 }

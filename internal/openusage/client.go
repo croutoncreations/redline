@@ -126,6 +126,17 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		Source:     "openusage",
 		Confidence: "high",
 	}
+	var accountWeeklyReset time.Time
+	for _, line := range selected.Lines {
+		key, _, _ := normalizeLabel(line.Label)
+		if key != "weekly" || strings.TrimSpace(line.ResetsAt) == "" {
+			continue
+		}
+		if reset, parseErr := parseTime("resetsAt", line.ResetsAt); parseErr == nil {
+			accountWeeklyReset = reset
+		}
+		break
+	}
 	weeklyFound := false
 	for _, line := range selected.Lines {
 		if !strings.EqualFold(line.Type, "progress") {
@@ -139,9 +150,16 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
-		reset, err := parseTime("resetsAt", line.ResetsAt)
-		if err != nil {
-			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
+		resetInferred := false
+		var reset time.Time
+		if strings.TrimSpace(line.ResetsAt) == "" && scope == "model" && role == "weekly" && !accountWeeklyReset.IsZero() {
+			reset, resetInferred = accountWeeklyReset, true
+			snapshot.Confidence = "medium"
+		} else {
+			reset, err = parseTime("resetsAt", line.ResetsAt)
+			if err != nil {
+				return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
+			}
 		}
 		periodSeconds := line.PeriodDurationMS / 1000
 		if periodSeconds == 0 {
@@ -152,7 +170,7 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 			}
 		}
 		allowance := decision.AllowanceWindow{Key: key, SourceLabel: line.Label, Scope: scope, Role: role,
-			Remaining: remaining, ResetsAt: reset, PeriodDurationSeconds: periodSeconds}
+			Remaining: remaining, ResetsAt: reset, PeriodDurationSeconds: periodSeconds, ResetInferred: resetInferred}
 		snapshot.Allowances = append(snapshot.Allowances, allowance)
 		switch key {
 		case "session":

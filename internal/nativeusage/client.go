@@ -157,11 +157,19 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		if limit.Kind != "weekly_scoped" || !strings.EqualFold(limit.Scope.Model.DisplayName, "Fable") {
 			continue
 		}
-		_, fable, err := normalizedWindow("model:fable:weekly", "Fable", "weekly", limit.Percent, limit.ResetsAt, 7*24*time.Hour)
+		resetText := limit.ResetsAt
+		resetInferred := false
+		if strings.TrimSpace(resetText) == "" {
+			resetText = weekly.ResetsAt.Format(time.RFC3339Nano)
+			resetInferred = true
+			snapshot.Confidence = "medium"
+		}
+		_, fable, err := normalizedWindow("model:fable:weekly", "Fable", "weekly", limit.Percent, resetText, 7*24*time.Hour)
 		if err != nil {
 			return decision.UsageSnapshot{}, err
 		}
 		fable.Scope = "model"
+		fable.ResetInferred = resetInferred
 		snapshot.Allowances = append(snapshot.Allowances, fable)
 		break
 	}

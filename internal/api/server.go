@@ -129,6 +129,9 @@ func newServer(
 		nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now},
 		now,
 	)
+	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
+		server.usageSources.MaxSnapshotAge = maxSnapshotAge
+	}
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {

@@ -37,6 +37,7 @@ type AllowanceWindow struct {
 	Remaining             float64   `json:"remaining"`
 	ResetsAt              time.Time `json:"resets_at"`
 	PeriodDurationSeconds int64     `json:"period_duration_seconds"`
+	ResetInferred         bool      `json:"reset_inferred,omitempty"`
 }
 
 type UsageSnapshot struct {
