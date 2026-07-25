@@ -65,6 +65,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarController?.stop()
     }
 
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            menuBarController?.showDashboard()
+        }
+        return true
+    }
+
     private var standardConfigURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Application Support/Redline/redline.yaml")

@@ -1,4 +1,5 @@
 import AppKit
+import RedlineKit
 import WebKit
 
 @MainActor
@@ -9,11 +10,13 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
     private static let browserIdentifier = NSToolbarItem.Identifier("RedlineOpenBrowser")
 
     private let dashboardURL: URL
+    private let navigationPolicy: DashboardNavigationPolicy
     private let webView: WKWebView
     private let connectionLabel = NSTextField(labelWithString: "Connecting…")
 
     init(dashboardURL: URL) {
         self.dashboardURL = dashboardURL
+        navigationPolicy = DashboardNavigationPolicy(dashboardURL: dashboardURL)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: configuration)
@@ -70,6 +73,19 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         connectionLabel.stringValue = "Local service connected"
         connectionLabel.textColor = .systemGreen
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction
+    ) async -> WKNavigationActionPolicy {
+        guard navigationAction.navigationType == .linkActivated,
+              navigationPolicy.destination(for: navigationAction.request.url) == .external,
+              let url = navigationAction.request.url else {
+            return .allow
+        }
+        NSWorkspace.shared.open(url)
+        return .cancel
     }
 
     func webView(

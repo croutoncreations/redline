@@ -221,7 +221,7 @@ struct StatusPopoverView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Button("Open Dashboard", action: actions.showDashboard).buttonStyle(.borderedProminent).tint(.red)
+            Button("Open Redline", action: actions.showDashboard).buttonStyle(.borderedProminent).tint(.red)
             Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.bordered).disabled(model.isRefreshing)
             Spacer()

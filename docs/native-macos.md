@@ -48,8 +48,9 @@ available from the quick panel for migration later.
 - Current weekly and five-hour availability for Codex and Claude.
 - Model-specific allowances such as Fable in a provider submenu.
 - Active-run, scheduler, operational-health, and service-ownership summaries.
-- A native dashboard window backed by `WKWebView`, with connection status, refresh, and an optional
-  Open in Browser action.
+- A primary **Open Redline** app window backed by `WKWebView`, with connection status, refresh, and
+  an optional Open in Browser action. Reopening the app brings this window back, while external
+  links leave the local interface and open in the default browser.
 - A native quick-status popover with provider capacity, scheduler and run state, the next queued
   tasks, the latest dispatch decision, and a link to the full dashboard.
 - Per-provider pause/resume controls and direct native access to recent stdout/stderr and lifecycle
