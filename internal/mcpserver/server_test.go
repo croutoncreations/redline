@@ -141,6 +141,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 
 func TestHermesRuntimeAndContextToolsUseServiceAPI(t *testing.T) {
 	var createdConnection, createdContext bool
+	var discoveryRequest map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/runtime-connections", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"id":"hermes-remote","runtime":"hermes","transport":"gateway","url":"https://gateway.example","max_concurrent_runs":1}]`)
@@ -151,8 +152,9 @@ func TestHermesRuntimeAndContextToolsUseServiceAPI(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_ = json.NewEncoder(w).Encode(body)
 	})
-	mux.HandleFunc("POST /v1/runtime-connections/hermes-remote/discover", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"version":"0.18.2","profiles":[{"name":"default"}],"profile_options":[]}`)
+	mux.HandleFunc("POST /v1/runtime-connections/hermes-remote/discover", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&discoveryRequest)
+		fmt.Fprint(w, `{"version":"0.18.2","profiles":[{"name":"default"}],"profile_options":[],"truncated":true}`)
 	})
 	mux.HandleFunc("POST /v1/agent-contexts", func(w http.ResponseWriter, r *http.Request) {
 		createdContext = true
@@ -174,9 +176,17 @@ func TestHermesRuntimeAndContextToolsUseServiceAPI(t *testing.T) {
 	if create.IsError || !createdConnection {
 		t.Fatalf("create=%s called=%t", contentText(create), createdConnection)
 	}
-	discover := callTool(t, session, "redline_runtime_connection_discover", map[string]any{"id": "hermes-remote"})
+	discover := callTool(t, session, "redline_runtime_connection_discover", map[string]any{
+		"id": "hermes-remote", "profile": "default", "provider": "anthropic",
+		"include_models": true, "model_offset": 10, "model_limit": 25,
+	})
 	if discover.IsError {
 		t.Fatalf("discover error: %s", contentText(discover))
+	}
+	if discoveryRequest["profile"] != "default" || discoveryRequest["provider"] != "anthropic" ||
+		discoveryRequest["include_models"] != true || discoveryRequest["model_offset"] != float64(10) ||
+		discoveryRequest["model_limit"] != float64(25) {
+		t.Fatalf("discovery request = %#v", discoveryRequest)
 	}
 	contextResult := callTool(t, session, "redline_agent_context_create", map[string]any{
 		"id": "hermes-default", "runtime_connection_id": "hermes-remote",

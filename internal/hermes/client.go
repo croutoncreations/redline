@@ -45,12 +45,15 @@ type Project struct {
 }
 
 type ModelProvider struct {
-	Slug          string         `json:"slug"`
-	Name          string         `json:"name"`
-	IsCurrent     bool           `json:"is_current"`
-	Models        []string       `json:"models"`
-	Authenticated bool           `json:"authenticated"`
-	Capabilities  map[string]any `json:"capabilities,omitempty"`
+	Slug            string         `json:"slug"`
+	Name            string         `json:"name"`
+	IsCurrent       bool           `json:"is_current"`
+	Models          []string       `json:"models,omitempty"`
+	ModelCount      int            `json:"model_count,omitempty"`
+	ModelOffset     int            `json:"model_offset,omitempty"`
+	ModelsTruncated bool           `json:"models_truncated,omitempty"`
+	Authenticated   bool           `json:"authenticated"`
+	Capabilities    map[string]any `json:"capabilities,omitempty"`
 }
 
 type ProfileOptions struct {
@@ -68,6 +71,82 @@ type Discovery struct {
 	AuthProviders  []string         `json:"auth_providers,omitempty"`
 	Profiles       []Profile        `json:"profiles"`
 	ProfileOptions []ProfileOptions `json:"profile_options"`
+	Truncated      bool             `json:"truncated,omitempty"`
+}
+
+type DiscoveryOptions struct {
+	Profile       string `json:"profile,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	IncludeModels bool   `json:"include_models,omitempty"`
+	ModelOffset   int    `json:"model_offset,omitempty"`
+	ModelLimit    int    `json:"model_limit,omitempty"`
+}
+
+const (
+	defaultDiscoveryModelLimit = 50
+	maxDiscoveryModelLimit     = 200
+)
+
+// View returns a bounded discovery representation suitable for APIs and agent
+// tools. Raw gateway discovery remains complete so runtime execution can use
+// the provider's authoritative catalog.
+func (d Discovery) View(options DiscoveryOptions) Discovery {
+	profileFilter := strings.TrimSpace(options.Profile)
+	providerFilter := strings.TrimSpace(options.Provider)
+	offset := max(0, options.ModelOffset)
+	limit := options.ModelLimit
+	if limit <= 0 {
+		limit = defaultDiscoveryModelLimit
+	}
+	limit = min(limit, maxDiscoveryModelLimit)
+
+	result := d
+	result.Profiles = nil
+	result.ProfileOptions = nil
+	result.Truncated = false
+	for _, profile := range d.Profiles {
+		if profileFilter == "" || profile.Name == profileFilter {
+			result.Profiles = append(result.Profiles, profile)
+		}
+	}
+	for _, profileOptions := range d.ProfileOptions {
+		if profileFilter != "" && profileOptions.Profile.Name != profileFilter {
+			continue
+		}
+		view := profileOptions
+		view.Providers = nil
+		for _, provider := range profileOptions.Providers {
+			if providerFilter != "" && provider.Slug != providerFilter {
+				continue
+			}
+			providerView := provider
+			providerView.ModelCount = len(provider.Models)
+			providerView.Models = nil
+			providerView.Capabilities = nil
+			providerView.ModelOffset = 0
+			if options.IncludeModels {
+				start := min(offset, len(provider.Models))
+				end := min(start+limit, len(provider.Models))
+				providerView.ModelOffset = start
+				providerView.Models = append([]string(nil), provider.Models[start:end]...)
+				providerView.ModelsTruncated = start > 0 || end < len(provider.Models)
+				if len(provider.Capabilities) > 0 {
+					providerView.Capabilities = make(map[string]any, len(providerView.Models))
+					for _, model := range providerView.Models {
+						if capability, ok := provider.Capabilities[model]; ok {
+							providerView.Capabilities[model] = capability
+						}
+					}
+				}
+			} else {
+				providerView.ModelsTruncated = len(provider.Models) > 0
+			}
+			result.Truncated = result.Truncated || providerView.ModelsTruncated
+			view.Providers = append(view.Providers, providerView)
+		}
+		result.ProfileOptions = append(result.ProfileOptions, view)
+	}
+	return result
 }
 
 type RunRequest struct {

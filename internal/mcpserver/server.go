@@ -17,6 +17,7 @@ import (
 	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/hermes"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -172,6 +173,15 @@ type runtimeConnectionUpdateInput struct {
 	MaxConcurrentRuns *int    `json:"max_concurrent_runs,omitempty" jsonschema:"new concurrency limit"`
 }
 
+type runtimeConnectionDiscoverInput struct {
+	ID            string `json:"id" jsonschema:"runtime connection ID"`
+	Profile       string `json:"profile,omitempty" jsonschema:"optional runtime profile name"`
+	Provider      string `json:"provider,omitempty" jsonschema:"optional provider slug such as anthropic or openai-codex"`
+	IncludeModels bool   `json:"include_models,omitempty" jsonschema:"include a bounded page of model identifiers; defaults to false"`
+	ModelOffset   int    `json:"model_offset,omitempty" jsonschema:"zero-based model offset within each matching provider"`
+	ModelLimit    int    `json:"model_limit,omitempty" jsonschema:"models per matching provider; defaults to 50 and is capped at 200"`
+}
+
 type agentContextCreateInput struct {
 	ID                  string `json:"id" jsonschema:"stable agent context ID"`
 	RuntimeConnectionID string `json:"runtime_connection_id" jsonschema:"existing runtime connection ID"`
@@ -296,7 +306,7 @@ func New(client apiclient.Client) *mcp.Server {
 	mcp.AddTool(result, mutationTool("redline_runtime_connection_delete", "Delete runtime connection",
 		"Delete an unreferenced runtime connection.", true, false, false), s.runtimeConnectionDelete)
 	mcp.AddTool(result, mutationTool("redline_runtime_connection_discover", "Discover runtime options",
-		"Connect to a runtime and discover its profiles, projects, providers, and models.", false, false, true), s.runtimeConnectionDiscover)
+		"Connect to a runtime and return compact profiles, projects, and providers; optionally filter and page model identifiers.", false, false, true), s.runtimeConnectionDiscover)
 	mcp.AddTool(result, mutationTool("redline_agent_context_create", "Create agent context",
 		"Create a runtime profile, project, and working-directory selection.", false, false, false), s.agentContextCreate)
 	mcp.AddTool(result, mutationTool("redline_agent_context_update", "Update agent context",
@@ -590,12 +600,19 @@ func (s *server) runtimeConnectionDelete(ctx context.Context, _ *mcp.CallToolReq
 	return nil, Output{Summary: fmt.Sprintf("Deleted runtime connection %s.", input.ID), Data: map[string]any{"id": input.ID, "deleted": true}}, nil
 }
 
-func (s *server) runtimeConnectionDiscover(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
-	var result map[string]any
-	if err := s.client.Do(ctx, http.MethodPost, "/v1/runtime-connections/"+url.PathEscape(input.ID)+"/discover", map[string]any{}, &result); err != nil {
+func (s *server) runtimeConnectionDiscover(ctx context.Context, _ *mcp.CallToolRequest, input runtimeConnectionDiscoverInput) (*mcp.CallToolResult, Output, error) {
+	body := hermes.DiscoveryOptions{
+		Profile: input.Profile, Provider: input.Provider, IncludeModels: input.IncludeModels,
+		ModelOffset: input.ModelOffset, ModelLimit: input.ModelLimit,
+	}
+	var result hermes.Discovery
+	if err := s.client.Do(ctx, http.MethodPost, "/v1/runtime-connections/"+url.PathEscape(input.ID)+"/discover", body, &result); err != nil {
 		return nil, Output{}, err
 	}
-	return nil, Output{Summary: fmt.Sprintf("Discovered runtime connection %s.", input.ID), Data: result}, nil
+	return nil, Output{
+		Summary:   fmt.Sprintf("Discovered runtime connection %s.", input.ID),
+		Truncated: result.Truncated, Data: result,
+	}, nil
 }
 
 func (s *server) agentContextsList(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, Output, error) {

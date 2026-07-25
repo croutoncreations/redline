@@ -260,7 +260,11 @@ async function discoverSelectedHermes(selectedProfile='',selectedProject='',sele
     return;
   }
   $('#profile-hermes-status').textContent = 'Connecting to Hermes Gateway…';
-  hermesDiscovery = await apiRequest(`/v1/runtime-connections/${encodeURIComponent(connection)}/discover`,{method:'POST',body:'{}'});
+  const provider = providerKind(), providerSlug = provider === 'codex' ? 'openai-codex' : provider === 'claude' ? 'anthropic' : '';
+  hermesDiscovery = await apiRequest(`/v1/runtime-connections/${encodeURIComponent(connection)}/discover`,{
+    method:'POST',
+    body:JSON.stringify({provider:providerSlug,include_models:true,model_limit:200})
+  });
   $('#profile-runtime-profile').innerHTML = (hermesDiscovery.profiles || []).map(item =>
     `<option value="${escapeHTML(item.name)}">${escapeHTML(item.name)} · ${escapeHTML(item.provider || 'provider')} / ${escapeHTML(item.model || 'default')}</option>`
   ).join('');

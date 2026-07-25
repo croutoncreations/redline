@@ -83,7 +83,7 @@ State-changing tools:
 | `redline_profile_delete` | Delete an unreferenced execution profile |
 | `redline_runtime_connection_create` / `redline_runtime_connection_update` | Configure a Hermes endpoint using a credential reference |
 | `redline_runtime_connection_delete` | Delete a runtime connection with no agent contexts |
-| `redline_runtime_connection_discover` | Discover remote profiles, projects, providers, and models |
+| `redline_runtime_connection_discover` | Discover remote profiles, projects, and providers; optionally filter and page models |
 | `redline_agent_context_create` / `redline_agent_context_update` | Configure a selected remote execution context |
 | `redline_agent_context_delete` | Delete a context with no execution profiles |
 | `redline_provider_control` | Pause or resume provider dispatch |
@@ -102,6 +102,12 @@ request.
 Runtime credentials are references, not inline secrets. `credential_source` may be
 `hermes_desktop`, `environment`, or `file`; `credential_ref` is the environment-variable name or
 protected JSON file path. Never pass a password or session token directly in an MCP tool argument.
+
+Runtime discovery is compact by default: it returns profiles, projects, providers, and each
+provider's `model_count` without returning model identifiers or capability maps. Set
+`include_models` and optionally `profile` or `provider` to request a model page. `model_limit`
+defaults to 50 and is capped at 200; use `model_offset` for subsequent pages. The response marks
+omitted model data with `truncated` and `models_truncated`.
 
 List results default to 20 items and cap at 100. Task prompts are omitted from lists and capped at
 8 KiB on detailed responses. Event and log tools also enforce server-side response bounds.

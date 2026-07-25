@@ -114,6 +114,13 @@ func (s *Server) deleteRuntimeConnection(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) discoverRuntimeConnection(w http.ResponseWriter, r *http.Request) {
+	var options hermes.DiscoveryOptions
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &options); err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+			return
+		}
+	}
 	item, err := s.store.GetRuntimeConnection(r.Context(), r.PathValue("connection"))
 	if err != nil {
 		writeError(w, err)
@@ -128,7 +135,7 @@ func (s *Server) discoverRuntimeConnection(w http.ResponseWriter, r *http.Reques
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, result.View(options))
 }
 
 func (s *Server) listAgentContexts(w http.ResponseWriter, r *http.Request) {

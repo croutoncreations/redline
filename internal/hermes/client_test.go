@@ -59,6 +59,59 @@ func TestDiscoverReturnsProfilesProjectsAndOnlyAuthenticatedModels(t *testing.T)
 	}
 }
 
+func TestDiscoveryViewIsCompactByDefaultAndBoundsFilteredModels(t *testing.T) {
+	discovery := hermes.Discovery{
+		Version:  "0.18.2",
+		Profiles: []hermes.Profile{{Name: "default"}, {Name: "other"}},
+		ProfileOptions: []hermes.ProfileOptions{{
+			Profile: hermes.Profile{Name: "default"},
+			Providers: []hermes.ModelProvider{
+				{
+					Slug: "anthropic", Name: "Anthropic", Authenticated: true,
+					Models: []string{"haiku", "sonnet", "opus"},
+					Capabilities: map[string]any{
+						"haiku":  map[string]any{"reasoning": false},
+						"sonnet": map[string]any{"reasoning": true},
+						"opus":   map[string]any{"reasoning": true},
+					},
+				},
+				{Slug: "openai-codex", Name: "OpenAI Codex", Authenticated: true, Models: []string{"gpt-5.5"}},
+			},
+		}, {
+			Profile:   hermes.Profile{Name: "other"},
+			Providers: []hermes.ModelProvider{{Slug: "anthropic", Models: []string{"other-model"}}},
+		}},
+	}
+
+	compact := discovery.View(hermes.DiscoveryOptions{})
+	provider := compact.ProfileOptions[0].Providers[0]
+	if provider.ModelCount != 3 || len(provider.Models) != 0 || provider.Capabilities != nil ||
+		!provider.ModelsTruncated || !compact.Truncated {
+		t.Fatalf("compact provider = %#v", provider)
+	}
+
+	filtered := discovery.View(hermes.DiscoveryOptions{
+		Profile: "default", Provider: "anthropic", IncludeModels: true, ModelOffset: 1, ModelLimit: 1,
+	})
+	if len(filtered.Profiles) != 1 || len(filtered.ProfileOptions) != 1 ||
+		len(filtered.ProfileOptions[0].Providers) != 1 {
+		t.Fatalf("filtered discovery = %#v", filtered)
+	}
+	provider = filtered.ProfileOptions[0].Providers[0]
+	if len(provider.Models) != 1 || provider.Models[0] != "sonnet" ||
+		provider.ModelCount != 3 || provider.ModelOffset != 1 || !provider.ModelsTruncated ||
+		len(provider.Capabilities) != 1 || provider.Capabilities["sonnet"] == nil {
+		t.Fatalf("filtered provider = %#v", provider)
+	}
+
+	complete := discovery.View(hermes.DiscoveryOptions{
+		Profile: "default", Provider: "anthropic", IncludeModels: true, ModelLimit: 3,
+	})
+	if complete.Truncated || complete.ProfileOptions[0].Providers[0].ModelsTruncated {
+		t.Fatalf("complete discovery unexpectedly truncated = %#v", complete)
+	}
+}
+
 func TestRunPersistsExternalIdentityBeforeWaitingAndCollectsUsage(t *testing.T) {
 	server := fakeGateway(t)
 	defer server.Close()

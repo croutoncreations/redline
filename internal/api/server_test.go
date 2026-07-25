@@ -54,6 +54,7 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/profile-options"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "include_models:true"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {
