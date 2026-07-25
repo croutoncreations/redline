@@ -333,6 +333,10 @@ interval. Each cycle skips paused providers, then fills available capacity up to
 `max_concurrent_runs` (default `1`). Optional `pool_concurrency` entries independently cap
 overlap within allowance pools such as `model:fable:weekly`. Each candidate task's Git revision
 is resolved independently, and automatic decisions are recorded with `"trigger":"automatic"`.
+The dashboard can persist a provider-level override without rewriting the YAML configuration;
+resetting the override restores the configured default. Remote Hermes jobs must also satisfy the
+selected runtime connection and agent context limits, so the effective concurrency is the
+strictest applicable provider, allowance-pool, connection, or context limit.
 Inspect the live loop with:
 
 ```bash

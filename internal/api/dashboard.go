@@ -35,19 +35,21 @@ type dashboardResponse struct {
 }
 
 type dashboardProvider struct {
-	ID                string                  `json:"id"`
-	Provider          string                  `json:"provider"`
-	Paused            bool                    `json:"paused"`
-	Snapshot          *decision.UsageSnapshot `json:"snapshot,omitempty"`
-	Error             string                  `json:"error,omitempty"`
-	UsageSource       usage.Status            `json:"usage_source"`
-	Policy            string                  `json:"policy"`
-	PolicySource      string                  `json:"policy_source"`
-	DefaultPolicy     string                  `json:"default_policy"`
-	MaxConcurrentRuns int                     `json:"max_concurrent_runs"`
-	ActiveRuns        int                     `json:"active_runs"`
-	PoolConcurrency   map[string]int          `json:"pool_concurrency,omitempty"`
-	ActivePoolClaims  map[string]int          `json:"active_pool_claims,omitempty"`
+	ID                       string                  `json:"id"`
+	Provider                 string                  `json:"provider"`
+	Paused                   bool                    `json:"paused"`
+	Snapshot                 *decision.UsageSnapshot `json:"snapshot,omitempty"`
+	Error                    string                  `json:"error,omitempty"`
+	UsageSource              usage.Status            `json:"usage_source"`
+	Policy                   string                  `json:"policy"`
+	PolicySource             string                  `json:"policy_source"`
+	DefaultPolicy            string                  `json:"default_policy"`
+	MaxConcurrentRuns        int                     `json:"max_concurrent_runs"`
+	DefaultMaxConcurrentRuns int                     `json:"default_max_concurrent_runs"`
+	ConcurrencySource        string                  `json:"concurrency_source"`
+	ActiveRuns               int                     `json:"active_runs"`
+	PoolConcurrency          map[string]int          `json:"pool_concurrency,omitempty"`
+	ActivePoolClaims         map[string]int          `json:"active_pool_claims,omitempty"`
 }
 
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
@@ -183,7 +185,13 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		if item.DefaultPolicy == "" {
 			item.DefaultPolicy = s.config.ActivePolicy
 		}
-		item.MaxConcurrentRuns = configured.EffectiveMaxConcurrentRuns()
+		concurrency, concurrencyErr := s.effectiveProviderConcurrency(ctx, id)
+		if concurrencyErr != nil {
+			return dashboardResponse{}, concurrencyErr
+		}
+		item.MaxConcurrentRuns = concurrency.MaxConcurrentRuns
+		item.DefaultMaxConcurrentRuns = concurrency.DefaultMaxConcurrentRuns
+		item.ConcurrencySource = concurrency.Source
 		item.PoolConcurrency = configured.PoolConcurrency
 		item.ActiveRuns, err = s.store.ActiveRunCount(ctx, id)
 		if err != nil {

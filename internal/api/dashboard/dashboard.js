@@ -36,10 +36,12 @@ function policyControl(item, provider) {
 }
 function concurrencyStatus(item) {
   const active = item.active_runs || 0, maximum = item.max_concurrent_runs || 1;
+  const source = item.concurrency_source === 'override' ? 'custom override' : `config default ${item.default_max_concurrent_runs || maximum}`;
+  const reset = item.concurrency_source === 'override' ? `<button type="button" data-provider-concurrency-reset="${escapeHTML(item.id)}">Use default</button>` : '';
   const pools = Object.entries(item.pool_concurrency || {}).sort(([left],[right]) => left.localeCompare(right)).map(([pool,limit]) =>
     `<span><b>${escapeHTML(title(pool))}</b><i>${item.active_pool_claims?.[pool] || 0}/${limit}</i></span>`
   ).join('');
-  return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Optional allowance-pool limits independently protect shared or model-specific capacity.">?</i></b><i>${active}/${maximum} active</i></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
+  return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Hermes connection and context limits, plus optional allowance-pool limits, apply independently.">?</i></b><span class="concurrency-control"><input data-provider-concurrency="${escapeHTML(item.id)}" type="number" min="1" max="32" value="${maximum}" aria-label="${escapeHTML(title(item.provider))} parallel run limit"><i>${active} active · ${escapeHTML(source)}</i>${reset}</span></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
@@ -88,6 +90,47 @@ function wireProviderDetails() {
       } catch (error) {
         $('#error-banner').hidden = false;
         $('#error-banner').textContent = `Could not update provider policy: ${error.message}`;
+        control.disabled = false;
+      }
+    });
+  });
+  document.querySelectorAll('[data-provider-concurrency]').forEach(input => {
+    input.addEventListener('click', event => event.stopPropagation());
+    input.addEventListener('change', async event => {
+      event.stopPropagation();
+      const control = event.currentTarget, providerID = control.dataset.providerConcurrency;
+      const limit = Number(control.value);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 32) {
+        $('#error-banner').hidden = false;
+        $('#error-banner').textContent = 'Provider parallel runs must be between 1 and 32.';
+        return;
+      }
+      control.disabled = true;
+      try {
+        await apiRequest(`/v1/providers/${encodeURIComponent(providerID)}/concurrency`, {
+          method:'PATCH', body:JSON.stringify({max_concurrent_runs:limit})
+        });
+        await refresh();
+      } catch (error) {
+        $('#error-banner').hidden = false;
+        $('#error-banner').textContent = `Could not update provider concurrency: ${error.message}`;
+        control.disabled = false;
+      }
+    });
+  });
+  document.querySelectorAll('[data-provider-concurrency-reset]').forEach(button => {
+    button.addEventListener('click', async event => {
+      event.stopPropagation();
+      const control = event.currentTarget, providerID = control.dataset.providerConcurrencyReset;
+      control.disabled = true;
+      try {
+        await apiRequest(`/v1/providers/${encodeURIComponent(providerID)}/concurrency`, {
+          method:'PATCH', body:JSON.stringify({max_concurrent_runs:0})
+        });
+        await refresh();
+      } catch (error) {
+        $('#error-banner').hidden = false;
+        $('#error-banner').textContent = `Could not reset provider concurrency: ${error.message}`;
         control.disabled = false;
       }
     });
@@ -430,7 +473,7 @@ function updateHarnessFields(selectedModelValue) {
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
   $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
-  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = '';
+  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = ''; $('#profile-context-concurrency').value = 1;
   updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
@@ -448,6 +491,7 @@ async function editProfile(id) {
       if (context) {
         $('#profile-runtime-connection').value = context.runtime_connection_id;
         $('#profile-session-mode').value = context.session_mode || 'isolated';
+        $('#profile-context-concurrency').value = context.max_concurrent_runs || 1;
         await discoverSelectedHermes(context.profile,context.project,profile.model || 'default');
       }
     }
@@ -470,8 +514,10 @@ async function saveProfile(event) {
       const projectOption=$('#profile-runtime-project').selectedOptions[0];
       repository=projectOption?.dataset.path || '';
       if (!repository) throw new Error('The selected Hermes context does not provide a working directory.');
-      const contextPayload={id:agentContextID,runtime_connection_id:$('#profile-runtime-connection').value,profile:$('#profile-runtime-profile').value,project:$('#profile-runtime-project').value,working_directory:repository,session_mode:$('#profile-session-mode').value,max_concurrent_runs:1};
-      await apiRequest(context ? `/v1/agent-contexts/${encodeURIComponent(agentContextID)}` : '/v1/agent-contexts',{method:context ? 'PATCH' : 'POST',body:JSON.stringify(contextPayload)});
+      const contextPayload={id:agentContextID,runtime_connection_id:$('#profile-runtime-connection').value,profile:$('#profile-runtime-profile').value,project:$('#profile-runtime-project').value,working_directory:repository,session_mode:$('#profile-session-mode').value,max_concurrent_runs:Number($('#profile-context-concurrency').value || 1)};
+      const savedContext=await apiRequest(context ? `/v1/agent-contexts/${encodeURIComponent(agentContextID)}` : '/v1/agent-contexts',{method:context ? 'PATCH' : 'POST',body:JSON.stringify(contextPayload)});
+      const contextIndex=agentContexts.findIndex(item => item.id === savedContext.id);
+      if (contextIndex >= 0) agentContexts[contextIndex]=savedContext; else agentContexts.push(savedContext);
       workspaceProvider='runtime-owned';
     }
     const payload = {id,provider_account_id:$('#profile-provider').value,agent_context_id:agentContextID,harness_type:harness,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:workspaceProvider,repository,base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:harness === 'hermes' ? '' : $('#profile-prepare').value,finalize_command:harness === 'hermes' ? '' : $('#profile-finalize').value};

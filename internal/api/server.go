@@ -152,6 +152,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/providers/{provider}/token-sync", server.syncProviderTokens)
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
 	mux.HandleFunc("PATCH /v1/providers/{provider}/policy", server.updateProviderPolicy)
+	mux.HandleFunc("PATCH /v1/providers/{provider}/concurrency", server.updateProviderConcurrency)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
 	mux.HandleFunc("GET /v1/profile-options", server.profileOptions)
@@ -482,6 +483,68 @@ type providerPolicySelection struct {
 	Policy     string        `json:"policy"`
 	Source     string        `json:"source"`
 	Definition config.Policy `json:"-"`
+}
+
+type providerConcurrencySelection struct {
+	MaxConcurrentRuns        int    `json:"max_concurrent_runs"`
+	DefaultMaxConcurrentRuns int    `json:"default_max_concurrent_runs"`
+	Source                   string `json:"source"`
+}
+
+func (s *Server) effectiveProviderConcurrency(
+	ctx context.Context,
+	providerID string,
+) (providerConcurrencySelection, error) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return providerConcurrencySelection{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	defaultLimit := configured.EffectiveMaxConcurrentRuns()
+	override, err := s.store.ProviderMaxConcurrentRuns(ctx, providerID)
+	if err != nil {
+		return providerConcurrencySelection{}, err
+	}
+	if override > 0 {
+		return providerConcurrencySelection{
+			MaxConcurrentRuns: override, DefaultMaxConcurrentRuns: defaultLimit, Source: "override",
+		}, nil
+	}
+	return providerConcurrencySelection{
+		MaxConcurrentRuns: defaultLimit, DefaultMaxConcurrentRuns: defaultLimit, Source: "config",
+	}, nil
+}
+
+func (s *Server) updateProviderConcurrency(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+	if _, ok := s.config.Providers[provider]; !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
+		return
+	}
+	var request struct {
+		MaxConcurrentRuns *int `json:"max_concurrent_runs"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	if request.MaxConcurrentRuns == nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "max_concurrent_runs is required"})
+		return
+	}
+	if *request.MaxConcurrentRuns < 0 {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "max_concurrent_runs cannot be negative"})
+		return
+	}
+	if err := s.store.SetProviderMaxConcurrentRuns(r.Context(), provider, *request.MaxConcurrentRuns); err != nil {
+		writeError(w, err)
+		return
+	}
+	selection, err := s.effectiveProviderConcurrency(r.Context(), provider)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, selection)
 }
 
 func (s *Server) effectiveProviderPolicy(ctx context.Context, providerID string) (providerPolicySelection, error) {
@@ -910,8 +973,11 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
-	configured := s.config.Providers[provider]
-	for range configured.EffectiveMaxConcurrentRuns() {
+	concurrency, err := s.effectiveProviderConcurrency(ctx, provider)
+	if err != nil {
+		return err
+	}
+	for range concurrency.MaxConcurrentRuns {
 		_, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
 		if err != nil {
 			return err
@@ -999,7 +1065,11 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
-	maxConcurrent := configuredProvider.EffectiveMaxConcurrentRuns()
+	concurrency, err := s.effectiveProviderConcurrency(ctx, request.ProviderAccountID)
+	if err != nil {
+		return response, false, err
+	}
+	maxConcurrent := concurrency.MaxConcurrentRuns
 	if active >= maxConcurrent {
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive,
 			Reason: fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)}
@@ -1019,9 +1089,24 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
+	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
+	if profile.AgentContextID != "" {
+		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
+		if contextErr != nil {
+			return response, false, contextErr
+		}
+		connection, connectionErr := s.store.GetRuntimeConnection(ctx, agentContext.RuntimeConnectionID)
+		if connectionErr != nil {
+			return response, false, connectionErr
+		}
+		limits.AgentContextID = agentContext.ID
+		limits.AgentContext = agentContext.MaxConcurrentRuns
+		limits.RuntimeConnectionID = connection.ID
+		limits.RuntimeConnection = connection.MaxConcurrentRuns
+	}
 	run, err := s.store.AdmitTaskWithLimits(
 		ctx, uuid.NewString(), task.ID, request.ProviderAccountID, revision, response.Result.RequiredPools,
-		store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}, s.now(),
+		limits, s.now(),
 	)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {

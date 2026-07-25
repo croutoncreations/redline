@@ -107,8 +107,10 @@ DROP TABLE runtime_connections;
 CREATE UNIQUE INDEX idx_runs_one_active_provider
 ON runs(provider_account_id) WHERE state IN ('preparing', 'running');
 ALTER TABLE provider_controls DROP COLUMN policy_name;
+ALTER TABLE provider_controls DROP COLUMN max_concurrent_runs;
 ALTER TABLE execution_profiles DROP COLUMN agent_context_id;
 ALTER TABLE runs DROP COLUMN runtime_connection_id;
+ALTER TABLE runs DROP COLUMN agent_context_id;
 ALTER TABLE runs DROP COLUMN external_run_id;
 ALTER TABLE runs DROP COLUMN external_session_id;
 ALTER TABLE usage_allowance_windows DROP COLUMN reset_inferred;

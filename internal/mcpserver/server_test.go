@@ -76,6 +76,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_agent_context_update",
 		"redline_agent_context_delete",
 		"redline_provider_control",
+		"redline_provider_concurrency",
 		"redline_scheduler_evaluate",
 		"redline_scheduler_dispatch",
 	}
@@ -296,6 +297,7 @@ func TestRunEventsBoundLargePayloads(t *testing.T) {
 func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	var created map[string]any
 	var dispatched map[string]any
+	var concurrency map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
@@ -310,6 +312,12 @@ func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprint(w, `{"result":{"decision":"run","reason":"surplus"},"run":{"id":"run-1"}}`)
+	})
+	mux.HandleFunc("PATCH /v1/providers/codex-main/concurrency", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&concurrency); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprint(w, `{"max_concurrent_runs":2,"default_max_concurrent_runs":1,"source":"override"}`)
 	})
 	session := connect(t, mux)
 
@@ -338,6 +346,12 @@ func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	}
 	if dispatched["provider_account_id"] != "codex-main" {
 		t.Fatalf("dispatch body = %#v", dispatched)
+	}
+	concurrencyResult := callTool(t, session, "redline_provider_concurrency", map[string]any{
+		"provider_account_id": "codex-main", "max_concurrent_runs": 2,
+	})
+	if concurrencyResult.IsError || concurrency["max_concurrent_runs"] != float64(2) {
+		t.Fatalf("concurrency result=%s body=%#v", contentText(concurrencyResult), concurrency)
 	}
 }
 

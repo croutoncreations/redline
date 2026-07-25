@@ -379,6 +379,20 @@ ADD COLUMN reset_inferred INTEGER NOT NULL DEFAULT 0;
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (19)`); err != nil {
 			return fmt.Errorf("record allowance reset metadata migration: %w", err)
 		}
+		version = 19
+	}
+	if version < 20 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE provider_controls
+ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs
+ADD COLUMN agent_context_id TEXT NOT NULL DEFAULT '';
+`); err != nil {
+			return fmt.Errorf("add configurable concurrency controls: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (20)`); err != nil {
+			return fmt.Errorf("record configurable concurrency migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

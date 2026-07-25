@@ -39,8 +39,12 @@ AND r.state IN ('preparing', 'running')`, providerAccountID, pool).Scan(&active)
 }
 
 type AdmissionLimits struct {
-	Provider int
-	Pools    map[string]int
+	Provider            int
+	Pools               map[string]int
+	RuntimeConnectionID string
+	RuntimeConnection   int
+	AgentContextID      string
+	AgentContext        int
 }
 
 func (d *DB) AdmitTask(
@@ -79,6 +83,34 @@ WHERE provider_account_id = ? AND state IN ('preparing', 'running')`, providerAc
 	if active >= limits.Provider {
 		return domain.Run{}, fmt.Errorf("%w: provider concurrency limit %d reached for %q",
 			ErrConflict, limits.Provider, providerAccountID)
+	}
+	if limits.RuntimeConnectionID != "" {
+		if limits.RuntimeConnection <= 0 {
+			limits.RuntimeConnection = 1
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
+WHERE runtime_connection_id = ? AND state IN ('preparing', 'running')`,
+			limits.RuntimeConnectionID).Scan(&active); err != nil {
+			return domain.Run{}, fmt.Errorf("check active runtime connection runs: %w", err)
+		}
+		if active >= limits.RuntimeConnection {
+			return domain.Run{}, fmt.Errorf("%w: runtime connection concurrency limit %d reached for %q",
+				ErrConflict, limits.RuntimeConnection, limits.RuntimeConnectionID)
+		}
+	}
+	if limits.AgentContextID != "" {
+		if limits.AgentContext <= 0 {
+			limits.AgentContext = 1
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
+WHERE agent_context_id = ? AND state IN ('preparing', 'running')`,
+			limits.AgentContextID).Scan(&active); err != nil {
+			return domain.Run{}, fmt.Errorf("check active agent context runs: %w", err)
+		}
+		if active >= limits.AgentContext {
+			return domain.Run{}, fmt.Errorf("%w: agent context concurrency limit %d reached for %q",
+				ErrConflict, limits.AgentContext, limits.AgentContextID)
+		}
 	}
 	for _, pool := range pools {
 		limit, configured := limits.Pools[pool]
@@ -125,12 +157,15 @@ WHERE id = ? AND state = 'queued' AND enabled = 1`, formatTime(now), formatTime(
 	}
 	run := domain.Run{
 		ID: runID, TaskID: taskID, ProviderAccountID: providerAccountID,
+		RuntimeConnectionID: limits.RuntimeConnectionID, AgentContextID: limits.AgentContextID,
 		State: domain.RunPreparing, SourceRevision: sourceRevision, StartedAt: now.UTC(),
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO runs (
-id, task_id, provider_account_id, state, source_revision, started_at
-) VALUES (?, ?, ?, ?, ?, ?)`,
-		run.ID, run.TaskID, run.ProviderAccountID, run.State, run.SourceRevision, formatTime(run.StartedAt))
+id, task_id, provider_account_id, runtime_connection_id, agent_context_id,
+state, source_revision, started_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.TaskID, run.ProviderAccountID, run.RuntimeConnectionID, run.AgentContextID,
+		run.State, run.SourceRevision, formatTime(run.StartedAt))
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("create run: %w", err)
 	}
@@ -334,7 +369,7 @@ run_id, event_type, occurred_at, payload_json
 const runSelect = `SELECT id, task_id, provider_account_id, state,
 workspace_directory, workspace_metadata, source_revision, started_at, completed_at,
 exit_code, output_file, error_file, error, finalize_state, finalize_error,
-runtime_connection_id, external_run_id, external_session_id FROM runs`
+runtime_connection_id, agent_context_id, external_run_id, external_session_id FROM runs`
 
 func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
@@ -345,7 +380,7 @@ func scanRun(row scanner) (domain.Run, error) {
 		&run.ID, &run.TaskID, &run.ProviderAccountID, &run.State,
 		&run.Workspace.Directory, &workspaceJSON, &run.SourceRevision, &started, &completed,
 		&exitCode, &run.OutputFile, &run.ErrorFile, &run.Error, &run.FinalizeState, &run.FinalizeError,
-		&run.External.RuntimeConnectionID, &run.External.RunID, &run.External.SessionID,
+		&run.RuntimeConnectionID, &run.AgentContextID, &run.External.RunID, &run.External.SessionID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound
@@ -353,6 +388,7 @@ func scanRun(row scanner) (domain.Run, error) {
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("scan run: %w", err)
 	}
+	run.External.RuntimeConnectionID = run.RuntimeConnectionID
 	if workspaceJSON != "" && workspaceJSON != "{}" {
 		if err := json.Unmarshal([]byte(workspaceJSON), &run.Workspace); err != nil {
 			return domain.Run{}, fmt.Errorf("decode run workspace: %w", err)

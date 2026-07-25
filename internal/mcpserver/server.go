@@ -108,6 +108,11 @@ type providerControlInput struct {
 	Control           string `json:"control" jsonschema:"pause or resume"`
 }
 
+type providerConcurrencyInput struct {
+	ProviderAccountID string `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
+	MaxConcurrentRuns int    `json:"max_concurrent_runs" jsonschema:"provider parallel run limit; use 0 to restore the configured default"`
+}
+
 type schedulerInput struct {
 	ProviderAccountID string `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
 	CurrentRevision   string `json:"current_revision,omitempty" jsonschema:"current repository commit SHA for repo-change eligibility"`
@@ -315,6 +320,8 @@ func New(client apiclient.Client) *mcp.Server {
 		"Delete an agent context that is not referenced by an execution profile.", true, false, false), s.agentContextDelete)
 	mcp.AddTool(result, mutationTool("redline_provider_control", "Control provider",
 		"Pause or resume automatic dispatch for a configured provider account.", false, true, false), s.providerControl)
+	mcp.AddTool(result, mutationTool("redline_provider_concurrency", "Set provider concurrency",
+		"Set the provider parallel-run limit, or use zero to restore its configured default.", false, true, false), s.providerConcurrency)
 	mcp.AddTool(result, mutationTool("redline_scheduler_evaluate", "Evaluate scheduler",
 		"Evaluate current usage and task eligibility without launching a task.", false, false, false), s.schedulerEvaluate)
 	mcp.AddTool(result, mutationTool("redline_scheduler_dispatch", "Dispatch scheduler task",
@@ -679,6 +686,19 @@ func (s *server) providerControl(ctx context.Context, _ *mcp.CallToolRequest, in
 		return nil, Output{}, err
 	}
 	return nil, Output{Summary: fmt.Sprintf("%s applied to provider %s.", input.Control, input.ProviderAccountID), Data: response}, nil
+}
+
+func (s *server) providerConcurrency(ctx context.Context, _ *mcp.CallToolRequest, input providerConcurrencyInput) (*mcp.CallToolResult, Output, error) {
+	var result map[string]any
+	if err := s.client.Do(ctx, http.MethodPatch,
+		providerPath(input.ProviderAccountID, "concurrency"),
+		map[string]any{"max_concurrent_runs": input.MaxConcurrentRuns}, &result); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{
+		Summary: fmt.Sprintf("Updated provider concurrency for %s.", input.ProviderAccountID),
+		Data:    result,
+	}, nil
 }
 
 func (s *server) schedulerEvaluate(ctx context.Context, _ *mcp.CallToolRequest, input schedulerInput) (*mcp.CallToolResult, Output, error) {

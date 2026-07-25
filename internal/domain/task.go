@@ -184,21 +184,23 @@ const (
 )
 
 type Run struct {
-	ID                string      `json:"id"`
-	TaskID            string      `json:"task_id"`
-	ProviderAccountID string      `json:"provider_account_id"`
-	State             RunState    `json:"state"`
-	Workspace         Workspace   `json:"workspace"`
-	SourceRevision    string      `json:"source_revision,omitempty"`
-	StartedAt         time.Time   `json:"started_at"`
-	CompletedAt       *time.Time  `json:"completed_at,omitempty"`
-	ExitCode          *int        `json:"exit_code,omitempty"`
-	OutputFile        string      `json:"output_file,omitempty"`
-	ErrorFile         string      `json:"error_file,omitempty"`
-	Error             string      `json:"error,omitempty"`
-	FinalizeState     string      `json:"finalize_state,omitempty"`
-	FinalizeError     string      `json:"finalize_error,omitempty"`
-	External          ExternalRun `json:"external,omitempty"`
+	ID                  string      `json:"id"`
+	TaskID              string      `json:"task_id"`
+	ProviderAccountID   string      `json:"provider_account_id"`
+	RuntimeConnectionID string      `json:"runtime_connection_id,omitempty"`
+	AgentContextID      string      `json:"agent_context_id,omitempty"`
+	State               RunState    `json:"state"`
+	Workspace           Workspace   `json:"workspace"`
+	SourceRevision      string      `json:"source_revision,omitempty"`
+	StartedAt           time.Time   `json:"started_at"`
+	CompletedAt         *time.Time  `json:"completed_at,omitempty"`
+	ExitCode            *int        `json:"exit_code,omitempty"`
+	OutputFile          string      `json:"output_file,omitempty"`
+	ErrorFile           string      `json:"error_file,omitempty"`
+	Error               string      `json:"error,omitempty"`
+	FinalizeState       string      `json:"finalize_state,omitempty"`
+	FinalizeError       string      `json:"finalize_error,omitempty"`
+	External            ExternalRun `json:"external,omitempty"`
 }
 
 type RunCompletion struct {

@@ -340,6 +340,36 @@ func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
 	}
 }
 
+func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProviderPolicy(ctx, "codex-main", "early"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProviderMaxConcurrentRuns(ctx, "codex-main", 3); err != nil {
+		t.Fatal(err)
+	}
+	limit, err := db.ProviderMaxConcurrentRuns(ctx, "codex-main")
+	if err != nil || limit != 3 {
+		t.Fatalf("limit=%d err=%v", limit, err)
+	}
+	paused, _ := db.ProviderPaused(ctx, "codex-main")
+	policy, _ := db.ProviderPolicy(ctx, "codex-main")
+	if !paused || policy != "early" {
+		t.Fatalf("paused=%t policy=%q", paused, policy)
+	}
+	if err := db.SetProviderMaxConcurrentRuns(ctx, "codex-main", 0); err != nil {
+		t.Fatal(err)
+	}
+	limit, err = db.ProviderMaxConcurrentRuns(ctx, "codex-main")
+	if err != nil || limit != 0 {
+		t.Fatalf("cleared limit=%d err=%v", limit, err)
+	}
+}
+
 func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 	db := openTaskDB(t)
 	ctx := context.Background()
@@ -415,6 +445,67 @@ func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
 	runs, err := db.ListRuns(t.Context(), 10)
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("runs=%#v err=%v", runs, err)
+	}
+}
+
+func TestRunAdmissionEnforcesRuntimeConnectionAndAgentContextLimits(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	connection := domain.RuntimeConnection{
+		ID: "hermes-remote", Runtime: "hermes", Transport: "gateway",
+		URL: "https://hermes.example", MaxConcurrentRuns: 2,
+	}
+	if err := db.CreateRuntimeConnection(t.Context(), connection, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, contextID := range []string{"context-a", "context-b", "context-c"} {
+		if err := db.CreateAgentContext(t.Context(), domain.AgentContext{
+			ID: contextID, RuntimeConnectionID: connection.ID, SessionMode: "isolated", MaxConcurrentRuns: 1,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+		profileID := "profile-" + contextID
+		if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+			ID: profileID, ProviderAccountID: "codex-main", AgentContextID: contextID,
+			HarnessType: "hermes", WorkspaceProvider: "runtime-owned",
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+		for _, suffix := range []string{"one", "two"} {
+			if err := db.CreateTask(t.Context(), domain.Task{
+				ID: contextID + "-" + suffix, Name: suffix, ExecutionProfileID: profileID, Type: domain.OneOff,
+			}, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	limits := func(contextID string) store.AdmissionLimits {
+		return store.AdmissionLimits{
+			Provider: 3, RuntimeConnectionID: connection.ID, RuntimeConnection: 2,
+			AgentContextID: contextID, AgentContext: 1,
+		}
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-a", "context-a-one", "codex-main", "",
+		nil, limits("context-a"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-a2", "context-a-two", "codex-main", "",
+		nil, limits("context-a"), now); !errors.Is(err, store.ErrConflict) ||
+		!strings.Contains(err.Error(), "agent context") {
+		t.Fatalf("expected context conflict, got %v", err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-b", "context-b-one", "codex-main", "",
+		nil, limits("context-b"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-c", "context-c-one", "codex-main", "",
+		nil, limits("context-c"), now); !errors.Is(err, store.ErrConflict) ||
+		!strings.Contains(err.Error(), "runtime connection") {
+		t.Fatalf("expected connection conflict, got %v", err)
+	}
+	run, err := db.GetRun(t.Context(), "run-a")
+	if err != nil || run.RuntimeConnectionID != connection.ID || run.AgentContextID != "context-a" {
+		t.Fatalf("run=%#v err=%v", run, err)
 	}
 }
 

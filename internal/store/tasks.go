@@ -389,6 +389,35 @@ func (d *DB) ProviderPolicy(ctx context.Context, provider string) (string, error
 	return policy, nil
 }
 
+func (d *DB) SetProviderMaxConcurrentRuns(ctx context.Context, provider string, limit int) error {
+	if limit < 0 {
+		return fmt.Errorf("provider max concurrent runs cannot be negative")
+	}
+	_, err := d.db.ExecContext(ctx, `INSERT INTO provider_controls(
+provider_account_id, paused, max_concurrent_runs, updated_at
+) VALUES (?, 0, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(provider_account_id) DO UPDATE SET
+max_concurrent_runs = excluded.max_concurrent_runs, updated_at = CURRENT_TIMESTAMP`,
+		provider, limit)
+	if err != nil {
+		return fmt.Errorf("set provider max concurrent runs: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) ProviderMaxConcurrentRuns(ctx context.Context, provider string) (int, error) {
+	var limit int
+	err := d.db.QueryRowContext(ctx, `SELECT max_concurrent_runs FROM provider_controls
+WHERE provider_account_id = ?`, provider).Scan(&limit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read provider max concurrent runs: %w", err)
+	}
+	return limit, nil
+}
+
 func (d *DB) ListTasks(ctx context.Context) ([]domain.Task, error) {
 	rows, err := d.db.QueryContext(ctx, taskSelect+` ORDER BY t.priority DESC, t.queue_sequence ASC`)
 	if err != nil {

@@ -87,6 +87,7 @@ State-changing tools:
 | `redline_agent_context_create` / `redline_agent_context_update` | Configure a selected remote execution context |
 | `redline_agent_context_delete` | Delete a context with no execution profiles |
 | `redline_provider_control` | Pause or resume provider dispatch |
+| `redline_provider_concurrency` | Set a provider parallel-run override or restore its configured default |
 | `redline_scheduler_evaluate` | Record a fresh decision without launching work |
 | `redline_scheduler_dispatch` | Evaluate and potentially launch one eligible task |
 

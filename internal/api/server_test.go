@@ -55,6 +55,8 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "method:id ? 'PATCH' : 'POST'"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/v1/profile-options"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "include_models:true"},
+		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "/concurrency"},
+		{path: "/", contentType: "text/html", contains: "profile-context-concurrency"},
 		{path: "/assets/claude.svg", contentType: "image/svg+xml", contains: "<title>Claude</title>"},
 		{path: "/assets/codex.svg", contentType: "image/svg+xml", contains: "<title>Codex</title>"},
 	} {
@@ -1579,6 +1581,53 @@ func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.
 		`{"policy":"late"}`, http.StatusNotFound)
 }
 
+func TestProviderConcurrencyOverridePersistsInDashboardAndCanBeCleared(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	var updated struct {
+		MaxConcurrentRuns int    `json:"max_concurrent_runs"`
+		Source            string `json:"source"`
+	}
+	patchJSON(t, server.URL+"/v1/providers/codex-main/concurrency",
+		map[string]any{"max_concurrent_runs": 3}, &updated)
+	if updated.MaxConcurrentRuns != 3 || updated.Source != "override" {
+		t.Fatalf("updated = %#v", updated)
+	}
+	var dashboard struct {
+		Providers []struct {
+			ID                       string `json:"id"`
+			MaxConcurrentRuns        int    `json:"max_concurrent_runs"`
+			DefaultMaxConcurrentRuns int    `json:"default_max_concurrent_runs"`
+			ConcurrencySource        string `json:"concurrency_source"`
+		} `json:"providers"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	var codexProvider *struct {
+		ID                       string `json:"id"`
+		MaxConcurrentRuns        int    `json:"max_concurrent_runs"`
+		DefaultMaxConcurrentRuns int    `json:"default_max_concurrent_runs"`
+		ConcurrencySource        string `json:"concurrency_source"`
+	}
+	for index := range dashboard.Providers {
+		if dashboard.Providers[index].ID == "codex-main" {
+			codexProvider = &dashboard.Providers[index]
+		}
+	}
+	if codexProvider == nil || codexProvider.MaxConcurrentRuns != 3 ||
+		codexProvider.DefaultMaxConcurrentRuns != 1 ||
+		codexProvider.ConcurrencySource != "override" {
+		t.Fatalf("dashboard = %#v", dashboard)
+	}
+	patchJSON(t, server.URL+"/v1/providers/codex-main/concurrency",
+		map[string]any{"max_concurrent_runs": 0}, &updated)
+	if updated.MaxConcurrentRuns != 1 || updated.Source != "config" {
+		t.Fatalf("cleared = %#v", updated)
+	}
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/providers/codex-main/concurrency",
+		`{"max_concurrent_runs":-1}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/providers/missing/concurrency",
+		`{"max_concurrent_runs":2}`, http.StatusNotFound)
+}
+
 func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
 	server, db := newAPIServer(t, claudePayload)
 	weeklyReset := time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC)
@@ -1761,7 +1810,6 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 	defer db.Close()
 	cfg := testConfig(usage.URL)
 	claude := cfg.Providers["claude-main"]
-	claude.MaxConcurrentRuns = 2
 	claude.PoolConcurrency = map[string]int{"model:fable:weekly": 1}
 	cfg.Providers["claude-main"] = claude
 	releaseExecutor := make(chan struct{})
@@ -1774,6 +1822,9 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	defer close(releaseExecutor)
+	var concurrency map[string]any
+	patchJSON(t, server.URL+"/v1/providers/claude-main/concurrency",
+		map[string]any{"max_concurrent_runs": 2}, &concurrency)
 	for _, profile := range []map[string]any{
 		{"id": "fable-profile", "provider_account_id": "claude-main", "harness_type": "claude-code",
 			"model": "fable", "workspace_provider": "devx"},
@@ -1830,6 +1881,7 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 			ActiveRuns        int            `json:"active_runs"`
 			PoolConcurrency   map[string]int `json:"pool_concurrency"`
 			ActivePoolClaims  map[string]int `json:"active_pool_claims"`
+			ConcurrencySource string         `json:"concurrency_source"`
 		} `json:"providers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&dashboard); err != nil {
@@ -1842,10 +1894,69 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 		}
 		found = provider.MaxConcurrentRuns == 2 && provider.ActiveRuns == 2 &&
 			provider.PoolConcurrency["model:fable:weekly"] == 1 &&
-			provider.ActivePoolClaims["model:fable:weekly"] == 1
+			provider.ActivePoolClaims["model:fable:weekly"] == 1 &&
+			provider.ConcurrencySource == "override"
 	}
 	if !found {
 		t.Fatalf("dashboard providers = %#v", dashboard.Providers)
+	}
+}
+
+func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	releaseExecutor := make(chan struct{})
+	handler := api.NewServerWithExecutor(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error {
+			<-releaseExecutor
+			return nil
+		},
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	defer close(releaseExecutor)
+	var concurrency map[string]any
+	patchJSON(t, server.URL+"/v1/providers/codex-main/concurrency",
+		map[string]any{"max_concurrent_runs": 2}, &concurrency)
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes-remote", "runtime": "hermes", "transport": "gateway",
+		"url": "https://hermes.example", "max_concurrent_runs": 2,
+	})
+	contextItem := postJSON[domain.AgentContext](t, server.URL+"/v1/agent-contexts", map[string]any{
+		"id": "hermes-context", "runtime_connection_id": connection.ID,
+		"session_mode": "isolated", "max_concurrent_runs": 1,
+	})
+	profile := postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "hermes-profile", "provider_account_id": "codex-main",
+		"agent_context_id": contextItem.ID, "harness_type": "hermes",
+		"workspace_provider": "runtime-owned", "repository": "/srv/redline",
+	})
+	for _, taskID := range []string{"hermes-one", "hermes-two"} {
+		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+			"id": taskID, "name": taskID, "priority": 50,
+			"execution_profile_id": profile.ID, "type": "one_off",
+		})
+	}
+	first := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	if first.Run == nil {
+		t.Fatalf("first response = %#v", first)
+	}
+	second := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/execute", map[string]any{
+		"provider_account_id": "codex-main",
+	})
+	if second.Run != nil || second.Result.Mode != decision.ModeActive ||
+		!strings.Contains(second.Result.Reason, "agent context concurrency limit 1") {
+		t.Fatalf("second response = %#v", second)
 	}
 }
 
@@ -2194,6 +2305,31 @@ func postJSON[T any](t *testing.T, url string, body any) T {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func patchJSON(t *testing.T, url string, body, result any) {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		contents, _ := io.ReadAll(response.Body)
+		t.Fatalf("PATCH %s: status=%d body=%s", url, response.StatusCode, contents)
+	}
+	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func getJSON(t *testing.T, url string, result any) {
