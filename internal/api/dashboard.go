@@ -50,6 +50,18 @@ type dashboardProvider struct {
 	ActiveRuns               int                     `json:"active_runs"`
 	PoolConcurrency          map[string]int          `json:"pool_concurrency,omitempty"`
 	ActivePoolClaims         map[string]int          `json:"active_pool_claims,omitempty"`
+	LatestDecision           *dashboardDecision      `json:"latest_decision,omitempty"`
+	LatestDecisionAt         *time.Time              `json:"latest_decision_at,omitempty"`
+}
+
+type dashboardDecision struct {
+	Decision            decision.Decision   `json:"decision"`
+	Mode                decision.Mode       `json:"mode"`
+	Reason              string              `json:"reason"`
+	Overflow            float64             `json:"overflow"`
+	RollingDispatchable float64             `json:"rolling_dispatchable"`
+	PaceGap             float64             `json:"pace_gap"`
+	UnlockedTier        domain.DispatchTier `json:"unlocked_tier,omitempty"`
 }
 
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
@@ -220,13 +232,28 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		} else {
 			item.Snapshot = &snapshot
 		}
-		result.Providers = append(result.Providers, item)
-
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)
 		if attemptsErr != nil {
 			return dashboardResponse{}, attemptsErr
 		}
 		result.Attempts = append(result.Attempts, attempts...)
+		decisions, decisionsErr := s.store.ListSchedulerDecisions(ctx, id, 1)
+		if decisionsErr != nil {
+			return dashboardResponse{}, decisionsErr
+		}
+		if len(decisions) > 0 {
+			var latest decisionResponse
+			if unmarshalErr := json.Unmarshal(decisions[0].DecisionJSON, &latest); unmarshalErr == nil {
+				item.LatestDecision = &dashboardDecision{
+					Decision: latest.Result.Decision, Mode: latest.Result.Mode, Reason: latest.Result.Reason,
+					Overflow: latest.Result.Overflow, RollingDispatchable: latest.Result.RollingDispatchable,
+					PaceGap: latest.Result.PaceGap, UnlockedTier: latest.Result.UnlockedTier,
+				}
+				createdAt := decisions[0].CreatedAt
+				item.LatestDecisionAt = &createdAt
+			}
+		}
+		result.Providers = append(result.Providers, item)
 	}
 	sort.Slice(result.Attempts, func(i, j int) bool { return result.Attempts[i].CompletedAt.After(result.Attempts[j].CompletedAt) })
 

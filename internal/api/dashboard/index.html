@@ -139,7 +139,7 @@
 
   <dialog id="logs-dialog" aria-labelledby="log-title">
     <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2></div><button id="close-logs" type="button" aria-label="Close">×</button></div>
-    <div class="log-tabs"><button class="active" data-stream="stdout">stdout</button><button data-stream="stderr">stderr</button></div>
+    <div class="log-toolbar"><div class="log-tabs"><button class="active" data-stream="stdout">stdout</button><button data-stream="stderr">stderr</button></div><div class="log-view-tabs" aria-label="Log display"><button class="active" data-log-view="formatted">Formatted</button><button data-log-view="raw">Raw</button></div></div>
     <pre id="log-content">Select a stream.</pre>
   </dialog>
   <script src="/assets/dashboard.js" defer></script>

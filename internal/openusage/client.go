@@ -150,6 +150,13 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
+		if strings.TrimSpace(line.ResetsAt) == "" && scope == "account" && role == "short" {
+			// The short window is optional and OpenUsage can briefly report it
+			// without a reset while provider state is refreshing. Preserve the
+			// valid weekly snapshot rather than inventing a reset or failing over.
+			snapshot.Confidence = "medium"
+			continue
+		}
 		resetInferred := false
 		var reset time.Time
 		if strings.TrimSpace(line.ResetsAt) == "" && scope == "model" && role == "weekly" && !accountWeeklyReset.IsZero() {

@@ -24,8 +24,8 @@ function dashboardFixture() {
     scheduler: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     usage_monitor: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     providers: [
-      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [{ key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', role: 'weekly', remaining: 1, resets_at: '2026-07-24T19:00:00Z', period_duration_seconds: 604800, reset_inferred: true }] } },
-      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
+      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'window_slots', reason: 'no actionable weekly overflow', overflow: .01, rolling_dispatchable: .37, pace_gap: .08 }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [{ key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', role: 'weekly', remaining: 1, resets_at: '2026-07-24T19:00:00Z', period_duration_seconds: 604800, reset_inferred: true }] } },
+      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .08 }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
     ],
     tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
     runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
@@ -205,7 +205,7 @@ async function loadDashboard(page, options = {}) {
       if (method === 'PATCH') { const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body }); Object.assign(task, body); return json(200, task); }
     }
     const logMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/logs$/);
-    if (logMatch) return json(200, { run_id: logMatch[1], stream: url.searchParams.get('stream'), content: url.searchParams.get('stream') === 'stderr' ? 'warning from stderr' : '{"type":"result","result":"ok"}' });
+    if (logMatch) return json(200, { run_id: logMatch[1], stream: url.searchParams.get('stream'), content: url.searchParams.get('stream') === 'stderr' ? 'warning from stderr' : '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n{"type":"turn.completed","usage":{"input_tokens":9346,"cached_input_tokens":7040,"output_tokens":28}}\n{"type":"result","result":"ok"}' });
     return json(404, { error: `unhandled ${method} ${url.pathname}` });
   });
 
@@ -222,6 +222,9 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByRole('button', { name: 'Recent errors' })).toBeVisible();
   await expect(page.locator('#health-explainer')).toContainText('temporary usage source timeout');
   await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('53%');
+  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('5h 62%');
+  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Watching · 1 pt to trigger');
+  await expect(page.getByRole('button', { name: 'Show Codex usage details' })).toContainText('8 pts behind pace');
   await page.getByRole('button', { name: 'Show Claude usage details' }).click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Native');
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('OpenUsage unavailable');
@@ -402,12 +405,17 @@ test('creates edits and deletes a standalone Hermes runtime connection', async (
 test('loads both run log streams and controls an existing task', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: 'View logs →' }).click();
+  await expect(page.locator('#log-content')).toContainText('RESULT');
+  await expect(page.locator('#log-content')).toContainText('ok');
+  await expect(page.locator('#log-content')).toContainText('9,346 input · 7,040 cached · 28 output');
+  await page.getByRole('button', { name: 'Raw' }).click();
   await expect(page.locator('#log-content')).toContainText('"result":"ok"');
+  await page.getByRole('button', { name: 'Formatted' }).click();
   await page.getByRole('button', { name: 'stderr' }).click();
   await expect(page.locator('#log-content')).toContainText('warning from stderr');
   await page.getByRole('button', { name: 'Close' }).click();
 
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('row').filter({ hasText: 'Audit authentication' }).click();
   await expect(page.getByRole('dialog', { name: 'Manage scheduled job' })).toBeVisible();
 	await page.locator('#task-priority').fill('75');
 	await page.getByRole('button', { name: 'Save job' }).click();

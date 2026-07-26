@@ -75,6 +75,32 @@ func TestParseAcceptsSingleProviderObject(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, 0.90)
 }
 
+func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":""},
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Short != nil {
+		t.Fatalf("short window = %#v, want omitted", got.Short)
+	}
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatalf("session allowance should be omitted: %#v", got.Allowances)
+	}
+	assertClose(t, got.Weekly.Remaining, .96)
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium", got.Confidence)
+	}
+}
+
 func TestParsePreservesClaudeFableAllowance(t *testing.T) {
 	payload := `{
       "providerId":"claude",

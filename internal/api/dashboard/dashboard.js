@@ -16,8 +16,10 @@ const duration = (nanos) => {
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
+const tokenNumber = (value) => new Intl.NumberFormat().format(value || 0);
 
-let currentRun = null, profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
+let currentRun = null, currentLogContent = '', currentLogView = 'formatted';
+let profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
@@ -41,13 +43,47 @@ function concurrencyStatus(item) {
   const pools = Object.entries(item.pool_concurrency || {}).sort(([left],[right]) => left.localeCompare(right)).map(([pool,limit]) =>
     `<span><b>${escapeHTML(title(pool))}</b><i>${item.active_pool_claims?.[pool] || 0}/${limit}</i></span>`
   ).join('');
-  return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Hermes connection and context limits, plus optional allowance-pool limits, apply independently.">?</i></b><span class="concurrency-control"><input data-provider-concurrency="${escapeHTML(item.id)}" type="number" min="1" max="32" value="${maximum}" aria-label="${escapeHTML(title(item.provider))} parallel run limit"><i>${active} active · ${escapeHTML(source)}</i>${reset}</span></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
+  return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Hermes connection and context limits, plus optional allowance-pool limits, apply independently.">?</i></b><span class="concurrency-control"><input data-provider-concurrency="${escapeHTML(item.id)}" type="number" min="1" max="32" value="${maximum}" aria-label="${escapeHTML(title(item.provider))} parallel run limit"><i>${active}/${maximum} active · ${escapeHTML(source)}</i>${reset}</span></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
+}
+function providerPressure(item) {
+  if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  const current = item.latest_decision;
+  if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
+  if (current.decision === 'RUN') {
+    return {label:`Redline · ${title(current.unlocked_tier || 'ready')}`,detail:current.reason || 'Background work is eligible to run.',tone:'triggered'};
+  }
+  if (current.mode === 'active_run') {
+    return {label:'Running · limit reached',detail:current.reason || 'Redline is waiting for an active run to finish.',tone:'triggered'};
+  }
+  if (current.mode === 'window_slots') {
+    if (current.reason === 'current 5-hour reserve protected') {
+      return {label:'Protected · 5h reserve',detail:current.reason,tone:'protected'};
+    }
+    const margin = policyCatalog[item.policy]?.trigger_margin || 0;
+    const distance = Math.max(0,margin - (current.overflow || 0));
+    const points = Math.max(0,Math.ceil((distance * 100) - .000001));
+    return {
+      label:`Watching · ${points} pt${points === 1 ? '' : 's'} to trigger`,
+      detail:current.reason || 'Weekly capacity remains consumable through future 5-hour windows.',
+      tone:points <= 2 ? 'near' : 'neutral',
+    };
+  }
+  const pacePoints = Math.round((current.pace_gap || 0) * 100);
+  if (pacePoints > 0) {
+    return {label:`${pacePoints} pts behind pace`,detail:current.reason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
+  }
+  return {label:'On pace',detail:current.reason || 'No dispatch threshold is currently active.',tone:'healthy'};
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
   const source = item.usage_source?.active || snap?.source || 'unknown';
   const icon = provider === 'claude' ? 'claude.svg' : 'codex.svg';
   const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0, tone = value < 35 ? 'warn' : '';
+  const pressure = providerPressure(item);
+  const weeklyReset = weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
+  const shortWindow = snap?.short
+    ? `5h ${percent(snap.short.remaining)}% · resets ${relative(snap.short.resets_at)}`
+    : 'No 5h limit';
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
   if (snap) {
     const windows = [];
@@ -57,12 +93,13 @@ function providerCompact(item) {
       const label = `${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));
     });
-    details = `${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
+    const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
+    details = `${decisionDetail}${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
   const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}%` : '—'}</b></span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span></button><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
+  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}% weekly` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span></button><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {
   document.querySelectorAll('.provider-compact').forEach(card => {
@@ -177,8 +214,17 @@ async function loadCapacityEvidence(card) {
 }
 function renderTasks(tasks) {
   $('#task-count').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(title(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
-  document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',() => openTask(button.dataset.task)));
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(title(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
+  document.querySelectorAll('[data-task-row]').forEach(row => {
+    row.addEventListener('click',() => openTask(row.dataset.taskRow));
+    row.addEventListener('keydown',event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openTask(row.dataset.taskRow);
+      }
+    });
+  });
 }
 function renderRuns(runs) {
   $('#run-count').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
@@ -224,16 +270,80 @@ function render(data) {
   $('#error-banner').hidden = true;
 }
 async function openLogs(run) {
-  currentRun = run; $('#log-title').textContent = run; $('#logs-dialog').showModal();
-  document.querySelectorAll('.log-tabs button').forEach(b => b.classList.toggle('active',b.dataset.stream === 'stdout'));
+  currentRun = run; currentLogView = 'formatted'; $('#log-title').textContent = run; $('#logs-dialog').showModal();
+  document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.toggle('active',b.dataset.stream === 'stdout'));
+  document.querySelectorAll('[data-log-view]').forEach(b => b.classList.toggle('active',b.dataset.logView === currentLogView));
   await loadLog('stdout');
+}
+function logUsage(usage = {}) {
+  const parts = [];
+  if (usage.input_tokens != null || usage.input != null) parts.push(`${tokenNumber(usage.input_tokens ?? usage.input)} input`);
+  if (usage.cached_input_tokens != null || usage.cache_read_input_tokens != null) parts.push(`${tokenNumber(usage.cached_input_tokens ?? usage.cache_read_input_tokens)} cached`);
+  if (usage.output_tokens != null || usage.output != null) parts.push(`${tokenNumber(usage.output_tokens ?? usage.output)} output`);
+  if (usage.reasoning_output_tokens != null || usage.reasoning != null) parts.push(`${tokenNumber(usage.reasoning_output_tokens ?? usage.reasoning)} reasoning`);
+  return parts.join(' · ');
+}
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter(item => item?.type === 'text' && item.text).map(item => item.text).join('\n');
+}
+function formattedLogLine(line) {
+  let event;
+  try { event = JSON.parse(line); } catch (_) { return line; }
+  const type = event.type || 'event';
+  if (type === 'hermes.result') {
+    const usage = logUsage(event.usage);
+    return `RESULT · ${event.provider || 'Hermes'} / ${event.model || 'default'}\n${event.output || '(no response)'}${usage ? `\n${usage}` : ''}`;
+  }
+  if (type === 'item.completed' && event.item?.type === 'agent_message') {
+    return `ASSISTANT\n${event.item.text || '(empty response)'}`;
+  }
+  if (type === 'turn.completed') {
+    const usage = logUsage(event.usage);
+    return `COMPLETED${usage ? `\n${usage}` : ''}`;
+  }
+  if (type === 'assistant') {
+    const text = contentText(event.message?.content);
+    const tools = (event.message?.content || []).filter(item => item?.type === 'tool_use').map(item => item.name).filter(Boolean);
+    return text ? `ASSISTANT\n${text}` : tools.length ? `TOOLS\n${tools.join(' · ')}` : 'ASSISTANT · response metadata';
+  }
+  if (type === 'user') {
+    const text = contentText(event.message?.content);
+    const toolResults = (event.message?.content || []).filter(item => item?.type === 'tool_result').length;
+    return text ? `USER\n${text}` : toolResults ? `TOOL RESULTS · ${toolResults}` : 'USER · message metadata';
+  }
+  if (type === 'result') {
+    const usage = logUsage(event.usage);
+    const result = typeof event.result === 'string' ? event.result : event.subtype || 'complete';
+    const cost = event.total_cost_usd != null ? ` · $${Number(event.total_cost_usd).toFixed(4)}` : '';
+    return `RESULT · ${title(event.subtype || event.terminal_reason || 'complete')}\n${result}${usage ? `\n${usage}${cost}` : cost}`;
+  }
+  if (type === 'rate_limit_event') {
+    const info = event.rate_limit_info || {};
+    return `RATE LIMIT · ${title(info.status || 'update')}\n${title(info.rateLimitType || 'allowance')}${info.resetsAt ? ` · resets ${relative(new Date(info.resetsAt * 1000))}` : ''}`;
+  }
+  if (type === 'thread.started') return `SESSION STARTED\n${event.thread_id || ''}`.trim();
+  if (type === 'turn.started') return 'TURN STARTED';
+  if (type === 'system') return `SYSTEM · ${title(event.subtype || 'event')}`;
+  return `${title(type)}${event.subtype ? ` · ${title(event.subtype)}` : ''}`;
+}
+function formatLogContent(content) {
+  if (!content) return '(empty log)';
+  return content.split(/\r?\n/).filter(line => line.trim()).map(formattedLogLine).join('\n\n');
+}
+function renderLogContent() {
+  $('#log-content').textContent = currentLogView === 'raw'
+    ? (currentLogContent || '(empty log)')
+    : formatLogContent(currentLogContent);
 }
 async function loadLog(stream) {
   const output = $('#log-content'); output.textContent = 'Loading…';
   try {
     const response = await fetch(`/v1/runs/${encodeURIComponent(currentRun)}/logs?stream=${stream}&tail_bytes=100000`), data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    output.textContent = data.content || '(empty log)';
+    currentLogContent = data.content || '';
+    renderLogContent();
   } catch (error) { output.textContent = `Log unavailable: ${error.message}`; }
 }
 function durationInput(nanos) {
@@ -596,7 +706,8 @@ $('#refresh-profile-options').addEventListener('click',async () => { const butto
 $('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
 $('#profile-repository-recent').addEventListener('change',() => { if ($('#profile-repository-recent').value) $('#profile-repository').value = $('#profile-repository-recent').value; });
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
-document.querySelectorAll('.log-tabs button').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
+document.querySelectorAll('.log-tabs button[data-stream]').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
+document.querySelectorAll('[data-log-view]').forEach(button => button.addEventListener('click',() => { currentLogView=button.dataset.logView; document.querySelectorAll('[data-log-view]').forEach(b => b.classList.toggle('active',b === button)); renderLogContent(); }));
 document.addEventListener('click',() => document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')));
 document.addEventListener('keydown',event => { if (event.key === 'Escape') document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')); });
 refresh(); connectLive();

@@ -162,6 +162,12 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
+	decisionJSON := json.RawMessage(`{"result":{"decision":"WAIT","policy":"standard","mode":"pace_threshold","reason":"no pace threshold matched","pace_gap":0.08},"trigger":"automatic"}`)
+	if _, err := db.RecordSchedulerDecision(t.Context(), domain.SchedulerDecision{
+		ProviderAccountID: "codex-main", DecisionJSON: decisionJSON,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := http.Get(server.URL + "/v1/dashboard")
 	if err != nil {
@@ -179,10 +185,11 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	var got struct {
 		ActivePolicy string `json:"active_policy"`
 		Providers    []struct {
-			ID       string                  `json:"id"`
-			Snapshot *decision.UsageSnapshot `json:"snapshot"`
-			Error    string                  `json:"error"`
-			Paused   bool                    `json:"paused"`
+			ID             string                  `json:"id"`
+			Snapshot       *decision.UsageSnapshot `json:"snapshot"`
+			Error          string                  `json:"error"`
+			Paused         bool                    `json:"paused"`
+			LatestDecision *decision.Result        `json:"latest_decision"`
 		} `json:"providers"`
 		Tasks []struct {
 			ID       string        `json:"id"`
@@ -202,6 +209,9 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	}
 	if got.Providers[1].ID != "codex-main" || got.Providers[1].Snapshot == nil || got.Providers[1].Snapshot.Weekly.Remaining != .86 || !got.Providers[1].Paused {
 		t.Fatalf("codex provider = %#v", got.Providers[1])
+	}
+	if got.Providers[1].LatestDecision == nil || got.Providers[1].LatestDecision.PaceGap != .08 {
+		t.Fatalf("codex latest decision = %#v", got.Providers[1].LatestDecision)
 	}
 	if got.Tasks[0].ID != "quiet-check" || got.Tasks[0].Provider != "codex-main" || got.Tasks[0].Model != "gpt-5" || got.Tasks[0].Interval != 24*time.Hour {
 		t.Fatalf("task projection = %#v", got.Tasks[0])

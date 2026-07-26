@@ -29,3 +29,45 @@ dialog{width:min(880px,calc(100vw - 32px));height:min(620px,calc(100vh - 80px));
 .concurrency-status{display:block;border-bottom:1px solid var(--line);padding:0 1px 13px;margin-bottom:14px}.concurrency-status>span,.concurrency-status small span{display:flex;align-items:center;justify-content:space-between;gap:12px}.concurrency-status b{font-size:10px;font-weight:500}.concurrency-status i{color:var(--muted);font:9px ui-monospace,monospace;font-style:normal}.concurrency-status small{display:grid;gap:4px;margin-top:7px;padding-left:8px;border-left:2px solid #2b3238}
 .concurrency-control{display:flex;align-items:center;justify-content:flex-end;gap:6px}.concurrency-control input{width:48px;border:1px solid var(--line);border-radius:6px;background:#0a0d0f;color:var(--text);padding:5px 6px;font:10px ui-monospace,monospace}.concurrency-control button{border:0;background:transparent;color:#d68686;font:8px ui-monospace,monospace;cursor:pointer;padding:3px}.concurrency-control button:hover{color:#ffaaaa;text-decoration:underline}
 @media(max-width:480px){.provider-compact{padding:0}.provider-trigger{padding:8px 10px}}
+
+/* Richer glanceable provider state. */
+.summary-rail{height:auto;min-height:76px}
+.provider-compact{min-width:290px}
+.provider-logo{width:29px;height:29px}
+.provider-logo img{width:17px;height:17px}
+.provider-summary{min-width:175px}
+.provider-copy-line{margin-bottom:3px}
+.provider-copy-line b{font-size:9px}
+.provider-window-line{display:flex;gap:9px;color:var(--muted);font:7.5px ui-monospace,monospace;white-space:nowrap;margin-bottom:3px}
+.provider-window-line span+span{padding-left:9px;border-left:1px solid var(--line)}
+.provider-pressure{display:block;color:#b8bec2;font:8px ui-monospace,monospace;margin-bottom:4px}
+.provider-pressure.near{color:var(--amber)}
+.provider-pressure.triggered{color:#ff918b}
+.provider-pressure.healthy{color:var(--green)}
+.provider-pressure.paused,.provider-pressure.protected{color:var(--muted)}
+.decision-detail{display:block;border:1px solid var(--line);border-left:3px solid #59636b;border-radius:7px;padding:9px 10px;margin-bottom:12px}
+.decision-detail.near{border-left-color:var(--amber)}
+.decision-detail.triggered{border-left-color:var(--accent)}
+.decision-detail.healthy{border-left-color:var(--green)}
+.decision-detail b,.decision-detail span{display:block}
+.decision-detail b{font-size:10px}
+.decision-detail span{color:var(--muted);font-size:9px;margin-top:3px}
+
+/* Entire rows behave like the Manage action, including keyboard activation. */
+.task-row{cursor:pointer;outline:none}
+.task-row:hover{background:#ffffff05}
+.task-row:focus-visible{box-shadow:inset 3px 0 var(--accent);background:#ffffff05}
+
+/* Separate artifact selection from the default human-readable log view. */
+.log-toolbar{display:flex;justify-content:space-between;align-items:center;padding:12px 22px 0}
+.log-toolbar .log-tabs{padding:0}
+.log-view-tabs{display:flex;gap:4px}
+.log-view-tabs button{border:1px solid var(--line);background:transparent;border-radius:6px;padding:6px 10px;font:9px ui-monospace,monospace;cursor:pointer}
+.log-view-tabs button.active{border-color:#8a3d40;color:#ff8c86;background:#2a181a}
+#log-content{line-height:1.65}
+
+@media(max-width:980px){
+  .provider-compact{min-width:240px}
+  .provider-window-line{display:grid;gap:1px}
+  .provider-window-line span+span{padding-left:0;border-left:0}
+}
