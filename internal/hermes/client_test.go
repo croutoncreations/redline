@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -155,6 +156,132 @@ func TestListAndTriggerJobsFallBackToDesktopCronAPI(t *testing.T) {
 	}
 	if !reflect.DeepEqual(requested, want) {
 		t.Fatalf("requests = %#v, want %#v", requested, want)
+	}
+}
+
+func TestRunJobWaitsForNewHermesSessionAndCollectsResult(t *testing.T) {
+	var runReads int
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs/content-post/runs":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs/content-post/runs":
+			runReads++
+			runs := []map[string]any{{"id": "cron_content-post_old", "ended_at": 100.0}}
+			if runReads >= 2 {
+				run := map[string]any{
+					"id": "cron_content-post_new", "started_at": 200.0,
+					"model": "claude-fable-5-medium", "billing_provider": "custom:cliproxyapi-plus",
+					"input_tokens": 120, "output_tokens": 8, "cache_read_tokens": 400,
+				}
+				if runReads >= 3 {
+					run["ended_at"] = 220.0
+					run["end_reason"] = "cron_complete"
+					run["profile"] = "default"
+				}
+				runs = append([]map[string]any{run}, runs...)
+			}
+			writeJSON(w, map[string]any{"runs": runs})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs":
+			writeJSON(w, []map[string]any{{
+				"id": "content-post", "last_run_at": "2026-07-28T10:02:20Z",
+				"last_status": "ok", "provider": "custom:cliproxyapi-plus",
+				"model": "claude-fable-5-medium", "enabled": true,
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/content-post/run":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/cron/jobs/content-post/trigger":
+			writeJSON(w, map[string]any{
+				"id": "content-post", "name": "Draft content post", "enabled": true,
+				"provider": "custom:cliproxyapi-plus", "model": "claude-fable-5-medium",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/cron_content-post_new/messages":
+			if r.URL.Query().Get("profile") != "default" {
+				t.Fatalf("profile query = %q", r.URL.Query().Get("profile"))
+			}
+			writeJSON(w, map[string]any{"session_id": "cron_content-post_new", "messages": []map[string]any{
+				{"role": "user", "content": "write"},
+				{"role": "assistant", "content": "Finished the content plan."},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{
+		HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+			return gateway.Client(), gateway.URL, nil
+		},
+		PollInterval: time.Millisecond,
+	}
+	var external domain.ExternalRun
+	result, err := client.RunJob(t.Context(), hermes.JobRunRequest{
+		Connection: domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"},
+		JobID:      "content-post",
+		OnExternalStarted: func(value domain.ExternalRun) error {
+			external = value
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Run.ID != "cron_content-post_new" || result.Run.EndReason != "cron_complete" ||
+		result.Output != "Finished the content plan." || runReads < 3 {
+		t.Fatalf("result=%#v runReads=%d", result, runReads)
+	}
+	if external.RuntimeConnectionID != "remote" || external.RunID != "content-post" ||
+		external.SessionID != "cron_content-post_new" {
+		t.Fatalf("external = %#v", external)
+	}
+}
+
+func TestRunJobReturnsFailureForNonSuccessfulHermesSession(t *testing.T) {
+	var runReads int
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs/broken/runs":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs/broken/runs":
+			runReads++
+			runs := []map[string]any{}
+			if runReads >= 2 {
+				runs = append(runs, map[string]any{
+					"id": "cron_broken_new", "started_at": 200.0, "ended_at": 201.0,
+					"end_reason": "cron_complete",
+				})
+			}
+			writeJSON(w, map[string]any{"runs": runs})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs":
+			writeJSON(w, []map[string]any{{
+				"id": "broken", "last_run_at": "2026-07-28T10:02:20Z",
+				"last_status": "error", "last_error": "provider rejected request", "enabled": true,
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/broken/run":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/cron/jobs/broken/trigger":
+			writeJSON(w, map[string]any{"id": "broken", "enabled": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{
+		HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+			return gateway.Client(), gateway.URL, nil
+		},
+		PollInterval: time.Millisecond,
+	}
+	_, err := client.RunJob(t.Context(), hermes.JobRunRequest{
+		Connection: domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"},
+		JobID:      "broken",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider rejected request") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

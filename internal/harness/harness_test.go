@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -246,14 +247,22 @@ func TestHermesHarnessCanTriggerExistingRuntimeJobWithoutPrompt(t *testing.T) {
 			ID: "hermes-pi", Runtime: "hermes", Transport: "gateway", URL: "http://gateway.test",
 		},
 	}
-	runner := &fakeHermesRunner{job: hermes.Job{
-		ID: "63c0e40d3eac", Name: "Nibit weekly GSC SEO content planner",
-		Provider: "custom:cliproxyapi-plus", Model: "claude-fable-5-medium", Enabled: true,
+	runner := &fakeHermesRunner{jobResult: hermes.JobRunResult{
+		Job: hermes.Job{
+			ID: "63c0e40d3eac", Name: "Nibit weekly GSC SEO content planner",
+			Provider: "custom:cliproxyapi-plus", Model: "claude-fable-5-medium", Enabled: true,
+		},
+		Run: hermes.JobRun{
+			ID: "cron_63c0e40d3eac_20260728_100214", EndReason: "cron_complete",
+			Model: "claude-fable-5-medium", BillingProvider: "custom:cliproxyapi-plus",
+			InputTokens: 120, OutputTokens: 8, CacheReadTokens: 400,
+		},
+		Output: "Finished the Nibit plan.",
 	}}
 	var external domain.ExternalRun
 	result, err := (harness.Adapter{Contexts: contexts, Hermes: runner}).Run(t.Context(), harness.Request{
 		RunID: "run-hermes-job", OutputDirectory: t.TempDir(),
-		Task: domain.Task{ID: "task", RuntimeJobID: runner.job.ID},
+		Task: domain.Task{ID: "task", RuntimeJobID: runner.jobResult.Job.ID},
 		Profile: domain.ExecutionProfile{
 			AgentContextID: contexts.context.ID, HarnessType: "hermes",
 			Model: "custom:cliproxyapi-plus/claude-fable-5-medium",
@@ -267,18 +276,53 @@ func TestHermesHarnessCanTriggerExistingRuntimeJobWithoutPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.triggeredConnection.ID != "hermes-pi" || runner.triggeredJobID != runner.job.ID {
+	if runner.jobRequest.Connection.ID != "hermes-pi" || runner.jobRequest.JobID != runner.jobResult.Job.ID {
 		t.Fatalf("connection=%#v job=%q", runner.triggeredConnection, runner.triggeredJobID)
 	}
-	if external.RuntimeConnectionID != "hermes-pi" || external.RunID != runner.job.ID {
+	if external.RuntimeConnectionID != "hermes-pi" || external.RunID != runner.jobResult.Job.ID ||
+		external.SessionID != runner.jobResult.Run.ID {
 		t.Fatalf("external = %#v", external)
 	}
-	if result.ExitCode != 0 || result.Metadata["external_job_id"] != runner.job.ID {
+	if result.ExitCode != 0 || result.Metadata["external_job_id"] != runner.jobResult.Job.ID ||
+		result.Metadata["external_session_id"] != runner.jobResult.Run.ID {
 		t.Fatalf("result = %#v", result)
 	}
 	data, err := os.ReadFile(result.OutputFile)
-	if err != nil || !strings.Contains(string(data), `"job_id":"63c0e40d3eac"`) {
+	if err != nil || !strings.Contains(string(data), `"job_id":"63c0e40d3eac"`) ||
+		!strings.Contains(string(data), `"output":"Finished the Nibit plan."`) {
 		t.Fatalf("artifact=%s err=%v", data, err)
+	}
+}
+
+func TestHermesHarnessPersistsFailedRuntimeJobUsage(t *testing.T) {
+	contexts := fakeContexts{
+		context:    domain.AgentContext{ID: "hermes-default", RuntimeConnectionID: "hermes-pi"},
+		connection: domain.RuntimeConnection{ID: "hermes-pi", Runtime: "hermes", Transport: "gateway"},
+	}
+	runner := &fakeHermesRunner{
+		jobResult: hermes.JobRunResult{
+			Job: hermes.Job{ID: "broken"},
+			Run: hermes.JobRun{
+				ID: "cron_broken_new", EndReason: "cron_complete",
+				Model: "claude-fable-5-medium", BillingProvider: "custom:cliproxyapi-plus",
+				InputTokens: 90, OutputTokens: 3,
+			},
+		},
+		jobErr: fmt.Errorf("provider rejected request"),
+	}
+	result, err := (harness.Adapter{Contexts: contexts, Hermes: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-hermes-failed", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", RuntimeJobID: "broken"},
+		Profile:   domain.ExecutionProfile{AgentContextID: contexts.context.ID, HarnessType: "hermes"},
+		Workspace: domain.Workspace{Directory: "/srv/redline"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider rejected request") || result.ExitCode != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	data, readErr := os.ReadFile(result.OutputFile)
+	if readErr != nil || !strings.Contains(string(data), `"input":90`) ||
+		!strings.Contains(string(data), `"error":"provider rejected request"`) {
+		t.Fatalf("artifact=%s err=%v", data, readErr)
 	}
 }
 
@@ -303,7 +347,9 @@ func (f fakeContexts) GetRuntimeConnection(context.Context, string) (domain.Runt
 type fakeHermesRunner struct {
 	request             hermes.RunRequest
 	result              hermes.RunResult
-	job                 hermes.Job
+	jobResult           hermes.JobRunResult
+	jobErr              error
+	jobRequest          hermes.JobRunRequest
 	triggeredConnection domain.RuntimeConnection
 	triggeredJobID      string
 }
@@ -321,7 +367,19 @@ func (f *fakeHermesRunner) Run(_ context.Context, request hermes.RunRequest) (he
 func (f *fakeHermesRunner) TriggerJob(_ context.Context, connection domain.RuntimeConnection, jobID string) (hermes.Job, error) {
 	f.triggeredConnection = connection
 	f.triggeredJobID = jobID
-	return f.job, nil
+	return f.jobResult.Job, nil
+}
+
+func (f *fakeHermesRunner) RunJob(_ context.Context, request hermes.JobRunRequest) (hermes.JobRunResult, error) {
+	f.jobRequest = request
+	if request.OnExternalStarted != nil {
+		_ = request.OnExternalStarted(domain.ExternalRun{
+			RuntimeConnectionID: request.Connection.ID,
+			RunID:               f.jobResult.Job.ID,
+			SessionID:           f.jobResult.Run.ID,
+		})
+	}
+	return f.jobResult, f.jobErr
 }
 
 func (r *captureRunner) Run(_ context.Context, command redprocess.Command) (int, error) {

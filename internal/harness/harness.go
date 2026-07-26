@@ -21,7 +21,7 @@ type ContextStore interface {
 
 type HermesRunner interface {
 	Run(context.Context, hermes.RunRequest) (hermes.RunResult, error)
-	TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error)
+	RunJob(context.Context, hermes.JobRunRequest) (hermes.JobRunResult, error)
 }
 
 type Adapter struct {
@@ -118,29 +118,47 @@ func (a Adapter) runHermesJob(
 	if err != nil {
 		return result, fmt.Errorf("load Hermes runtime connection: %w", err)
 	}
-	job, err := a.Hermes.TriggerJob(ctx, connection, request.Task.RuntimeJobID)
+	jobResult, err := a.Hermes.RunJob(ctx, hermes.JobRunRequest{
+		Connection:        connection,
+		JobID:             request.Task.RuntimeJobID,
+		OnExternalStarted: request.OnExternalStarted,
+	})
 	if err != nil {
 		result.ExitCode = 1
-		return result, fmt.Errorf("trigger Hermes job: %w", err)
-	}
-	if request.OnExternalStarted != nil {
-		if err := request.OnExternalStarted(domain.ExternalRun{
-			RuntimeConnectionID: connection.ID, RunID: job.ID,
-		}); err != nil {
-			return result, fmt.Errorf("record Hermes job: %w", err)
+		if jobResult.Run.ID != "" {
+			_ = json.NewEncoder(stdout).Encode(hermesJobRecord(jobResult, err.Error()))
+			result.Metadata = hermesJobMetadata(jobResult)
 		}
+		return result, fmt.Errorf("run Hermes job: %w", err)
 	}
-	if err := json.NewEncoder(stdout).Encode(map[string]any{
-		"type": "hermes.job_triggered", "job_id": job.ID, "name": job.Name,
-		"model": job.Model, "provider": job.Provider,
-	}); err != nil {
+	if err := json.NewEncoder(stdout).Encode(hermesJobRecord(jobResult, "")); err != nil {
 		return result, fmt.Errorf("write Hermes job result: %w", err)
 	}
 	result.ExitCode = 0
-	result.Metadata = map[string]any{
-		"external_job_id": job.ID, "actual_model": job.Model, "actual_provider": job.Provider,
-	}
+	result.Metadata = hermesJobMetadata(jobResult)
 	return result, nil
+}
+
+func hermesJobRecord(jobResult hermes.JobRunResult, errorMessage string) map[string]any {
+	return map[string]any{
+		"type": "hermes.result", "job_id": jobResult.Job.ID, "name": jobResult.Job.Name,
+		"session_id": jobResult.Run.ID, "output": jobResult.Output, "error": errorMessage,
+		"model": jobResult.Run.Model, "provider": jobResult.Run.BillingProvider,
+		"end_reason": jobResult.Run.EndReason,
+		"usage": map[string]any{
+			"input": jobResult.Run.InputTokens, "output": jobResult.Run.OutputTokens,
+			"cache_read": jobResult.Run.CacheReadTokens, "cache_write": jobResult.Run.CacheWriteTokens,
+			"reasoning": jobResult.Run.ReasoningTokens,
+		},
+	}
+}
+
+func hermesJobMetadata(jobResult hermes.JobRunResult) map[string]any {
+	return map[string]any{
+		"external_job_id": jobResult.Job.ID, "external_session_id": jobResult.Run.ID,
+		"actual_model": jobResult.Run.Model, "actual_provider": jobResult.Run.BillingProvider,
+		"end_reason": jobResult.Run.EndReason,
+	}
 }
 
 func (a Adapter) runHermes(

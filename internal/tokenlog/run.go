@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/capacity"
@@ -81,11 +82,11 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			if record.Type != "hermes.result" {
 				continue
 			}
-			provider := normalizeHermesProvider(record.Provider)
 			model := record.Model
 			if model == "" {
 				model = configuredModel
 			}
+			provider := normalizeHermesProvider(record.Provider, model)
 			input := record.Usage.InputTokens
 			if record.Usage.Input > 0 {
 				input = record.Usage.Input
@@ -119,13 +120,21 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 	return nonzeroObservations(result), nil
 }
 
-func normalizeHermesProvider(provider string) string {
+func normalizeHermesProvider(provider, model string) string {
 	switch provider {
 	case "openai-codex":
 		return "codex"
 	case "anthropic", "anthropic-cli":
 		return "claude"
 	default:
+		lowerModel := strings.ToLower(model)
+		if strings.HasPrefix(provider, "custom:") && strings.Contains(lowerModel, "claude") {
+			return "claude"
+		}
+		if strings.HasPrefix(provider, "custom:") &&
+			(strings.Contains(lowerModel, "gpt-") || strings.Contains(lowerModel, "codex")) {
+			return "codex"
+		}
 		return provider
 	}
 }

@@ -186,10 +186,40 @@ type RunResult struct {
 	Provider  string         `json:"provider,omitempty"`
 }
 
+type JobRunRequest struct {
+	Connection        domain.RuntimeConnection
+	JobID             string
+	OnExternalStarted func(domain.ExternalRun) error
+}
+
+type JobRun struct {
+	ID               string   `json:"id"`
+	StartedAt        float64  `json:"started_at"`
+	EndedAt          *float64 `json:"ended_at,omitempty"`
+	EndReason        string   `json:"end_reason,omitempty"`
+	Model            string   `json:"model,omitempty"`
+	BillingProvider  string   `json:"billing_provider,omitempty"`
+	InputTokens      int64    `json:"input_tokens,omitempty"`
+	OutputTokens     int64    `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64    `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64    `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64    `json:"reasoning_tokens,omitempty"`
+	MessageCount     int      `json:"message_count,omitempty"`
+	ToolCallCount    int      `json:"tool_call_count,omitempty"`
+	Profile          string   `json:"profile,omitempty"`
+}
+
+type JobRunResult struct {
+	Job    Job    `json:"job"`
+	Run    JobRun `json:"run"`
+	Output string `json:"output,omitempty"`
+}
+
 type HTTPClientFactory func(context.Context, domain.RuntimeConnection) (*http.Client, string, error)
 
 type Client struct {
-	HTTPClient HTTPClientFactory
+	HTTPClient   HTTPClientFactory
+	PollInterval time.Duration
 }
 
 func (c Client) Discover(ctx context.Context, connection domain.RuntimeConnection) (Discovery, error) {
@@ -305,6 +335,212 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 		return Job{}, fmt.Errorf("Hermes returned an empty job id")
 	}
 	return payload.Job, nil
+}
+
+func (c Client) RunJob(ctx context.Context, request JobRunRequest) (JobRunResult, error) {
+	request.JobID = strings.TrimSpace(request.JobID)
+	if request.JobID == "" {
+		return JobRunResult{}, fmt.Errorf("Hermes job id is required")
+	}
+	httpClient, baseURL, err := c.httpClient(ctx, request.Connection)
+	if err != nil {
+		return JobRunResult{}, err
+	}
+	before, err := listJobRuns(ctx, httpClient, baseURL, request.JobID)
+	if err != nil {
+		return JobRunResult{}, fmt.Errorf("read Hermes job baseline: %w", err)
+	}
+	known := make(map[string]struct{}, len(before))
+	for _, run := range before {
+		known[run.ID] = struct{}{}
+	}
+	job, err := c.TriggerJob(ctx, request.Connection, request.JobID)
+	if err != nil {
+		return JobRunResult{}, err
+	}
+	interval := c.PollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	var tracked JobRun
+	for {
+		runs, err := listJobRuns(ctx, httpClient, baseURL, request.JobID)
+		if err != nil {
+			return JobRunResult{}, fmt.Errorf("monitor Hermes job %q: %w", request.JobID, err)
+		}
+		if tracked.ID == "" {
+			for _, run := range runs {
+				if _, existed := known[run.ID]; !existed {
+					tracked = run
+					if request.OnExternalStarted != nil {
+						if err := request.OnExternalStarted(domain.ExternalRun{
+							RuntimeConnectionID: request.Connection.ID,
+							RunID:               job.ID,
+							SessionID:           run.ID,
+						}); err != nil {
+							return JobRunResult{}, fmt.Errorf("record Hermes job session: %w", err)
+						}
+					}
+					break
+				}
+			}
+		} else {
+			for _, run := range runs {
+				if run.ID == tracked.ID {
+					tracked = run
+					break
+				}
+			}
+		}
+		if tracked.ID != "" && tracked.EndedAt != nil {
+			result := JobRunResult{Job: job, Run: tracked}
+			current, err := waitForJobResult(ctx, c, request.Connection, job, interval)
+			if err != nil {
+				return result, fmt.Errorf("read Hermes job result: %w", err)
+			}
+			result.Job = current
+			result.Output, _ = lastAssistantMessage(ctx, httpClient, baseURL, tracked.ID, tracked.Profile)
+			if failedJobStatus(result.Job.LastStatus) {
+				return result, fmt.Errorf("Hermes job %q session %q failed: %s",
+					request.JobID, tracked.ID, emptyFallback(result.Job.LastError, result.Job.LastStatus))
+			}
+			if !successfulJobEnd(tracked.EndReason) {
+				return result, fmt.Errorf("Hermes job %q session %q ended with %s",
+					request.JobID, tracked.ID, emptyFallback(tracked.EndReason, "unknown status"))
+			}
+			return result, nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return JobRunResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func listJobRuns(
+	ctx context.Context,
+	client *http.Client,
+	baseURL, jobID string,
+) ([]JobRun, error) {
+	var payload struct {
+		Runs []JobRun `json:"runs"`
+	}
+	escaped := url.PathEscape(jobID)
+	err := getJSON(ctx, client, baseURL+"/api/jobs/"+escaped+"/runs?limit=20", &payload)
+	if err != nil {
+		if !isHTTPStatus(err, http.StatusNotFound) {
+			return nil, err
+		}
+		if err := getJSON(ctx, client, baseURL+"/api/cron/jobs/"+escaped+"/runs?limit=20", &payload); err != nil {
+			return nil, fmt.Errorf("gateway runs API unavailable; desktop cron runs API: %w", err)
+		}
+	}
+	if payload.Runs == nil {
+		payload.Runs = []JobRun{}
+	}
+	return payload.Runs, nil
+}
+
+func lastAssistantMessage(
+	ctx context.Context,
+	client *http.Client,
+	baseURL, sessionID, profile string,
+) (string, error) {
+	var payload struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	query := url.Values{"limit": []string{"500"}}
+	if strings.TrimSpace(profile) != "" {
+		query.Set("profile", profile)
+	}
+	target := baseURL + "/api/sessions/" + url.PathEscape(sessionID) + "/messages?" + query.Encode()
+	if err := getJSON(ctx, client, target, &payload); err != nil {
+		return "", err
+	}
+	for index := len(payload.Messages) - 1; index >= 0; index-- {
+		message := payload.Messages[index]
+		if message.Role != "assistant" {
+			continue
+		}
+		switch content := message.Content.(type) {
+		case string:
+			if strings.TrimSpace(content) != "" {
+				return content, nil
+			}
+		case []any:
+			var parts []string
+			for _, item := range content {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if text, ok := block["text"].(string); ok && strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n"), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func waitForJobResult(
+	ctx context.Context,
+	client Client,
+	connection domain.RuntimeConnection,
+	previous Job,
+	interval time.Duration,
+) (Job, error) {
+	for {
+		jobs, err := client.ListJobs(ctx, connection)
+		if err == nil {
+			for _, job := range jobs {
+				if job.ID == previous.ID && job.LastRunAt != "" && job.LastRunAt != previous.LastRunAt {
+					return job, nil
+				}
+			}
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return Job{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func failedJobStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "failure":
+		return true
+	default:
+		return false
+	}
+}
+
+func successfulJobEnd(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "cron_complete", "complete", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
+func emptyFallback(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (c Client) Run(ctx context.Context, request RunRequest) (RunResult, error) {

@@ -92,3 +92,21 @@ func TestLoadRunArtifactReadsHermesUsageAndMapsSubscriptionProvider(t *testing.T
 		t.Fatalf("observation=%#v", item)
 	}
 }
+
+func TestLoadRunArtifactReadsExistingHermesJobUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes-job.jsonl")
+	data := `{"type":"hermes.result","job_id":"63c0e40d3eac","session_id":"cron_63c0e40d3eac_new","model":"claude-fable-5-medium","provider":"custom:cliproxyapi-plus","usage":{"input":120,"output":8,"cache_read":400,"cache_write":5}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-hermes-job", "custom:cliproxyapi-plus/claude-fable-5-medium", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	item := got[0]
+	if item.Provider != "claude" || item.Model != "claude-fable-5-medium" ||
+		item.InputTokens != 120 || item.OutputTokens != 8 ||
+		item.CacheReadTokens != 400 || item.CacheCreationTokens != 5 {
+		t.Fatalf("observation=%#v", item)
+	}
+}
