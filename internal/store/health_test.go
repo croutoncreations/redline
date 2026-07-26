@@ -18,6 +18,12 @@ func TestOperationalHealthSummarizesRecentFailuresAndActiveRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{
+		ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchError,
+		Error: "fetch usage: context canceled", StartedAt: now.Add(-time.Minute), CompletedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	deliveryID, err := db.CreateNotificationDelivery(context.Background(), domain.EventSchedulerError, json.RawMessage(`{}`), now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +46,7 @@ func TestOperationalHealthSummarizesRecentFailuresAndActiveRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if health.Status != "degraded" || health.ActiveRuns != 1 || health.DispatchAttempts != 1 ||
+	if health.Status != "degraded" || health.ActiveRuns != 1 || health.DispatchAttempts != 2 ||
 		health.DispatchErrors != 1 || health.NotificationFailures != 1 {
 		t.Fatalf("health = %#v", health)
 	}

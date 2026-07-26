@@ -29,7 +29,7 @@ FROM runs WHERE completed_at >= ?`, formatTime(since)).Scan(&health.CompletedRun
 		return domain.OperationalHealth{}, fmt.Errorf("summarize completed runs: %w", err)
 	}
 	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*),
-COALESCE(SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END), 0)
+COALESCE(SUM(CASE WHEN outcome = 'error' AND error NOT LIKE '%context canceled%' THEN 1 ELSE 0 END), 0)
 FROM dispatch_attempts WHERE completed_at >= ?`, formatTime(since)).Scan(
 		&health.DispatchAttempts, &health.DispatchErrors,
 	); err != nil {
