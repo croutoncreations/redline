@@ -223,8 +223,8 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.locator('#health-explainer')).toContainText('temporary usage source timeout');
   await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('53%');
   await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('5h 62%');
-  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Watching · 1 pt to trigger');
-  await expect(page.getByRole('button', { name: 'Show Codex usage details' })).toContainText('8 pts behind pace');
+  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Watching · 1% to trigger');
+  await expect(page.getByRole('button', { name: 'Show Codex usage details' })).toContainText('8% behind pace');
   await page.getByRole('button', { name: 'Show Claude usage details' }).click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Native');
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('OpenUsage unavailable');

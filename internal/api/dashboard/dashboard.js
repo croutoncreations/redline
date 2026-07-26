@@ -63,14 +63,14 @@ function providerPressure(item) {
     const distance = Math.max(0,margin - (current.overflow || 0));
     const points = Math.max(0,Math.ceil((distance * 100) - .000001));
     return {
-      label:`Watching · ${points} pt${points === 1 ? '' : 's'} to trigger`,
-      detail:current.reason || 'Weekly capacity remains consumable through future 5-hour windows.',
+      label:`Watching · ${points}% to trigger`,
+      detail:current.reason || `${points} percentage point${points === 1 ? '' : 's'} of additional projected weekly overflow needed to trigger.`,
       tone:points <= 2 ? 'near' : 'neutral',
     };
   }
   const pacePoints = Math.round((current.pace_gap || 0) * 100);
   if (pacePoints > 0) {
-    return {label:`${pacePoints} pts behind pace`,detail:current.reason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
+    return {label:`${pacePoints}% behind pace`,detail:current.reason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
   }
   return {label:'On pace',detail:current.reason || 'No dispatch threshold is currently active.',tone:'healthy'};
 }
