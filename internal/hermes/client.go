@@ -251,16 +251,27 @@ func (c Client) ListJobs(ctx context.Context, connection domain.RuntimeConnectio
 	if err != nil {
 		return nil, err
 	}
-	var payload struct {
+	var gatewayPayload struct {
 		Jobs []Job `json:"jobs"`
 	}
-	if err := getJSON(ctx, httpClient, baseURL+"/api/jobs", &payload); err != nil {
+	err = getJSON(ctx, httpClient, baseURL+"/api/jobs", &gatewayPayload)
+	if err == nil {
+		if gatewayPayload.Jobs == nil {
+			gatewayPayload.Jobs = []Job{}
+		}
+		return gatewayPayload.Jobs, nil
+	}
+	if !isHTTPStatus(err, http.StatusNotFound) {
 		return nil, fmt.Errorf("list Hermes jobs: %w", err)
 	}
-	if payload.Jobs == nil {
-		payload.Jobs = []Job{}
+	var desktopJobs []Job
+	if err := getJSON(ctx, httpClient, baseURL+"/api/cron/jobs", &desktopJobs); err != nil {
+		return nil, fmt.Errorf("list Hermes jobs: gateway API unavailable; desktop cron API: %w", err)
 	}
-	return payload.Jobs, nil
+	if desktopJobs == nil {
+		desktopJobs = []Job{}
+	}
+	return desktopJobs, nil
 }
 
 func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnection, jobID string) (Job, error) {
@@ -277,7 +288,18 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 	}
 	target := baseURL + "/api/jobs/" + url.PathEscape(jobID) + "/run"
 	if err := postJSON(ctx, httpClient, target, &payload); err != nil {
-		return Job{}, fmt.Errorf("trigger Hermes job %q: %w", jobID, err)
+		if !isHTTPStatus(err, http.StatusNotFound) {
+			return Job{}, fmt.Errorf("trigger Hermes job %q: %w", jobID, err)
+		}
+		var desktopJob Job
+		target = baseURL + "/api/cron/jobs/" + url.PathEscape(jobID) + "/trigger"
+		if err := postJSON(ctx, httpClient, target, &desktopJob); err != nil {
+			return Job{}, fmt.Errorf("trigger Hermes job %q: gateway API unavailable; desktop cron API: %w", jobID, err)
+		}
+		if desktopJob.ID == "" {
+			return Job{}, fmt.Errorf("Hermes returned an empty job id")
+		}
+		return desktopJob, nil
 	}
 	if payload.Job.ID == "" {
 		return Job{}, fmt.Errorf("Hermes returned an empty job id")
@@ -592,7 +614,7 @@ func getJSON(ctx context.Context, client *http.Client, target string, result any
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("HTTP %d", response.StatusCode)
+		return httpStatusError{code: response.StatusCode}
 	}
 	return json.NewDecoder(response.Body).Decode(result)
 }
@@ -605,9 +627,22 @@ func postJSON(ctx context.Context, client *http.Client, target string, result an
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("HTTP %d", response.StatusCode)
+		return httpStatusError{code: response.StatusCode}
 	}
 	return json.NewDecoder(response.Body).Decode(result)
+}
+
+type httpStatusError struct {
+	code int
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d", e.code)
+}
+
+func isHTTPStatus(err error, code int) bool {
+	status, ok := err.(httpStatusError)
+	return ok && status.code == code
 }
 
 type rpcFrame struct {

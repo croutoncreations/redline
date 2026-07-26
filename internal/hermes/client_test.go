@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,6 +104,57 @@ func TestListAndTriggerJobsUseAuthenticatedGatewayAPI(t *testing.T) {
 	}
 	if job.ID != jobs[0].ID || triggered != "/api/jobs/content-post/run" {
 		t.Fatalf("job=%#v triggered=%q", job, triggered)
+	}
+}
+
+func TestListAndTriggerJobsFallBackToDesktopCronAPI(t *testing.T) {
+	var requested []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.Method+" "+r.URL.Path)
+		switch {
+		case r.URL.Path == "/api/jobs" || r.URL.Path == "/api/jobs/content-post/run":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs":
+			writeJSON(w, []map[string]any{{
+				"id": "content-post", "name": "Draft content post",
+				"enabled": true, "provider": "anthropic-cli",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/cron/jobs/content-post/trigger":
+			writeJSON(w, map[string]any{
+				"id": "content-post", "name": "Draft content post", "enabled": true,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return gateway.Client(), gateway.URL, nil
+	}}
+	connection := domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"}
+
+	jobs, err := client.ListJobs(t.Context(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "content-post" {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	job, err := client.TriggerJob(t.Context(), connection, jobs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != jobs[0].ID {
+		t.Fatalf("job = %#v", job)
+	}
+	want := []string{
+		"GET /api/jobs",
+		"GET /api/cron/jobs",
+		"POST /api/jobs/content-post/run",
+		"POST /api/cron/jobs/content-post/trigger",
+	}
+	if !reflect.DeepEqual(requested, want) {
+		t.Fatalf("requests = %#v, want %#v", requested, want)
 	}
 }
 
