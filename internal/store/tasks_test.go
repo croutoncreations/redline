@@ -54,12 +54,12 @@ func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
 	if err := db.CreateTask(t.Context(), domain.Task{ID: "job", Name: "Before", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
 		t.Fatal(err)
 	}
-	updated := domain.Task{ID: "job", Name: "After", Prompt: "Do the thing", Priority: 90, ExecutionProfileID: profile.ID, Type: domain.Recurring, MinInterval: 24 * time.Hour, RequireRepoChange: true, DispatchTier: domain.DispatchWellBehind}
+	updated := domain.Task{ID: "job", Name: "After", Prompt: "Do the thing", Priority: 90, ExecutionProfileID: profile.ID, RuntimeJobID: "hermes-job-1", Type: domain.Recurring, MinInterval: 24 * time.Hour, RequireRepoChange: true, DispatchTier: domain.DispatchWellBehind}
 	if err := db.UpdateTask(t.Context(), updated, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.GetTask(t.Context(), "job")
-	if err != nil || got.Name != "After" || got.Priority != 90 || got.Type != domain.Recurring || got.MinInterval != 24*time.Hour || !got.RequireRepoChange || got.DispatchTier != domain.DispatchWellBehind || got.State != domain.Queued {
+	if err != nil || got.Name != "After" || got.Priority != 90 || got.RuntimeJobID != "hermes-job-1" || got.Type != domain.Recurring || got.MinInterval != 24*time.Hour || !got.RequireRepoChange || got.DispatchTier != domain.DispatchWellBehind || got.State != domain.Queued {
 		t.Fatalf("task=%#v err=%v", got, err)
 	}
 	if err := db.DeleteTask(t.Context(), "job"); err != nil {

@@ -874,6 +874,7 @@ type taskRequest struct {
 	PromptFile         string              `json:"prompt_file"`
 	Priority           int                 `json:"priority"`
 	ExecutionProfileID string              `json:"execution_profile_id"`
+	RuntimeJobID       string              `json:"runtime_job_id"`
 	Type               domain.TaskType     `json:"type"`
 	MinInterval        string              `json:"min_interval"`
 	RequireRepoChange  bool                `json:"require_repo_change"`
@@ -886,6 +887,7 @@ type taskUpdateRequest struct {
 	PromptFile         *string              `json:"prompt_file"`
 	Priority           *int                 `json:"priority"`
 	ExecutionProfileID *string              `json:"execution_profile_id"`
+	RuntimeJobID       *string              `json:"runtime_job_id"`
 	Type               *domain.TaskType     `json:"type"`
 	MinInterval        *string              `json:"min_interval"`
 	RequireRepoChange  *bool                `json:"require_repo_change"`
@@ -914,7 +916,8 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	task := domain.Task{
 		ID: id, Name: request.Name, Prompt: request.Prompt, PromptFile: request.PromptFile,
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
-		Type: request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+		RuntimeJobID: request.RuntimeJobID,
+		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
 	if err := s.store.CreateTask(r.Context(), task, s.now()); err != nil {
 		writeError(w, err)
@@ -971,6 +974,9 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.ExecutionProfileID != nil {
 		task.ExecutionProfileID = *request.ExecutionProfileID
+	}
+	if request.RuntimeJobID != nil {
+		task.RuntimeJobID = *request.RuntimeJobID
 	}
 	if request.Type != nil {
 		task.Type = *request.Type

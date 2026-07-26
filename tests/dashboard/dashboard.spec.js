@@ -92,6 +92,7 @@ async function loadDashboard(page, options = {}) {
     dashboard: dashboardFixture(), profiles: profileFixture(), profileOptions: profileOptionsFixture(),
     taskTemplates: taskTemplatesFixture(),
     runtimeConnections: [], agentContexts: [],
+    runtimeJobs: {},
     requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
   };
 	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
@@ -147,6 +148,10 @@ async function loadDashboard(page, options = {}) {
       id: 'hermes-desktop', runtime: 'hermes', transport: 'gateway',
       url: 'http://hermes.test:9119', credential_source: 'hermes_desktop', max_concurrent_runs: 1,
     }]);
+    const runtimeJobsMatch = url.pathname.match(/^\/v1\/runtime-connections\/([^/]+)\/jobs$/);
+    if (runtimeJobsMatch && method === 'GET') {
+      return json(200, state.runtimeJobs[decodeURIComponent(runtimeJobsMatch[1])] || []);
+    }
     if (/^\/v1\/runtime-connections\/[^/]+\/discover$/.test(url.pathname) && method === 'POST') return json(200, {
       version: '0.17.0', profiles: [{ name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' }],
       profile_options: [{
@@ -401,6 +406,45 @@ test('imports Hermes Desktop and creates a remote profile from discovered contex
     agent_context_id: 'hermes-scout-context', harness_type: 'hermes',
     model: 'openai-codex/gpt-5.6-sol', workspace_provider: 'runtime-owned',
     repository: '/home/jon/projects/scout',
+  });
+});
+
+test('selects a discovered existing Hermes job for a scheduled task', async ({ page }) => {
+  const state = await loadDashboard(page, {
+    profiles: [...profileFixture(), {
+      id: 'hermes-nibit', provider_account_id: 'claude-main',
+      agent_context_id: 'hermes-nibit-context', harness_type: 'hermes',
+      model: 'custom:cliproxyapi-plus/claude-fable-5-medium',
+      budget_model_group: 'fable', workspace_provider: 'runtime-owned',
+      repository: '/home/jon/worktrees/nibit-seo',
+    }],
+    runtimeConnections: [{
+      id: 'hermes-desktop', runtime: 'hermes', transport: 'gateway',
+      url: 'http://hermes.test:9119', max_concurrent_runs: 1,
+    }],
+    agentContexts: [{
+      id: 'hermes-nibit-context', runtime_connection_id: 'hermes-desktop',
+      profile: 'default', project: 'nibit', working_directory: '/home/jon/worktrees/nibit-seo',
+      session_mode: 'isolated', max_concurrent_runs: 1,
+    }],
+    runtimeJobs: {
+      'hermes-desktop': [{
+        id: '63c0e40d3eac', name: 'Nibit weekly GSC SEO content planner',
+        provider: 'custom:cliproxyapi-plus', model: 'claude-fable-5-medium', enabled: true,
+      }],
+    },
+  });
+  await page.getByRole('button', { name: 'New job' }).click();
+  await page.locator('#task-name').fill('Nibit content planner');
+  await page.locator('#task-profile').selectOption('hermes-nibit');
+  await expect(page.locator('#task-runtime-job-field')).toBeVisible();
+  await expect(page.locator('#task-runtime-job')).toContainText('Nibit weekly GSC SEO content planner');
+  await page.locator('#task-runtime-job').selectOption('63c0e40d3eac');
+  await page.getByRole('button', { name: 'Save job' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body).toMatchObject({
+    execution_profile_id: 'hermes-nibit', runtime_job_id: '63c0e40d3eac',
   });
 });
 

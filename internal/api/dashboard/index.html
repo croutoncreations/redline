@@ -72,6 +72,7 @@
         <label id="task-template-field" class="field field-wide"><span>Start from</span><select id="task-template"><option value="">Blank job</option></select><small id="task-template-description" class="field-note">Choose an editable starter prompt or begin from scratch.</small></label>
         <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
+        <label id="task-runtime-job-field" class="field" hidden><span>Existing Hermes job <i class="help" tabindex="0" data-help="Choose an existing job discovered from the Hermes connection. Redline will trigger that job instead of sending this prompt to a new Hermes session.">?</i></span><select id="task-runtime-job"><option value="">New Hermes session from prompt</option></select><small id="task-runtime-job-status" class="field-note"></small></label>
         <label class="field"><span>Priority</span><input id="task-priority" type="number" value="50" required></label>
         <label class="field"><span>Run when</span><select id="task-tier"><option value="behind">Behind pace</option><option value="well_behind">Well behind pace</option><option value="expiring">Capacity likely to expire</option></select></label>
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>

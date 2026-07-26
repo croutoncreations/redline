@@ -497,9 +497,39 @@ async function deleteRuntimeConnection() {
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
 }
+async function updateTaskRuntimeJobs(selected='') {
+  const profile=profiles.find(item => item.id === $('#task-profile').value);
+  const field=$('#task-runtime-job-field'), select=$('#task-runtime-job'), status=$('#task-runtime-job-status');
+  if (profile?.harness_type !== 'hermes') {
+    field.hidden=true; select.innerHTML='<option value="">Not a Hermes profile</option>'; return;
+  }
+  field.hidden=false;
+  const context=agentContexts.find(item => item.id === profile.agent_context_id);
+  if (!context?.runtime_connection_id) {
+    select.innerHTML='<option value="">New Hermes session from prompt</option>';
+    status.textContent='This profile has no Hermes connection.';
+    return;
+  }
+  status.textContent='Discovering existing Hermes jobs…';
+  try {
+    const jobs=await apiRequest(`/v1/runtime-connections/${encodeURIComponent(context.runtime_connection_id)}/jobs`);
+    select.innerHTML='<option value="">New Hermes session from prompt</option>' + jobs.map(job => {
+      const details=[job.provider,job.model,job.enabled ? '' : 'disabled'].filter(Boolean).join(' · ');
+      return `<option value="${escapeHTML(job.id)}">${escapeHTML(job.name || job.id)}${details ? ` — ${escapeHTML(details)}` : ''}</option>`;
+    }).join('');
+    if (selected && !jobs.some(job => job.id === selected)) {
+      select.innerHTML += `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} — unavailable</option>`;
+    }
+    select.value=selected || '';
+    status.textContent=`${jobs.length} existing job${jobs.length === 1 ? '' : 's'} available from ${context.runtime_connection_id}.`;
+  } catch(error) {
+    select.innerHTML='<option value="">New Hermes session from prompt</option>';
+    status.textContent=`Could not load Hermes jobs: ${error.message}`;
+  }
+}
 async function openTask(id='') {
   try {
-    await Promise.all([loadProfiles(),loadTaskTemplates()]); showTaskError(''); $('#task-form').reset(); $('#task-id').value = id;
+    await Promise.all([loadProfiles(),loadTaskTemplates(),loadRuntimeConfiguration()]); showTaskError(''); $('#task-form').reset(); $('#task-id').value = id;
     let task = null;
     if (id) task = await apiRequest(`/v1/tasks/${encodeURIComponent(id)}`);
     $('#task-dialog-title').textContent = task ? 'Manage scheduled job' : 'New scheduled job';
@@ -508,6 +538,7 @@ async function openTask(id='') {
     $('#task-template-description').textContent = 'Choose an editable starter prompt or begin from scratch.';
     $('#task-name').value = task?.name || '';
     $('#task-profile').value = task?.execution_profile_id || profiles[0]?.id || '';
+    await updateTaskRuntimeJobs(task?.runtime_job_id || '');
     $('#task-priority').value = task?.priority ?? 50;
     $('#task-tier').value = task?.dispatch_tier || 'behind';
     $('#task-type').value = task?.type || 'one_off';
@@ -543,6 +574,7 @@ async function saveTask(event) {
   event.preventDefault(); showTaskError('');
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
+    runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
     priority:Number($('#task-priority').value), type:$('#task-type').value,
     dispatch_tier:$('#task-tier').value,
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
@@ -715,6 +747,7 @@ $('#refresh').addEventListener('click',refresh);
 $('#new-task').addEventListener('click',() => openTask());
 $('#manage-profiles').addEventListener('click',openProfiles);
 $('#task-form').addEventListener('submit',saveTask);
+$('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());

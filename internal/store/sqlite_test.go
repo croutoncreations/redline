@@ -109,6 +109,7 @@ ON runs(provider_account_id) WHERE state IN ('preparing', 'running');
 ALTER TABLE provider_controls DROP COLUMN policy_name;
 ALTER TABLE provider_controls DROP COLUMN max_concurrent_runs;
 ALTER TABLE execution_profiles DROP COLUMN agent_context_id;
+ALTER TABLE tasks DROP COLUMN runtime_job_id;
 ALTER TABLE runs DROP COLUMN runtime_connection_id;
 ALTER TABLE runs DROP COLUMN agent_context_id;
 ALTER TABLE runs DROP COLUMN external_run_id;

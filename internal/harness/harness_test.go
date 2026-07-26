@@ -236,6 +236,52 @@ func TestHermesHarnessUsesAgentContextAndPersistsExternalSession(t *testing.T) {
 	}
 }
 
+func TestHermesHarnessCanTriggerExistingRuntimeJobWithoutPrompt(t *testing.T) {
+	contexts := fakeContexts{
+		context: domain.AgentContext{
+			ID: "hermes-default", RuntimeConnectionID: "hermes-pi",
+			Profile: "default", WorkingDirectory: "/srv/redline",
+		},
+		connection: domain.RuntimeConnection{
+			ID: "hermes-pi", Runtime: "hermes", Transport: "gateway", URL: "http://gateway.test",
+		},
+	}
+	runner := &fakeHermesRunner{job: hermes.Job{
+		ID: "63c0e40d3eac", Name: "Nibit weekly GSC SEO content planner",
+		Provider: "custom:cliproxyapi-plus", Model: "claude-fable-5-medium", Enabled: true,
+	}}
+	var external domain.ExternalRun
+	result, err := (harness.Adapter{Contexts: contexts, Hermes: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-hermes-job", OutputDirectory: t.TempDir(),
+		Task: domain.Task{ID: "task", RuntimeJobID: runner.job.ID},
+		Profile: domain.ExecutionProfile{
+			AgentContextID: contexts.context.ID, HarnessType: "hermes",
+			Model: "custom:cliproxyapi-plus/claude-fable-5-medium",
+		},
+		Workspace: domain.Workspace{Directory: "/srv/redline"},
+		OnExternalStarted: func(value domain.ExternalRun) error {
+			external = value
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.triggeredConnection.ID != "hermes-pi" || runner.triggeredJobID != runner.job.ID {
+		t.Fatalf("connection=%#v job=%q", runner.triggeredConnection, runner.triggeredJobID)
+	}
+	if external.RuntimeConnectionID != "hermes-pi" || external.RunID != runner.job.ID {
+		t.Fatalf("external = %#v", external)
+	}
+	if result.ExitCode != 0 || result.Metadata["external_job_id"] != runner.job.ID {
+		t.Fatalf("result = %#v", result)
+	}
+	data, err := os.ReadFile(result.OutputFile)
+	if err != nil || !strings.Contains(string(data), `"job_id":"63c0e40d3eac"`) {
+		t.Fatalf("artifact=%s err=%v", data, err)
+	}
+}
+
 type captureRunner struct {
 	command redprocess.Command
 	stdin   string
@@ -255,8 +301,11 @@ func (f fakeContexts) GetRuntimeConnection(context.Context, string) (domain.Runt
 }
 
 type fakeHermesRunner struct {
-	request hermes.RunRequest
-	result  hermes.RunResult
+	request             hermes.RunRequest
+	result              hermes.RunResult
+	job                 hermes.Job
+	triggeredConnection domain.RuntimeConnection
+	triggeredJobID      string
 }
 
 func (f *fakeHermesRunner) Run(_ context.Context, request hermes.RunRequest) (hermes.RunResult, error) {
@@ -267,6 +316,12 @@ func (f *fakeHermesRunner) Run(_ context.Context, request hermes.RunRequest) (he
 		})
 	}
 	return f.result, nil
+}
+
+func (f *fakeHermesRunner) TriggerJob(_ context.Context, connection domain.RuntimeConnection, jobID string) (hermes.Job, error) {
+	f.triggeredConnection = connection
+	f.triggeredJobID = jobID
+	return f.job, nil
 }
 
 func (r *captureRunner) Run(_ context.Context, command redprocess.Command) (int, error) {

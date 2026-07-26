@@ -79,6 +79,7 @@ type taskCreateInput struct {
 	PromptFile         string `json:"prompt_file,omitempty" jsonschema:"path to a prompt file available to the Redline service"`
 	Priority           int    `json:"priority" jsonschema:"higher values run before lower values within the unlocked dispatch tier"`
 	ExecutionProfileID string `json:"execution_profile_id" jsonschema:"existing execution profile ID"`
+	RuntimeJobID       string `json:"runtime_job_id,omitempty" jsonschema:"existing Hermes job ID to trigger instead of starting a new prompt session"`
 	Type               string `json:"type" jsonschema:"one_off or recurring"`
 	DispatchTier       string `json:"dispatch_tier" jsonschema:"behind, well_behind, or expiring"`
 	MinInterval        string `json:"min_interval,omitempty" jsonschema:"minimum interval between recurring runs, such as 6h or 7d"`
@@ -92,6 +93,7 @@ type taskUpdateInput struct {
 	PromptFile         *string `json:"prompt_file,omitempty" jsonschema:"new prompt file path"`
 	Priority           *int    `json:"priority,omitempty" jsonschema:"new priority"`
 	ExecutionProfileID *string `json:"execution_profile_id,omitempty" jsonschema:"new execution profile ID"`
+	RuntimeJobID       *string `json:"runtime_job_id,omitempty" jsonschema:"new existing Hermes job ID; empty clears it"`
 	Type               *string `json:"type,omitempty" jsonschema:"one_off or recurring"`
 	DispatchTier       *string `json:"dispatch_tier,omitempty" jsonschema:"behind, well_behind, or expiring"`
 	MinInterval        *string `json:"min_interval,omitempty" jsonschema:"new minimum interval; an empty string clears it"`
@@ -218,6 +220,7 @@ type taskView struct {
 	Priority                     int                 `json:"priority"`
 	QueueSequence                int64               `json:"queue_sequence"`
 	ExecutionProfileID           string              `json:"execution_profile_id"`
+	RuntimeJobID                 string              `json:"runtime_job_id,omitempty"`
 	Type                         domain.TaskType     `json:"type"`
 	DispatchTier                 domain.DispatchTier `json:"dispatch_tier"`
 	MinInterval                  string              `json:"min_interval"`
@@ -505,6 +508,7 @@ func (s *server) taskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input t
 	putOptional(body, "prompt_file", input.PromptFile)
 	putOptional(body, "priority", input.Priority)
 	putOptional(body, "execution_profile_id", input.ExecutionProfileID)
+	putOptional(body, "runtime_job_id", input.RuntimeJobID)
 	putOptional(body, "type", input.Type)
 	putOptional(body, "dispatch_tier", input.DispatchTier)
 	putOptional(body, "min_interval", input.MinInterval)
@@ -791,7 +795,8 @@ func viewTask(item domain.Task, includePrompt bool) taskView {
 	result := taskView{
 		ID: item.ID, Name: item.Name, PromptFile: item.PromptFile, Priority: item.Priority,
 		QueueSequence: item.QueueSequence, ExecutionProfileID: item.ExecutionProfileID,
-		Type: item.Type, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(),
+		RuntimeJobID: item.RuntimeJobID,
+		Type:         item.Type, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(),
 		RequireRepoChange: item.RequireRepoChange, Enabled: item.Enabled, State: item.State,
 		LastStartedAt: item.LastStartedAt, LastCompletedAt: item.LastCompletedAt,
 		LastSuccessfulSourceRevision: item.LastSuccessfulSourceRevision,

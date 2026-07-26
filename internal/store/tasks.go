@@ -189,11 +189,11 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (
 id, name, prompt, prompt_file, priority, queue_sequence, execution_profile_id,
-task_type, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
+runtime_job_id, task_type, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
 last_started_at, last_completed_at, last_successful_source_revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Prompt, task.PromptFile, task.Priority, sequence,
-		task.ExecutionProfileID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
+		task.ExecutionProfileID, task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
 		state, nullableTime(task.LastStartedAt), nullableTime(task.LastCompletedAt),
 		task.LastSuccessfulSourceRevision, formatTime(now), formatTime(now),
 	)
@@ -228,9 +228,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("%w: running task %q cannot be edited", ErrConflict, task.ID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET name = ?, prompt = ?, prompt_file = ?, priority = ?,
-execution_profile_id = ?, task_type = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
+execution_profile_id = ?, runtime_job_id = ?, task_type = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
 WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.ExecutionProfileID,
-		task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
+		task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -560,7 +560,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 }
 
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
-t.queue_sequence, t.execution_profile_id, t.task_type, t.min_interval_ns, t.dispatch_tier,
+t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
 t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
 
@@ -574,7 +574,7 @@ func scanTask(row scanner) (domain.Task, error) {
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
-		&task.QueueSequence, &task.ExecutionProfileID, &task.Type, &minInterval, &task.DispatchTier,
+		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
 		&task.LastSuccessfulSourceRevision, &created, &updated,
 	)

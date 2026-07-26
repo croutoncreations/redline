@@ -393,6 +393,17 @@ ADD COLUMN agent_context_id TEXT NOT NULL DEFAULT '';
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (20)`); err != nil {
 			return fmt.Errorf("record configurable concurrency migration: %w", err)
 		}
+		version = 20
+	}
+	if version < 21 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE tasks ADD COLUMN runtime_job_id TEXT NOT NULL DEFAULT '';
+`); err != nil {
+			return fmt.Errorf("add runtime job task target: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (21)`); err != nil {
+			return fmt.Errorf("record runtime job task target migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

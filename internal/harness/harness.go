@@ -21,6 +21,7 @@ type ContextStore interface {
 
 type HermesRunner interface {
 	Run(context.Context, hermes.RunRequest) (hermes.RunResult, error)
+	TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error)
 }
 
 type Adapter struct {
@@ -46,10 +47,6 @@ type Result struct {
 }
 
 func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
-	prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
-	if err != nil {
-		return Result{}, err
-	}
 	if request.RunID == "" || request.OutputDirectory == "" || request.Workspace.Directory == "" {
 		return Result{}, fmt.Errorf("run id, output directory, and workspace directory are required")
 	}
@@ -76,7 +73,18 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	defer stderr.Close()
 
 	if request.Profile.HarnessType == "hermes" {
+		if request.Task.RuntimeJobID != "" {
+			return a.runHermesJob(ctx, request, stdout, result)
+		}
+		prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
+		if err != nil {
+			return Result{}, err
+		}
 		return a.runHermes(ctx, request, prompt, stdout, result)
+	}
+	prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
+	if err != nil {
+		return Result{}, err
 	}
 	command, err := buildCommand(request, prompt, stdout, stderr)
 	if err != nil {
@@ -86,6 +94,51 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	result.ExitCode = exitCode
 	if err != nil {
 		return result, fmt.Errorf("launch %s harness: %w", request.Profile.HarnessType, err)
+	}
+	return result, nil
+}
+
+func (a Adapter) runHermesJob(
+	ctx context.Context,
+	request Request,
+	stdout io.Writer,
+	result Result,
+) (Result, error) {
+	if a.Contexts == nil {
+		return result, fmt.Errorf("Hermes harness requires an agent context store")
+	}
+	if a.Hermes == nil {
+		a.Hermes = hermes.Client{}
+	}
+	agentContext, err := a.Contexts.GetAgentContext(ctx, request.Profile.AgentContextID)
+	if err != nil {
+		return result, fmt.Errorf("load Hermes agent context: %w", err)
+	}
+	connection, err := a.Contexts.GetRuntimeConnection(ctx, agentContext.RuntimeConnectionID)
+	if err != nil {
+		return result, fmt.Errorf("load Hermes runtime connection: %w", err)
+	}
+	job, err := a.Hermes.TriggerJob(ctx, connection, request.Task.RuntimeJobID)
+	if err != nil {
+		result.ExitCode = 1
+		return result, fmt.Errorf("trigger Hermes job: %w", err)
+	}
+	if request.OnExternalStarted != nil {
+		if err := request.OnExternalStarted(domain.ExternalRun{
+			RuntimeConnectionID: connection.ID, RunID: job.ID,
+		}); err != nil {
+			return result, fmt.Errorf("record Hermes job: %w", err)
+		}
+	}
+	if err := json.NewEncoder(stdout).Encode(map[string]any{
+		"type": "hermes.job_triggered", "job_id": job.ID, "name": job.Name,
+		"model": job.Model, "provider": job.Provider,
+	}); err != nil {
+		return result, fmt.Errorf("write Hermes job result: %w", err)
+	}
+	result.ExitCode = 0
+	result.Metadata = map[string]any{
+		"external_job_id": job.ID, "actual_model": job.Model, "actual_provider": job.Provider,
 	}
 	return result, nil
 }

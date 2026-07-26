@@ -89,6 +89,7 @@ type Task struct {
 	Priority                     int           `json:"priority"`
 	QueueSequence                int64         `json:"queue_sequence"`
 	ExecutionProfileID           string        `json:"execution_profile_id"`
+	RuntimeJobID                 string        `json:"runtime_job_id,omitempty"`
 	Type                         TaskType      `json:"type"`
 	DispatchTier                 DispatchTier  `json:"dispatch_tier"`
 	MinInterval                  time.Duration `json:"min_interval"`
