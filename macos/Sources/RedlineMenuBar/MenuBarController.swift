@@ -3,7 +3,6 @@ import RedlineKit
 
 @MainActor
 final class MenuBarController: NSObject {
-    private let apiURL: URL
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let showAppSetup: @MainActor () -> Void
@@ -34,7 +33,6 @@ final class MenuBarController: NSObject {
         supervisor: ServiceSupervisor,
         showAppSetup: @escaping @MainActor () -> Void = {}
     ) {
-        self.apiURL = apiURL
         client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
         dashboardURL = APICredentialStore.authenticatedDashboardURL(baseURL: apiURL, token: apiToken)
         self.supervisor = supervisor
@@ -152,6 +150,6 @@ final class MenuBarController: NSObject {
     }
 
     private func openDashboardInBrowser() {
-        NSWorkspace.shared.open(apiURL)
+        NSWorkspace.shared.open(dashboardURL)
     }
 }

@@ -166,3 +166,19 @@ also supplies an isolated signing key.
 `tests/macos/release-packaging.sh` exercises the complete local archive path with two configured
 versions. It verifies both appcast entries, the generated binary delta, and the Ed25519 signatures
 on the new archive and delta. This test uses a published Ed25519 test vector, not a production key.
+
+## Clean-install release rehearsal
+
+The packaging test proves the archive, signatures, appcast, and updater mechanics, but it cannot
+faithfully reproduce a first launch on a user's Mac. Use three layers before a public release:
+
+1. Let CI build and test the app plus the complete two-version packaging/update path.
+2. Install the candidate DMG from a fresh macOS user account. This gives Redline an empty
+   Application Support directory, no API credential, no login item, and no inherited preferences,
+   while retaining the machine's real Codex, Claude, Pi, DevX, and Hermes installations.
+3. Before public beta, restore a clean Apple Silicon macOS VM snapshot (Tart or UTM), download the
+   published DMG and checksum as a user would, and verify Gatekeeper, first-run configuration,
+   background-service ownership, pause-by-default onboarding, and an update from the prior release.
+
+GitHub's macOS runner is useful for deterministic build and package checks; it is not a substitute
+for the user-facing Gatekeeper dialogs, login persistence, or a real Sparkle update rehearsal.
