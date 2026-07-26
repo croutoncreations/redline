@@ -24,9 +24,10 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [StubURLProtocol.self]
     let session = URLSession(configuration: configuration)
-    let client = RedlineAPIClient(baseURL: URL(string: "http://127.0.0.1:7436")!, session: session)
+    let client = RedlineAPIClient(baseURL: URL(string: "http://127.0.0.1:7436")!, token: "local-token", session: session)
     nonisolated(unsafe) var requests: [(String, String)] = []
     StubURLProtocol.handler = { request in
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer local-token")
         requests.append((request.httpMethod ?? "", request.url!.absoluteString))
         let body = request.url!.path.hasSuffix("/logs")
             ? Data(#"{"content":"hello\n","size_bytes":6,"truncated":false}"#.utf8)

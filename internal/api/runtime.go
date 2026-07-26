@@ -138,6 +138,45 @@ func (s *Server) discoverRuntimeConnection(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, result.View(options))
 }
 
+func (s *Server) listRuntimeJobs(w http.ResponseWriter, r *http.Request) {
+	item, ok := s.hermesRuntimeConnection(w, r)
+	if !ok {
+		return
+	}
+	jobs, err := s.hermes.ListJobs(r.Context(), item)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (s *Server) triggerRuntimeJob(w http.ResponseWriter, r *http.Request) {
+	item, ok := s.hermesRuntimeConnection(w, r)
+	if !ok {
+		return
+	}
+	job, err := s.hermes.TriggerJob(r.Context(), item, r.PathValue("job"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) hermesRuntimeConnection(w http.ResponseWriter, r *http.Request) (domain.RuntimeConnection, bool) {
+	item, err := s.store.GetRuntimeConnection(r.Context(), r.PathValue("connection"))
+	if err != nil {
+		writeError(w, err)
+		return domain.RuntimeConnection{}, false
+	}
+	if item.Runtime != "hermes" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "runtime jobs are only supported for Hermes"})
+		return domain.RuntimeConnection{}, false
+	}
+	return item, true
+}
+
 func (s *Server) listAgentContexts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListAgentContexts(r.Context())
 	if err != nil {

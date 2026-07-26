@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +33,7 @@ import (
 	"github.com/jfox/redline/internal/openusage"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
+	"github.com/jfox/redline/internal/tasktemplate"
 	"github.com/jfox/redline/internal/tokenlog"
 	"github.com/jfox/redline/internal/usage"
 	"github.com/jfox/redline/internal/workspace"
@@ -49,6 +53,8 @@ type HarnessDiscoverer interface {
 
 type HermesDiscoverer interface {
 	Discover(context.Context, domain.RuntimeConnection) (hermes.Discovery, error)
+	ListJobs(context.Context, domain.RuntimeConnection) ([]hermes.Job, error)
+	TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error)
 }
 
 type Server struct {
@@ -167,12 +173,15 @@ func newServer(
 	mux.HandleFunc("PATCH /v1/runtime-connections/{connection}", server.updateRuntimeConnection)
 	mux.HandleFunc("DELETE /v1/runtime-connections/{connection}", server.deleteRuntimeConnection)
 	mux.HandleFunc("POST /v1/runtime-connections/{connection}/discover", server.discoverRuntimeConnection)
+	mux.HandleFunc("GET /v1/runtime-connections/{connection}/jobs", server.listRuntimeJobs)
+	mux.HandleFunc("POST /v1/runtime-connections/{connection}/jobs/{job}/run", server.triggerRuntimeJob)
 	mux.HandleFunc("GET /v1/agent-contexts", server.listAgentContexts)
 	mux.HandleFunc("POST /v1/agent-contexts", server.createAgentContext)
 	mux.HandleFunc("GET /v1/agent-contexts/{context}", server.getAgentContext)
 	mux.HandleFunc("PATCH /v1/agent-contexts/{context}", server.updateAgentContext)
 	mux.HandleFunc("DELETE /v1/agent-contexts/{context}", server.deleteAgentContext)
 	mux.HandleFunc("GET /v1/tasks", server.listTasks)
+	mux.HandleFunc("GET /v1/task-templates", server.listTaskTemplates)
 	mux.HandleFunc("POST /v1/tasks", server.createTask)
 	mux.HandleFunc("GET /v1/tasks/{task}", server.getTask)
 	mux.HandleFunc("PATCH /v1/tasks/{task}", server.updateTask)
@@ -204,7 +213,94 @@ func configuredNotifier(cfg config.Config, database *store.DB, now func() time.T
 	}
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	if !loopbackHost(r.Host) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "Redline only accepts loopback hosts"})
+		return
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !sameOrigin(origin, r) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "cross-origin Redline API requests are not allowed"})
+		return
+	}
+	if s.config.APIToken != "" {
+		if s.bootstrapDashboardSession(w, r) {
+			return
+		}
+		if !s.authorized(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
+			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
+			return
+		}
+	}
+	s.mux.ServeHTTP(w, r)
+}
+
+const apiSessionCookie = "redline_api_session"
+
+func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard") {
+		return false
+	}
+	token := r.URL.Query().Get("access_token")
+	if token == "" {
+		return false
+	}
+	if !secureTokenEqual(token, s.config.APIToken) {
+		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+		return true
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+	clean := *r.URL
+	query := clean.Query()
+	query.Del("access_token")
+	clean.RawQuery = query.Encode()
+	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
+	return true
+}
+
+func (s *Server) authorized(r *http.Request) bool {
+	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
+		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
+		return true
+	}
+	cookie, err := r.Cookie(apiSessionCookie)
+	return err == nil && secureTokenEqual(cookie.Value, s.config.APIToken)
+}
+
+func secureTokenEqual(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+func loopbackHost(hostPort string) bool {
+	host := hostPort
+	if parsed, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
+}
+
+func sameOrigin(origin string, r *http.Request) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host)
+}
+
+func (s *Server) listTaskTemplates(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, tasktemplate.Catalog())
+}
 
 func (s *Server) StartScheduler(ctx context.Context) {
 	s.startMu.Lock()

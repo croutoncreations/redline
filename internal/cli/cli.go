@@ -10,12 +10,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jfox/redline/internal/api"
+	"github.com/jfox/redline/internal/apiauth"
 	"github.com/jfox/redline/internal/apiclient"
 	"github.com/jfox/redline/internal/artifacts"
 	"github.com/jfox/redline/internal/calibration"
@@ -54,7 +56,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification>")
 		return 1
 	}
-	client := apiclient.Client{BaseURL: *apiURL}
+	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
@@ -198,6 +200,11 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	cfg.APIToken, err = apiauth.EnsureToken(configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	database, err := store.Open(cfg.Database)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -242,6 +249,24 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		apiServer.Wait()
 	}
 	return 0
+}
+
+func clientToken(configPath string) string {
+	if token := strings.TrimSpace(os.Getenv("REDLINE_API_TOKEN")); token != "" {
+		return token
+	}
+	if token, err := apiauth.ReadToken(configPath); err == nil {
+		return token
+	}
+	if configPath == "redline.yaml" {
+		if home, err := os.UserHomeDir(); err == nil {
+			standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
+			if token, err := apiauth.ReadToken(standard); err == nil {
+				return token
+			}
+		}
+	}
+	return ""
 }
 
 func runDecision(client apiclient.Client, args []string, stdout, stderr io.Writer) int {

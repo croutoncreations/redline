@@ -1,7 +1,7 @@
 # MCP and agent interface
 
 Redline exposes a local stdio MCP server for agents that need usage guidance or queue access. The
-MCP process is a thin client of the existing loopback HTTP service:
+MCP process is a thin authenticated client of the existing loopback HTTP service:
 
 ```text
 agent host -> redline mcp -> http://127.0.0.1:7436 -> service -> SQLite
@@ -17,6 +17,10 @@ The Redline service must already be running. For a source checkout, build a stab
 ```bash
 go build -o "$PWD/dist/redline" ./cmd/redline
 ```
+
+Pass the same `--config` path used by the service when it is not in the standard macOS location.
+The MCP client reads the protected sibling `api-token` automatically. `REDLINE_API_TOKEN` is
+available for supervised environments that inject the token without a readable config path.
 
 Register that command with Codex:
 

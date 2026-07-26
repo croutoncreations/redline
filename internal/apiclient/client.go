@@ -13,6 +13,7 @@ import (
 
 type Client struct {
 	BaseURL    string
+	Token      string
 	HTTPClient *http.Client
 }
 
@@ -33,6 +34,9 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	client := c.HTTPClient
 	if client == nil {

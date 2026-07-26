@@ -59,6 +59,64 @@ func TestDiscoverReturnsProfilesProjectsAndOnlyAuthenticatedModels(t *testing.T)
 	}
 }
 
+func TestListAndTriggerJobsUseAuthenticatedGatewayAPI(t *testing.T) {
+	var triggered string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
+			writeJSON(w, map[string]any{"jobs": []map[string]any{{
+				"id": "content-post", "name": "Draft content post", "state": "scheduled",
+				"enabled": true, "provider": "anthropic-cli",
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/content-post/run":
+			triggered = r.URL.Path
+			writeJSON(w, map[string]any{"job": map[string]any{
+				"id": "content-post", "name": "Draft content post", "state": "scheduled",
+				"enabled": true,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return &http.Client{Transport: bearerTransport{
+			token: "test-key", base: http.DefaultTransport,
+		}}, gateway.URL, nil
+	}}
+	connection := domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"}
+
+	jobs, err := client.ListJobs(t.Context(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "content-post" || jobs[0].Provider != "anthropic-cli" {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	job, err := client.TriggerJob(t.Context(), connection, jobs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != jobs[0].ID || triggered != "/api/jobs/content-post/run" {
+		t.Fatalf("job=%#v triggered=%q", job, triggered)
+	}
+}
+
+type bearerTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t bearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(cloned)
+}
+
 func TestDiscoveryViewIsCompactByDefaultAndBoundsFilteredModels(t *testing.T) {
 	discovery := hermes.Discovery{
 		Version:  "0.18.2",

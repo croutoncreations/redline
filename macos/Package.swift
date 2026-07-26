@@ -13,7 +13,10 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
     ],
     targets: [
-        .target(name: "RedlineKit"),
+        .target(
+            name: "RedlineKit",
+            linkerSettings: [.linkedFramework("Security")]
+        ),
         .executableTarget(
             name: "RedlineMenuBar",
             dependencies: [

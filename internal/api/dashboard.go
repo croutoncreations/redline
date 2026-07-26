@@ -62,6 +62,8 @@ type dashboardDecision struct {
 	RollingDispatchable float64             `json:"rolling_dispatchable"`
 	PaceGap             float64             `json:"pace_gap"`
 	UnlockedTier        domain.DispatchTier `json:"unlocked_tier,omitempty"`
+	ProjectedTriggerAt  *time.Time          `json:"projected_trigger_at,omitempty"`
+	ProjectionBasis     string              `json:"projection_basis,omitempty"`
 }
 
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
@@ -249,6 +251,11 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 					Overflow: latest.Result.Overflow, RollingDispatchable: latest.Result.RollingDispatchable,
 					PaceGap: latest.Result.PaceGap, UnlockedTier: latest.Result.UnlockedTier,
 				}
+				projected, projectionErr := s.projectedTrigger(ctx, id, snapshot, selection)
+				if projectionErr == nil {
+					item.LatestDecision.ProjectedTriggerAt = projected
+					item.LatestDecision.ProjectionBasis = "Assumes weekly usage stays unchanged."
+				}
 				createdAt := decisions[0].CreatedAt
 				item.LatestDecisionAt = &createdAt
 			}
@@ -280,4 +287,34 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		return dashboardResponse{}, err
 	}
 	return result, nil
+}
+
+func (s *Server) projectedTrigger(
+	ctx context.Context,
+	providerID string,
+	snapshot decision.UsageSnapshot,
+	selection providerPolicySelection,
+) (*time.Time, error) {
+	thresholds, err := selection.Definition.DecisionThresholds()
+	if err != nil {
+		return nil, err
+	}
+	maxAge, err := s.config.SnapshotAge()
+	if err != nil {
+		return nil, err
+	}
+	estimate, err := s.calibration(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	pollInterval, err := s.config.SchedulerInterval()
+	if err != nil {
+		return nil, err
+	}
+	return decision.ProjectTriggerAt(decision.Input{
+		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
+		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
+		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
+		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+	}, pollInterval), nil
 }

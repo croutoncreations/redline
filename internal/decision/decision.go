@@ -227,6 +227,46 @@ func Evaluate(in Input) Result {
 	return evaluateSlots(in)
 }
 
+// ProjectTriggerAt returns the first scheduler poll at which unchanged weekly
+// usage would become eligible to run. Short windows reset to full capacity at
+// their fixed boundaries. The projection intentionally makes no claim about
+// future interactive usage and returns nil when flat usage never qualifies.
+func ProjectTriggerAt(in Input, pollInterval time.Duration) *time.Time {
+	if pollInterval <= 0 || in.Now.IsZero() || !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
+		return nil
+	}
+	if result := Evaluate(in); result.Decision == Run {
+		projected := in.Now
+		return &projected
+	}
+	for projected := in.Now.Add(pollInterval); projected.Before(in.Snapshot.Weekly.ResetsAt); projected = projected.Add(pollInterval) {
+		future := projectInput(in, projected)
+		if result := Evaluate(future); result.Decision == Run {
+			at := projected
+			return &at
+		}
+	}
+	return nil
+}
+
+func projectInput(in Input, at time.Time) Input {
+	future := in
+	future.Now = at
+	future.Snapshot.ObservedAt = at
+	if in.Snapshot.Short == nil {
+		return future
+	}
+	short := *in.Snapshot.Short
+	if !at.Before(short.ResetsAt) {
+		elapsed := at.Sub(short.ResetsAt)
+		resets := elapsed/ShortWindowDuration + 1
+		short.ResetsAt = short.ResetsAt.Add(resets * ShortWindowDuration)
+		short.Remaining = 1
+	}
+	future.Snapshot.Short = &short
+	return future
+}
+
 func evaluateSlots(in Input) Result {
 	slots := buildSlots(in.Now, *in.Snapshot.Short, in.Snapshot.Weekly.ResetsAt)
 	maximumConsumable := 0.0

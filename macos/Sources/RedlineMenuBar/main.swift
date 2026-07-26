@@ -9,22 +9,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let apiURL = URL(string: ProcessInfo.processInfo.environment["REDLINE_API_URL"] ?? "http://127.0.0.1:7436")!
-        let client = RedlineAPIClient(baseURL: apiURL)
+        let bootstrapClient = RedlineAPIClient(baseURL: apiURL)
         let installation: AppInstallationCoordinator?
         do {
-            installation = try AppInstallationCoordinator(client: client)
+            installation = try AppInstallationCoordinator(client: bootstrapClient)
         } catch {
             installation = nil
             installationFailure = error.localizedDescription
         }
         installationCoordinator = installation
         let configURL = installation?.configURL ?? standardConfigURL
+        let apiToken: String
+        do {
+            apiToken = try APICredentialStore.loadOrCreateToken(for: configURL)
+        } catch {
+            installationFailure = "Could not create the protected local API credential: \(error.localizedDescription)"
+            presentInstallationFailure()
+            return
+        }
+        let client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
+        installation?.updateClient(client)
         let supervisor = ServiceSupervisor(
             client: client,
             launchConfiguration: launchConfiguration(apiURL: apiURL, configURL: configURL)
         )
         let controller = MenuBarController(
             apiURL: apiURL,
+            apiToken: apiToken,
             supervisor: supervisor,
             showAppSetup: { [weak self, weak installation] in
                 if let installation { installation.presentSetup() }

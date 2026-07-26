@@ -13,6 +13,8 @@ const assets = {
 
 function dashboardFixture() {
   const observed = '2026-07-20T19:00:00Z';
+  const claudeTrigger = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  const codexTrigger = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   return {
     generated_at: observed,
     active_policy: 'standard',
@@ -24,8 +26,8 @@ function dashboardFixture() {
     scheduler: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     usage_monitor: { enabled: true, next_cycle_at: '2026-07-20T19:05:00Z' },
     providers: [
-      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'window_slots', reason: 'no actionable weekly overflow', overflow: .01, rolling_dispatchable: .37, pace_gap: .08 }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [{ key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', role: 'weekly', remaining: 1, resets_at: '2026-07-24T19:00:00Z', period_duration_seconds: 604800, reset_inferred: true }] } },
-      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .08 }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
+      { id: 'claude-main', provider: 'claude', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native', last_error: 'OpenUsage unavailable; using native collection' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'window_slots', reason: 'no actionable weekly overflow', overflow: .01, rolling_dispatchable: .37, pace_gap: .08, projected_trigger_at: claudeTrigger, projection_basis: 'Assumes weekly usage stays unchanged.' }, snapshot: { provider: 'claude', observed_at: observed, short: { remaining: 0.62, resets_at: '2026-07-20T23:00:00Z' }, weekly: { remaining: 0.53, resets_at: '2026-07-24T19:00:00Z' }, allowances: [{ key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', role: 'weekly', remaining: 1, resets_at: '2026-07-24T19:00:00Z', period_duration_seconds: 604800, reset_inferred: true }] } },
+      { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .08, projected_trigger_at: codexTrigger, projection_basis: 'Assumes weekly usage stays unchanged.' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
     ],
     tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
     runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
@@ -56,6 +58,17 @@ function profileOptionsFixture() {
   };
 }
 
+function taskTemplatesFixture() {
+  return [{
+    id: 'bug-hunt', name: 'Find and fix one reproducible bug',
+    description: 'Reproduce one real defect, fix its root cause, and verify the affected suite.',
+    prompt: 'Find ONE real, demonstrable bug. Reproduce it, fix it, and verify the affected suite.',
+    priority: 80, type: 'recurring', dispatch_tier: 'behind',
+    min_interval: 259200000000000, require_repo_change: true,
+    requirements: ['Repository access', 'Test and static-analysis tools'],
+  }];
+}
+
 function capacityFixture(provider) {
   return {
     provider,
@@ -77,6 +90,7 @@ function capacityFixture(provider) {
 async function loadDashboard(page, options = {}) {
   const state = {
     dashboard: dashboardFixture(), profiles: profileFixture(), profileOptions: profileOptionsFixture(),
+    taskTemplates: taskTemplatesFixture(),
     runtimeConnections: [], agentContexts: [],
     requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
   };
@@ -108,6 +122,7 @@ async function loadDashboard(page, options = {}) {
       return state.dashboardError ? json(500, { error: 'dashboard unavailable' }) : json(200, state.dashboard);
     }
     if (url.pathname === '/v1/profile-options') return json(200, state.profileOptions);
+    if (url.pathname === '/v1/task-templates') return json(200, state.taskTemplates);
     if (url.pathname === '/v1/runtime-connections' && method === 'GET') return json(200, state.runtimeConnections);
     if (url.pathname === '/v1/runtime-connections' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
@@ -223,8 +238,8 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.locator('#health-explainer')).toContainText('temporary usage source timeout');
   await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('53%');
   await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('5h 62%');
-  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Watching · 1% to trigger');
-  await expect(page.getByRole('button', { name: 'Show Codex usage details' })).toContainText('8% behind pace');
+  await expect(page.getByRole('button', { name: 'Show Claude usage details' })).toContainText('Likely eligible in 2 hrs');
+  await expect(page.getByRole('button', { name: 'Show Codex usage details' })).toContainText('Likely eligible in 1 day');
   await page.getByRole('button', { name: 'Show Claude usage details' }).click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Native');
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('OpenUsage unavailable');
@@ -318,6 +333,23 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await expect(dialog).toBeHidden();
   await expect.poll(() => state.requests.filter(item => item.path === '/v1/tasks').length).toBe(1);
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true });
+});
+
+test('starts a job from an editable prompt template', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-template').selectOption('bug-hunt');
+  await expect(page.locator('#task-name')).toHaveValue('Find and fix one reproducible bug');
+  await expect(page.locator('#task-prompt')).toHaveValue(/Find ONE real/);
+  await expect(page.locator('#task-template-description')).toContainText('Requires: Repository access');
+  await page.locator('#task-name').fill('Find one bug in parsing');
+  await page.locator('#task-prompt').fill('Inspect parsing only. Reproduce one bug before fixing it.');
+  await page.locator('#task-profile').selectOption('codex-devx');
+  await page.getByRole('button', { name: 'Save job' }).click();
+  await expect.poll(() => state.requests.some(item =>
+    item.path === '/v1/tasks' && item.body.name === 'Find one bug in parsing' &&
+    item.body.prompt === 'Inspect parsing only. Reproduce one bug before fixing it.'
+  )).toBe(true);
 });
 
 test('creates a Pi profile and surfaces blocked deletion errors', async ({ page }) => {

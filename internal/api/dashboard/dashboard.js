@@ -19,7 +19,7 @@ const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'comp
 const tokenNumber = (value) => new Intl.NumberFormat().format(value || 0);
 
 let currentRun = null, currentLogContent = '', currentLogView = 'formatted';
-let profiles = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
+let profiles = [], taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
@@ -62,13 +62,23 @@ function providerPressure(item) {
     const margin = policyCatalog[item.policy]?.trigger_margin || 0;
     const distance = Math.max(0,margin - (current.overflow || 0));
     const points = Math.max(0,Math.ceil((distance * 100) - .000001));
+    const projected = current.projected_trigger_at && new Date(current.projected_trigger_at) > new Date()
+      ? `Likely eligible ${relative(current.projected_trigger_at)}`
+      : '';
     return {
-      label:`Watching · ${points}% to trigger`,
-      detail:current.reason || `${points} percentage point${points === 1 ? '' : 's'} of additional projected weekly overflow needed to trigger.`,
+      label:projected || `Watching · ${points}% to trigger`,
+      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'} ${points} percentage point${points === 1 ? '' : 's'} of additional projected weekly overflow needed.${current.reason ? ` ${current.reason}.` : ''}`,
       tone:points <= 2 ? 'near' : 'neutral',
     };
   }
   const pacePoints = Math.round((current.pace_gap || 0) * 100);
+  if (current.projected_trigger_at && new Date(current.projected_trigger_at) > new Date()) {
+    return {
+      label:`Likely eligible ${relative(current.projected_trigger_at)}`,
+      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'}${current.reason ? ` ${current.reason}.` : ''}`,
+      tone:'neutral',
+    };
+  }
   if (pacePoints > 0) {
     return {label:`${pacePoints}% behind pace`,detail:current.reason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
   }
@@ -360,6 +370,10 @@ async function apiRequest(path,options={}) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
+async function loadTaskTemplates() {
+  if (!taskTemplates.length) taskTemplates = await apiRequest('/v1/task-templates');
+  return taskTemplates;
+}
 async function loadProfiles(force=false) {
   if (force || !profiles.length) profiles = await apiRequest('/v1/profiles');
   $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
@@ -485,10 +499,13 @@ function showTaskError(message) {
 }
 async function openTask(id='') {
   try {
-    await loadProfiles(); showTaskError(''); $('#task-form').reset(); $('#task-id').value = id;
+    await Promise.all([loadProfiles(),loadTaskTemplates()]); showTaskError(''); $('#task-form').reset(); $('#task-id').value = id;
     let task = null;
     if (id) task = await apiRequest(`/v1/tasks/${encodeURIComponent(id)}`);
     $('#task-dialog-title').textContent = task ? 'Manage scheduled job' : 'New scheduled job';
+    $('#task-template-field').hidden = !!task;
+    $('#task-template').innerHTML = '<option value="">Blank job</option>' + taskTemplates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)}</option>`).join('');
+    $('#task-template-description').textContent = 'Choose an editable starter prompt or begin from scratch.';
     $('#task-name').value = task?.name || '';
     $('#task-profile').value = task?.execution_profile_id || profiles[0]?.id || '';
     $('#task-priority').value = task?.priority ?? 50;
@@ -504,6 +521,23 @@ async function openTask(id='') {
     $('#toggle-task').dataset.action = task?.enabled ? 'disable' : 'enable';
     $('#task-dialog').showModal();
   } catch (error) { $('#error-banner').hidden = false; $('#error-banner').textContent = `Could not open job: ${error.message}`; }
+}
+function applyTaskTemplate() {
+  const template = taskTemplates.find(item => item.id === $('#task-template').value);
+  if (!template) {
+    $('#task-template-description').textContent = 'Choose an editable starter prompt or begin from scratch.';
+    return;
+  }
+  $('#task-name').value = template.name || '';
+  $('#task-priority').value = template.priority ?? 50;
+  $('#task-tier').value = template.dispatch_tier || 'behind';
+  $('#task-type').value = template.type || 'recurring';
+  $('#task-interval').value = durationInput(template.min_interval || 0);
+  $('#task-prompt').value = template.prompt || '';
+  $('#task-prompt-file').value = '';
+  $('#task-repo-change').checked = !!template.require_repo_change;
+  const requirements = (template.requirements || []).join(' · ');
+  $('#task-template-description').textContent = `${template.description || 'Editable starter prompt.'}${requirements ? ` Requires: ${requirements}.` : ''}`;
 }
 async function saveTask(event) {
   event.preventDefault(); showTaskError('');
@@ -681,6 +715,7 @@ $('#refresh').addEventListener('click',refresh);
 $('#new-task').addEventListener('click',() => openTask());
 $('#manage-profiles').addEventListener('click',openProfiles);
 $('#task-form').addEventListener('submit',saveTask);
+$('#task-template').addEventListener('change',applyTaskTemplate);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);

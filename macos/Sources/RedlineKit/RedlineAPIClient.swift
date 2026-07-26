@@ -14,18 +14,17 @@ public struct RedlineAPIClient: Sendable {
     }
 
     public let baseURL: URL
+    public let token: String
     private let session: URLSession
 
-    public init(baseURL: URL, session: URLSession = .shared) {
+    public init(baseURL: URL, token: String = "", session: URLSession = .shared) {
         self.baseURL = baseURL
+        self.token = token
         self.session = session
     }
 
     public func dashboard() async throws -> DashboardSnapshot {
-        let (data, response) = try await session.data(from: baseURL.appending(path: "v1/dashboard"))
-        guard let response = response as? HTTPURLResponse else { throw Error.invalidResponse }
-        guard response.statusCode == 200 else { throw Error.status(response.statusCode) }
-        return try DashboardSnapshot.decode(data)
+        try await request(baseURL.appending(path: "v1/dashboard"), method: "GET", as: DashboardSnapshot.self)
     }
 
     public func pauseProvider(_ providerID: String) async throws -> ProviderControlResult {
@@ -63,6 +62,9 @@ public struct RedlineAPIClient: Sendable {
     private func request<T: Decodable>(_ url: URL, method: String, as type: T.Type) async throws -> T {
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if method == "POST" {
             request.httpBody = Data("{}".utf8)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

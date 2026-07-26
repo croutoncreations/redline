@@ -46,6 +46,7 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/", contentType: "text/html", contains: "gas-gauge"},
 		{path: "/", contentType: "text/html", contains: "+ New job"},
 		{path: "/", contentType: "text/html", contains: "Run when"},
+		{path: "/", contentType: "text/html", contains: "Start from"},
 		{path: "/", contentType: "text/html", contains: "EXECUTION PROFILES"},
 		{path: "/", contentType: "text/html", contains: "Custom command"},
 		{path: "/", contentType: "text/html", contains: "Recently used repositories"},
@@ -78,6 +79,143 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing asset status = %d", resp.StatusCode)
+	}
+}
+
+func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	for _, test := range []struct {
+		name   string
+		host   string
+		origin string
+	}{
+		{name: "non loopback host", host: "redline.attacker.test"},
+		{name: "cross origin", origin: "https://attacker.test"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/providers/codex-main/pause", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.host != "" {
+				req.Host = test.host
+			}
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+			}
+		})
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Frame-Options") != "DENY" ||
+		!strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'self'") {
+		t.Fatalf("status=%d headers=%v", resp.StatusCode, resp.Header)
+	}
+}
+
+func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bearer status = %d", resp.StatusCode)
+	}
+
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err = client.Get(server.URL + "/?access_token=" + url.QueryEscape(cfg.APIToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/" {
+		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	cookies := resp.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || !cookies[0].HttpOnly ||
+		cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("bootstrap cookies = %#v", cookies)
+	}
+	req, err = http.NewRequest(http.MethodGet, server.URL+"/v1/dashboard", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(cookies[0])
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cookie status = %d", resp.StatusCode)
+	}
+}
+
+func TestTaskTemplatesAreEditableStarters(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	resp, err := http.Get(server.URL + "/v1/task-templates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var templates []struct {
+		ID          string          `json:"id"`
+		Prompt      string          `json:"prompt"`
+		MinInterval time.Duration   `json:"min_interval"`
+		Type        domain.TaskType `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&templates); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || len(templates) != 6 {
+		t.Fatalf("status=%d templates=%#v", resp.StatusCode, templates)
+	}
+	if templates[0].ID != "bug-hunt" || templates[0].Prompt == "" ||
+		templates[0].MinInterval != 3*24*time.Hour || templates[0].Type != domain.Recurring {
+		t.Fatalf("first template = %#v", templates[0])
 	}
 }
 
@@ -189,7 +327,10 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 			Snapshot       *decision.UsageSnapshot `json:"snapshot"`
 			Error          string                  `json:"error"`
 			Paused         bool                    `json:"paused"`
-			LatestDecision *decision.Result        `json:"latest_decision"`
+			LatestDecision *struct {
+				PaceGap            float64    `json:"pace_gap"`
+				ProjectedTriggerAt *time.Time `json:"projected_trigger_at"`
+			} `json:"latest_decision"`
 		} `json:"providers"`
 		Tasks []struct {
 			ID       string        `json:"id"`
@@ -212,6 +353,10 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	}
 	if got.Providers[1].LatestDecision == nil || got.Providers[1].LatestDecision.PaceGap != .08 {
 		t.Fatalf("codex latest decision = %#v", got.Providers[1].LatestDecision)
+	}
+	if got.Providers[1].LatestDecision.ProjectedTriggerAt == nil ||
+		!got.Providers[1].LatestDecision.ProjectedTriggerAt.Equal(apiNow.Add(24*time.Hour)) {
+		t.Fatalf("codex projected trigger = %#v", got.Providers[1].LatestDecision.ProjectedTriggerAt)
 	}
 	if got.Tasks[0].ID != "quiet-check" || got.Tasks[0].Provider != "codex-main" || got.Tasks[0].Model != "gpt-5" || got.Tasks[0].Interval != 24*time.Hour {
 		t.Fatalf("task projection = %#v", got.Tasks[0])
@@ -2180,6 +2325,42 @@ func TestRuntimeConnectionAndAgentContextConfigurationAPI(t *testing.T) {
 	requestStatus(t, http.MethodDelete, server.URL+"/v1/profiles/"+profile.ID, "", http.StatusNoContent)
 	requestStatus(t, http.MethodDelete, server.URL+"/v1/agent-contexts/"+agentContext.ID, "", http.StatusNoContent)
 	requestStatus(t, http.MethodDelete, server.URL+"/v1/runtime-connections/"+connection.ID, "", http.StatusNoContent)
+}
+
+func TestRuntimeJobsCanBeDiscoveredAndTriggered(t *testing.T) {
+	triggered := atomic.Bool{}
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
+			_, _ = io.WriteString(w, `{"jobs":[{"id":"content-post","name":"Draft content post","state":"scheduled","enabled":true}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/content-post/run":
+			triggered.Store(true)
+			_, _ = io.WriteString(w, `{"job":{"id":"content-post","name":"Draft content post","state":"scheduled","enabled":true}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	server, _ := newAPIServer(t, codexPayload)
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes-remote", "runtime": "hermes", "transport": "gateway", "url": gateway.URL,
+	})
+	var jobs []map[string]any
+	getJSON(t, server.URL+"/v1/runtime-connections/"+connection.ID+"/jobs", &jobs)
+	if len(jobs) != 1 || jobs[0]["id"] != "content-post" {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	response, err := http.Post(
+		server.URL+"/v1/runtime-connections/"+connection.ID+"/jobs/content-post/run",
+		"application/json", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted || !triggered.Load() {
+		t.Fatalf("status=%d triggered=%v", response.StatusCode, triggered.Load())
+	}
 }
 
 func TestRuntimeConfigurationAPIUsesEmptyArraysAndRejectsIncompleteHermesProfile(t *testing.T) {

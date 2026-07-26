@@ -15,7 +15,7 @@ final class AppInstallationCoordinator {
     private(set) var legacyAgent: LegacyLaunchAgent?
     var onMigrationCompleted: (@MainActor () async -> Void)?
 
-    private let client: RedlineAPIClient
+    private var client: RedlineAPIClient
     private let defaults: UserDefaults
     private let supportDirectory: URL
 
@@ -50,6 +50,10 @@ final class AppInstallationCoordinator {
             createdStarterConfig = false
         }
         defaults.set(configURL.path, forKey: Keys.preferredConfigPath)
+    }
+
+    func updateClient(_ client: RedlineAPIClient) {
+        self.client = client
     }
 
     var shouldPresentFirstRun: Bool {

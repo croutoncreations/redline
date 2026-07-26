@@ -21,6 +21,7 @@ type Config struct {
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
+	APIToken        string              `yaml:"-"`
 }
 
 type Notifications struct {

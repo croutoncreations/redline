@@ -82,6 +82,25 @@ type DiscoveryOptions struct {
 	ModelLimit    int    `json:"model_limit,omitempty"`
 }
 
+type Job struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name,omitempty"`
+	Prompt      string         `json:"prompt,omitempty"`
+	Schedule    map[string]any `json:"schedule,omitempty"`
+	Skills      []string       `json:"skills,omitempty"`
+	State       string         `json:"state,omitempty"`
+	Enabled     bool           `json:"enabled"`
+	NextRunAt   string         `json:"next_run_at,omitempty"`
+	LastRunAt   string         `json:"last_run_at,omitempty"`
+	LastStatus  string         `json:"last_status,omitempty"`
+	Model       string         `json:"model,omitempty"`
+	Provider    string         `json:"provider,omitempty"`
+	Deliver     string         `json:"deliver,omitempty"`
+	RunCount    int            `json:"run_count,omitempty"`
+	LastError   string         `json:"last_error,omitempty"`
+	Description string         `json:"description,omitempty"`
+}
+
 const (
 	defaultDiscoveryModelLimit = 50
 	maxDiscoveryModelLimit     = 200
@@ -225,6 +244,45 @@ func (c Client) Discover(ctx context.Context, connection domain.RuntimeConnectio
 		})
 	}
 	return result, nil
+}
+
+func (c Client) ListJobs(ctx context.Context, connection domain.RuntimeConnection) ([]Job, error) {
+	httpClient, baseURL, err := c.httpClient(ctx, connection)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Jobs []Job `json:"jobs"`
+	}
+	if err := getJSON(ctx, httpClient, baseURL+"/api/jobs", &payload); err != nil {
+		return nil, fmt.Errorf("list Hermes jobs: %w", err)
+	}
+	if payload.Jobs == nil {
+		payload.Jobs = []Job{}
+	}
+	return payload.Jobs, nil
+}
+
+func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnection, jobID string) (Job, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return Job{}, fmt.Errorf("Hermes job id is required")
+	}
+	httpClient, baseURL, err := c.httpClient(ctx, connection)
+	if err != nil {
+		return Job{}, err
+	}
+	var payload struct {
+		Job Job `json:"job"`
+	}
+	target := baseURL + "/api/jobs/" + url.PathEscape(jobID) + "/run"
+	if err := postJSON(ctx, httpClient, target, &payload); err != nil {
+		return Job{}, fmt.Errorf("trigger Hermes job %q: %w", jobID, err)
+	}
+	if payload.Job.ID == "" {
+		return Job{}, fmt.Errorf("Hermes returned an empty job id")
+	}
+	return payload.Job, nil
 }
 
 func (c Client) Run(ctx context.Context, request RunRequest) (RunResult, error) {
@@ -528,6 +586,19 @@ func normalizeBaseURL(raw string) (string, error) {
 
 func getJSON(ctx context.Context, client *http.Client, target string, result any) error {
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode/100 != 2 {
+		return fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	return json.NewDecoder(response.Body).Decode(result)
+}
+
+func postJSON(ctx context.Context, client *http.Client, target string, result any) error {
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
 	response, err := client.Do(request)
 	if err != nil {
 		return err

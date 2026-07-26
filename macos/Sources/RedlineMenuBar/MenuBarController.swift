@@ -10,7 +10,8 @@ final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
     private let updates: NativeUpdateController
-    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: apiURL)
+    private let dashboardURL: URL
+    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
     private lazy var runLogWindow = RunLogWindowController(client: client)
     private lazy var notifications = NativeNotificationController()
     private lazy var popoverController = StatusPopoverController(
@@ -29,11 +30,13 @@ final class MenuBarController: NSObject {
 
     init(
         apiURL: URL,
+        apiToken: String,
         supervisor: ServiceSupervisor,
         showAppSetup: @escaping @MainActor () -> Void = {}
     ) {
         self.apiURL = apiURL
-        client = RedlineAPIClient(baseURL: apiURL)
+        client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
+        dashboardURL = APICredentialStore.authenticatedDashboardURL(baseURL: apiURL, token: apiToken)
         self.supervisor = supervisor
         self.showAppSetup = showAppSetup
         popoverModel = PopoverViewModel(client: client)

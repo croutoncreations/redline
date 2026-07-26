@@ -82,6 +82,11 @@ cp config.example.yaml redline.yaml
 go run ./cmd/redline --config redline.yaml serve
 ```
 
+Prefer a guided setup? Copy the bounded prompt in
+[`docs/agent-install.md`](docs/agent-install.md) into a trusted local coding agent. It verifies the
+signed release, preserves safe defaults, discovers existing harnesses, and proposes a couple of
+editable starter jobs without enabling automatic dispatch on its own.
+
 In another terminal, all commands use the API:
 
 ```bash
@@ -247,8 +252,8 @@ GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
 GET  /v1/notifications
 ```
 
-The service includes a local dashboard at
-[`http://127.0.0.1:7436/`](http://127.0.0.1:7436/). It summarizes current provider allowances,
+The native app opens an authenticated local dashboard backed by
+`http://127.0.0.1:7436/`. It summarizes current provider allowances,
 the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. Jobs and execution
 profiles can be created and managed there. A server-sent event stream keeps the page current while
 it is open; the aggregate API does not expose task prompts or lifecycle commands.
@@ -257,8 +262,20 @@ Each provider's usage detail includes a dispatch-policy selector. Selecting a na
 an override in SQLite; selecting **Default** returns to the provider-level YAML policy when present,
 or to `active_policy` otherwise.
 
-The service binds to loopback by default and currently has no authentication. Do not expose
-it to an untrusted network.
+The service accepts loopback hosts only. On first service or app launch, Redline creates a random
+API credential named `api-token` beside the selected configuration with mode `0600`. The native
+app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
+automatically from the `--config` location (or the standard macOS Application Support location).
+Cross-origin requests and non-loopback Host headers are rejected independently. Do not copy the
+credential into logs or expose the service through a network proxy.
+
+For a direct API call:
+
+```bash
+REDLINE_API_TOKEN="$(<"$HOME/Library/Application Support/Redline/api-token")"
+curl -H "Authorization: Bearer $REDLINE_API_TOKEN" \
+  http://127.0.0.1:7436/v1/health
+```
 
 ## MCP and agent access
 

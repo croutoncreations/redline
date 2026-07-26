@@ -17,8 +17,11 @@ availability and API compatibility:
 
 App-owned service output is retained under `~/Library/Logs/Redline/app-service.*.log`.
 
-The app never exposes the service beyond its configured loopback address. On a fresh install it
-copies the bundled starter configuration into Application Support with mode `0600`. The starter
+The app never exposes the service beyond its configured loopback address. It creates a random
+local API credential beside the selected configuration with mode `0600`, sends it as a bearer
+credential for native requests, and exchanges it for an HttpOnly same-site cookie when opening the
+dashboard. On a fresh install it copies the bundled starter configuration into Application Support
+with mode `0600`. The starter
 enables read-only monitoring but leaves automatic dispatch disabled, so merely installing the app
 cannot spend subscription capacity.
 

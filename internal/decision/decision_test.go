@@ -259,6 +259,63 @@ func TestUsageSnapshotValidateRejectsFractionsOutsideUnitInterval(t *testing.T) 
 	}
 }
 
+func TestProjectTriggerAtAcrossShortWindowReset(t *testing.T) {
+	start := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	in := decision.Input{
+		Snapshot: decision.UsageSnapshot{
+			Provider:   "claude",
+			ObservedAt: start,
+			Short:      &decision.UsageWindow{Remaining: .75, ResetsAt: start.Add(2 * time.Hour)},
+			Weekly:     decision.UsageWindow{Remaining: .40, ResetsAt: start.Add(21 * time.Hour)},
+		},
+		WindowWeeklyCost: .10,
+		TriggerMargin:    .02,
+		RollingReserve:   .25,
+		Now:              start,
+		MaxSnapshotAge:   15 * time.Minute,
+	}
+
+	got := decision.ProjectTriggerAt(in, 5*time.Minute)
+	want := start.Add(2*time.Hour + 5*time.Minute)
+	if got == nil || !got.Equal(want) {
+		t.Fatalf("projected trigger = %v, want %v", got, want)
+	}
+}
+
+func TestProjectTriggerAtUsesPaceThresholdBoundary(t *testing.T) {
+	start := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	weeklyReset := start.Add(96 * time.Hour)
+	in := decision.Input{
+		Snapshot: decision.UsageSnapshot{
+			Provider: "codex", ObservedAt: start,
+			Weekly: decision.UsageWindow{Remaining: .80, ResetsAt: weeklyReset},
+		},
+		PaceThresholds:   []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: .50}},
+		WindowWeeklyCost: .10, Now: start, MaxSnapshotAge: 15 * time.Minute,
+	}
+
+	got := decision.ProjectTriggerAt(in, 5*time.Minute)
+	want := weeklyReset.Add(-72 * time.Hour)
+	if got == nil || !got.Equal(want) {
+		t.Fatalf("projected trigger = %v, want %v", got, want)
+	}
+}
+
+func TestProjectTriggerAtReturnsNilWhenFlatUsageNeverQualifies(t *testing.T) {
+	start := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	in := decision.Input{
+		Snapshot: decision.UsageSnapshot{
+			Provider: "codex", ObservedAt: start,
+			Weekly: decision.UsageWindow{Remaining: .10, ResetsAt: start.Add(96 * time.Hour)},
+		},
+		PaceThresholds:   []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: .50}},
+		WindowWeeklyCost: .10, Now: start, MaxSnapshotAge: 15 * time.Minute,
+	}
+	if got := decision.ProjectTriggerAt(in, 5*time.Minute); got != nil {
+		t.Fatalf("projected trigger = %v, want nil", got)
+	}
+}
+
 func assertClose(t *testing.T, name string, got, want float64) {
 	t.Helper()
 	const epsilon = 1e-9

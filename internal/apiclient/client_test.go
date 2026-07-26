@@ -16,11 +16,14 @@ func TestClientEncodesRequestAndDecodesResponse(t *testing.T) {
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("request = %s content-type=%s", r.Method, r.Header.Get("Content-Type"))
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer local-redline-token" {
+			t.Errorf("authorization = %q", got)
+		}
 		_, _ = fmt.Fprint(w, `{"status":"ok"}`)
 	}))
 	defer server.Close()
 	var output map[string]string
-	client := apiclient.Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	client := apiclient.Client{BaseURL: server.URL, Token: "local-redline-token", HTTPClient: server.Client()}
 	if err := client.Do(context.Background(), http.MethodPost, "/test", map[string]bool{"run": true}, &output); err != nil {
 		t.Fatal(err)
 	}
