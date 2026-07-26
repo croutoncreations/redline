@@ -1092,6 +1092,12 @@ func (s *Server) dispatch(
 ) (response schedulerResponse, admitted bool, dispatchErr error) {
 	startedAt := s.now().UTC()
 	response, admitted, dispatchErr = s.dispatchCore(ctx, request, trigger)
+	// Service shutdown can cancel an in-flight usage fetch or database read.
+	// That is an expected lifecycle event, not a failed dispatch, and persisting
+	// it would make the next process report degraded health after every restart.
+	if dispatchErr != nil && errors.Is(dispatchErr, context.Canceled) && ctx.Err() != nil {
+		return response, false, dispatchErr
+	}
 	attempt := domain.DispatchAttempt{
 		ProviderAccountID: request.ProviderAccountID, Trigger: trigger,
 		StartedAt: startedAt, CompletedAt: s.now().UTC(),

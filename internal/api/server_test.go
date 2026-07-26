@@ -1313,6 +1313,40 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 	}
 }
 
+func TestAutomaticSchedulerDoesNotPersistShutdownCancellationAsAnError(t *testing.T) {
+	requestStarted := make(chan struct{})
+	usage := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig(usage.URL)
+	delete(cfg.Providers, "claude-main")
+	cfg.Scheduler = config.Scheduler{Enabled: true, PollInterval: "1h"}
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	ctx, cancel := context.WithCancel(context.Background())
+	handler.StartScheduler(ctx)
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("usage request did not start")
+	}
+	cancel()
+	handler.Wait()
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("shutdown cancellation attempts = %#v", attempts)
+	}
+}
+
 func TestAutomaticSchedulerCompletesHermesRemoteRunAndRecordsUsage(t *testing.T) {
 	const credentialVariable = "REDLINE_TEST_HERMES_SESSION"
 	t.Setenv(credentialVariable, `{"session_token":"scheduler-token"}`)
