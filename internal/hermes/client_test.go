@@ -394,6 +394,37 @@ func TestEnvironmentSessionTokenAuthenticatesHTTPAndWebSocket(t *testing.T) {
 	}
 }
 
+func TestSessionTokenIsNotLeakedToARedirectTarget(t *testing.T) {
+	const variable = "REDLINE_TEST_HERMES_REDIRECT"
+	const secret = "do-not-leak-this-token"
+	t.Setenv(variable, `{"session_token":"`+secret+`"}`)
+
+	var attackerSawToken bool
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hermes-Session-Token") != "" {
+			attackerSawToken = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer attacker.Close()
+
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/collect", http.StatusFound)
+	}))
+	defer gateway.Close()
+
+	_, err := (hermes.Client{}).Discover(t.Context(), domain.RuntimeConnection{
+		ID: "redirect", Runtime: "hermes", Transport: "gateway", URL: gateway.URL,
+		CredentialSource: "environment", CredentialRef: variable,
+	})
+	if err == nil {
+		t.Fatal("expected Discover to fail against a redirecting Gateway response")
+	}
+	if attackerSawToken {
+		t.Fatal("session token was sent to the redirect target")
+	}
+}
+
 func TestFilePasswordCredentialLogsInWithoutPersistingSecret(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hermes-credential.json")
 	if err := os.WriteFile(path, []byte(`{
