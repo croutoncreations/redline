@@ -81,8 +81,11 @@ run_tart() {
 run_tart_bounded() {
   local limit_seconds="$1"
   shift
-  run_tart "$@" &
+  local input_fd
+  exec {input_fd}<&0
+  run_tart "$@" <&"${input_fd}" &
   local command_pid="$!"
+  exec {input_fd}<&-
   (
     sleep "${limit_seconds}"
     kill -TERM "${command_pid}" >/dev/null 2>&1 || true
@@ -246,6 +249,7 @@ EOF
     clone_disposable
     start_vm "$(dirname "${candidate_path}")"
     wait_for_guest
+    wait_for_guest_network
     run_guest prepare-candidate "/Volumes/My Shared Files/candidate/$(basename "${candidate_path}")" "$3"
     ;;
   open)

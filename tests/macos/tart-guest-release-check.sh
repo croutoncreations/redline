@@ -56,7 +56,15 @@ wait_for_service() {
 verify_distribution() {
   codesign --verify --deep --strict "${application}"
   spctl --assess --type execute --verbose=2 "${application}"
-  xcrun stapler validate "${application}"
+  local attempts=0
+  until xcrun stapler validate "${application}"; do
+    attempts=$((attempts + 1))
+    if [[ "${attempts}" -ge 3 ]]; then
+      printf 'Stapler validation failed after %s attempts.\n' "${attempts}" >&2
+      exit 1
+    fi
+    sleep 5
+  done
 }
 
 install_dmg() {
