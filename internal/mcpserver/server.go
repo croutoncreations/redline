@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jfox/redline/internal/apiclient"
 	"github.com/jfox/redline/internal/artifacts"
@@ -835,6 +836,9 @@ func viewRunEvent(event domain.RunEvent) runEventView {
 func truncateString(value string, limit int) (string, bool) {
 	if len(value) <= limit {
 		return value, false
+	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
 	}
 	return value[:limit], true
 }
