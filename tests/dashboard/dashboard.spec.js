@@ -372,6 +372,10 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
 	await page.locator('#profile-base-branch').fill('main');
 	await page.getByRole('button', { name: 'Save profile' }).click();
 	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/pi-codex')).toBe(true);
+  // saveProfile() re-enables #save-profile only after its full chain (loadProfiles -> editProfile ->
+  // refresh) resolves; editProfile() clears #profile-form-error as part of that chain, so waiting for
+  // the PATCH request alone races the delete click below against that clear.
+  await expect(page.getByRole('button', { name: 'Save profile' })).toBeEnabled();
 
   state.blockProfileDelete = true;
   page.once('dialog', confirmation => confirmation.accept());
