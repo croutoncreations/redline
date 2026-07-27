@@ -491,16 +491,17 @@ go run ./cmd/redline run logs <run-id> --stream finalize_stdout
 
 ## Notifications and health
 
-Notifications are disabled by default. When enabled, Redline invokes a trusted local command with
-a versioned event document on stdin. Supported events are `run.completed`, `run.failed`, and
-`scheduler.error`.
+Native macOS alerts can be enabled from the Redline app and cover job starts, completions, and
+failures. Command notifications are disabled by default. When enabled, Redline invokes a trusted
+local command with a versioned event document on stdin. Supported events are `run.started`,
+`run.completed`, `run.failed`, and `scheduler.error`.
 
 ```yaml
 notifications:
   enabled: true
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.completed, run.failed, scheduler.error]
+  events: [run.started, run.completed, run.failed, scheduler.error]
 ```
 
 The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and

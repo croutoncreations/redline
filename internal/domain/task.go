@@ -136,6 +136,7 @@ type DispatchAttempt struct {
 }
 
 const (
+	EventRunStarted     = "run.started"
 	EventRunCompleted   = "run.completed"
 	EventRunFailed      = "run.failed"
 	EventSchedulerError = "scheduler.error"

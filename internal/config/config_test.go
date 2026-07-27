@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jfox/redline/internal/config"
+	"github.com/jfox/redline/internal/domain"
 )
 
 func TestSchedulerIntervalDefaultsToFiveMinutes(t *testing.T) {
@@ -70,6 +71,9 @@ func TestNotificationsAreDisabledByDefault(t *testing.T) {
 	}
 	if cfg.Notifications.Enabled || cfg.NotificationTimeout() != 30*time.Second {
 		t.Fatalf("notifications = %#v timeout=%s", cfg.Notifications, cfg.NotificationTimeout())
+	}
+	if !cfg.NotificationEvents()[domain.EventRunStarted] {
+		t.Fatalf("default events = %#v", cfg.NotificationEvents())
 	}
 }
 

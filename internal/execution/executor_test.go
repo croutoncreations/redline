@@ -80,7 +80,7 @@ func TestSuccessfulExecutionRecordsLifecycleTimelineWithoutPrompt(t *testing.T) 
 	}
 }
 
-func TestExecutionEmitsCompletedNotification(t *testing.T) {
+func TestExecutionEmitsStartedThenCompletedNotifications(t *testing.T) {
 	db, run, task, profile := admittedRun(t, domain.OneOff)
 	notifier := &fakeNotifier{}
 	executor := execution.Executor{
@@ -91,7 +91,9 @@ func TestExecutionEmitsCompletedNotification(t *testing.T) {
 	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
 		t.Fatal(err)
 	}
-	if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventRunCompleted ||
+	if len(notifier.events) != 2 ||
+		notifier.events[0].Type != domain.EventRunStarted ||
+		notifier.events[1].Type != domain.EventRunCompleted ||
 		notifier.events[0].RunID != run.ID || notifier.events[0].TaskID != task.ID {
 		t.Fatalf("events = %#v", notifier.events)
 	}
@@ -179,7 +181,9 @@ func TestHarnessFailureFailsTaskButStillFinalizes(t *testing.T) {
 	if storedRun.State != domain.RunFailed || storedTask.State != domain.Failed || !workspaces.finalized {
 		t.Fatalf("run=%#v task=%#v finalized=%v", storedRun, storedTask, workspaces.finalized)
 	}
-	if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventRunFailed {
+	if len(notifier.events) != 2 ||
+		notifier.events[0].Type != domain.EventRunStarted ||
+		notifier.events[1].Type != domain.EventRunFailed {
 		t.Fatalf("events = %#v", notifier.events)
 	}
 }
@@ -202,7 +206,7 @@ func TestHarnessFailurePersistsActionableDiagnosisAndIncludesItInNotification(t 
 	if storedRun.Error != "Claude Code is signed out. Run `claude auth login`, then retry this job." {
 		t.Fatalf("run error = %q", storedRun.Error)
 	}
-	if len(notifier.events) != 1 || notifier.events[0].Data["error"] != storedRun.Error {
+	if len(notifier.events) != 2 || notifier.events[1].Data["error"] != storedRun.Error {
 		t.Fatalf("notification = %#v", notifier.events)
 	}
 }

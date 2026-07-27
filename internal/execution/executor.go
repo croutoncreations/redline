@@ -122,6 +122,18 @@ func (e Executor) Execute(
 			FinalizeState: finalizeState, FinalizeError: finalizeError,
 		})
 	}
+	if e.Notifier != nil {
+		startedAt := e.now().UTC()
+		event := domain.NotificationEvent{
+			Version: 1, Type: domain.EventRunStarted, OccurredAt: startedAt,
+			ProviderAccountID: run.ProviderAccountID, TaskID: task.ID, RunID: run.ID,
+			Message: "Redline run started",
+			Data:    map[string]string{"state": string(domain.RunRunning)},
+		}
+		if err := e.Notifier.Notify(ctx, event); err != nil {
+			log.Printf("redline run %s start notification failed: %v", run.ID, err)
+		}
+	}
 	e.recordEvent(ctx, run.ID, domain.RunEventWorkspacePrepared, map[string]any{
 		"workspace": prepared, "prepare_artifacts": e.lifecycleArtifacts(run.ID, "prepare"),
 	})

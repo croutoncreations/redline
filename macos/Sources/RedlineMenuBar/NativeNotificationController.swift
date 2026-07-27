@@ -5,7 +5,7 @@ import UserNotifications
 @MainActor
 final class NativeNotificationController {
     private let center = UNUserNotificationCenter.current()
-    private var tracker = TerminalRunTracker()
+    private var tracker = RunNotificationTracker()
     private var authorized = false
 
     init() {
@@ -34,7 +34,7 @@ final class NativeNotificationController {
                 let alert = NSAlert()
                 if granted {
                     alert.messageText = "Redline notifications are enabled"
-                    alert.informativeText = "You’ll be notified when a queued run completes or fails."
+                    alert.informativeText = "You’ll be notified when a queued run starts, completes, or fails."
                 } else {
                     alert.messageText = "Notifications were not enabled"
                     alert.informativeText = failure ?? "You can allow Redline notifications in System Settings."
@@ -45,9 +45,16 @@ final class NativeNotificationController {
         }
     }
 
-    private func deliver(_ event: TerminalRunEvent, taskName: String) {
+    private func deliver(_ event: RunNotificationEvent, taskName: String) {
         let content = UNMutableNotificationContent()
-        content.title = event.state == "completed" ? "Redline run completed" : "Redline run failed"
+        switch event.state {
+        case "running":
+            content.title = "Redline job started"
+        case "completed":
+            content.title = "Redline job completed"
+        default:
+            content.title = "Redline job failed"
+        }
         content.body = "\(taskName) · \(event.providerAccountID)" + (event.error.map { "\n\($0)" } ?? "")
         content.sound = event.state == "failed" ? .default : nil
         center.add(UNNotificationRequest(identifier: "redline-run-\(event.runID)", content: content, trigger: nil))

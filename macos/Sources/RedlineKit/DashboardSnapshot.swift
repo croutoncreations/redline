@@ -188,7 +188,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     }
 }
 
-public struct TerminalRunEvent: Sendable, Equatable {
+public struct RunNotificationEvent: Sendable, Equatable {
     public let runID: String
     public let taskID: String
     public let providerAccountID: String
@@ -196,23 +196,25 @@ public struct TerminalRunEvent: Sendable, Equatable {
     public let error: String?
 }
 
-public struct TerminalRunTracker: Sendable {
-    private var observedRunIDs = Set<String>()
+public struct RunNotificationTracker: Sendable {
+    private var observedRunStates = [String: String]()
     private var hasEstablishedBaseline = false
 
     public init() {}
 
-    public mutating func observe(_ runs: [RunSummary]) -> [TerminalRunEvent] {
-        let terminal = runs.filter { $0.state == "completed" || $0.state == "failed" }
+    public mutating func observe(_ runs: [RunSummary]) -> [RunNotificationEvent] {
+        let observable = runs.filter {
+            $0.state == "running" || $0.state == "completed" || $0.state == "failed"
+        }
         defer {
-            observedRunIDs.formUnion(terminal.map(\.id))
+            for run in observable {
+                observedRunStates[run.id] = run.state
+            }
             hasEstablishedBaseline = true
         }
         guard hasEstablishedBaseline else {
-            guard let run = terminal.first(where: {
-                $0.state == "failed" && !observedRunIDs.contains($0.id)
-            }) else { return [] }
-            return [TerminalRunEvent(
+            guard let run = observable.first(where: { $0.state == "failed" }) else { return [] }
+            return [RunNotificationEvent(
                 runID: run.id,
                 taskID: run.taskID,
                 providerAccountID: run.providerAccountID,
@@ -220,9 +222,9 @@ public struct TerminalRunTracker: Sendable {
                 error: run.error
             )]
         }
-        return terminal.compactMap { run in
-            guard !observedRunIDs.contains(run.id) else { return nil }
-            return TerminalRunEvent(
+        return observable.compactMap { run in
+            guard observedRunStates[run.id] != run.state else { return nil }
+            return RunNotificationEvent(
                 runID: run.id,
                 taskID: run.taskID,
                 providerAccountID: run.providerAccountID,

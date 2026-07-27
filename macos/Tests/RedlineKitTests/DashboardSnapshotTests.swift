@@ -41,14 +41,14 @@ import Testing
     #expect(snapshot.latestAttemptsByProvider.map(\.providerAccountID) == ["codex-main", "claude-main"])
 }
 
-@Test func terminalRunTrackerBaselinesHistoryAndReportsOnlyNewTerminalRuns() throws {
+@Test func runNotificationTrackerBaselinesHistoryAndReportsStateChanges() throws {
     let initial = try DashboardSnapshot.decode(Data(#"""
     {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
       {"id":"old","task_id":"task-old","provider_account_id":"codex-main","state":"completed","started_at":"2026-07-20T01:00:00Z"},
       {"id":"active","task_id":"task-active","provider_account_id":"claude-main","state":"running","started_at":"2026-07-21T01:00:00Z"}
     ]}
     """#.utf8))
-    var tracker = TerminalRunTracker()
+    var tracker = RunNotificationTracker()
     #expect(tracker.observe(initial.runs).isEmpty)
 
     let update = try DashboardSnapshot.decode(Data(#"""
@@ -64,7 +64,29 @@ import Testing
     #expect(tracker.observe(update.runs).isEmpty)
 }
 
-@Test func terminalRunTrackerReportsFailedRunFoundAtStartup() throws {
+@Test func runNotificationTrackerReportsRunStartAndLaterCompletion() throws {
+    let empty = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[]}
+    """#.utf8))
+    var tracker = RunNotificationTracker()
+    #expect(tracker.observe(empty.runs).isEmpty)
+
+    let running = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":1,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"new-run","task_id":"task-new","provider_account_id":"claude-main","state":"running","started_at":"2026-07-21T02:00:00Z"}
+    ]}
+    """#.utf8))
+    #expect(tracker.observe(running.runs).map(\.state) == ["running"])
+
+    let completed = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"new-run","task_id":"task-new","provider_account_id":"claude-main","state":"completed","started_at":"2026-07-21T02:00:00Z","completed_at":"2026-07-21T02:01:00Z"}
+    ]}
+    """#.utf8))
+    #expect(tracker.observe(completed.runs).map(\.state) == ["completed"])
+}
+
+@Test func runNotificationTrackerReportsFailedRunFoundAtStartup() throws {
     let snapshot = try DashboardSnapshot.decode(Data(#"""
     {"health":{"status":"degraded","window":"24h","active_runs":0,"completed_runs":0,"failed_runs":1,"dispatch_attempts":1,"dispatch_errors":0,"notification_failures":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
       {"id":"startup-failure","task_id":"task-failed","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T02:00:00Z","error":"Claude Code is signed out."},
@@ -72,14 +94,14 @@ import Testing
     ]}
     """#.utf8))
 
-    var tracker = TerminalRunTracker()
+    var tracker = RunNotificationTracker()
     let events = tracker.observe(snapshot.runs)
 
     #expect(events.map(\.runID) == ["startup-failure"])
     #expect(tracker.observe(snapshot.runs).isEmpty)
 }
 
-@Test func terminalRunTrackerReportsOnlyNewestFailureAtStartup() throws {
+@Test func runNotificationTrackerReportsOnlyNewestFailureAtStartup() throws {
     let snapshot = try DashboardSnapshot.decode(Data(#"""
     {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
       {"id":"newest-failure","task_id":"task-new","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T03:00:00Z","error":"not logged in"},
@@ -87,7 +109,7 @@ import Testing
     ]}
     """#.utf8))
 
-    var tracker = TerminalRunTracker()
+    var tracker = RunNotificationTracker()
     #expect(tracker.observe(snapshot.runs).map(\.runID) == ["newest-failure"])
 }
 

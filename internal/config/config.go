@@ -32,7 +32,7 @@ type Notifications struct {
 }
 
 var knownNotificationEvents = map[string]bool{
-	"run.completed": true, "run.failed": true, "scheduler.error": true,
+	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -46,7 +46,7 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.completed", "run.failed", "scheduler.error"}
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {
