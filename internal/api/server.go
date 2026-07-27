@@ -1425,6 +1425,7 @@ func (s *Server) evaluateCandidateBudget(
 		poolDecision := decision.Evaluate(decision.Input{
 			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
 			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+			PaceGapTrigger: policy.PaceGapTrigger,
 			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 		})
 		poolResults = append(poolResults, decision.PoolResult{
@@ -1713,6 +1714,7 @@ func (s *Server) evaluateProvider(
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
+		PaceGapTrigger: selection.Definition.PaceGapTrigger,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	})
 	result.Policy = selection.Policy

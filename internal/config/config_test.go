@@ -181,6 +181,27 @@ func TestLoadParsesPaceThresholds(t *testing.T) {
 	}
 }
 
+func TestLoadParsesPolicyPaceGapTrigger(t *testing.T) {
+	withTrigger := strings.Replace(validConfig, "    rolling_reserve: 0.25", `    rolling_reserve: 0.25
+    pace_gap_trigger: 0.30`, 1)
+	cfg, err := config.Load(writeConfig(t, withTrigger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Policies["standard"].PaceGapTrigger
+	if got == nil || *got != 0.30 {
+		t.Fatalf("pace gap trigger = %#v", got)
+	}
+}
+
+func TestLoadRejectsInvalidPolicyPaceGapTrigger(t *testing.T) {
+	withTrigger := strings.Replace(validConfig, "    rolling_reserve: 0.25", `    rolling_reserve: 0.25
+    pace_gap_trigger: 1.10`, 1)
+	if _, err := config.Load(writeConfig(t, withTrigger)); err == nil {
+		t.Fatal("expected invalid pace gap trigger error")
+	}
+}
+
 func TestLoadRejectsInvalidPaceThreshold(t *testing.T) {
 	withThreshold := strings.Replace(validConfig, "    rolling_reserve: 0.25", `    rolling_reserve: 0.25
     pace_thresholds:

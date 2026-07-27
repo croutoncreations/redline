@@ -315,6 +315,7 @@ func (s *Server) projectedTrigger(
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
+		PaceGapTrigger: selection.Definition.PaceGapTrigger,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, pollInterval), nil
 }

@@ -162,6 +162,7 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 type Policy struct {
 	TriggerMargin  float64         `yaml:"trigger_margin" json:"trigger_margin"`
 	RollingReserve float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
+	PaceGapTrigger *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
 	PaceThresholds []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
 }
 
@@ -249,6 +250,11 @@ func Load(path string) (Config, error) {
 		}
 		if err := fraction("rolling_reserve", policy.RollingReserve); err != nil {
 			return Config{}, fmt.Errorf("policy %q: %w", name, err)
+		}
+		if policy.PaceGapTrigger != nil {
+			if err := fraction("pace_gap_trigger", *policy.PaceGapTrigger); err != nil {
+				return Config{}, fmt.Errorf("policy %q: %w", name, err)
+			}
 		}
 		if _, err := policy.DecisionThresholds(); err != nil {
 			return Config{}, fmt.Errorf("policy %q: %w", name, err)

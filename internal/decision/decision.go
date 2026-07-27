@@ -150,6 +150,7 @@ type Input struct {
 	CalibrationConfidence  string
 	TriggerMargin          float64
 	RollingReserve         float64
+	PaceGapTrigger         *float64
 	PaceThresholds         []PaceThreshold
 	Now                    time.Time
 	MaxSnapshotAge         time.Duration
@@ -309,6 +310,12 @@ func evaluateSlots(in Input) Result {
 		result.UnlockedTier = domain.DispatchExpiring
 		return result
 	}
+	if in.PaceGapTrigger != nil && paceGap >= *in.PaceGapTrigger {
+		result.Decision = Run
+		result.Reason = "weekly remaining is well behind pace"
+		result.UnlockedTier = tierForPaceGap(paceGap)
+		return result
+	}
 	if threshold := matchingPaceThreshold(in); threshold != nil {
 		result.Decision = Run
 		result.Reason = "weekly remaining is behind configured pace"
@@ -322,11 +329,17 @@ func evaluateSlots(in Input) Result {
 }
 
 func evaluatePace(in Input) Result {
-	if len(in.PaceThresholds) == 0 {
+	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil {
 		return unknown("unrestricted provider has no pace thresholds")
 	}
 	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
 	result := Result{Mode: ModePace, PaceGap: paceGap}
+	if in.PaceGapTrigger != nil && paceGap >= *in.PaceGapTrigger {
+		result.Decision = Run
+		result.Reason = "weekly remaining is well behind pace"
+		result.UnlockedTier = tierForPaceGap(paceGap)
+		return result
+	}
 	if threshold := matchingPaceThreshold(in); threshold != nil {
 		result.Decision = Run
 		result.Reason = "weekly remaining meets pace threshold"
@@ -402,6 +415,11 @@ func validateInput(in Input) error {
 	}
 	if err := unitFraction("rolling reserve", in.RollingReserve); err != nil {
 		return err
+	}
+	if in.PaceGapTrigger != nil {
+		if err := unitFraction("pace gap trigger", *in.PaceGapTrigger); err != nil {
+			return err
+		}
 	}
 	for _, threshold := range in.PaceThresholds {
 		if threshold.TimeRemaining <= 0 {

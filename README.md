@@ -146,6 +146,12 @@ five-hour window exists. `priority` only orders tasks whose tiers are already un
 intervals, repository-change checks, and enable/disable state remain independent eligibility gates.
 Existing databases migrate tasks to `behind`, preserving the prior default behavior.
 
+Policies may set `pace_gap_trigger` to admit work whenever the fraction of weekly allowance
+remaining exceeds the fraction of time remaining by that amount. For example, `0.30` means Redline
+can run when an account is at least 30 percentage points behind an even weekly burn pace. The
+standard bundled policy uses `0.30`, early uses `0.15`, and late omits the setting so that it
+continues to require a configured time threshold or unavoidable overflow.
+
 Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fable`,
 `claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
 account-pool-only models.

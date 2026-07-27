@@ -67,12 +67,14 @@ policies:
   standard:
     trigger_margin: 0.02
     rolling_reserve: 0.25
+    pace_gap_trigger: 0.30
     pace_thresholds:
       - { time_remaining: 72h, min_weekly_remaining: 0.50 }
       - { time_remaining: 24h, min_weekly_remaining: 0.20 }
   early:
     trigger_margin: 0.00
     rolling_reserve: 0.10
+    pace_gap_trigger: 0.15
     pace_thresholds:
       - { time_remaining: 120h, min_weekly_remaining: 0.50 }
       - { time_remaining: 72h, min_weekly_remaining: 0.30 }

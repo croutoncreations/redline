@@ -72,6 +72,39 @@ func TestLimitedWindowCanRunBehindPaceBeforeOverflow(t *testing.T) {
 	}
 }
 
+func TestLimitedWindowRunsWhenPolicyPaceGapTriggerMatches(t *testing.T) {
+	s := limitedSnapshot()
+	s.Weekly.Remaining = 0.90
+	s.Weekly.ResetsAt = now.Add(95 * time.Hour)
+	in := input(s)
+	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
+	trigger := 0.30
+	in.PaceGapTrigger = &trigger
+
+	got := decision.Evaluate(in)
+
+	if got.Decision != decision.Run || got.Reason != "weekly remaining is well behind pace" {
+		t.Fatalf("got %#v", got)
+	}
+	if got.MatchedPaceThreshold != nil || got.UnlockedTier != domain.DispatchExpiring {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestLimitedWindowKeepsPaceGapAdmissionDisabledWhenPolicyOmitsIt(t *testing.T) {
+	s := limitedSnapshot()
+	s.Weekly.Remaining = 0.90
+	s.Weekly.ResetsAt = now.Add(95 * time.Hour)
+	in := input(s)
+	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
+
+	got := decision.Evaluate(in)
+
+	if got.Decision != decision.Wait || got.Reason != "no actionable weekly overflow" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestCurrentSlotUsesLowerOfTimeAndRemainingAllowance(t *testing.T) {
 	s := limitedSnapshot()
 	s.Short.Remaining = 0.15
@@ -174,6 +207,25 @@ func TestUnrestrictedProviderRunsWhenPaceThresholdMatches(t *testing.T) {
 	}
 	if got.UnlockedTier != domain.DispatchExpiring {
 		t.Fatalf("unlocked tier = %q", got.UnlockedTier)
+	}
+}
+
+func TestUnrestrictedProviderRunsWhenPaceGapTriggerMatches(t *testing.T) {
+	s := limitedSnapshot()
+	s.Short = nil
+	s.Weekly.Remaining = 0.90
+	s.Weekly.ResetsAt = now.Add(95 * time.Hour)
+	in := input(s)
+	in.PaceThresholds = nil
+	trigger := 0.30
+	in.PaceGapTrigger = &trigger
+
+	got := decision.Evaluate(in)
+
+	if got.Decision != decision.Run || got.Mode != decision.ModePace ||
+		got.Reason != "weekly remaining is well behind pace" ||
+		got.UnlockedTier != domain.DispatchExpiring {
+		t.Fatalf("got %#v", got)
 	}
 }
 
@@ -298,6 +350,26 @@ func TestProjectTriggerAtUsesPaceThresholdBoundary(t *testing.T) {
 	want := weeklyReset.Add(-72 * time.Hour)
 	if got == nil || !got.Equal(want) {
 		t.Fatalf("projected trigger = %v, want %v", got, want)
+	}
+}
+
+func TestProjectTriggerAtUsesPaceGapBoundary(t *testing.T) {
+	s := limitedSnapshot()
+	s.Short = nil
+	s.Weekly.Remaining = 0.90
+	s.Weekly.ResetsAt = now.Add(110 * time.Hour)
+	trigger := 0.30
+	in := input(s)
+	in.PaceThresholds = nil
+	in.PaceGapTrigger = &trigger
+
+	got := decision.ProjectTriggerAt(in, 5*time.Minute)
+	if got == nil {
+		t.Fatal("expected projected trigger")
+	}
+	want := now.Add(9*time.Hour + 15*time.Minute)
+	if !got.Equal(want) {
+		t.Fatalf("projected trigger = %s, want %s", got, want)
 	}
 }
 
