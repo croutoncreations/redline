@@ -165,6 +165,24 @@ case "${action}" in
     seed_retained_state
     printf 'Prepared Redline %s with retained-state sentinels.\n' "$(app_version)"
     ;;
+  prepare-upgrade-from-dmg)
+    [[ "$#" -eq 3 ]] || exit 1
+    validate_version "$3"
+    [[ -f "$2" ]] || { printf 'Baseline DMG is unavailable in the guest: %s\n' "$2" >&2; exit 1; }
+    if [[ -f "${2}.sha256" ]]; then
+      (
+        cd "$(dirname "$2")"
+        shasum -a 256 -c "$(basename "$2").sha256"
+      )
+    fi
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$2"
+    install_dmg "$2"
+    [[ "$(app_version)" == "$3" ]]
+    verify_distribution
+    launch_redline
+    seed_retained_state
+    printf 'Prepared Redline %s from a local DMG with retained-state sentinels.\n' "$(app_version)"
+    ;;
   verify-upgrade)
     [[ "$#" -eq 2 ]] || exit 1
     validate_version "$2"
@@ -198,7 +216,7 @@ case "${action}" in
     printf 'Verified clean installation and first launch of Redline %s.\n' "$3"
     ;;
   *)
-    printf 'usage: tart-guest-release-check.sh <prepare-upgrade|verify-upgrade|prepare-candidate> ...\n' >&2
+    printf 'usage: tart-guest-release-check.sh <prepare-upgrade|prepare-upgrade-from-dmg|verify-upgrade|prepare-candidate> ...\n' >&2
     exit 1
     ;;
 esac

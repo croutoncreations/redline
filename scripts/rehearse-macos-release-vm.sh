@@ -19,6 +19,7 @@ usage:
   rehearse-macos-release-vm.sh plan-upgrade <baseline-tag> <expected-version>
   rehearse-macos-release-vm.sh bootstrap
   rehearse-macos-release-vm.sh prepare-upgrade <baseline-tag>
+  rehearse-macos-release-vm.sh prepare-upgrade-from-dmg <dmg-path> <expected-version>
   rehearse-macos-release-vm.sh verify-upgrade <expected-version>
   rehearse-macos-release-vm.sh prepare-candidate <dmg-path> <expected-version>
   rehearse-macos-release-vm.sh open
@@ -227,6 +228,27 @@ In the VM:
   2. After the next release is published, choose Redline > Check for Updates.
   3. Let Sparkle replace and relaunch the app.
 Then run:
+  $0 verify-upgrade <new-version>
+EOF
+    ;;
+  prepare-upgrade-from-dmg)
+    [[ "$#" -eq 3 ]] || { usage >&2; exit 1; }
+    baseline_path="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+    [[ -f "${baseline_path}" ]] || { printf 'Baseline DMG does not exist: %s\n' "${baseline_path}" >&2; exit 1; }
+    [[ "${baseline_path}" != *:* ]] || { printf 'Baseline path cannot contain a colon.\n' >&2; exit 1; }
+    validate_version "$3"
+    require_tart
+    ensure_base
+    clone_disposable
+    start_vm "$(dirname "${baseline_path}")"
+    wait_for_guest
+    wait_for_guest_network
+    run_guest prepare-upgrade-from-dmg \
+      "/Volumes/My Shared Files/candidate/$(basename "${baseline_path}")" "$3"
+    cat <<EOF
+
+Baseline $3 is installed in ${test_vm}, and retained-state sentinels are ready.
+Use Redline > Check for Updates in the VM, then run:
   $0 verify-upgrade <new-version>
 EOF
     ;;

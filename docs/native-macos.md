@@ -222,3 +222,15 @@ Use `REDLINE_TART_REPLACE=1` only when intentionally discarding an existing disp
 VM. The script never deletes the retained base VM. If host VPN or DNS settings produce an
 unreachable resolver in the guest, the rehearsal falls back to Cloudflare and Google public DNS
 inside the disposable clone only.
+
+GitHub's `releases/latest` endpoint excludes prereleases. To rehearse a prerelease without changing
+the stable feed, build a signed baseline DMG whose `SUFeedURL` points directly to the prerelease
+appcast, then prepare it with:
+
+```bash
+REDLINE_TART_TEST_VM=redline-upgrade-test \
+  ./scripts/rehearse-macos-release-vm.sh prepare-upgrade-from-dmg \
+  /absolute/path/to/test-channel-baseline.dmg 0.1.0
+```
+
+This mode performs the same distribution checks and retained-state seeding as a published baseline.

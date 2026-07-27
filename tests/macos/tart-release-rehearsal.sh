@@ -25,6 +25,10 @@ if "${host_script}" plan-upgrade release-1 0.1.1 >/dev/null 2>&1; then
   printf 'host rehearsal unexpectedly accepted an invalid release tag\n' >&2
   exit 1
 fi
+if "${host_script}" prepare-upgrade-from-dmg /does/not/exist.dmg 0.1.0 >/dev/null 2>&1; then
+  printf 'host rehearsal unexpectedly accepted a missing baseline DMG\n' >&2
+  exit 1
+fi
 if "${guest_script}" verify-upgrade invalid-version >/dev/null 2>&1; then
   printf 'guest verification unexpectedly accepted an invalid version\n' >&2
   exit 1
