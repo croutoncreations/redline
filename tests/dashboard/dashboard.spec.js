@@ -153,10 +153,10 @@ async function loadDashboard(page, options = {}) {
       return json(200, state.runtimeJobs[decodeURIComponent(runtimeJobsMatch[1])] || []);
     }
     if (/^\/v1\/runtime-connections\/[^/]+\/discover$/.test(url.pathname) && method === 'POST') return json(200, {
-      version: '0.17.0', profiles: [{ name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' }],
+      version: '0.17.0', profiles: [{ name: 'default', path: '/home/tester/.hermes', model: 'gpt-5.5', provider: 'openai-codex' }],
       profile_options: [{
-        profile: { name: 'default', path: '/home/jon/.hermes', model: 'gpt-5.5', provider: 'openai-codex' },
-        projects: [{ id: 'scout', name: 'Scout', primary_path: '/home/jon/projects/scout' }],
+        profile: { name: 'default', path: '/home/tester/.hermes', model: 'gpt-5.5', provider: 'openai-codex' },
+        projects: [{ id: 'sample-app', name: 'Sample App', primary_path: '/home/tester/projects/sample-app' }],
         providers: [{ slug: 'openai-codex', authenticated: true, models: ['gpt-5.5', 'gpt-5.6-sol'] }],
       }],
     });
@@ -382,14 +382,14 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
 test('imports Hermes Desktop and creates a remote profile from discovered context', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();
-  await page.locator('#profile-id').fill('hermes-scout');
+  await page.locator('#profile-id').fill('hermes-sample-app');
   await page.locator('#profile-provider').selectOption('codex-main');
   await page.locator('#profile-harness').selectOption('hermes');
   await expect(page.locator('#profile-hermes-fields')).toBeVisible();
   await page.getByRole('button', { name: 'Import Desktop' }).click();
   await expect(page.locator('#profile-hermes-status')).toContainText('1 profile discovered');
   await expect(page.locator('#profile-runtime-profile')).toHaveValue('default');
-  await page.locator('#profile-runtime-project').selectOption('scout');
+  await page.locator('#profile-runtime-project').selectOption('sample-app');
   await expect(page.locator('#profile-model-choice')).toHaveValue('default');
   await page.locator('#profile-model-choice').selectOption('openai-codex/gpt-5.6-sol');
   await page.getByRole('button', { name: 'Save profile' }).click();
@@ -397,54 +397,54 @@ test('imports Hermes Desktop and creates a remote profile from discovered contex
   await expect.poll(() => state.requests.some(item => item.path === '/v1/agent-contexts')).toBe(true);
   await expect.poll(() => state.requests.some(item => item.path === '/v1/profiles')).toBe(true);
   expect(state.requests.find(item => item.path === '/v1/agent-contexts').body).toMatchObject({
-    id: 'hermes-scout-context', runtime_connection_id: 'hermes-desktop',
-    profile: 'default', project: 'scout', working_directory: '/home/jon/projects/scout',
+    id: 'hermes-sample-app-context', runtime_connection_id: 'hermes-desktop',
+    profile: 'default', project: 'sample-app', working_directory: '/home/tester/projects/sample-app',
     session_mode: 'isolated',
   });
   expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({
-    id: 'hermes-scout', provider_account_id: 'codex-main',
-    agent_context_id: 'hermes-scout-context', harness_type: 'hermes',
+    id: 'hermes-sample-app', provider_account_id: 'codex-main',
+    agent_context_id: 'hermes-sample-app-context', harness_type: 'hermes',
     model: 'openai-codex/gpt-5.6-sol', workspace_provider: 'runtime-owned',
-    repository: '/home/jon/projects/scout',
+    repository: '/home/tester/projects/sample-app',
   });
 });
 
 test('selects a discovered existing Hermes job for a scheduled task', async ({ page }) => {
   const state = await loadDashboard(page, {
     profiles: [...profileFixture(), {
-      id: 'hermes-nibit', provider_account_id: 'claude-main',
-      agent_context_id: 'hermes-nibit-context', harness_type: 'hermes',
+      id: 'hermes-content', provider_account_id: 'claude-main',
+      agent_context_id: 'hermes-content-context', harness_type: 'hermes',
       model: 'custom:cliproxyapi-plus/claude-fable-5-medium',
       budget_model_group: 'fable', workspace_provider: 'runtime-owned',
-      repository: '/home/jon/worktrees/nibit-seo',
+      repository: '/home/tester/worktrees/content-site',
     }],
     runtimeConnections: [{
       id: 'hermes-desktop', runtime: 'hermes', transport: 'gateway',
       url: 'http://hermes.test:9119', max_concurrent_runs: 1,
     }],
     agentContexts: [{
-      id: 'hermes-nibit-context', runtime_connection_id: 'hermes-desktop',
-      profile: 'default', project: 'nibit', working_directory: '/home/jon/worktrees/nibit-seo',
+      id: 'hermes-content-context', runtime_connection_id: 'hermes-desktop',
+      profile: 'default', project: 'content-site', working_directory: '/home/tester/worktrees/content-site',
       session_mode: 'isolated', max_concurrent_runs: 1,
     }],
     runtimeJobs: {
       'hermes-desktop': [{
-        id: '63c0e40d3eac', name: 'Nibit weekly GSC SEO content planner',
+        id: 'job-seo-planner', name: 'Weekly SEO content planner',
         provider: 'custom:cliproxyapi-plus', model: 'claude-fable-5-medium', enabled: true,
       }],
     },
   });
   await page.getByRole('button', { name: 'New job' }).click();
-  await page.locator('#task-name').fill('Nibit content planner');
-  await page.locator('#task-profile').selectOption('hermes-nibit');
+  await page.locator('#task-name').fill('Content planner');
+  await page.locator('#task-profile').selectOption('hermes-content');
   await expect(page.locator('#task-runtime-job-field')).toBeVisible();
-  await expect(page.locator('#task-runtime-job')).toContainText('Nibit weekly GSC SEO content planner');
-  await page.locator('#task-runtime-job').selectOption('63c0e40d3eac');
+  await expect(page.locator('#task-runtime-job')).toContainText('Weekly SEO content planner');
+  await page.locator('#task-runtime-job').selectOption('job-seo-planner');
   await page.getByRole('button', { name: 'Save job' }).click();
 
   await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
   expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body).toMatchObject({
-    execution_profile_id: 'hermes-nibit', runtime_job_id: '63c0e40d3eac',
+    execution_profile_id: 'hermes-content', runtime_job_id: 'job-seo-planner',
   });
 });
 

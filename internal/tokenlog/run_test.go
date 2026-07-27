@@ -95,7 +95,7 @@ func TestLoadRunArtifactReadsHermesUsageAndMapsSubscriptionProvider(t *testing.T
 
 func TestLoadRunArtifactReadsExistingHermesJobUsage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hermes-job.jsonl")
-	data := `{"type":"hermes.result","job_id":"63c0e40d3eac","session_id":"cron_63c0e40d3eac_new","model":"claude-fable-5-medium","provider":"custom:cliproxyapi-plus","usage":{"input":120,"output":8,"cache_read":400,"cache_write":5}}`
+	data := `{"type":"hermes.result","job_id":"job-seo-planner","session_id":"cron_job-seo-planner_new","model":"claude-fable-5-medium","provider":"custom:cliproxyapi-plus","usage":{"input":120,"output":8,"cache_read":400,"cache_write":5}}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}

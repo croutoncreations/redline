@@ -249,15 +249,15 @@ func TestHermesHarnessCanTriggerExistingRuntimeJobWithoutPrompt(t *testing.T) {
 	}
 	runner := &fakeHermesRunner{jobResult: hermes.JobRunResult{
 		Job: hermes.Job{
-			ID: "63c0e40d3eac", Name: "Nibit weekly GSC SEO content planner",
+			ID: "job-seo-planner", Name: "Weekly SEO content planner",
 			Provider: "custom:cliproxyapi-plus", Model: "claude-fable-5-medium", Enabled: true,
 		},
 		Run: hermes.JobRun{
-			ID: "cron_63c0e40d3eac_20260728_100214", EndReason: "cron_complete",
+			ID: "cron_job-seo-planner_20260728_100214", EndReason: "cron_complete",
 			Model: "claude-fable-5-medium", BillingProvider: "custom:cliproxyapi-plus",
 			InputTokens: 120, OutputTokens: 8, CacheReadTokens: 400,
 		},
-		Output: "Finished the Nibit plan.",
+		Output: "Finished the content plan.",
 	}}
 	var external domain.ExternalRun
 	result, err := (harness.Adapter{Contexts: contexts, Hermes: runner}).Run(t.Context(), harness.Request{
@@ -288,8 +288,8 @@ func TestHermesHarnessCanTriggerExistingRuntimeJobWithoutPrompt(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	data, err := os.ReadFile(result.OutputFile)
-	if err != nil || !strings.Contains(string(data), `"job_id":"63c0e40d3eac"`) ||
-		!strings.Contains(string(data), `"output":"Finished the Nibit plan."`) {
+	if err != nil || !strings.Contains(string(data), `"job_id":"job-seo-planner"`) ||
+		!strings.Contains(string(data), `"output":"Finished the content plan."`) {
 		t.Fatalf("artifact=%s err=%v", data, err)
 	}
 }
