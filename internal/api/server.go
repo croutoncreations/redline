@@ -1098,10 +1098,11 @@ func (s *Server) dispatch(
 ) (response schedulerResponse, admitted bool, dispatchErr error) {
 	startedAt := s.now().UTC()
 	response, admitted, dispatchErr = s.dispatchCore(ctx, request, trigger)
-	// Service shutdown can cancel an in-flight usage fetch or database read.
-	// That is an expected lifecycle event, not a failed dispatch, and persisting
-	// it would make the next process report degraded health after every restart.
-	if dispatchErr != nil && errors.Is(dispatchErr, context.Canceled) && ctx.Err() != nil {
+	// Service or request shutdown can cancel an in-flight usage fetch or database
+	// read. Some SQLite paths return only the driver's error text rather than
+	// wrapping context.Canceled, so recognize that exact terminal cause too.
+	// Cancellation is a lifecycle event, not a failed dispatch.
+	if isContextCancellation(dispatchErr) {
 		return response, false, dispatchErr
 	}
 	attempt := domain.DispatchAttempt{
@@ -1149,6 +1150,18 @@ func (s *Server) dispatch(
 		}
 	}
 	return response, admitted, dispatchErr
+}
+
+func isContextCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := err.Error()
+	return message == context.Canceled.Error() ||
+		strings.HasSuffix(message, ": "+context.Canceled.Error())
 }
 
 func (s *Server) dispatchCore(

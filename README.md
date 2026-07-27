@@ -161,9 +161,16 @@ incomplete or a local integration is not built in.
 
 For Hermes, choose **Hermes** as the harness and import the current Hermes Desktop connection.
 Redline reuses the Desktop-authenticated remote Gateway session, discovers its profiles, projects,
-and authenticated model catalogs, and persists the selection as an agent context. Each admitted
-task creates a new isolated Hermes session in the selected remote context. The external session ID,
-actual provider/model, terminal output, and reported token totals are retained with the Redline run.
+authenticated model catalogs, and existing scheduled jobs, and persists the selected execution
+context. A task can either start a new isolated Hermes session from its prompt or select an existing
+Hermes job from the dashboard. Existing jobs should remain paused in Hermes while Redline owns
+admission; this avoids Hermes' native schedule racing Redline's allowance-aware scheduler.
+
+After triggering either form, Redline follows the remote session to a terminal state rather than
+treating the initial Gateway response as completion. The external job and session IDs, actual
+provider/model, final assistant output, lifecycle events, and reported input/output/cache token
+totals are retained with the Redline run. Those observations are attributed to the provider and
+model allowance selected by the execution profile, including separate model pools such as Fable.
 The Gateway owns the remote filesystem; local prepare/finalize commands are therefore disabled for
 runtime-owned workspaces.
 

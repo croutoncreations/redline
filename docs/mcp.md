@@ -67,7 +67,7 @@ Read-only tools:
 | `redline_overview` | Compact health, provider, queue, scheduler, and recent-run state |
 | `redline_provider_status` | Latest usage windows and model allowances |
 | `redline_provider_capacity` | Learned token-capacity evidence and confidence |
-| `redline_tasks_list` / `redline_task_get` | Bounded queue and task inspection |
+| `redline_tasks_list` / `redline_task_get` | Bounded queue and task inspection, including any selected Hermes job |
 | `redline_profiles_list` / `redline_profile_get` | Available harness/model/workspace profiles |
 | `redline_runtime_connections_list` / `redline_runtime_connection_get` | Remote runtime endpoints and credential references |
 | `redline_agent_contexts_list` / `redline_agent_context_get` | Runtime profiles, projects, and working directories |
@@ -79,8 +79,8 @@ State-changing tools:
 
 | Tool | Effect |
 |---|---|
-| `redline_task_create` | Queue a one-off or recurring task |
-| `redline_task_update` | Change task instructions or eligibility |
+| `redline_task_create` | Queue a one-off or recurring task; `runtime_job_id` selects an existing Hermes job |
+| `redline_task_update` | Change task instructions, eligibility, or the selected Hermes job |
 | `redline_task_control` | Enable, disable, or retry a task |
 | `redline_profile_create` | Create a harness/model/workspace execution profile |
 | `redline_profile_update` | Change profile routing, commands, or lifecycle hooks |
@@ -114,6 +114,13 @@ provider's `model_count` without returning model identifiers or capability maps.
 defaults to 50 and is capped at 200; use `model_offset` for subsequent pages. The response marks
 omitted model data with `truncated` and `models_truncated`.
 
+For an existing Hermes scheduled job, discover the connection's jobs through the dashboard or
+`GET /v1/runtime-connections/{connection}/jobs`, then pass that job ID as `runtime_job_id` when
+creating or updating the Redline task. Keep the Hermes-native job paused so only Redline owns
+admission. When Redline releases it, the run remains active until the resulting remote session
+finishes; its final output, provider/model routing, and reported token classes are available through
+the normal run, event, and log tools.
+
 List results default to 20 items and cap at 100. Task prompts are omitted from lists and capped at
 8 KiB on detailed responses. Event and log tools also enforce server-side response bounds.
 
@@ -136,6 +143,8 @@ whether queued work may start; task instructions define what the admitted agent 
 
 ## Security
 
-The HTTP service and stdio MCP server are local and unauthenticated. Keep the service bound to
-loopback, use an absolute trusted executable path, and do not expose it through a remote MCP
-transport without adding authentication and authorization.
+The HTTP service accepts loopback hosts only and requires the random `api-token` stored beside the
+active configuration. The stdio MCP process reads that protected credential and authenticates each
+request; it does not expose a network listener of its own. Use an absolute trusted executable path
+and do not forward the loopback API or stdio server through a remote transport without adding a
+separate authorization boundary.
