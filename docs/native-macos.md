@@ -182,3 +182,43 @@ faithfully reproduce a first launch on a user's Mac. Use three layers before a p
 
 GitHub's macOS runner is useful for deterministic build and package checks; it is not a substitute
 for the user-facing Gatekeeper dialogs, login persistence, or a real Sparkle update rehearsal.
+
+The repository includes a Tart-based rehearsal for the third layer. Tart's first Sequoia base-image
+download is large, but the retained base is reused and each disposable test VM is an inexpensive
+APFS clone:
+
+```bash
+# Current Homebrew releases may require formula-level trust for the third-party tap.
+brew trust --formula cirruslabs/cli/tart
+brew trust --formula cirruslabs/cli/softnet
+brew install cirruslabs/cli/tart
+
+# Optional: inspect the exact rehearsal before changing VM state.
+./scripts/rehearse-macos-release-vm.sh plan-upgrade v0.1.0 0.1.1
+
+# Download/reuse the base, create a disposable graphical VM, install v0.1.0,
+# and seed a profile/task that must survive the update.
+./scripts/rehearse-macos-release-vm.sh prepare-upgrade v0.1.0
+
+# In the VM, inspect first-run behavior and choose Redline > Check for Updates.
+# After Sparkle replaces and relaunches the app:
+./scripts/rehearse-macos-release-vm.sh verify-upgrade 0.1.1
+
+# Remove only the disposable VM. The clean base remains for the next release.
+./scripts/rehearse-macos-release-vm.sh destroy
+```
+
+`verify-upgrade` checks the new bundle version and distribution signatures, retained configuration
+and SQLite state, the protected API credential, the seeded task/profile, API health, and single
+service ownership. To exercise a candidate DMG as a clean installation before publishing it:
+
+```bash
+REDLINE_TART_REPLACE=1 \
+  ./scripts/rehearse-macos-release-vm.sh prepare-candidate \
+  /absolute/path/to/Redline-0.1.1-arm64.dmg 0.1.1
+```
+
+Use `REDLINE_TART_REPLACE=1` only when intentionally discarding an existing disposable rehearsal
+VM. The script never deletes the retained base VM. If host VPN or DNS settings produce an
+unreachable resolver in the guest, the rehearsal falls back to Cloudflare and Google public DNS
+inside the disposable clone only.

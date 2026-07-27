@@ -52,3 +52,5 @@ jobs:
         run: codesign --verify --deep --strict dist/Redline.app
       - name: Exercise release packaging and update feed
         run: tests/macos/release-packaging.sh
+      - name: Validate Tart release rehearsal commands
+        run: tests/macos/tart-release-rehearsal.sh
