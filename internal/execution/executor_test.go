@@ -184,6 +184,29 @@ func TestHarnessFailureFailsTaskButStillFinalizes(t *testing.T) {
 	}
 }
 
+func TestHarnessFailurePersistsActionableDiagnosisAndIncludesItInNotification(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	notifier := &fakeNotifier{}
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}},
+		Harness: &fakeHarness{result: harness.Result{
+			ExitCode: 1,
+			Failure:  "Claude Code is signed out. Run `claude auth login`, then retry this job.",
+		}},
+		Notifier: notifier, OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	storedRun, _ := db.GetRun(t.Context(), run.ID)
+	if storedRun.Error != "Claude Code is signed out. Run `claude auth login`, then retry this job." {
+		t.Fatalf("run error = %q", storedRun.Error)
+	}
+	if len(notifier.events) != 1 || notifier.events[0].Data["error"] != storedRun.Error {
+		t.Fatalf("notification = %#v", notifier.events)
+	}
+}
+
 func TestPartiallyPreparedWorkspaceIsRecordedAndCleanedOnSetupFailure(t *testing.T) {
 	db, run, task, profile := admittedRun(t, domain.OneOff)
 	profile.CleanupPolicy = "always"

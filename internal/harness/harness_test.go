@@ -65,6 +65,22 @@ func TestClaudeAdapterBuildsNoninteractiveCommand(t *testing.T) {
 	}
 }
 
+func TestClaudeAdapterDiagnosesSignedOutSession(t *testing.T) {
+	result, err := (harness.Adapter{Runner: claudeSignedOutRunner{}}).Run(t.Context(), harness.Request{
+		RunID: "run-signed-out", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "review auth"},
+		Profile:   domain.ExecutionProfile{HarnessType: "claude-code", Model: "sonnet"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 1 ||
+		result.Failure != "Claude Code is signed out. Run `claude auth login`, then retry this job." {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestPiAdapterBuildsNoninteractiveNamedSession(t *testing.T) {
 	runner := &captureRunner{}
 	_, err := (harness.Adapter{Runner: runner}).Run(context.Background(), harness.Request{
@@ -329,6 +345,13 @@ func TestHermesHarnessPersistsFailedRuntimeJobUsage(t *testing.T) {
 type captureRunner struct {
 	command redprocess.Command
 	stdin   string
+}
+
+type claudeSignedOutRunner struct{}
+
+func (claudeSignedOutRunner) Run(_ context.Context, command redprocess.Command) (int, error) {
+	_, _ = io.WriteString(command.Stdout, `{"type":"assistant","error":"authentication_failed","result":"Not logged in · Please run /login"}`)
+	return 1, nil
 }
 
 type fakeContexts struct {

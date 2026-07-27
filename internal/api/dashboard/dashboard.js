@@ -241,6 +241,50 @@ function renderRuns(runs) {
   $('#runs-list').innerHTML = runs.length ? runs.map(run => `<div class="activity"><i class="activity-dot ${escapeHTML(run.state)}"></i><div><strong>${escapeHTML(run.task_id)}</strong><p>${escapeHTML(run.provider_account_id)} · ${escapeHTML(title(run.state))}${run.error ? ` · ${escapeHTML(run.error)}` : ''}</p><button class="log-link" data-run="${escapeHTML(run.id)}">View logs →</button></div><time>${escapeHTML(relative(run.started_at))}</time></div>`).join('') : '<p class="empty">No runs recorded yet.</p>';
   document.querySelectorAll('[data-run]').forEach(button => button.addEventListener('click', () => openLogs(button.dataset.run)));
 }
+function failureMessage(run,task) {
+  if (run.error && run.error !== 'harness exited with code 1') return run.error;
+  if (task?.harness_type === 'claude-code') {
+    return 'Claude Code stopped unexpectedly. Open the logs for details. If its session expired, run `claude auth login`, then retry.';
+  }
+  if (task?.harness_type === 'codex-cli') {
+    return 'Codex CLI stopped unexpectedly. Open the logs for details. If its session expired, run `codex login`, then retry.';
+  }
+  return run.error || 'The agent stopped unexpectedly. Open the run logs for details.';
+}
+function renderFailure(tasks,runs,providers) {
+  const failure = runs.find(run => {
+    if (run.state !== 'failed') return false;
+    const task = tasks.find(item => item.id === run.task_id);
+    return !task || task.state === 'failed';
+  });
+  const alert = $('#failure-alert');
+  if (!failure) {
+    alert.hidden = true;
+    alert.innerHTML = '';
+    return;
+  }
+  const task = tasks.find(item => item.id === failure.task_id);
+  const providerPaused = providers.find(item => item.id === failure.provider_account_id)?.paused === true;
+  const taskName = task?.name || failure.task_id;
+  alert.innerHTML = `<span class="failure-icon" aria-hidden="true">!</span><span class="failure-copy"><span class="eyebrow">JOB NEEDS ATTENTION</span><strong>${escapeHTML(taskName)}</strong><span>${escapeHTML(failureMessage(failure,task))}</span><small>${escapeHTML(failure.provider_account_id)} · failed ${escapeHTML(relative(failure.completed_at || failure.started_at))}${providerPaused ? ' · scheduling paused' : ''}</small></span><span class="failure-actions"><button class="quiet-button" type="button" data-failure-logs="${escapeHTML(failure.id)}">View logs</button><button class="primary-button" type="button" data-failure-retry="${escapeHTML(failure.task_id)}">${providerPaused ? 'Resume & retry' : 'Retry job'}</button></span>`;
+  alert.hidden = false;
+  alert.querySelector('[data-failure-logs]').addEventListener('click',event => openLogs(event.currentTarget.dataset.failureLogs));
+  alert.querySelector('[data-failure-retry]').addEventListener('click',async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      if (providerPaused) {
+        await apiRequest(`/v1/providers/${encodeURIComponent(failure.provider_account_id)}/resume`,{method:'POST',body:'{}'});
+      }
+      await apiRequest(`/v1/tasks/${encodeURIComponent(button.dataset.failureRetry)}/retry`,{method:'POST',body:'{}'});
+      await refresh();
+    } catch(error) {
+      $('#error-banner').hidden = false;
+      $('#error-banner').textContent = `Could not retry failed job: ${error.message}`;
+      button.disabled = false;
+    }
+  });
+}
 function renderAttempts(attempts) {
   $('#attempt-count').textContent = `${attempts.length} event${attempts.length === 1 ? '' : 's'}`;
   $('#attempts-list').innerHTML = attempts.length ? attempts.slice(0,12).map(a => `<div class="activity"><i class="activity-dot ${escapeHTML(a.outcome)}"></i><div><strong>${escapeHTML(title(a.outcome))} · ${escapeHTML(a.provider_account_id)}</strong><p>${escapeHTML(a.reason || a.error || a.mode || 'Scheduler evaluated capacity')}</p></div><time>${escapeHTML(relative(a.completed_at))}</time></div>`).join('') : '<p class="empty">No scheduler decisions recorded yet.</p>';
@@ -254,10 +298,14 @@ function renderHealth(health, attempts) {
     ? `The newest scheduler check was ${latest.outcome}${latest.completed_at ? ` ${relative(latest.completed_at)}` : ''}.`
     : 'No recent scheduler check is available.';
   const cause = recentError ? ` Latest sampled cause: ${recentError.error || recentError.reason}.` : '';
+  const failureParts = [];
+  if (health.failed_runs) failureParts.push(`${health.failed_runs} job${health.failed_runs === 1 ? '' : 's'} failed`);
+  if (health.dispatch_errors) failureParts.push(`${health.dispatch_errors} dispatch check${health.dispatch_errors === 1 ? '' : 's'} failed`);
+  if (health.notification_failures) failureParts.push(`${health.notification_failures} notification${health.notification_failures === 1 ? '' : 's'} failed`);
   const detail = healthy
     ? `No run, dispatch, or notification failures were recorded during the last ${health.window}.`
-    : `${health.dispatch_errors} of ${health.dispatch_attempts} dispatch checks failed during the rolling ${health.window}; this does not mean the service is currently offline. ${latestState}${cause}`;
-  $('#health-explainer').innerHTML = `<strong>${healthy ? 'Operational health' : 'Recent scheduler errors'}</strong><p>${escapeHTML(detail)}</p>`;
+    : `${failureParts.join(', ') || 'An operation failed'} during the rolling ${health.window}; this does not mean the service is currently offline. ${latestState}${cause}`;
+  $('#health-explainer').innerHTML = `<strong>${healthy ? 'Operational health' : 'Recent failures'}</strong><p>${escapeHTML(detail)}</p>`;
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
@@ -276,7 +324,7 @@ function render(data) {
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
-  renderHealth(data.health,data.attempts); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
+  renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
 }
 async function openLogs(run) {

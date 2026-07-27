@@ -64,6 +64,47 @@ import Testing
     #expect(tracker.observe(update.runs).isEmpty)
 }
 
+@Test func terminalRunTrackerReportsFailedRunFoundAtStartup() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"completed_runs":0,"failed_runs":1,"dispatch_attempts":1,"dispatch_errors":0,"notification_failures":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"startup-failure","task_id":"task-failed","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T02:00:00Z","error":"Claude Code is signed out."},
+      {"id":"old-success","task_id":"task-old","provider_account_id":"codex-main","state":"completed","started_at":"2026-07-20T01:00:00Z"}
+    ]}
+    """#.utf8))
+
+    var tracker = TerminalRunTracker()
+    let events = tracker.observe(snapshot.runs)
+
+    #expect(events.map(\.runID) == ["startup-failure"])
+    #expect(tracker.observe(snapshot.runs).isEmpty)
+}
+
+@Test func terminalRunTrackerReportsOnlyNewestFailureAtStartup() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"newest-failure","task_id":"task-new","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T03:00:00Z","error":"not logged in"},
+      {"id":"older-failure","task_id":"task-old","provider_account_id":"codex-main","state":"failed","started_at":"2026-07-21T02:00:00Z","error":"network error"}
+    ]}
+    """#.utf8))
+
+    var tracker = TerminalRunTracker()
+    #expect(tracker.observe(snapshot.runs).map(\.runID) == ["newest-failure"])
+}
+
+@Test func snapshotExposesLatestUnresolvedTaskFailure() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"completed_runs":0,"failed_runs":1,"dispatch_attempts":1,"dispatch_errors":0,"notification_failures":0},"scheduler":{"enabled":true,"running":false},"providers":[],"attempts":[],"tasks":[
+      {"id":"failed-task","name":"Find one real bug","priority":80,"state":"failed","provider_account_id":"claude-main","model":"sonnet","dispatch_tier":"behind"}
+    ],"runs":[
+      {"id":"failed-run","task_id":"failed-task","provider_account_id":"claude-main","state":"failed","started_at":"2026-07-21T02:00:00Z","error":"Claude Code is signed out."}
+    ]}
+    """#.utf8))
+
+    #expect(snapshot.unresolvedFailure?.id == "failed-run")
+    #expect(snapshot.unresolvedFailureTask?.name == "Find one real bug")
+    #expect(TrayState(snapshot: snapshot).activity == .attention)
+}
+
 @Test func trayStateUsesWorstRelevantSignal() throws {
     let healthy = TrayState(snapshot: .fixture(health: "healthy", activeRuns: 0, lowestWeekly: 0.75))
     #expect(healthy.level == .comfortable)

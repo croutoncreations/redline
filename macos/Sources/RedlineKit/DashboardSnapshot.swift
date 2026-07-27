@@ -33,6 +33,17 @@ public struct DashboardSnapshot: Codable, Sendable {
         var seen = Set<String>()
         return attempts.filter { seen.insert($0.providerAccountID).inserted }
     }
+    public var unresolvedFailure: RunSummary? {
+        runs.first { run in
+            guard run.state == "failed" else { return false }
+            guard let task = tasks.first(where: { $0.id == run.taskID }) else { return true }
+            return task.state == "failed"
+        }
+    }
+    public var unresolvedFailureTask: TaskSummary? {
+        guard let failure = unresolvedFailure else { return nil }
+        return tasks.first { $0.id == failure.taskID }
+    }
 
     enum CodingKeys: String, CodingKey { case health, scheduler, providers, tasks, runs, attempts }
 
@@ -54,11 +65,13 @@ public struct TaskSummary: Codable, Sendable, Identifiable {
     public let state: String
     public let providerAccountID: String
     public let model: String?
+    public let harnessType: String?
     public let dispatchTier: String
 
     enum CodingKeys: String, CodingKey {
         case id, name, priority, state, model
         case providerAccountID = "provider_account_id"
+        case harnessType = "harness_type"
         case dispatchTier = "dispatch_tier"
     }
 }
@@ -195,7 +208,18 @@ public struct TerminalRunTracker: Sendable {
             observedRunIDs.formUnion(terminal.map(\.id))
             hasEstablishedBaseline = true
         }
-        guard hasEstablishedBaseline else { return [] }
+        guard hasEstablishedBaseline else {
+            guard let run = terminal.first(where: {
+                $0.state == "failed" && !observedRunIDs.contains($0.id)
+            }) else { return [] }
+            return [TerminalRunEvent(
+                runID: run.id,
+                taskID: run.taskID,
+                providerAccountID: run.providerAccountID,
+                state: run.state,
+                error: run.error
+            )]
+        }
         return terminal.compactMap { run in
             guard !observedRunIDs.contains(run.id) else { return nil }
             return TerminalRunEvent(
@@ -280,7 +304,8 @@ public struct TrayState: Sendable {
         if snapshot.health.activeRuns > 0 || snapshot.scheduler.running {
             level = .running
             activity = .running
-        } else if snapshot.latestAttemptsByProvider.contains(where: { $0.outcome == "error" }) {
+        } else if snapshot.unresolvedFailure != nil ||
+                    snapshot.latestAttemptsByProvider.contains(where: { $0.outcome == "error" }) {
             level = .degraded
             activity = .attention
         } else if let percent = lowestWeeklyPercent, percent <= 20 {

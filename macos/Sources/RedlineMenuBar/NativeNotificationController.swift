@@ -20,7 +20,10 @@ final class NativeNotificationController {
     func observe(_ snapshot: DashboardSnapshot) {
         let events = tracker.observe(snapshot.runs)
         guard authorized else { return }
-        for event in events { deliver(event) }
+        for event in events {
+            let taskName = snapshot.tasks.first { $0.id == event.taskID }?.name ?? event.taskID
+            deliver(event, taskName: taskName)
+        }
     }
 
     func enable() {
@@ -42,10 +45,10 @@ final class NativeNotificationController {
         }
     }
 
-    private func deliver(_ event: TerminalRunEvent) {
+    private func deliver(_ event: TerminalRunEvent, taskName: String) {
         let content = UNMutableNotificationContent()
         content.title = event.state == "completed" ? "Redline run completed" : "Redline run failed"
-        content.body = "\(event.taskID) · \(event.providerAccountID)" + (event.error.map { "\n\($0)" } ?? "")
+        content.body = "\(taskName) · \(event.providerAccountID)" + (event.error.map { "\n\($0)" } ?? "")
         content.sound = event.state == "failed" ? .default : nil
         center.add(UNNotificationRequest(identifier: "redline-run-\(event.runID)", content: content, trigger: nil))
     }

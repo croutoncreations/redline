@@ -43,6 +43,7 @@ type Result struct {
 	ExitCode   int            `json:"exit_code"`
 	OutputFile string         `json:"output_file"`
 	ErrorFile  string         `json:"error_file"`
+	Failure    string         `json:"failure,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
@@ -95,7 +96,56 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("launch %s harness: %w", request.Profile.HarnessType, err)
 	}
+	if exitCode != 0 {
+		_ = stdout.Sync()
+		_ = stderr.Sync()
+		result.Failure = diagnoseFailure(request.Profile.HarnessType, result.OutputFile, result.ErrorFile)
+	}
 	return result, nil
+}
+
+func diagnoseFailure(harnessType string, paths ...string) string {
+	var evidence strings.Builder
+	for _, path := range paths {
+		data, err := readTail(path, 64*1024)
+		if err == nil {
+			evidence.Write(data)
+			evidence.WriteByte('\n')
+		}
+	}
+	normalized := strings.ToLower(evidence.String())
+	switch harnessType {
+	case "claude-code":
+		if strings.Contains(normalized, "not logged in") ||
+			strings.Contains(normalized, `"error":"authentication_failed"`) {
+			return "Claude Code is signed out. Run `claude auth login`, then retry this job."
+		}
+	case "codex-cli":
+		if strings.Contains(normalized, "not logged in") ||
+			strings.Contains(normalized, "login required") {
+			return "Codex CLI is signed out. Run `codex login`, then retry this job."
+		}
+	}
+	return ""
+}
+
+func readTail(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	offset := max(int64(0), info.Size()-limit)
+	data := make([]byte, info.Size()-offset)
+	_, err = file.ReadAt(data, offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (a Adapter) runHermesJob(

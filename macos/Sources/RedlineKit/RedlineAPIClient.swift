@@ -35,6 +35,21 @@ public struct RedlineAPIClient: Sendable {
         try await controlProvider(providerID, action: "resume")
     }
 
+    public func retryTask(_ taskID: String) async throws -> TaskSummary {
+        try await request(endpoint(["v1", "tasks", taskID, "retry"]), method: "POST", as: TaskSummary.self)
+    }
+
+    public func recoverFailedTask(
+        _ taskID: String,
+        providerID: String,
+        providerPaused: Bool
+    ) async throws -> TaskSummary {
+        if providerPaused {
+            _ = try await resumeProvider(providerID)
+        }
+        return try await retryTask(taskID)
+    }
+
     public func runLogs(runID: String, stream: RunLogStream = .stdout, tailBytes: Int = 32 * 1024) async throws -> RunLogTail {
         var components = URLComponents(url: endpoint(["v1", "runs", runID, "logs"]), resolvingAgainstBaseURL: false)!
         components.queryItems = [

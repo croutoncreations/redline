@@ -24,6 +24,7 @@ struct StatusPopoverView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    failureSection
                     providerGrid
                     activitySection
                     queueSection
@@ -37,6 +38,50 @@ struct StatusPopoverView: View {
         }
         .frame(width: 420, height: 640)
         .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder private var failureSection: some View {
+        if let failure = snapshot?.unresolvedFailure {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Job failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.red)
+                Text(taskName(failure.taskID))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(failureMessage(failure))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Button("View logs") { actions.showRunLogs(failure) }
+                        .buttonStyle(.bordered)
+                    Button {
+                        Task {
+                            await model.recoverFailedTask(
+                                failure.taskID,
+                                providerID: failure.providerAccountID,
+                                providerPaused: failedProviderIsPaused(failure)
+                            )
+                        }
+                    } label: {
+                        if model.tasksBeingControlled.contains(failure.taskID) {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text(failedProviderIsPaused(failure) ? "Resume & retry" : "Retry job")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(model.tasksBeingControlled.contains(failure.taskID))
+                    Button("Enable alerts…", action: actions.enableNotifications)
+                        .buttonStyle(.borderless)
+                }
+                .font(.system(size: 10, weight: .medium))
+            }
+            .padding(12)
+            .background(Color.red.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.red.opacity(0.35)))
+        }
     }
 
     private var header: some View {
@@ -242,6 +287,25 @@ struct StatusPopoverView: View {
 
     private func taskName(_ taskID: String) -> String {
         snapshot?.tasks.first { $0.id == taskID }?.name ?? taskID
+    }
+
+    private func failureMessage(_ run: RunSummary) -> String {
+        let error = run.error ?? ""
+        if error != "harness exited with code 1" {
+            return error.isEmpty ? "The agent stopped unexpectedly. Open the run logs for details." : error
+        }
+        switch snapshot?.tasks.first(where: { $0.id == run.taskID })?.harnessType {
+        case "claude-code":
+            return "Claude Code stopped unexpectedly. Open the logs for details. If its session expired, run `claude auth login`, then retry."
+        case "codex-cli":
+            return "Codex CLI stopped unexpectedly. Open the logs for details. If its session expired, run `codex login`, then retry."
+        default:
+            return "The agent stopped unexpectedly. Open the run logs for details."
+        }
+    }
+
+    private func failedProviderIsPaused(_ run: RunSummary) -> Bool {
+        snapshot?.providers.first { $0.id == run.providerAccountID }?.paused == true
     }
 
     private func runSymbol(_ state: String) -> String {

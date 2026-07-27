@@ -8,6 +8,7 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var actionError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var providersBeingControlled = Set<String>()
+    @Published private(set) var tasksBeingControlled = Set<String>()
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -47,6 +48,22 @@ final class PopoverViewModel: ObservableObject {
         do {
             if paused { _ = try await client.pauseProvider(providerID) }
             else { _ = try await client.resumeProvider(providerID) }
+            apply(try await client.dashboard())
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    func recoverFailedTask(_ taskID: String, providerID: String, providerPaused: Bool) async {
+        guard tasksBeingControlled.insert(taskID).inserted else { return }
+        actionError = nil
+        defer { tasksBeingControlled.remove(taskID) }
+        do {
+            _ = try await client.recoverFailedTask(
+                taskID,
+                providerID: providerID,
+                providerPaused: providerPaused
+            )
             apply(try await client.dashboard())
         } catch {
             actionError = error.localizedDescription

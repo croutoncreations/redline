@@ -162,6 +162,8 @@ func (e Executor) Execute(
 		state = domain.RunFailed
 		if harnessErr != nil {
 			agentError = harnessErr.Error()
+		} else if harnessResult.Failure != "" {
+			agentError = harnessResult.Failure
 		} else {
 			agentError = fmt.Sprintf("harness exited with code %d", harnessResult.ExitCode)
 		}
@@ -255,7 +257,7 @@ func (e Executor) complete(
 		Message: message,
 		Data: map[string]string{
 			"state": string(completion.State), "exit_code": strconv.Itoa(completion.ExitCode),
-			"finalize_state": completion.FinalizeState,
+			"finalize_state": completion.FinalizeState, "error": completion.Error,
 		},
 	}
 	if err := e.Notifier.Notify(ctx, event); err != nil {
