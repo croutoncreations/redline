@@ -747,7 +747,19 @@ func DesktopHTTPClient(ctx context.Context, connection domain.RuntimeConnection)
 		return nil, "", err
 	}
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Timeout: 20 * time.Second}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 20 * time.Second,
+		// The session token is attached by sessionTokenTransport on every
+		// outgoing request, not read from the original request's headers, so
+		// Go's cross-host Authorization-stripping does not protect it. A
+		// malicious or compromised Gateway could otherwise redirect a request
+		// to an attacker-controlled host and receive the token. Do not follow
+		// redirects at all; no Gateway call in this client legitimately needs one.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	if connection.CredentialSource == "hermes_desktop" {
 		home, _ := os.UserHomeDir()
 		cookiesPath := filepath.Join(home, defaultDesktopCookies)
