@@ -28,10 +28,6 @@ type Usage struct {
 	CacheCreationTokens int64
 }
 
-func (u Usage) TotalTokens() int64 {
-	return u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheCreationTokens
-}
-
 type QuoteResult struct {
 	Priced          bool    `json:"priced"`
 	Unit            Unit    `json:"unit,omitempty"`
