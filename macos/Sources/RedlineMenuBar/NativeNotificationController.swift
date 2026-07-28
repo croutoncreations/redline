@@ -27,22 +27,65 @@ final class NativeNotificationController {
     }
 
     func enable() {
+        center.getNotificationSettings { [weak self] settings in
+            let authorizationStatus = settings.authorizationStatus.rawValue
+            Task { @MainActor in
+                switch UNAuthorizationStatus(rawValue: authorizationStatus) {
+                case .notDetermined:
+                    self?.requestAuthorization()
+                case .authorized, .provisional, .ephemeral:
+                    self?.authorized = true
+                    self?.showAlert(
+                        title: "Redline notifications are enabled",
+                        detail: "You’ll be notified when a queued run starts, completes, or fails."
+                    )
+                case .denied:
+                    self?.authorized = false
+                    self?.showDeniedAlert()
+                case .none:
+                    self?.requestAuthorization()
+                @unknown default:
+                    self?.requestAuthorization()
+                }
+            }
+        }
+    }
+
+    private func requestAuthorization() {
         center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             let failure = error?.localizedDescription
             Task { @MainActor in
                 self?.authorized = granted
-                let alert = NSAlert()
                 if granted {
-                    alert.messageText = "Redline notifications are enabled"
-                    alert.informativeText = "You’ll be notified when a queued run starts, completes, or fails."
+                    self?.showAlert(
+                        title: "Redline notifications are enabled",
+                        detail: "You’ll be notified when a queued run starts, completes, or fails."
+                    )
                 } else {
-                    alert.messageText = "Notifications were not enabled"
-                    alert.informativeText = failure ?? "You can allow Redline notifications in System Settings."
-                    alert.alertStyle = .warning
+                    self?.showDeniedAlert(detail: failure)
                 }
-                alert.runModal()
             }
         }
+    }
+
+    private func showDeniedAlert(detail: String? = nil) {
+        let alert = NSAlert()
+        alert.messageText = "Notifications are disabled"
+        alert.informativeText = detail ?? "Allow Redline notifications in System Settings to receive job updates."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Notification Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func showAlert(title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.runModal()
     }
 
     private func deliver(_ event: RunNotificationEvent, taskName: String) {

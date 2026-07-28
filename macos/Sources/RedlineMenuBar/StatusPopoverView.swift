@@ -270,10 +270,12 @@ struct StatusPopoverView: View {
             Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.bordered).disabled(model.isRefreshing)
             Spacer()
+            Button("Notifications…", action: actions.enableNotifications)
+                .buttonStyle(.bordered)
+                .help("Enable or manage job notifications")
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
-                Button("Enable Notifications…", action: actions.enableNotifications)
                 Button("App Setup…", action: actions.showAppSetup)
                 Divider()
                 Button("Quit Redline", action: actions.quit)

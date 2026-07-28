@@ -318,7 +318,8 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 	}
 	target := baseURL + "/api/jobs/" + url.PathEscape(jobID) + "/run"
 	if err := postJSON(ctx, httpClient, target, &payload); err != nil {
-		if !isHTTPStatus(err, http.StatusNotFound) {
+		if !isHTTPStatus(err, http.StatusNotFound) &&
+			!isHTTPStatus(err, http.StatusMethodNotAllowed) {
 			return Job{}, fmt.Errorf("trigger Hermes job %q: %w", jobID, err)
 		}
 		var desktopJob Job
