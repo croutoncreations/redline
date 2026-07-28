@@ -39,8 +39,50 @@ func TestClientReturnsStructuredAPIError(t *testing.T) {
 	}))
 	defer server.Close()
 	client := apiclient.Client{BaseURL: server.URL, HTTPClient: server.Client()}
-	err := client.Do(context.Background(), http.MethodGet, "/test", nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "bad request") {
-		t.Fatalf("error = %v", err)
+	err := client.Do(context.Background(), http.MethodGet, "/v1/tasks/xyz", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	// The message must carry method, path, status code, and server detail so
+	// a CLI/MCP caller can tell which of dozens of endpoints failed and why,
+	// instead of a bare "Redline API: bad request" indistinguishable from
+	// any other failing request.
+	for _, want := range []string{"GET", "/v1/tasks/xyz", "400", "bad request"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestClientAPIErrorFallsBackToStatusText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	client := apiclient.Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	err := client.Do(context.Background(), http.MethodDelete, "/v1/tasks/missing", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	for _, want := range []string{"DELETE", "/v1/tasks/missing", "404", "Not Found"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestClientTransportErrorIncludesMethodAndPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	unreachable := server.URL
+	server.Close() // closed server: connections will be refused
+	client := apiclient.Client{BaseURL: unreachable, HTTPClient: server.Client()}
+	err := client.Do(context.Background(), http.MethodPost, "/v1/runs", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	for _, want := range []string{"POST", "/v1/runs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }
