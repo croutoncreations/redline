@@ -303,7 +303,9 @@ function renderHealth(health, attempts) {
   if (health.dispatch_errors) failureParts.push(`${health.dispatch_errors} dispatch check${health.dispatch_errors === 1 ? '' : 's'} failed`);
   if (health.notification_failures) failureParts.push(`${health.notification_failures} notification${health.notification_failures === 1 ? '' : 's'} failed`);
   const detail = healthy
-    ? `No run, dispatch, or notification failures were recorded during the last ${health.window}.`
+    ? (health.failed_runs
+      ? `${health.failed_runs} agent job${health.failed_runs === 1 ? '' : 's'} failed during the last ${health.window}, but scheduler dispatch and notifications are healthy. Job failures remain visible in Recent work.`
+      : `No scheduler dispatch or notification failures were recorded during the last ${health.window}.`)
     : `${failureParts.join(', ') || 'An operation failed'} during the rolling ${health.window}; this does not mean the service is currently offline. ${latestState}${cause}`;
   $('#health-explainer').innerHTML = `<strong>${healthy ? 'Operational health' : 'Recent failures'}</strong><p>${escapeHTML(detail)}</p>`;
 }

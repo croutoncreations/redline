@@ -96,3 +96,35 @@ func TestOperationalHealthRecoversAfterFailuresAgeOut(t *testing.T) {
 		t.Fatalf("health = %#v", health)
 	}
 }
+
+func TestOperationalHealthTreatsJobFailureAsWorkloadHistory(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 27, 18, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
+		ID: "p", ProviderAccountID: "claude-main", HarnessType: "command", WorkspaceProvider: "existing-directory",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(context.Background(), domain.Task{
+		ID: "t", Name: "Task", ExecutionProfileID: "p", Type: domain.OneOff,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(context.Background(), "r", "t", "claude-main", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(context.Background(), "r", domain.RunCompletion{
+		State: domain.RunFailed, ExitCode: 1, Error: "agent task failed", FinalizeState: "completed",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := db.OperationalHealth(context.Background(), now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Status != "healthy" || health.FailedRuns != 1 ||
+		health.DispatchErrors != 0 || health.NotificationFailures != 0 {
+		t.Fatalf("health = %#v", health)
+	}
+}
