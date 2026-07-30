@@ -48,7 +48,7 @@ type manifest struct {
 func Build(input Input) Result {
 	result := Result{}
 	if input.ResultFile != "" {
-		if data, err := os.ReadFile(input.ResultFile); err == nil {
+		if data, err := readTail(input.ResultFile, maxOutputBytes); err == nil {
 			var value manifest
 			if json.Unmarshal(data, &value) == nil {
 				result = Result{
@@ -213,8 +213,14 @@ func appendUnique(values []string, value string) []string {
 
 func appendUniqueArtifact(values []domain.RunArtifact, value domain.RunArtifact) []domain.RunArtifact {
 	for _, existing := range values {
-		if existing.Type == value.Type && existing.URL == value.URL && existing.Path == value.Path &&
-			existing.Label == value.Label {
+		if value.URL != "" && existing.URL == value.URL {
+			return values
+		}
+		if value.Path != "" && existing.Path == value.Path {
+			return values
+		}
+		if existing.Type == value.Type && existing.Label == value.Label &&
+			existing.URL == value.URL && existing.Path == value.Path {
 			return values
 		}
 	}

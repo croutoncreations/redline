@@ -251,15 +251,29 @@ function showMoreButton(total, kind, expanded, noun) {
   const label = expanded ? `Show latest ${ACTIVITY_PREVIEW}` : `Show all ${total} ${noun}`;
   return `<button type="button" class="show-more" data-show-more="${kind}">${label}</button>`;
 }
-function renderRuns(runs) {
+function artifactLinks(artifacts = []) {
+  return artifacts.filter(artifact => /^https?:\/\//i.test(artifact.url || '')).map(artifact =>
+    `<a href="${escapeHTML(artifact.url)}" target="_blank" rel="noreferrer">${escapeHTML(artifact.label || title(artifact.type || 'link'))} ↗</a>`
+  ).join('');
+}
+function renderRuns(runs, unreadRuns = 0) {
   latestRuns = runs;
-  $('#run-count').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
+  $('#run-count').textContent = unreadRuns
+    ? `${unreadRuns} new · ${runs.length} total`
+    : `${runs.length} run${runs.length === 1 ? '' : 's'}`;
+  $('#run-count').classList.toggle('count-attention', unreadRuns > 0);
+  $('#mark-runs-read').hidden = unreadRuns === 0;
   const visible = showAllRuns ? runs : runs.slice(0, ACTIVITY_PREVIEW);
   $('#runs-list').innerHTML = runs.length
-    ? visible.map(run => `<button type="button" class="activity activity-action" data-run="${escapeHTML(run.id)}"><i class="activity-dot ${escapeHTML(run.state)}"></i><span class="activity-body"><strong>${escapeHTML(taskNames.get(run.task_id) || run.task_id)}</strong><span class="activity-desc">${escapeHTML(run.provider_account_id)} · ${escapeHTML(title(run.state))}${run.error ? ` · ${escapeHTML(run.error)}` : ''}</span></span><span class="activity-side"><time>${escapeHTML(relative(run.started_at))}</time><span class="activity-open">View logs →</span></span></button>`).join('') + showMoreButton(runs.length, 'runs', showAllRuns, 'runs')
+    ? visible.map(run => {
+      const unread = (run.state === 'completed' || run.state === 'failed') && !run.activity_read_at;
+      const route = [run.actual_provider || run.provider_account_id, run.actual_model].filter(Boolean).join(' · ');
+      const summary = run.summary || run.error || `${title(run.state)} run`;
+      return `<div class="activity-shell ${unread ? 'unread' : ''}"><button type="button" class="activity activity-action" data-run="${escapeHTML(run.id)}"><i class="activity-dot ${escapeHTML(run.state)}"></i><span class="activity-body"><strong>${escapeHTML(taskNames.get(run.task_id) || run.task_id)}${unread ? '<em class="new-label">New</em>' : ''}</strong><span class="activity-desc result-summary">${escapeHTML(summary)}</span><span class="activity-meta">${escapeHTML(route)} · ${escapeHTML(title(run.outcome || run.state))}</span></span><span class="activity-side"><time>${escapeHTML(relative(run.completed_at || run.started_at))}</time><span class="activity-open">View details →</span></span></button>${run.artifacts?.some(artifact => artifact.url) ? `<div class="activity-artifacts">${artifactLinks(run.artifacts)}</div>` : ''}</div>`;
+    }).join('') + showMoreButton(runs.length, 'runs', showAllRuns, 'runs')
     : '<p class="empty">No runs yet. Completed and failed runs will appear here.</p>';
   document.querySelectorAll('[data-run]').forEach(button => button.addEventListener('click', () => openLogs(button.dataset.run)));
-  wireShowMore('runs', () => { showAllRuns = !showAllRuns; renderRuns(latestRuns); });
+  wireShowMore('runs', () => { showAllRuns = !showAllRuns; renderRuns(latestRuns, unreadRuns); });
 }
 function wireShowMore(kind, toggle) {
   const button = document.querySelector(`[data-show-more="${kind}"]`);
@@ -356,7 +370,7 @@ function render(data) {
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
-  renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
+  renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs,data.unread_runs || 0); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
 }
 async function openLogs(runID) {
@@ -366,9 +380,23 @@ async function openLogs(runID) {
   $('#log-context').textContent = run
     ? `${runID} · ${title(run.state)} · ${run.provider_account_id} · started ${relative(run.started_at)}`
     : runID;
+  const result = $('#run-result');
+  if (run && (run.summary || run.artifacts?.length || run.warnings?.length)) {
+    const route = [run.actual_provider, run.actual_model].filter(Boolean).join(' · ');
+    result.innerHTML = `${run.summary ? `<p>${escapeHTML(run.summary)}</p>` : ''}${route ? `<small>Actual route · ${escapeHTML(route)}</small>` : ''}${run.artifacts?.length ? `<div class="result-artifacts">${artifactLinks(run.artifacts)}${run.artifacts.filter(artifact => !artifact.url).map(artifact => `<span>${escapeHTML(artifact.label)}${artifact.path ? ` · ${escapeHTML(artifact.path)}` : ''}</span>`).join('')}</div>` : ''}${run.warnings?.length ? `<ul>${run.warnings.map(warning => `<li>${escapeHTML(warning)}</li>`).join('')}</ul>` : ''}`;
+    result.hidden = false;
+  } else {
+    result.hidden = true; result.innerHTML = '';
+  }
   $('#logs-dialog').showModal();
   document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.toggle('active',b.dataset.stream === 'stdout'));
   document.querySelectorAll('[data-log-view]').forEach(b => b.classList.toggle('active',b.dataset.logView === currentLogView));
+  if (run && !run.activity_read_at && (run.state === 'completed' || run.state === 'failed')) {
+    apiRequest(`/v1/runs/${encodeURIComponent(runID)}/read`,{method:'POST'}).then(() => {
+      run.activity_read_at = new Date().toISOString();
+      refresh();
+    }).catch(() => {});
+  }
   await loadLog('stdout');
 }
 function logUsage(usage = {}) {
@@ -839,6 +867,11 @@ function connectLive() {
 $('#refresh').addEventListener('click',refresh);
 $('#new-task').addEventListener('click',() => openTask());
 $('#manage-profiles').addEventListener('click',openProfiles);
+$('#mark-runs-read').addEventListener('click',async event => {
+  const button = event.currentTarget; button.disabled = true;
+  try { await apiRequest('/v1/runs/read-all',{method:'POST'}); await refresh(); }
+  finally { button.disabled = false; }
+});
 $('#task-form').addEventListener('submit',saveTask);
 $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);

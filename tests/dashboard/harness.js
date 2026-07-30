@@ -30,7 +30,8 @@ function dashboardFixture() {
       { id: 'codex-main', provider: 'codex', policy: 'standard', policy_source: 'global', default_policy: 'standard', max_concurrent_runs: 2, active_runs: 1, pool_concurrency: { weekly: 2 }, active_pool_claims: { weekly: 1 }, usage_source: { active: 'openusage' }, latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .08, projected_trigger_at: codexTrigger, projection_basis: 'Assumes weekly usage stays unchanged.' }, snapshot: { provider: 'codex', observed_at: observed, weekly: { remaining: 0.47, resets_at: '2026-07-25T19:00:00Z' }, allowances: [] } },
     ],
     tasks: [{ id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', min_interval: 86400000000000, require_repo_change: true, dispatch_tier: 'well_behind' }],
-    runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed }],
+    unread_runs: 1,
+    runs: [{ id: 'run-1', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed', started_at: observed, completed_at: observed, summary: 'Opened a focused authentication fix.', outcome: 'changes_proposed', actual_provider: 'openai-codex', actual_model: 'gpt-5.6-sol', artifacts: [{ type: 'pull_request', label: 'PR #42', url: 'https://github.com/acme/redline/pull/42' }] }],
     attempts: [{ id: 1, provider_account_id: 'codex-main', outcome: 'error', error: 'temporary usage source timeout', completed_at: observed }],
   };
 }
@@ -226,6 +227,9 @@ async function loadDashboard(page, options = {}) {
     }
     const logMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/logs$/);
     if (logMatch) return json(200, { run_id: logMatch[1], stream: url.searchParams.get('stream'), content: url.searchParams.get('stream') === 'stderr' ? 'warning from stderr' : '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n{"type":"turn.completed","usage":{"input_tokens":9346,"cached_input_tokens":7040,"output_tokens":28}}\n{"type":"result","result":"ok"}' });
+    const readMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/read$/);
+    if (readMatch && method === 'POST') { state.requests.push({ method, path: url.pathname }); return json(200, { read: true }); }
+    if (url.pathname === '/v1/runs/read-all' && method === 'POST') { state.requests.push({ method, path: url.pathname }); return json(200, { read: true }); }
     return json(404, { error: `unhandled ${method} ${url.pathname}` });
   });
 

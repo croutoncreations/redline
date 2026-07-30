@@ -250,7 +250,7 @@ test('creates edits and deletes a standalone Hermes runtime connection', async (
 
 test('loads both run log streams and controls an existing task', async ({ page }) => {
   const state = await loadDashboard(page);
-  await page.getByRole('button', { name: 'View logs →' }).click();
+  await page.getByRole('button', { name: 'View details →' }).click();
   await expect(page.locator('#log-content')).toContainText('RESULT');
   await expect(page.locator('#log-content')).toContainText('ok');
   await expect(page.locator('#log-content')).toContainText('9,346 input · 7,040 cached · 28 output');
@@ -294,6 +294,18 @@ test('summarizes queue states, previews long run history, and keeps log context'
   await page.locator('[data-run="run-1"]').click();
   await expect(page.locator('#log-title')).toHaveText('Audit authentication');
   await expect(page.locator('#log-context')).toContainText('run-1 · Completed · codex-main');
+});
+
+test('shows durable activity results, artifacts, and marks opened work read', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible();
+  await expect(page.locator('#run-count')).toHaveText('1 new · 1 total');
+  await expect(page.locator('#runs-list')).toContainText('Opened a focused authentication fix.');
+  await expect(page.locator('#runs-list')).toContainText('openai-codex · gpt-5.6-sol');
+  await page.locator('[data-run="run-1"]').click();
+  await expect(page.locator('#run-result')).toContainText('Opened a focused authentication fix.');
+  await expect(page.locator('#run-result').getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/acme/redline/pull/42');
+  await expect.poll(() => state.requests.some(item => item.path === '/v1/runs/run-1/read')).toBe(true);
 });
 
 test('shows dashboard API errors and preserves the responsive queue layout', async ({ page }) => {

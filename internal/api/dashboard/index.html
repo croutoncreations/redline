@@ -54,7 +54,7 @@
 
     <div class="lower-grid">
       <section class="panel">
-        <div class="section-head"><div><p class="eyebrow">RECENT WORK</p><h2>Run history</h2></div><span id="run-count" class="count">0 runs</span></div>
+        <div class="section-head"><div><p class="eyebrow">RESULTS &amp; ARTIFACTS</p><h2>Activity</h2></div><div class="section-actions"><span id="run-count" class="count">0 runs</span><button id="mark-runs-read" class="quiet-button compact-button" type="button" hidden>Mark all read</button></div></div>
         <div id="runs-list" class="activity-list"><p class="empty">Loading runs…</p></div>
       </section>
       <section class="panel">
@@ -142,6 +142,7 @@
 
   <dialog id="logs-dialog" aria-labelledby="log-title">
     <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2><small id="log-context" class="dialog-note"></small></div><button id="close-logs" type="button" aria-label="Close">×</button></div>
+    <section id="run-result" class="run-result" hidden></section>
     <div class="log-toolbar"><div class="log-tabs"><button class="active" data-stream="stdout">stdout</button><button data-stream="stderr">stderr</button></div><div class="log-view-tabs" aria-label="Log display"><button class="active" data-log-view="formatted">Formatted</button><button data-log-view="raw">Raw</button></div></div>
     <pre id="log-content">Select a stream.</pre>
   </dialog>

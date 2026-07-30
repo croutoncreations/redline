@@ -79,7 +79,7 @@ test('captures default, dialog, and detail views', async ({ page }) => {
   await expect(page.locator('#profile-discovery-status')).toContainText('found');
   await shoot(page, 'dialog-profiles');
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await page.getByRole('button', { name: /View logs/ }).first().click();
+  await page.getByRole('button', { name: /View details/ }).first().click();
   await expect(page.locator('#log-content')).toContainText('RESULT');
   await shoot(page, 'dialog-logs');
 });
