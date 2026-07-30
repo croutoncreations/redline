@@ -45,6 +45,10 @@ type schedulerResponse struct {
 }
 
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		writeHelp(stdout)
+		return 0
+	}
 	global := flag.NewFlagSet("redline", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	configPath := global.String("config", "redline.yaml", "service configuration file")
@@ -93,6 +97,18 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
 	}
+}
+
+func writeHelp(output io.Writer) {
+	fmt.Fprintln(output, "Redline — budget-aware dispatch for deferred LLM work")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "commands: serve, mcp, health, decision, status, calibration, capacity, token,")
+	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, pause, resume")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
+	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
 }
 
 func runMCP(client apiclient.Client, args []string, stderr io.Writer) int {

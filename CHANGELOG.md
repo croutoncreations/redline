@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   from the README and embedded dashboard.
 - After the first successful run, the menu-bar app now shows one small dismissible builder-updates
   prompt. The action menu also provides persistent, attributed links to updates and related tools.
+- `redline --help` now returns a concise successful help page with project and update links.
 - Native macOS alerts now fire when a run starts, in addition to completing or failing. The
   `notifications` command hook gained a matching `run.started` event, so custom notification
   scripts can subscribe to it via `events: [run.started, run.completed, run.failed,
