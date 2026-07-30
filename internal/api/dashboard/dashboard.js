@@ -53,7 +53,12 @@ function providerPressure(item) {
   const current = item.latest_decision;
   if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
   if (current.decision === 'RUN') {
-    return {label:`Redline · ${title(current.unlocked_tier || 'ready')}`,detail:current.reason || 'Background work is eligible to run.',tone:'triggered'};
+    const pressure = {
+      behind: {label:'Run now · behind pace',detail:'Standard background jobs are eligible.'},
+      well_behind: {label:'Run now · surplus',detail:'More discretionary background jobs are eligible.'},
+      expiring: {label:'Run now · high surplus',detail:'All job tiers are eligible because weekly allowance is at risk of expiring unused.'},
+    }[current.unlocked_tier] || {label:'Run now',detail:'Background work is eligible.'};
+    return {label:pressure.label,detail:`${pressure.detail}${current.reason ? ` ${current.reason}.` : ''}`,tone:'triggered'};
   }
   if (current.mode === 'active_run') {
     return {label:'Running · limit reached',detail:current.reason || 'Redline is waiting for an active run to finish.',tone:'triggered'};

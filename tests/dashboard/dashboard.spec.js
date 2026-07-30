@@ -23,6 +23,23 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('describes high scheduling pressure without implying the subscription expires', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].latest_decision = {
+    decision: 'RUN',
+    mode: 'window_slots',
+    reason: 'weekly remaining is well behind pace',
+    unlocked_tier: 'expiring',
+  };
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Run now · high surplus');
+  await expect(claude).not.toContainText('Redline · Expiring');
+  await claude.click();
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .toContainText('All job tiers are eligible because weekly allowance is at risk of expiring unused.');
+});
+
 test('loads capacity attribution and model evidence on demand', async ({ page }) => {
 	const state = await loadDashboard(page);
 	const claude = page.getByRole('button', { name: 'Show Claude usage details' });
