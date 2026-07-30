@@ -147,12 +147,31 @@ public struct AttemptSummary: Codable, Sendable, Identifiable {
     public let outcome: String
     public let decision: String?
     public let reason: String?
+    public let error: String?
     public let startedAt: String
 
     enum CodingKeys: String, CodingKey {
-        case id, outcome, decision, reason
+        case id, outcome, decision, reason, error
         case providerAccountID = "provider_account_id"
         case startedAt = "started_at"
+    }
+
+    public init(
+        id: Int,
+        providerAccountID: String,
+        outcome: String,
+        decision: String?,
+        reason: String?,
+        error: String? = nil,
+        startedAt: String
+    ) {
+        self.id = id
+        self.providerAccountID = providerAccountID
+        self.outcome = outcome
+        self.decision = decision
+        self.reason = reason
+        self.error = error
+        self.startedAt = startedAt
     }
 }
 

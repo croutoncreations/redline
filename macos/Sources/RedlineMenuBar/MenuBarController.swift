@@ -144,9 +144,10 @@ final class MenuBarController: NSObject {
             ))
         }
         if unreadRuns > 0 {
+            let unreadFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
             result.append(NSAttributedString(
-                string: "  •\(unreadRuns)",
-                attributes: [.font: font, .foregroundColor: NSColor.systemRed]
+                string: "  +\(unreadRuns)",
+                attributes: [.font: unreadFont, .foregroundColor: NSColor.systemBlue]
             ))
         }
         return result

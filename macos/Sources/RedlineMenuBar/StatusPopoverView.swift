@@ -171,15 +171,17 @@ struct StatusPopoverView: View {
             if let error = model.errorMessage {
                 Label(error, systemImage: "wifi.exclamationmark").font(.system(size: 11)).foregroundStyle(.red)
             } else if let health = snapshot?.health, health.status != "healthy" {
-                let currentFailure = snapshot?.latestAttemptsByProvider.contains { $0.outcome == "error" } == true
+                let currentFailures = snapshot?.latestAttemptsByProvider.filter { $0.outcome == "error" } ?? []
+                let currentFailure = !currentFailures.isEmpty
                 Label(
                     currentFailure
-                        ? "A provider's latest dispatch check failed"
+                        ? dispatchFailureSummary(currentFailures)
                         : "\(health.dispatchErrors) earlier dispatch errors; latest checks are succeeding",
                     systemImage: currentFailure ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark"
                 )
                 .font(.system(size: 11))
                 .foregroundStyle(currentFailure ? .red : .orange)
+                .help(currentFailure ? dispatchFailureDetails(currentFailures) : "No provider's latest check is failing.")
             }
             if let error = model.actionError {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.red)
@@ -194,30 +196,56 @@ struct StatusPopoverView: View {
             VStack(alignment: .leading, spacing: 8) {
                 sectionLabel(overflowLabel("RECENT RUNS", showing: runs.count, of: allRuns.count))
                 ForEach(runs) { run in
-                    HStack(spacing: 9) {
-                        if run.isUnread {
-                            Circle().fill(.red).frame(width: 6, height: 6)
-                        }
-                        Image(systemName: runSymbol(run.state))
-                            .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
-                            .frame(width: 14)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            if let summary = run.summary, !summary.isEmpty {
-                                Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                                Text(runDetail(run)).font(.system(size: 9)).foregroundStyle(.tertiary)
-                            } else {
-                                Text(runDetail(run)).font(.system(size: 10)).foregroundStyle(.secondary)
+                    Button {
+                        actions.showRunLogs(run)
+                    } label: {
+                        HStack(spacing: 9) {
+                            if run.isUnread {
+                                Circle().fill(.blue).frame(width: 6, height: 6)
                             }
+                            Image(systemName: runSymbol(run.state))
+                                .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
+                                .frame(width: 14)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                if let summary = run.summary, !summary.isEmpty {
+                                    Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(runDetail(run)).font(.system(size: 9)).foregroundStyle(.tertiary)
+                                } else {
+                                    Text(runDetail(run)).font(.system(size: 10)).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Text("Details")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Button("Details") { actions.showRunLogs(run) }
-                            .font(.system(size: 10)).buttonStyle(.borderless)
-                            .help("Open the logs for this run")
                     }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .help("Open this run's activity and logs")
                 }
             }
         }
+    }
+
+    private func dispatchFailureSummary(_ failures: [AttemptSummary]) -> String {
+        let names = failures.map { providerName($0.providerAccountID) }
+        if names.count == 1 {
+            return "\(names[0]) usage check failed"
+        }
+        return "\(names.joined(separator: " and ")) usage checks failed"
+    }
+
+    private func dispatchFailureDetails(_ failures: [AttemptSummary]) -> String {
+        failures.map {
+            let detail = $0.error ?? $0.reason ?? "No error detail was reported."
+            return "\(providerName($0.providerAccountID)): \(detail)"
+        }.joined(separator: "\n")
+    }
+
+    private func providerName(_ providerID: String) -> String {
+        snapshot?.providers.first { $0.id == providerID }?.displayName ?? providerID
     }
 
     private func runDetail(_ run: RunSummary) -> String {
