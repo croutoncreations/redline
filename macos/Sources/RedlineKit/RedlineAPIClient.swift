@@ -39,6 +39,10 @@ public struct RedlineAPIClient: Sendable {
         try await controlProvider(providerID, action: "resume")
     }
 
+    public func refreshProvider(_ providerID: String) async throws -> UsageSnapshot {
+        try await request(endpoint(["v1", "providers", providerID, "refresh"]), method: "POST", as: UsageSnapshot.self)
+    }
+
     public func retryTask(_ taskID: String) async throws -> TaskSummary {
         try await request(endpoint(["v1", "tasks", taskID, "retry"]), method: "POST", as: TaskSummary.self)
     }

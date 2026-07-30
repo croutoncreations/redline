@@ -21,6 +21,7 @@ final class MenuBarController: NSObject {
             showDashboard: { [weak self] in self?.showDashboard() },
             openBrowser: { [weak self] in self?.openDashboardInBrowser() },
             showRunLogs: { [weak self] run in self?.showRun(run) },
+            reconnectProvider: { [weak self] provider in self?.reconnectProvider(provider) },
             checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAppSetup: showAppSetup,
@@ -168,6 +169,26 @@ final class MenuBarController: NSObject {
                 return
             }
             showRun(run)
+        }
+    }
+
+    private func reconnectProvider(_ provider: ProviderSummary) {
+        guard let command = ProviderRecovery.loginCommand(for: provider.provider) else {
+            showDashboard()
+            return
+        }
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let source = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+        var error: NSDictionary?
+        if NSAppleScript(source: source)?.executeAndReturnError(&error) == nil {
+            showDashboard()
         }
     }
 

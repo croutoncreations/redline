@@ -5,6 +5,7 @@ struct StatusPopoverActions {
     let showDashboard: @MainActor () -> Void
     let openBrowser: @MainActor () -> Void
     let showRunLogs: @MainActor (RunSummary) -> Void
+    let reconnectProvider: @MainActor (ProviderSummary) -> Void
     let checkForUpdates: @MainActor () -> Void
     let enableNotifications: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
@@ -182,6 +183,27 @@ struct StatusPopoverView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(currentFailure ? .red : .orange)
                 .help(currentFailure ? dispatchFailureDetails(currentFailures) : "No provider's latest check is failing.")
+                if let provider = authenticationFailureProvider(currentFailures) {
+                    HStack(spacing: 12) {
+                        Button("Reconnect \(provider.displayName)…") {
+                            actions.reconnectProvider(provider)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        Button {
+                            Task { await model.refreshUsage(providerID: provider.id) }
+                        } label: {
+                            if model.providersBeingControlled.contains(provider.id) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Retry now")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.providersBeingControlled.contains(provider.id))
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                }
             }
             if let error = model.actionError {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.red)
@@ -242,6 +264,15 @@ struct StatusPopoverView: View {
             let detail = $0.error ?? $0.reason ?? "No error detail was reported."
             return "\(providerName($0.providerAccountID)): \(detail)"
         }.joined(separator: "\n")
+    }
+
+    private func authenticationFailureProvider(_ failures: [AttemptSummary]) -> ProviderSummary? {
+        guard let failure = failures.first(where: {
+            ProviderRecovery.isAuthenticationError($0.error ?? $0.reason)
+        }) else {
+            return nil
+        }
+        return snapshot?.providers.first { $0.id == failure.providerAccountID }
     }
 
     private func providerName(_ providerID: String) -> String {

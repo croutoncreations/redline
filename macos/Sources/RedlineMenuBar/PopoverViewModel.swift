@@ -54,6 +54,18 @@ final class PopoverViewModel: ObservableObject {
         }
     }
 
+    func refreshUsage(providerID: String) async {
+        guard providersBeingControlled.insert(providerID).inserted else { return }
+        actionError = nil
+        defer { providersBeingControlled.remove(providerID) }
+        do {
+            _ = try await client.refreshProvider(providerID)
+            apply(try await client.dashboard())
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
     func recoverFailedTask(_ taskID: String, providerID: String, providerPaused: Bool) async {
         guard tasksBeingControlled.insert(taskID).inserted else { return }
         actionError = nil

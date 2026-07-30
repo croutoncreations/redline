@@ -64,7 +64,7 @@ private struct RunLogView: View {
             if let summary = run.summary, !summary.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("RESULT").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    Text(summary).font(.callout).textSelection(.enabled)
+                    Text(LinkedResultText.make(summary)).font(.callout).textSelection(.enabled)
                     if !run.artifacts.isEmpty {
                         HStack {
                             ForEach(run.artifacts) { artifact in
