@@ -22,7 +22,7 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode API request: %w", err)
+			return fmt.Errorf("%s %s: encode request body: %w", method, path, err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
@@ -30,7 +30,7 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		ctx, method, strings.TrimRight(c.BaseURL, "/")+path, reader,
 	)
 	if err != nil {
-		return fmt.Errorf("build API request: %w", err)
+		return fmt.Errorf("%s %s: build request: %w", method, path, err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -44,7 +44,7 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("call Redline API: %w", err)
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -55,11 +55,11 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		if problem.Error == "" {
 			problem.Error = resp.Status
 		}
-		return fmt.Errorf("Redline API: %s", problem.Error)
+		return fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, problem.Error)
 	}
 	if output != nil {
 		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
-			return fmt.Errorf("decode Redline API response: %w", err)
+			return fmt.Errorf("%s %s: decode response: %w", method, path, err)
 		}
 	}
 	return nil

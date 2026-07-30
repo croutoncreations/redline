@@ -13,9 +13,9 @@ type ExecRunner struct{}
 func (ExecRunner) Run(ctx context.Context, command Command) (int, error) {
 	cmd := exec.CommandContext(ctx, command.Name, command.Args...)
 	cmd.Dir = command.Dir
-	environment := command.Env
+	var environment []string
 	if command.Env != nil {
-		environment = append([]string(nil), command.Env...)
+		environment = append(make([]string, 0, len(command.Env)), command.Env...)
 	} else {
 		environment = os.Environ()
 	}
