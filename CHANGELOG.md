@@ -23,6 +23,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Added a `prepare-upgrade-from-dmg` mode to the macOS release rehearsal script so a signed
   baseline DMG can be rehearsed as a prerelease upgrade, working around GitHub's
   `releases/latest` endpoint excluding prereleases.
+- Completed runs now have a durable Activity inbox with unread state, human-readable summaries,
+  bounded formatted logs, and clickable PR and web artifacts in both the dashboard and menu-bar
+  app.
+- Release packaging now produces a Universal DMG containing native Apple Silicon and Intel slices
+  for both the menu-bar app and bundled service. CI exercises the Intel build on native
+  `macos-15-intel` hardware.
 
 ### Fixed
 
@@ -31,3 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The "Enable Notifications" flow now checks existing macOS notification permission before
   prompting, so already-authorized users get a confirmation instead of a re-prompt, and denied
   users get a warning with a direct link to System Settings.
+- Confirmed Claude Code or Codex CLI sign-outs now pause scheduling for the affected provider,
+  preventing a queue of jobs from failing with the same expired session. The failure card opens
+  the supported login command and resumes scheduling when the user retries.
+- API client errors now include the HTTP method, path, and response status, making failed
+  operations actionable without enabling debug logging.
+- Subprocesses configured with an explicitly empty environment no longer inherit Redline's parent
+  environment and its credentials.
