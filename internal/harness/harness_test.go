@@ -81,6 +81,26 @@ func TestClaudeAdapterDiagnosesSignedOutSession(t *testing.T) {
 	}
 }
 
+func TestAuthenticationFailureClassificationOnlyMatchesActionableHarnessFailures(t *testing.T) {
+	for _, message := range []string{
+		"Claude Code is signed out. Run `claude auth login`, then retry this job.",
+		"Codex CLI is signed out. Run `codex login`, then retry this job.",
+	} {
+		if !harness.IsAuthenticationFailure(message) {
+			t.Fatalf("authentication failure was not recognized: %q", message)
+		}
+	}
+	for _, message := range []string{
+		"tests failed",
+		"authentication service is temporarily unavailable",
+		"Claude credentials could not be refreshed for usage monitoring",
+	} {
+		if harness.IsAuthenticationFailure(message) {
+			t.Fatalf("ordinary failure was misclassified: %q", message)
+		}
+	}
+}
+
 func TestPiAdapterBuildsNoninteractiveNamedSession(t *testing.T) {
 	runner := &captureRunner{}
 	_, err := (harness.Adapter{Runner: runner}).Run(context.Background(), harness.Request{
