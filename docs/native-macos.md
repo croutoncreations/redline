@@ -215,13 +215,20 @@ service ownership. To exercise a candidate DMG as a clean installation before pu
 ```bash
 REDLINE_TART_REPLACE=1 \
   ./scripts/rehearse-macos-release-vm.sh prepare-candidate \
-  /absolute/path/to/Redline-0.1.1-arm64.dmg 0.1.1
+  /absolute/path/to/Redline-0.1.2-universal.dmg 0.1.2
 ```
 
 Use `REDLINE_TART_REPLACE=1` only when intentionally discarding an existing disposable rehearsal
 VM. The script never deletes the retained base VM. If host VPN or DNS settings produce an
 unreachable resolver in the guest, the rehearsal falls back to Cloudflare and Google public DNS
 inside the disposable clone only.
+
+Release packages are Universal by default and contain both `arm64` and `x86_64` slices for the
+Swift menu-bar executable and bundled Go service. Set `REDLINE_BUILD_ARCH=arm64` or
+`REDLINE_BUILD_ARCH=x86_64` only when intentionally producing an architecture-specific local
+package. `tests/macos/universal-build.sh` verifies both slices, code signing, and command startup
+through macOS's native architecture selector (using Rosetta for the Intel slice on Apple Silicon).
+CI also builds, tests, and starts the x86_64 service on GitHub's native `macos-15-intel` runner.
 
 GitHub's `releases/latest` endpoint excludes prereleases. To rehearse a prerelease without changing
 the stable feed, build a signed baseline DMG whose `SUFeedURL` points directly to the prerelease

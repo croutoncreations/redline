@@ -73,3 +73,49 @@ dialog{width:min(880px,calc(100vw - 32px));height:min(620px,calc(100vh - 80px));
   .provider-window-line{display:grid;gap:1px}
   .provider-window-line span+span{padding-left:0;border-left:0}
 }
+
+/* Queue stays scannable as jobs accumulate: bounded height, pinned header. */
+.table-wrap{max-height:560px}
+th{position:sticky;top:0;background:#171b20;z-index:2}
+.count-attention{color:var(--amber);border-color:#685630}
+
+/* Run rows are single actions; lists preview recent items and expand on demand. */
+.activity-action{width:100%;border:0;border-top:1px solid rgba(42,48,54,.58);background:transparent;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.activity-action:first-child{border-top:0}
+.activity-action:hover{background:#ffffff05}
+.activity-body{display:block;min-width:0}
+.activity-desc{display:block;font-size:10px;color:var(--muted);line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-side{display:grid;gap:5px;justify-items:end}
+.activity-open{color:var(--accent);font:9px ui-monospace,monospace;opacity:.5;transition:opacity .12s}
+.activity-action:hover .activity-open,.activity-action:focus-visible .activity-open{opacity:1}
+.activity-shell{border-top:1px solid rgba(42,48,54,.58)}
+.activity-shell:first-child{border-top:0}
+.activity-shell .activity-action{border-top:0}
+.activity-shell.unread{background:linear-gradient(90deg,#2a191b88,transparent 72%)}
+.activity-shell.unread .activity-dot{box-shadow:0 0 8px currentColor}
+.new-label{display:inline-block;margin-left:7px;color:#ff918b;font:7px ui-monospace,monospace;font-style:normal;text-transform:uppercase;letter-spacing:.08em}
+.activity-meta{display:block;color:#747c82;font:8px ui-monospace,monospace;margin-top:3px}
+.result-summary{color:#c3c7c9;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.activity-artifacts{display:flex;gap:9px;flex-wrap:wrap;padding:0 0 9px 26px}
+.activity-artifacts a,.result-artifacts a{color:#ff8882;font:9px ui-monospace,monospace;text-decoration:none}
+.activity-artifacts a:hover,.result-artifacts a:hover{text-decoration:underline}
+.compact-button{padding:5px 9px}
+.run-result{margin:14px 22px 0;padding:13px 14px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;background:#171b20}
+.run-result p{margin:0;color:#d9dcdd;font-size:11px;line-height:1.55}
+.run-result small{display:block;color:var(--muted);font:8px ui-monospace,monospace;margin-top:7px}
+.run-result ul{margin:8px 0 0;padding-left:18px;color:var(--amber);font-size:9px}
+.result-artifacts{display:flex;gap:10px;flex-wrap:wrap;margin-top:9px}
+.result-artifacts span{color:var(--muted);font:9px ui-monospace,monospace}
+#logs-dialog:has(.run-result:not([hidden])) pre{height:calc(100% - 230px)}
+.show-more{display:block;width:100%;border:0;border-top:1px solid rgba(42,48,54,.58);background:transparent;color:var(--muted);font:9px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;padding:11px 0 3px;cursor:pointer}
+.show-more:hover{color:var(--text)}
+
+/* Dialog context line under the title. */
+.dialog-note{display:block;color:var(--muted);font:9px ui-monospace,monospace;margin-top:5px}
+
+/* Keyboard focus is visible on every control. */
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #f0524d99;outline-offset:2px}
+
+@media (prefers-reduced-motion:reduce){
+  *,*:before,*:after{animation:none!important;transition:none!important}
+}

@@ -100,6 +100,7 @@ func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`DROP INDEX idx_usage_snapshots_identity;
+DROP INDEX idx_runs_activity_unread;
 DELETE FROM schema_migrations WHERE version >= 15;
 DROP TABLE run_allowance_pool_claims;
 DROP TABLE agent_contexts;
@@ -114,6 +115,13 @@ ALTER TABLE runs DROP COLUMN runtime_connection_id;
 ALTER TABLE runs DROP COLUMN agent_context_id;
 ALTER TABLE runs DROP COLUMN external_run_id;
 ALTER TABLE runs DROP COLUMN external_session_id;
+ALTER TABLE runs DROP COLUMN activity_summary;
+ALTER TABLE runs DROP COLUMN activity_outcome;
+ALTER TABLE runs DROP COLUMN activity_artifacts_json;
+ALTER TABLE runs DROP COLUMN activity_warnings_json;
+ALTER TABLE runs DROP COLUMN actual_provider;
+ALTER TABLE runs DROP COLUMN actual_model;
+ALTER TABLE runs DROP COLUMN activity_read_at;
 ALTER TABLE usage_allowance_windows DROP COLUMN reset_inferred;
 INSERT INTO usage_snapshots (
     provider, observed_at, short_remaining, short_resets_at,

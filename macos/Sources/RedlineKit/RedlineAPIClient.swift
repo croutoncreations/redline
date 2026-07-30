@@ -27,12 +27,20 @@ public struct RedlineAPIClient: Sendable {
         try await request(baseURL.appending(path: "v1/dashboard"), method: "GET", as: DashboardSnapshot.self)
     }
 
+    public func run(_ runID: String) async throws -> RunSummary {
+        try await request(endpoint(["v1", "runs", runID]), method: "GET", as: RunSummary.self)
+    }
+
     public func pauseProvider(_ providerID: String) async throws -> ProviderControlResult {
         try await controlProvider(providerID, action: "pause")
     }
 
     public func resumeProvider(_ providerID: String) async throws -> ProviderControlResult {
         try await controlProvider(providerID, action: "resume")
+    }
+
+    public func refreshProvider(_ providerID: String) async throws -> UsageSnapshot {
+        try await request(endpoint(["v1", "providers", providerID, "refresh"]), method: "POST", as: UsageSnapshot.self)
     }
 
     public func retryTask(_ taskID: String) async throws -> TaskSummary {
@@ -57,6 +65,14 @@ public struct RedlineAPIClient: Sendable {
             URLQueryItem(name: "tail_bytes", value: String(tailBytes)),
         ]
         return try await request(components.url!, method: "GET", as: RunLogTail.self)
+    }
+
+    public func markRunRead(_ runID: String) async throws {
+        _ = try await request(endpoint(["v1", "runs", runID, "read"]), method: "POST", as: ReadResult.self)
+    }
+
+    public func markAllRunsRead() async throws {
+        _ = try await request(endpoint(["v1", "runs", "read-all"]), method: "POST", as: ReadResult.self)
     }
 
     public func isCompatible() async -> Bool {
@@ -90,6 +106,8 @@ public struct RedlineAPIClient: Sendable {
         return try JSONDecoder().decode(type, from: data)
     }
 }
+
+private struct ReadResult: Codable { let read: Bool }
 
 public struct ProviderControlResult: Codable, Sendable {
     public let providerAccountID: String

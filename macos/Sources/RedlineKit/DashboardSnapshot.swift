@@ -7,6 +7,7 @@ public struct DashboardSnapshot: Codable, Sendable {
     public let tasks: [TaskSummary]
     public let runs: [RunSummary]
     public let attempts: [AttemptSummary]
+    public let unreadRuns: Int
 
     public init(
         health: HealthSummary,
@@ -14,7 +15,8 @@ public struct DashboardSnapshot: Codable, Sendable {
         providers: [ProviderSummary],
         tasks: [TaskSummary] = [],
         runs: [RunSummary] = [],
-        attempts: [AttemptSummary] = []
+        attempts: [AttemptSummary] = [],
+        unreadRuns: Int = 0
     ) {
         self.health = health
         self.scheduler = scheduler
@@ -22,6 +24,7 @@ public struct DashboardSnapshot: Codable, Sendable {
         self.tasks = tasks
         self.runs = runs
         self.attempts = attempts
+        self.unreadRuns = unreadRuns
     }
 
     public static func decode(_ data: Data) throws -> DashboardSnapshot {
@@ -45,7 +48,10 @@ public struct DashboardSnapshot: Codable, Sendable {
         return tasks.first { $0.id == failure.taskID }
     }
 
-    enum CodingKeys: String, CodingKey { case health, scheduler, providers, tasks, runs, attempts }
+    enum CodingKeys: String, CodingKey {
+        case health, scheduler, providers, tasks, runs, attempts
+        case unreadRuns = "unread_runs"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -55,6 +61,7 @@ public struct DashboardSnapshot: Codable, Sendable {
         tasks = try container.decodeIfPresent([TaskSummary].self, forKey: .tasks) ?? []
         runs = try container.decodeIfPresent([RunSummary].self, forKey: .runs) ?? []
         attempts = try container.decodeIfPresent([AttemptSummary].self, forKey: .attempts) ?? []
+        unreadRuns = try container.decodeIfPresent(Int.self, forKey: .unreadRuns) ?? 0
     }
 }
 
@@ -84,14 +91,54 @@ public struct RunSummary: Codable, Sendable, Identifiable {
     public let startedAt: String
     public let completedAt: String?
     public let error: String?
+    public let summary: String?
+    public let outcome: String?
+    public let artifacts: [RunArtifactSummary]
+    public let warnings: [String]
+    public let actualProvider: String?
+    public let actualModel: String?
+    public let activityReadAt: String?
+
+    public var isUnread: Bool {
+        (state == "completed" || state == "failed") && activityReadAt == nil
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, state, error
+        case id, state, error, summary, outcome, artifacts, warnings
         case taskID = "task_id"
         case providerAccountID = "provider_account_id"
         case startedAt = "started_at"
         case completedAt = "completed_at"
+        case actualProvider = "actual_provider"
+        case actualModel = "actual_model"
+        case activityReadAt = "activity_read_at"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        taskID = try container.decode(String.self, forKey: .taskID)
+        providerAccountID = try container.decode(String.self, forKey: .providerAccountID)
+        state = try container.decode(String.self, forKey: .state)
+        startedAt = try container.decode(String.self, forKey: .startedAt)
+        completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        outcome = try container.decodeIfPresent(String.self, forKey: .outcome)
+        artifacts = try container.decodeIfPresent([RunArtifactSummary].self, forKey: .artifacts) ?? []
+        warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        actualProvider = try container.decodeIfPresent(String.self, forKey: .actualProvider)
+        actualModel = try container.decodeIfPresent(String.self, forKey: .actualModel)
+        activityReadAt = try container.decodeIfPresent(String.self, forKey: .activityReadAt)
+    }
+}
+
+public struct RunArtifactSummary: Codable, Sendable, Identifiable {
+    public var id: String { "\(type):\(url ?? path ?? label)" }
+    public let type: String
+    public let label: String
+    public let url: String?
+    public let path: String?
 }
 
 public struct AttemptSummary: Codable, Sendable, Identifiable {
@@ -100,12 +147,31 @@ public struct AttemptSummary: Codable, Sendable, Identifiable {
     public let outcome: String
     public let decision: String?
     public let reason: String?
+    public let error: String?
     public let startedAt: String
 
     enum CodingKeys: String, CodingKey {
-        case id, outcome, decision, reason
+        case id, outcome, decision, reason, error
         case providerAccountID = "provider_account_id"
         case startedAt = "started_at"
+    }
+
+    public init(
+        id: Int,
+        providerAccountID: String,
+        outcome: String,
+        decision: String?,
+        reason: String?,
+        error: String? = nil,
+        startedAt: String
+    ) {
+        self.id = id
+        self.providerAccountID = providerAccountID
+        self.outcome = outcome
+        self.decision = decision
+        self.reason = reason
+        self.error = error
+        self.startedAt = startedAt
     }
 }
 

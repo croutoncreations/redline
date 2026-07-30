@@ -29,10 +29,16 @@ if [[ "${allow_unnotarized}" != "1" && ( -z "${sparkle_feed_url}" || -z "${spark
   exit 1
 fi
 
+export REDLINE_BUILD_ARCH="${REDLINE_BUILD_ARCH:-universal}"
 "${repository_root}/scripts/build-macos-app.sh"
 
 app_path="${app_output_root}/Redline.app"
-build_arch="$(lipo -archs "${app_path}/Contents/MacOS/RedlineMenuBar")"
+build_slices="$(lipo -archs "${app_path}/Contents/MacOS/RedlineMenuBar")"
+if [[ " ${build_slices} " == *" arm64 "* && " ${build_slices} " == *" x86_64 "* ]]; then
+  build_arch="universal"
+else
+  build_arch="${build_slices}"
+fi
 release_name="Redline-${version}-${build_arch}"
 dmg_path="${release_output_root}/${release_name}.dmg"
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/redline-macos-package.XXXXXX")"

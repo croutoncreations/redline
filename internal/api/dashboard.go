@@ -32,6 +32,7 @@ type dashboardResponse struct {
 	Tasks        []dashboardTask          `json:"tasks"`
 	Runs         []domain.Run             `json:"runs"`
 	Attempts     []domain.DispatchAttempt `json:"attempts"`
+	UnreadRuns   int                      `json:"unread_runs"`
 }
 
 type dashboardProvider struct {
@@ -283,6 +284,10 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		})
 	}
 	result.Runs, err = s.store.ListRuns(ctx, 20)
+	if err != nil {
+		return dashboardResponse{}, err
+	}
+	result.UnreadRuns, err = s.store.UnreadRunActivityCount(ctx)
 	if err != nil {
 		return dashboardResponse{}, err
 	}

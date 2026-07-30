@@ -22,7 +22,7 @@
         </div>
       </div>
       <span id="updated-at" class="updated">Not yet synced</span>
-      <button id="refresh" class="refresh" type="button" aria-label="Refresh dashboard">↻</button>
+      <button id="refresh" class="refresh" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
     </div>
   </header>
 
@@ -44,7 +44,7 @@
     <section class="panel queue-panel">
       <div class="section-head">
         <div><p class="eyebrow">DISPATCH QUEUE</p><h1>Scheduled jobs</h1></div>
-        <div class="section-actions"><span id="task-count" class="count">0 tasks</span><button id="manage-profiles" class="quiet-button" type="button">Profiles</button><button id="new-task" class="primary-button" type="button">+ New job</button></div>
+        <div class="section-actions"><span id="task-count" class="count">0 jobs</span><button id="manage-profiles" class="quiet-button" type="button">Profiles</button><button id="new-task" class="primary-button" type="button">+ New job</button></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Priority</th><th>Job</th><th>Run when</th><th>Route</th><th>Recurrence</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -54,7 +54,7 @@
 
     <div class="lower-grid">
       <section class="panel">
-        <div class="section-head"><div><p class="eyebrow">RECENT WORK</p><h2>Run history</h2></div><span id="run-count" class="count">0 runs</span></div>
+        <div class="section-head"><div><p class="eyebrow">RESULTS &amp; ARTIFACTS</p><h2>Activity</h2></div><div class="section-actions"><span id="run-count" class="count">0 runs</span><button id="mark-runs-read" class="quiet-button compact-button" type="button" hidden>Mark all read</button></div></div>
         <div id="runs-list" class="activity-list"><p class="empty">Loading runs…</p></div>
       </section>
       <section class="panel">
@@ -74,10 +74,10 @@
         <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
         <label id="task-runtime-job-field" class="field" hidden><span>Existing Hermes job <i class="help" tabindex="0" data-help="Choose an existing job discovered from the Hermes connection. Redline will trigger that job instead of sending this prompt to a new Hermes session.">?</i></span><select id="task-runtime-job"><option value="">New Hermes session from prompt</option></select><small id="task-runtime-job-status" class="field-note"></small></label>
-        <label class="field"><span>Priority</span><input id="task-priority" type="number" value="50" required></label>
-        <label class="field"><span>Run when</span><select id="task-tier"><option value="behind">Behind pace</option><option value="well_behind">Well behind pace</option><option value="expiring">Capacity likely to expire</option></select></label>
+        <label class="field"><span>Priority <i class="help" tabindex="0" data-help="When several jobs are eligible at the same time, the one with the highest priority is dispatched first.">?</i></span><input id="task-priority" type="number" min="0" max="100" value="50" required></label>
+        <label class="field"><span>Run when <i class="help" tabindex="0" data-help="How much spare capacity must build up before this job runs. Behind pace runs earliest; Capacity likely to expire waits until allowance would otherwise go unused.">?</i></span><select id="task-tier"><option value="behind">Behind pace</option><option value="well_behind">Well behind pace</option><option value="expiring">Capacity likely to expire</option></select></label>
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
-        <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"></label>
+        <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"><small id="task-interval-note" class="field-note" hidden>Applies to recurring jobs only.</small></label>
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
         <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="tasks/review-auth.md"></label>
         <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>
@@ -141,7 +141,8 @@
   </dialog>
 
   <dialog id="logs-dialog" aria-labelledby="log-title">
-    <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2></div><button id="close-logs" type="button" aria-label="Close">×</button></div>
+    <div class="dialog-head"><div><p class="eyebrow">RUN ARTIFACTS</p><h2 id="log-title">Run logs</h2><small id="log-context" class="dialog-note"></small></div><button id="close-logs" type="button" aria-label="Close">×</button></div>
+    <section id="run-result" class="run-result" hidden></section>
     <div class="log-toolbar"><div class="log-tabs"><button class="active" data-stream="stdout">stdout</button><button data-stream="stderr">stderr</button></div><div class="log-view-tabs" aria-label="Log display"><button class="active" data-log-view="formatted">Formatted</button><button data-log-view="raw">Raw</button></div></div>
     <pre id="log-content">Select a stream.</pre>
   </dialog>

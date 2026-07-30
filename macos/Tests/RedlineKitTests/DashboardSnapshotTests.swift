@@ -12,10 +12,11 @@ import Testing
         {"id":"codex-main","provider":"codex","paused":true,"snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-07-25T03:24:11Z"},"source":"builtin"}}
       ],
       "tasks": [{"id":"tests","name":"Add focused tests","priority":60,"state":"queued","provider_account_id":"codex-main","model":"gpt-5","dispatch_tier":"behind"}],
-      "runs": [],
+      "unread_runs": 1,
+      "runs": [{"id":"run-1","task_id":"tests","provider_account_id":"codex-main","state":"completed","started_at":"2026-07-20T23:40:00Z","summary":"Opened a PR.","outcome":"changes_proposed","artifacts":[{"type":"pull_request","label":"PR #42","url":"https://github.com/acme/app/pull/42"}],"actual_provider":"openai-codex","actual_model":"gpt-5.6-sol"}],
       "attempts": [
         {"id":9,"provider_account_id":"codex-main","outcome":"wait","decision":"WAIT","reason":"no pace threshold matched","started_at":"2026-07-20T23:51:00Z"},
-        {"id":8,"provider_account_id":"claude-main","outcome":"wait","decision":"WAIT","reason":"no actionable weekly overflow","started_at":"2026-07-20T23:50:00Z"}
+        {"id":8,"provider_account_id":"claude-main","outcome":"error","error":"native usage source: Claude credentials are invalid","started_at":"2026-07-20T23:50:00Z"}
       ]
     }
     """#.utf8)
@@ -39,6 +40,11 @@ import Testing
     #expect(snapshot.tasks.first?.dispatchTier == "behind")
     #expect(snapshot.latestAttempt?.decision == "WAIT")
     #expect(snapshot.latestAttemptsByProvider.map(\.providerAccountID) == ["codex-main", "claude-main"])
+    #expect(snapshot.latestAttemptsByProvider.last?.error == "native usage source: Claude credentials are invalid")
+    #expect(snapshot.unreadRuns == 1)
+    #expect(snapshot.runs.first?.isUnread == true)
+    #expect(snapshot.runs.first?.artifacts.first?.type == "pull_request")
+    #expect(snapshot.runs.first?.actualModel == "gpt-5.6-sol")
 }
 
 @Test func runNotificationTrackerBaselinesHistoryAndReportsStateChanges() throws {

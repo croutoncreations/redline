@@ -39,7 +39,10 @@ FROM dispatch_attempts WHERE completed_at >= ?`, formatTime(since)).Scan(
 WHERE status = 'failed' AND updated_at >= ?`, formatTime(since)).Scan(&health.NotificationFailures); err != nil {
 		return domain.OperationalHealth{}, fmt.Errorf("summarize notification failures: %w", err)
 	}
-	if health.FailedRuns > 0 || health.DispatchErrors > 0 || health.NotificationFailures > 0 {
+	// A failed agent job is a workload outcome, not evidence that the Redline
+	// service is unhealthy. Keep the count for run-history visibility, but only
+	// degrade operational health when Redline itself cannot dispatch or notify.
+	if health.DispatchErrors > 0 || health.NotificationFailures > 0 {
 		health.Status = "degraded"
 	}
 	return health, nil

@@ -39,12 +39,21 @@ type Request struct {
 	OnExternalStarted func(domain.ExternalRun) error
 }
 
+func ResultFilePath(outputDirectory, runID string) string {
+	return filepath.Join(outputDirectory, runID+".result.json")
+}
+
 type Result struct {
 	ExitCode   int            `json:"exit_code"`
 	OutputFile string         `json:"output_file"`
 	ErrorFile  string         `json:"error_file"`
 	Failure    string         `json:"failure,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+func IsAuthenticationFailure(failure string) bool {
+	return strings.HasPrefix(failure, "Claude Code is signed out.") ||
+		strings.HasPrefix(failure, "Codex CLI is signed out.")
 }
 
 func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
@@ -274,6 +283,14 @@ func buildCommand(
 ) (redprocess.Command, error) {
 	base := redprocess.Command{
 		Dir: request.Workspace.Directory, Stdout: stdout, Stderr: stderr,
+		Env: append(os.Environ(),
+			"REDLINE_RUN_ID="+request.RunID,
+			"REDLINE_TASK_ID="+request.Task.ID,
+			"REDLINE_TASK_NAME="+request.Task.Name,
+			"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
+			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
+			"REDLINE_RESULT_FILE="+ResultFilePath(request.OutputDirectory, request.RunID),
+		),
 	}
 	switch request.Profile.HarnessType {
 	case "codex-cli":
@@ -309,13 +326,6 @@ func buildCommand(
 		base.Name = "/bin/sh"
 		base.Args = []string{"-lc", request.Profile.HarnessCommand}
 		base.Stdin = strings.NewReader(prompt)
-		base.Env = append(os.Environ(),
-			"REDLINE_RUN_ID="+request.RunID,
-			"REDLINE_TASK_ID="+request.Task.ID,
-			"REDLINE_TASK_NAME="+request.Task.Name,
-			"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
-			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
-		)
 	default:
 		return redprocess.Command{}, fmt.Errorf("unsupported harness %q", request.Profile.HarnessType)
 	}

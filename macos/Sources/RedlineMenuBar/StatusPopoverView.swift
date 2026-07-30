@@ -5,6 +5,7 @@ struct StatusPopoverActions {
     let showDashboard: @MainActor () -> Void
     let openBrowser: @MainActor () -> Void
     let showRunLogs: @MainActor (RunSummary) -> Void
+    let reconnectProvider: @MainActor (ProviderSummary) -> Void
     let checkForUpdates: @MainActor () -> Void
     let enableNotifications: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
@@ -55,6 +56,13 @@ struct StatusPopoverView: View {
                 HStack(spacing: 12) {
                     Button("View logs") { actions.showRunLogs(failure) }
                         .buttonStyle(.bordered)
+                    if let provider = failedAuthenticationProvider(failure) {
+                        Button("Reconnect \(provider.displayName)…") {
+                            actions.reconnectProvider(provider)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    }
                     Button {
                         Task {
                             await model.recoverFailedTask(
@@ -67,14 +75,15 @@ struct StatusPopoverView: View {
                         if model.tasksBeingControlled.contains(failure.taskID) {
                             ProgressView().controlSize(.small)
                         } else {
-                            Text(failedProviderIsPaused(failure) ? "Resume & retry" : "Retry job")
+                            Text(failedProviderIsPaused(failure) ? "Retry after login" : "Retry job")
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(.bordered)
                     .disabled(model.tasksBeingControlled.contains(failure.taskID))
-                    Button("Enable alerts…", action: actions.enableNotifications)
-                        .buttonStyle(.borderless)
+                    if failedAuthenticationProvider(failure) == nil {
+                        Button("Enable alerts…", action: actions.enableNotifications)
+                            .buttonStyle(.borderless)
+                    }
                 }
                 .font(.system(size: 10, weight: .medium))
             }
@@ -171,15 +180,38 @@ struct StatusPopoverView: View {
             if let error = model.errorMessage {
                 Label(error, systemImage: "wifi.exclamationmark").font(.system(size: 11)).foregroundStyle(.red)
             } else if let health = snapshot?.health, health.status != "healthy" {
-                let currentFailure = snapshot?.latestAttemptsByProvider.contains { $0.outcome == "error" } == true
+                let currentFailures = snapshot?.latestAttemptsByProvider.filter { $0.outcome == "error" } ?? []
+                let currentFailure = !currentFailures.isEmpty
                 Label(
                     currentFailure
-                        ? "A provider's latest dispatch check failed"
+                        ? dispatchFailureSummary(currentFailures)
                         : "\(health.dispatchErrors) earlier dispatch errors; latest checks are succeeding",
                     systemImage: currentFailure ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark"
                 )
                 .font(.system(size: 11))
                 .foregroundStyle(currentFailure ? .red : .orange)
+                .help(currentFailure ? dispatchFailureDetails(currentFailures) : "No provider's latest check is failing.")
+                if let provider = authenticationFailureProvider(currentFailures) {
+                    HStack(spacing: 12) {
+                        Button("Reconnect \(provider.displayName)…") {
+                            actions.reconnectProvider(provider)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        Button {
+                            Task { await model.refreshUsage(providerID: provider.id) }
+                        } label: {
+                            if model.providersBeingControlled.contains(provider.id) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Retry now")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.providersBeingControlled.contains(provider.id))
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                }
             }
             if let error = model.actionError {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.red)
@@ -188,36 +220,86 @@ struct StatusPopoverView: View {
     }
 
     @ViewBuilder private var recentRunsSection: some View {
-        let runs = Array((snapshot?.runs ?? []).prefix(3))
+        let allRuns = snapshot?.runs ?? []
+        let runs = Array(allRuns.prefix(3))
         if !runs.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                sectionLabel("RECENT RUNS")
+                sectionLabel(overflowLabel("RECENT RUNS", showing: runs.count, of: allRuns.count))
                 ForEach(runs) { run in
-                    HStack(spacing: 9) {
-                        Image(systemName: runSymbol(run.state))
-                            .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
-                            .frame(width: 14)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            Text("\(run.providerAccountID) · \(run.state)").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Button {
+                        actions.showRunLogs(run)
+                    } label: {
+                        HStack(spacing: 9) {
+                            if run.isUnread {
+                                Circle().fill(.blue).frame(width: 6, height: 6)
+                            }
+                            Image(systemName: runSymbol(run.state))
+                                .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
+                                .frame(width: 14)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                if let summary = run.summary, !summary.isEmpty {
+                                    Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(runDetail(run)).font(.system(size: 9)).foregroundStyle(.tertiary)
+                                } else {
+                                    Text(runDetail(run)).font(.system(size: 10)).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Text("Details")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Button("Logs") { actions.showRunLogs(run) }
-                            .font(.system(size: 10)).buttonStyle(.borderless)
                     }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .help("Open this run's activity and logs")
                 }
             }
         }
     }
 
+    private func dispatchFailureSummary(_ failures: [AttemptSummary]) -> String {
+        let names = failures.map { providerName($0.providerAccountID) }
+        if names.count == 1 {
+            return "\(names[0]) usage check failed"
+        }
+        return "\(names.joined(separator: " and ")) usage checks failed"
+    }
+
+    private func dispatchFailureDetails(_ failures: [AttemptSummary]) -> String {
+        failures.map {
+            let detail = $0.error ?? $0.reason ?? "No error detail was reported."
+            return "\(providerName($0.providerAccountID)): \(detail)"
+        }.joined(separator: "\n")
+    }
+
+    private func authenticationFailureProvider(_ failures: [AttemptSummary]) -> ProviderSummary? {
+        guard let failure = failures.first(where: {
+            ProviderRecovery.isAuthenticationError($0.error ?? $0.reason)
+        }) else {
+            return nil
+        }
+        return snapshot?.providers.first { $0.id == failure.providerAccountID }
+    }
+
+    private func providerName(_ providerID: String) -> String {
+        snapshot?.providers.first { $0.id == providerID }?.displayName ?? providerID
+    }
+
+    private func runDetail(_ run: RunSummary) -> String {
+        var parts = ["\(run.providerAccountID) · \(run.state)"]
+        if let age = relativeAge(run.completedAt ?? run.startedAt) {
+            parts.append(age)
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder private var queueSection: some View {
+        let queued = (snapshot?.tasks ?? []).filter { $0.state == "queued" }
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("NEXT IN QUEUE")
-            let tasks = Array(
-                (snapshot?.tasks ?? [])
-                    .filter { $0.state == "queued" }
-                    .prefix(3)
-            )
+            sectionLabel(overflowLabel("NEXT IN QUEUE", showing: min(3, queued.count), of: queued.count))
+            let tasks = Array(queued.prefix(3))
             if tasks.isEmpty {
                 emptyRow("No queued jobs", symbol: "checkmark.circle")
             } else {
@@ -270,10 +352,12 @@ struct StatusPopoverView: View {
             Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.bordered).disabled(model.isRefreshing)
             Spacer()
+            Button("Notifications…", action: actions.enableNotifications)
+                .buttonStyle(.bordered)
+                .help("Enable or manage job notifications")
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
-                Button("Enable Notifications…", action: actions.enableNotifications)
                 Button("App Setup…", action: actions.showAppSetup)
                 Divider()
                 Button("Quit Redline", action: actions.quit)
@@ -306,6 +390,13 @@ struct StatusPopoverView: View {
 
     private func failedProviderIsPaused(_ run: RunSummary) -> Bool {
         snapshot?.providers.first { $0.id == run.providerAccountID }?.paused == true
+    }
+
+    private func failedAuthenticationProvider(_ run: RunSummary) -> ProviderSummary? {
+        guard ProviderRecovery.isAuthenticationError(run.error) else {
+            return nil
+        }
+        return snapshot?.providers.first { $0.id == run.providerAccountID }
     }
 
     private func runSymbol(_ state: String) -> String {
@@ -376,15 +467,32 @@ struct StatusPopoverView: View {
     }
 
     private func relativeReset(_ timestamp: String?) -> String? {
-        guard let timestamp else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        guard let date = fractional.date(from: timestamp) ?? plain.date(from: timestamp) else { return nil }
+        guard let date = parseTimestamp(timestamp) else { return nil }
         let seconds = max(0, date.timeIntervalSinceNow)
         if seconds < 3600 { return "in \(max(1, Int(ceil(seconds / 60))))m" }
         if seconds < 86400 { return "in \(Int(ceil(seconds / 3600)))h" }
         return "in \(Int(ceil(seconds / 86400)))d"
+    }
+
+    private func relativeAge(_ timestamp: String?) -> String? {
+        guard let date = parseTimestamp(timestamp) else { return nil }
+        let seconds = max(0, -date.timeIntervalSinceNow)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
+        return "\(Int(seconds / 86400))d ago"
+    }
+
+    private func parseTimestamp(_ timestamp: String?) -> Date? {
+        guard let timestamp else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        return fractional.date(from: timestamp) ?? plain.date(from: timestamp)
+    }
+
+    private func overflowLabel(_ label: String, showing: Int, of total: Int) -> String {
+        total > showing ? "\(label) · \(showing) OF \(total)" : label
     }
 
     private func providerRank(_ provider: String) -> Int {

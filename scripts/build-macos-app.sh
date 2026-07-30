@@ -51,12 +51,26 @@ fi
 case "${build_arch}" in
   arm64) go_arch="arm64" ;;
   x86_64) go_arch="amd64" ;;
+  universal) go_arch="" ;;
   *) printf 'Unsupported build architecture: %s\n' "${build_arch}" >&2; exit 1 ;;
 esac
 
-swift build --package-path "${repository_root}/macos" -c release --arch "${build_arch}"
-swift_bin_path="$(swift build --package-path "${repository_root}/macos" -c release --arch "${build_arch}" --show-bin-path)"
-GOARCH="${go_arch}" go build -trimpath -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
+swift_arch_args=(--arch "${build_arch}")
+if [[ "${build_arch}" == "universal" ]]; then
+  swift_arch_args=(--arch arm64 --arch x86_64)
+fi
+swift build --package-path "${repository_root}/macos" -c release "${swift_arch_args[@]}"
+swift_bin_path="$(swift build --package-path "${repository_root}/macos" -c release "${swift_arch_args[@]}" --show-bin-path)"
+if [[ "${build_arch}" == "universal" ]]; then
+  GOARCH=arm64 go build -trimpath -o "${temporary_root}/redline-arm64" "${repository_root}/cmd/redline"
+  GOARCH=amd64 go build -trimpath -o "${temporary_root}/redline-x86_64" "${repository_root}/cmd/redline"
+  lipo -create \
+    "${temporary_root}/redline-arm64" \
+    "${temporary_root}/redline-x86_64" \
+    -output "${temporary_root}/redline"
+else
+  GOARCH="${go_arch}" go build -trimpath -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
+fi
 
 if [[ -e "${app_path}" ]]; then
   rm -rf "${app_path}"
@@ -77,7 +91,15 @@ cp "${repository_root}/macos/.build/artifacts/sparkle/Sparkle/LICENSE" "${app_pa
 
 swift_arch="$(lipo -archs "${app_path}/Contents/MacOS/RedlineMenuBar")"
 service_arch="$(lipo -archs "${app_path}/Contents/Resources/bin/redline")"
-if [[ "${swift_arch}" != "${build_arch}" || "${service_arch}" != "${build_arch}" ]]; then
+architecture_matches() {
+  local actual="$1"
+  if [[ "${build_arch}" == "universal" ]]; then
+    [[ " ${actual} " == *" arm64 "* && " ${actual} " == *" x86_64 "* ]]
+  else
+    [[ "${actual}" == "${build_arch}" ]]
+  fi
+}
+if ! architecture_matches "${swift_arch}" || ! architecture_matches "${service_arch}"; then
   printf 'Architecture mismatch: app=%s service=%s expected=%s\n' "${swift_arch}" "${service_arch}" "${build_arch}" >&2
   exit 1
 fi

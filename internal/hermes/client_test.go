@@ -159,6 +159,44 @@ func TestListAndTriggerJobsFallBackToDesktopCronAPI(t *testing.T) {
 	}
 }
 
+func TestTriggerJobFallsBackToDesktopCronAPIWhenGatewayRouteRejectsMethod(t *testing.T) {
+	var requested []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/content-post/run":
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/cron/jobs/content-post/trigger":
+			writeJSON(w, map[string]any{
+				"id": "content-post", "name": "Draft content post", "enabled": true,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return gateway.Client(), gateway.URL, nil
+	}}
+
+	job, err := client.TriggerJob(t.Context(), domain.RuntimeConnection{
+		ID: "remote", Runtime: "hermes", Transport: "gateway",
+	}, "content-post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != "content-post" {
+		t.Fatalf("job = %#v", job)
+	}
+	want := []string{
+		"POST /api/jobs/content-post/run",
+		"POST /api/cron/jobs/content-post/trigger",
+	}
+	if !reflect.DeepEqual(requested, want) {
+		t.Fatalf("requests = %#v, want %#v", requested, want)
+	}
+}
+
 func TestRunJobWaitsForNewHermesSessionAndCollectsResult(t *testing.T) {
 	var runReads int
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,17 +223,15 @@ func TestRunJobWaitsForNewHermesSessionAndCollectsResult(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
 			http.NotFound(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs":
-			writeJSON(w, []map[string]any{{
-				"id": "content-post", "last_run_at": "2026-07-28T10:02:20Z",
-				"last_status": "ok", "provider": "custom:cliproxyapi-plus",
-				"model": "claude-fable-5-medium", "enabled": true,
-			}})
+			// Hermes removes completed one-shot jobs from the active job list.
+			writeJSON(w, []map[string]any{})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/jobs/content-post/run":
 			http.NotFound(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/cron/jobs/content-post/trigger":
 			writeJSON(w, map[string]any{
 				"id": "content-post", "name": "Draft content post", "enabled": true,
 				"provider": "custom:cliproxyapi-plus", "model": "claude-fable-5-medium",
+				"last_run_at": "2026-07-28T10:02:20Z",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/cron_content-post_new/messages":
 			if r.URL.Query().Get("profile") != "default" {
@@ -217,7 +253,9 @@ func TestRunJobWaitsForNewHermesSessionAndCollectsResult(t *testing.T) {
 		PollInterval: time.Millisecond,
 	}
 	var external domain.ExternalRun
-	result, err := client.RunJob(t.Context(), hermes.JobRunRequest{
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	result, err := client.RunJob(ctx, hermes.JobRunRequest{
 		Connection: domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"},
 		JobID:      "content-post",
 		OnExternalStarted: func(value domain.ExternalRun) error {

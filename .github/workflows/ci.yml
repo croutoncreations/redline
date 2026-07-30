@@ -54,3 +54,23 @@ jobs:
         run: tests/macos/release-packaging.sh
       - name: Validate Tart release rehearsal commands
         run: tests/macos/tart-release-rehearsal.sh
+
+  macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test native app on Intel
+        run: swift test --package-path macos
+      - name: Build Intel app
+        run: REDLINE_BUILD_ARCH=x86_64 ./scripts/build-macos-app.sh
+      - name: Verify Intel slices and signatures
+        run: |
+          test "$(lipo -archs dist/Redline.app/Contents/MacOS/RedlineMenuBar)" = "x86_64"
+          test "$(lipo -archs dist/Redline.app/Contents/Resources/bin/redline)" = "x86_64"
+          output="$(dist/Redline.app/Contents/Resources/bin/redline unsupported-command 2>&1 || true)"
+          test "${output}" = 'unknown command "unsupported-command"'
+          codesign --verify --deep --strict dist/Redline.app

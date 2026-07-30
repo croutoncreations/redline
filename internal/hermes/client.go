@@ -318,7 +318,8 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 	}
 	target := baseURL + "/api/jobs/" + url.PathEscape(jobID) + "/run"
 	if err := postJSON(ctx, httpClient, target, &payload); err != nil {
-		if !isHTTPStatus(err, http.StatusNotFound) {
+		if !isHTTPStatus(err, http.StatusNotFound) &&
+			!isHTTPStatus(err, http.StatusMethodNotAllowed) {
 			return Job{}, fmt.Errorf("trigger Hermes job %q: %w", jobID, err)
 		}
 		var desktopJob Job
@@ -499,14 +500,23 @@ func waitForJobResult(
 	previous Job,
 	interval time.Duration,
 ) (Job, error) {
-	for {
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
 		jobs, err := client.ListJobs(ctx, connection)
 		if err == nil {
 			for _, job := range jobs {
-				if job.ID == previous.ID && job.LastRunAt != "" && job.LastRunAt != previous.LastRunAt {
+				// Hermes Desktop's trigger response may already contain the
+				// current run's last_run_at. Once the newly discovered session
+				// has ended, a matching job with any last-run timestamp is the
+				// result we just observed; waiting for the timestamp to change
+				// again leaves the Redline run stuck forever.
+				if job.ID == previous.ID && job.LastRunAt != "" {
 					return job, nil
 				}
 			}
+		}
+		if attempt == attempts-1 {
+			break
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -516,6 +526,10 @@ func waitForJobResult(
 		case <-timer.C:
 		}
 	}
+	// Completed one-shot jobs are removed from Hermes's active job list. The
+	// newly tracked session remains authoritative for completion and usage, so
+	// retain the trigger response when no refreshed job record survives.
+	return previous, nil
 }
 
 func failedJobStatus(status string) bool {
