@@ -228,6 +228,7 @@ Swift menu-bar executable and bundled Go service. Set `REDLINE_BUILD_ARCH=arm64`
 `REDLINE_BUILD_ARCH=x86_64` only when intentionally producing an architecture-specific local
 package. `tests/macos/universal-build.sh` verifies both slices, code signing, and command startup
 through macOS's native architecture selector (using Rosetta for the Intel slice on Apple Silicon).
+CI also builds, tests, and starts the x86_64 service on GitHub's native `macos-15-intel` runner.
 
 GitHub's `releases/latest` endpoint excludes prereleases. To rehearse a prerelease without changing
 the stable feed, build a signed baseline DMG whose `SUFeedURL` points directly to the prerelease
