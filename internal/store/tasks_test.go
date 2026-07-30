@@ -751,6 +751,9 @@ func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
 	}
 	if err := db.CompleteRun(ctx, "run-1", domain.RunCompletion{
 		State: domain.RunCompleted, ExitCode: 0, OutputFile: "/tmp/out", FinalizeState: "completed",
+		Summary: "Added regression coverage.", Outcome: "changes_proposed",
+		Artifacts:      []domain.RunArtifact{{Type: "pull_request", Label: "PR #42", URL: "https://github.com/example/repo/pull/42"}},
+		ActualProvider: "anthropic", ActualModel: "claude-opus-4-1",
 	}, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -761,6 +764,19 @@ func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
 	run, err := db.GetRun(ctx, "run-1")
 	if err != nil || run.State != domain.RunCompleted || run.Workspace.SessionID != "session" {
 		t.Fatalf("run=%#v err=%v", run, err)
+	}
+	if run.Summary != "Added regression coverage." || run.Outcome != "changes_proposed" ||
+		len(run.Artifacts) != 1 || run.ActualProvider != "anthropic" ||
+		run.ActualModel != "claude-opus-4-1" || run.ActivityReadAt != nil {
+		t.Fatalf("activity = %#v", run)
+	}
+	readAt := now.Add(2 * time.Hour)
+	if err := db.MarkRunActivityRead(ctx, run.ID, readAt); err != nil {
+		t.Fatal(err)
+	}
+	run, err = db.GetRun(ctx, run.ID)
+	if err != nil || run.ActivityReadAt == nil || !run.ActivityReadAt.Equal(readAt) {
+		t.Fatalf("marked read run=%#v err=%v", run, err)
 	}
 }
 

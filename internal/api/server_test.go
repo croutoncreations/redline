@@ -399,6 +399,40 @@ func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
 	requestStatus(t, http.MethodGet, server.URL+"/v1/runs/missing", "", http.StatusNotFound)
 }
 
+func TestRunActivityCanBeMarkedRead(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "activity-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
+	})
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "activity-task", "name": "Activity task", "execution_profile_id": "activity-profile", "type": "one_off",
+	})
+	run, err := db.AdmitTask(t.Context(), "activity-run", "activity-task", "codex-main", "revision", apiNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(t.Context(), run.ID, domain.RunCompletion{
+		State: domain.RunCompleted, ExitCode: 0, Summary: "Opened a PR.",
+		Artifacts: []domain.RunArtifact{{Type: "pull_request", Label: "Pull request", URL: "https://github.com/acme/app/pull/42"}},
+	}, apiNow.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var dashboard struct {
+		UnreadRuns int          `json:"unread_runs"`
+		Runs       []domain.Run `json:"runs"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	if dashboard.UnreadRuns != 1 || len(dashboard.Runs) == 0 || dashboard.Runs[0].Summary != "Opened a PR." {
+		t.Fatalf("dashboard = %#v", dashboard)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/runs/"+run.ID+"/read", "", http.StatusOK)
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	if dashboard.UnreadRuns != 0 || dashboard.Runs[0].ActivityReadAt == nil {
+		t.Fatalf("read dashboard = %#v", dashboard)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/runs/missing/read", "", http.StatusNotFound)
+}
+
 func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, claudePayload) }))
 	defer usage.Close()

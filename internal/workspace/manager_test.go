@@ -119,13 +119,14 @@ func TestFinalizeHookReceivesRunEnvironment(t *testing.T) {
 	manager := workspace.Manager{Runner: runner}
 	err := manager.Finalize(context.Background(), workspace.FinalizeRequest{
 		RunID: "run-1", TaskID: "task-1", Status: "completed", ExitCode: 0,
-		Profile:   domain.ExecutionProfile{FinalizeCommand: "finalize-workspace"},
-		Workspace: domain.Workspace{Directory: "/tmp/work", SessionID: "session-1"},
+		ResultFile: "/tmp/run-1.result.json",
+		Profile:    domain.ExecutionProfile{FinalizeCommand: "finalize-workspace"},
+		Workspace:  domain.Workspace{Directory: "/tmp/work", SessionID: "session-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"REDLINE_RUN_ID=run-1", "REDLINE_TASK_ID=task-1", "REDLINE_WORKSPACE_DIR=/tmp/work", "REDLINE_RUN_STATUS=completed"} {
+	for _, want := range []string{"REDLINE_RUN_ID=run-1", "REDLINE_TASK_ID=task-1", "REDLINE_WORKSPACE_DIR=/tmp/work", "REDLINE_RUN_STATUS=completed", "REDLINE_RESULT_FILE=/tmp/run-1.result.json"} {
 		if !strings.Contains(environment, want) {
 			t.Errorf("environment missing %q: %s", want, environment)
 		}

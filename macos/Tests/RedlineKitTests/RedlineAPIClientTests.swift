@@ -47,9 +47,14 @@ private final class RetryStubURLProtocol: URLProtocol, @unchecked Sendable {
     StubURLProtocol.handler = { request in
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer local-token")
         requests.append((request.httpMethod ?? "", request.url!.absoluteString))
-        let body = request.url!.path.hasSuffix("/logs")
-            ? Data(#"{"content":"hello\n","size_bytes":6,"truncated":false}"#.utf8)
-            : Data(#"{"provider_account_id":"codex main","paused":true}"#.utf8)
+        let body: Data
+        if request.url!.path.hasSuffix("/logs") {
+            body = Data(#"{"content":"hello\n","size_bytes":6,"truncated":false}"#.utf8)
+        } else if request.url!.path.hasSuffix("/read") {
+            body = Data(#"{"read":true}"#.utf8)
+        } else {
+            body = Data(#"{"provider_account_id":"codex main","paused":true}"#.utf8)
+        }
         return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
     }
     defer { StubURLProtocol.handler = nil }
@@ -57,12 +62,15 @@ private final class RetryStubURLProtocol: URLProtocol, @unchecked Sendable {
     let control = try await client.pauseProvider("codex main")
     #expect(control.paused)
     let log = try await client.runLogs(runID: "run/one", stream: .stderr, tailBytes: 4096)
+    try await client.markRunRead("run/one")
     #expect(log.content == "hello\n")
-    #expect(requests.count == 2)
+    #expect(requests.count == 3)
     #expect(requests[0].0 == "POST")
     #expect(requests[0].1 == "http://127.0.0.1:7436/v1/providers/codex%20main/pause")
     #expect(requests[1].0 == "GET")
     #expect(requests[1].1 == "http://127.0.0.1:7436/v1/runs/run%2Fone/logs?stream=stderr&tail_bytes=4096")
+    #expect(requests[2].0 == "POST")
+    #expect(requests[2].1 == "http://127.0.0.1:7436/v1/runs/run%2Fone/read")
 }
 
 @Test func apiClientResumesPausedProviderBeforeRetryingFailedTask() async throws {

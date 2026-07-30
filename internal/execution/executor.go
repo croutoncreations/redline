@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jfox/redline/internal/activity"
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/harness"
 	"github.com/jfox/redline/internal/workspace"
@@ -202,7 +203,9 @@ func (e Executor) Execute(
 	})
 	if err := e.Workspaces.Finalize(ctx, workspace.FinalizeRequest{
 		RunID: run.ID, TaskID: task.ID, Status: status, ExitCode: harnessResult.ExitCode,
-		OutputFile: harnessResult.OutputFile, Profile: profile, Workspace: prepared,
+		OutputFile: harnessResult.OutputFile,
+		ResultFile: harness.ResultFilePath(e.OutputDirectory, run.ID),
+		Profile:    profile, Workspace: prepared,
 	}); err != nil {
 		finalizeState = "failed"
 		lifecycleErrors = append(lifecycleErrors, err.Error())
@@ -227,11 +230,20 @@ func (e Executor) Execute(
 		e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
 	}
 
+	activityResult := activity.Build(activity.Input{
+		State: state, Error: agentError, OutputFile: harnessResult.OutputFile,
+		ResultFile: harness.ResultFilePath(e.OutputDirectory, run.ID),
+		Workspace:  prepared, Metadata: harnessResult.Metadata,
+		Provider: profile.HarnessType, Model: profile.Model,
+	})
 	return e.complete(ctx, run, task, domain.RunCompletion{
 		State: state, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, ErrorFile: harnessResult.ErrorFile,
 		Error: agentError, FinalizeState: finalizeState,
 		FinalizeError: strings.Join(lifecycleErrors, "; "),
+		Summary:       activityResult.Summary, Outcome: activityResult.Outcome,
+		Artifacts: activityResult.Artifacts, Warnings: activityResult.Warnings,
+		ActualProvider: activityResult.ActualProvider, ActualModel: activityResult.ActualModel,
 	})
 }
 

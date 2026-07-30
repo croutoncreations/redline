@@ -241,10 +241,35 @@ WHERE id = ? AND state IN ('preparing', 'running')`, runID).Scan(&taskID, &sourc
 	if err := tx.QueryRowContext(ctx, `SELECT task_type FROM tasks WHERE id = ?`, taskID).Scan(&taskType); err != nil {
 		return fmt.Errorf("read run task: %w", err)
 	}
+	artifactsJSON, err := json.Marshal(completion.Artifacts)
+	if err != nil {
+		return fmt.Errorf("encode run artifacts: %w", err)
+	}
+	warningsJSON, err := json.Marshal(completion.Warnings)
+	if err != nil {
+		return fmt.Errorf("encode run warnings: %w", err)
+	}
+	if completion.Summary == "" {
+		completion.Summary = "Run completed"
+		if completion.State == domain.RunFailed {
+			completion.Summary = completion.Error
+			if completion.Summary == "" {
+				completion.Summary = "Run failed"
+			}
+		}
+	}
+	if completion.Outcome == "" {
+		completion.Outcome = string(completion.State)
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE runs SET state = ?, completed_at = ?, exit_code = ?,
-output_file = ?, error_file = ?, error = ?, finalize_state = ?, finalize_error = ? WHERE id = ?`,
+output_file = ?, error_file = ?, error = ?, finalize_state = ?, finalize_error = ?,
+activity_summary = ?, activity_outcome = ?, activity_artifacts_json = ?,
+activity_warnings_json = ?, actual_provider = ?, actual_model = ?, activity_read_at = NULL
+WHERE id = ?`,
 		completion.State, formatTime(now), completion.ExitCode, completion.OutputFile,
-		completion.ErrorFile, completion.Error, completion.FinalizeState, completion.FinalizeError, runID)
+		completion.ErrorFile, completion.Error, completion.FinalizeState, completion.FinalizeError,
+		completion.Summary, completion.Outcome, string(artifactsJSON), string(warningsJSON),
+		completion.ActualProvider, completion.ActualModel, runID)
 	if err != nil {
 		return fmt.Errorf("complete run: %w", err)
 	}
@@ -277,6 +302,36 @@ last_completed_at = ?, last_successful_source_revision = ?, updated_at = ? WHERE
 		return fmt.Errorf("commit run completion: %w", err)
 	}
 	return nil
+}
+
+func (d *DB) MarkRunActivityRead(ctx context.Context, runID string, now time.Time) error {
+	result, err := d.db.ExecContext(ctx, `UPDATE runs SET activity_read_at = ?
+WHERE id = ? AND state IN ('completed', 'failed')`, formatTime(now), runID)
+	if err != nil {
+		return fmt.Errorf("mark run activity read: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows != 1 {
+		return fmt.Errorf("%w: terminal run %q", ErrNotFound, runID)
+	}
+	return nil
+}
+
+func (d *DB) MarkAllRunActivityRead(ctx context.Context, now time.Time) error {
+	if _, err := d.db.ExecContext(ctx, `UPDATE runs SET activity_read_at = ?
+WHERE state IN ('completed', 'failed') AND activity_read_at IS NULL`, formatTime(now)); err != nil {
+		return fmt.Errorf("mark all run activity read: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) UnreadRunActivityCount(ctx context.Context) (int, error) {
+	var count int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
+WHERE state IN ('completed', 'failed') AND activity_read_at IS NULL`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count unread run activity: %w", err)
+	}
+	return count, nil
 }
 
 func (d *DB) GetRun(ctx context.Context, runID string) (domain.Run, error) {
@@ -336,7 +391,12 @@ FROM runs WHERE state IN ('preparing', 'running')`)
 exit_code = -1, error = 'service restarted while run was active',
 finalize_state = CASE WHEN workspace_directory <> '' THEN 'preserved' ELSE 'skipped' END,
 finalize_error = CASE WHEN workspace_directory <> ''
-    THEN 'service restarted; workspace preserved for manual recovery' ELSE '' END
+    THEN 'service restarted; workspace preserved for manual recovery' ELSE '' END,
+activity_summary = 'The Redline service restarted while this job was active.',
+activity_outcome = 'failed',
+activity_warnings_json = CASE WHEN workspace_directory <> ''
+    THEN '["The workspace was preserved for manual recovery."]' ELSE '[]' END,
+activity_read_at = NULL
 WHERE id = ?`, formatTime(now), item.runID); err != nil {
 			return fmt.Errorf("recover interrupted run: %w", err)
 		}
@@ -369,18 +429,23 @@ run_id, event_type, occurred_at, payload_json
 const runSelect = `SELECT id, task_id, provider_account_id, state,
 workspace_directory, workspace_metadata, source_revision, started_at, completed_at,
 exit_code, output_file, error_file, error, finalize_state, finalize_error,
-runtime_connection_id, agent_context_id, external_run_id, external_session_id FROM runs`
+runtime_connection_id, agent_context_id, external_run_id, external_session_id,
+activity_summary, activity_outcome, activity_artifacts_json, activity_warnings_json,
+actual_provider, actual_model, activity_read_at FROM runs`
 
 func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
 	var workspaceJSON, started string
-	var completed sql.NullString
+	var completed, activityReadAt sql.NullString
 	var exitCode sql.NullInt64
+	var artifactsJSON, warningsJSON string
 	err := row.Scan(
 		&run.ID, &run.TaskID, &run.ProviderAccountID, &run.State,
 		&run.Workspace.Directory, &workspaceJSON, &run.SourceRevision, &started, &completed,
 		&exitCode, &run.OutputFile, &run.ErrorFile, &run.Error, &run.FinalizeState, &run.FinalizeError,
 		&run.RuntimeConnectionID, &run.AgentContextID, &run.External.RunID, &run.External.SessionID,
+		&run.Summary, &run.Outcome, &artifactsJSON, &warningsJSON,
+		&run.ActualProvider, &run.ActualModel, &activityReadAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound
@@ -408,6 +473,19 @@ func scanRun(row scanner) (domain.Run, error) {
 	if exitCode.Valid {
 		value := int(exitCode.Int64)
 		run.ExitCode = &value
+	}
+	if err := json.Unmarshal([]byte(artifactsJSON), &run.Artifacts); err != nil {
+		return domain.Run{}, fmt.Errorf("decode run artifacts: %w", err)
+	}
+	if err := json.Unmarshal([]byte(warningsJSON), &run.Warnings); err != nil {
+		return domain.Run{}, fmt.Errorf("decode run warnings: %w", err)
+	}
+	if activityReadAt.Valid {
+		value, err := parseStoredTime(activityReadAt.String)
+		if err != nil {
+			return domain.Run{}, err
+		}
+		run.ActivityReadAt = &value
 	}
 	return run, nil
 }

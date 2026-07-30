@@ -196,6 +196,8 @@ func newServer(
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
+	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
+	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
@@ -1518,6 +1520,22 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) markRunActivityRead(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.MarkRunActivityRead(r.Context(), r.PathValue("run"), s.now()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"read": true})
+}
+
+func (s *Server) markAllRunActivityRead(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.MarkAllRunActivityRead(r.Context(), s.now()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"read": true})
 }
 
 func (s *Server) listRunEvents(w http.ResponseWriter, r *http.Request) {

@@ -12,13 +12,15 @@ final class MenuBarController: NSObject {
     private let dashboardURL: URL
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
     private lazy var runLogWindow = RunLogWindowController(client: client)
-    private lazy var notifications = NativeNotificationController()
+    private lazy var notifications = NativeNotificationController(
+        onOpenRun: { [weak self] runID in self?.openRun(runID) }
+    )
     private lazy var popoverController = StatusPopoverController(
         model: popoverModel,
         actions: StatusPopoverActions(
             showDashboard: { [weak self] in self?.showDashboard() },
             openBrowser: { [weak self] in self?.openDashboardInBrowser() },
-            showRunLogs: { [weak self] run in self?.runLogWindow.show(run: run) },
+            showRunLogs: { [weak self] run in self?.showRun(run) },
             checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAppSetup: showAppSetup,
@@ -47,7 +49,7 @@ final class MenuBarController: NSObject {
 
         guard let button = statusItem.button else { return }
         button.image = GaugeIcon.image(activity: nil, remainingPercent: nil)
-        button.attributedTitle = providerSummary([])
+        button.attributedTitle = providerSummary([], unreadRuns: 0)
         button.toolTip = "Redline is starting"
         button.target = self
         button.action = #selector(togglePopover)
@@ -106,7 +108,7 @@ final class MenuBarController: NSObject {
             activity: trayState.activity,
             remainingPercent: trayState.lowestWeeklyPercent
         )
-        button.attributedTitle = providerSummary(trayState.providerBadges)
+        button.attributedTitle = providerSummary(trayState.providerBadges, unreadRuns: snapshot.unreadRuns)
         button.toolTip = trayState.menuBarTitle
         button.setAccessibilityLabel("Redline \(trayState.menuBarTitle)")
     }
@@ -114,12 +116,12 @@ final class MenuBarController: NSObject {
     private func renderOffline(_ detail: String) {
         guard let button = statusItem.button else { return }
         button.image = GaugeIcon.image(activity: nil, remainingPercent: nil, offline: true)
-        button.attributedTitle = providerSummary([])
+        button.attributedTitle = providerSummary([], unreadRuns: 0)
         button.toolTip = "Redline offline: \(detail)"
         button.setAccessibilityLabel("Redline is offline")
     }
 
-    private func providerSummary(_ badges: [ProviderBadge]) -> NSAttributedString {
+    private func providerSummary(_ badges: [ProviderBadge], unreadRuns: Int) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         for (index, badge) in badges.enumerated() {
@@ -141,7 +143,31 @@ final class MenuBarController: NSObject {
                 attributes: [.font: font]
             ))
         }
+        if unreadRuns > 0 {
+            result.append(NSAttributedString(
+                string: "  •\(unreadRuns)",
+                attributes: [.font: font, .foregroundColor: NSColor.systemRed]
+            ))
+        }
         return result
+    }
+
+    private func showRun(_ run: RunSummary) {
+        runLogWindow.show(run: run)
+        Task {
+            try? await client.markRunRead(run.id)
+            await refresh()
+        }
+    }
+
+    private func openRun(_ runID: String) {
+        Task {
+            guard let run = try? await client.run(runID) else {
+                showDashboard()
+                return
+            }
+            showRun(run)
+        }
     }
 
     @objc private func togglePopover() {

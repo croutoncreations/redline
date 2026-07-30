@@ -404,6 +404,27 @@ ALTER TABLE tasks ADD COLUMN runtime_job_id TEXT NOT NULL DEFAULT '';
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (21)`); err != nil {
 			return fmt.Errorf("record runtime job task target migration: %w", err)
 		}
+		version = 21
+	}
+	if version < 22 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE runs ADD COLUMN activity_summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN activity_outcome TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN activity_artifacts_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE runs ADD COLUMN activity_warnings_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE runs ADD COLUMN actual_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN actual_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN activity_read_at TEXT;
+UPDATE runs SET activity_read_at = completed_at
+WHERE state IN ('completed', 'failed') AND completed_at IS NOT NULL;
+CREATE INDEX idx_runs_activity_unread
+ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('completed', 'failed');
+`); err != nil {
+			return fmt.Errorf("add durable run activity: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (22)`); err != nil {
+			return fmt.Errorf("record durable run activity migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

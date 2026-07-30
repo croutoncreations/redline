@@ -5,10 +5,13 @@ import UserNotifications
 @MainActor
 final class NativeNotificationController {
     private let center = UNUserNotificationCenter.current()
+    private let responseDelegate: NotificationResponseDelegate
     private var tracker = RunNotificationTracker()
     private var authorized = false
 
-    init() {
+    init(onOpenRun: @escaping @MainActor (String) -> Void) {
+        responseDelegate = NotificationResponseDelegate(onOpenRun: onOpenRun)
+        center.delegate = responseDelegate
         center.getNotificationSettings { [weak self] settings in
             let isAuthorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
             Task { @MainActor in
@@ -100,6 +103,30 @@ final class NativeNotificationController {
         }
         content.body = "\(taskName) · \(event.providerAccountID)" + (event.error.map { "\n\($0)" } ?? "")
         content.sound = event.state == "failed" ? .default : nil
+        content.userInfo = ["run_id": event.runID]
         center.add(UNNotificationRequest(identifier: "redline-run-\(event.runID)", content: content, trigger: nil))
+    }
+}
+
+private final class NotificationResponseDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    private let onOpenRun: @MainActor (String) -> Void
+
+    init(onOpenRun: @escaping @MainActor (String) -> Void) {
+        self.onOpenRun = onOpenRun
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard let runID = response.notification.request.content.userInfo["run_id"] as? String else { return }
+        await onOpenRun(runID)
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list]
     }
 }

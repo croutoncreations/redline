@@ -29,6 +29,7 @@ type FinalizeRequest struct {
 	Status     string
 	ExitCode   int
 	OutputFile string
+	ResultFile string
 	Profile    domain.ExecutionProfile
 	Workspace  domain.Workspace
 }
@@ -349,6 +350,7 @@ func hookEnvironment(request FinalizeRequest) []string {
 		"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
 		"REDLINE_SESSION_ID="+request.Workspace.SessionID,
 		"REDLINE_OUTPUT_FILE="+request.OutputFile,
+		"REDLINE_RESULT_FILE="+request.ResultFile,
 	)
 }
 

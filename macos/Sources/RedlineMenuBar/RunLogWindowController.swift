@@ -61,6 +61,25 @@ private struct RunLogView: View {
                 .frame(width: 180)
                 Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
             }
+            if let summary = run.summary, !summary.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("RESULT").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(summary).font(.callout).textSelection(.enabled)
+                    if !run.artifacts.isEmpty {
+                        HStack {
+                            ForEach(run.artifacts) { artifact in
+                                if let value = artifact.url, let url = URL(string: value) {
+                                    Link(artifact.label, destination: url)
+                                } else {
+                                    Text(artifact.label).foregroundStyle(.secondary)
+                                }
+                            }
+                        }.font(.caption)
+                    }
+                }
+                .padding(10)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+            }
             if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(.secondary) }
             ScrollView([.horizontal, .vertical]) {
                 Text(content.isEmpty ? "This log is empty." : content)

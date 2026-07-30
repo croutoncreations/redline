@@ -194,15 +194,19 @@ struct StatusPopoverView: View {
                 sectionLabel("RECENT RUNS")
                 ForEach(runs) { run in
                     HStack(spacing: 9) {
+                        if run.isUnread {
+                            Circle().fill(.red).frame(width: 6, height: 6)
+                        }
                         Image(systemName: runSymbol(run.state))
                             .foregroundStyle(run.state == "failed" ? .red : run.state == "completed" ? .green : .blue)
                             .frame(width: 14)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            Text("\(run.providerAccountID) · \(run.state)").font(.system(size: 10)).foregroundStyle(.secondary)
+                            Text(run.summary ?? "\(run.providerAccountID) · \(run.state)")
+                                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                         }
                         Spacer()
-                        Button("Logs") { actions.showRunLogs(run) }
+                        Button("Details") { actions.showRunLogs(run) }
                             .font(.system(size: 10)).buttonStyle(.borderless)
                     }
                 }

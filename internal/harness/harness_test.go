@@ -168,8 +168,9 @@ func TestHarnessResultUsesAbsoluteArtifactPaths(t *testing.T) {
 func TestGenericCommandHarnessReceivesPromptAndEnvironment(t *testing.T) {
 	runner := &captureRunner{}
 	adapter := harness.Adapter{Runner: runner}
+	outputDirectory := t.TempDir()
 	_, err := adapter.Run(context.Background(), harness.Request{
-		RunID: "run-3", OutputDirectory: t.TempDir(),
+		RunID: "run-3", OutputDirectory: outputDirectory,
 		Task:      domain.Task{ID: "task", Name: "Review", Prompt: "do work"},
 		Profile:   domain.ExecutionProfile{HarnessType: "command", HarnessCommand: "agent --run"},
 		Workspace: domain.Workspace{Directory: "/tmp/work"},
@@ -180,7 +181,8 @@ func TestGenericCommandHarnessReceivesPromptAndEnvironment(t *testing.T) {
 	if runner.command.Name != "/bin/sh" || strings.Join(runner.command.Args, " ") != "-lc agent --run" || runner.stdin != "do work" {
 		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
 	}
-	if !contains(runner.command.Env, "REDLINE_RUN_ID=run-3") {
+	if !contains(runner.command.Env, "REDLINE_RUN_ID=run-3") ||
+		!contains(runner.command.Env, "REDLINE_RESULT_FILE="+harness.ResultFilePath(outputDirectory, "run-3")) {
 		t.Fatalf("environment = %#v", runner.command.Env)
 	}
 }
