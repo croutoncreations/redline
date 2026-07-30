@@ -23,6 +23,14 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('links the dashboard to product updates and the Crouton Creations tool family', async ({ page }) => {
+  await loadDashboard(page);
+  await expect(page.getByRole('link', { name: 'More tools from Crouton Creations' }))
+    .toHaveAttribute('href', /utm_source=redline/);
+  await expect(page.getByRole('link', { name: 'Get builder updates' }))
+    .toHaveAttribute('href', /buttondown\.com\/croutoncreations\?utm_source=redline/);
+});
+
 test('describes high scheduling pressure without implying the subscription expires', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].latest_decision = {

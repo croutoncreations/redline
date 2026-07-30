@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added a concise end-user getting-started guide, troubleshooting guide, agent-assisted install
+  path, release-note template, and attributed links to Crouton Creations tools and builder updates
+  from the README and embedded dashboard.
+- After the first successful run, the menu-bar app now shows one small dismissible builder-updates
+  prompt. The action menu also provides persistent, attributed links to updates and related tools.
 - Native macOS alerts now fire when a run starts, in addition to completing or failing. The
   `notifications` command hook gained a matching `run.started` event, so custom notification
   scripts can subscribe to it via `events: [run.started, run.completed, run.failed,

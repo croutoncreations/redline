@@ -52,6 +52,8 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/", contentType: "text/html", contains: "Recently used repositories"},
 		{path: "/", contentType: "text/html", contains: "Allowance routing override"},
 		{path: "/", contentType: "text/html", contains: `id="failure-alert"`},
+		{path: "/", contentType: "text/html", contains: `href="https://www.croutoncreations.com/?utm_source=redline&amp;utm_medium=product&amp;utm_campaign=redline"`},
+		{path: "/", contentType: "text/html", contains: `href="https://buttondown.com/croutoncreations?utm_source=redline&amp;utm_medium=product&amp;utm_campaign=redline"`},
 		{path: "/assets/dashboard.css", contentType: "text/css", contains: ":root"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Recent errors"},
 		{path: "/assets/dashboard.js", contentType: "text/javascript", contains: "Resume & retry"},
