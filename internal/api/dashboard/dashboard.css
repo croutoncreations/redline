@@ -73,3 +73,30 @@ dialog{width:min(880px,calc(100vw - 32px));height:min(620px,calc(100vh - 80px));
   .provider-window-line{display:grid;gap:1px}
   .provider-window-line span+span{padding-left:0;border-left:0}
 }
+
+/* Queue stays scannable as jobs accumulate: bounded height, pinned header. */
+.table-wrap{max-height:560px}
+th{position:sticky;top:0;background:#171b20;z-index:2}
+.count-attention{color:var(--amber);border-color:#685630}
+
+/* Run rows are single actions; lists preview recent items and expand on demand. */
+.activity-action{width:100%;border:0;border-top:1px solid rgba(42,48,54,.58);background:transparent;text-align:left;cursor:pointer;font:inherit;color:inherit}
+.activity-action:first-child{border-top:0}
+.activity-action:hover{background:#ffffff05}
+.activity-body{display:block;min-width:0}
+.activity-desc{display:block;font-size:10px;color:var(--muted);line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-side{display:grid;gap:5px;justify-items:end}
+.activity-open{color:var(--accent);font:9px ui-monospace,monospace;opacity:.5;transition:opacity .12s}
+.activity-action:hover .activity-open,.activity-action:focus-visible .activity-open{opacity:1}
+.show-more{display:block;width:100%;border:0;border-top:1px solid rgba(42,48,54,.58);background:transparent;color:var(--muted);font:9px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;padding:11px 0 3px;cursor:pointer}
+.show-more:hover{color:var(--text)}
+
+/* Dialog context line under the title. */
+.dialog-note{display:block;color:var(--muted);font:9px ui-monospace,monospace;margin-top:5px}
+
+/* Keyboard focus is visible on every control. */
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #f0524d99;outline-offset:2px}
+
+@media (prefers-reduced-motion:reduce){
+  *,*:before,*:after{animation:none!important;transition:none!important}
+}

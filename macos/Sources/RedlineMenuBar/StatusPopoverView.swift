@@ -188,10 +188,11 @@ struct StatusPopoverView: View {
     }
 
     @ViewBuilder private var recentRunsSection: some View {
-        let runs = Array((snapshot?.runs ?? []).prefix(3))
+        let allRuns = snapshot?.runs ?? []
+        let runs = Array(allRuns.prefix(3))
         if !runs.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                sectionLabel("RECENT RUNS")
+                sectionLabel(overflowLabel("RECENT RUNS", showing: runs.count, of: allRuns.count))
                 ForEach(runs) { run in
                     HStack(spacing: 9) {
                         if run.isUnread {
@@ -202,26 +203,36 @@ struct StatusPopoverView: View {
                             .frame(width: 14)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(taskName(run.taskID)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            Text(run.summary ?? "\(run.providerAccountID) · \(run.state)")
-                                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                            if let summary = run.summary, !summary.isEmpty {
+                                Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                Text(runDetail(run)).font(.system(size: 9)).foregroundStyle(.tertiary)
+                            } else {
+                                Text(runDetail(run)).font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
                         }
                         Spacer()
                         Button("Details") { actions.showRunLogs(run) }
                             .font(.system(size: 10)).buttonStyle(.borderless)
+                            .help("Open the logs for this run")
                     }
                 }
             }
         }
     }
 
+    private func runDetail(_ run: RunSummary) -> String {
+        var parts = ["\(run.providerAccountID) · \(run.state)"]
+        if let age = relativeAge(run.completedAt ?? run.startedAt) {
+            parts.append(age)
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder private var queueSection: some View {
+        let queued = (snapshot?.tasks ?? []).filter { $0.state == "queued" }
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("NEXT IN QUEUE")
-            let tasks = Array(
-                (snapshot?.tasks ?? [])
-                    .filter { $0.state == "queued" }
-                    .prefix(3)
-            )
+            sectionLabel(overflowLabel("NEXT IN QUEUE", showing: min(3, queued.count), of: queued.count))
+            let tasks = Array(queued.prefix(3))
             if tasks.isEmpty {
                 emptyRow("No queued jobs", symbol: "checkmark.circle")
             } else {
@@ -382,15 +393,32 @@ struct StatusPopoverView: View {
     }
 
     private func relativeReset(_ timestamp: String?) -> String? {
-        guard let timestamp else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        guard let date = fractional.date(from: timestamp) ?? plain.date(from: timestamp) else { return nil }
+        guard let date = parseTimestamp(timestamp) else { return nil }
         let seconds = max(0, date.timeIntervalSinceNow)
         if seconds < 3600 { return "in \(max(1, Int(ceil(seconds / 60))))m" }
         if seconds < 86400 { return "in \(Int(ceil(seconds / 3600)))h" }
         return "in \(Int(ceil(seconds / 86400)))d"
+    }
+
+    private func relativeAge(_ timestamp: String?) -> String? {
+        guard let date = parseTimestamp(timestamp) else { return nil }
+        let seconds = max(0, -date.timeIntervalSinceNow)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
+        return "\(Int(seconds / 86400))d ago"
+    }
+
+    private func parseTimestamp(_ timestamp: String?) -> Date? {
+        guard let timestamp else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        return fractional.date(from: timestamp) ?? plain.date(from: timestamp)
+    }
+
+    private func overflowLabel(_ label: String, showing: Int, of total: Int) -> String {
+        total > showing ? "\(label) · \(showing) OF \(total)" : label
     }
 
     private func providerRank(_ provider: String) -> Int {

@@ -19,6 +19,9 @@ const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'comp
 const tokenNumber = (value) => new Intl.NumberFormat().format(value || 0);
 
 let currentRun = null, currentLogContent = '', currentLogView = 'formatted';
+let latestRuns = [], latestAttempts = [], taskNames = new Map();
+let showAllRuns = false, showAllAttempts = false;
+const ACTIVITY_PREVIEW = 8;
 let profiles = [], taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
 const capacityCache = new Map();
@@ -223,7 +226,14 @@ async function loadCapacityEvidence(card) {
   } finally { target.dataset.loading = 'false'; }
 }
 function renderTasks(tasks) {
-  $('#task-count').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
+  const byState = (state) => tasks.filter(task => task.state === state).length;
+  const running = byState('running'), failed = byState('failed'), disabled = byState('disabled');
+  const summary = [`${tasks.length} job${tasks.length === 1 ? '' : 's'}`];
+  if (running) summary.push(`${running} running`);
+  if (failed) summary.push(`${failed} failed`);
+  if (disabled) summary.push(`${disabled} disabled`);
+  $('#task-count').textContent = summary.join(' · ');
+  $('#task-count').classList.toggle('count-attention', failed > 0);
   $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(title(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
@@ -236,10 +246,24 @@ function renderTasks(tasks) {
     });
   });
 }
+function showMoreButton(total, kind, expanded, noun) {
+  if (total <= ACTIVITY_PREVIEW) return '';
+  const label = expanded ? `Show latest ${ACTIVITY_PREVIEW}` : `Show all ${total} ${noun}`;
+  return `<button type="button" class="show-more" data-show-more="${kind}">${label}</button>`;
+}
 function renderRuns(runs) {
+  latestRuns = runs;
   $('#run-count').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
-  $('#runs-list').innerHTML = runs.length ? runs.map(run => `<div class="activity"><i class="activity-dot ${escapeHTML(run.state)}"></i><div><strong>${escapeHTML(run.task_id)}</strong><p>${escapeHTML(run.provider_account_id)} · ${escapeHTML(title(run.state))}${run.error ? ` · ${escapeHTML(run.error)}` : ''}</p><button class="log-link" data-run="${escapeHTML(run.id)}">View logs →</button></div><time>${escapeHTML(relative(run.started_at))}</time></div>`).join('') : '<p class="empty">No runs recorded yet.</p>';
+  const visible = showAllRuns ? runs : runs.slice(0, ACTIVITY_PREVIEW);
+  $('#runs-list').innerHTML = runs.length
+    ? visible.map(run => `<button type="button" class="activity activity-action" data-run="${escapeHTML(run.id)}"><i class="activity-dot ${escapeHTML(run.state)}"></i><span class="activity-body"><strong>${escapeHTML(taskNames.get(run.task_id) || run.task_id)}</strong><span class="activity-desc">${escapeHTML(run.provider_account_id)} · ${escapeHTML(title(run.state))}${run.error ? ` · ${escapeHTML(run.error)}` : ''}</span></span><span class="activity-side"><time>${escapeHTML(relative(run.started_at))}</time><span class="activity-open">View logs →</span></span></button>`).join('') + showMoreButton(runs.length, 'runs', showAllRuns, 'runs')
+    : '<p class="empty">No runs yet. Completed and failed runs will appear here.</p>';
   document.querySelectorAll('[data-run]').forEach(button => button.addEventListener('click', () => openLogs(button.dataset.run)));
+  wireShowMore('runs', () => { showAllRuns = !showAllRuns; renderRuns(latestRuns); });
+}
+function wireShowMore(kind, toggle) {
+  const button = document.querySelector(`[data-show-more="${kind}"]`);
+  if (button) button.addEventListener('click', toggle);
 }
 function failureMessage(run,task) {
   if (run.error && run.error !== 'harness exited with code 1') return run.error;
@@ -286,8 +310,13 @@ function renderFailure(tasks,runs,providers) {
   });
 }
 function renderAttempts(attempts) {
+  latestAttempts = attempts;
   $('#attempt-count').textContent = `${attempts.length} event${attempts.length === 1 ? '' : 's'}`;
-  $('#attempts-list').innerHTML = attempts.length ? attempts.slice(0,12).map(a => `<div class="activity"><i class="activity-dot ${escapeHTML(a.outcome)}"></i><div><strong>${escapeHTML(title(a.outcome))} · ${escapeHTML(a.provider_account_id)}</strong><p>${escapeHTML(a.reason || a.error || a.mode || 'Scheduler evaluated capacity')}</p></div><time>${escapeHTML(relative(a.completed_at))}</time></div>`).join('') : '<p class="empty">No scheduler decisions recorded yet.</p>';
+  const visible = showAllAttempts ? attempts : attempts.slice(0, ACTIVITY_PREVIEW);
+  $('#attempts-list').innerHTML = attempts.length
+    ? visible.map(a => `<div class="activity"><i class="activity-dot ${escapeHTML(a.outcome)}"></i><div><strong>${escapeHTML(title(a.outcome))} · ${escapeHTML(a.provider_account_id)}</strong><p>${escapeHTML(a.reason || a.error || a.mode || 'Scheduler evaluated capacity')}</p></div><time>${escapeHTML(relative(a.completed_at))}</time></div>`).join('') + showMoreButton(attempts.length, 'attempts', showAllAttempts, 'events')
+    : '<p class="empty">No scheduler decisions recorded yet.</p>';
+  wireShowMore('attempts', () => { showAllAttempts = !showAllAttempts; renderAttempts(latestAttempts); });
 }
 function renderHealth(health, attempts) {
   const healthy = health.status === 'ok' || health.status === 'healthy';
@@ -312,6 +341,7 @@ function renderHealth(health, attempts) {
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
   policyCatalog = data.policies || {};
+  taskNames = new Map(data.tasks.map(task => [task.id, task.name]));
   providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));
   providerAccounts = providerCatalog.map(provider => provider.id);
   const openProviderID = document.querySelector('.provider-compact.open')?.dataset.providerId;
@@ -329,8 +359,14 @@ function render(data) {
   renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
 }
-async function openLogs(run) {
-  currentRun = run; currentLogView = 'formatted'; $('#log-title').textContent = run; $('#logs-dialog').showModal();
+async function openLogs(runID) {
+  const run = latestRuns.find(item => item.id === runID);
+  currentRun = runID; currentLogView = 'formatted';
+  $('#log-title').textContent = run ? (taskNames.get(run.task_id) || run.task_id) : runID;
+  $('#log-context').textContent = run
+    ? `${runID} · ${title(run.state)} · ${run.provider_account_id} · started ${relative(run.started_at)}`
+    : runID;
+  $('#logs-dialog').showModal();
   document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.toggle('active',b.dataset.stream === 'stdout'));
   document.querySelectorAll('[data-log-view]').forEach(b => b.classList.toggle('active',b.dataset.logView === currentLogView));
   await loadLog('stdout');
@@ -547,6 +583,11 @@ async function deleteRuntimeConnection() {
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
 }
+function syncIntervalField() {
+  const recurring = $('#task-type').value === 'recurring';
+  $('#task-interval').disabled = !recurring;
+  $('#task-interval-note').hidden = recurring;
+}
 async function updateTaskRuntimeJobs(selected='') {
   const profile=profiles.find(item => item.id === $('#task-profile').value);
   const field=$('#task-runtime-job-field'), select=$('#task-runtime-job'), status=$('#task-runtime-job-status');
@@ -593,6 +634,7 @@ async function openTask(id='') {
     $('#task-tier').value = task?.dispatch_tier || 'behind';
     $('#task-type').value = task?.type || 'one_off';
     $('#task-interval').value = durationInput(task?.min_interval || 0);
+    syncIntervalField();
     $('#task-prompt').value = task?.prompt || '';
     $('#task-prompt-file').value = task?.prompt_file || '';
     $('#task-repo-change').checked = !!task?.require_repo_change;
@@ -614,6 +656,7 @@ function applyTaskTemplate() {
   $('#task-tier').value = template.dispatch_tier || 'behind';
   $('#task-type').value = template.type || 'recurring';
   $('#task-interval').value = durationInput(template.min_interval || 0);
+  syncIntervalField();
   $('#task-prompt').value = template.prompt || '';
   $('#task-prompt-file').value = '';
   $('#task-repo-change').checked = !!template.require_repo_change;
@@ -799,6 +842,7 @@ $('#manage-profiles').addEventListener('click',openProfiles);
 $('#task-form').addEventListener('submit',saveTask);
 $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
+$('#task-type').addEventListener('change',syncIntervalField);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);
@@ -827,5 +871,9 @@ $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
 document.querySelectorAll('.log-tabs button[data-stream]').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
 document.querySelectorAll('[data-log-view]').forEach(button => button.addEventListener('click',() => { currentLogView=button.dataset.logView; document.querySelectorAll('[data-log-view]').forEach(b => b.classList.toggle('active',b === button)); renderLogContent(); }));
 document.addEventListener('click',() => document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')));
-document.addEventListener('keydown',event => { if (event.key === 'Escape') document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open')); });
+document.addEventListener('keydown',event => {
+  if (event.key !== 'Escape') return;
+  document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open'));
+  if (document.activeElement?.closest('.provider-compact')) document.activeElement.blur();
+});
 refresh(); connectLive();
