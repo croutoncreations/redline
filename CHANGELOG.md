@@ -44,3 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   operations actionable without enabling debug logging.
 - Subprocesses configured with an explicitly empty environment no longer inherit Redline's parent
   environment and its credentials.
+- A second service process now claims the API listener before opening SQLite, recovering runs, or
+  starting scheduler loops. Duplicate launches therefore fail immediately instead of leaving
+  orphan schedulers sharing the live database.

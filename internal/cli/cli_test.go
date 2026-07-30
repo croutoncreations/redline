@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,50 @@ import (
 
 	"github.com/jfox/redline/internal/cli"
 )
+
+func TestServeClaimsListenerBeforeOpeningDatabaseOrStartingScheduler(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	root := t.TempDir()
+	database := filepath.Join(root, "redline.db")
+	configPath := filepath.Join(root, "redline.yaml")
+	config := fmt.Sprintf(`
+database: %s
+active_policy: standard
+scheduler:
+  enabled: false
+usage_monitor:
+  enabled: false
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.10
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+`, database)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--config", configPath, "serve", "--listen", occupied.Addr().String()},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 1 || !strings.Contains(stderr.String(), "address already in use") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(database); !os.IsNotExist(err) {
+		t.Fatalf("database was touched before listener ownership was established: %v", err)
+	}
+}
 
 func TestDecisionCommandConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

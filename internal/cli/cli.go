@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -205,6 +206,12 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer listener.Close()
 	database, err := store.Open(cfg.Database)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -228,9 +235,9 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		Handler:           apiServer,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", *listen)
+	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
 	errors := make(chan error, 1)
-	go func() { errors <- server.ListenAndServe() }()
+	go func() { errors <- server.Serve(listener) }()
 	select {
 	case err := <-errors:
 		stop()
