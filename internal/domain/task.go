@@ -252,6 +252,7 @@ const (
 	RunEventExternalStarted   = "runtime.external_started"
 	RunEventHarnessCompleted  = "harness.completed"
 	RunEventHarnessFailed     = "harness.failed"
+	RunEventProviderPaused    = "provider.paused"
 	RunEventUsageRecorded     = "usage.recorded"
 	RunEventUsageFailed       = "usage.failed"
 	RunEventFinalizeStarted   = "finalize.started"

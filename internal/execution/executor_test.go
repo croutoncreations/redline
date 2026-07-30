@@ -209,6 +209,35 @@ func TestHarnessFailurePersistsActionableDiagnosisAndIncludesItInNotification(t 
 	if len(notifier.events) != 2 || notifier.events[1].Data["error"] != storedRun.Error {
 		t.Fatalf("notification = %#v", notifier.events)
 	}
+	paused, err := db.ProviderPaused(t.Context(), run.ProviderAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !paused {
+		t.Fatal("provider was not paused after a confirmed harness authentication failure")
+	}
+}
+
+func TestOrdinaryHarnessFailureDoesNotPauseProvider(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}},
+		Harness: &fakeHarness{result: harness.Result{
+			ExitCode: 1,
+			Failure:  "tests failed",
+		}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := db.ProviderPaused(t.Context(), run.ProviderAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused {
+		t.Fatal("provider was paused for an ordinary task failure")
+	}
 }
 
 func TestPartiallyPreparedWorkspaceIsRecordedAndCleanedOnSetupFailure(t *testing.T) {

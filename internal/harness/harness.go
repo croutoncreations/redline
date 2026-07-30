@@ -51,6 +51,11 @@ type Result struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
+func IsAuthenticationFailure(failure string) bool {
+	return strings.HasPrefix(failure, "Claude Code is signed out.") ||
+		strings.HasPrefix(failure, "Codex CLI is signed out.")
+}
+
 func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	if request.RunID == "" || request.OutputDirectory == "" || request.Workspace.Directory == "" {
 		return Result{}, fmt.Errorf("run id, output directory, and workspace directory are required")

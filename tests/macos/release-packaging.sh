@@ -47,7 +47,7 @@ REDLINE_SPARKLE_PUBLIC_KEY="${sparkle_public_key}" \
 REDLINE_SPARKLE_PRIVATE_KEY_FILE="${sparkle_private_key}" \
   "${repository_root}/scripts/package-macos-release.sh"
 
-dmg_path="${test_root}/release/Redline-9.8.7-arm64.dmg"
+dmg_path="${test_root}/release/Redline-9.8.7-universal.dmg"
 test -s "${dmg_path}"
 test -s "${dmg_path}.sha256"
 (cd "$(dirname "${dmg_path}")" && shasum -a 256 -c "$(basename "${dmg_path}").sha256")
@@ -64,6 +64,13 @@ test "$(plutil -extract CFBundleIconFile raw "${app_path}/Contents/Info.plist")"
 test "$(plutil -extract SUFeedURL raw "${app_path}/Contents/Info.plist")" = "https://updates.redline.example/appcast.xml"
 test "$(plutil -extract SUPublicEDKey raw "${app_path}/Contents/Info.plist")" = "${sparkle_public_key}"
 test -s "${app_path}/Contents/Resources/AppIcon.icns"
+for executable in \
+  "${app_path}/Contents/MacOS/RedlineMenuBar" \
+  "${app_path}/Contents/Resources/bin/redline"; do
+  slices="$(lipo -archs "${executable}")"
+  [[ " ${slices} " == *" arm64 "* ]]
+  [[ " ${slices} " == *" x86_64 "* ]]
+done
 codesign --verify --deep --strict "${app_path}"
 signature_details="$(codesign -dvv "${app_path}" 2>&1)"
 [[ "${signature_details}" == *"runtime"* ]]
@@ -94,7 +101,7 @@ REDLINE_SPARKLE_PUBLIC_KEY="${sparkle_public_key}" \
 REDLINE_SPARKLE_PRIVATE_KEY_FILE="${sparkle_private_key}" \
   "${repository_root}/scripts/package-macos-release.sh"
 
-new_dmg_path="${test_root}/release/Redline-9.8.8-arm64.dmg"
+new_dmg_path="${test_root}/release/Redline-9.8.8-universal.dmg"
 delta_path="${test_root}/release/Redline43-42.delta"
 appcast_path="${test_root}/release/appcast.xml"
 test -s "${new_dmg_path}"

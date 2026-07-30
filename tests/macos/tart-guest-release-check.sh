@@ -93,11 +93,21 @@ download_release() {
   local version="${tag#v}"
   local work_directory="$2"
   local release_root="https://github.com/croutoncreations/redline/releases/download/${tag}"
-  local dmg_name="Redline-${version}-arm64.dmg"
+  local dmg_name=""
   mkdir -p "${work_directory}"
-  curl --fail --location --silent --show-error \
-    --connect-timeout 10 --max-time 180 \
-    --output "${work_directory}/${dmg_name}" "${release_root}/${dmg_name}" || return 1
+  for candidate in "Redline-${version}-universal.dmg" "Redline-${version}-arm64.dmg"; do
+    if curl --fail --location --silent \
+      --connect-timeout 10 --max-time 180 \
+      --output "${work_directory}/${candidate}" "${release_root}/${candidate}"; then
+      dmg_name="${candidate}"
+      break
+    fi
+    rm -f "${work_directory}/${candidate}"
+  done
+  if [[ -z "${dmg_name}" ]]; then
+    printf 'No Universal or arm64 Redline DMG was found for %s\n' "${tag}" >&2
+    return 1
+  fi
   curl --fail --location --silent --show-error \
     --connect-timeout 10 --max-time 60 \
     --output "${work_directory}/${dmg_name}.sha256" "${release_root}/${dmg_name}.sha256" || return 1

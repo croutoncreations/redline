@@ -56,6 +56,13 @@ struct StatusPopoverView: View {
                 HStack(spacing: 12) {
                     Button("View logs") { actions.showRunLogs(failure) }
                         .buttonStyle(.bordered)
+                    if let provider = failedAuthenticationProvider(failure) {
+                        Button("Reconnect \(provider.displayName)…") {
+                            actions.reconnectProvider(provider)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    }
                     Button {
                         Task {
                             await model.recoverFailedTask(
@@ -68,14 +75,15 @@ struct StatusPopoverView: View {
                         if model.tasksBeingControlled.contains(failure.taskID) {
                             ProgressView().controlSize(.small)
                         } else {
-                            Text(failedProviderIsPaused(failure) ? "Resume & retry" : "Retry job")
+                            Text(failedProviderIsPaused(failure) ? "Retry after login" : "Retry job")
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(.bordered)
                     .disabled(model.tasksBeingControlled.contains(failure.taskID))
-                    Button("Enable alerts…", action: actions.enableNotifications)
-                        .buttonStyle(.borderless)
+                    if failedAuthenticationProvider(failure) == nil {
+                        Button("Enable alerts…", action: actions.enableNotifications)
+                            .buttonStyle(.borderless)
+                    }
                 }
                 .font(.system(size: 10, weight: .medium))
             }
@@ -382,6 +390,13 @@ struct StatusPopoverView: View {
 
     private func failedProviderIsPaused(_ run: RunSummary) -> Bool {
         snapshot?.providers.first { $0.id == run.providerAccountID }?.paused == true
+    }
+
+    private func failedAuthenticationProvider(_ run: RunSummary) -> ProviderSummary? {
+        guard ProviderRecovery.isAuthenticationError(run.error) else {
+            return nil
+        }
+        return snapshot?.providers.first { $0.id == run.providerAccountID }
     }
 
     private func runSymbol(_ state: String) -> String {

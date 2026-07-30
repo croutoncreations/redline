@@ -257,6 +257,20 @@ func (e Executor) complete(
 	if err := e.Store.CompleteRun(ctx, run.ID, completion, completedAt); err != nil {
 		return err
 	}
+	if completion.State == domain.RunFailed && harness.IsAuthenticationFailure(completion.Error) {
+		if controls, ok := e.Store.(interface {
+			SetProviderPaused(context.Context, string, bool) error
+		}); ok {
+			if err := controls.SetProviderPaused(ctx, run.ProviderAccountID, true); err != nil {
+				log.Printf("redline run %s pause provider after authentication failure: %v", run.ID, err)
+			} else {
+				e.recordEvent(ctx, run.ID, domain.RunEventProviderPaused, map[string]any{
+					"provider_account_id": run.ProviderAccountID,
+					"reason":              "harness authentication failed",
+				})
+			}
+		}
+	}
 	terminalEvent := domain.RunEventCompleted
 	if completion.State == domain.RunFailed {
 		terminalEvent = domain.RunEventFailed
