@@ -53,7 +53,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification|pause|resume>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
