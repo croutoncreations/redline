@@ -58,3 +58,46 @@ func TestRunEventValidation(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestListRunEventsReturnsMostRecentWhenTruncated(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{
+		ID: "profile-events-truncated", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "existing-directory",
+	}
+	task := domain.Task{
+		ID: "task-events-truncated", Name: "Audit me", Prompt: "secret prompt",
+		Priority: 50, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+	}
+	if err := db.CreateProfile(context.Background(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(context.Background(), task, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(context.Background(), "run-events-truncated", task.ID, "codex-main", "abc", now); err != nil {
+		t.Fatal(err)
+	}
+
+	types := []string{
+		domain.RunEventStarted, domain.RunEventWorkspacePrepared, domain.RunEventCompleted,
+	}
+	for index, eventType := range types {
+		event := domain.RunEvent{
+			RunID: "run-events-truncated", Type: eventType, Payload: json.RawMessage(`{}`),
+			OccurredAt: now.Add(time.Duration(index) * time.Second),
+		}
+		if _, err := db.RecordRunEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := db.ListRunEvents(context.Background(), "run-events-truncated", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Type != domain.RunEventWorkspacePrepared || got[1].Type != domain.RunEventCompleted {
+		t.Fatalf("expected the two most recent events in chronological order, got %#v", got)
+	}
+}
