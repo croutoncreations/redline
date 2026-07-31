@@ -9,20 +9,32 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var providersBeingControlled = Set<String>()
     @Published private(set) var tasksBeingControlled = Set<String>()
+    @Published private(set) var showsBuilderUpdatesPrompt = false
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
     private let client: RedlineAPIClient
+    private let defaults: UserDefaults
 
-    init(client: RedlineAPIClient) {
+    init(client: RedlineAPIClient, defaults: UserDefaults = .standard) {
         self.client = client
+        self.defaults = defaults
     }
 
     func apply(_ snapshot: DashboardSnapshot) {
         self.snapshot = snapshot
+        showsBuilderUpdatesPrompt = EngagementPromptPolicy.shouldShow(
+            hasCompletedRun: snapshot.runs.contains { $0.state == "completed" },
+            dismissed: defaults.bool(forKey: EngagementPromptPolicy.dismissalKey)
+        )
         errorMessage = nil
         actionError = nil
         onSnapshot?(snapshot)
+    }
+
+    func dismissBuilderUpdatesPrompt() {
+        defaults.set(true, forKey: EngagementPromptPolicy.dismissalKey)
+        showsBuilderUpdatesPrompt = false
     }
 
     func apply(error: String) {

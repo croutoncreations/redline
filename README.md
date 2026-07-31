@@ -7,6 +7,17 @@ Redline includes a local service, CLI, web dashboard, and native macOS menu-bar 
 scheduler evaluates configured providers and launches eligible Codex CLI, Claude Code, Pi, or
 generic-command tasks unattended.
 
+**[Download Redline for macOS](https://github.com/croutoncreations/redline/releases/latest)** ·
+[Getting started](docs/getting-started.md) · [Troubleshooting](docs/troubleshooting.md)
+
+Requires macOS 13 or later. Release builds are signed, notarized, and Universal for Apple Silicon
+and Intel Macs.
+
+> **Stay in the loop.** Redline is built by
+> [Crouton Creations](https://www.croutoncreations.com/?utm_source=redline&utm_medium=github&utm_campaign=redline).
+> [Get new open-source tools and practical builder notes](https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=github&utm_campaign=redline)
+> when they ship.
+
 ## Architecture
 
 ```text
@@ -73,6 +84,9 @@ and profile/task import; large run artifacts will remain on the filesystem.
   and a separately annotated scheduler-dispatch tool.
 
 ## Quick start
+
+For the signed menu-bar app, follow the [five-minute getting-started guide](docs/getting-started.md).
+The source workflow below is intended for contributors and custom deployments.
 
 Copy and adjust the example config. Redline reuses OpenUsage when it is running, but can collect
 Codex and Claude subscription windows natively when it is unavailable:

@@ -113,8 +113,19 @@ th{position:sticky;top:0;background:#171b20;z-index:2}
 /* Dialog context line under the title. */
 .dialog-note{display:block;color:var(--muted);font:9px ui-monospace,monospace;margin-top:5px}
 
+.product-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:2px 4px 18px;color:var(--muted);font-size:9px}
+.product-footer span:last-child{display:flex;align-items:center;gap:8px}
+.product-footer a{color:#b8bec2;text-decoration:none}
+.product-footer a:hover,.product-footer a:focus{color:#ef7772;text-decoration:underline}
+.product-footer i{color:#555d63;font-style:normal}
+
 /* Keyboard focus is visible on every control. */
 button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #f0524d99;outline-offset:2px}
+
+@media(max-width:480px){
+  .product-footer{align-items:flex-start;flex-direction:column}
+  .product-footer span:last-child{flex-wrap:wrap}
+}
 
 @media (prefers-reduced-motion:reduce){
   *,*:before,*:after{animation:none!important;transition:none!important}

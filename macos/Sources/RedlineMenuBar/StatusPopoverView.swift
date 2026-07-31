@@ -25,6 +25,7 @@ struct StatusPopoverView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    builderUpdatesPrompt
                     failureSection
                     providerGrid
                     activitySection
@@ -39,6 +40,35 @@ struct StatusPopoverView: View {
         }
         .frame(width: 420, height: 640)
         .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder private var builderUpdatesPrompt: some View {
+        if model.showsBuilderUpdatesPrompt {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Want the next useful tool?")
+                        .font(.system(size: 11, weight: .semibold))
+                    Link("Get occasional builder updates", destination: ProductLinks.builderUpdates)
+                        .font(.system(size: 10))
+                }
+                Spacer()
+                Button {
+                    model.dismissBuilderUpdatesPrompt()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Dismiss")
+            }
+            .padding(10)
+            .background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8).stroke(.red.opacity(0.18))
+            }
+        }
     }
 
     @ViewBuilder private var failureSection: some View {
@@ -359,6 +389,9 @@ struct StatusPopoverView: View {
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
                 Button("App Setup…", action: actions.showAppSetup)
+                Divider()
+                Link("More tools from Crouton Creations…", destination: ProductLinks.moreTools)
+                Link("Get builder updates…", destination: ProductLinks.builderUpdates)
                 Divider()
                 Button("Quit Redline", action: actions.quit)
             } label: { Image(systemName: "ellipsis.circle") }

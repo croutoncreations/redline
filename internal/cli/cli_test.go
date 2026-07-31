@@ -15,6 +15,17 @@ import (
 	"github.com/jfox/redline/internal/cli"
 )
 
+func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--help"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stderr.Len() != 0 ||
+		!strings.Contains(stdout.String(), "usage: redline") ||
+		!strings.Contains(stdout.String(), "github.com/croutoncreations/redline") ||
+		!strings.Contains(stdout.String(), "utm_medium=cli") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestServeClaimsListenerBeforeOpeningDatabaseOrStartingScheduler(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
