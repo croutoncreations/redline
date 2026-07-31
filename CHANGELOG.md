@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Prevent Redline from refreshing or writing Claude Code's shared macOS keychain credential; native
+  monitoring now fails closed and asks the user to authenticate with Claude Code when refresh is
+  required.
+- Mark expired usage snapshots as unavailable in the dashboard and menu bar instead of presenting
+  their last-known percentages as current scheduling data.
+
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).

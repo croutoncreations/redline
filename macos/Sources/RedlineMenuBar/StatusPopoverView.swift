@@ -169,15 +169,23 @@ struct StatusPopoverView: View {
                     .resizable().frame(width: 17, height: 17)
                 Text(provider.displayName).font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Text(provider.weeklyPercent.map { "\($0)%" } ?? "—")
+                Text(provider.snapshotStale ? "Unavailable" : provider.weeklyPercent.map { "\($0)%" } ?? "—")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(provider.snapshotStale ? .orange : .primary)
             }
-            ProgressView(value: Double(provider.weeklyPercent ?? 0), total: 100)
-                .tint(progressColor(provider.weeklyPercent))
+            if provider.snapshotStale {
+                Label("Last usage sample is stale", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .help(provider.error ?? "Scheduling waits for fresh usage data.")
+            } else {
+                ProgressView(value: Double(provider.weeklyPercent ?? 0), total: 100)
+                    .tint(progressColor(provider.weeklyPercent))
+            }
             HStack {
-                Text("Weekly").foregroundStyle(.secondary)
+                Text(provider.snapshotStale ? "Scheduling paused" : "Weekly").foregroundStyle(.secondary)
                 Spacer()
-                if let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
+                if !provider.snapshotStale, let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }
             .font(.system(size: 10))
             Button {

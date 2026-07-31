@@ -367,6 +367,40 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	}
 }
 
+func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider:   "claude",
+		ObservedAt: apiNow.Add(-time.Hour),
+		Short: &decision.UsageWindow{
+			Remaining: .75, ResetsAt: apiNow.Add(4 * time.Hour),
+		},
+		Weekly: decision.UsageWindow{
+			Remaining: .40, ResetsAt: apiNow.Add(4 * 24 * time.Hour),
+		},
+		Source: "native",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var dashboard struct {
+		Providers []struct {
+			ID            string                  `json:"id"`
+			Snapshot      *decision.UsageSnapshot `json:"snapshot"`
+			SnapshotStale bool                    `json:"snapshot_stale"`
+			Error         string                  `json:"error"`
+		} `json:"providers"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	claude := dashboard.Providers[0]
+	if claude.ID != "claude-main" || claude.Snapshot == nil || !claude.SnapshotStale {
+		t.Fatalf("claude provider = %#v", claude)
+	}
+	if !strings.Contains(claude.Error, "Usage data is stale") || !strings.Contains(claude.Error, "scheduling is paused") {
+		t.Fatalf("stale error = %q", claude.Error)
+	}
+}
+
 func TestDashboardReportsStoreFailures(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.Close(); err != nil {

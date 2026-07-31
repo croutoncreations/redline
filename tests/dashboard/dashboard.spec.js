@@ -48,6 +48,22 @@ test('describes high scheduling pressure without implying the subscription expir
     .toContainText('All job tiers are eligible because weekly allowance is at risk of expiring unused.');
 });
 
+test('does not present a stale usage percentage as current', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available.';
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Usage unavailable');
+  await expect(claude).toContainText('Last sample');
+  await expect(claude).not.toContainText('53% weekly');
+  await claude.click();
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .toContainText('Last known usage');
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .toContainText('scheduling is paused');
+});
+
 test('loads capacity attribution and model evidence on demand', async ({ page }) => {
 	const state = await loadDashboard(page);
 	const claude = page.getByRole('button', { name: 'Show Claude usage details' });

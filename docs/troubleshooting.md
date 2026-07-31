@@ -17,10 +17,12 @@ Open the provider details and inspect **Usage source**.
 
 - If OpenUsage is already running, confirm `http://127.0.0.1:6736/v1/limits` responds.
 - Redline automatically falls back to its native collector after repeated OpenUsage failures.
+- On macOS, Redline reads but never refreshes Claude Code's shared keychain credential. Claude Code
+  or OpenUsage must refresh it; if authentication has expired, run `claude auth login`.
 - Start one normal interactive Codex or Claude session if the provider has not produced a fresh
   subscription snapshot recently.
 - A stale or unavailable snapshot fails closed: Redline waits instead of guessing and spending
-  capacity.
+  capacity. The UI labels old measurements as last-known data rather than showing them as current.
 
 ## A job has not run
 

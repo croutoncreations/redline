@@ -170,6 +170,21 @@ import Testing
     #expect(TrayState(snapshot: snapshot).providerBadges.map(\.displayName) == ["Codex", "Claude", "Other"])
 }
 
+@Test func staleProviderUsageIsNotPresentedAsCurrentInTrayState() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":1},"scheduler":{"enabled":true,"running":false},"providers":[
+      {"id":"claude-main","provider":"claude","snapshot_stale":true,"error":"Usage data is stale","snapshot":{"weekly":{"remaining":0.53,"resets_at":"2026-07-24T17:00:00Z"},"source":"native"}},
+      {"id":"codex-main","provider":"codex","snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-07-25T03:24:11Z"},"source":"openusage"}}
+    ],"tasks":[],"runs":[],"attempts":[]}
+    """#.utf8))
+
+    #expect(snapshot.providers[0].snapshotStale)
+    #expect(snapshot.providers[0].weeklyPercent == nil)
+    #expect(snapshot.providers[0].error == "Usage data is stale")
+    #expect(TrayState(snapshot: snapshot).lowestWeeklyPercent == 32)
+    #expect(TrayState(snapshot: snapshot).menuBarTitle == "WAIT  Codex 32% · Claude —")
+}
+
 private extension DashboardSnapshot {
     static func fixture(health: String, activeRuns: Int, lowestWeekly: Double, latestOutcome: String? = nil) -> DashboardSnapshot {
         DashboardSnapshot(

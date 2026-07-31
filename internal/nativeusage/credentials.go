@@ -28,6 +28,10 @@ const (
 
 type secretStore interface {
 	Read(context.Context) ([]byte, error)
+}
+
+type writableSecretStore interface {
+	secretStore
 	CompareAndSwap(context.Context, []byte, []byte) error
 }
 
@@ -87,6 +91,10 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	}
 	now := d.now()
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
+		writable, ok := store.(writableSecretStore)
+		if !ok {
+			return Credential{}, fmt.Errorf("Claude credentials require refresh; Redline will not modify Claude Code's shared credential—run `claude auth login`")
+		}
 		if file.ClaudeAIOAuth.RefreshToken == "" {
 			return Credential{}, fmt.Errorf("Claude token expired without a refresh token")
 		}
@@ -128,7 +136,7 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 		oauth["refreshToken"] = file.ClaudeAIOAuth.RefreshToken
 		oauth["expiresAt"] = file.ClaudeAIOAuth.ExpiresAt
 		updated, _ := json.Marshal(document)
-		if err := store.CompareAndSwap(ctx, raw, updated); err != nil {
+		if err := writable.CompareAndSwap(ctx, raw, updated); err != nil {
 			return Credential{}, fmt.Errorf("persist Claude token refresh: %w", err)
 		}
 	}
@@ -160,6 +168,10 @@ func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
 	}
 	now := d.now()
 	if expiresAt, ok := jwtExpiry(file.Tokens.AccessToken); ok && expiresAt.Sub(now) <= 5*time.Minute {
+		writable, ok := store.(writableSecretStore)
+		if !ok {
+			return Credential{}, fmt.Errorf("Codex credential store is read-only")
+		}
 		if file.Tokens.RefreshToken == "" {
 			return Credential{}, fmt.Errorf("Codex token expired without a refresh token")
 		}
@@ -203,7 +215,7 @@ func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
 		}
 		document["last_refresh"] = file.LastRefresh
 		updated, _ := json.MarshalIndent(document, "", "  ")
-		if err := store.CompareAndSwap(ctx, raw, updated); err != nil {
+		if err := writable.CompareAndSwap(ctx, raw, updated); err != nil {
 			return Credential{}, fmt.Errorf("persist Codex token refresh: %w", err)
 		}
 	}
