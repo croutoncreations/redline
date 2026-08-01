@@ -116,7 +116,10 @@ async function loadDashboard(page, options = {}) {
     const request = route.request(), url = new URL(request.url()), method = request.method();
     if (assets[url.pathname]) {
       const [body, contentType] = assets[url.pathname];
-      return route.fulfill({ status: 200, body, contentType });
+      const headers = url.pathname === '/' ? {
+        'Content-Security-Policy': "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
+      } : {};
+      return route.fulfill({ status: 200, body, contentType, headers });
     }
     const json = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     if (url.pathname === '/v1/dashboard') {

@@ -23,6 +23,18 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('sizes weekly usage bars to the displayed remaining percentage', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot.weekly.remaining = .98;
+  dashboard.providers[1].snapshot.weekly.remaining = .37;
+  await loadDashboard(page, { dashboard });
+
+  for (const [provider, expected] of [['claude-main', .98], ['codex-main', .37]]) {
+    const progress = page.locator(`[data-provider-id="${provider}"] .compact-progress`);
+    await expect(progress).toHaveJSProperty('value', expected * 100);
+  }
+});
+
 test('links the dashboard to product updates and the Crouton Creations tool family', async ({ page }) => {
   await loadDashboard(page);
   await expect(page.getByRole('link', { name: 'More tools from Crouton Creations' }))
