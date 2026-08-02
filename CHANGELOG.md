@@ -1,13 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Prevent Redline from refreshing or writing Claude Code's shared macOS keychain credential; native
-  monitoring now fails closed and asks the user to authenticate with Claude Code when refresh is
-  required.
-- Mark expired usage snapshots as unavailable in the dashboard and menu bar instead of presenting
-  their last-known percentages as current scheduling data.
-
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
@@ -46,6 +38,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Prevent Redline from refreshing or writing Claude Code's shared macOS keychain credential; native
+  monitoring now fails closed and asks the user to authenticate with Claude Code when refresh is
+  required.
+- Mark expired usage snapshots as unavailable in the dashboard and menu bar instead of presenting
+  their last-known percentages as current scheduling data.
+- Usage progress bars now render their actual remaining percentage under the dashboard's strict
+  content-security policy instead of appearing completely full.
 - Fixed Hermes desktop job triggers not falling back correctly when Hermes responded with
   `405 Method Not Allowed` (previously only `404` triggered the desktop fallback).
 - The "Enable Notifications" flow now checks existing macOS notification permission before
