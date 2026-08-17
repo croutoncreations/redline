@@ -1119,7 +1119,7 @@ func (s *Server) dispatch(
 		attempt.Error = dispatchErr.Error()
 	case admitted:
 		attempt.Outcome = domain.DispatchAdmitted
-	case response.Result.Decision == decision.Run:
+	case response.Result.Decision == decision.Admit:
 		attempt.Outcome = domain.DispatchNoTask
 		if response.Result.TaskSelectionReason != "" {
 			attempt.Reason = response.Result.TaskSelectionReason
@@ -1382,7 +1382,7 @@ func (s *Server) evaluateCandidateBudget(
 		Remaining: snapshot.Weekly.Remaining, UnlockedTier: base.UnlockedTier,
 	}}
 	triggering := make([]string, 0, 2)
-	if base.Decision == decision.Run {
+	if base.Decision == decision.Admit {
 		triggering = append(triggering, "weekly")
 	}
 	if base.Decision == decision.Unknown {
@@ -1438,7 +1438,7 @@ func (s *Server) evaluateCandidateBudget(
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 				poolKey + " decision is unknown: " + poolDecision.Reason
 		}
-		if poolDecision.Decision == decision.Run {
+		if poolDecision.Decision == decision.Admit {
 			triggering = append(triggering, poolKey)
 		}
 	}
@@ -1446,8 +1446,8 @@ func (s *Server) evaluateCandidateBudget(
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false, ""
 	}
 	result := base
-	if base.Decision != decision.Run {
-		result.Decision = decision.Run
+	if base.Decision != decision.Admit {
+		result.Decision = decision.Admit
 		result.Mode = decision.ModePace
 		result.Reason = "model-specific allowance meets pace threshold"
 	}

@@ -40,7 +40,7 @@ func input(s decision.UsageSnapshot) decision.Input {
 func TestEvaluateProratesCurrentAndFinalSlots(t *testing.T) {
 	got := decision.Evaluate(input(limitedSnapshot()))
 
-	if got.Decision != decision.Run {
+	if got.Decision != decision.Admit {
 		t.Fatalf("decision = %q, want RUN (reason: %s)", got.Decision, got.Reason)
 	}
 	wantFractions := []float64{0.4, 1, 0.8}
@@ -67,7 +67,7 @@ func TestLimitedWindowCanRunBehindPaceBeforeOverflow(t *testing.T) {
 	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
 	got := decision.Evaluate(in)
 
-	if got.Decision != decision.Run || got.Overflow > in.TriggerMargin || got.UnlockedTier != domain.DispatchWellBehind {
+	if got.Decision != decision.Admit || got.Overflow > in.TriggerMargin || got.UnlockedTier != domain.DispatchWellBehind {
 		t.Fatalf("got %#v", got)
 	}
 }
@@ -83,7 +83,7 @@ func TestLimitedWindowRunsWhenPolicyPaceGapTriggerMatches(t *testing.T) {
 
 	got := decision.Evaluate(in)
 
-	if got.Decision != decision.Run || got.Reason != "weekly remaining is well behind pace" {
+	if got.Decision != decision.Admit || got.Reason != "weekly remaining is well behind pace" {
 		t.Fatalf("got %#v", got)
 	}
 	if got.MatchedPaceThreshold != nil || got.UnlockedTier != domain.DispatchExpiring {
@@ -199,7 +199,7 @@ func TestUnrestrictedProviderRunsWhenPaceThresholdMatches(t *testing.T) {
 	}
 	got := decision.Evaluate(in)
 
-	if got.Decision != decision.Run || got.Mode != decision.ModePace {
+	if got.Decision != decision.Admit || got.Mode != decision.ModePace {
 		t.Fatalf("got %#v, want pace RUN", got)
 	}
 	if got.MatchedPaceThreshold == nil || got.MatchedPaceThreshold.MinWeeklyRemaining != 0.50 {
@@ -222,7 +222,7 @@ func TestUnrestrictedProviderRunsWhenPaceGapTriggerMatches(t *testing.T) {
 
 	got := decision.Evaluate(in)
 
-	if got.Decision != decision.Run || got.Mode != decision.ModePace ||
+	if got.Decision != decision.Admit || got.Mode != decision.ModePace ||
 		got.Reason != "weekly remaining is well behind pace" ||
 		got.UnlockedTier != domain.DispatchExpiring {
 		t.Fatalf("got %#v", got)
@@ -239,7 +239,7 @@ func TestUnrestrictedPaceThresholdIsInclusiveAtExactBoundaries(t *testing.T) {
 	in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: 0.50}}
 	got := decision.Evaluate(in)
 
-	if got.Decision != decision.Run || got.Mode != decision.ModePace {
+	if got.Decision != decision.Admit || got.Mode != decision.ModePace {
 		t.Fatalf("got %#v", got)
 	}
 }
