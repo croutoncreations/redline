@@ -110,7 +110,7 @@ func outputSummary(path string) string {
 	}
 	var last string
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 64*1024), maxOutputBytes)
+	scanner.Buffer(make([]byte, 64*1024), maxOutputBytes+1)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
