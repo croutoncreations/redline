@@ -3,8 +3,11 @@ package nativeusage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -38,6 +41,66 @@ func TestCredentialRefreshRejectsConcurrentReplacement(t *testing.T) {
 	if _, err := credentials.Access(context.Background(), "claude"); err == nil {
 		t.Fatal("expected concurrent credential replacement error")
 	}
+}
+
+func TestFirstFileStoreCompareAndSwap(t *testing.T) {
+	t.Run("replaces matching credential and preserves permissions", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "auth.json")
+		original := []byte(`{"tokens":{"access_token":"old"}}`)
+		updated := []byte(`{"tokens":{"access_token":"new"}}`)
+		if err := os.WriteFile(path, original, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		store := firstFileStore{Paths: []string{path}}
+
+		if err := store.CompareAndSwap(t.Context(), original, updated); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, updated) {
+			t.Fatalf("credential = %s, want %s", got, updated)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.Mode().Perm(), os.FileMode(0o640); got != want {
+			t.Fatalf("credential permissions = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("rejects concurrent replacement without overwriting it", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "auth.json")
+		original := []byte(`{"tokens":{"access_token":"old"}}`)
+		replacement := []byte(`{"tokens":{"access_token":"other-process"}}`)
+		updated := []byte(`{"tokens":{"access_token":"redline-refresh"}}`)
+		if err := os.WriteFile(path, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := firstFileStore{Paths: []string{path}}
+		observed, err := store.Read(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err = store.CompareAndSwap(t.Context(), observed, updated)
+		if !errors.Is(err, errCredentialsChanged) {
+			t.Fatalf("CompareAndSwap error = %v, want %v", err, errCredentialsChanged)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(got, replacement) {
+			t.Fatalf("credential = %s, want concurrent replacement %s", got, replacement)
+		}
+	})
 }
 
 type memorySecretStore struct {
