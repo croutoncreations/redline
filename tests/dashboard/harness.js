@@ -11,10 +11,13 @@ const assets = {
   '/assets/codex.svg': [fs.readFileSync(path.join(dashboardRoot, 'codex.svg')), 'image/svg+xml'],
 };
 
+const FIXTURE_NOW = '2026-07-20T19:00:00Z';
+
 function dashboardFixture() {
-  const observed = '2026-07-20T19:00:00Z';
-  const claudeTrigger = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-  const codexTrigger = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const observed = FIXTURE_NOW;
+  const observedMs = new Date(observed).getTime();
+  const claudeTrigger = new Date(observedMs + 2 * 60 * 60 * 1000).toISOString();
+  const codexTrigger = new Date(observedMs + 24 * 60 * 60 * 1000).toISOString();
   return {
     generated_at: observed,
     active_policy: 'standard',
@@ -100,6 +103,11 @@ async function loadDashboard(page, options = {}) {
   state.tasks = {
     'audit-auth': { id: 'audit-auth', name: 'Audit authentication', priority: 70, type: 'recurring', state: 'queued', enabled: true, execution_profile_id: 'codex-devx', min_interval: 86400000000000, prompt: 'Inspect one bounded area.', require_repo_change: true, dispatch_tier: 'well_behind' },
   };
+
+  // Freeze the page clock to the fixture's reference instant so dashboard.js's
+  // relative-time formatting can't drift across a bucket boundary (e.g. "1 day" vs
+  // "24 hrs") based on how long the browser takes to load and render.
+  await page.clock.install({ time: new Date(FIXTURE_NOW) });
 
   await page.addInitScript(() => {
     window.__redlineEventSources = [];
