@@ -823,8 +823,7 @@ func viewRunEvent(event domain.RunEvent) runEventView {
 		OccurredAt: event.OccurredAt, PayloadBytes: len(event.Payload),
 	}
 	if len(event.Payload) > maxEventPayload {
-		view.Payload = string(event.Payload[:maxEventPayload])
-		view.PayloadTruncated = true
+		view.Payload, view.PayloadTruncated = truncateString(string(event.Payload), maxEventPayload)
 		return view
 	}
 	if err := json.Unmarshal(event.Payload, &view.Payload); err != nil {
