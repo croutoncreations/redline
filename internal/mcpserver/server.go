@@ -823,7 +823,7 @@ func viewRunEvent(event domain.RunEvent) runEventView {
 		OccurredAt: event.OccurredAt, PayloadBytes: len(event.Payload),
 	}
 	if len(event.Payload) > maxEventPayload {
-		view.Payload = string(event.Payload[:maxEventPayload])
+		view.Payload, _ = truncateString(string(event.Payload), maxEventPayload)
 		view.PayloadTruncated = true
 		return view
 	}
