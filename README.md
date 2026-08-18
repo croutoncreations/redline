@@ -259,6 +259,7 @@ GET  /v1/providers/{account}/capacity
 POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
 PATCH /v1/providers/{account}/policy
+PATCH /v1/providers/{account}/concurrency
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
 GET  /v1/profile-options?refresh={true|false}
