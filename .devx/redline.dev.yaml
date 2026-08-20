@@ -1,0 +1,33 @@
+database: .redline/devx.db
+run_artifacts_dir: .redline/runs
+active_policy: standard
+max_snapshot_age: 15m
+
+# DevX sessions use isolated state and never dispatch unattended work.
+scheduler:
+  enabled: false
+  poll_interval: 5m
+
+# Developers can refresh providers explicitly without a background monitor
+# competing with the installed Redline app.
+usage_monitor:
+  enabled: false
+
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.10
+  claude-main:
+    provider: claude
+    usage_source: native
+    window_weekly_cost: 0.08
+
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+    pace_gap_trigger: 0.30
+    pace_thresholds:
+      - { time_remaining: 72h, min_weekly_remaining: 0.50 }
+      - { time_remaining: 24h, min_weekly_remaining: 0.20 }

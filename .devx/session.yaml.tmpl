@@ -1,0 +1,62 @@
+session_name: Redline - {{.Name}}
+start_directory: {{.Path}}
+suppress_history: false
+options:
+  base-index: 1
+  automatic-rename: "off"
+  mouse: on
+  status: on
+  status-interval: 5
+  status-left-length: 60
+  status-right-length: 120
+  status-left: '#[bold]Redline - #{session_name}#[default] | #{window_index}:#{window_name}'
+  status-right: '#{pane_current_path} | %Y-%m-%d %H:%M'
+window_options:
+  window-status-format: ' #{window_index}:#{window_name} '
+  window-status-current-format: ' #[reverse]#{window_index}:#{window_name}#[default] '
+windows:
+  - window_name: agent
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - pi -c
+
+  - window_name: codex
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - codex resume --last || codex
+
+  - window_name: service
+    layout: main-horizontal
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}
+      - export SESSION_NAME={{.Name}}
+      - export REDLINE_DEV_API=http://127.0.0.1:$API
+    panes:
+      - pane_name: api
+        shell_command: {{.Path}}/.devx/start_service.sh
+      - pane_name: shell
+        shell_command: >-
+          echo "API: $REDLINE_DEV_API" &&
+          echo "Health: go run ./cmd/redline --config .devx/redline.dev.yaml --api $REDLINE_DEV_API health" &&
+          echo "Dashboard: .devx/open_dashboard.sh" &&
+          bash
+
+  - window_name: tests
+    layout: tiled
+    shell_command_before:
+      - cd {{.Path}}{{range $name, $port := .Ports}}
+      - export {{$name}}={{$port}}{{end}}
+      - export SESSION_NAME={{.Name}}
+    panes:
+      - echo 'Go checks: test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...' && bash
+      - echo 'macOS checks: swift test --package-path macos' && bash
+      - echo 'Dashboard checks: npm ci && npm run test:dashboard' && bash

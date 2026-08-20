@@ -1,0 +1,8 @@
+target: host
+basedomain: localhost
+disable_caddy: true
+close_editor_on_rm: true
+editor: cursor
+ports:
+  - API
+tmuxp_template: ./session.yaml.tmpl
