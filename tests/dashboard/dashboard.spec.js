@@ -23,6 +23,18 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('sizes weekly usage bars to the displayed remaining percentage', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot.weekly.remaining = .98;
+  dashboard.providers[1].snapshot.weekly.remaining = .37;
+  await loadDashboard(page, { dashboard });
+
+  for (const [provider, expected] of [['claude-main', .98], ['codex-main', .37]]) {
+    const progress = page.locator(`[data-provider-id="${provider}"] .compact-progress`);
+    await expect(progress).toHaveJSProperty('value', expected * 100);
+  }
+});
+
 test('links the dashboard to product updates and the Crouton Creations tool family', async ({ page }) => {
   await loadDashboard(page);
   await expect(page.getByRole('link', { name: 'More tools from Crouton Creations' }))
@@ -46,6 +58,22 @@ test('describes high scheduling pressure without implying the subscription expir
   await claude.click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
     .toContainText('All job tiers are eligible because weekly allowance is at risk of expiring unused.');
+});
+
+test('does not present a stale usage percentage as current', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available.';
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Usage unavailable');
+  await expect(claude).toContainText('Last sample');
+  await expect(claude).not.toContainText('53% weekly');
+  await claude.click();
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .toContainText('Last known usage');
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .toContainText('scheduling is paused');
 });
 
 test('loads capacity attribution and model evidence on demand', async ({ page }) => {

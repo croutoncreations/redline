@@ -27,7 +27,7 @@ let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editing
 const capacityCache = new Map();
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
-  return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><div class="meter-track"><div class="meter-fill ${tone}" style="width:${value}%"></div></div><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
+  return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
 }
 function policyControl(item, provider) {
   const defaultPolicy = item.default_policy || item.policy || 'default';
@@ -50,6 +50,11 @@ function concurrencyStatus(item) {
 }
 function providerPressure(item) {
   if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  if (item.snapshot_stale) return {
+    label:'Usage unavailable',
+    detail:'The last successful usage sample is stale. Scheduling is paused until a fresh sample is available.',
+    tone:'near',
+  };
   const current = item.latest_decision;
   if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
   if (current.decision === 'RUN') {
@@ -94,21 +99,23 @@ function providerPressure(item) {
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
+  const stale = Boolean(item.snapshot_stale);
   const source = item.usage_source?.active || snap?.source || 'unknown';
   const icon = provider === 'claude' ? 'claude.svg' : 'codex.svg';
   const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0, tone = value < 35 ? 'warn' : '';
   const pressure = providerPressure(item);
-  const weeklyReset = weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
-  const shortWindow = snap?.short
+  const weeklyReset = stale ? `Last sample ${relative(snap?.observed_at)}` : weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
+  const shortWindow = stale ? 'Fresh usage required' : snap?.short
     ? `5h ${percent(snap.short.remaining)}% · resets ${relative(snap.short.resets_at)}`
     : 'No 5h limit';
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
   if (snap) {
     const windows = [];
-    if (snap.short) windows.push(meter('5-hour window',snap.short.remaining,snap.short.resets_at));
-    windows.push(meter('Weekly allowance',snap.weekly.remaining,snap.weekly.resets_at));
+    const lastKnown = stale ? 'Last known ' : '';
+    if (snap.short) windows.push(meter(`${lastKnown}5-hour window`,snap.short.remaining,snap.short.resets_at));
+    windows.push(meter(`${lastKnown}weekly allowance`,snap.weekly.remaining,snap.weekly.resets_at));
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => {
-      const label = `${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
+      const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));
     });
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
@@ -117,7 +124,7 @@ function providerCompact(item) {
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
   const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${weekly ? `${value}% weekly` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><span class="compact-track"><span class="compact-fill ${tone}" style="width:${value}%"></span></span></span></button><span class="provider-detail"><span class="detail-head"><strong>${escapeHTML(title(provider))} capacity</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
+  return `<div class="provider-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${stale ? 'Usage unavailable' : weekly ? `${value}% weekly` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress ${tone}" max="100" value="${stale ? 0 : value}" aria-label="${stale ? 'Usage unavailable' : `${value}% weekly remaining`}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? 'Last known usage' : `${escapeHTML(title(provider))} capacity`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {
   document.querySelectorAll('.provider-compact').forEach(card => {

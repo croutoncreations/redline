@@ -217,15 +217,29 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let provider: String
     public let paused: Bool
     public let snapshot: UsageSnapshot?
+    public let snapshotStale: Bool
+    public let error: String?
 
-    public init(id: String, provider: String, paused: Bool = false, snapshot: UsageSnapshot?) {
+    public init(
+        id: String,
+        provider: String,
+        paused: Bool = false,
+        snapshot: UsageSnapshot?,
+        snapshotStale: Bool = false,
+        error: String? = nil
+    ) {
         self.id = id
         self.provider = provider
         self.paused = paused
         self.snapshot = snapshot
+        self.snapshotStale = snapshotStale
+        self.error = error
     }
 
-    enum CodingKeys: String, CodingKey { case id, provider, paused, snapshot }
+    enum CodingKeys: String, CodingKey {
+        case id, provider, paused, snapshot, error
+        case snapshotStale = "snapshot_stale"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -233,6 +247,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         provider = try container.decode(String.self, forKey: .provider)
         paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         snapshot = try container.decodeIfPresent(UsageSnapshot.self, forKey: .snapshot)
+        snapshotStale = try container.decodeIfPresent(Bool.self, forKey: .snapshotStale) ?? false
+        error = try container.decodeIfPresent(String.self, forKey: .error)
     }
 
     public var displayName: String {
@@ -243,8 +259,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         }
     }
 
-    public var weeklyPercent: Int? { snapshot?.weekly.map(Self.percent) }
-    public var shortPercent: Int? { snapshot?.short.map(Self.percent) }
+    public var weeklyPercent: Int? { snapshotStale ? nil : snapshot?.weekly.map(Self.percent) }
+    public var shortPercent: Int? { snapshotStale ? nil : snapshot?.short.map(Self.percent) }
     public var modelAllowances: [AllowanceSummary] {
         snapshot?.allowances.filter { $0.key.hasPrefix("model:") } ?? []
     }
@@ -366,7 +382,9 @@ public struct TrayState: Sendable {
     public let providerBadges: [ProviderBadge]
 
     public init(snapshot: DashboardSnapshot) {
-        let percentages = snapshot.providers.compactMap(\.snapshot?.weekly?.remaining)
+        let percentages = snapshot.providers.compactMap { provider in
+            provider.snapshotStale ? nil : provider.snapshot?.weekly?.remaining
+        }
         lowestWeeklyPercent = percentages.min().map { Int(($0 * 100).rounded()) }
 
         if snapshot.health.activeRuns > 0 || snapshot.scheduler.running {
