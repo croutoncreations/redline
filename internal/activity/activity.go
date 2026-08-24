@@ -58,8 +58,12 @@ func Build(input Input) Result {
 			}
 		}
 	}
+	outputSummary, outputArtifacts := outputDetails(input.OutputFile)
 	if result.Summary == "" {
-		result.Summary = outputSummary(input.OutputFile)
+		result.Summary = outputSummary
+	}
+	for _, artifact := range outputArtifacts {
+		result.Artifacts = appendUniqueArtifact(result.Artifacts, artifact)
 	}
 	if result.ActualProvider == "" {
 		result.ActualProvider, _ = input.Metadata["actual_provider"].(string)
@@ -89,7 +93,9 @@ func Build(input Input) Result {
 			result.Summary = "Run completed successfully."
 		}
 	}
-	result.Artifacts = append(result.Artifacts, links(result.Summary)...)
+	for _, artifact := range links(result.Summary) {
+		result.Artifacts = appendUniqueArtifact(result.Artifacts, artifact)
+	}
 	if input.Workspace.Directory != "" {
 		result.Artifacts = appendUniqueArtifact(result.Artifacts, domain.RunArtifact{
 			Type: "workspace", Label: "Workspace", Path: input.Workspace.Directory,
@@ -103,12 +109,14 @@ func Build(input Input) Result {
 	return result
 }
 
-func outputSummary(path string) string {
+func outputDetails(path string) (string, []domain.RunArtifact) {
 	data, err := readTail(path, maxOutputBytes)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	var last string
+	var artifacts []domain.RunArtifact
+	publishedChange := false
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	scanner.Buffer(make([]byte, 64*1024), maxOutputBytes+1)
 	for scanner.Scan() {
@@ -118,14 +126,49 @@ func outputSummary(path string) string {
 		}
 		var value any
 		if json.Unmarshal([]byte(line), &value) == nil {
+			if isCodeChangePublished(value) {
+				publishedChange = true
+				continue
+			}
 			if text := summaryFromJSON(value); text != "" {
 				last = text
+				for _, artifact := range publicationLinks(text) {
+					artifacts = appendUniqueArtifact(artifacts, artifact)
+				}
+				if publishedChange {
+					for _, artifact := range links(text) {
+						artifacts = appendUniqueArtifact(artifacts, artifact)
+					}
+					publishedChange = false
+				}
 			}
 		} else {
 			last = line
 		}
 	}
-	return strings.TrimSpace(last)
+	return strings.TrimSpace(last), artifacts
+}
+
+func publicationLinks(text string) []domain.RunArtifact {
+	lower := strings.ToLower(text)
+	markers := []string{
+		"draft pr created", "draft pr opened", "draft pr #", "opened draft pr",
+		"pull request created", "pull request opened", "opened a draft pull request",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return links(text)
+		}
+	}
+	return nil
+}
+
+func isCodeChangePublished(value any) bool {
+	object, ok := value.(map[string]any)
+	if !ok || object["type"] != "system" {
+		return false
+	}
+	return object["subtype"] == "code_change_published"
 }
 
 func summaryFromJSON(value any) string {
@@ -168,7 +211,7 @@ func summaryFromJSON(value any) string {
 func links(summary string) []domain.RunArtifact {
 	var result []domain.RunArtifact
 	for _, raw := range urlPattern.FindAllString(summary, -1) {
-		url := strings.TrimRight(raw, ".,;:!?)]}")
+		url := strings.TrimRight(raw, ".,;:!?)]}*_`")
 		artifactType, label := "link", "Link"
 		switch {
 		case strings.Contains(url, "github.com/") && strings.Contains(url, "/pull/"):
