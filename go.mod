@@ -2,6 +2,8 @@ module github.com/jfox/redline
 
 go 1.25.13
 
+toolchain go1.26.6
+
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
