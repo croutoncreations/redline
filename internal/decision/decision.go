@@ -14,7 +14,7 @@ type Decision string
 type Mode string
 
 const (
-	Run     Decision = "RUN"
+	Admit   Decision = "RUN"
 	Wait    Decision = "WAIT"
 	Unknown Decision = "UNKNOWN"
 
@@ -236,13 +236,13 @@ func ProjectTriggerAt(in Input, pollInterval time.Duration) *time.Time {
 	if pollInterval <= 0 || in.Now.IsZero() || !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
 		return nil
 	}
-	if result := Evaluate(in); result.Decision == Run {
+	if result := Evaluate(in); result.Decision == Admit {
 		projected := in.Now
 		return &projected
 	}
 	for projected := in.Now.Add(pollInterval); projected.Before(in.Snapshot.Weekly.ResetsAt); projected = projected.Add(pollInterval) {
 		future := projectInput(in, projected)
-		if result := Evaluate(future); result.Decision == Run {
+		if result := Evaluate(future); result.Decision == Admit {
 			at := projected
 			return &at
 		}
@@ -305,19 +305,19 @@ func evaluateSlots(in Input) Result {
 		return result
 	}
 	if overflow > in.TriggerMargin {
-		result.Decision = Run
+		result.Decision = Admit
 		result.Reason = "weekly remaining exceeds prorated short-window throughput"
 		result.UnlockedTier = domain.DispatchExpiring
 		return result
 	}
 	if in.PaceGapTrigger != nil && paceGap >= *in.PaceGapTrigger {
-		result.Decision = Run
+		result.Decision = Admit
 		result.Reason = "weekly remaining is well behind pace"
 		result.UnlockedTier = tierForPaceGap(paceGap)
 		return result
 	}
 	if threshold := matchingPaceThreshold(in); threshold != nil {
-		result.Decision = Run
+		result.Decision = Admit
 		result.Reason = "weekly remaining is behind configured pace"
 		result.MatchedPaceThreshold = threshold
 		result.UnlockedTier = tierForPaceGap(paceGap)
@@ -335,13 +335,13 @@ func evaluatePace(in Input) Result {
 	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
 	result := Result{Mode: ModePace, PaceGap: paceGap}
 	if in.PaceGapTrigger != nil && paceGap >= *in.PaceGapTrigger {
-		result.Decision = Run
+		result.Decision = Admit
 		result.Reason = "weekly remaining is well behind pace"
 		result.UnlockedTier = tierForPaceGap(paceGap)
 		return result
 	}
 	if threshold := matchingPaceThreshold(in); threshold != nil {
-		result.Decision = Run
+		result.Decision = Admit
 		result.Reason = "weekly remaining meets pace threshold"
 		result.MatchedPaceThreshold = threshold
 		result.UnlockedTier = tierForPaceGap(paceGap)

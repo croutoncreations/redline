@@ -634,7 +634,7 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{
 		"provider_account_id": "codex-main",
 	})
-	if result.Result.Decision != decision.Run || result.Result.Mode != decision.ModePace {
+	if result.Result.Decision != decision.Admit || result.Result.Mode != decision.ModePace {
 		t.Fatalf("decision = %#v", result.Result)
 	}
 	if result.SelectedTask == nil || result.SelectedTask.ID != "review" {
@@ -873,7 +873,7 @@ func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
 		Result       decision.Result `json:"result"`
 		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
 	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
-	if response.Result.Decision != decision.Run || response.SelectedTask != nil {
+	if response.Result.Decision != decision.Admit || response.SelectedTask != nil {
 		t.Fatalf("response = %#v", response)
 	}
 	if len(response.Result.CandidateRejections) != 1 ||
@@ -956,7 +956,7 @@ func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 	if result.SelectedTask == nil || result.SelectedTask.ID != "fable-task" {
 		t.Fatalf("selected task = %#v result=%#v", result.SelectedTask, result.Result)
 	}
-	if result.Result.Decision != decision.Run ||
+	if result.Result.Decision != decision.Admit ||
 		strings.Join(result.Result.TriggeringPools, ",") != "model:fable:weekly" {
 		t.Fatalf("result = %#v", result.Result)
 	}
@@ -1764,7 +1764,7 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
 	initial := postJSON[decisionResponseForTest](t, server.URL+"/v1/providers/codex-main/decision", map[string]any{})
-	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Run {
+	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Admit {
 		t.Fatalf("initial result = %#v", initial.Result)
 	}
 
