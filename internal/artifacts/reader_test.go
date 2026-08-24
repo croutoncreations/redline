@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jfox/redline/internal/artifacts"
 )
@@ -58,5 +59,25 @@ func TestReaderClampsRequestedBytes(t *testing.T) {
 	result, err := (artifacts.Reader{Root: root, MaxBytes: 3}).ReadTail(path, 100)
 	if err != nil || result.Content != "789" {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestReaderDoesNotSplitMultiByteRuneAtTailStart(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "run.log")
+	content := "abc世界xyz" // 'abc' (3 bytes) + '世' + '界' (3 bytes each) + 'xyz' (3 bytes) = 12 bytes
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// requestedBytes=8 puts start at byte 4, landing mid-rune inside '世' (bytes 3-6).
+	result, err := (artifacts.Reader{Root: root, MaxBytes: 8}).ReadTail(path, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(result.Content) {
+		t.Fatalf("ReadTail produced invalid UTF-8: %q (bytes %v)", result.Content, []byte(result.Content))
+	}
+	if result.Content != "界xyz" {
+		t.Fatalf("Content = %q, want %q", result.Content, "界xyz")
 	}
 }

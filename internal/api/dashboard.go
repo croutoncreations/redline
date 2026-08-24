@@ -40,6 +40,7 @@ type dashboardProvider struct {
 	Provider                 string                  `json:"provider"`
 	Paused                   bool                    `json:"paused"`
 	Snapshot                 *decision.UsageSnapshot `json:"snapshot,omitempty"`
+	SnapshotStale            bool                    `json:"snapshot_stale"`
 	Error                    string                  `json:"error,omitempty"`
 	UsageSource              usage.Status            `json:"usage_source"`
 	Policy                   string                  `json:"policy"`
@@ -170,6 +171,10 @@ func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
+	maxSnapshotAge, err := s.config.SnapshotAge()
+	if err != nil {
+		return dashboardResponse{}, err
+	}
 	result := dashboardResponse{
 		GeneratedAt: s.now(), ActivePolicy: s.config.ActivePolicy,
 		Policies:  s.config.Policies,
@@ -177,7 +182,6 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		Providers: make([]dashboardProvider, 0, len(s.config.Providers)),
 		Tasks:     make([]dashboardTask, 0), Runs: make([]domain.Run, 0), Attempts: make([]domain.DispatchAttempt, 0),
 	}
-	var err error
 	result.Health, err = s.store.OperationalHealth(ctx, s.now(), 24*time.Hour)
 	if err != nil {
 		return dashboardResponse{}, err
@@ -234,6 +238,11 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			}
 		} else {
 			item.Snapshot = &snapshot
+			age := s.now().Sub(snapshot.ObservedAt)
+			if age > maxSnapshotAge || age < 0 {
+				item.SnapshotStale = true
+				item.Error = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+			}
 		}
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)
 		if attemptsErr != nil {
@@ -252,10 +261,12 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 					Overflow: latest.Result.Overflow, RollingDispatchable: latest.Result.RollingDispatchable,
 					PaceGap: latest.Result.PaceGap, UnlockedTier: latest.Result.UnlockedTier,
 				}
-				projected, projectionErr := s.projectedTrigger(ctx, id, snapshot, selection)
-				if projectionErr == nil {
-					item.LatestDecision.ProjectedTriggerAt = projected
-					item.LatestDecision.ProjectionBasis = "Assumes weekly usage stays unchanged."
+				if !item.SnapshotStale {
+					projected, projectionErr := s.projectedTrigger(ctx, id, snapshot, selection)
+					if projectionErr == nil {
+						item.LatestDecision.ProjectedTriggerAt = projected
+						item.LatestDecision.ProjectionBasis = "Assumes weekly usage stays unchanged."
+					}
 				}
 				createdAt := decisions[0].CreatedAt
 				item.LatestDecisionAt = &createdAt

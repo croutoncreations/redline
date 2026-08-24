@@ -367,6 +367,40 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 	}
 }
 
+func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider:   "claude",
+		ObservedAt: apiNow.Add(-time.Hour),
+		Short: &decision.UsageWindow{
+			Remaining: .75, ResetsAt: apiNow.Add(4 * time.Hour),
+		},
+		Weekly: decision.UsageWindow{
+			Remaining: .40, ResetsAt: apiNow.Add(4 * 24 * time.Hour),
+		},
+		Source: "native",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var dashboard struct {
+		Providers []struct {
+			ID            string                  `json:"id"`
+			Snapshot      *decision.UsageSnapshot `json:"snapshot"`
+			SnapshotStale bool                    `json:"snapshot_stale"`
+			Error         string                  `json:"error"`
+		} `json:"providers"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	claude := dashboard.Providers[0]
+	if claude.ID != "claude-main" || claude.Snapshot == nil || !claude.SnapshotStale {
+		t.Fatalf("claude provider = %#v", claude)
+	}
+	if !strings.Contains(claude.Error, "Usage data is stale") || !strings.Contains(claude.Error, "scheduling is paused") {
+		t.Fatalf("stale error = %q", claude.Error)
+	}
+}
+
 func TestDashboardReportsStoreFailures(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.Close(); err != nil {
@@ -600,7 +634,7 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{
 		"provider_account_id": "codex-main",
 	})
-	if result.Result.Decision != decision.Run || result.Result.Mode != decision.ModePace {
+	if result.Result.Decision != decision.Admit || result.Result.Mode != decision.ModePace {
 		t.Fatalf("decision = %#v", result.Result)
 	}
 	if result.SelectedTask == nil || result.SelectedTask.ID != "review" {
@@ -839,7 +873,7 @@ func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
 		Result       decision.Result `json:"result"`
 		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
 	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
-	if response.Result.Decision != decision.Run || response.SelectedTask != nil {
+	if response.Result.Decision != decision.Admit || response.SelectedTask != nil {
 		t.Fatalf("response = %#v", response)
 	}
 	if len(response.Result.CandidateRejections) != 1 ||
@@ -922,7 +956,7 @@ func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 	if result.SelectedTask == nil || result.SelectedTask.ID != "fable-task" {
 		t.Fatalf("selected task = %#v result=%#v", result.SelectedTask, result.Result)
 	}
-	if result.Result.Decision != decision.Run ||
+	if result.Result.Decision != decision.Admit ||
 		strings.Join(result.Result.TriggeringPools, ",") != "model:fable:weekly" {
 		t.Fatalf("result = %#v", result.Result)
 	}
@@ -1730,7 +1764,7 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.T) {
 	server, db := newAPIServer(t, codexPayload)
 	initial := postJSON[decisionResponseForTest](t, server.URL+"/v1/providers/codex-main/decision", map[string]any{})
-	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Run {
+	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Admit {
 		t.Fatalf("initial result = %#v", initial.Result)
 	}
 

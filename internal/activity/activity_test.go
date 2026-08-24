@@ -3,6 +3,7 @@ package activity_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jfox/redline/internal/activity"
@@ -61,5 +62,18 @@ func TestBuildMakesFailureHumanReadable(t *testing.T) {
 	})
 	if got.Outcome != "failed" || got.Summary == "" || len(got.Warnings) != 1 {
 		t.Fatalf("result = %#v", got)
+	}
+}
+
+func TestBuildPreservesMaximumLengthPlainTextSummary(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "run.stdout")
+	want := strings.Repeat("x", 512*1024)
+	if err := os.WriteFile(output, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if got.Summary != want {
+		t.Fatalf("summary length = %d, want %d", len(got.Summary), len(want))
 	}
 }

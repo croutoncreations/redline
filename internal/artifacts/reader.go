@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 var ErrOutsideRoot = errors.New("artifact path is outside configured root")
@@ -75,5 +76,15 @@ func (r Reader) ReadTail(path string, requestedBytes int64) (Tail, error) {
 	if err != nil {
 		return Tail{}, fmt.Errorf("read artifact: %w", err)
 	}
-	return Tail{Content: string(data), SizeBytes: info.Size(), Truncated: start > 0}, nil
+	truncated := start > 0
+	if truncated {
+		// start may land mid-rune; drop the dangling continuation bytes so the
+		// tail begins on a valid UTF-8 boundary instead of being replaced with U+FFFD.
+		skip := 0
+		for skip < len(data) && !utf8.RuneStart(data[skip]) {
+			skip++
+		}
+		data = data[skip:]
+	}
+	return Tail{Content: string(data), SizeBytes: info.Size(), Truncated: truncated}, nil
 }

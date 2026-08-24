@@ -3,7 +3,13 @@
 bin/
 /redline
 .artifacts/
-.devx/
+.devx/*
+!.devx/README.md
+!.devx/config.yaml
+!.devx/open_dashboard.sh
+!.devx/redline.dev.yaml
+!.devx/session.yaml.tmpl
+!.devx/start_service.sh
 .redline/
 node_modules/
 playwright-report/

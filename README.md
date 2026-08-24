@@ -259,11 +259,21 @@ GET  /v1/providers/{account}/capacity
 POST /v1/providers/{account}/token-sync
 POST /v1/providers/{account}/decision
 PATCH /v1/providers/{account}/policy
+PATCH /v1/providers/{account}/concurrency
 POST /v1/providers/{account}/pause|resume
 GET|POST /v1/profiles
 GET  /v1/profile-options?refresh={true|false}
 GET|PATCH|DELETE /v1/profiles/{id}
+GET  /v1/runtime-connections/imports
+GET|POST /v1/runtime-connections
+GET|PATCH|DELETE /v1/runtime-connections/{id}
+POST /v1/runtime-connections/{id}/discover
+GET  /v1/runtime-connections/{id}/jobs
+POST /v1/runtime-connections/{id}/jobs/{job}/run
+GET|POST /v1/agent-contexts
+GET|PATCH|DELETE /v1/agent-contexts/{id}
 GET|POST /v1/tasks
+GET  /v1/task-templates
 GET|PATCH|DELETE /v1/tasks/{id}
 POST /v1/tasks/{id}/enable|disable|retry
 POST /v1/scheduler/evaluate
@@ -276,6 +286,8 @@ GET  /v1/runs
 GET  /v1/runs/{id}
 GET  /v1/runs/{id}/events?limit={n}
 GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
+POST /v1/runs/{id}/read
+POST /v1/runs/read-all
 GET  /v1/notifications
 ```
 
@@ -337,10 +349,14 @@ LaunchAgent without moving the configured database, queue, history, or run artif
 is retained as a recoverable backup.
 
 ```bash
-swift test --package-path macos
+swift test --package-path macos --disable-xctest
 ./scripts/build-macos-app.sh
 open dist/Redline.app
 ```
+
+`--disable-xctest` skips an empty legacy XCTest bundle that some SwiftPM toolchain versions fail to
+load (all suites here use the Swift Testing framework); omit it if your toolchain doesn't need the
+workaround.
 
 See [the native macOS guide](docs/native-macos.md) for service ownership, packaging, and release
 configuration.
