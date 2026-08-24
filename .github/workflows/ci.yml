@@ -70,6 +70,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Cache Swift Package Manager dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('macos/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
       - name: Test native app on Intel
         run: swift test --package-path macos
       - name: Build Intel app
