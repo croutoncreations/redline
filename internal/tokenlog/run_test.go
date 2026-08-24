@@ -76,6 +76,89 @@ func TestLoadRunArtifactReadsCodexTurnUsageAndSeparatesCachedInput(t *testing.T)
 	}
 }
 
+// TestNormalizeHermesProviderDirectAnthropicNames verifies that the literal
+// provider strings "anthropic" and "anthropic-cli" both map to "claude".
+// Bug class: if these cases fall through to the default branch, tokens would be
+// attributed to the raw provider string and go uncounted toward Claude quota.
+func TestNormalizeHermesProviderDirectAnthropicNames(t *testing.T) {
+	for _, provider := range []string{"anthropic", "anthropic-cli"} {
+		path := filepath.Join(t.TempDir(), "hermes.jsonl")
+		data := `{"type":"hermes.result","model":"claude-opus-4","provider":"` + provider + `","usage":{"input":50,"output":10}}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-anthr", "claude-opus-4", time.Now())
+		if err != nil || len(got) != 1 {
+			t.Fatalf("provider=%q: observations=%#v err=%v", provider, got, err)
+		}
+		if got[0].Provider != "claude" {
+			t.Errorf("provider=%q: got Provider=%q, want \"claude\"", provider, got[0].Provider)
+		}
+	}
+}
+
+// TestNormalizeHermesProviderCustomPrefixGptMapsToCodex verifies that a
+// custom-prefixed provider with a GPT or codex model maps to "codex".
+// Bug class: without this branch, usage from OpenAI-compatible proxies would
+// accumulate in an arbitrary provider bucket and be invisible to the codex
+// quota check.
+func TestNormalizeHermesProviderCustomPrefixGptMapsToCodex(t *testing.T) {
+	for _, model := range []string{"gpt-4o", "gpt-4.5-preview", "o3-codex"} {
+		path := filepath.Join(t.TempDir(), "hermes.jsonl")
+		data := `{"type":"hermes.result","model":"` + model + `","provider":"custom:myproxy","usage":{"input":80,"output":15}}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-gpt", model, time.Now())
+		if err != nil || len(got) != 1 {
+			t.Fatalf("model=%q: observations=%#v err=%v", model, got, err)
+		}
+		if got[0].Provider != "codex" {
+			t.Errorf("model=%q: got Provider=%q, want \"codex\"", model, got[0].Provider)
+		}
+	}
+}
+
+// TestNormalizeHermesProviderUnknownPassesThrough verifies that a provider
+// string that matches no known pattern is returned verbatim.  Changing this
+// to a silent drop or remapping would hide usage from unknown providers.
+func TestNormalizeHermesProviderUnknownPassesThrough(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes.jsonl")
+	data := `{"type":"hermes.result","model":"llama-4-scout","provider":"custom:ollama-proxy","usage":{"input":30,"output":5}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-unknown", "llama-4-scout", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	if got[0].Provider != "custom:ollama-proxy" {
+		t.Errorf("got Provider=%q, want \"custom:ollama-proxy\"", got[0].Provider)
+	}
+}
+
+// TestLoadRunArtifactHermesCacheReadPrefersLargestFieldValue verifies that
+// when a Hermes result record carries both cached_input_tokens and
+// cache_read_input_tokens the parser selects whichever is larger.
+// Bug class: if the wrong field is taken, cache-read tokens are
+// under-reported, making usage estimates systematically low and causing the
+// scheduler to over-dispatch.
+func TestLoadRunArtifactHermesCacheReadPrefersLargestFieldValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hermes-cache.jsonl")
+	// cached_input_tokens (200) > cache_read_input_tokens (50): must pick 200.
+	data := `{"type":"hermes.result","model":"claude-haiku-4","provider":"anthropic","usage":{"input":100,"output":10,"cache_read_input_tokens":50,"cached_input_tokens":200}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "hermes", "run-cache", "claude-haiku-4", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	if got[0].CacheReadTokens != 200 {
+		t.Errorf("CacheReadTokens = %d, want 200 (largest of the two cache fields)", got[0].CacheReadTokens)
+	}
+}
+
 func TestLoadRunArtifactReadsHermesUsageAndMapsSubscriptionProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hermes.jsonl")
 	data := `{"type":"hermes.result","model":"gpt-5.5","provider":"openai-codex","usage":{"input":100,"output":12,"cache_read":40}}`
