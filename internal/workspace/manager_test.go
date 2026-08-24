@@ -49,6 +49,26 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	}
 }
 
+func TestGitWorktreeWorkspaceFailureIncludesGitStderr(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "fatal: branch 'redline/run-1' already exists\n")
+		return 128, nil
+	}}
+	manager := workspace.Manager{Runner: runner}
+	_, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"fatal: branch 'redline/run-1' already exists", "code 128", repo, "redline/run-1", "main"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
 func TestDevXWorkspaceCreatesNamedSession(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
@@ -83,6 +103,46 @@ func TestDevXWorkspacePassesConfiguredArguments(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDevXWorkspaceFailureIncludesDevXStderr(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "error: authentication expired, run `devx login`\n")
+		return 1, nil
+	}}
+	manager := workspace.Manager{Runner: runner}
+	_, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "devx", Repository: repo,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"authentication expired", "code 1", "redline-run-1", repo} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestExistingDirectoryRequireCleanReportsDirtyFiles(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stdout, " M internal/workspace/manager.go\n?? scratch.txt\n")
+		return 0, nil
+	}}
+	manager := workspace.Manager{Runner: runner}
+	_, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "existing-directory", Repository: repo, RequireClean: true,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{repo, "internal/workspace/manager.go", "scratch.txt", "require_clean"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
 	}
 }
 
@@ -217,6 +277,28 @@ func TestDevXCleanupPolicyRemovesSession(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDevXCleanupFailureIncludesDevXStderr(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "error: session redline-run-1 not found\n")
+		return 1, nil
+	}}
+	manager := workspace.Manager{Runner: runner}
+	err := manager.Cleanup(context.Background(), workspace.CleanupRequest{
+		Success:   true,
+		Profile:   domain.ExecutionProfile{WorkspaceProvider: "devx", Repository: repo, CleanupPolicy: "on_success"},
+		Workspace: domain.Workspace{Directory: filepath.Join(repo, ".worktrees", "redline-run-1"), SessionID: "redline-run-1"},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"session redline-run-1 not found", "code 1", "devx", filepath.Join(repo, ".worktrees", "redline-run-1")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
 	}
 }
 

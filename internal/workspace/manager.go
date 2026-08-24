@@ -123,6 +123,7 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 		return fmt.Errorf("unsupported cleanup policy %q", policy)
 	}
 	var command redprocess.Command
+	var stderr bytes.Buffer
 	switch request.Profile.WorkspaceProvider {
 	case "devx":
 		if request.Workspace.SessionID == "" {
@@ -130,17 +131,17 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 		}
 		command = redprocess.Command{
 			Name: "devx", Args: []string{"session", "rm", request.Workspace.SessionID, "--force"},
-			Dir: request.Profile.Repository, Stdout: io.Discard, Stderr: io.Discard,
+			Dir: request.Profile.Repository, Stdout: io.Discard, Stderr: &stderr,
 		}
 	case "git-worktree":
 		root := filepath.Join(request.Profile.Repository, ".redline", "worktrees")
 		relative, err := filepath.Rel(root, request.Workspace.Directory)
 		if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
-			return fmt.Errorf("refusing to clean workspace outside managed worktree root")
+			return fmt.Errorf("refusing to clean workspace %s: outside managed worktree root %s", request.Workspace.Directory, root)
 		}
 		command = redprocess.Command{
 			Name: "git", Args: []string{"-C", request.Profile.Repository, "worktree", "remove", "--force", request.Workspace.Directory},
-			Stdout: io.Discard, Stderr: io.Discard,
+			Stdout: io.Discard, Stderr: &stderr,
 		}
 	case "existing-directory", "command", "runtime-owned":
 		return nil
@@ -149,10 +150,11 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 	}
 	exitCode, err := m.runner().Run(ctx, command)
 	if err != nil {
-		return fmt.Errorf("clean workspace: %w", err)
+		return fmt.Errorf("clean %s workspace %s: %w", request.Profile.WorkspaceProvider, request.Workspace.Directory, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("workspace cleanup exited with code %d", exitCode)
+		return fmt.Errorf("clean %s workspace %s exited with code %d: %s",
+			request.Profile.WorkspaceProvider, request.Workspace.Directory, exitCode, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -205,15 +207,17 @@ func (m Manager) prepareGitWorktree(
 	if base == "" {
 		base = "HEAD"
 	}
+	var stderr bytes.Buffer
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: "git", Args: []string{"-C", profile.Repository, "worktree", "add", "-b", branch, directory, base},
-		Stdout: io.Discard, Stderr: io.Discard,
+		Stdout: io.Discard, Stderr: &stderr,
 	})
 	if err != nil {
-		return domain.Workspace{}, fmt.Errorf("create git worktree: %w", err)
+		return domain.Workspace{}, fmt.Errorf("create git worktree %s (branch %s, base %s) in %s: %w", directory, branch, base, profile.Repository, err)
 	}
 	if exitCode != 0 {
-		return domain.Workspace{}, fmt.Errorf("git worktree creation exited with code %d", exitCode)
+		return domain.Workspace{}, fmt.Errorf("git worktree add %s (branch %s, base %s) in %s exited with code %d: %s",
+			directory, branch, base, profile.Repository, exitCode, strings.TrimSpace(stderr.String()))
 	}
 	if err := requireDirectory(directory); err != nil {
 		return domain.Workspace{}, err
@@ -229,15 +233,17 @@ func (m Manager) prepareDevX(
 	session := "redline-" + safeName(runID)
 	args := []string{"session", "create", session, "--no-tmux"}
 	args = append(args, profile.WorkspaceArgs...)
+	var stderr bytes.Buffer
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: "devx", Args: args,
-		Dir: profile.Repository, Stdout: io.Discard, Stderr: io.Discard,
+		Dir: profile.Repository, Stdout: io.Discard, Stderr: &stderr,
 	})
 	if err != nil {
-		return domain.Workspace{}, fmt.Errorf("create DevX session: %w", err)
+		return domain.Workspace{}, fmt.Errorf("create DevX session %s in %s: %w", session, profile.Repository, err)
 	}
 	if exitCode != 0 {
-		return domain.Workspace{}, fmt.Errorf("DevX session creation exited with code %d", exitCode)
+		return domain.Workspace{}, fmt.Errorf("devx session create %s in %s exited with code %d: %s",
+			session, profile.Repository, exitCode, strings.TrimSpace(stderr.String()))
 	}
 	directory := filepath.Join(profile.Repository, ".worktrees", session)
 	if err := requireDirectory(directory); err != nil {
@@ -291,19 +297,19 @@ func (m Manager) prepareCommand(
 }
 
 func (m Manager) requireClean(ctx context.Context, repository string) error {
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: "git", Args: []string{"-C", repository, "status", "--porcelain"},
-		Stdout: &stdout, Stderr: io.Discard,
+		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
-		return fmt.Errorf("check working tree: %w", err)
+		return fmt.Errorf("check working tree in %s: %w", repository, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("git status exited with code %d", exitCode)
+		return fmt.Errorf("git status in %s exited with code %d: %s", repository, exitCode, strings.TrimSpace(stderr.String()))
 	}
-	if strings.TrimSpace(stdout.String()) != "" {
-		return fmt.Errorf("existing workspace has uncommitted changes")
+	if dirty := strings.TrimSpace(stdout.String()); dirty != "" {
+		return fmt.Errorf("existing workspace %s has uncommitted changes, run with a clean working tree or disable require_clean:\n%s", repository, dirty)
 	}
 	return nil
 }
