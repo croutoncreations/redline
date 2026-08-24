@@ -236,6 +236,13 @@ func TestPrepareAndFinalizeHooksCaptureOutput(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s = %q, want %q", path, got, want)
 		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Fatalf("%s mode = %o, want 0600 (prepare/finalize hooks run with the full process environment and must not leave world-readable logs)", path, mode)
+		}
 	}
 }
 

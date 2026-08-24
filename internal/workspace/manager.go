@@ -329,14 +329,14 @@ func (m Manager) artifactWriters(runID, phase string) (io.Writer, io.Writer, fun
 	if m.OutputDirectory == "" {
 		return io.Discard, io.Discard, func() {}, nil
 	}
-	if err := os.MkdirAll(m.OutputDirectory, 0o755); err != nil {
+	if err := os.MkdirAll(m.OutputDirectory, 0o700); err != nil {
 		return nil, nil, nil, fmt.Errorf("create lifecycle artifact directory: %w", err)
 	}
-	stdout, err := os.Create(ArtifactPath(m.OutputDirectory, runID, phase, "stdout"))
+	stdout, err := os.OpenFile(ArtifactPath(m.OutputDirectory, runID, phase, "stdout"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create %s stdout artifact: %w", phase, err)
 	}
-	stderr, err := os.Create(ArtifactPath(m.OutputDirectory, runID, phase, "stderr"))
+	stderr, err := os.OpenFile(ArtifactPath(m.OutputDirectory, runID, phase, "stderr"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		_ = stdout.Close()
 		return nil, nil, nil, fmt.Errorf("create %s stderr artifact: %w", phase, err)
