@@ -52,7 +52,7 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-
       - name: Test native app
-        run: swift test --package-path macos
+        run: swift test --package-path macos --disable-xctest
       - name: Build bundled app
         run: ./scripts/build-macos-app.sh
       - name: Verify signatures
@@ -78,7 +78,7 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-
       - name: Test native app on Intel
-        run: swift test --package-path macos
+        run: swift test --package-path macos --disable-xctest
       - name: Build Intel app
         run: REDLINE_BUILD_ARCH=x86_64 ./scripts/build-macos-app.sh
       - name: Verify Intel slices and signatures

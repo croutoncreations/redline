@@ -338,10 +338,14 @@ LaunchAgent without moving the configured database, queue, history, or run artif
 is retained as a recoverable backup.
 
 ```bash
-swift test --package-path macos
+swift test --package-path macos --disable-xctest
 ./scripts/build-macos-app.sh
 open dist/Redline.app
 ```
+
+`--disable-xctest` skips an empty legacy XCTest bundle that some SwiftPM toolchain versions fail to
+load (all suites here use the Swift Testing framework); omit it if your toolchain doesn't need the
+workaround.
 
 See [the native macOS guide](docs/native-macos.md) for service ownership, packaging, and release
 configuration.
