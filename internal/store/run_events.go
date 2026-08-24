@@ -48,7 +48,11 @@ func (d *DB) ListRunEvents(ctx context.Context, runID string, limit int) ([]doma
 		return nil, ErrNotFound
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT id, run_id, event_type, occurred_at, payload_json
-FROM run_events WHERE run_id = ? ORDER BY id ASC LIMIT ?`, runID, limit)
+FROM (
+    SELECT id, run_id, event_type, occurred_at, payload_json
+    FROM run_events WHERE run_id = ?
+    ORDER BY id DESC LIMIT ?
+) ORDER BY id ASC`, runID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list run events: %w", err)
 	}
