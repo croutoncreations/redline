@@ -2,14 +2,6 @@ import Foundation
 
 @MainActor
 public final class ServiceSupervisor {
-    public enum State: Equatable {
-        case checking
-        case connectedToExistingService
-        case runningBundledService
-        case unavailable(String)
-    }
-
-    public private(set) var state: State = .checking
     private let client: RedlineAPIClient
     private let launchConfiguration: ServiceLaunchConfiguration?
     private var ownedProcess: Process?
@@ -21,17 +13,13 @@ public final class ServiceSupervisor {
     }
 
     public func ensureRunning() async {
-        state = .checking
         if await client.isCompatible() {
-            state = .connectedToExistingService
             return
         }
         guard let launchConfiguration else {
-            state = .unavailable("The bundled Redline service was not found.")
             return
         }
         guard FileManager.default.fileExists(atPath: launchConfiguration.configURL.path) else {
-            state = .unavailable("Configuration is missing at \(launchConfiguration.configURL.path).")
             return
         }
         do {
@@ -53,7 +41,6 @@ public final class ServiceSupervisor {
             for _ in 0..<20 {
                 try await Task.sleep(for: .milliseconds(250))
                 if await client.isCompatible() {
-                    state = process.isRunning ? .runningBundledService : .connectedToExistingService
                     if !process.isRunning {
                         ownedProcess = nil
                         closeLogHandles()
@@ -65,10 +52,8 @@ public final class ServiceSupervisor {
             process.terminate()
             ownedProcess = nil
             closeLogHandles()
-            state = .unavailable("The bundled Redline service did not become healthy.")
         } catch {
             closeLogHandles()
-            state = .unavailable(error.localizedDescription)
         }
     }
 
