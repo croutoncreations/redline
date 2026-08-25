@@ -562,3 +562,7 @@ The Playwright suite runs the embedded dashboard in an isolated browser with det
 server-sent-event fixtures. It covers task/profile workflows, dynamic harness and model selection,
 run logs, live updates, responsive layout, and loading/error states without touching a live queue or
 using provider quota.
+
+## License
+
+Redline is licensed under the [Apache License 2.0](LICENSE).

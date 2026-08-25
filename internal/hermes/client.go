@@ -307,7 +307,7 @@ func (c Client) ListJobs(ctx context.Context, connection domain.RuntimeConnectio
 func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnection, jobID string) (Job, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
-		return Job{}, fmt.Errorf("Hermes job id is required")
+		return Job{}, fmt.Errorf("hermes job id is required")
 	}
 	httpClient, baseURL, err := c.httpClient(ctx, connection)
 	if err != nil {
@@ -328,12 +328,12 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 			return Job{}, fmt.Errorf("trigger Hermes job %q: gateway API unavailable; desktop cron API: %w", jobID, err)
 		}
 		if desktopJob.ID == "" {
-			return Job{}, fmt.Errorf("Hermes returned an empty job id")
+			return Job{}, fmt.Errorf("hermes returned an empty job id")
 		}
 		return desktopJob, nil
 	}
 	if payload.Job.ID == "" {
-		return Job{}, fmt.Errorf("Hermes returned an empty job id")
+		return Job{}, fmt.Errorf("hermes returned an empty job id")
 	}
 	return payload.Job, nil
 }
@@ -341,7 +341,7 @@ func (c Client) TriggerJob(ctx context.Context, connection domain.RuntimeConnect
 func (c Client) RunJob(ctx context.Context, request JobRunRequest) (JobRunResult, error) {
 	request.JobID = strings.TrimSpace(request.JobID)
 	if request.JobID == "" {
-		return JobRunResult{}, fmt.Errorf("Hermes job id is required")
+		return JobRunResult{}, fmt.Errorf("hermes job id is required")
 	}
 	httpClient, baseURL, err := c.httpClient(ctx, request.Connection)
 	if err != nil {
@@ -402,11 +402,11 @@ func (c Client) RunJob(ctx context.Context, request JobRunRequest) (JobRunResult
 			result.Job = current
 			result.Output, _ = lastAssistantMessage(ctx, httpClient, baseURL, tracked.ID, tracked.Profile)
 			if failedJobStatus(result.Job.LastStatus) {
-				return result, fmt.Errorf("Hermes job %q session %q failed: %s",
+				return result, fmt.Errorf("hermes job %q session %q failed: %s",
 					request.JobID, tracked.ID, emptyFallback(result.Job.LastError, result.Job.LastStatus))
 			}
 			if !successfulJobEnd(tracked.EndReason) {
-				return result, fmt.Errorf("Hermes job %q session %q ended with %s",
+				return result, fmt.Errorf("hermes job %q session %q ended with %s",
 					request.JobID, tracked.ID, emptyFallback(tracked.EndReason, "unknown status"))
 			}
 			return result, nil
@@ -559,7 +559,7 @@ func emptyFallback(value, fallback string) string {
 
 func (c Client) Run(ctx context.Context, request RunRequest) (RunResult, error) {
 	if strings.TrimSpace(request.Prompt) == "" {
-		return RunResult{}, fmt.Errorf("Hermes prompt is required")
+		return RunResult{}, fmt.Errorf("hermes prompt is required")
 	}
 	httpClient, baseURL, err := c.httpClient(ctx, request.Connection)
 	if err != nil {
@@ -593,7 +593,7 @@ func (c Client) Run(ctx context.Context, request RunRequest) (RunResult, error) 
 		return RunResult{}, fmt.Errorf("create Hermes session: %w", err)
 	}
 	if session.SessionID == "" {
-		return RunResult{}, fmt.Errorf("Hermes returned an empty session id")
+		return RunResult{}, fmt.Errorf("hermes returned an empty session id")
 	}
 	if request.OnExternalStarted != nil {
 		if err := request.OnExternalStarted(domain.ExternalRun{
@@ -670,7 +670,7 @@ func loadCredential(connection domain.RuntimeConnection) (credentialDocument, er
 	case "environment":
 		value, ok := os.LookupEnv(connection.CredentialRef)
 		if !ok || strings.TrimSpace(value) == "" {
-			return credentialDocument{}, fmt.Errorf("Hermes credential environment variable %q is empty", connection.CredentialRef)
+			return credentialDocument{}, fmt.Errorf("hermes credential environment variable %q is empty", connection.CredentialRef)
 		}
 		data = []byte(value)
 	case "file":
@@ -680,10 +680,10 @@ func loadCredential(connection domain.RuntimeConnection) (credentialDocument, er
 			return credentialDocument{}, fmt.Errorf("read Hermes credential file: %w", statErr)
 		}
 		if info.Mode().Perm()&0o077 != 0 {
-			return credentialDocument{}, fmt.Errorf("Hermes credential file permissions must not allow group or other access")
+			return credentialDocument{}, fmt.Errorf("hermes credential file permissions must not allow group or other access")
 		}
 		if info.Size() > 64*1024 {
-			return credentialDocument{}, fmt.Errorf("Hermes credential file exceeds 64 KiB")
+			return credentialDocument{}, fmt.Errorf("hermes credential file exceeds 64 KiB")
 		}
 		data, err = os.ReadFile(connection.CredentialRef)
 		if err != nil {
@@ -699,7 +699,7 @@ func loadCredential(connection domain.RuntimeConnection) (credentialDocument, er
 	hasToken := strings.TrimSpace(credential.SessionToken) != ""
 	hasPassword := strings.TrimSpace(credential.Username) != "" && credential.Password != ""
 	if hasToken == hasPassword {
-		return credentialDocument{}, fmt.Errorf("Hermes credential must contain either session_token or username and password")
+		return credentialDocument{}, fmt.Errorf("hermes credential must contain either session_token or username and password")
 	}
 	if hasPassword && credential.Provider == "" {
 		credential.Provider = "basic"
@@ -725,7 +725,7 @@ func LoadDesktopConnection(path string) (domain.RuntimeConnection, error) {
 		return domain.RuntimeConnection{}, fmt.Errorf("decode Hermes Desktop connection: %w", err)
 	}
 	if configured.Mode != "remote" || strings.TrimSpace(configured.Remote.URL) == "" {
-		return domain.RuntimeConnection{}, fmt.Errorf("Hermes Desktop does not have a remote Gateway configured")
+		return domain.RuntimeConnection{}, fmt.Errorf("hermes Desktop does not have a remote Gateway configured")
 	}
 	if _, err := normalizeBaseURL(configured.Remote.URL); err != nil {
 		return domain.RuntimeConnection{}, err
@@ -842,7 +842,7 @@ WHERE host_key = ? AND name IN ('hermes_session_at', 'hermes_session_rt')`, pars
 			return fmt.Errorf("scan Hermes Desktop session: %w", err)
 		}
 		if value == "" && len(encrypted) > 0 {
-			return fmt.Errorf("Hermes Desktop session is encrypted and cannot be imported; configure a separate Redline credential")
+			return fmt.Errorf("hermes Desktop session is encrypted and cannot be imported; configure a separate Redline credential")
 		}
 		if value != "" {
 			if unquoted, err := strconv.Unquote(value); err == nil {
@@ -852,7 +852,7 @@ WHERE host_key = ? AND name IN ('hermes_session_at', 'hermes_session_rt')`, pars
 		}
 	}
 	if len(cookies) == 0 {
-		return fmt.Errorf("Hermes Desktop has no authenticated session for %s", parsed.Hostname())
+		return fmt.Errorf("hermes Desktop has no authenticated session for %s", parsed.Hostname())
 	}
 	jar.SetCookies(parsed, cookies)
 	return rows.Err()
@@ -1009,7 +1009,7 @@ func (g *gatewayClient) call(ctx context.Context, method string, params any, res
 	select {
 	case frame := <-response:
 		if frame.Error != nil {
-			return fmt.Errorf("Hermes RPC %s: %s", method, frame.Error.Message)
+			return fmt.Errorf("hermes RPC %s: %s", method, frame.Error.Message)
 		}
 		if result != nil && len(frame.Result) > 0 {
 			if err := json.Unmarshal(frame.Result, result); err != nil {
@@ -1043,7 +1043,7 @@ func (g *gatewayClient) waitForCompletion(ctx context.Context, sessionID string)
 			case "message.complete":
 				return event.Payload.Text, nil
 			case "error":
-				return "", fmt.Errorf("Hermes run failed: %s", event.Payload.Message)
+				return "", fmt.Errorf("hermes run failed: %s", event.Payload.Message)
 			}
 		case err := <-g.errs:
 			return "", err
