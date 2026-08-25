@@ -197,6 +197,45 @@ func TestTriggerJobFallsBackToDesktopCronAPIWhenGatewayRouteRejectsMethod(t *tes
 	}
 }
 
+func TestListJobsFallsBackToDesktopCronAPIWhenGatewayRouteRejectsMethod(t *testing.T) {
+	var requested []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs":
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cron/jobs":
+			writeJSON(w, []map[string]any{{
+				"id": "content-post", "name": "Draft content post",
+				"enabled": true, "provider": "anthropic-cli",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return gateway.Client(), gateway.URL, nil
+	}}
+
+	jobs, err := client.ListJobs(t.Context(), domain.RuntimeConnection{
+		ID: "remote", Runtime: "hermes", Transport: "gateway",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "content-post" {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	want := []string{
+		"GET /api/jobs",
+		"GET /api/cron/jobs",
+	}
+	if !reflect.DeepEqual(requested, want) {
+		t.Fatalf("requests = %#v, want %#v", requested, want)
+	}
+}
+
 func TestRunJobWaitsForNewHermesSessionAndCollectsResult(t *testing.T) {
 	var runReads int
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

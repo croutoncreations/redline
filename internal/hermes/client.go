@@ -291,7 +291,7 @@ func (c Client) ListJobs(ctx context.Context, connection domain.RuntimeConnectio
 		}
 		return gatewayPayload.Jobs, nil
 	}
-	if !isHTTPStatus(err, http.StatusNotFound) {
+	if !isHTTPStatus(err, http.StatusNotFound) && !isHTTPStatus(err, http.StatusMethodNotAllowed) {
 		return nil, fmt.Errorf("list Hermes jobs: %w", err)
 	}
 	var desktopJobs []Job
@@ -432,7 +432,7 @@ func listJobRuns(
 	escaped := url.PathEscape(jobID)
 	err := getJSON(ctx, client, baseURL+"/api/jobs/"+escaped+"/runs?limit=20", &payload)
 	if err != nil {
-		if !isHTTPStatus(err, http.StatusNotFound) {
+		if !isHTTPStatus(err, http.StatusNotFound) && !isHTTPStatus(err, http.StatusMethodNotAllowed) {
 			return nil, err
 		}
 		if err := getJSON(ctx, client, baseURL+"/api/cron/jobs/"+escaped+"/runs?limit=20", &payload); err != nil {
