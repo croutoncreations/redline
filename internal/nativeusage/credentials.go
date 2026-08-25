@@ -87,16 +87,16 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	}
 	var file claudeCredentialsFile
 	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
-		return Credential{}, fmt.Errorf("Claude credentials are invalid")
+		return Credential{}, fmt.Errorf("claude credentials are invalid")
 	}
 	now := d.now()
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
 		writable, ok := store.(writableSecretStore)
 		if !ok {
-			return Credential{}, fmt.Errorf("Claude credentials require refresh; Redline will not modify Claude Code's shared credential—run `claude auth login`")
+			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential—run `claude auth login`")
 		}
 		if file.ClaudeAIOAuth.RefreshToken == "" {
-			return Credential{}, fmt.Errorf("Claude token expired without a refresh token")
+			return Credential{}, fmt.Errorf("claude token expired without a refresh token")
 		}
 		payload := map[string]any{"grant_type": "refresh_token", "refresh_token": file.ClaudeAIOAuth.RefreshToken, "client_id": claudeClientID,
 			"scope": "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}
@@ -156,7 +156,7 @@ type codexAuthFile struct {
 func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
 	store := d.CodexStore
 	if store == nil {
-		return Credential{}, fmt.Errorf("Codex credential store is unavailable")
+		return Credential{}, fmt.Errorf("codex credential store is unavailable")
 	}
 	raw, err := store.Read(ctx)
 	if err != nil {
@@ -164,16 +164,16 @@ func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
 	}
 	var file codexAuthFile
 	if json.Unmarshal(raw, &file) != nil || file.Tokens.AccessToken == "" {
-		return Credential{}, fmt.Errorf("Codex credentials are invalid")
+		return Credential{}, fmt.Errorf("codex credentials are invalid")
 	}
 	now := d.now()
 	if expiresAt, ok := jwtExpiry(file.Tokens.AccessToken); ok && expiresAt.Sub(now) <= 5*time.Minute {
 		writable, ok := store.(writableSecretStore)
 		if !ok {
-			return Credential{}, fmt.Errorf("Codex credential store is read-only")
+			return Credential{}, fmt.Errorf("codex credential store is read-only")
 		}
 		if file.Tokens.RefreshToken == "" {
-			return Credential{}, fmt.Errorf("Codex token expired without a refresh token")
+			return Credential{}, fmt.Errorf("codex token expired without a refresh token")
 		}
 		values := url.Values{"grant_type": {"refresh_token"}, "client_id": {codexClientID}, "refresh_token": {file.Tokens.RefreshToken}}
 		endpoint := d.CodexRefreshURL

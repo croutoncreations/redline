@@ -51,10 +51,7 @@ func Build(input Input) Result {
 		if data, err := readTail(input.ResultFile, maxOutputBytes); err == nil {
 			var value manifest
 			if json.Unmarshal(data, &value) == nil {
-				result = Result{
-					Summary: value.Summary, Outcome: value.Outcome, Artifacts: value.Artifacts,
-					Warnings: value.Warnings, ActualProvider: value.ActualProvider, ActualModel: value.ActualModel,
-				}
+				result = Result(value)
 			}
 		}
 	}

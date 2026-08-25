@@ -164,7 +164,7 @@ func (a Adapter) runHermesJob(
 	result Result,
 ) (Result, error) {
 	if a.Contexts == nil {
-		return result, fmt.Errorf("Hermes harness requires an agent context store")
+		return result, fmt.Errorf("hermes harness requires an agent context store")
 	}
 	if a.Hermes == nil {
 		a.Hermes = hermes.Client{}
@@ -228,7 +228,7 @@ func (a Adapter) runHermes(
 	result Result,
 ) (Result, error) {
 	if a.Contexts == nil {
-		return result, fmt.Errorf("Hermes harness requires an agent context store")
+		return result, fmt.Errorf("hermes harness requires an agent context store")
 	}
 	if a.Hermes == nil {
 		a.Hermes = hermes.Client{}
