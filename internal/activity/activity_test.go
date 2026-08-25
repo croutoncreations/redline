@@ -56,6 +56,46 @@ func TestBuildExtractsHarnessSummaryMetadataAndLinks(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesLinksFromEarlierHarnessMessages(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "run.stdout.jsonl")
+	body := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed https://github.com/dependency/project/pull/99"}]}}`,
+		`{"type":"system","subtype":"code_change_published"}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"https://github.com/acme/app/pull/52"}]}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"A later background check found another possible improvement."}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if got.Summary != "A later background check found another possible improvement." {
+		t.Fatalf("summary = %q", got.Summary)
+	}
+	if len(got.Artifacts) != 1 || got.Artifacts[0].Type != "pull_request" ||
+		got.Artifacts[0].URL != "https://github.com/acme/app/pull/52" {
+		t.Fatalf("artifacts = %#v", got.Artifacts)
+	}
+}
+
+func TestBuildPreservesPublishedLinkFromEarlierAssistantSummary(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "run.stdout.jsonl")
+	body := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Draft PR created: **https://github.com/acme/app/pull/53**"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"A later background check completed."}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if len(got.Artifacts) != 1 || got.Artifacts[0].URL != "https://github.com/acme/app/pull/53" {
+		t.Fatalf("artifacts = %#v", got.Artifacts)
+	}
+}
+
 func TestBuildMakesFailureHumanReadable(t *testing.T) {
 	got := activity.Build(activity.Input{
 		State: domain.RunFailed, Error: "Claude Code is signed out. Run `claude auth login`, then retry this job.",

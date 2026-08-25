@@ -90,3 +90,25 @@ Useful read-only commands include:
 ```
 
 For source installs and custom service locations, see the main [README](../README.md).
+
+## Uninstall completely
+
+If you may want the task history later, first copy
+`~/Library/Application Support/Redline/` to a safe location. Then:
+
+1. Open **App Setup…**, turn off **Launch Redline at login**, and quit Redline.
+2. Move `/Applications/Redline.app` to the Trash.
+3. Remove `~/Library/Application Support/Redline/` to delete the configuration, local API
+   credential, SQLite history, and run artifacts.
+4. Remove `~/Library/Logs/Redline/` to delete service logs.
+
+People who used the pre-app LaunchAgent should also remove its retired files:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.jfox.redline.plist" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/com.jfox.redline.plist"
+```
+
+The LaunchAgent command only targets Redline's legacy user service. It is harmless when that file
+is already absent. Redline does not install system extensions, privileged helpers, or files under
+`/Library`.

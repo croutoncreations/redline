@@ -30,7 +30,7 @@ CLI / MCP / dashboard / native app
       SQLite      OpenUsage/native + Gatepost logs
          |
          v
- simulated scheduler
+ opt-in scheduler
 ```
 
 Only `redline serve` reads configuration and opens SQLite. All operational CLI commands
