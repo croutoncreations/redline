@@ -38,3 +38,24 @@ func TestDispatchAttemptValidation(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	for _, attempt := range []domain.DispatchAttempt{
+		{ProviderAccountID: "claude", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT", StartedAt: start, CompletedAt: start.Add(time.Minute)},
+		{ProviderAccountID: "claude", Trigger: "manual", Outcome: domain.DispatchWait, Decision: "WAIT", StartedAt: start.Add(time.Hour), CompletedAt: start.Add(time.Hour + time.Minute)},
+		{ProviderAccountID: "codex", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT", StartedAt: start.Add(2 * time.Hour), CompletedAt: start.Add(2*time.Hour + time.Minute)},
+	} {
+		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListDispatchAttemptsRange(context.Background(), "automatic", start.Add(30*time.Minute), start.Add(3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ProviderAccountID != "codex" {
+		t.Fatalf("attempts = %#v", got)
+	}
+}

@@ -418,6 +418,23 @@ func TestCapacityConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestLaunchMetricsConsumesServiceAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/metrics/launch" ||
+			r.URL.Query().Get("days") != "14" || r.URL.Query().Get("provider") != "claude-main" {
+			t.Errorf("request = %s %s", r.Method, r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"since":"2026-08-12T00:00:00Z","until":"2026-08-26T00:00:00Z","decisions":{"automatic_checks":10,"run":2,"wait":8,"unknown":0,"errors":0,"no_eligible_task":1,"wait_rate":0.8},"jobs":{},"providers":[],"methodology":[]}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "metrics", "launch", "--days", "14", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"wait_rate": 0.8`) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestTokenSyncConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/token-sync" {

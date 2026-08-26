@@ -26,6 +26,7 @@ import (
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/mcpserver"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
@@ -58,7 +59,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|token|usage|task|profile|scheduler|run|notification|pause|resume>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|pause|resume>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -77,6 +78,8 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runCalibration(client, remaining[1:], stdout, stderr)
 	case "capacity":
 		return runCapacity(client, remaining[1:], stdout, stderr)
+	case "metrics":
+		return runMetrics(client, remaining[1:], stdout, stderr)
 	case "token":
 		return runToken(client, remaining[1:], stdout, stderr)
 	case "usage":
@@ -104,11 +107,39 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "commands: serve, mcp, health, decision, status, calibration, capacity, token,")
+	fmt.Fprintln(output, "commands: serve, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, pause, resume")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
+}
+
+func runMetrics(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "launch" {
+		fmt.Fprintln(stderr, "usage: redline metrics launch [--days N] [--provider ID]")
+		return 1
+	}
+	flags := flag.NewFlagSet("metrics launch", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	days := flags.Int("days", 21, "report window in days")
+	provider := flags.String("provider", "", "optional configured provider account")
+	if err := flags.Parse(args[1:]); err != nil || *days < 1 || *days > 365 {
+		if *days < 1 || *days > 365 {
+			fmt.Fprintln(stderr, "--days must be between 1 and 365")
+		}
+		return 1
+	}
+	values := url.Values{"days": {strconv.Itoa(*days)}}
+	if *provider != "" {
+		values.Set("provider", *provider)
+	}
+	var report launchmetrics.Report
+	if err := client.Do(context.Background(), http.MethodGet, "/v1/metrics/launch?"+values.Encode(), nil, &report); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, report)
+	return 0
 }
 
 func runMCP(client apiclient.Client, args []string, stderr io.Writer) int {

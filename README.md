@@ -316,6 +316,17 @@ curl -H "Authorization: Bearer $REDLINE_API_TOKEN" \
   http://127.0.0.1:7436/v1/health
 ```
 
+## Launch metrics
+
+Redline can report exact automatic RUN/WAIT/UNKNOWN decisions and job outcomes, alongside
+coverage- and confidence-labeled estimates of allowance converted to completed work:
+
+```bash
+redline metrics launch --days 21
+```
+
+See [the launch-metrics methodology](docs/launch-metrics.md) for definitions and caveats.
+
 ## MCP and agent access
 
 Run `redline mcp` as a local stdio MCP server. It delegates every operation to the running

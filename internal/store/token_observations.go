@@ -64,16 +64,9 @@ cache_read_tokens, cache_creation_tokens, confidence FROM token_observations WHE
 	defer rows.Close()
 	var result []capacity.TokenObservation
 	for rows.Next() {
-		var observation capacity.TokenObservation
-		var observedAt string
-		if err := rows.Scan(&observation.Provider, &observation.Source, &observation.SourceID, &observedAt,
-			&observation.Model, &observation.InputTokens, &observation.OutputTokens, &observation.CacheReadTokens,
-			&observation.CacheCreationTokens, &observation.Confidence); err != nil {
-			return nil, fmt.Errorf("scan token observation: %w", err)
-		}
-		observation.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt)
+		observation, err := scanTokenObservation(rows)
 		if err != nil {
-			return nil, fmt.Errorf("parse token observation time: %w", err)
+			return nil, err
 		}
 		result = append(result, observation)
 	}
@@ -81,6 +74,48 @@ cache_read_tokens, cache_creation_tokens, confidence FROM token_observations WHE
 		return nil, fmt.Errorf("iterate token observations: %w", err)
 	}
 	return result, nil
+}
+
+func (d *DB) ListTokenObservationsBySource(
+	ctx context.Context, provider, source string, since, until time.Time,
+) ([]capacity.TokenObservation, error) {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(source) == "" ||
+		since.IsZero() || until.IsZero() || !until.After(since) {
+		return nil, fmt.Errorf("token observation provider, source, and valid time range are required")
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT provider, source, source_id, observed_at, model,
+input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, confidence
+FROM token_observations WHERE provider = ? AND source = ? AND observed_at >= ? AND observed_at < ?
+ORDER BY observed_at, id`, provider, source, formatTokenTime(since), formatTokenTime(until))
+	if err != nil {
+		return nil, fmt.Errorf("list token observations by source: %w", err)
+	}
+	defer rows.Close()
+	var result []capacity.TokenObservation
+	for rows.Next() {
+		observation, err := scanTokenObservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, observation)
+	}
+	return result, rows.Err()
+}
+
+func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
+	var observation capacity.TokenObservation
+	var observedAt string
+	if err := row.Scan(&observation.Provider, &observation.Source, &observation.SourceID, &observedAt,
+		&observation.Model, &observation.InputTokens, &observation.OutputTokens, &observation.CacheReadTokens,
+		&observation.CacheCreationTokens, &observation.Confidence); err != nil {
+		return capacity.TokenObservation{}, fmt.Errorf("scan token observation: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, observedAt)
+	if err != nil {
+		return capacity.TokenObservation{}, fmt.Errorf("parse token observation time: %w", err)
+	}
+	observation.ObservedAt = parsed
+	return observation, nil
 }
 
 func formatTokenTime(value time.Time) string {

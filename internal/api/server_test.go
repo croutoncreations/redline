@@ -29,12 +29,44 @@ import (
 	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/discovery"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/workspace"
 )
 
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+
+func TestLaunchMetricsReportsAutomaticWaitRate(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	for _, attempt := range []domain.DispatchAttempt{
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", Mode: "pace_threshold", StartedAt: apiNow.Add(-time.Hour), CompletedAt: apiNow.Add(-time.Hour + time.Second)},
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchNoTask,
+			Decision: "RUN", Mode: "pace_threshold", StartedAt: apiNow.Add(-30 * time.Minute), CompletedAt: apiNow.Add(-30*time.Minute + time.Second)},
+		{ProviderAccountID: "codex-main", Trigger: "manual", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: apiNow.Add(-time.Minute), CompletedAt: apiNow},
+	} {
+		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := http.Get(server.URL + "/v1/metrics/launch?provider=codex-main&days=7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var report launchmetrics.Report
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || report.Decisions.AutomaticChecks != 2 || report.Decisions.WaitRate != .5 {
+		t.Fatalf("status=%d report=%#v", resp.StatusCode, report)
+	}
+	if len(report.Providers) != 1 || report.Providers[0].Allowance.Status != launchmetrics.StatusUnavailable {
+		t.Fatalf("providers = %#v", report.Providers)
+	}
+}
 
 func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
