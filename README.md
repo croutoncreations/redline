@@ -8,7 +8,7 @@ scheduler evaluates configured providers and launches eligible Codex CLI, Claude
 generic-command tasks unattended.
 
 **[Download Redline for macOS](https://github.com/croutoncreations/redline/releases/latest)** ·
-[Getting started](docs/getting-started.md) · [Troubleshooting](docs/troubleshooting.md)
+[Getting started](docs/getting-started.md) · [Demo staging](docs/demo-staging.md) · [Troubleshooting](docs/troubleshooting.md)
 
 Requires macOS 13 or later. Release builds are signed, notarized, and Universal for Apple Silicon
 and Intel Macs.

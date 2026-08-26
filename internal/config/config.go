@@ -22,6 +22,9 @@ type Config struct {
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	APIToken        string              `yaml:"-"`
+	// DemoScenario is set only by the isolated demo launcher. It is never loaded
+	// from user configuration and lets clients clearly label synthetic data.
+	DemoScenario string `yaml:"-"`
 }
 
 type Notifications struct {

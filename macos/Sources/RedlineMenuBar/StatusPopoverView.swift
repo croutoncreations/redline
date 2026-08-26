@@ -152,7 +152,18 @@ struct StatusPopoverView: View {
                 .resizable()
                 .frame(width: 26, height: 26)
             VStack(alignment: .leading, spacing: 2) {
-                Text(activityTitle).font(.system(size: 15, weight: .semibold))
+				HStack(spacing: 7) {
+					Text(activityTitle).font(.system(size: 15, weight: .semibold))
+					if let demo = snapshot?.demo, demo.synthetic {
+						Text("DEMO · \(demo.scenario.uppercased())")
+							.font(.system(size: 8, weight: .bold, design: .monospaced))
+							.foregroundStyle(.red)
+							.padding(.horizontal, 6).padding(.vertical, 3)
+							.background(.red.opacity(0.1), in: Capsule())
+							.overlay(Capsule().stroke(.red.opacity(0.35)))
+							.help("Synthetic \(demo.scenario) scenario; no provider is being used")
+					}
+				}
                 Text(activityDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()

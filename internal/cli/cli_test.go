@@ -26,6 +26,44 @@ func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
 	}
 }
 
+func TestDemoListDocumentsAvailableScenes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"demo", "list"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stderr.Len() != 0 ||
+		!strings.Contains(stdout.String(), "overview") ||
+		!strings.Contains(stdout.String(), "attention") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestDemoServeRefusesUnsafeListeners(t *testing.T) {
+	for _, listen := range []string{"0.0.0.0:7446", "127.0.0.1:7436"} {
+		t.Run(listen, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run([]string{"demo", "serve", "--listen", listen}, &stdout, &stderr, time.Now)
+			if exit != 1 || !strings.Contains(stderr.String(), "demo") {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestDemoServeRefusesNonEmptyStateDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("do not touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"demo", "serve", "--listen", "127.0.0.1:0", "--state-dir", root}, &stdout, &stderr, time.Now)
+	if exit != 1 || !strings.Contains(stderr.String(), "must be empty") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "keep.txt"))
+	if err != nil || string(contents) != "do not touch" {
+		t.Fatalf("existing state changed: contents=%q err=%v", contents, err)
+	}
+}
+
 func TestServeClaimsListenerBeforeOpeningDatabaseOrStartingScheduler(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -366,6 +366,10 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
+  document.body.classList.toggle('demo-mode', Boolean(data.demo?.synthetic));
+  const demoPill = $('#demo-pill');
+  demoPill.hidden = !data.demo?.synthetic;
+  if (data.demo?.synthetic) demoPill.querySelector('b').textContent = data.demo.scenario || 'synthetic';
   policyCatalog = data.policies || {};
   taskNames = new Map(data.tasks.map(task => [task.id, task.name]));
   providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));

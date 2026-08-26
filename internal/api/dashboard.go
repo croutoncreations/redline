@@ -33,6 +33,12 @@ type dashboardResponse struct {
 	Runs         []domain.Run             `json:"runs"`
 	Attempts     []domain.DispatchAttempt `json:"attempts"`
 	UnreadRuns   int                      `json:"unread_runs"`
+	Demo         *dashboardDemo           `json:"demo,omitempty"`
+}
+
+type dashboardDemo struct {
+	Scenario  string `json:"scenario"`
+	Synthetic bool   `json:"synthetic"`
 }
 
 type dashboardProvider struct {
@@ -181,6 +187,14 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		Scheduler: s.scheduler.Status(), UsageMonitor: s.usageMonitor.Status(),
 		Providers: make([]dashboardProvider, 0, len(s.config.Providers)),
 		Tasks:     make([]dashboardTask, 0), Runs: make([]domain.Run, 0), Attempts: make([]domain.DispatchAttempt, 0),
+	}
+	if s.config.DemoScenario != "" {
+		result.Demo = &dashboardDemo{Scenario: s.config.DemoScenario, Synthetic: true}
+		if result.Scheduler.Enabled && result.Scheduler.NextCycleAt == nil {
+			interval, _ := s.config.SchedulerInterval()
+			next := s.now().UTC().Add(interval)
+			result.Scheduler.NextCycleAt = &next
+		}
 	}
 	result.Health, err = s.store.OperationalHealth(ctx, s.now(), 24*time.Hour)
 	if err != nil {

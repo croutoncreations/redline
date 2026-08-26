@@ -1,6 +1,7 @@
 import Foundation
 
 public struct DashboardSnapshot: Codable, Sendable {
+	public let demo: DemoSummary?
     public let health: HealthSummary
     public let scheduler: SchedulerSummary
     public let providers: [ProviderSummary]
@@ -10,6 +11,7 @@ public struct DashboardSnapshot: Codable, Sendable {
     public let unreadRuns: Int
 
     public init(
+		demo: DemoSummary? = nil,
         health: HealthSummary,
         scheduler: SchedulerSummary,
         providers: [ProviderSummary],
@@ -18,6 +20,7 @@ public struct DashboardSnapshot: Codable, Sendable {
         attempts: [AttemptSummary] = [],
         unreadRuns: Int = 0
     ) {
+		self.demo = demo
         self.health = health
         self.scheduler = scheduler
         self.providers = providers
@@ -49,13 +52,14 @@ public struct DashboardSnapshot: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case health, scheduler, providers, tasks, runs, attempts
+		case demo, health, scheduler, providers, tasks, runs, attempts
         case unreadRuns = "unread_runs"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        health = try container.decode(HealthSummary.self, forKey: .health)
+		demo = try container.decodeIfPresent(DemoSummary.self, forKey: .demo)
+		health = try container.decode(HealthSummary.self, forKey: .health)
         scheduler = try container.decode(SchedulerSummary.self, forKey: .scheduler)
         providers = try container.decodeIfPresent([ProviderSummary].self, forKey: .providers) ?? []
         tasks = try container.decodeIfPresent([TaskSummary].self, forKey: .tasks) ?? []
@@ -63,6 +67,16 @@ public struct DashboardSnapshot: Codable, Sendable {
         attempts = try container.decodeIfPresent([AttemptSummary].self, forKey: .attempts) ?? []
         unreadRuns = try container.decodeIfPresent(Int.self, forKey: .unreadRuns) ?? 0
     }
+}
+
+public struct DemoSummary: Codable, Sendable, Equatable {
+	public let scenario: String
+	public let synthetic: Bool
+
+	public init(scenario: String, synthetic: Bool = true) {
+		self.scenario = scenario
+		self.synthetic = synthetic
+	}
 }
 
 public struct TaskSummary: Codable, Sendable, Identifiable {
