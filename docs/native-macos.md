@@ -40,7 +40,11 @@ history, queue, and artifacts remain in their existing locations. If macOS requi
 approval, Redline opens System Settings and leaves the legacy service untouched until approval.
 
 Choosing **Keep Existing Service** preserves the current adoption behavior. App Setup remains
-available from the quick panel for migration later.
+available from the quick panel for migration later. While the legacy LaunchAgent remains,
+Redline keeps an installation-safety warning visible in the quick panel and marks the menu-bar
+status as needing attention. The warning identifies the configured executable and links back to
+the recoverable migration flow so an obsolete service cannot fail repeatedly without surfacing in
+the app.
 
 ## Current menu
 
@@ -77,18 +81,37 @@ instead of sending the user to a browser tab.
 open dist/Redline.app
 ```
 
-The build creates one ad-hoc-signed `Redline.app` containing the Swift menu process, Go service,
-Sparkle framework, and safe starter configuration. Set `REDLINE_SIGN_IDENTITY` to a Developer ID
-identity for distributable signing, and `REDLINE_APP_OUTPUT_DIR` to change the output directory.
-Local builds omit Sparkle feed settings and show a clear informational message when update checks
-are requested.
+The build creates one `Redline.app` containing the Swift menu process, Go service, Sparkle
+framework, and safe starter configuration. It automatically uses the first installed Developer ID
+Application identity so macOS can retain Redline's privacy decisions across rebuilds. When no
+Developer ID identity is available, it falls back to an ad-hoc signature with a warning. Set
+`REDLINE_SIGN_IDENTITY=-` to request an ad-hoc build explicitly, or provide an exact identity to
+override automatic selection. `REDLINE_APP_OUTPUT_DIR` changes the output directory.
+
+Native-architecture builds also remove unused architecture slices from every bundled Sparkle
+component. An ARM64 build therefore contains no Intel helper code; universal release builds retain
+both ARM64 and x86_64 throughout the bundle.
+
+Local builds omit Sparkle feed settings, do not start the updater, and show a clear informational
+message when update checks are requested.
 
 Every build signs the menu process and nested Go service separately with Hardened Runtime enabled.
-Local builds use an ad-hoc identity and no timestamp. Version metadata is configurable:
+Developer ID builds use a secure timestamp; ad-hoc builds do not. Version metadata is configurable:
 
 ```bash
 REDLINE_VERSION=0.2.0 REDLINE_BUILD_NUMBER=2 ./scripts/build-macos-app.sh
 ```
+
+## Agent permissions
+
+Redline launches the configured harness without removing its tools or capabilities. When that
+agent, an MCP server, a browser, or a test process requests protected macOS access, macOS may name
+Redline in the prompt because it is the responsible parent application. The exact access therefore
+depends on the job and harness rather than a fixed Redline permission list.
+
+Redline does not request broad access in advance. Use **… → Agent Permissions…** in the menu-bar
+popover for this explanation, then inspect the active or recent run to identify the responsible job
+before allowing an unexpected request.
 
 ## Sparkle updates
 

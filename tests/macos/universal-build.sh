@@ -19,6 +19,12 @@ for executable in \
   [[ " ${slices} " == *" x86_64 "* ]]
 done
 
+while IFS= read -r executable; do
+  slices="$(lipo -archs "${executable}")"
+  [[ " ${slices} " == *" arm64 "* ]]
+  [[ " ${slices} " == *" x86_64 "* ]]
+done < <(find "${app_path}" -type f -print0 | xargs -0 file | sed -n 's/: Mach-O.*$//p')
+
 codesign --verify --deep --strict "${app_path}"
 service="${app_path}/Contents/Resources/bin/redline"
 for architecture in arm64 x86_64; do

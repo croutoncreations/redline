@@ -8,6 +8,7 @@ struct StatusPopoverActions {
     let reconnectProvider: @MainActor (ProviderSummary) -> Void
     let checkForUpdates: @MainActor () -> Void
     let enableNotifications: @MainActor () -> Void
+    let showAgentPermissionHelp: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
@@ -26,6 +27,7 @@ struct StatusPopoverView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     builderUpdatesPrompt
+                    installationSafetySection
                     failureSection
                     providerGrid
                     activitySection
@@ -40,6 +42,27 @@ struct StatusPopoverView: View {
         }
         .frame(width: 420, height: 640)
         .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder private var installationSafetySection: some View {
+        if let issue = model.installationIssue {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(issue.title, systemImage: "exclamationmark.shield.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text(issue.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(issue.actionTitle, action: actions.showAppSetup)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .padding(12)
+            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.orange.opacity(0.35)))
+        }
     }
 
     @ViewBuilder private var builderUpdatesPrompt: some View {
@@ -396,6 +419,7 @@ struct StatusPopoverView: View {
             Menu {
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
+                Button("Agent Permissions…", action: actions.showAgentPermissionHelp)
                 Button("App Setup…", action: actions.showAppSetup)
                 Divider()
                 Link("More tools from Crouton Creations…", destination: ProductLinks.moreTools)
@@ -458,6 +482,7 @@ struct StatusPopoverView: View {
 
     private var activityTitle: String {
         guard model.errorMessage == nil else { return "Redline is offline" }
+        if model.installationIssue != nil { return "Redline setup needs attention" }
         return switch trayState?.activity {
         case .running: "Running a queued job"
         case .attention: "Redline needs attention"
@@ -468,6 +493,7 @@ struct StatusPopoverView: View {
 
     private var activityDetail: String {
         if model.errorMessage != nil { return "The local service could not be reached" }
+        if let issue = model.installationIssue { return issue.title }
         if trayState?.activity == .attention { return "The service is online, but recent operations failed" }
         if trayState?.activity == .running { return "An admitted task is currently active" }
         return "Monitoring usage and the dispatch queue"
@@ -475,6 +501,7 @@ struct StatusPopoverView: View {
 
     private var activityColor: Color {
         guard model.errorMessage == nil else { return .red }
+        if model.installationIssue != nil { return .orange }
         return switch trayState?.activity {
         case .running: .blue
         case .attention: .orange

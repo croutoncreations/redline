@@ -53,10 +53,12 @@ jobs:
             spm-${{ runner.os }}-
       - name: Test native app
         run: swift test --package-path macos --disable-xctest
+      - name: Test signing policy
+        run: tests/macos/signing-policy.sh
       - name: Build bundled app
         run: ./scripts/build-macos-app.sh
-      - name: Verify signatures
-        run: codesign --verify --deep --strict dist/Redline.app
+      - name: Verify ARM64 slices and signatures
+        run: REDLINE_ARM64_SKIP_BUILD=1 REDLINE_ARM64_APP_PATH=dist/Redline.app tests/macos/arm64-build.sh
       - name: Exercise release packaging and update feed
         run: tests/macos/release-packaging.sh
       - name: Validate Tart release rehearsal commands

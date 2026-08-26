@@ -10,6 +10,7 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var providersBeingControlled = Set<String>()
     @Published private(set) var tasksBeingControlled = Set<String>()
     @Published private(set) var showsBuilderUpdatesPrompt = false
+    @Published private(set) var installationIssue: InstallationIssue?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -35,6 +36,10 @@ final class PopoverViewModel: ObservableObject {
     func dismissBuilderUpdatesPrompt() {
         defaults.set(true, forKey: EngagementPromptPolicy.dismissalKey)
         showsBuilderUpdatesPrompt = false
+    }
+
+    func apply(installationIssue: InstallationIssue?) {
+        self.installationIssue = installationIssue
     }
 
     func apply(error: String) {

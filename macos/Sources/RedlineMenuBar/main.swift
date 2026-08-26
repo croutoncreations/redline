@@ -37,6 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             apiURL: apiURL,
             apiToken: apiToken,
             supervisor: supervisor,
+            installationIssue: { [weak installation] in
+                installation?.refreshInstallationIssue()
+            },
             showAppSetup: { [weak self, weak installation] in
                 if let installation { installation.presentSetup() }
                 else { self?.presentInstallationFailure() }

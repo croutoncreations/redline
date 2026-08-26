@@ -30,6 +30,26 @@ import Testing
     ]) == nil)
 }
 
+@Test func updaterStartsOnlyForSecureConfiguredBuilds() {
+    let validKey = Data(repeating: 7, count: 32).base64EncodedString()
+    #expect(!UpdateStartupPolicy.shouldStartUpdater(infoDictionary: [:]))
+    #expect(!UpdateStartupPolicy.shouldStartUpdater(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml",
+    ]))
+    #expect(UpdateStartupPolicy.shouldStartUpdater(infoDictionary: [
+        "SUFeedURL": "https://updates.redline.example/appcast.xml",
+        "SUPublicEDKey": validKey,
+    ]))
+}
+
+@Test func agentPermissionGuidanceExplainsDynamicChildProcessAttribution() {
+    #expect(AgentPermissionGuidance.title == "Agent access and macOS permissions")
+    #expect(AgentPermissionGuidance.summary.contains("scheduled agent"))
+    #expect(AgentPermissionGuidance.summary.contains("Redline"))
+    #expect(AgentPermissionGuidance.detail.contains("job and harness"))
+    #expect(AgentPermissionGuidance.detail.contains("only when access is needed"))
+}
+
 @Test func installationResolutionPrefersPersistedThenLegacyThenDefaultConfig() throws {
     let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -122,6 +142,26 @@ import Testing
     #expect(agent.label == "com.example.redline")
     #expect(agent.configURL == config)
     #expect(agent.plistURL == plist)
+    #expect(agent.executableURL == URL(fileURLWithPath: "/usr/local/bin/redline"))
+}
+
+@Test func legacyServiceIssuePersistsUntilTheAgentIsRemoved() throws {
+    let plist = URL(fileURLWithPath: "/Users/test/Library/LaunchAgents/com.jfox.redline.plist")
+    let config = URL(fileURLWithPath: "/Users/test/Library/Application Support/Redline/redline.yaml")
+    let executable = URL(fileURLWithPath: "/Users/test/projects/redline/redline")
+    let agent = LegacyLaunchAgent(
+        label: "com.jfox.redline",
+        plistURL: plist,
+        configURL: config,
+        executableURL: executable
+    )
+
+    let issue = try #require(InstallationSafety.issue(for: agent))
+    #expect(issue.title == "Legacy background service configured")
+    #expect(issue.detail.contains("another Redline service owner"))
+    #expect(issue.detail.contains(executable.path))
+    #expect(issue.actionTitle == "Review service setup…")
+    #expect(InstallationSafety.issue(for: nil) == nil)
 }
 
 @Test func legacyMigrationPlanIsRecoverableAndUsesUserDomain() throws {

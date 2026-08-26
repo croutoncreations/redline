@@ -18,6 +18,7 @@ final class AppInstallationCoordinator {
     private var client: RedlineAPIClient
     private let defaults: UserDefaults
     private let supportDirectory: URL
+    private let legacyPlistURL: URL
 
     init(client: RedlineAPIClient, defaults: UserDefaults = .standard) throws {
         self.client = client
@@ -26,7 +27,7 @@ final class AppInstallationCoordinator {
         let home = FileManager.default.homeDirectoryForCurrentUser
         supportDirectory = home.appending(path: "Library/Application Support/Redline")
         let standardConfigURL = supportDirectory.appending(path: "redline.yaml")
-        let legacyPlistURL = home.appending(path: "Library/LaunchAgents/com.jfox.redline.plist")
+        legacyPlistURL = home.appending(path: "Library/LaunchAgents/com.jfox.redline.plist")
         legacyAgent = try LegacyLaunchAgent.discover(at: legacyPlistURL)
 
         let environmentPath = ProcessInfo.processInfo.environment["REDLINE_CONFIG_PATH"]
@@ -56,6 +57,16 @@ final class AppInstallationCoordinator {
         self.client = client
     }
 
+    var installationIssue: InstallationIssue? {
+        InstallationSafety.issue(for: legacyAgent)
+    }
+
+    @discardableResult
+    func refreshInstallationIssue() -> InstallationIssue? {
+        legacyAgent = try? LegacyLaunchAgent.discover(at: legacyPlistURL)
+        return installationIssue
+    }
+
     var shouldPresentFirstRun: Bool {
         !defaults.bool(forKey: Keys.presentedFirstRun) &&
             (createdStarterConfig || legacyAgent != nil)
@@ -74,6 +85,15 @@ final class AppInstallationCoordinator {
         } else {
             presentLaunchAtLoginSetup(createdConfig: createdStarterConfig)
         }
+    }
+
+    @discardableResult
+    func enableLaunchAtLogin() throws -> SMAppService.Status {
+        let service = SMAppService.mainApp
+        if service.status != .enabled && service.status != .requiresApproval {
+            try service.register()
+        }
+        return service.status
     }
 
     private func presentLegacyMigration(agent: LegacyLaunchAgent) {
@@ -114,7 +134,7 @@ final class AppInstallationCoordinator {
             return
         }
         do {
-            try service.register()
+            _ = try enableLaunchAtLogin()
             if service.status == .requiresApproval {
                 presentApprovalRequired()
             } else {
