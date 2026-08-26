@@ -50,6 +50,29 @@ func TestTokenObservationRequiresStableIdentityAndNonnegativeCounts(t *testing.T
 	}
 }
 
+func TestListTokenObservationsBySourceExcludesAmbientUsage(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	at := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err = db.SaveTokenObservations(context.Background(), []capacity.TokenObservation{
+		{Provider: "claude", Source: "redline-run", SourceID: "run:sonnet", ObservedAt: at, Model: "sonnet-5", InputTokens: 10},
+		{Provider: "claude", Source: "gatepost", SourceID: "session", ObservedAt: at, Model: "sonnet-5", InputTokens: 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ListTokenObservationsBySource(context.Background(), "claude", "redline-run", at.Add(-time.Minute), at.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SourceID != "run:sonnet" {
+		t.Fatalf("observations = %#v", got)
+	}
+}
+
 // TestLatestTokenObservationTime verifies that LatestTokenObservationTime
 // returns a zero time when no rows exist and the exact saved timestamp when
 // rows are present.  This function drives ingestion cursors: a wrong return

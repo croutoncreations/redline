@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/jfox/redline/internal/execution"
 	"github.com/jfox/redline/internal/harness"
 	"github.com/jfox/redline/internal/hermes"
+	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/nativeusage"
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
@@ -193,6 +195,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/usage-monitor/status", server.usageMonitorStatus)
 	mux.HandleFunc("GET /v1/scheduler/decisions", server.listDecisions)
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
+	mux.HandleFunc("GET /v1/metrics/launch", server.launchMetrics)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
@@ -402,31 +405,40 @@ func (s *Server) providerCalibration(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) providerCapacity(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("provider")
-	configured, ok := s.config.Providers[providerID]
-	if !ok {
+	if _, ok := s.config.Providers[providerID]; !ok {
 		writeJSON(w, http.StatusNotFound, problem{Error: fmt.Sprintf("provider %q is not configured", providerID)})
 		return
 	}
-	snapshots, err := s.store.ListSnapshots(r.Context(), configured.Provider, 5000)
+	estimate, err := s.capacityEstimate(r.Context(), providerID)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, estimate)
+}
+
+func (s *Server) capacityEstimate(ctx context.Context, providerID string) (capacity.EstimateResult, error) {
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		return capacity.EstimateResult{}, fmt.Errorf("provider %q is not configured", providerID)
+	}
+	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 5000)
+	if err != nil {
+		return capacity.EstimateResult{}, err
 	}
 	var after time.Time
 	if len(snapshots) > 0 {
 		after = snapshots[0].ObservedAt.Add(-time.Nanosecond)
 	}
-	observations, err := s.store.ListTokenObservations(r.Context(), configured.Provider, after, time.Time{})
+	observations, err := s.store.ListTokenObservations(ctx, configured.Provider, after, time.Time{})
 	if err != nil {
-		writeError(w, err)
-		return
+		return capacity.EstimateResult{}, err
 	}
-	calibrated, err := s.calibration(r.Context(), providerID)
+	calibrated, err := s.calibration(ctx, providerID)
 	if err != nil {
-		writeError(w, err)
-		return
+		return capacity.EstimateResult{}, err
 	}
-	writeJSON(w, http.StatusOK, capacity.Estimate(configured.Provider, snapshots, observations, calibrated.EffectiveCost, s.now()))
+	return capacity.Estimate(configured.Provider, snapshots, observations, calibrated.EffectiveCost, s.now()), nil
 }
 
 type tokenSyncResult struct {
@@ -1702,6 +1714,101 @@ func (s *Server) listAttempts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, attempts)
+}
+
+func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
+	until := s.now().UTC()
+	if value := strings.TrimSpace(r.URL.Query().Get("until")); value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "until must be RFC3339"})
+			return
+		}
+		until = parsed.UTC()
+	}
+	days := 21
+	if value := strings.TrimSpace(r.URL.Query().Get("days")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 365 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "days must be between 1 and 365"})
+			return
+		}
+		days = parsed
+	}
+	since := until.Add(-time.Duration(days) * 24 * time.Hour)
+	providerFilter := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if providerFilter != "" {
+		if _, ok := s.config.Providers[providerFilter]; !ok {
+			writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
+			return
+		}
+	}
+	attempts, err := s.store.ListDispatchAttemptsRange(r.Context(), "automatic", since, until)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	filtered := attempts[:0]
+	runs := make(map[string]domain.Run)
+	providerIDs := make([]string, 0, len(s.config.Providers))
+	for providerID := range s.config.Providers {
+		if providerFilter == "" || providerID == providerFilter {
+			providerIDs = append(providerIDs, providerID)
+		}
+	}
+	sort.Strings(providerIDs)
+	for _, attempt := range attempts {
+		if providerFilter != "" && attempt.ProviderAccountID != providerFilter {
+			continue
+		}
+		filtered = append(filtered, attempt)
+		if attempt.RunID == "" {
+			continue
+		}
+		run, err := s.store.GetRun(r.Context(), attempt.RunID)
+		if err != nil {
+			writeError(w, fmt.Errorf("load admitted run %q: %w", attempt.RunID, err))
+			return
+		}
+		runs[run.ID] = run
+	}
+	observationsByRun := make(map[string][]capacity.TokenObservation)
+	capacities := make(map[string]launchmetrics.ProviderCapacity)
+	for _, providerID := range providerIDs {
+		configured := s.config.Providers[providerID]
+		observations, err := s.store.ListTokenObservationsBySource(
+			r.Context(), configured.Provider, "redline-run", since, until,
+		)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		for _, observation := range observations {
+			runID := observation.SourceID
+			if separator := strings.IndexByte(runID, ':'); separator >= 0 {
+				runID = runID[:separator]
+			}
+			if _, belongs := runs[runID]; belongs {
+				observationsByRun[runID] = append(observationsByRun[runID], observation)
+			}
+		}
+		providerCapacity := launchmetrics.ProviderCapacity{UsageProvider: configured.Provider}
+		estimate, estimateErr := s.capacityEstimate(r.Context(), providerID)
+		if estimateErr != nil {
+			providerCapacity.UnavailableReason = estimateErr.Error()
+		} else {
+			providerCapacity.Confidence = estimate.Confidence
+			if estimate.Weekly != nil {
+				providerCapacity.Accounting = estimate.Weekly.Accounting
+			}
+		}
+		capacities[providerID] = providerCapacity
+	}
+	report := launchmetrics.Build(launchmetrics.Input{
+		Since: since, Until: until, Providers: providerIDs, Attempts: filtered,
+		Runs: runs, RunObservations: observationsByRun, Capacity: capacities,
+	})
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) evaluateProvider(
