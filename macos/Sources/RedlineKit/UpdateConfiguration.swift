@@ -23,3 +23,9 @@ public struct UpdateConfiguration: Equatable, Sendable {
         self.publicEDKey = publicEDKey
     }
 }
+
+public enum UpdateStartupPolicy {
+    public static func shouldStartUpdater(infoDictionary: [String: Any]) -> Bool {
+        UpdateConfiguration(infoDictionary: infoDictionary) != nil
+    }
+}

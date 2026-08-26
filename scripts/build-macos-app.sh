@@ -2,11 +2,13 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repository_root}/scripts/lib/macos-signing.sh"
 output_root="${REDLINE_APP_OUTPUT_DIR:-${repository_root}/dist}"
 app_path="${output_root}/Redline.app"
 version="${REDLINE_VERSION:-0.1.0}"
 build_number="${REDLINE_BUILD_NUMBER:-1}"
-sign_identity="${REDLINE_SIGN_IDENTITY:--}"
+requested_sign_identity="${REDLINE_SIGN_IDENTITY:-auto}"
+sign_identity="$(resolve_redline_sign_identity "${requested_sign_identity}")"
 sparkle_feed_url="${REDLINE_SPARKLE_FEED_URL:-}"
 sparkle_public_key="${REDLINE_SPARKLE_PUBLIC_KEY:-}"
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/redline-macos-build.XXXXXX")"
@@ -84,6 +86,20 @@ mkdir -p "${app_path}/Contents/MacOS" "${app_path}/Contents/Resources/bin" "${ap
 cp "${swift_bin_path}/RedlineMenuBar" "${app_path}/Contents/MacOS/RedlineMenuBar"
 cp "${temporary_root}/redline" "${app_path}/Contents/Resources/bin/redline"
 ditto "${sparkle_framework}" "${app_path}/Contents/Frameworks/Sparkle.framework"
+if [[ "${build_arch}" != "universal" ]]; then
+  while IFS= read -r -d '' candidate; do
+    if ! file "${candidate}" | grep -q 'Mach-O'; then
+      continue
+    fi
+    slices="$(lipo -archs "${candidate}")"
+    if [[ " ${slices} " == *" ${build_arch} "* && "${slices}" != "${build_arch}" ]]; then
+      thinned="${temporary_root}/$(basename "${candidate}").${RANDOM}.thin"
+      lipo -thin "${build_arch}" "${candidate}" -output "${thinned}"
+      chmod "$(stat -f '%Lp' "${candidate}")" "${thinned}"
+      mv "${thinned}" "${candidate}"
+    fi
+  done < <(find "${app_path}/Contents/Frameworks/Sparkle.framework" -type f -print0)
+fi
 cp "${repository_root}/macos/Sources/RedlineMenuBar/Resources/claude.svg" "${app_path}/Contents/Resources/claude.svg"
 cp "${repository_root}/macos/Sources/RedlineMenuBar/Resources/AppIcon.icns" "${app_path}/Contents/Resources/AppIcon.icns"
 cp "${repository_root}/config.example.yaml" "${app_path}/Contents/Resources/config.example.yaml"
@@ -103,6 +119,16 @@ if ! architecture_matches "${swift_arch}" || ! architecture_matches "${service_a
   printf 'Architecture mismatch: app=%s service=%s expected=%s\n' "${swift_arch}" "${service_arch}" "${build_arch}" >&2
   exit 1
 fi
+while IFS= read -r -d '' candidate; do
+  if file "${candidate}" | grep -q 'Mach-O'; then
+    candidate_arch="$(lipo -archs "${candidate}")"
+    if ! architecture_matches "${candidate_arch}"; then
+      printf 'Architecture mismatch in bundled component: %s has %s expected %s\n' \
+        "${candidate}" "${candidate_arch}" "${build_arch}" >&2
+      exit 1
+    fi
+  fi
+done < <(find "${app_path}" -type f -print0)
 
 info_plist="${app_path}/Contents/Info.plist"
 plutil -create xml1 "${info_plist}"
@@ -127,6 +153,9 @@ fi
 
 sign_options=(--force --options runtime --sign "${sign_identity}")
 if [[ "${sign_identity}" == "-" ]]; then
+  if [[ "${requested_sign_identity}" == "auto" ]]; then
+    printf 'Warning: no Developer ID Application identity found; using an ad-hoc signature. macOS permissions may be requested again after rebuilding.\n' >&2
+  fi
   sign_options+=(--timestamp=none)
 else
   sign_options+=(--timestamp)

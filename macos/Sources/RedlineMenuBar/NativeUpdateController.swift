@@ -7,7 +7,7 @@ final class NativeUpdateController {
     private let updaterController: SPUStandardUpdaterController?
 
     init(bundle: Bundle = .main) {
-        guard UpdateConfiguration(infoDictionary: bundle.infoDictionary ?? [:]) != nil else {
+        guard UpdateStartupPolicy.shouldStartUpdater(infoDictionary: bundle.infoDictionary ?? [:]) else {
             updaterController = nil
             return
         }

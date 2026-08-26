@@ -6,6 +6,7 @@ final class MenuBarController: NSObject {
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let showAppSetup: @MainActor () -> Void
+    private let installationIssue: @MainActor () -> InstallationIssue?
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
     private let updates: NativeUpdateController
@@ -24,6 +25,7 @@ final class MenuBarController: NSObject {
             reconnectProvider: { [weak self] provider in self?.reconnectProvider(provider) },
             checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
             enableNotifications: { [weak self] in self?.notifications.enable() },
+            showAgentPermissionHelp: { [weak self] in self?.showAgentPermissionHelp() },
             showAppSetup: showAppSetup,
             quit: { NSApplication.shared.terminate(nil) }
         )
@@ -34,11 +36,13 @@ final class MenuBarController: NSObject {
         apiURL: URL,
         apiToken: String,
         supervisor: ServiceSupervisor,
+        installationIssue: @escaping @MainActor () -> InstallationIssue? = { nil },
         showAppSetup: @escaping @MainActor () -> Void = {}
     ) {
         client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
         dashboardURL = APICredentialStore.authenticatedDashboardURL(baseURL: apiURL, token: apiToken)
         self.supervisor = supervisor
+        self.installationIssue = installationIssue
         self.showAppSetup = showAppSetup
         popoverModel = PopoverViewModel(client: client)
         updates = NativeUpdateController()
@@ -86,12 +90,22 @@ final class MenuBarController: NSObject {
         popoverController.showPreviewWindow()
     }
 
+    private func showAgentPermissionHelp() {
+        let alert = NSAlert()
+        alert.messageText = AgentPermissionGuidance.title
+        alert.informativeText = "\(AgentPermissionGuidance.summary)\n\n\(AgentPermissionGuidance.detail)"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     func reconnectAfterServiceMigration() async {
         await supervisor.ensureRunning()
         await refresh()
     }
 
     private func refresh() async {
+        popoverModel.apply(installationIssue: installationIssue())
         do {
             let snapshot = try await client.dashboard()
             popoverModel.apply(snapshot)
@@ -104,14 +118,16 @@ final class MenuBarController: NSObject {
     private func render(_ snapshot: DashboardSnapshot) {
         notifications.observe(snapshot)
         let trayState = TrayState(snapshot: snapshot)
+        let setupIssue = installationIssue()
+        popoverModel.apply(installationIssue: setupIssue)
         guard let button = statusItem.button else { return }
         button.image = GaugeIcon.image(
-            activity: trayState.activity,
+            activity: setupIssue == nil ? trayState.activity : .attention,
             remainingPercent: trayState.lowestWeeklyPercent
         )
         button.attributedTitle = providerSummary(trayState.providerBadges, unreadRuns: snapshot.unreadRuns)
-        button.toolTip = trayState.menuBarTitle
-        button.setAccessibilityLabel("Redline \(trayState.menuBarTitle)")
+        button.toolTip = setupIssue?.title ?? trayState.menuBarTitle
+        button.setAccessibilityLabel(setupIssue.map { "Redline needs attention: \($0.title)" } ?? "Redline \(trayState.menuBarTitle)")
     }
 
     private func renderOffline(_ detail: String) {

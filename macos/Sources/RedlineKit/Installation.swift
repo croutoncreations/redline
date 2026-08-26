@@ -61,11 +61,18 @@ public struct LegacyLaunchAgent: Equatable, Sendable {
     public let label: String
     public let plistURL: URL
     public let configURL: URL
+    public let executableURL: URL?
 
-    public init(label: String, plistURL: URL, configURL: URL) {
+    public init(
+        label: String,
+        plistURL: URL,
+        configURL: URL,
+        executableURL: URL? = nil
+    ) {
         self.label = label
         self.plistURL = plistURL
         self.configURL = configURL
+        self.executableURL = executableURL
     }
 
     public static func discover(at plistURL: URL) throws -> LegacyLaunchAgent? {
@@ -87,7 +94,10 @@ public struct LegacyLaunchAgent: Equatable, Sendable {
         return LegacyLaunchAgent(
             label: label,
             plistURL: plistURL,
-            configURL: URL(fileURLWithPath: configPath)
+            configURL: URL(fileURLWithPath: configPath),
+            executableURL: arguments.first.flatMap {
+                $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil
+            }
         )
     }
 
@@ -101,6 +111,32 @@ public struct LegacyLaunchAgent: Equatable, Sendable {
             }
         }
         return nil
+    }
+}
+
+public struct InstallationIssue: Equatable, Sendable {
+    public let title: String
+    public let detail: String
+    public let actionTitle: String
+
+    public init(title: String, detail: String, actionTitle: String) {
+        self.title = title
+        self.detail = detail
+        self.actionTitle = actionTitle
+    }
+}
+
+public enum InstallationSafety {
+    public static func issue(for legacyAgent: LegacyLaunchAgent?) -> InstallationIssue? {
+        guard let legacyAgent else { return nil }
+        let executableDetail = legacyAgent.executableURL.map {
+            "\n\nConfigured executable: \($0.path)"
+        } ?? ""
+        return InstallationIssue(
+            title: "Legacy background service configured",
+            detail: "Redline found another Redline service owner configured through \(legacyAgent.label). Multiple service owners can repeatedly launch competing or incompatible binaries. Migrate it into the app before continuing unattended operation.\(executableDetail)",
+            actionTitle: "Review service setup…"
+        )
     }
 }
 

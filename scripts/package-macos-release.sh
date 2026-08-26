@@ -30,6 +30,7 @@ if [[ "${allow_unnotarized}" != "1" && ( -z "${sparkle_feed_url}" || -z "${spark
 fi
 
 export REDLINE_BUILD_ARCH="${REDLINE_BUILD_ARCH:-universal}"
+export REDLINE_SIGN_IDENTITY="${sign_identity}"
 "${repository_root}/scripts/build-macos-app.sh"
 
 app_path="${app_output_root}/Redline.app"
