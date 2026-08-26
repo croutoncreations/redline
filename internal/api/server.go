@@ -99,6 +99,61 @@ func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now f
 	return server
 }
 
+// NewDemoServer constructs an API with deterministic in-memory usage and
+// discovery adapters. Unlike NewServer it never instantiates provider clients
+// or host discovery, making demo mode safe for recordings and screenshots.
+func NewDemoServer(
+	cfg config.Config,
+	database *store.DB,
+	now func() time.Time,
+	snapshots map[string]decision.UsageSnapshot,
+	discoverer HarnessDiscoverer,
+	executor Executor,
+) *Server {
+	server := newServer(cfg, database, now, executor, demoRevisionResolver{}, nil)
+	source := staticUsageSource{snapshots: snapshots}
+	server.usageSources = usage.NewManager(source, source, now)
+	server.discovery = discoverer
+	server.hermes = disabledDemoHermes{}
+	for accountID, provider := range cfg.Providers {
+		_, _, _ = server.usageSources.Fetch(context.Background(), accountID, provider)
+	}
+	return server
+}
+
+type staticUsageSource struct {
+	snapshots map[string]decision.UsageSnapshot
+}
+
+type demoRevisionResolver struct{}
+
+func (demoRevisionResolver) Resolve(context.Context, domain.ExecutionProfile) (string, error) {
+	return "demo-revision-current", nil
+}
+
+type disabledDemoHermes struct{}
+
+func (disabledDemoHermes) Discover(context.Context, domain.RuntimeConnection) (hermes.Discovery, error) {
+	return hermes.Discovery{}, fmt.Errorf("hermes discovery is disabled in demo mode")
+}
+func (disabledDemoHermes) ListJobs(context.Context, domain.RuntimeConnection) ([]hermes.Job, error) {
+	return nil, fmt.Errorf("hermes job lookup is disabled in demo mode")
+}
+func (disabledDemoHermes) TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error) {
+	return hermes.Job{}, fmt.Errorf("hermes job execution is disabled in demo mode")
+}
+
+func (staticUsageSource) Name() string { return "demo" }
+func (s staticUsageSource) Fetch(_ context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	for _, snapshot := range s.snapshots {
+		if strings.EqualFold(snapshot.Provider, provider.Provider) {
+			raw, _ := json.Marshal(snapshot)
+			return snapshot, raw, nil
+		}
+	}
+	return decision.UsageSnapshot{}, nil, fmt.Errorf("demo snapshot for %q is unavailable", provider.Provider)
+}
+
 func NewServerWithExecutor(
 	cfg config.Config,
 	database *store.DB,

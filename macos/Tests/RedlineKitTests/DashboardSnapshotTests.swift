@@ -155,6 +155,20 @@ import Testing
     #expect(failing.activity == .attention)
 }
 
+@Test func dashboardSnapshotIdentifiesSyntheticDemoMode() throws {
+	let snapshot = try DashboardSnapshot.decode(Data(#"""
+	{"demo":{"scenario":"overview","synthetic":true},"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[]}
+	"""#.utf8))
+	#expect(snapshot.demo == DemoSummary(scenario: "overview"))
+
+	let production = DashboardSnapshot(
+		health: HealthSummary(status: "healthy", window: "24h", activeRuns: 0, dispatchErrors: 0),
+		scheduler: SchedulerSummary(enabled: true, running: false, nextCycleAt: nil),
+		providers: []
+	)
+	#expect(production.demo == nil)
+}
+
 @Test func trayStateShowsEveryProviderInStableOrder() {
     let snapshot = DashboardSnapshot(
         health: HealthSummary(status: "healthy", window: "24h", activeRuns: 0, dispatchErrors: 0),

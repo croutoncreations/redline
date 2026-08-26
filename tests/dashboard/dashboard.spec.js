@@ -23,6 +23,18 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.demo = { scenario: 'overview', synthetic: true };
+  await loadDashboard(page, { dashboard });
+  await expect(page.locator('#demo-pill')).toContainText('DEMO · overview');
+  await expect(page.locator('body')).toHaveClass(/demo-mode/);
+
+  await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), { ...dashboard, demo: undefined });
+  await expect(page.locator('#demo-pill')).toBeHidden();
+  await expect(page.locator('body')).not.toHaveClass(/demo-mode/);
+});
+
 test('sizes weekly usage bars to the displayed remaining percentage', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot.weekly.remaining = .98;

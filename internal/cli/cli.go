@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/config"
 	"github.com/jfox/redline/internal/decision"
+	"github.com/jfox/redline/internal/demo"
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/mcpserver"
@@ -59,13 +61,15 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|pause|resume>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|pause|resume>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
+	case "demo":
+		return runDemo(remaining[1:], stdout, stderr, now)
 	case "mcp":
 		return runMCP(client, remaining[1:], stderr)
 	case "health":
@@ -107,11 +111,137 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "commands: serve, mcp, health, decision, status, calibration, capacity, metrics, token,")
+	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, pause, resume")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
+}
+
+func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	if len(args) == 1 && args[0] == "list" {
+		fmt.Fprintln(stdout, "Available Redline demo scenarios:")
+		for _, scenario := range demo.Scenarios() {
+			fmt.Fprintf(stdout, "  %-10s %s\n", scenario.Name, scenario.Description)
+		}
+		return 0
+	}
+	if len(args) == 0 || args[0] != "serve" {
+		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open]")
+		return 1
+	}
+	flags := flag.NewFlagSet("demo serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	scenario := flags.String("scenario", "overview", "named fixture scenario")
+	listen := flags.String("listen", "127.0.0.1:7446", "loopback listen address")
+	stateDir := flags.String("state-dir", "", "new or empty isolated state directory")
+	keep := flags.Bool("keep", false, "preserve temporary demo state after exit")
+	openDashboard := flags.Bool("open", false, "open the demo dashboard in the default browser")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if err := validateDemoListen(*listen); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer listener.Close()
+	root, temporary, err := prepareDemoState(*stateDir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if temporary && !*keep {
+		defer os.RemoveAll(root)
+	}
+	env, err := demo.Create(context.Background(), *scenario, root, now())
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer env.Close()
+	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
+		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	server := &http.Server{Addr: *listen, Handler: apiServer, ReadHeaderTimeout: 5 * time.Second}
+	address := "http://" + listener.Addr().String()
+	fmt.Fprintf(stdout, "Redline demo (%s) listening on %s\n", *scenario, address)
+	fmt.Fprintf(stdout, "Synthetic state: %s\n", root)
+	fmt.Fprintln(stdout, "This process does not read real Redline data or invoke provider harnesses.")
+	if *openDashboard {
+		if err := exec.Command("open", address).Start(); err != nil {
+			fmt.Fprintf(stderr, "open dashboard: %v\n", err)
+		}
+	}
+	errors := make(chan error, 1)
+	go func() { errors <- server.Serve(listener) }()
+	select {
+	case err := <-errors:
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdown); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+	apiServer.Wait()
+	return 0
+}
+
+func validateDemoListen(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid demo listen address: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("demo mode only listens on an explicit loopback IP")
+	}
+	if port == "7436" {
+		return fmt.Errorf("demo mode refuses Redline's production port 7436")
+	}
+	return nil
+}
+
+func prepareDemoState(requested string) (string, bool, error) {
+	if requested == "" {
+		root, err := os.MkdirTemp("", "redline-demo-")
+		return root, true, err
+	}
+	root, err := filepath.Abs(requested)
+	if err != nil {
+		return "", false, err
+	}
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+		production := filepath.Join(home, "Library", "Application Support", "Redline")
+		if root == production {
+			return "", false, fmt.Errorf("demo state cannot use Redline's production state directory")
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return "", false, err
+		}
+		return root, false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if len(entries) != 0 {
+		return "", false, fmt.Errorf("demo state directory must be empty: %s", root)
+	}
+	return root, false, nil
 }
 
 func runMetrics(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
