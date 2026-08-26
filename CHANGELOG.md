@@ -6,8 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-26
+
 ### Added
 
+- Added auditable launch metrics for completed-job allowance, capacity reclaimed before expiry,
+  scheduler WAIT frequency, and reserve behavior through the API and CLI.
+- The macOS app now explains agent-driven folder permission prompts and detects a stale legacy
+  LaunchAgent before it can compete with the app-owned service.
+- Local macOS builds automatically use an available Developer ID Application identity, and ARM64
+  packaging validates every bundled executable and library slice.
 - Added a concise end-user getting-started guide, troubleshooting guide, agent-assisted install
   path, release-note template, and attributed links to Crouton Creations tools and builder updates
   from the README and embedded dashboard.
