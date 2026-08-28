@@ -232,6 +232,19 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
   await expect(page.locator('#profile-form-error')).toContainText('profile is assigned to a task');
 });
 
+test('top-aligns harness and model controls in the profile editor', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await page.locator('[data-profile="codex-devx"]').click();
+
+  const harness = await page.locator('#profile-harness').boundingBox();
+  const model = await page.locator('#profile-model-choice').boundingBox();
+  expect(harness).not.toBeNull();
+  expect(model).not.toBeNull();
+  expect(Math.abs(harness.y - model.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(harness.height - model.height)).toBeLessThanOrEqual(1);
+});
+
 test('imports Hermes Desktop and creates a remote profile from discovered context', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();
