@@ -383,7 +383,7 @@ struct StatusPopoverView: View {
                             .foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(task.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            Text("\(task.providerAccountID) · \(task.dispatchTier.replacingOccurrences(of: "_", with: " "))")
+                            Text("\(task.providerAccountID) · \(dispatchTierLabel(task.dispatchTier))")
                                 .font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -580,6 +580,19 @@ struct StatusPopoverView: View {
         case "claude": 1
         default: 2
         }
+    }
+}
+
+func dispatchTierLabel(_ tier: String) -> String {
+    switch tier {
+    case "behind":
+        return "standard surplus"
+    case "well_behind":
+        return "high surplus"
+    case "expiring":
+        return "near expiry"
+    default:
+        return tier.replacingOccurrences(of: "_", with: " ")
     }
 }
 

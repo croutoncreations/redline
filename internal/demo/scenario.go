@@ -257,10 +257,10 @@ func seed(ctx context.Context, env *Environment, scenario, provider string, now 
 			return err
 		}
 	}
-	if err := completedRun(ctx, env.Database, "demo-run-release", "release-notes", "claude-main", now.Add(-90*time.Minute), now.Add(-82*time.Minute), "Drafted concise release notes for the upcoming version.", nil); err != nil {
+	if err := completedRun(ctx, env, "demo-run-release", "release-notes", "claude-main", now.Add(-90*time.Minute), now.Add(-82*time.Minute), "Drafted concise release notes for the upcoming version.", nil); err != nil {
 		return err
 	}
-	if err := completedRun(ctx, env.Database, "demo-run-bug", "bug-hunt", "codex-main", now.Add(-26*time.Hour), now.Add(-25*time.Hour-42*time.Minute), "Fixed a race in cache refresh and opened a draft pull request.", []domain.RunArtifact{{Type: "pull_request", Label: "Draft pull request", URL: "https://example.com/pull/142"}}); err != nil {
+	if err := completedRun(ctx, env, "demo-run-bug", "bug-hunt", "codex-main", now.Add(-26*time.Hour), now.Add(-25*time.Hour-42*time.Minute), "Fixed a race in cache refresh and opened a draft pull request.", []domain.RunArtifact{{Type: "pull_request", Label: "Draft pull request", URL: "https://example.com/pull/142"}}); err != nil {
 		return err
 	}
 	switch scenario {
@@ -344,16 +344,44 @@ func demoDecisionReason(scenario, provider string, snapshot decision.UsageSnapsh
 	return fmt.Sprintf("%.0f%% capacity surplus versus time remaining; above the configured trigger", result.PaceGap*100)
 }
 
-func completedRun(ctx context.Context, db *store.DB, id, task, provider string, started, completed time.Time, summary string, artifacts []domain.RunArtifact) error {
-	run, err := db.AdmitTask(ctx, id, task, provider, "demo-revision-1", started)
+func completedRun(ctx context.Context, env *Environment, id, task, provider string, started, completed time.Time, summary string, artifacts []domain.RunArtifact) error {
+	run, err := env.Database.AdmitTask(ctx, id, task, provider, "demo-revision-1", started)
 	if err != nil {
 		return err
 	}
 	workspace := domain.Workspace{Directory: "/Demo/Atlas/.worktrees/" + task, Branch: "redline/" + task}
-	if err := db.MarkRunRunning(ctx, run.ID, workspace); err != nil {
+	if err := env.Database.MarkRunRunning(ctx, run.ID, workspace); err != nil {
 		return err
 	}
-	return db.CompleteRun(ctx, run.ID, domain.RunCompletion{State: domain.RunCompleted, ExitCode: 0, Summary: summary, Outcome: "completed", Artifacts: artifacts, ActualProvider: providerName(provider), ActualModel: demoModel(provider)}, completed)
+	outputDirectory := filepath.Join(env.Config.RunArtifactsDir, id)
+	if err := os.MkdirAll(outputDirectory, 0o700); err != nil {
+		return err
+	}
+	message := summary
+	result := "Verified the requested outcome and left one reviewable change."
+	if task == "bug-hunt" {
+		message = "Reproduced a concurrent cache refresh race, added a focused regression test, and opened draft PR #142."
+		result = "Tests passed: go test ./internal/cache\nDraft PR: https://example.com/pull/142"
+	}
+	events := []map[string]any{
+		{"type": "thread.started", "thread_id": "demo-" + task},
+		{"type": "item.completed", "item": map[string]any{"type": "agent_message", "text": message}},
+		{"type": "result", "subtype": "success", "result": result},
+	}
+	var output strings.Builder
+	for _, event := range events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		output.Write(encoded)
+		output.WriteByte('\n')
+	}
+	outputFile := filepath.Join(outputDirectory, "stdout.jsonl")
+	if err := os.WriteFile(outputFile, []byte(output.String()), 0o600); err != nil {
+		return err
+	}
+	return env.Database.CompleteRun(ctx, run.ID, domain.RunCompletion{State: domain.RunCompleted, ExitCode: 0, OutputFile: outputFile, Summary: summary, Outcome: "completed", Artifacts: artifacts, ActualProvider: providerName(provider), ActualModel: demoModel(provider)}, completed)
 }
 
 func providerName(id string) string {

@@ -3,6 +3,8 @@ package demo_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -100,11 +102,29 @@ func TestOverviewCreatesIsolatedSyntheticState(t *testing.T) {
 	if err != nil || len(runs) < 2 {
 		t.Fatalf("runs=%#v err=%v", runs, err)
 	}
+	completedOutputs := 0
 	for _, run := range runs {
 		encoded := run.Summary + run.OutputFile + run.Workspace.Directory
 		if strings.Contains(encoded, "/Users/jfox") || strings.Contains(encoded, "croutoncreations") {
 			t.Fatalf("demo leaked owner-specific data: %q", encoded)
 		}
+		if run.State == "completed" {
+			completedOutputs++
+			if run.OutputFile == "" {
+				t.Fatalf("completed demo run %s has no output artifact", run.ID)
+			}
+			relative, err := filepath.Rel(env.Config.RunArtifactsDir, run.OutputFile)
+			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				t.Fatalf("output artifact escaped demo root: %q", run.OutputFile)
+			}
+			content, err := os.ReadFile(run.OutputFile)
+			if err != nil || !strings.Contains(string(content), `"type":"result"`) {
+				t.Fatalf("output artifact %q is not readable formatted demo output: %q err=%v", run.OutputFile, content, err)
+			}
+		}
+	}
+	if completedOutputs < 2 {
+		t.Fatalf("completed demo outputs = %d, want at least 2", completedOutputs)
 	}
 	for _, provider := range []string{"claude-main", "codex-main"} {
 		decisions, err := env.Database.ListSchedulerDecisions(context.Background(), provider, 10)
