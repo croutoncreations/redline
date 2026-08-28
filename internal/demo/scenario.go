@@ -91,6 +91,10 @@ func Scenarios() []Scenario {
 		{"running", "A job actively running with recent completed work"},
 		{"attention", "A failed job requiring user attention"},
 		{"empty", "Configured providers before the first job is added"},
+		{"decision-wait", "One bounded task waiting because no actionable capacity surplus is available"},
+		{"decision-run", "The same task admitted because capacity surplus exceeds the pace trigger"},
+		{"decision-run-near-expiry", "The same task admitted shortly before a weekly reset with capacity still unused"},
+		{"decision-unknown", "The same task held because its synthetic usage sample is stale"},
 	}
 }
 
@@ -109,25 +113,38 @@ func (e *Environment) Close() error {
 }
 
 func Create(ctx context.Context, scenario, root string, now time.Time) (*Environment, error) {
+	return CreateForProvider(ctx, scenario, "claude-main", root, now)
+}
+
+func CreateForProvider(ctx context.Context, scenario, provider, root string, now time.Time) (*Environment, error) {
 	if !knownScenario(scenario) {
 		return nil, fmt.Errorf("unknown demo scenario %q", scenario)
+	}
+	if isDecisionScenario(scenario) && provider != "claude-main" && provider != "codex-main" {
+		return nil, fmt.Errorf("unknown demo provider %q", provider)
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create demo state: %w", err)
 	}
 	now = now.UTC()
-	cfg := fixtureConfig(root, scenario)
+	cfg := fixtureConfig(root, scenario, provider)
 	database, err := store.Open(cfg.Database)
 	if err != nil {
 		return nil, err
 	}
-	env := &Environment{Root: root, Config: cfg, Database: database, Snapshots: fixtureSnapshots(now)}
-	if err := seed(ctx, env, scenario, now); err != nil {
+	snapshots := fixtureSnapshots(now)
+	if isDecisionScenario(scenario) {
+		snapshots = decisionFixtureSnapshots(scenario, provider, now)
+	}
+	env := &Environment{Root: root, Config: cfg, Database: database, Snapshots: snapshots}
+	if err := seed(ctx, env, scenario, provider, now); err != nil {
 		database.Close()
 		return nil, err
 	}
 	return env, nil
 }
+
+func isDecisionScenario(name string) bool { return strings.HasPrefix(name, "decision-") }
 
 func knownScenario(name string) bool {
 	for _, scenario := range Scenarios() {
@@ -138,11 +155,16 @@ func knownScenario(name string) bool {
 	return false
 }
 
-func fixtureConfig(root, scenario string) config.Config {
+func fixtureConfig(root, scenario, provider string) config.Config {
 	pace := 0.08
+	label := scenario
+	if isDecisionScenario(scenario) {
+		pace = 0.30
+		label += " · " + strings.TrimSuffix(provider, "-main")
+	}
 	return config.Config{
 		Database: filepath.Join(root, "redline-demo.db"), RunArtifactsDir: filepath.Join(root, "runs"),
-		ActivePolicy: "standard", MaxSnapshotAge: "24h", DemoScenario: scenario,
+		ActivePolicy: "standard", MaxSnapshotAge: "15m", DemoScenario: label,
 		Scheduler:    config.Scheduler{Enabled: true, PollInterval: "5m"},
 		UsageMonitor: config.UsageMonitor{Enabled: false},
 		Providers: map[string]config.Provider{
@@ -153,6 +175,33 @@ func fixtureConfig(root, scenario string) config.Config {
 			"standard": {TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: &pace},
 		},
 	}
+}
+
+func decisionFixtureSnapshots(scenario, provider string, now time.Time) map[string]decision.UsageSnapshot {
+	weeklyRemaining, weeklyReset := .30, now.Add(4*24*time.Hour)
+	shortRemaining, shortReset := .70, now.Add(2*time.Hour)
+	switch scenario {
+	case "decision-run":
+		weeklyRemaining, weeklyReset = .72, now.Add(2*24*time.Hour)
+		shortRemaining = .80
+	case "decision-run-near-expiry":
+		weeklyRemaining, weeklyReset = .40, now.Add(6*time.Hour)
+		shortRemaining = .80
+	}
+	observedAt := now
+	if scenario == "decision-unknown" {
+		observedAt = now.Add(-20 * time.Minute)
+	}
+	target := decision.UsageSnapshot{
+		Provider: strings.TrimSuffix(provider, "-main"), ObservedAt: observedAt, Source: "demo", Confidence: "synthetic",
+		Weekly: decision.UsageWindow{Remaining: weeklyRemaining, ResetsAt: weeklyReset},
+	}
+	if provider == "claude-main" {
+		target.Short = &decision.UsageWindow{Remaining: shortRemaining, ResetsAt: shortReset}
+	}
+	result := fixtureSnapshots(now)
+	result[provider] = target
+	return result
 }
 
 func fixtureSnapshots(now time.Time) map[string]decision.UsageSnapshot {
@@ -172,12 +221,15 @@ func fixtureSnapshots(now time.Time) map[string]decision.UsageSnapshot {
 	}
 }
 
-func seed(ctx context.Context, env *Environment, scenario string, now time.Time) error {
+func seed(ctx context.Context, env *Environment, scenario, provider string, now time.Time) error {
 	for _, snapshot := range env.Snapshots {
 		raw, _ := json.Marshal(snapshot)
 		if err := env.Database.SaveSnapshot(ctx, snapshot, raw); err != nil {
 			return err
 		}
+	}
+	if isDecisionScenario(scenario) {
+		return seedDecisionScenario(ctx, env, scenario, provider, now)
 	}
 	if err := seedDecisions(ctx, env.Database, now); err != nil {
 		return err
@@ -186,8 +238,8 @@ func seed(ctx context.Context, env *Environment, scenario string, now time.Time)
 		return nil
 	}
 	profiles := []domain.ExecutionProfile{
-		{ID: "codex-demo", ProviderAccountID: "codex-main", HarnessType: "codex-cli", Model: "gpt-5.6", WorkspaceProvider: "git-worktree", Repository: "/Users/demo/Projects/Atlas", BaseBranch: "main", RequireClean: true},
-		{ID: "claude-demo", ProviderAccountID: "claude-main", HarnessType: "claude-code", Model: "claude-opus-4.8", WorkspaceProvider: "git-worktree", Repository: "/Users/demo/Projects/Atlas", BaseBranch: "main", RequireClean: true},
+		{ID: "codex-demo", ProviderAccountID: "codex-main", HarnessType: "codex-cli", Model: "gpt-5.6", WorkspaceProvider: "git-worktree", Repository: "/Demo/Atlas", BaseBranch: "main", RequireClean: true},
+		{ID: "claude-demo", ProviderAccountID: "claude-main", HarnessType: "claude-code", Model: "claude-opus-4.8", WorkspaceProvider: "git-worktree", Repository: "/Demo/Atlas", BaseBranch: "main", RequireClean: true},
 	}
 	for _, profile := range profiles {
 		if err := env.Database.CreateProfile(ctx, profile, now.Add(-14*24*time.Hour)); err != nil {
@@ -217,13 +269,13 @@ func seed(ctx context.Context, env *Environment, scenario string, now time.Time)
 		if err != nil {
 			return err
 		}
-		return env.Database.MarkRunRunning(ctx, run.ID, domain.Workspace{Directory: "/Users/demo/Projects/Atlas/.worktrees/test-coverage", Branch: "redline/test-coverage"})
+		return env.Database.MarkRunRunning(ctx, run.ID, domain.Workspace{Directory: "/Demo/Atlas/.worktrees/test-coverage", Branch: "redline/test-coverage"})
 	case "attention":
 		run, err := env.Database.AdmitTask(ctx, "demo-run-failed", "test-coverage", "claude-main", "demo-revision-3", now.Add(-12*time.Minute))
 		if err != nil {
 			return err
 		}
-		if err := env.Database.MarkRunRunning(ctx, run.ID, domain.Workspace{Directory: "/Users/demo/Projects/Atlas/.worktrees/test-coverage"}); err != nil {
+		if err := env.Database.MarkRunRunning(ctx, run.ID, domain.Workspace{Directory: "/Demo/Atlas/.worktrees/test-coverage"}); err != nil {
 			return err
 		}
 		return env.Database.CompleteRun(ctx, run.ID, domain.RunCompletion{State: domain.RunFailed, ExitCode: 1, Error: "Claude Code is signed out. Reconnect the provider, then retry this job.", Summary: "The agent could not start because its demo credentials need attention.", ActualProvider: "claude", ActualModel: "claude-opus-4.8"}, now.Add(-10*time.Minute))
@@ -231,12 +283,73 @@ func seed(ctx context.Context, env *Environment, scenario string, now time.Time)
 	return nil
 }
 
+func seedDecisionScenario(ctx context.Context, env *Environment, scenario, provider string, now time.Time) error {
+	profileID, harness, model := "claude-decision-demo", "claude-code", "claude-opus-4.8"
+	if provider == "codex-main" {
+		profileID, harness, model = "codex-decision-demo", "codex-cli", "gpt-5.6"
+	}
+	profile := domain.ExecutionProfile{ID: profileID, ProviderAccountID: provider, HarnessType: harness, Model: model,
+		WorkspaceProvider: "git-worktree", Repository: "/Demo/Atlas", BaseBranch: "main", RequireClean: true}
+	if err := env.Database.CreateProfile(ctx, profile, now.Add(-24*time.Hour)); err != nil {
+		return err
+	}
+	task := domain.Task{ID: "demo-decision-task", Name: "Find and fix one real bug",
+		Prompt:   "Find, reproduce, and fix one meaningful bug. Add a regression test and open a draft pull request.",
+		Priority: 90, ExecutionProfileID: profileID, Type: domain.Recurring, DispatchTier: domain.DispatchBehind, MinInterval: 48 * time.Hour}
+	if err := env.Database.CreateTask(ctx, task, now.Add(-24*time.Hour)); err != nil {
+		return err
+	}
+	policy := env.Config.Policies["standard"]
+	result := decision.Evaluate(decision.Input{
+		Snapshot: env.Snapshots[provider], WindowWeeklyCost: env.Config.Providers[provider].WindowWeeklyCost,
+		WindowWeeklyCostSource: "demo", CalibrationConfidence: "synthetic",
+		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, PaceGapTrigger: policy.PaceGapTrigger,
+		Now: now, MaxSnapshotAge: 15 * time.Minute,
+	})
+	result.Policy = "standard"
+	payload, _ := json.Marshal(map[string]any{"snapshot": env.Snapshots[provider], "result": result})
+	selectedTask := ""
+	outcome := domain.DispatchWait
+	if result.Decision == decision.Admit {
+		selectedTask = task.ID
+		outcome = domain.DispatchNoTask
+	}
+	if _, err := env.Database.RecordSchedulerDecision(ctx, domain.SchedulerDecision{
+		ProviderAccountID: provider, SelectedTaskID: selectedTask, DecisionJSON: payload,
+	}, now.Add(-30*time.Second)); err != nil {
+		return err
+	}
+	_, err := env.Database.RecordDispatchAttempt(ctx, domain.DispatchAttempt{
+		ProviderAccountID: provider, Trigger: "demo", Outcome: outcome, Decision: string(result.Decision),
+		Mode: string(result.Mode), Reason: demoDecisionReason(scenario, provider, env.Snapshots[provider], result, policy.RollingReserve), SelectedTaskID: selectedTask,
+		StartedAt: now.Add(-30 * time.Second), CompletedAt: now.Add(-29 * time.Second),
+	})
+	return err
+}
+
+func demoDecisionReason(scenario, provider string, snapshot decision.UsageSnapshot, result decision.Result, reserve float64) string {
+	if result.Decision == decision.Unknown {
+		return "Usage sample is stale; waiting for fresh evidence"
+	}
+	if result.Decision == decision.Wait {
+		return "No actionable capacity surplus yet"
+	}
+	weekly := fmt.Sprintf("%.0f%% weekly remains", snapshot.Weekly.Remaining*100)
+	if scenario == "decision-run-near-expiry" {
+		if provider == "claude-main" {
+			return fmt.Sprintf("Resets in 6 hours; %s; %.0f%% of the current 5-hour window held in reserve; remaining throughput cannot consume the surplus", weekly, reserve*100)
+		}
+		return fmt.Sprintf("Resets in 6 hours; %s; no current 5-hour limit; %.0f%% capacity surplus", weekly, result.PaceGap*100)
+	}
+	return fmt.Sprintf("%.0f%% capacity surplus versus time remaining; above the configured trigger", result.PaceGap*100)
+}
+
 func completedRun(ctx context.Context, db *store.DB, id, task, provider string, started, completed time.Time, summary string, artifacts []domain.RunArtifact) error {
 	run, err := db.AdmitTask(ctx, id, task, provider, "demo-revision-1", started)
 	if err != nil {
 		return err
 	}
-	workspace := domain.Workspace{Directory: "/Users/demo/Projects/Atlas/.worktrees/" + task, Branch: "redline/" + task}
+	workspace := domain.Workspace{Directory: "/Demo/Atlas/.worktrees/" + task, Branch: "redline/" + task}
 	if err := db.MarkRunRunning(ctx, run.ID, workspace); err != nil {
 		return err
 	}

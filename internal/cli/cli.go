@@ -127,12 +127,13 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open]")
+		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--provider claude-main|codex-main] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open]")
 		return 1
 	}
 	flags := flag.NewFlagSet("demo serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	scenario := flags.String("scenario", "overview", "named fixture scenario")
+	provider := flags.String("provider", "claude-main", "provider for decision scenarios")
 	listen := flags.String("listen", "127.0.0.1:7446", "loopback listen address")
 	stateDir := flags.String("state-dir", "", "new or empty isolated state directory")
 	keep := flags.Bool("keep", false, "preserve temporary demo state after exit")
@@ -158,7 +159,7 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	if temporary && !*keep {
 		defer os.RemoveAll(root)
 	}
-	env, err := demo.Create(context.Background(), *scenario, root, now())
+	env, err := demo.CreateForProvider(context.Background(), *scenario, *provider, root, now())
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

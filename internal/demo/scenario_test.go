@@ -2,15 +2,17 @@ package demo_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jfox/redline/internal/decision"
 	"github.com/jfox/redline/internal/demo"
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {
-	want := []string{"overview", "running", "attention", "empty"}
+	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown"}
 	got := demo.Scenarios()
 	if len(got) != len(want) {
 		t.Fatalf("scenarios = %#v", got)
@@ -19,6 +21,63 @@ func TestScenariosAreStableAndDocumented(t *testing.T) {
 		if got[i].Name != name || got[i].Description == "" {
 			t.Fatalf("scenario[%d] = %#v", i, got[i])
 		}
+	}
+}
+
+func TestDecisionScenariosUseProductionEvaluationForEachProvider(t *testing.T) {
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		scenario string
+		provider string
+		want     decision.Decision
+		mode     decision.Mode
+		short    bool
+	}{
+		{"decision-wait", "claude-main", decision.Wait, decision.ModeSlots, true},
+		{"decision-run", "claude-main", decision.Admit, decision.ModeSlots, true},
+		{"decision-run-near-expiry", "claude-main", decision.Admit, decision.ModeSlots, true},
+		{"decision-unknown", "claude-main", decision.Unknown, "", true},
+		{"decision-wait", "codex-main", decision.Wait, decision.ModePace, false},
+		{"decision-run", "codex-main", decision.Admit, decision.ModePace, false},
+		{"decision-run-near-expiry", "codex-main", decision.Admit, decision.ModePace, false},
+		{"decision-unknown", "codex-main", decision.Unknown, "", false},
+	} {
+		t.Run(tc.scenario+"/"+tc.provider, func(t *testing.T) {
+			env, err := demo.CreateForProvider(t.Context(), tc.scenario, tc.provider, t.TempDir(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer env.Close()
+
+			snapshot := env.Snapshots[tc.provider]
+			if (snapshot.Short != nil) != tc.short {
+				t.Fatalf("short window present = %v, want %v", snapshot.Short != nil, tc.short)
+			}
+			decisions, err := env.Database.ListSchedulerDecisions(t.Context(), tc.provider, 1)
+			if err != nil || len(decisions) != 1 {
+				t.Fatalf("decisions=%#v err=%v", decisions, err)
+			}
+			var payload struct {
+				Result decision.Result `json:"result"`
+			}
+			if err := json.Unmarshal(decisions[0].DecisionJSON, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Result.Decision != tc.want || payload.Result.Mode != tc.mode {
+				t.Fatalf("result=%#v want decision=%s mode=%s", payload.Result, tc.want, tc.mode)
+			}
+			tasks, err := env.Database.ListTasks(t.Context())
+			if err != nil || len(tasks) != 1 || tasks[0].ID != "demo-decision-task" || tasks[0].Name != "Find and fix one real bug" {
+				t.Fatalf("tasks=%#v err=%v", tasks, err)
+			}
+		})
+	}
+}
+
+func TestDecisionScenarioRejectsUnknownProvider(t *testing.T) {
+	_, err := demo.CreateForProvider(t.Context(), "decision-run", "other", t.TempDir(), time.Now())
+	if err == nil || !strings.Contains(err.Error(), "unknown demo provider") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
