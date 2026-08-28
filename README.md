@@ -13,10 +13,84 @@ generic-command tasks unattended.
 Requires macOS 13 or later. Release builds are signed, notarized, and Universal for Apple Silicon
 and Intel Macs.
 
+<p align="center">
+  <img src="docs/assets/launch/redline-overview-near-expiry-dark.png" width="900" alt="Redline dashboard showing allowance near expiry, an explained RUN decision, and queued work">
+</p>
+<p align="center"><sub>Near-expiry demo: Redline holds the configured reserve, explains the surplus, and admits deferred work.</sub></p>
+
 > **Stay in the loop.** Redline is built by
 > [Crouton Creations](https://www.croutoncreations.com/?utm_source=redline&utm_medium=github&utm_campaign=redline).
 > [Get new open-source tools and practical builder notes](https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=github&utm_campaign=redline)
 > when they ship.
+
+## See Redline at work
+
+These screenshots use Redline's isolated synthetic demo fixtures. They contain no personal
+repositories, filesystem paths, credentials, or live allowance data.
+
+<table>
+  <tr>
+    <td width="35%" align="center"><strong>Native quick panel</strong></td>
+    <td width="65%" align="center"><strong>Active work</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/launch/redline-native-quick-panel-running.png" width="300" alt="Native Redline quick panel showing provider allowance, one running job, queue, and recent work"></td>
+    <td><img src="docs/assets/launch/redline-active-work-dark.png" alt="Redline dashboard showing a running job and recently completed work"></td>
+  </tr>
+</table>
+
+### Review what finished
+
+Completed runs retain a concise result, delivery artifacts, and bounded formatted output so useful
+work does not disappear just because it ran unattended.
+
+<p align="center">
+  <img src="docs/assets/launch/redline-completed-run-detail-dark.png" width="900" alt="Completed Redline run with result summary, test evidence, formatted output, and a draft pull request link">
+</p>
+
+### Configure jobs and execution environments
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>Job configuration</strong></td>
+    <td width="50%" align="center"><strong>Execution environment</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/launch/redline-job-configuration-dark.png" alt="Redline job editor with task prompt, provider, priority, recurrence, and dispatch tier"></td>
+    <td><img src="docs/assets/launch/redline-environment-configuration-dark.png" alt="Redline execution profile editor with harness, model, repository, workspace isolation, and lifecycle settings"></td>
+  </tr>
+</table>
+
+### Understand every admission decision
+
+Redline records why each provider chose `WAIT`, `RUN`, or fail-closed `UNKNOWN`. Near-expiry is a
+specific `RUN` case: unused allowance is approaching reset while the configured reserve remains held.
+
+<details>
+<summary><strong>Claude Code decision gallery</strong></summary>
+
+| WAIT | RUN |
+|---|---|
+| ![Claude WAIT decision](docs/assets/launch/claude-wait-dark.png) | ![Claude RUN decision](docs/assets/launch/claude-run-dark.png) |
+
+| Near expiry | UNKNOWN |
+|---|---|
+| ![Claude near-expiry RUN decision](docs/assets/launch/claude-near-expiry-dark.png) | ![Claude UNKNOWN decision caused by stale telemetry](docs/assets/launch/claude-unknown-dark.png) |
+
+</details>
+
+<details>
+<summary><strong>Codex decision gallery</strong></summary>
+
+| WAIT | RUN |
+|---|---|
+| ![Codex WAIT decision](docs/assets/launch/codex-wait-dark.png) | ![Codex RUN decision](docs/assets/launch/codex-run-dark.png) |
+
+| Near expiry | UNKNOWN |
+|---|---|
+| ![Codex near-expiry RUN decision](docs/assets/launch/codex-near-expiry-dark.png) | ![Codex UNKNOWN decision caused by stale telemetry](docs/assets/launch/codex-unknown-dark.png) |
+
+</details>
 
 ## Architecture
 
