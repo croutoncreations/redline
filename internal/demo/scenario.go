@@ -375,8 +375,8 @@ func seedDecisions(ctx context.Context, db *store.DB, now time.Time) error {
 		result   decision.Result
 		at       time.Time
 	}{
-		{"claude-main", decision.Result{Decision: decision.Admit, Policy: "standard", Mode: decision.ModePace, Reason: "weekly usage is 14% behind the target pace", PaceGap: .14, UnlockedTier: domain.DispatchWellBehind}, now.Add(-2 * time.Minute)},
-		{"codex-main", decision.Result{Decision: decision.Wait, Policy: "standard", Mode: decision.ModePace, Reason: "usage is on pace; more headroom is needed before dispatch", PaceGap: .03, UnlockedTier: domain.DispatchBehind}, now.Add(-3 * time.Minute)},
+		{"claude-main", decision.Result{Decision: decision.Admit, Policy: "standard", Mode: decision.ModePace, Reason: "14% weekly capacity surplus; high-surplus tasks are eligible", PaceGap: .14, UnlockedTier: domain.DispatchWellBehind}, now.Add(-2 * time.Minute)},
+		{"codex-main", decision.Result{Decision: decision.Wait, Policy: "standard", Mode: decision.ModePace, Reason: "3% weekly capacity surplus; below the standard dispatch threshold", PaceGap: .03, UnlockedTier: domain.DispatchBehind}, now.Add(-3 * time.Minute)},
 	}
 	for _, item := range items {
 		payload, _ := json.Marshal(map[string]any{"snapshot": fixtureSnapshots(now)[item.provider], "result": item.result})

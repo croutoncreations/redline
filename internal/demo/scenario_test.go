@@ -106,6 +106,15 @@ func TestOverviewCreatesIsolatedSyntheticState(t *testing.T) {
 			t.Fatalf("demo leaked owner-specific data: %q", encoded)
 		}
 	}
+	for _, provider := range []string{"claude-main", "codex-main"} {
+		decisions, err := env.Database.ListSchedulerDecisions(context.Background(), provider, 10)
+		if err != nil || len(decisions) != 1 {
+			t.Fatalf("%s decisions=%#v err=%v", provider, decisions, err)
+		}
+		if strings.Contains(strings.ToLower(string(decisions[0].DecisionJSON)), "behind pace") || strings.Contains(strings.ToLower(string(decisions[0].DecisionJSON)), "behind the target") {
+			t.Fatalf("demo decision uses inverted pace wording: %s", decisions[0].DecisionJSON)
+		}
+	}
 }
 
 func TestScenarioRunStates(t *testing.T) {
