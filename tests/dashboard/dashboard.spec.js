@@ -16,6 +16,7 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Native');
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('OpenUsage unavailable');
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Fable · reset inferred');
+  await expect(page.locator('#tasks-body')).toContainText('High surplus');
   await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), { ...state.dashboard, tasks: [], runs: [], attempts: [], health: { ...state.dashboard.health, status: 'ok', dispatch_errors: 0 } });
   await expect(page.getByText('No jobs are queued yet.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'healthy' })).toBeVisible();
@@ -69,7 +70,20 @@ test('describes high scheduling pressure without implying the subscription expir
   await expect(claude).not.toContainText('Redline · Expiring');
   await claude.click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
-    .toContainText('All job tiers are eligible because weekly allowance is at risk of expiring unused.');
+    .toContainText('25% of the current 5-hour window is protected');
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail'))
+    .not.toContainText('behind pace');
+});
+
+test('uses surplus-first wording for pace waits', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[1].latest_decision = {
+    decision: 'WAIT', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .06,
+  };
+  await loadDashboard(page, { dashboard });
+  const codex = page.getByRole('button', { name: 'Show Codex usage details' });
+  await expect(codex).toContainText('6% capacity surplus');
+  await expect(codex).not.toContainText('behind pace');
 });
 
 test('does not present a stale usage percentage as current', async ({ page }) => {
@@ -216,6 +230,19 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
   page.once('dialog', confirmation => confirmation.accept());
   await page.getByRole('button', { name: 'Delete' }).click();
   await expect(page.locator('#profile-form-error')).toContainText('profile is assigned to a task');
+});
+
+test('top-aligns harness and model controls in the profile editor', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await page.locator('[data-profile="codex-devx"]').click();
+
+  const harness = await page.locator('#profile-harness').boundingBox();
+  const model = await page.locator('#profile-model-choice').boundingBox();
+  expect(harness).not.toBeNull();
+  expect(model).not.toBeNull();
+  expect(Math.abs(harness.y - model.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(harness.height - model.height)).toBeLessThanOrEqual(1);
 });
 
 test('imports Hermes Desktop and creates a remote profile from discovered context', async ({ page }) => {

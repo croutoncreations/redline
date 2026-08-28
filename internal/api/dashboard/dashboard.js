@@ -14,6 +14,7 @@ const duration = (nanos) => {
   return hours >= 1 ? `${Math.round(hours)}h minimum` : `${Math.round(nanos/6e10)}m minimum`;
 };
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+const dispatchTierLabel = (value) => ({behind:'Standard surplus',well_behind:'High surplus',expiring:'Near expiry'}[value] || title(value));
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 const tokenNumber = (value) => new Intl.NumberFormat().format(value || 0);
@@ -57,13 +58,30 @@ function providerPressure(item) {
   };
   const current = item.latest_decision;
   if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
+  const normalizedReason = ({
+    'weekly remaining is well behind pace':'Weekly capacity surplus is above the configured pace trigger',
+    'weekly remaining is behind configured pace':'Weekly capacity surplus meets a configured pace threshold',
+    'weekly remaining meets pace threshold':'Weekly capacity surplus meets a configured pace threshold',
+    'no pace threshold matched':'No actionable capacity surplus yet',
+    'no actionable weekly overflow':'No actionable weekly surplus yet',
+    'weekly remaining exceeds prorated short-window throughput':'Weekly capacity exceeds the remaining prorated 5-hour throughput',
+  })[current.reason] || current.reason || '';
   if (current.decision === 'RUN') {
     const pressure = {
-      behind: {label:'Run now · behind pace',detail:'Standard background jobs are eligible.'},
+      behind: {label:'Run now · surplus',detail:'Standard background jobs are eligible.'},
       well_behind: {label:'Run now · surplus',detail:'More discretionary background jobs are eligible.'},
       expiring: {label:'Run now · high surplus',detail:'All job tiers are eligible because weekly allowance is at risk of expiring unused.'},
     }[current.unlocked_tier] || {label:'Run now',detail:'Background work is eligible.'};
-    return {label:pressure.label,detail:`${pressure.detail}${current.reason ? ` ${current.reason}.` : ''}`,tone:'triggered'};
+    const weekly = item.snapshot?.weekly;
+    if (current.unlocked_tier === 'expiring' && weekly) {
+      const remaining = percent(weekly.remaining), reset = relative(weekly.resets_at);
+      if (item.snapshot?.short) {
+        const reserve = percent(policyCatalog[item.policy]?.rolling_reserve || 0);
+        return {label:pressure.label,detail:`Week resets ${reset}; ${remaining}% remains; ${reserve}% of the current 5-hour window is protected. ${normalizedReason}.`,tone:'triggered'};
+      }
+      return {label:pressure.label,detail:`Week resets ${reset}; ${remaining}% remains; no current 5-hour limit; ${Math.round((current.pace_gap || 0)*100)}% capacity surplus.`,tone:'triggered'};
+    }
+    return {label:pressure.label,detail:`${pressure.detail}${normalizedReason ? ` ${normalizedReason}.` : ''}`,tone:'triggered'};
   }
   if (current.mode === 'active_run') {
     return {label:'Running · limit reached',detail:current.reason || 'Redline is waiting for an active run to finish.',tone:'triggered'};
@@ -80,7 +98,7 @@ function providerPressure(item) {
       : '';
     return {
       label:projected || `Watching · ${points}% to trigger`,
-      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'} ${points} percentage point${points === 1 ? '' : 's'} of additional projected weekly overflow needed.${current.reason ? ` ${current.reason}.` : ''}`,
+      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'} ${points} percentage point${points === 1 ? '' : 's'} of additional projected weekly overflow needed.${normalizedReason ? ` ${normalizedReason}.` : ''}`,
       tone:points <= 2 ? 'near' : 'neutral',
     };
   }
@@ -88,14 +106,14 @@ function providerPressure(item) {
   if (current.projected_trigger_at && new Date(current.projected_trigger_at) > new Date()) {
     return {
       label:`Likely eligible ${relative(current.projected_trigger_at)}`,
-      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'}${current.reason ? ` ${current.reason}.` : ''}`,
+      detail:`${current.projection_basis || 'Assumes weekly usage stays unchanged.'}${normalizedReason ? ` ${normalizedReason}.` : ''}`,
       tone:'neutral',
     };
   }
   if (pacePoints > 0) {
-    return {label:`${pacePoints}% behind pace`,detail:current.reason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
+    return {label:`${pacePoints}% capacity surplus`,detail:normalizedReason || 'Waiting for a configured pace threshold.',tone:pacePoints >= 15 ? 'near' : 'neutral'};
   }
-  return {label:'On pace',detail:current.reason || 'No dispatch threshold is currently active.',tone:'healthy'};
+  return {label:'No actionable surplus',detail:normalizedReason || 'No dispatch threshold is currently active.',tone:'healthy'};
 }
 function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
@@ -246,7 +264,7 @@ function renderTasks(tasks) {
   if (disabled) summary.push(`${disabled} disabled`);
   $('#task-count').textContent = summary.join(' · ');
   $('#task-count').classList.toggle('count-attention', failed > 0);
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(title(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
     row.addEventListener('click',() => openTask(row.dataset.taskRow));

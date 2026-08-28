@@ -29,6 +29,26 @@ Available scenes:
 - `running`: the overview plus an active job.
 - `attention`: the overview plus a failed job and recovery affordances.
 - `empty`: configured providers before any jobs have been added.
+- `decision-wait`: one bounded task with no actionable capacity surplus.
+- `decision-run`: the same task with capacity surplus above the pace trigger.
+- `decision-run-near-expiry`: the same task with substantial capacity remaining
+  six hours before the weekly reset.
+- `decision-unknown`: the same task held because its synthetic sample is stale.
+
+Decision scenes default to Claude. Use `--provider codex-main` to stage the
+same condition without a five-hour window:
+
+```bash
+./redline demo serve \
+  --scenario decision-run-near-expiry \
+  --provider codex-main \
+  --state-dir /tmp/redline-demo-codex-expiry \
+  --keep
+```
+
+The decision itself is computed by the production evaluator before being
+persisted. Demo-specific copy translates internal pace-gap terminology into
+surplus-first wording, but does not change `RUN`, `WAIT`, or `UNKNOWN`.
 
 By default the service creates and removes a temporary state directory. To keep
 the database, logs, and artifacts after a take for inspection, provide a new or
