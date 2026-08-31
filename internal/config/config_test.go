@@ -11,6 +11,40 @@ import (
 	"github.com/jfox/redline/internal/domain"
 )
 
+func TestLoadParsesTrustedAPIHosts(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - macbook.example.ts.net
+    - 100.101.102.103`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.API.TrustedHosts) != 2 || cfg.API.TrustedHosts[0] != "macbook.example.ts.net" ||
+		cfg.API.TrustedHosts[1] != "100.101.102.103" {
+		t.Fatalf("trusted hosts = %#v", cfg.API.TrustedHosts)
+	}
+}
+
+func TestLoadRejectsInvalidTrustedAPIHosts(t *testing.T) {
+	for _, host := range []string{
+		"https://macbook.example.ts.net", "*.example.ts.net", "macbook.example.ts.net:443", "",
+		"mac book.example.ts.net", "user@example.ts.net", `macbook\\name.example.ts.net`,
+		".example.ts.net", "macbook..example.ts.net", "example.ts.net.", "-macbook.example.ts.net",
+	} {
+		t.Run(host, func(t *testing.T) {
+			configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - "`+host+`"`, 1)
+			if _, err := config.Load(writeConfig(t, configured)); err == nil {
+				t.Fatalf("expected trusted host %q to be rejected", host)
+			}
+		})
+	}
+}
+
 func TestSchedulerIntervalDefaultsToFiveMinutes(t *testing.T) {
 	cfg, err := config.Load(writeConfig(t, validConfig))
 	if err != nil {

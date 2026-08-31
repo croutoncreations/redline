@@ -165,6 +165,121 @@ func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	}
 }
 
+func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name       string
+		host       string
+		origin     string
+		token      string
+		wantStatus int
+	}{
+		{name: "trusted authenticated host", host: "macbook.example.ts.net", origin: "https://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusOK},
+		{name: "trusted host is case insensitive", host: "MACBOOK.EXAMPLE.TS.NET", origin: "https://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusOK},
+		{name: "trusted host still requires authentication", host: "macbook.example.ts.net", origin: "https://macbook.example.ts.net", wantStatus: http.StatusUnauthorized},
+		{name: "trusted host rejects another origin", host: "macbook.example.ts.net", origin: "https://attacker.test", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+		{name: "trusted HTTPS host rejects HTTP origin", host: "macbook.example.ts.net", origin: "http://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+		{name: "untrusted host stays forbidden", host: "other.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, requestErr := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			req.Host = test.host
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if strings.EqualFold(test.host, "macbook.example.ts.net") {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			}
+			if test.token != "" {
+				req.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			resp, requestErr := http.DefaultClient.Do(req)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?access_token="+url.QueryEscape(cfg.APIToken), nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.RemoteAddr = "100.101.102.103:54321"
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage&access_token="+url.QueryEscape(cfg.APIToken), nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, req)
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	location, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSeeOther || location.Path != "/m" || location.Query().Get("view") != "usage" ||
+		location.Query().Has("access_token") {
+		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	cookies := resp.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || !cookies[0].HttpOnly ||
+		!cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("bootstrap cookies = %#v", cookies)
+	}
+
+	page := httptest.NewRecorder()
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage", nil)
+	pageRequest.Header.Set("X-Forwarded-Proto", "https")
+	pageRequest.RemoteAddr = "127.0.0.1:54321"
+	pageRequest.AddCookie(cookies[0])
+	handler.ServeHTTP(page, pageRequest)
+	if page.Code != http.StatusOK || !strings.Contains(page.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("mobile page status=%d content-type=%q", page.Code, page.Header().Get("Content-Type"))
+	}
+}
+
 func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {

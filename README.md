@@ -375,12 +375,15 @@ Each provider's usage detail includes a dispatch-policy selector. Selecting a na
 an override in SQLite; selecting **Default** returns to the provider-level YAML policy when present,
 or to `active_policy` otherwise.
 
-The service accepts loopback hosts only. On first service or app launch, Redline creates a random
-API credential named `api-token` beside the selected configuration with mode `0600`. The native
-app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
+The service accepts loopback hosts by default. On first service or app launch, Redline creates a
+random API credential named `api-token` beside the selected configuration with mode `0600`. The
+native app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
 automatically from the `--config` location (or the standard macOS Application Support location).
-Cross-origin requests and non-loopback Host headers are rejected independently. Do not copy the
-credential into logs or expose the service through a network proxy.
+Cross-origin requests and untrusted Host headers are rejected independently. Exact Tailscale
+MagicDNS hostnames may be added under `api.trusted_hosts` for HTTPS access through Tailscale Serve;
+keep Redline bound to loopback and proxy it with `tailscale serve --bg localhost:7436`. Remote
+session cookies are Secure. Do not copy the credential into logs or expose Redline publicly with
+Tailscale Funnel.
 
 For a direct API call:
 

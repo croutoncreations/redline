@@ -260,6 +260,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
+	mux.HandleFunc("GET /m", server.dashboardPage)
 	mux.HandleFunc("GET /assets/{asset}", server.dashboardAsset)
 	server.mux = mux
 	return server
@@ -278,8 +279,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	if !loopbackHost(r.Host) {
-		writeJSON(w, http.StatusForbidden, problem{Error: "Redline only accepts loopback hosts"})
+	if !allowedHost(r.Host, s.config.API.TrustedHosts) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "Redline does not trust this host"})
 		return
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !sameOrigin(origin, r) {
@@ -302,7 +303,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 const apiSessionCookie = "redline_api_session"
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard") {
+	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
 		return false
 	}
 	token := r.URL.Query().Get("access_token")
@@ -313,9 +314,13 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
 		return true
 	}
+	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
+		return true
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
 	})
 	clean := *r.URL
 	query := clean.Query()
@@ -350,12 +355,48 @@ func loopbackHost(hostPort string) bool {
 	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
 }
 
+func allowedHost(hostPort string, trusted []string) bool {
+	if loopbackHost(hostPort) {
+		return true
+	}
+	host := hostPort
+	if parsed, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	for _, candidate := range trusted {
+		if strings.EqualFold(host, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	if strings.EqualFold(forwarded, "https") && loopbackRemote(r.RemoteAddr) {
+		return "https"
+	}
+	return "http"
+}
+
+func loopbackRemote(address string) bool {
+	host := address
+	if parsed, _, err := net.SplitHostPort(address); err == nil {
+		host = parsed
+	}
+	return net.ParseIP(strings.Trim(host, "[]")).IsLoopback()
+}
+
 func sameOrigin(origin string, r *http.Request) bool {
 	parsed, err := url.Parse(origin)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+	return strings.EqualFold(parsed.Scheme, requestScheme(r)) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func (s *Server) listTaskTemplates(w http.ResponseWriter, _ *http.Request) {
