@@ -29,6 +29,7 @@ let activeTab = 'usage';
 let selectedQueueProvider = '';
 let candidatesCache = new Map(); // provider → candidatesResponse
 let openProviderID = null; // expanded usage card
+let usageInitialized = false;
 let unreadRuns = 0;
 let confirmPending = null; // {providerID, taskID, taskName}
 let actionSheetCloser = null;
@@ -175,7 +176,7 @@ function renderUsageDetail(item) {
     });
     metersHTML = `<div class="m-meters">${windows.join('')}</div>`;
   } else {
-    metersHTML = `<p style="color:var(--muted);font-size:12px;margin:0 0 10px">${esc(item.error || 'No usage data available.')}</p>`;
+    metersHTML = `<p class="m-inline-muted">${esc(item.error || 'No usage data available.')}</p>`;
   }
 
   // Decision block
@@ -197,16 +198,16 @@ function renderUsageDetail(item) {
     const rows = Object.entries(item.pool_concurrency).sort().map(([pool, limit]) =>
       `<div class="m-pool-row"><span>${esc(title(pool))}</span><b>${item.active_pool_claims?.[pool] || 0}/${limit}</b></div>`
     ).join('');
-    poolHTML = `<div style="margin-bottom:10px;font:9px ui-monospace,monospace;color:var(--muted)">POOLS</div>${rows}`;
+    poolHTML = `<div class="m-pools-label">POOLS</div>${rows}`;
   }
 
   const stateLabel = paused ? 'Paused' : `${item.active_runs || 0}/${item.max_concurrent_runs || 1} active`;
 
   return `
     ${decisionHTML}
-    <div style="font:9px ui-monospace,monospace;color:var(--muted);margin-bottom:10px">
+    <div class="m-source-meta">
       ${esc(item.usage_source?.active || 'unknown')} source
-      ${item.usage_source?.last_error ? `<span style="color:#ff918b;display:block">${esc(item.usage_source.last_error)}</span>` : ''}
+      ${item.usage_source?.last_error ? `<span class="m-source-error">${esc(item.usage_source.last_error)}</span>` : ''}
       · ${esc(stateLabel)}
       ${snap ? ` · sampled ${esc(relative(snap.observed_at))}` : ''}
     </div>
@@ -233,6 +234,10 @@ function renderUsage(providers) {
   if (!providers || !providers.length) {
     list.innerHTML = '<p class="m-empty">No providers configured.</p>';
     return;
+  }
+  if (!usageInitialized) {
+    openProviderID = providers[0].id;
+    usageInitialized = true;
   }
   list.innerHTML = providers.map(renderUsageProvider).join('');
   // Wire provider toggle
@@ -313,10 +318,7 @@ async function loadCandidates(providerID) {
 
 function renderCandidates(data, providerID) {
   const snapshotAt = data.snapshot_observed_at;
-  const provider = providerMap.get(providerID);
-  const maxAge = 30 * 60 * 1000; // 30 min fallback
-  const ageMs = snapshotAt ? Date.now() - new Date(snapshotAt) : Infinity;
-  const stale = data.snapshot_stale || ageMs > maxAge;
+  const stale = Boolean(data.snapshot_stale);
   const ready = data.dispatch_available && !stale;
   const metaEl = $('#m-snapshot-meta');
   metaEl.className = `m-snapshot-meta${stale ? ' stale' : ''}`;
@@ -378,7 +380,7 @@ function renderCandidates(data, providerID) {
                 data-task="${esc(c.task_id)}"
                 data-task-name="${esc(c.name)}"
                 aria-label="Dispatch ${esc(c.name)}">Run</button>
-        <button class="m-btn" type="button" style="min-width:44px;padding:0 10px"
+        <button class="m-btn m-overflow-button" type="button"
                 data-action="candidate-overflow"
                 data-provider="${esc(providerID)}"
                 data-task="${esc(c.task_id)}"
@@ -523,12 +525,12 @@ async function openRunDetail(runID) {
 
   // Show detail panel over list
   $('#m-run-detail').classList.add('visible');
-  $('#m-runs-list').style.display = 'none';
-  $('#m-runs-empty').style.display = 'none';
+  $('#m-runs-list').classList.add('m-runs-obscured');
+  $('#m-runs-empty').classList.add('m-runs-obscured');
   $('#m-run-detail-title').textContent = taskName;
 
   const body = $('#m-run-detail-body');
-  body.innerHTML = '<p style="color:var(--muted);font-size:12px">Loading…</p>';
+  body.innerHTML = '<p class="m-inline-muted">Loading…</p>';
 
   // Mark read
   try {
@@ -550,13 +552,13 @@ async function openRunDetail(runID) {
     ]);
     renderRunDetail(run, events, logs?.content);
   } catch (err) {
-    body.innerHTML = `<p style="color:#ff918b;font-size:12px">Could not load run data: ${esc(err.message)}</p>`;
+    body.innerHTML = `<p class="m-inline-error">Could not load run data: ${esc(err.message)}</p>`;
   }
 }
 
 function renderRunDetail(run, events, stderr) {
   if (!run) {
-    $('#m-run-detail-body').innerHTML = '<p style="color:var(--muted);font-size:12px">Run not found in current data.</p>';
+    $('#m-run-detail-body').innerHTML = '<p class="m-inline-muted">Run not found in current data.</p>';
     return;
   }
   const taskName = taskNames.get(run.task_id) || run.task_id;
@@ -579,7 +581,7 @@ function renderRunDetail(run, events, stderr) {
     ${run.summary ? `<p class="m-run-summary">${esc(run.summary)}</p>` : ''}
     <div class="m-run-info">${esc(run.id)} · ${esc(title(run.state))} · ${esc(route)}</div>
     <div class="m-run-info">${run.completed_at ? `Completed ${esc(shortTime(run.completed_at))}` : `Started ${esc(shortTime(run.started_at))}`}</div>
-    ${artifacts ? `<div style="margin:8px 0">${artifacts}</div>` : ''}
+    ${artifacts ? `<div class="m-run-artifacts">${artifacts}</div>` : ''}
     ${eventsHTML}
     ${stderrHTML}
   `;
@@ -588,8 +590,8 @@ function renderRunDetail(run, events, stderr) {
 function closeRunDetail() {
   currentRunID = null;
   $('#m-run-detail').classList.remove('visible');
-  $('#m-runs-list').style.display = '';
-  $('#m-runs-empty').style.display = '';
+  $('#m-runs-list').classList.remove('m-runs-obscured');
+  $('#m-runs-empty').classList.remove('m-runs-obscured');
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
@@ -625,11 +627,10 @@ function render(data) {
   providerMap = new Map((data.providers || []).map(p => [p.id, p]));
 
   if (activeTab === 'usage') renderUsage(data.providers || []);
-  if (activeTab === 'queue') {
-    renderQueueSelector(data.providers || []);
-    if (selectedQueueProvider) loadCandidates(selectedQueueProvider);
-  } else {
-    renderQueueSelector(data.providers || []);
+  renderQueueSelector(data.providers || []);
+  if (activeTab === 'queue' && selectedQueueProvider) {
+    const cached = candidatesCache.get(selectedQueueProvider);
+    if (cached) renderCandidates(cached, selectedQueueProvider);
   }
   renderRuns(data.runs || [], data.unread_runs || 0);
   renderHealth(data);

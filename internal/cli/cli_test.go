@@ -70,17 +70,22 @@ func TestCandidatesRequiresProvider(t *testing.T) {
 
 func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	configPath, token := writePairingConfig(t, []string{"redline.example.ts.net"})
+	pairingToken := strings.Repeat("one-time-pairing-", 3)
+	server := pairingAPIServer(t, token, pairingToken)
+	defer server.Close()
 	var stdout, stderr bytes.Buffer
-	exit := cli.Run([]string{"--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net"}, &stdout, &stderr, time.Now)
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net"}, &stdout, &stderr, time.Now)
 	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net") ||
 		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "full API access") ||
-		strings.Contains(stdout.String(), "access_token") || strings.Contains(stdout.String(), token) {
+		strings.Contains(stdout.String(), "pairing_token") || strings.Contains(stdout.String(), pairingToken) || strings.Contains(stdout.String(), token) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
 
 func TestPairQRDiscoversTailscaleDNSName(t *testing.T) {
-	configPath, _ := writePairingConfig(t, []string{"redline.tailnet.ts.net"})
+	configPath, token := writePairingConfig(t, []string{"redline.tailnet.ts.net"})
+	server := pairingAPIServer(t, token, strings.Repeat("discovered-pairing-", 3))
+	defer server.Close()
 	bin := t.TempDir()
 	script := filepath.Join(bin, "tailscale")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"redline.tailnet.ts.net.\"}}'\n"), 0o700); err != nil {
@@ -88,7 +93,7 @@ func TestPairQRDiscoversTailscaleDNSName(t *testing.T) {
 	}
 	t.Setenv("PATH", bin)
 	var stdout, stderr bytes.Buffer
-	exit := cli.Run([]string{"--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
 	if exit != 0 || !strings.Contains(stdout.String(), "redline.tailnet.ts.net") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
@@ -111,6 +116,18 @@ func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func pairingAPIServer(t *testing.T, apiToken, pairingToken string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/pairing" || r.Header.Get("Authorization") != "Bearer "+apiToken {
+			t.Errorf("pairing request=%s %s authorization=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"pairing_token":%q,"expires_at":%q}`, pairingToken, time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339Nano))
+	}))
 }
 
 func writePairingConfig(t *testing.T, trustedHosts []string) (string, string) {

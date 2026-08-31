@@ -17,10 +17,12 @@ test('captures Pixel 9 usage queue and runs views', async ({ page }, testInfo) =
   test.skip(testInfo.project.name !== 'mobile', 'mobile project only');
   await loadMobileDashboard(page);
   await expect(page.locator('[data-testid="provider-card"]')).toHaveCount(2);
+  await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeVisible();
   await shoot(page, 'mobile-usage');
 
-  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
-  await shoot(page, 'mobile-usage-detail');
+  await page.getByRole('button', { name: 'Show Codex usage details' }).click();
+  await expect(page.locator('[data-testid="provider-detail-codex-main"]')).toBeVisible();
+  await shoot(page, 'mobile-usage-codex-detail');
 
   await page.locator('#m-tab-queue').click();
   await expect(page.locator('[data-testid="next-up"]')).toBeVisible();

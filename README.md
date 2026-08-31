@@ -328,6 +328,7 @@ GET  /v1/health
 GET  /v1/health/details?window={duration}
 GET  /v1/dashboard
 GET  /v1/dashboard/events
+POST /v1/pairing
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
 GET  /v1/providers/{account}/candidates

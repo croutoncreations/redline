@@ -15,14 +15,12 @@ func TestLoadParsesTrustedAPIHosts(t *testing.T) {
 	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 api:
   trusted_hosts:
-    - macbook.example.ts.net
-    - 100.101.102.103`, 1)
+    - macbook.example.ts.net`, 1)
 	cfg, err := config.Load(writeConfig(t, configured))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.API.TrustedHosts) != 2 || cfg.API.TrustedHosts[0] != "macbook.example.ts.net" ||
-		cfg.API.TrustedHosts[1] != "100.101.102.103" {
+	if len(cfg.API.TrustedHosts) != 1 || cfg.API.TrustedHosts[0] != "macbook.example.ts.net" {
 		t.Fatalf("trusted hosts = %#v", cfg.API.TrustedHosts)
 	}
 }
@@ -32,6 +30,7 @@ func TestLoadRejectsInvalidTrustedAPIHosts(t *testing.T) {
 		"https://macbook.example.ts.net", "*.example.ts.net", "macbook.example.ts.net:443", "",
 		"mac book.example.ts.net", "user@example.ts.net", `macbook\\name.example.ts.net`,
 		".example.ts.net", "macbook..example.ts.net", "example.ts.net.", "-macbook.example.ts.net",
+		"100.101.102.103", "redline.example.com",
 	} {
 		t.Run(host, func(t *testing.T) {
 			configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,8 @@ type Server struct {
 	loopWorkers  sync.WaitGroup
 	startMu      sync.Mutex
 	started      bool
+	pairingMu    sync.Mutex
+	pairing      map[string]time.Time
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -183,6 +187,7 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
+		pairing:   make(map[string]time.Time),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -208,6 +213,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
+	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
@@ -283,6 +289,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	if loopbackHost(r.Host) && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) != "" {
+		writeJSON(w, http.StatusForbidden, problem{Error: "reverse proxies must preserve a configured trusted host"})
+		return
+	}
 	if !allowedHost(r.Host, s.config.API.TrustedHosts) {
 		writeJSON(w, http.StatusForbidden, problem{Error: "Redline does not trust this host"})
 		return
@@ -306,21 +316,65 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 const apiSessionCookie = "redline_api_session"
 
+func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		writeError(w, fmt.Errorf("generate pairing token: %w", err))
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(bytes)
+	expiresAt := s.now().UTC().Add(10 * time.Minute)
+	s.pairingMu.Lock()
+	for existing, expiry := range s.pairing {
+		if !expiry.After(s.now()) {
+			delete(s.pairing, existing)
+		}
+	}
+	s.pairing[token] = expiresAt
+	s.pairingMu.Unlock()
+	writeJSON(w, http.StatusCreated, struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}{Token: token, ExpiresAt: expiresAt})
+}
+
+func (s *Server) consumePairingToken(token string) bool {
+	s.pairingMu.Lock()
+	defer s.pairingMu.Unlock()
+	expiresAt, ok := s.pairing[token]
+	if ok {
+		delete(s.pairing, token)
+	}
+	return ok && expiresAt.After(s.now())
+}
+
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
 		return false
 	}
-	token := r.URL.Query().Get("access_token")
-	if token == "" {
+	accessToken := r.URL.Query().Get("access_token")
+	pairingToken := r.URL.Query().Get("pairing_token")
+	if accessToken == "" && pairingToken == "" {
 		return false
-	}
-	if !secureTokenEqual(token, s.config.APIToken) {
-		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
-		return true
 	}
 	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
 		return true
+	}
+	if pairingToken != "" {
+		if !s.consumePairingToken(pairingToken) {
+			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
+			return true
+		}
+	} else {
+		if !loopbackHost(r.Host) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires a one-time pairing token"})
+			return true
+		}
+		if !secureTokenEqual(accessToken, s.config.APIToken) {
+			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+			return true
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
@@ -329,6 +383,7 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
+	query.Del("pairing_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true
@@ -1275,14 +1330,13 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 	revisions := make(map[string]profileRevision)
 	for _, task := range tasks {
-		_, _, _, result, selectErr := s.selectTaskCached(r.Context(), providerID, "", snapshot, base, task.ID, revisions)
-		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority, Eligible: selectErr == nil}
-		if selectErr != nil {
-			view.Reason = result.Reason
-			if view.Reason == "" {
-				view.Reason = result.TaskSelectionReason
-			}
+		verdict, evaluateErr := s.evaluateCandidate(r.Context(), providerID, task, "", snapshot, base, revisions)
+		if evaluateErr != nil {
+			writeError(w, evaluateErr)
+			return
 		}
+		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
+			Eligible: verdict.Eligible, Reason: verdict.Reason}
 		response.Candidates = append(response.Candidates, view)
 		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
 			response.SelectedTaskID = task.ID
@@ -1539,12 +1593,83 @@ func (s *Server) selectTask(
 		make(map[string]profileRevision))
 }
 
+type candidateVerdict struct {
+	Profile  domain.ExecutionProfile
+	Revision string
+	Result   decision.Result
+	Eligible bool
+	Reason   string
+}
+
+func (s *Server) evaluateCandidate(
+	ctx context.Context, provider string, task domain.Task, suppliedRevision string,
+	snapshot decision.UsageSnapshot, base decision.Result, revisions map[string]profileRevision,
+) (candidateVerdict, error) {
+	verdict := candidateVerdict{Result: base}
+	if task.LastCompletedAt != nil && task.MinInterval > 0 {
+		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
+		if s.now().Before(eligibleAt) {
+			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			return verdict, nil
+		}
+	}
+	profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+	if err != nil {
+		return verdict, err
+	}
+	verdict.Profile = profile
+	verdict.Revision = suppliedRevision
+	if verdict.Revision == "" && profile.Repository != "" {
+		cached, ok := revisions[profile.ID]
+		if !ok {
+			cached.revision, cached.err = s.revision.Resolve(ctx, profile)
+			revisions[profile.ID] = cached
+		}
+		if cached.err == nil {
+			verdict.Revision = cached.revision
+		} else if task.RequireRepoChange {
+			verdict.Reason = "repository revision could not be read: " + cached.err.Error()
+			return verdict, nil
+		}
+	}
+	if task.RequireRepoChange {
+		switch {
+		case verdict.Revision == "":
+			verdict.Reason = "repository revision is unavailable"
+			return verdict, nil
+		case verdict.Revision == task.LastSuccessfulSourceRevision:
+			verdict.Reason = "repository has not changed since the last successful run"
+			return verdict, nil
+		}
+	}
+	result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
+	verdict.Result = result
+	if !eligible {
+		verdict.Reason = reason
+		if verdict.Reason == "" {
+			verdict.Reason = base.Reason
+		}
+		return verdict, nil
+	}
+	if reason, err := s.concurrencyRejection(ctx, provider, result.RequiredPools); err != nil {
+		return verdict, err
+	} else if reason != "" {
+		verdict.Reason = reason
+		return verdict, nil
+	}
+	if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
+		verdict.Reason = fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)
+		return verdict, nil
+	}
+	verdict.Eligible = true
+	return verdict, nil
+}
+
 func (s *Server) selectTaskCached(
 	ctx context.Context, provider, suppliedRevision string,
 	snapshot decision.UsageSnapshot, base decision.Result,
 	requestedTaskID string, revisions map[string]profileRevision,
 ) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
-	now := s.now()
 	tasks, err := s.store.DispatchCandidates(ctx, provider)
 	if err != nil {
 		return domain.Task{}, domain.ExecutionProfile{}, "", base, err
@@ -1554,78 +1679,22 @@ func (s *Server) selectTaskCached(
 		if requestedTaskID != "" && task.ID != requestedTaskID {
 			continue
 		}
-		if task.LastCompletedAt != nil && task.MinInterval > 0 {
-			eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
-			if now.Before(eligibleAt) {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"cooldown until "+eligibleAt.UTC().Format(time.RFC3339))
-				continue
-			}
-		}
-		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+		verdict, err := s.evaluateCandidate(ctx, provider, task, suppliedRevision, snapshot, base, revisions)
 		if err != nil {
 			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 		}
-		revision := suppliedRevision
-		if revision == "" && profile.Repository != "" {
-			cached, ok := revisions[profile.ID]
-			if !ok {
-				cached.revision, cached.err = s.revision.Resolve(ctx, profile)
-				revisions[profile.ID] = cached
-			}
-			resolved, resolveErr := cached.revision, cached.err
-			if resolveErr == nil {
-				revision = resolved
-			} else if task.RequireRepoChange {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"repository revision could not be read: "+resolveErr.Error())
-				continue
-			}
-		}
-		if task.RequireRepoChange {
-			if revision == "" {
-				rejections = appendCandidateRejection(rejections, task.ID, "repository revision is unavailable")
-				continue
-			}
-			if revision == task.LastSuccessfulSourceRevision {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"repository has not changed since the last successful run")
-				continue
-			}
-		}
-		result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
-		if !eligible {
-			if reason != "" && len(rejections) < 20 {
-				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID, Reason: reason})
-			}
+		if !verdict.Eligible {
+			rejections = appendCandidateRejection(rejections, task.ID, verdict.Reason)
 			continue
 		}
-		if reason, err := s.concurrencyRejection(ctx, provider, result.RequiredPools); err != nil {
-			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
-		} else if reason != "" {
-			rejections = appendCandidateRejection(rejections, task.ID, reason)
-			continue
-		}
-		if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
-			if len(rejections) < 20 {
-				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID,
-					Reason: fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)})
-			}
-			continue
-		}
-		result.CandidateRejections = rejections
-		result.TaskSelectionReason = "selected highest-priority eligible task"
-		return task, profile, revision, result, nil
+		verdict.Result.CandidateRejections = rejections
+		verdict.Result.TaskSelectionReason = "selected highest-priority eligible task"
+		return task, verdict.Profile, verdict.Revision, verdict.Result, nil
 	}
 	base.CandidateRejections = rejections
 	base.TaskSelectionReason = "no queued tasks are eligible"
-	if requestedTaskID != "" {
-		for _, rejection := range rejections {
-			if rejection.TaskID == requestedTaskID {
-				base.Reason = rejection.Reason
-				break
-			}
-		}
+	if requestedTaskID != "" && len(rejections) > 0 {
+		base.Reason = rejections[0].Reason
 	}
 	return domain.Task{}, domain.ExecutionProfile{}, "", base,
 		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)

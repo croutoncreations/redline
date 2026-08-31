@@ -184,8 +184,8 @@ func validTrustedHost(host string) bool {
 	if host == "" || strings.TrimSpace(host) != host {
 		return false
 	}
-	if net.ParseIP(host) != nil {
-		return true
+	if net.ParseIP(host) != nil || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return false
 	}
 	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
 		return false
@@ -229,7 +229,7 @@ func Load(path string) (Config, error) {
 	}
 	for index, host := range cfg.API.TrustedHosts {
 		if !validTrustedHost(host) {
-			return Config{}, fmt.Errorf("api trusted_host %q must be a valid hostname or IP address without a scheme, port, or wildcard", host)
+			return Config{}, fmt.Errorf("api trusted_host %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", host)
 		}
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}

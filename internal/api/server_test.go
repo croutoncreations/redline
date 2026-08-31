@@ -264,6 +264,27 @@ func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *tes
 	}
 }
 
+func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/v1/health", nil)
+	request.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("rewritten proxy host status=%d want=%d", recorder.Code, http.StatusForbidden)
+	}
+}
+
 func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
@@ -294,8 +315,28 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	pairing := httptest.NewRecorder()
+	pairingRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing", nil)
+	pairingRequest.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	pairingRequest.Header.Set("X-Forwarded-Proto", "https")
+	pairingRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(pairing, pairingRequest)
+	if pairing.Code != http.StatusCreated {
+		t.Fatalf("pairing status=%d body=%s", pairing.Code, pairing.Body.String())
+	}
+	var pairingResponse struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(pairing.Body).Decode(&pairingResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(pairingResponse.Token) < 32 || !pairingResponse.ExpiresAt.After(apiNow) || pairingResponse.Token == cfg.APIToken {
+		t.Fatalf("pairing response=%#v", pairingResponse)
+	}
+
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage&access_token="+url.QueryEscape(cfg.APIToken), nil)
+	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage&pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.RemoteAddr = "127.0.0.1:54321"
 	handler.ServeHTTP(recorder, req)
@@ -306,7 +347,7 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusSeeOther || location.Path != "/m" || location.Query().Get("view") != "usage" ||
-		location.Query().Has("access_token") {
+		location.Query().Has("pairing_token") {
 		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	cookies := resp.Cookies()
@@ -323,6 +364,24 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	handler.ServeHTTP(page, pageRequest)
 	if page.Code != http.StatusOK || !strings.Contains(page.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("mobile page status=%d content-type=%q", page.Code, page.Header().Get("Content-Type"))
+	}
+
+	reused := httptest.NewRecorder()
+	reusedRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	reusedRequest.Header.Set("X-Forwarded-Proto", "https")
+	reusedRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(reused, reusedRequest)
+	if reused.Code != http.StatusUnauthorized {
+		t.Fatalf("reused pairing token status=%d want=%d", reused.Code, http.StatusUnauthorized)
+	}
+
+	fullToken := httptest.NewRecorder()
+	fullTokenRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?access_token="+url.QueryEscape(cfg.APIToken), nil)
+	fullTokenRequest.Header.Set("X-Forwarded-Proto", "https")
+	fullTokenRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(fullToken, fullTokenRequest)
+	if fullToken.Code != http.StatusBadRequest {
+		t.Fatalf("remote full API token bootstrap status=%d want=%d", fullToken.Code, http.StatusBadRequest)
 	}
 }
 

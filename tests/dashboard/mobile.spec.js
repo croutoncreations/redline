@@ -69,10 +69,8 @@ test('shows paused card styling when provider is paused', async ({ page }) => {
   await expect(card.locator('.m-provider-status')).toHaveText('Paused');
 });
 
-test('expands provider card to show usage detail and meters', async ({ page }) => {
+test('opens the first provider usage detail by default', async ({ page }) => {
   await loadMobileDashboard(page);
-  const header = page.locator('[data-provider-id="claude-main"] [data-provider-toggle="claude-main"]');
-  await header.click();
   const detail = page.locator('[data-testid="provider-detail-claude-main"]');
   await expect(detail).toBeVisible();
   // Should show both short and weekly meters for Claude
@@ -91,7 +89,6 @@ test('account pools displayed before model pools in detail', async ({ page }) =>
     { key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', remaining: 1, resets_at: '2026-07-24T19:00:00Z', reset_inferred: true },
   ];
   await loadMobileDashboard(page, { dashboard });
-  await page.locator('[data-provider-toggle="claude-main"]').click();
   const detail = page.locator('[data-testid="provider-detail-claude-main"]');
   const metersText = await detail.locator('.m-meters').textContent();
   const accountIdx = metersText.indexOf('Pro Account');
@@ -102,7 +99,6 @@ test('account pools displayed before model pools in detail', async ({ page }) =>
 
 test('decision detail block is expandable in provider card', async ({ page }) => {
   await loadMobileDashboard(page);
-  await page.locator('[data-provider-toggle="claude-main"]').click();
   const decisionDetail = page.locator('[data-testid="decision-detail"]').first();
   await expect(decisionDetail).toBeVisible();
   // It's a <details> element — click summary to expand
@@ -113,7 +109,6 @@ test('decision detail block is expandable in provider card', async ({ page }) =>
 test('View Queue button switches to queue tab with provider pre-selected', async ({ page }) => {
   await loadMobileDashboard(page);
   // Open Claude provider
-  await page.locator('[data-provider-toggle="claude-main"]').click();
   // Click View Queue
   await page.locator('[data-action="view-queue"][data-provider="claude-main"]').click();
   // Should switch to queue tab
@@ -125,7 +120,6 @@ test('View Queue button switches to queue tab with provider pre-selected', async
 test('pause and resume actions call the correct API endpoints', async ({ page }) => {
   const state = await loadMobileDashboard(page);
   // Open Claude provider
-  await page.locator('[data-provider-toggle="claude-main"]').click();
   // Pause
   await page.locator('[data-action="pause-provider"][data-provider="claude-main"]').click();
   await expect.poll(() => state.requests.some(r => r.path === '/v1/providers/claude-main/pause')).toBe(true);
@@ -133,7 +127,6 @@ test('pause and resume actions call the correct API endpoints', async ({ page })
 
 test('Refresh usage button calls refresh endpoint', async ({ page }) => {
   const state = await loadMobileDashboard(page);
-  await page.locator('[data-provider-toggle="claude-main"]').click();
   await page.locator('[data-action="refresh-usage"][data-provider="claude-main"]').click();
   await expect.poll(() => state.requests.some(r => r.path === '/v1/providers/claude-main/refresh')).toBe(true);
 });
@@ -159,7 +152,6 @@ test('stale banner appears when SSE connection is lost', async ({ page }) => {
 
 test('all provider action buttons meet 44px tap target minimum', async ({ page }) => {
   await loadMobileDashboard(page);
-  await page.locator('[data-provider-toggle="claude-main"]').click();
 
   for (const selector of [
     '[data-provider-toggle="claude-main"]',
@@ -175,6 +167,22 @@ test('all provider action buttons meet 44px tap target minimum', async ({ page }
 });
 
 // ── Queue tab ─────────────────────────────────────────────────────────────────
+
+test('SSE dashboard updates do not repeatedly recompute candidates', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  await page.locator('#m-tab-queue').click();
+  await expect.poll(() => state.requests.filter(r => r.path === '/v1/providers/claude-main/candidates').length).toBe(0);
+  // Candidate GETs are intentionally not recorded by the harness, so count them at the browser boundary.
+  let candidateRequests = 0;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.endsWith('/candidates')) candidateRequests += 1;
+  });
+  await page.locator('#m-queue-provider').selectOption('codex-main');
+  await expect.poll(() => candidateRequests).toBe(1);
+  await page.evaluate(d => window.__redlineEventSources[0].emit('dashboard', d), state.dashboard);
+  await page.waitForTimeout(50);
+  expect(candidateRequests).toBe(1);
+});
 
 test('Queue tab shows candidates with eligibility and reasons', async ({ page }) => {
   const state = await loadMobileDashboard(page, {

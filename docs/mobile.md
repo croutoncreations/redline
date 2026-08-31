@@ -48,14 +48,15 @@ If automatic hostname discovery is unavailable, provide the already-trusted host
 redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net
 ```
 
-Scan the QR from a phone connected to the tailnet. Its credential-bearing URL exchanges
-the API token for a Secure, HttpOnly, SameSite=Strict cookie and immediately redirects to
-a URL without the token query parameter. The credential is reusable until the API token
-is rotated; the redirect only removes it from browser history.
+Scan the QR from a phone connected to the tailnet. The CLI authenticates to the running
+Redline service and creates a random pairing credential that expires after ten minutes
+and is consumed on first use. Redeeming it creates a Secure, HttpOnly, SameSite=Strict
+session cookie and immediately redirects to a URL without the credential query parameter.
 
-The pairing URL grants the browser the same API authority as the Redline CLI. Keep it
-private. If it is exposed, stop Redline, replace the protected `api-token` file beside
-the configuration, and pair devices again.
+Until it is redeemed or expires, the QR can grant a browser the same API authority as the
+Redline CLI. Keep it private. A reused or expired QR is rejected. To revoke an already
+paired browser, stop Redline, replace the protected `api-token` file beside the
+configuration, and pair devices again.
 
 ## Operational checks
 

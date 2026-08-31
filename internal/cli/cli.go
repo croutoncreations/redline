@@ -106,7 +106,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	case "pause", "resume":
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	case "pair":
-		return runPair(remaining[1:], *configPath, stdout, stderr)
+		return runPair(client, remaining[1:], *configPath, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -659,7 +659,7 @@ type tailscaleStatus struct {
 	} `json:"Self"`
 }
 
-func runPair(args []string, configPath string, stdout, stderr io.Writer) int {
+func runPair(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
@@ -695,14 +695,21 @@ func runPair(args []string, configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
 		return 1
 	}
-	token, err := apiauth.ReadToken(configPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
+	var pairing struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &pairing); err != nil {
+		fmt.Fprintln(stderr, "create pairing token:", err)
+		return 1
+	}
+	if pairing.Token == "" || !pairing.ExpiresAt.After(time.Now()) {
+		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
 		return 1
 	}
 	pairingURL := url.URL{Scheme: "https", Host: selectedHost, Path: "/m"}
 	query := pairingURL.Query()
-	query.Set("access_token", token)
+	query.Set("pairing_token", pairing.Token)
 	pairingURL.RawQuery = query.Encode()
 	code, err := qrcode.New(pairingURL.String(), qrcode.Medium)
 	if err != nil {
