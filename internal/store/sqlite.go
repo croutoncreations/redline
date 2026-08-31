@@ -425,6 +425,15 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (22)`); err != nil {
 			return fmt.Errorf("record durable run activity migration: %w", err)
 		}
+		version = 22
+	}
+	if version < 23 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE dispatch_attempts ADD COLUMN requested_task_id TEXT REFERENCES tasks(id);`); err != nil {
+			return fmt.Errorf("add requested task dispatch target: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (23)`); err != nil {
+			return fmt.Errorf("record requested task dispatch target migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

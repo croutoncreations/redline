@@ -2128,6 +2128,269 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 	}
 }
 
+func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "queued", Name: "Queued", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	handler := api.NewDemoServer(testConfig("http://usage.invalid"), db, func() time.Time { return apiNow }, nil,
+		&fakeHarnessDiscoverer{}, fakeExecutor{execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil }})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+		Candidates        []struct {
+			Eligible bool   `json:"eligible"`
+			Reason   string `json:"reason"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DispatchAvailable || response.ProviderReason == "" || response.SelectedTaskID != "" ||
+		len(response.Candidates) != 1 || response.Candidates[0].Eligible || response.Candidates[0].Reason == "" {
+		t.Fatalf("response=%#v", response)
+	}
+
+	stale := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow.Add(-time.Hour),
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), stale, []byte(`{"stale":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	staleRecorder := httptest.NewRecorder()
+	staleRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	staleRequest.Host = "localhost"
+	handler.ServeHTTP(staleRecorder, staleRequest)
+	var staleResponse struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SnapshotStale     bool   `json:"snapshot_stale"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(staleRecorder.Body).Decode(&staleResponse); err != nil {
+		t.Fatal(err)
+	}
+	if staleRecorder.Code != http.StatusOK || staleResponse.DispatchAvailable || !staleResponse.SnapshotStale ||
+		staleResponse.ProviderReason == "" || staleResponse.SelectedTaskID != "" {
+		t.Fatalf("stale response status=%d response=%#v", staleRecorder.Code, staleResponse)
+	}
+}
+
+func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://usage.invalid")
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "shared", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx", Repository: "/repo"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"first", "second"} {
+		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var calls atomic.Int32
+	handler := api.NewServerWithDependencies(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, fakeRevisionResolver{revisions: map[string]string{"shared": "revision"}, calls: &calls})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("revision resolve calls=%d want=1", calls.Load())
+	}
+}
+
+func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://usage.invalid")
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []domain.Task{
+		{ID: "blocked", Name: "Blocked", Priority: 110, ExecutionProfileID: profile.ID, Type: domain.OneOff, RequireRepoChange: true},
+		{ID: "high", Name: "High", Priority: 100, ExecutionProfileID: profile.ID, Type: domain.OneOff},
+		{ID: "low", Name: "Low", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff},
+	} {
+		if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executed := make(chan domain.Task, 1)
+	handler := api.NewDemoServer(cfg, db, func() time.Time { return apiNow },
+		map[string]decision.UsageSnapshot{"codex-main": snapshot}, &fakeHarnessDiscoverer{}, fakeExecutor{
+			execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+				executed <- task
+				return nil
+			},
+		})
+
+	requestWithBody := httptest.NewRecorder()
+	bodyRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", strings.NewReader(`{"current_revision":"forged"}`))
+	bodyRequest.Host = "localhost"
+	handler.ServeHTTP(requestWithBody, bodyRequest)
+	if requestWithBody.Code != http.StatusBadRequest {
+		t.Fatalf("dispatch body status=%d body=%s", requestWithBody.Code, requestWithBody.Body.String())
+	}
+
+	preview := httptest.NewRecorder()
+	previewRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	previewRequest.Host = "localhost"
+	handler.ServeHTTP(preview, previewRequest)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var candidates struct {
+		Candidates []struct {
+			TaskID   string `json:"task_id"`
+			Eligible bool   `json:"eligible"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(preview.Body).Decode(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates.Candidates) != 3 || candidates.Candidates[0].TaskID != "blocked" || candidates.Candidates[0].Eligible ||
+		candidates.Candidates[1].TaskID != "high" || candidates.Candidates[2].TaskID != "low" {
+		t.Fatalf("candidates=%#v", candidates.Candidates)
+	}
+	if attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10); err != nil || len(attempts) != 0 {
+		t.Fatalf("preview attempts=%#v err=%v", attempts, err)
+	}
+	if decisions, err := db.ListSchedulerDecisions(t.Context(), "codex-main", 10); err != nil || len(decisions) != 0 {
+		t.Fatalf("preview decisions=%#v err=%v", decisions, err)
+	}
+
+	blockedDispatch := httptest.NewRecorder()
+	blockedRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/blocked/dispatch", nil)
+	blockedRequest.Host = "localhost"
+	handler.ServeHTTP(blockedDispatch, blockedRequest)
+	if blockedDispatch.Code != http.StatusOK {
+		t.Fatalf("blocked dispatch status=%d body=%s", blockedDispatch.Code, blockedDispatch.Body.String())
+	}
+	var blockedResponse schedulerResponseForTest
+	if err := json.NewDecoder(blockedDispatch.Body).Decode(&blockedResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(blockedResponse.Result.Reason, "repository revision is unavailable") {
+		t.Fatalf("blocked reason=%q result=%#v", blockedResponse.Result.Reason, blockedResponse.Result)
+	}
+
+	if err := db.SetProviderPaused(t.Context(), "codex-main", true); err != nil {
+		t.Fatal(err)
+	}
+	pausedPreview := httptest.NewRecorder()
+	pausedPreviewRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	pausedPreviewRequest.Host = "localhost"
+	handler.ServeHTTP(pausedPreview, pausedPreviewRequest)
+	var pausedCandidates struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(pausedPreview.Body).Decode(&pausedCandidates); err != nil {
+		t.Fatal(err)
+	}
+	if pausedPreview.Code != http.StatusOK || pausedCandidates.DispatchAvailable ||
+		pausedCandidates.ProviderReason != "provider is paused" || pausedCandidates.SelectedTaskID != "" {
+		t.Fatalf("paused preview status=%d response=%#v", pausedPreview.Code, pausedCandidates)
+	}
+	pausedDispatch := httptest.NewRecorder()
+	pausedRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", nil)
+	pausedRequest.Host = "localhost"
+	handler.ServeHTTP(pausedDispatch, pausedRequest)
+	if pausedDispatch.Code != http.StatusConflict {
+		t.Fatalf("paused dispatch status=%d body=%s", pausedDispatch.Code, pausedDispatch.Body.String())
+	}
+	if err := db.SetProviderPaused(t.Context(), "codex-main", false); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatch := httptest.NewRecorder()
+	dispatchRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", nil)
+	dispatchRequest.Host = "localhost"
+	handler.ServeHTTP(dispatch, dispatchRequest)
+	if dispatch.Code != http.StatusAccepted {
+		t.Fatalf("dispatch status=%d body=%s", dispatch.Code, dispatch.Body.String())
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 3 || attempts[0].Trigger != "manual-task" ||
+		attempts[0].RequestedTaskID != "low" || attempts[0].SelectedTaskID != "low" ||
+		attempts[1].RequestedTaskID != "low" || attempts[1].Mode != string(decision.ModePaused) ||
+		attempts[2].RequestedTaskID != "blocked" || attempts[2].SelectedTaskID != "" {
+		t.Fatalf("attempts=%#v err=%v", attempts, err)
+	}
+	select {
+	case task := <-executed:
+		if task.ID != "low" {
+			t.Fatalf("executed task=%q", task.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("targeted executor was not started")
+	}
+	concurrencyPreview := httptest.NewRecorder()
+	concurrencyRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	concurrencyRequest.Host = "localhost"
+	handler.ServeHTTP(concurrencyPreview, concurrencyRequest)
+	var concurrencyResponse struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(concurrencyPreview.Body).Decode(&concurrencyResponse); err != nil {
+		t.Fatal(err)
+	}
+	if concurrencyPreview.Code != http.StatusOK || concurrencyResponse.DispatchAvailable ||
+		!strings.Contains(concurrencyResponse.ProviderReason, "provider concurrency limit") || concurrencyResponse.SelectedTaskID != "" {
+		t.Fatalf("concurrency preview status=%d response=%#v", concurrencyPreview.Code, concurrencyResponse)
+	}
+}
+
 func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 	var usageRequests atomic.Int32
 	usageBarrier := make(chan struct{})
@@ -2715,9 +2978,13 @@ func (f *fakeHarnessDiscoverer) Discover(context.Context) discovery.Catalog {
 type fakeRevisionResolver struct {
 	revisions map[string]string
 	failures  map[string]error
+	calls     *atomic.Int32
 }
 
 func (f fakeRevisionResolver) Resolve(_ context.Context, profile domain.ExecutionProfile) (string, error) {
+	if f.calls != nil {
+		f.calls.Add(1)
+	}
 	if err := f.failures[profile.ID]; err != nil {
 		return "", err
 	}

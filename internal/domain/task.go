@@ -128,6 +128,7 @@ type DispatchAttempt struct {
 	Decision          string          `json:"decision,omitempty"`
 	Mode              string          `json:"mode,omitempty"`
 	Reason            string          `json:"reason,omitempty"`
+	RequestedTaskID   string          `json:"requested_task_id,omitempty"`
 	SelectedTaskID    string          `json:"selected_task_id,omitempty"`
 	RunID             string          `json:"run_id,omitempty"`
 	Error             string          `json:"error,omitempty"`

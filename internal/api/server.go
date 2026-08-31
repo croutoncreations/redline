@@ -210,6 +210,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
+	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
 	mux.HandleFunc("GET /v1/providers/{provider}/capacity", server.providerCapacity)
 	mux.HandleFunc("POST /v1/providers/{provider}/token-sync", server.syncProviderTokens)
@@ -244,6 +245,7 @@ func newServer(
 	mux.HandleFunc("PATCH /v1/tasks/{task}", server.updateTask)
 	mux.HandleFunc("DELETE /v1/tasks/{task}", server.deleteTask)
 	mux.HandleFunc("POST /v1/tasks/{task}/{control}", server.taskControl)
+	mux.HandleFunc("POST /v1/tasks/{task}/dispatch", server.dispatchTask)
 	mux.HandleFunc("POST /v1/scheduler/evaluate", server.evaluateScheduler)
 	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
 	mux.HandleFunc("GET /v1/scheduler/status", server.schedulerStatus)
@@ -1148,6 +1150,7 @@ func (s *Server) taskControl(w http.ResponseWriter, r *http.Request) {
 type schedulerRequest struct {
 	ProviderAccountID string `json:"provider_account_id"`
 	CurrentRevision   string `json:"current_revision"`
+	RequestedTaskID   string `json:"-"`
 }
 
 type schedulerResponse struct {
@@ -1169,6 +1172,165 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, admitted, err := s.dispatch(r.Context(), request, "manual")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if response.Result.Mode == decision.ModePaused {
+		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
+		return
+	}
+	status := http.StatusOK
+	if admitted {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, response)
+}
+
+type candidateView struct {
+	TaskID   string `json:"task_id"`
+	Name     string `json:"name"`
+	Priority int    `json:"priority"`
+	Eligible bool   `json:"eligible"`
+	Reason   string `json:"reason"`
+}
+
+type candidatesResponse struct {
+	GeneratedAt        time.Time       `json:"generated_at"`
+	ProviderAccountID  string          `json:"provider_account_id"`
+	DispatchAvailable  bool            `json:"dispatch_available"`
+	ProviderReason     string          `json:"provider_reason"`
+	SnapshotObservedAt *time.Time      `json:"snapshot_observed_at,omitempty"`
+	SnapshotStale      bool            `json:"snapshot_stale"`
+	SelectedTaskID     string          `json:"selected_task_id,omitempty"`
+	Candidates         []candidateView `json:"candidates"`
+}
+
+type profileRevision struct {
+	revision string
+	err      error
+}
+
+func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("provider")
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: fmt.Sprintf("provider %q is not configured", providerID)})
+		return
+	}
+	tasks, err := s.store.DispatchCandidates(r.Context(), providerID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := candidatesResponse{GeneratedAt: s.now().UTC(), ProviderAccountID: providerID,
+		Candidates: make([]candidateView, 0, len(tasks))}
+	snapshot, _, err := s.store.LatestSnapshot(r.Context(), configured.Provider)
+	if errors.Is(err, store.ErrNotFound) {
+		response.ProviderReason = "no usage snapshot has been collected yet"
+		for _, task := range tasks {
+			response.Candidates = append(response.Candidates, candidateView{
+				TaskID: task.ID, Name: task.Name, Priority: task.Priority, Reason: response.ProviderReason,
+			})
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	base, err := s.evaluateStoredProvider(r.Context(), providerID, snapshot)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response.SnapshotObservedAt = &snapshot.ObservedAt
+	maxAge, _ := s.config.SnapshotAge()
+	age := s.now().Sub(snapshot.ObservedAt)
+	response.SnapshotStale = age > maxAge || age < 0
+	response.DispatchAvailable = base.Decision != decision.Unknown && !response.SnapshotStale
+	if !response.DispatchAvailable {
+		response.ProviderReason = base.Reason
+	}
+	paused, err := s.store.ProviderPaused(r.Context(), providerID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if paused {
+		response.DispatchAvailable = false
+		response.ProviderReason = "provider is paused"
+	} else if active, countErr := s.store.ActiveRunCount(r.Context(), providerID); countErr != nil {
+		writeError(w, countErr)
+		return
+	} else if concurrency, limitErr := s.effectiveProviderConcurrency(r.Context(), providerID); limitErr != nil {
+		writeError(w, limitErr)
+		return
+	} else if active >= concurrency.MaxConcurrentRuns {
+		response.DispatchAvailable = false
+		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", concurrency.MaxConcurrentRuns)
+	}
+	revisions := make(map[string]profileRevision)
+	for _, task := range tasks {
+		_, _, _, result, selectErr := s.selectTaskCached(r.Context(), providerID, "", snapshot, base, task.ID, revisions)
+		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority, Eligible: selectErr == nil}
+		if selectErr != nil {
+			view.Reason = result.Reason
+			if view.Reason == "" {
+				view.Reason = result.TaskSelectionReason
+			}
+		}
+		response.Candidates = append(response.Candidates, view)
+		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
+			response.SelectedTaskID = task.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) dispatchTask(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		contents, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "read task dispatch request: " + err.Error()})
+			return
+		}
+		if strings.TrimSpace(string(contents)) != "" {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "task dispatch does not accept a request body"})
+			return
+		}
+	}
+	task, err := s.store.GetTask(r.Context(), r.PathValue("task"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !task.Enabled || task.State != domain.Queued {
+		reason := "task is disabled"
+		if task.Enabled {
+			reason = fmt.Sprintf("task state is %q, not queued", task.State)
+		}
+		now := s.now().UTC()
+		if _, err := s.store.RecordDispatchAttempt(r.Context(), domain.DispatchAttempt{
+			ProviderAccountID: profile.ProviderAccountID, Trigger: "manual-task",
+			RequestedTaskID: task.ID, Outcome: domain.DispatchWait,
+			Decision: string(decision.Wait), Reason: reason, StartedAt: now, CompletedAt: now,
+		}); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusConflict, problem{Error: reason})
+		return
+	}
+	response, admitted, err := s.dispatch(r.Context(), schedulerRequest{
+		ProviderAccountID: profile.ProviderAccountID, RequestedTaskID: task.ID,
+	}, "manual-task")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1217,7 +1379,8 @@ func (s *Server) dispatch(
 	}
 	attempt := domain.DispatchAttempt{
 		ProviderAccountID: request.ProviderAccountID, Trigger: trigger,
-		StartedAt: startedAt, CompletedAt: s.now().UTC(),
+		RequestedTaskID: request.RequestedTaskID,
+		StartedAt:       startedAt, CompletedAt: s.now().UTC(),
 		Decision: string(response.Result.Decision), Mode: string(response.Result.Mode),
 		Reason: response.Result.Reason,
 	}
@@ -1312,6 +1475,7 @@ func (s *Server) dispatchCore(
 	}
 	task, profile, revision, selectedResult, err := s.selectTask(
 		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
+		request.RequestedTaskID,
 	)
 	response.Result = selectedResult
 	if errors.Is(err, store.ErrNotFound) {
@@ -1320,6 +1484,7 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
+	response.SelectedTask = &task
 	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
@@ -1349,7 +1514,6 @@ func (s *Server) dispatchCore(
 		}
 		return response, false, err
 	}
-	response.SelectedTask = &task
 	response.Run = &run
 	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
 		log.Printf("redline run %s decision history failed: %v", run.ID, err)
@@ -1367,6 +1531,16 @@ func (s *Server) dispatchCore(
 func (s *Server) selectTask(
 	ctx context.Context, provider, suppliedRevision string,
 	snapshot decision.UsageSnapshot, base decision.Result,
+	requestedTaskID string,
+) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
+	return s.selectTaskCached(ctx, provider, suppliedRevision, snapshot, base, requestedTaskID,
+		make(map[string]profileRevision))
+}
+
+func (s *Server) selectTaskCached(
+	ctx context.Context, provider, suppliedRevision string,
+	snapshot decision.UsageSnapshot, base decision.Result,
+	requestedTaskID string, revisions map[string]profileRevision,
 ) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
 	now := s.now()
 	tasks, err := s.store.DispatchCandidates(ctx, provider)
@@ -1375,6 +1549,9 @@ func (s *Server) selectTask(
 	}
 	rejections := make([]decision.CandidateRejection, 0)
 	for _, task := range tasks {
+		if requestedTaskID != "" && task.ID != requestedTaskID {
+			continue
+		}
 		if task.LastCompletedAt != nil && task.MinInterval > 0 {
 			eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
 			if now.Before(eligibleAt) {
@@ -1389,7 +1566,12 @@ func (s *Server) selectTask(
 		}
 		revision := suppliedRevision
 		if revision == "" && profile.Repository != "" {
-			resolved, resolveErr := s.revision.Resolve(ctx, profile)
+			cached, ok := revisions[profile.ID]
+			if !ok {
+				cached.revision, cached.err = s.revision.Resolve(ctx, profile)
+				revisions[profile.ID] = cached
+			}
+			resolved, resolveErr := cached.revision, cached.err
 			if resolveErr == nil {
 				revision = resolved
 			} else if task.RequireRepoChange {
@@ -1435,6 +1617,14 @@ func (s *Server) selectTask(
 	}
 	base.CandidateRejections = rejections
 	base.TaskSelectionReason = "no queued tasks are eligible"
+	if requestedTaskID != "" {
+		for _, rejection := range rejections {
+			if rejection.TaskID == requestedTaskID {
+				base.Reason = rejection.Reason
+				break
+			}
+		}
+	}
 	return domain.Task{}, domain.ExecutionProfile{}, "", base,
 		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
 }
@@ -1759,6 +1949,7 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 	response := schedulerResponse{Snapshot: snapshot, Result: result}
 	task, _, _, selectedResult, err := s.selectTask(
 		r.Context(), request.ProviderAccountID, request.CurrentRevision, snapshot, result,
+		"",
 	)
 	response.Result = selectedResult
 	if err == nil {
@@ -1915,21 +2106,28 @@ func (s *Server) evaluateProvider(
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
+	result, err := s.evaluateStoredProvider(ctx, providerID, snapshot)
+	return snapshot, result, err
+}
+
+func (s *Server) evaluateStoredProvider(
+	ctx context.Context, providerID string, snapshot decision.UsageSnapshot,
+) (decision.Result, error) {
 	selection, err := s.effectiveProviderPolicy(ctx, providerID)
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	thresholds, err := selection.Definition.DecisionThresholds()
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	maxAge, err := s.config.SnapshotAge()
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	estimate, err := s.calibration(ctx, providerID)
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	result := decision.Evaluate(decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
@@ -1939,7 +2137,7 @@ func (s *Server) evaluateProvider(
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	})
 	result.Policy = selection.Policy
-	return snapshot, result, nil
+	return result, nil
 }
 
 func (s *Server) calibration(ctx context.Context, providerID string) (calibration.Estimate, error) {

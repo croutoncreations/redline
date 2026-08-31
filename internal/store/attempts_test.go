@@ -11,12 +11,23 @@ import (
 func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 	db := openTaskDB(t)
 	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "requested-task", Name: "Requested", ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, start); err != nil {
+		t.Fatal(err)
+	}
 	for _, attempt := range []domain.DispatchAttempt{
 		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchError,
 			Error: "OpenUsage unavailable", StartedAt: start, CompletedAt: start.Add(time.Second)},
 		{ProviderAccountID: "codex-main", Trigger: "manual", Outcome: domain.DispatchWait,
 			Decision: "WAIT", Mode: "pace_threshold", Reason: "no threshold matched",
-			StartedAt: start.Add(time.Minute), CompletedAt: start.Add(time.Minute + time.Second)},
+			RequestedTaskID: "requested-task",
+			StartedAt:       start.Add(time.Minute), CompletedAt: start.Add(time.Minute + time.Second)},
 	} {
 		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
 			t.Fatal(err)
@@ -28,6 +39,9 @@ func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Trigger != "manual" || got[1].Error != "OpenUsage unavailable" {
 		t.Fatalf("attempts = %#v", got)
+	}
+	if got[0].RequestedTaskID != "requested-task" {
+		t.Fatalf("requested task id = %q", got[0].RequestedTaskID)
 	}
 }
 
