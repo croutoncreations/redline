@@ -263,7 +263,9 @@ func newServer(
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
+	mux.HandleFunc("GET /sw.js", server.mobileServiceWorker)
 	mux.HandleFunc("GET /assets/{asset}", server.dashboardAsset)
+	mux.HandleFunc("GET /assets/mobile/{asset}", server.mobileDashboardAsset)
 	server.mux = mux
 	return server
 }

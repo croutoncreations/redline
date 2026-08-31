@@ -118,6 +118,52 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	}
 }
 
+func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	for _, test := range []struct {
+		path        string
+		contentType string
+		contains    string
+	}{
+		{path: "/m", contentType: "text/html", contains: "m-header"},
+		{path: "/m", contentType: "text/html", contains: "m-tabs"},
+		{path: "/m", contentType: "text/html", contains: "manifest.webmanifest"},
+		{path: "/m", contentType: "text/html", contains: "mobile.css"},
+		{path: "/m", contentType: "text/html", contains: "mobile.js"},
+		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "--bg"},
+		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "m-header"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "connectSSE"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "/v1/dashboard"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "serviceWorker"},
+		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "maskable"},
+		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "icon-192.png"},
+		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v1"},
+		{path: "/sw.js", contentType: "text/javascript", contains: "/v1/"},
+		{path: "/assets/mobile/icon-192.png", contentType: "image/png", contains: "\x89PNG"},
+		{path: "/assets/mobile/icon-512.png", contentType: "image/png", contains: "\x89PNG"},
+	} {
+		resp, err := http.Get(server.URL + test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := new(bytes.Buffer)
+		_, _ = body.ReadFrom(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), test.contentType) || !strings.Contains(body.String(), test.contains) {
+			t.Fatalf("GET %s: status=%d content-type=%q body contains %q not found in: %.200s",
+				test.path, resp.StatusCode, resp.Header.Get("Content-Type"), test.contains, body.String())
+		}
+	}
+	resp, err := http.Get(server.URL + "/assets/mobile/missing.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing mobile asset status = %d", resp.StatusCode)
+	}
+}
+
 func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	for _, test := range []struct {

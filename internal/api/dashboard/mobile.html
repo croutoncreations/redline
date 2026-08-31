@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Redline">
+  <meta name="theme-color" content="#0d0f12">
+  <meta name="color-scheme" content="dark light">
+  <title>Redline</title>
+  <link rel="manifest" href="/assets/mobile/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/mobile/icon-192.png">
+  <link rel="stylesheet" href="/assets/mobile/mobile.css">
+</head>
+<body>
+
+  <!-- Persistent header -->
+  <header class="m-header" role="banner">
+    <a class="m-brand" href="/m" aria-label="Redline mobile dashboard">
+      <span class="m-mark" aria-hidden="true"><i></i></span>
+      <strong>REDLINE</strong>
+    </a>
+    <div class="m-header-right">
+      <span id="m-live-pill" class="m-live-pill connecting" aria-live="polite" aria-label="Connection status">
+        <i aria-hidden="true"></i><span>connecting</span>
+      </span>
+      <span id="m-health-pill" class="m-health-pill muted" role="status"
+            aria-label="Scheduler health" aria-describedby="m-health-tip">
+        <i aria-hidden="true"></i><span>checking</span>
+      </span>
+    </div>
+  </header>
+  <div id="m-health-tip" class="m-sr-only" role="tooltip">Operational health status</div>
+
+  <!-- Stale connection banner -->
+  <div id="m-stale-banner" class="m-stale-banner" hidden role="alert">
+    Live connection lost — data may be stale
+  </div>
+
+  <!-- Error banner -->
+  <div id="m-error-banner" class="m-error-banner" hidden role="alert"></div>
+
+  <!-- ── Usage panel ── -->
+  <section id="m-usage-panel" class="m-panel active" role="tabpanel" aria-labelledby="m-tab-usage">
+    <div class="m-section">
+      <p class="m-eyebrow">PROVIDER USAGE</p>
+      <h1 class="m-heading">Capacity</h1>
+    </div>
+    <div id="m-usage-list" aria-label="Provider usage cards">
+      <!-- provider cards injected here -->
+      <div class="m-provider-card" aria-busy="true">
+        <div class="m-provider-header" style="pointer-events:none">
+          <div class="m-provider-logo"><span class="m-skeleton" style="width:18px;height:18px;border-radius:50%"></span></div>
+          <div class="m-provider-summary">
+            <div class="m-skeleton" style="width:80px;margin-bottom:6px"></div>
+            <div class="m-skeleton" style="width:120px;height:9px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Queue panel ── -->
+  <section id="m-queue-panel" class="m-panel" role="tabpanel" aria-labelledby="m-tab-queue" hidden>
+    <div class="m-queue-selector">
+      <p class="m-eyebrow">DISPATCH QUEUE</p>
+      <label class="m-sr-only" for="m-queue-provider">Provider account</label>
+      <select id="m-queue-provider" class="m-select" aria-label="Select provider account"></select>
+    </div>
+    <div class="m-queue-meta-row">
+      <div id="m-snapshot-meta" class="m-snapshot-meta" aria-live="polite"></div>
+      <button id="m-queue-refresh" class="m-btn compact" type="button" aria-label="Refresh provider usage and queue">Refresh</button>
+    </div>
+    <div id="m-next-up" hidden></div>
+    <div id="m-candidates-list" aria-label="Dispatch candidates"></div>
+    <div id="m-queue-empty" class="m-queue-empty" hidden>No tasks are queued for this provider.</div>
+  </section>
+
+  <!-- ── Runs panel ── -->
+  <section id="m-runs-panel" class="m-panel" role="tabpanel" aria-labelledby="m-tab-runs" hidden>
+    <div id="m-runs-list" aria-label="Recent runs"></div>
+    <div id="m-runs-empty" class="m-empty" hidden>No runs yet. Completed and failed runs will appear here.</div>
+
+    <!-- Run detail (slides over list) -->
+    <div id="m-run-detail" class="m-run-detail" role="region" aria-label="Run detail">
+      <div class="m-run-detail-head">
+        <button class="m-run-back" id="m-run-back" aria-label="Back to runs list">&#8592;</button>
+        <h2 id="m-run-detail-title">Run detail</h2>
+      </div>
+      <div class="m-run-detail-body" id="m-run-detail-body">
+        <!-- injected -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Bottom tab bar ── -->
+  <nav class="m-tabs" role="tablist" aria-label="Main navigation">
+    <button class="m-tab active" id="m-tab-usage" role="tab"
+            aria-selected="true" aria-controls="m-usage-panel"
+            data-tab="usage" type="button">
+      <!-- Usage icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <path d="M12 2 a10 10 0 1 0 10 10" stroke-dasharray="none"/>
+        <path d="M22 2 L12 12"/>
+        <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>
+      </svg>
+      <span>Usage</span>
+    </button>
+    <button class="m-tab" id="m-tab-queue" role="tab"
+            aria-selected="false" aria-controls="m-queue-panel"
+            data-tab="queue" type="button">
+      <!-- Queue icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="15" y2="18"/>
+      </svg>
+      <span>Queue</span>
+    </button>
+    <button class="m-tab" id="m-tab-runs" role="tab"
+            aria-selected="false" aria-controls="m-runs-panel"
+            data-tab="runs" type="button">
+      <!-- Runs icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/>
+        <polyline points="12,7 12,12 15,15"/>
+      </svg>
+      <span id="m-runs-tab-label">Runs</span>
+      <span id="m-runs-badge" class="m-tab-badge" hidden aria-label="unread runs"></span>
+    </button>
+  </nav>
+
+  <!-- Run confirm sheet -->
+  <div id="m-run-confirm" class="m-run-confirm" hidden role="dialog" aria-labelledby="m-run-confirm-title" aria-modal="true">
+    <div class="m-run-confirm-sheet">
+      <h3 id="m-run-confirm-title">Dispatch run</h3>
+      <p id="m-run-confirm-body"></p>
+      <div class="m-run-confirm-actions">
+        <button class="m-btn" id="m-run-confirm-cancel" type="button">Cancel</button>
+        <button class="m-btn primary" id="m-run-confirm-ok" type="button">Run now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overflow action sheet -->
+  <div id="m-action-sheet" class="m-action-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="m-action-sheet-title">
+    <div class="m-action-sheet-inner">
+      <div id="m-action-sheet-title" class="m-action-sheet-title"></div>
+      <div id="m-action-sheet-buttons"></div>
+    </div>
+  </div>
+
+  <script src="/assets/mobile/mobile.js" defer></script>
+</body>
+</html>

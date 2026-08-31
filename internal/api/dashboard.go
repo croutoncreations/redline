@@ -95,7 +95,11 @@ type dashboardTask struct {
 	LastCompletedAt    *time.Time          `json:"last_completed_at,omitempty"`
 }
 
-func (s *Server) dashboardPage(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/m" {
+		s.serveDashboardFile(w, "dashboard/mobile.html", "text/html; charset=utf-8")
+		return
+	}
 	s.serveDashboardFile(w, "dashboard/index.html", "text/html; charset=utf-8")
 }
 
@@ -109,6 +113,27 @@ func (s *Server) dashboardAsset(w http.ResponseWriter, r *http.Request) {
 		s.serveDashboardFile(w, "dashboard/claude.svg", "image/svg+xml")
 	case "codex.svg":
 		s.serveDashboardFile(w, "dashboard/codex.svg", "image/svg+xml")
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) mobileServiceWorker(w http.ResponseWriter, _ *http.Request) {
+	s.serveDashboardFile(w, "dashboard/sw.js", "text/javascript; charset=utf-8")
+}
+
+func (s *Server) mobileDashboardAsset(w http.ResponseWriter, r *http.Request) {
+	switch r.PathValue("asset") {
+	case "mobile.css":
+		s.serveDashboardFile(w, "dashboard/mobile.css", "text/css; charset=utf-8")
+	case "mobile.js":
+		s.serveDashboardFile(w, "dashboard/mobile.js", "text/javascript; charset=utf-8")
+	case "manifest.webmanifest":
+		s.serveDashboardFile(w, "dashboard/manifest.webmanifest", "application/manifest+json")
+	case "icon-192.png":
+		s.serveDashboardFile(w, "dashboard/icon-192.png", "image/png")
+	case "icon-512.png":
+		s.serveDashboardFile(w, "dashboard/icon-512.png", "image/png")
 	default:
 		http.NotFound(w, r)
 	}
