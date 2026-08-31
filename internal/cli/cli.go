@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/skip2/go-qrcode"
 
 	"github.com/jfox/redline/internal/api"
 	"github.com/jfox/redline/internal/apiauth"
@@ -61,7 +64,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|pause|resume>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -98,8 +101,12 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runRuns(client, remaining[1:], stdout, stderr)
 	case "notification":
 		return runNotifications(client, remaining[1:], stdout, stderr)
+	case "candidates":
+		return runCandidates(client, remaining[1:], stdout, stderr)
 	case "pause", "resume":
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
+	case "pair":
+		return runPair(remaining[1:], *configPath, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -112,7 +119,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, pause, resume")
+	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
@@ -537,7 +544,11 @@ func runResource(
 	stdout, stderr io.Writer,
 ) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, "usage: redline %s <add|list>\n", strings.TrimSuffix(resource, "s"))
+		commands := "add|list"
+		if resource == "tasks" {
+			commands = "add|list|enable|disable|retry|dispatch"
+		}
+		fmt.Fprintf(stderr, "usage: redline %s <%s>\n", strings.TrimSuffix(resource, "s"), commands)
 		return 1
 	}
 	switch args[0] {
@@ -586,7 +597,7 @@ func runResource(
 			fmt.Fprintf(stdout, "created %s\n", strings.TrimSuffix(resource, "s"))
 		}
 		return 0
-	case "enable", "disable", "retry":
+	case "enable", "disable", "retry", "dispatch":
 		if resource != "tasks" || len(args) < 2 {
 			fmt.Fprintf(stderr, "usage: redline task %s <id> [--json]\n", args[0])
 			return 1
@@ -599,12 +610,18 @@ func runResource(
 		}
 		var task domain.Task
 		path := "/v1/tasks/" + url.PathEscape(args[1]) + "/" + args[0]
-		if err := client.Do(context.Background(), http.MethodPost, path, map[string]any{}, &task); err != nil {
+		var body any = map[string]any{}
+		var output any = &task
+		if args[0] == "dispatch" {
+			body = nil
+			output = &map[string]any{}
+		}
+		if err := client.Do(context.Background(), http.MethodPost, path, body, output); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		if *jsonOutput {
-			writeJSON(stdout, task)
+		if *jsonOutput || args[0] == "dispatch" {
+			writeJSON(stdout, output)
 		} else {
 			fmt.Fprintf(stdout, "%sd task %s\n", args[0], task.ID)
 		}
@@ -612,6 +629,143 @@ func runResource(
 	default:
 		fmt.Fprintf(stderr, "unknown %s command %q\n", strings.TrimSuffix(resource, "s"), args[0])
 		return 1
+	}
+}
+
+func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("candidates", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	provider := flags.String("provider", "", "provider account")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if strings.TrimSpace(*provider) == "" {
+		fmt.Fprintln(stderr, "--provider is required")
+		return 1
+	}
+	var response map[string]any
+	path := "/v1/providers/" + url.PathEscape(*provider) + "/candidates"
+	if err := client.Do(context.Background(), http.MethodGet, path, nil, &response); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, response)
+	return 0
+}
+
+type tailscaleStatus struct {
+	Self struct {
+		DNSName string `json:"DNSName"`
+	} `json:"Self"`
+}
+
+func runPair(args []string, configPath string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
+	host := flags.String("host", "", "Tailscale MagicDNS hostname")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if !*qrOutput {
+		fmt.Fprintln(stderr, "--qr is required")
+		return 1
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	selectedHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))
+	if selectedHost == "" {
+		selectedHost, err = tailscaleDNSName()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+	trusted := false
+	for _, configuredHost := range cfg.API.TrustedHosts {
+		if strings.EqualFold(configuredHost, selectedHost) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
+		return 1
+	}
+	token, err := apiauth.ReadToken(configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	pairingURL := url.URL{Scheme: "https", Host: selectedHost, Path: "/m"}
+	query := pairingURL.Query()
+	query.Set("access_token", token)
+	pairingURL.RawQuery = query.Encode()
+	code, err := qrcode.New(pairingURL.String(), qrcode.Medium)
+	if err != nil {
+		fmt.Fprintln(stderr, "create pairing QR:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", selectedHost)
+	renderTerminalQR(stdout, code.Bitmap())
+	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
+	return 0
+}
+
+func tailscaleDNSName() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "tailscale", "status", "--json").CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("read Tailscale status: command timed out")
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			return "", fmt.Errorf("read Tailscale status: %s", detail)
+		}
+		return "", fmt.Errorf("read Tailscale status: %w", err)
+	}
+	var status tailscaleStatus
+	if err := json.Unmarshal(output, &status); err != nil {
+		return "", fmt.Errorf("decode Tailscale status: %w", err)
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), "."))
+	if host == "" {
+		return "", fmt.Errorf("Tailscale status did not include this device's MagicDNS name")
+	}
+	return host, nil
+}
+
+func renderTerminalQR(output io.Writer, bitmap [][]bool) {
+	const margin = 2
+	width := 0
+	if len(bitmap) > 0 {
+		width = len(bitmap[0])
+	}
+	blank := strings.Repeat(" ", width+2*margin)
+	for range margin / 2 {
+		fmt.Fprintln(output, blank)
+	}
+	for y := -margin; y < len(bitmap)+margin; y += 2 {
+		for x := -margin; x < width+margin; x++ {
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			switch {
+			case top && bottom:
+				fmt.Fprint(output, "█")
+			case top:
+				fmt.Fprint(output, "▀")
+			case bottom:
+				fmt.Fprint(output, "▄")
+			default:
+				fmt.Fprint(output, " ")
+			}
+		}
+		fmt.Fprintln(output)
 	}
 }
 

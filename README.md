@@ -219,6 +219,8 @@ go run ./cmd/redline profile list
 go run ./cmd/redline task list
 go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
+go run ./cmd/redline candidates --provider codex-main
+go run ./cmd/redline task dispatch add-tests
 ```
 
 Each task has a `dispatch_tier` that controls when it becomes eligible:
@@ -328,6 +330,7 @@ GET  /v1/dashboard
 GET  /v1/dashboard/events
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
+GET  /v1/providers/{account}/candidates
 GET  /v1/providers/{account}/calibration
 GET  /v1/providers/{account}/capacity
 POST /v1/providers/{account}/token-sync
@@ -350,6 +353,7 @@ GET|POST /v1/tasks
 GET  /v1/task-templates
 GET|PATCH|DELETE /v1/tasks/{id}
 POST /v1/tasks/{id}/enable|disable|retry
+POST /v1/tasks/{id}/dispatch
 POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
@@ -383,7 +387,7 @@ Cross-origin requests and untrusted Host headers are rejected independently. Exa
 MagicDNS hostnames may be added under `api.trusted_hosts` for HTTPS access through Tailscale Serve;
 keep Redline bound to loopback and proxy it with `tailscale serve --bg localhost:7436`. Remote
 session cookies are Secure. Do not copy the credential into logs or expose Redline publicly with
-Tailscale Funnel.
+Tailscale Funnel. See [Mobile dashboard setup](docs/mobile.md) for the HTTPS proxy and pairing flow.
 
 For a direct API call:
 

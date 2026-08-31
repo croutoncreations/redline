@@ -2,7 +2,9 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,118 @@ import (
 
 	"github.com/jfox/redline/internal/cli"
 )
+
+func TestTaskDispatchConsumesServiceAPIWithoutBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v1/tasks/review%2Fauth/dispatch" {
+			t.Errorf("request = %s %s", r.Method, r.URL.EscapedPath())
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) != 0 {
+			t.Errorf("body = %q err=%v", body, err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = fmt.Fprint(w, `{"run":{"id":"run-1","task_id":"review/auth","state":"preparing"}}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "task", "dispatch", "review/auth"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"task_id": "review/auth"`) || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestCandidatesConsumesProviderAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/v1/providers/team%2Fcodex/candidates" {
+			t.Errorf("request = %s %s", r.Method, r.URL.EscapedPath())
+		}
+		_, _ = fmt.Fprint(w, `{"provider_account_id":"team/codex","dispatch_available":true,"candidates":[{"task_id":"review","eligible":true}]}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "candidates", "--provider", "team/codex"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), `"dispatch_available": true`) || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTaskUsageIncludesDispatchAndControls(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"task"}, &stdout, &stderr, time.Now)
+	if exit != 1 || !strings.Contains(stderr.String(), "enable|disable|retry|dispatch") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestCandidatesRequiresProvider(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"candidates"}, &stdout, &stderr, time.Now)
+	if exit != 1 || !strings.Contains(stderr.String(), "--provider is required") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestPairQRWithExplicitTrustedHost(t *testing.T) {
+	configPath, token := writePairingConfig(t, []string{"redline.example.ts.net"})
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net") ||
+		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "full API access") ||
+		strings.Contains(stdout.String(), "access_token") || strings.Contains(stdout.String(), token) {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestPairQRDiscoversTailscaleDNSName(t *testing.T) {
+	configPath, _ := writePairingConfig(t, []string{"redline.tailnet.ts.net"})
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"redline.tailnet.ts.net.\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), "redline.tailnet.ts.net") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
+	configPath, _ := writePairingConfig(t, []string{"trusted.example.ts.net"})
+	for name, test := range map[string]struct {
+		args []string
+		want string
+	}{
+		"untrusted":  {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "api.trusted_hosts"},
+		"missing qr": {[]string{"--config", configPath, "pair"}, "--qr is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run(test.args, &stdout, &stderr, time.Now)
+			if exit != 1 || !strings.Contains(stderr.String(), test.want) || stdout.Len() != 0 {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func writePairingConfig(t *testing.T, trustedHosts []string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	configPath := filepath.Join(root, "redline.yaml")
+	hosts, _ := json.Marshal(trustedHosts)
+	contents := fmt.Sprintf("database: redline.db\nactive_policy: standard\napi:\n  trusted_hosts: %s\nproviders:\n  codex-main:\n    provider: codex\n    usage_source: native\n    window_weekly_cost: 0.1\npolicies:\n  standard:\n    trigger_margin: 0.02\n    rolling_reserve: 0.25\n", hosts)
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("pairing-secret-", 3)
+	if err := os.WriteFile(filepath.Join(root, "api-token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, token
+}
 
 func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
 	var stdout, stderr bytes.Buffer
