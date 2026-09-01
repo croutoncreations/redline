@@ -214,6 +214,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
@@ -269,6 +270,7 @@ func newServer(
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
+	mux.HandleFunc("GET /pair", server.pairingPage)
 	mux.HandleFunc("GET /sw.js", server.mobileServiceWorker)
 	mux.HandleFunc("GET /assets/{asset}", server.dashboardAsset)
 	mux.HandleFunc("GET /assets/mobile/{asset}", server.mobileDashboardAsset)
@@ -301,6 +303,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, problem{Error: "cross-origin Redline API requests are not allowed"})
 		return
 	}
+	if publicPairingRequest(r) {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
 	if s.config.APIToken != "" {
 		if s.bootstrapDashboardSession(w, r) {
 			return
@@ -315,6 +321,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 const apiSessionCookie = "redline_api_session"
+
+func publicPairingRequest(r *http.Request) bool {
+	return (r.Method == http.MethodGet && (r.URL.Path == "/pair" || r.URL.Path == "/assets/mobile/pair.js" || r.URL.Path == "/assets/mobile/mobile.css")) ||
+		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
+}
 
 func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	bytes := make([]byte, 32)
@@ -348,42 +359,57 @@ func (s *Server) consumePairingToken(token string) bool {
 	return ok && expiresAt.After(s.now())
 }
 
+func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
+	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
+		return
+	}
+	var request struct {
+		Token string `json:"pairing_token"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	if request.Token == "" || !s.consumePairingToken(request.Token) {
+		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
+		return
+	}
+	s.setDashboardSessionCookie(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
+	})
+}
+
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
-	pairingToken := r.URL.Query().Get("pairing_token")
-	if accessToken == "" && pairingToken == "" {
+	if accessToken == "" {
 		return false
 	}
 	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
 		return true
 	}
-	if pairingToken != "" {
-		if !s.consumePairingToken(pairingToken) {
-			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
-			return true
-		}
-	} else {
-		if !loopbackHost(r.Host) {
-			writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires a one-time pairing token"})
-			return true
-		}
-		if !secureTokenEqual(accessToken, s.config.APIToken) {
-			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
-			return true
-		}
+	if !loopbackHost(r.Host) {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires the pairing page"})
+		return true
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
-		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
-	})
+	if !secureTokenEqual(accessToken, s.config.APIToken) {
+		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+		return true
+	}
+	s.setDashboardSessionCookie(w, r)
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
-	query.Del("pairing_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true

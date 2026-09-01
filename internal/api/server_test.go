@@ -130,11 +130,13 @@ func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/m", contentType: "text/html", contains: "manifest.webmanifest"},
 		{path: "/m", contentType: "text/html", contains: "mobile.css"},
 		{path: "/m", contentType: "text/html", contains: "mobile.js"},
+		{path: "/pair", contentType: "text/html", contains: "Pair this browser"},
 		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "--bg"},
 		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "m-header"},
 		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "connectSSE"},
 		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "/v1/dashboard"},
 		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "serviceWorker"},
+		{path: "/assets/mobile/pair.js", contentType: "text/javascript", contains: "/v1/pairing/redeem"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "maskable"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "icon-192.png"},
 		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v1"},
@@ -314,7 +316,8 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	cfg := testConfig("http://unused")
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
-	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	currentTime := apiNow
+	handler := api.NewServer(cfg, db, func() time.Time { return currentTime })
 	pairing := httptest.NewRecorder()
 	pairingRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing", nil)
 	pairingRequest.Header.Set("Authorization", "Bearer "+cfg.APIToken)
@@ -335,29 +338,34 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 		t.Fatalf("pairing response=%#v", pairingResponse)
 	}
 
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage&pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
-	req.Header.Set("X-Forwarded-Proto", "https")
-	req.RemoteAddr = "127.0.0.1:54321"
-	handler.ServeHTTP(recorder, req)
-	resp := recorder.Result()
-	defer resp.Body.Close()
-	location, err := url.Parse(resp.Header.Get("Location"))
+	pairPage := httptest.NewRecorder()
+	pairPageRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/pair", nil)
+	pairPageRequest.Header.Set("X-Forwarded-Proto", "https")
+	pairPageRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(pairPage, pairPageRequest)
+	if pairPage.Code != http.StatusOK || !strings.Contains(pairPage.Body.String(), "Pair this browser") {
+		t.Fatalf("pair page status=%d body=%s", pairPage.Code, pairPage.Body.String())
+	}
+
+	redeemBody, err := json.Marshal(map[string]string{"pairing_token": pairingResponse.Token})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusSeeOther || location.Path != "/m" || location.Query().Get("view") != "usage" ||
-		location.Query().Has("pairing_token") {
-		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
-	}
-	cookies := resp.Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || !cookies[0].HttpOnly ||
-		!cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
-		t.Fatalf("bootstrap cookies = %#v", cookies)
+	redeem := httptest.NewRecorder()
+	redeemRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing/redeem", bytes.NewReader(redeemBody))
+	redeemRequest.Header.Set("Content-Type", "application/json")
+	redeemRequest.Header.Set("Origin", "https://macbook.example.ts.net")
+	redeemRequest.Header.Set("X-Forwarded-Proto", "https")
+	redeemRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(redeem, redeemRequest)
+	cookies := redeem.Result().Cookies()
+	if redeem.Code != http.StatusNoContent || len(cookies) != 1 || cookies[0].Name != "redline_api_session" ||
+		!cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("redeem status=%d cookies=%#v body=%s", redeem.Code, cookies, redeem.Body.String())
 	}
 
 	page := httptest.NewRecorder()
-	pageRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage", nil)
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m", nil)
 	pageRequest.Header.Set("X-Forwarded-Proto", "https")
 	pageRequest.RemoteAddr = "127.0.0.1:54321"
 	pageRequest.AddCookie(cookies[0])
@@ -367,7 +375,9 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	}
 
 	reused := httptest.NewRecorder()
-	reusedRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	reusedRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing/redeem", bytes.NewReader(redeemBody))
+	reusedRequest.Header.Set("Content-Type", "application/json")
+	reusedRequest.Header.Set("Origin", "https://macbook.example.ts.net")
 	reusedRequest.Header.Set("X-Forwarded-Proto", "https")
 	reusedRequest.RemoteAddr = "127.0.0.1:54321"
 	handler.ServeHTTP(reused, reusedRequest)

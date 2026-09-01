@@ -351,6 +351,16 @@ button { color: inherit; font: inherit; }
 }
 .m-empty { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 12px; }
 
+/* Pairing page */
+.m-pair-page { min-height:100dvh; display:grid; place-items:center; padding:24px; }
+.m-pair-shell { width:min(100%, 420px); padding:28px; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--panel); }
+.m-pair-brand { display:flex; align-items:center; gap:10px; margin-bottom:24px; font-weight:700; letter-spacing:.12em; }
+.m-pair-shell h1 { margin:0 0 12px; font-size:28px; }
+.m-pair-shell p { color:var(--muted); line-height:1.55; }
+.m-pair-shell .m-btn { width:100%; margin-top:16px; }
+.m-pair-status { min-height:20px; margin-top:14px; color:var(--muted); font:10px ui-monospace,monospace; }
+.m-pair-status.error { color:#ff918b; }
+
 /* Skeleton loading */
 .m-skeleton { background: linear-gradient(90deg, #20252a 25%, #30363b 50%, #20252a 75%); background-size: 200% 100%; animation: shine 1.4s infinite; border-radius: 5px; height: 12px; }
 @keyframes shine { to { background-position: -200% 0; } }

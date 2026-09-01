@@ -32,6 +32,13 @@ tailscale serve --bg localhost:7436
 tailscale serve status
 ```
 
+If HTTPS port 443 is already serving another local tool, use a separate HTTPS port
+without replacing that configuration:
+
+```sh
+tailscale serve --bg --https=8443 localhost:7436
+```
+
 Tailscale terminates HTTPS and forwards to Redline over loopback. Redline accepts the
 forwarded HTTPS scheme only from a loopback peer, requires an exact trusted Host, and
 continues to reject cross-origin requests.
@@ -48,13 +55,21 @@ If automatic hostname discovery is unavailable, provide the already-trusted host
 redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net
 ```
 
+For a non-default Tailscale Serve HTTPS port, include the same port when pairing:
+
+```sh
+redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
+```
+
 Scan the QR from a phone connected to the tailnet. The CLI authenticates to the running
-Redline service and creates a random pairing credential that expires after ten minutes
-and is consumed on first use. Redeeming it creates a Secure, HttpOnly, SameSite=Strict
-session cookie and immediately redirects to a URL without the credential query parameter.
+Redline service and creates a random pairing credential that expires after ten minutes.
+The scanner opens a public Redline pairing page with the credential in the URL fragment,
+which is not sent in HTTP requests or consumed by link previews. Tap **Pair this browser**
+to redeem it once, create a Secure, HttpOnly, SameSite=Strict session cookie, and continue
+to `/m`.
 
 Until it is redeemed or expires, the QR can grant a browser the same API authority as the
-Redline CLI. Keep it private. A reused or expired QR is rejected. To revoke an already
+Redline CLI. Keep it private. To revoke an already
 paired browser, stop Redline, replace the protected `api-token` file beside the
 configuration, and pair devices again.
 

@@ -664,11 +664,16 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	flags.SetOutput(stderr)
 	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
 	host := flags.String("host", "", "Tailscale MagicDNS hostname")
+	port := flags.Int("port", 443, "Tailscale Serve HTTPS port")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if !*qrOutput {
 		fmt.Fprintln(stderr, "--qr is required")
+		return 1
+	}
+	if *port < 1 || *port > 65535 {
+		fmt.Fprintln(stderr, "--port must be between 1 and 65535")
 		return 1
 	}
 	cfg, err := config.Load(configPath)
@@ -707,19 +712,32 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
 		return 1
 	}
-	pairingURL := url.URL{Scheme: "https", Host: selectedHost, Path: "/m"}
-	query := pairingURL.Query()
-	query.Set("pairing_token", pairing.Token)
-	pairingURL.RawQuery = query.Encode()
-	code, err := qrcode.New(pairingURL.String(), qrcode.Medium)
+	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token)
+	code, err := qrcode.New(pairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", selectedHost)
+	endpoint := selectedHost
+	if *port != 443 {
+		endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+	}
+	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
 	renderTerminalQR(stdout, code.Bitmap())
 	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
 	return 0
+}
+
+func mobilePairingURL(host string, port int, token string) string {
+	endpoint := host
+	if port != 443 {
+		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
+	fragment := url.Values{}
+	fragment.Set("pairing_token", token)
+	pairingURL.Fragment = fragment.Encode()
+	return pairingURL.String()
 }
 
 func tailscaleDNSName() (string, error) {

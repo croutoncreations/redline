@@ -1,6 +1,32 @@
 // Mobile dashboard Playwright tests — Phase 4
 const { test, expect } = require('@playwright/test');
-const { loadMobileDashboard, candidatesFixture, dashboardFixture } = require('./harness');
+const { assets, loadMobileDashboard, candidatesFixture, dashboardFixture } = require('./harness');
+
+// ── Pairing ──────────────────────────────────────────────────────────────────
+
+test('pairing page waits for an explicit browser action before redeeming', async ({ page }) => {
+  const redemptions = [];
+  await page.route('http://redline.test/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (assets[url.pathname]) {
+      const [body, contentType] = assets[url.pathname];
+      return route.fulfill({status: 200, body, contentType});
+    }
+    if (url.pathname === '/v1/pairing/redeem' && request.method() === 'POST') {
+      redemptions.push(request.postDataJSON());
+      return route.fulfill({status: 204});
+    }
+    return route.fulfill({status: 404, contentType: 'application/json', body: '{"error":"not found"}'});
+  });
+  await page.goto('http://redline.test/pair#pairing_token=preview-safe-token');
+  await expect(page.getByRole('heading', {name: 'Pair this browser'})).toBeVisible();
+  expect(redemptions).toHaveLength(0);
+  await expect(page).toHaveURL(/#pairing_token=preview-safe-token$/);
+  await page.getByRole('button', {name: 'Pair this browser'}).click();
+  await expect.poll(() => redemptions).toEqual([{pairing_token: 'preview-safe-token'}]);
+  await expect(page).toHaveURL('http://redline.test/m');
+});
 
 // ── Usage tab ─────────────────────────────────────────────────────────────────
 

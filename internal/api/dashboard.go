@@ -118,6 +118,10 @@ func (s *Server) dashboardAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) pairingPage(w http.ResponseWriter, _ *http.Request) {
+	s.serveDashboardFile(w, "dashboard/pair.html", "text/html; charset=utf-8")
+}
+
 func (s *Server) mobileServiceWorker(w http.ResponseWriter, _ *http.Request) {
 	s.serveDashboardFile(w, "dashboard/sw.js", "text/javascript; charset=utf-8")
 }
@@ -128,6 +132,8 @@ func (s *Server) mobileDashboardAsset(w http.ResponseWriter, r *http.Request) {
 		s.serveDashboardFile(w, "dashboard/mobile.css", "text/css; charset=utf-8")
 	case "mobile.js":
 		s.serveDashboardFile(w, "dashboard/mobile.js", "text/javascript; charset=utf-8")
+	case "pair.js":
+		s.serveDashboardFile(w, "dashboard/pair.js", "text/javascript; charset=utf-8")
 	case "manifest.webmanifest":
 		s.serveDashboardFile(w, "dashboard/manifest.webmanifest", "application/manifest+json")
 	case "icon-192.png":
