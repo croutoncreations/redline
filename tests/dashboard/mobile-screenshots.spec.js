@@ -18,10 +18,10 @@ test('captures Pixel 9 usage queue and runs views', async ({ page }, testInfo) =
   await loadMobileDashboard(page);
   await expect(page.locator('[data-testid="provider-card"]')).toHaveCount(2);
   await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeVisible();
+  await expect(page.locator('[data-testid="provider-detail-codex-main"]')).toBeVisible();
   await shoot(page, 'mobile-usage');
 
-  await page.getByRole('button', { name: 'Show Codex usage details' }).click();
-  await expect(page.locator('[data-testid="provider-detail-codex-main"]')).toBeVisible();
+  await page.locator('[data-testid="provider-detail-codex-main"]').scrollIntoViewIfNeeded();
   await shoot(page, 'mobile-usage-codex-detail');
 
   await page.locator('#m-tab-queue').click();

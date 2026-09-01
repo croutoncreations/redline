@@ -69,16 +69,28 @@ test('shows paused card styling when provider is paused', async ({ page }) => {
   await expect(card.locator('.m-provider-status')).toHaveText('Paused');
 });
 
-test('opens the first provider usage detail by default', async ({ page }) => {
+test('opens every provider usage detail by default', async ({ page }) => {
   await loadMobileDashboard(page);
-  const detail = page.locator('[data-testid="provider-detail-claude-main"]');
-  await expect(detail).toBeVisible();
-  // Should show both short and weekly meters for Claude
-  await expect(detail).toContainText('5-hour window');
-  await expect(detail).toContainText('Weekly allowance');
-  // Model allowance (Fable) with reset_inferred
-  await expect(detail).toContainText('Fable');
-  await expect(detail).toContainText('reset inferred');
+  const claudeDetail = page.locator('[data-testid="provider-detail-claude-main"]');
+  const codexDetail = page.locator('[data-testid="provider-detail-codex-main"]');
+  await expect(claudeDetail).toBeVisible();
+  await expect(codexDetail).toBeVisible();
+  // Should show both short and weekly meters for Claude.
+  await expect(claudeDetail).toContainText('5-hour window');
+  await expect(claudeDetail).toContainText('Weekly allowance');
+  // Model allowance (Fable) with reset_inferred.
+  await expect(claudeDetail).toContainText('Fable');
+  await expect(claudeDetail).toContainText('reset inferred');
+  await expect(codexDetail).toContainText('Weekly allowance');
+});
+
+test('collapses provider usage details independently', async ({ page }) => {
+  await loadMobileDashboard(page);
+  await page.locator('[data-provider-toggle="claude-main"]').click();
+  await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeHidden();
+  await expect(page.locator('[data-testid="provider-detail-codex-main"]')).toBeVisible();
+  await page.locator('[data-provider-toggle="claude-main"]').click();
+  await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeVisible();
 });
 
 test('account pools displayed before model pools in detail', async ({ page }) => {

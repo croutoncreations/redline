@@ -28,7 +28,7 @@ let providerMap = new Map(); // id → dashboardProvider
 let activeTab = 'usage';
 let selectedQueueProvider = '';
 let candidatesCache = new Map(); // provider → candidatesResponse
-let openProviderID = null; // expanded usage card
+let openProviderIDs = new Set(); // independently collapsible usage cards
 let usageInitialized = false;
 let unreadRuns = 0;
 let confirmPending = null; // {providerID, taskID, taskName}
@@ -95,7 +95,7 @@ function renderUsageProvider(item) {
   const pressure = providerPressure(item);
 
   const cardClass = ['m-provider-card', stale ? 'stale' : '', paused ? 'paused' : '', errState ? 'error-state' : ''].filter(Boolean).join(' ');
-  const isOpen = openProviderID === item.id;
+  const isOpen = openProviderIDs.has(item.id);
 
   let detailHTML = '';
   if (isOpen) {
@@ -236,7 +236,7 @@ function renderUsage(providers) {
     return;
   }
   if (!usageInitialized) {
-    openProviderID = providers[0].id;
+    openProviderIDs = new Set(providers.map(provider => provider.id));
     usageInitialized = true;
   }
   list.innerHTML = providers.map(renderUsageProvider).join('');
@@ -244,7 +244,8 @@ function renderUsage(providers) {
   list.querySelectorAll('[data-provider-toggle]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.providerToggle;
-      openProviderID = openProviderID === id ? null : id;
+      if (openProviderIDs.has(id)) openProviderIDs.delete(id);
+      else openProviderIDs.add(id);
       renderUsage(dashboard?.providers || []);
     });
   });
