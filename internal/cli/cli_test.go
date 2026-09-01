@@ -74,8 +74,8 @@ func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	server := pairingAPIServer(t, token, pairingToken)
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
-	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net"}, &stdout, &stderr, time.Now)
-	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net") ||
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net", "--port", "8443"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net:8443") ||
 		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "full API access") ||
 		strings.Contains(stdout.String(), "pairing_token") || strings.Contains(stdout.String(), pairingToken) || strings.Contains(stdout.String(), token) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
@@ -105,8 +105,9 @@ func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
 		args []string
 		want string
 	}{
-		"untrusted":  {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "api.trusted_hosts"},
-		"missing qr": {[]string{"--config", configPath, "pair"}, "--qr is required"},
+		"untrusted":    {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "api.trusted_hosts"},
+		"missing qr":   {[]string{"--config", configPath, "pair"}, "--qr is required"},
+		"invalid port": {[]string{"--config", configPath, "pair", "--qr", "--host", "trusted.example.ts.net", "--port", "70000"}, "--port must be between"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

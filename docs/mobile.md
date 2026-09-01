@@ -32,6 +32,13 @@ tailscale serve --bg localhost:7436
 tailscale serve status
 ```
 
+If HTTPS port 443 is already serving another local tool, use a separate HTTPS port
+without replacing that configuration:
+
+```sh
+tailscale serve --bg --https=8443 localhost:7436
+```
+
 Tailscale terminates HTTPS and forwards to Redline over loopback. Redline accepts the
 forwarded HTTPS scheme only from a loopback peer, requires an exact trusted Host, and
 continues to reject cross-origin requests.
@@ -46,6 +53,12 @@ If automatic hostname discovery is unavailable, provide the already-trusted host
 
 ```sh
 redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net
+```
+
+For a non-default Tailscale Serve HTTPS port, include the same port when pairing:
+
+```sh
+redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
 ```
 
 Scan the QR from a phone connected to the tailnet. The CLI authenticates to the running
