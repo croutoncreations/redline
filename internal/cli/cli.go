@@ -733,10 +733,10 @@ func mobilePairingURL(host string, port int, token string) string {
 	if port != 443 {
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
 	}
-	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/m"}
-	query := pairingURL.Query()
-	query.Set("pairing_token", token)
-	pairingURL.RawQuery = query.Encode()
+	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
+	fragment := url.Values{}
+	fragment.Set("pairing_token", token)
+	pairingURL.Fragment = fragment.Encode()
 	return pairingURL.String()
 }
 

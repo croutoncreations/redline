@@ -61,12 +61,6 @@ type HermesDiscoverer interface {
 	TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error)
 }
 
-type pairingCredential struct {
-	expiresAt   time.Time
-	redeemedAt  time.Time
-	redemptions int
-}
-
 type Server struct {
 	config       config.Config
 	store        *store.DB
@@ -89,7 +83,7 @@ type Server struct {
 	startMu      sync.Mutex
 	started      bool
 	pairingMu    sync.Mutex
-	pairing      map[string]pairingCredential
+	pairing      map[string]time.Time
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -193,7 +187,7 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
-		pairing:   make(map[string]pairingCredential),
+		pairing:   make(map[string]time.Time),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -220,6 +214,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
@@ -275,6 +270,7 @@ func newServer(
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
+	mux.HandleFunc("GET /pair", server.pairingPage)
 	mux.HandleFunc("GET /sw.js", server.mobileServiceWorker)
 	mux.HandleFunc("GET /assets/{asset}", server.dashboardAsset)
 	mux.HandleFunc("GET /assets/mobile/{asset}", server.mobileDashboardAsset)
@@ -307,6 +303,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, problem{Error: "cross-origin Redline API requests are not allowed"})
 		return
 	}
+	if publicPairingRequest(r) {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
 	if s.config.APIToken != "" {
 		if s.bootstrapDashboardSession(w, r) {
 			return
@@ -322,6 +322,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 const apiSessionCookie = "redline_api_session"
 
+func publicPairingRequest(r *http.Request) bool {
+	return (r.Method == http.MethodGet && (r.URL.Path == "/pair" || r.URL.Path == "/assets/mobile/pair.js" || r.URL.Path == "/assets/mobile/mobile.css")) ||
+		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
+}
+
 func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -331,12 +336,12 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, credential := range s.pairing {
-		if !credential.expiresAt.After(s.now()) {
+	for existing, expiry := range s.pairing {
+		if !expiry.After(s.now()) {
 			delete(s.pairing, existing)
 		}
 	}
-	s.pairing[token] = pairingCredential{expiresAt: expiresAt}
+	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
 	writeJSON(w, http.StatusCreated, struct {
 		Token     string    `json:"pairing_token"`
@@ -347,27 +352,38 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) consumePairingToken(token string) bool {
 	s.pairingMu.Lock()
 	defer s.pairingMu.Unlock()
-	credential, ok := s.pairing[token]
-	if !ok || !credential.expiresAt.After(s.now()) {
+	expiresAt, ok := s.pairing[token]
+	if ok {
 		delete(s.pairing, token)
-		return false
 	}
-	if credential.redemptions == 0 {
-		credential.redeemedAt = s.now()
-		credential.redemptions = 1
-		s.pairing[token] = credential
-		return true
+	return ok && expiresAt.After(s.now())
+}
+
+func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
+	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
+		return
 	}
-	// Mobile QR scanners commonly preview the URL before handing it to the
-	// browser. Permit exactly one immediate follow-up redemption so that preview
-	// does not consume the credential intended for browser navigation.
-	if credential.redemptions == 1 && s.now().Sub(credential.redeemedAt) <= 2*time.Minute {
-		credential.redemptions = 2
-		s.pairing[token] = credential
-		return true
+	var request struct {
+		Token string `json:"pairing_token"`
 	}
-	delete(s.pairing, token)
-	return false
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	if request.Token == "" || !s.consumePairingToken(request.Token) {
+		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
+		return
+	}
+	s.setDashboardSessionCookie(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
+	})
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
@@ -375,37 +391,25 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
-	pairingToken := r.URL.Query().Get("pairing_token")
-	if accessToken == "" && pairingToken == "" {
+	if accessToken == "" {
 		return false
 	}
 	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
 		return true
 	}
-	if pairingToken != "" {
-		if !s.consumePairingToken(pairingToken) {
-			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
-			return true
-		}
-	} else {
-		if !loopbackHost(r.Host) {
-			writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires a one-time pairing token"})
-			return true
-		}
-		if !secureTokenEqual(accessToken, s.config.APIToken) {
-			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
-			return true
-		}
+	if !loopbackHost(r.Host) {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires the pairing page"})
+		return true
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
-		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
-	})
+	if !secureTokenEqual(accessToken, s.config.APIToken) {
+		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+		return true
+	}
+	s.setDashboardSessionCookie(w, r)
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
-	query.Del("pairing_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true

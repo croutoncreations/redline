@@ -10,8 +10,10 @@ const assets = {
   '/assets/claude.svg': [fs.readFileSync(path.join(dashboardRoot, 'claude.svg')), 'image/svg+xml'],
   '/assets/codex.svg': [fs.readFileSync(path.join(dashboardRoot, 'codex.svg')), 'image/svg+xml'],
   '/m': [fs.readFileSync(path.join(dashboardRoot, 'mobile.html')), 'text/html'],
+  '/pair': [fs.readFileSync(path.join(dashboardRoot, 'pair.html')), 'text/html'],
   '/assets/mobile/mobile.css': [fs.readFileSync(path.join(dashboardRoot, 'mobile.css')), 'text/css'],
   '/assets/mobile/mobile.js': [fs.readFileSync(path.join(dashboardRoot, 'mobile.js')), 'text/javascript'],
+  '/assets/mobile/pair.js': [fs.readFileSync(path.join(dashboardRoot, 'pair.js')), 'text/javascript'],
   '/assets/mobile/manifest.webmanifest': [fs.readFileSync(path.join(dashboardRoot, 'manifest.webmanifest')), 'application/manifest+json'],
   '/sw.js': [fs.readFileSync(path.join(dashboardRoot, 'sw.js')), 'text/javascript'],
   '/assets/mobile/icon-192.png': [fs.readFileSync(path.join(dashboardRoot, 'icon-192.png')), 'image/png'],
@@ -400,4 +402,4 @@ async function loadMobileDashboard(page, options = {}) {
   return state;
 }
 
-module.exports = { loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
+module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
