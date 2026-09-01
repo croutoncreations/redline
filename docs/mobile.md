@@ -62,12 +62,14 @@ redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port
 ```
 
 Scan the QR from a phone connected to the tailnet. The CLI authenticates to the running
-Redline service and creates a random pairing credential that expires after ten minutes
-and is consumed on first use. Redeeming it creates a Secure, HttpOnly, SameSite=Strict
-session cookie and immediately redirects to a URL without the credential query parameter.
+Redline service and creates a random pairing credential that expires after ten minutes.
+Redeeming it creates a Secure, HttpOnly, SameSite=Strict session cookie and immediately
+redirects to a URL without the credential query parameter. Because phone QR scanners often
+preview a link before opening the browser, the credential permits exactly one additional
+redemption within two minutes of the first request and rejects any further reuse.
 
-Until it is redeemed or expires, the QR can grant a browser the same API authority as the
-Redline CLI. Keep it private. A reused or expired QR is rejected. To revoke an already
+Until its redemption window closes or it expires, the QR can grant a browser the same API
+authority as the Redline CLI. Keep it private. To revoke an already
 paired browser, stop Redline, replace the protected `api-token` file beside the
 configuration, and pair devices again.
 

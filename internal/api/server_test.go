@@ -314,7 +314,8 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	cfg := testConfig("http://unused")
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
-	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	currentTime := apiNow
+	handler := api.NewServer(cfg, db, func() time.Time { return currentTime })
 	pairing := httptest.NewRecorder()
 	pairingRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing", nil)
 	pairingRequest.Header.Set("Authorization", "Bearer "+cfg.APIToken)
@@ -371,8 +372,27 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	reusedRequest.Header.Set("X-Forwarded-Proto", "https")
 	reusedRequest.RemoteAddr = "127.0.0.1:54321"
 	handler.ServeHTTP(reused, reusedRequest)
-	if reused.Code != http.StatusUnauthorized {
-		t.Fatalf("reused pairing token status=%d want=%d", reused.Code, http.StatusUnauthorized)
+	if reused.Code != http.StatusSeeOther || len(reused.Result().Cookies()) != 1 {
+		t.Fatalf("scanner-preview retry status=%d cookies=%#v", reused.Code, reused.Result().Cookies())
+	}
+
+	thirdRedemption := httptest.NewRecorder()
+	thirdRedemptionRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	thirdRedemptionRequest.Header.Set("X-Forwarded-Proto", "https")
+	thirdRedemptionRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(thirdRedemption, thirdRedemptionRequest)
+	if thirdRedemption.Code != http.StatusUnauthorized {
+		t.Fatalf("third pairing redemption status=%d want=%d", thirdRedemption.Code, http.StatusUnauthorized)
+	}
+
+	currentTime = apiNow.Add(2*time.Minute + time.Second)
+	expiredGrace := httptest.NewRecorder()
+	expiredGraceRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	expiredGraceRequest.Header.Set("X-Forwarded-Proto", "https")
+	expiredGraceRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(expiredGrace, expiredGraceRequest)
+	if expiredGrace.Code != http.StatusUnauthorized {
+		t.Fatalf("expired pairing redemption grace status=%d want=%d", expiredGrace.Code, http.StatusUnauthorized)
 	}
 
 	fullToken := httptest.NewRecorder()

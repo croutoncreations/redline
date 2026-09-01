@@ -61,6 +61,12 @@ type HermesDiscoverer interface {
 	TriggerJob(context.Context, domain.RuntimeConnection, string) (hermes.Job, error)
 }
 
+type pairingCredential struct {
+	expiresAt   time.Time
+	redeemedAt  time.Time
+	redemptions int
+}
+
 type Server struct {
 	config       config.Config
 	store        *store.DB
@@ -83,7 +89,7 @@ type Server struct {
 	startMu      sync.Mutex
 	started      bool
 	pairingMu    sync.Mutex
-	pairing      map[string]time.Time
+	pairing      map[string]pairingCredential
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -187,7 +193,7 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
-		pairing:   make(map[string]time.Time),
+		pairing:   make(map[string]pairingCredential),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -325,12 +331,12 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, expiry := range s.pairing {
-		if !expiry.After(s.now()) {
+	for existing, credential := range s.pairing {
+		if !credential.expiresAt.After(s.now()) {
 			delete(s.pairing, existing)
 		}
 	}
-	s.pairing[token] = expiresAt
+	s.pairing[token] = pairingCredential{expiresAt: expiresAt}
 	s.pairingMu.Unlock()
 	writeJSON(w, http.StatusCreated, struct {
 		Token     string    `json:"pairing_token"`
@@ -341,11 +347,27 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) consumePairingToken(token string) bool {
 	s.pairingMu.Lock()
 	defer s.pairingMu.Unlock()
-	expiresAt, ok := s.pairing[token]
-	if ok {
+	credential, ok := s.pairing[token]
+	if !ok || !credential.expiresAt.After(s.now()) {
 		delete(s.pairing, token)
+		return false
 	}
-	return ok && expiresAt.After(s.now())
+	if credential.redemptions == 0 {
+		credential.redeemedAt = s.now()
+		credential.redemptions = 1
+		s.pairing[token] = credential
+		return true
+	}
+	// Mobile QR scanners commonly preview the URL before handing it to the
+	// browser. Permit exactly one immediate follow-up redemption so that preview
+	// does not consume the credential intended for browser navigation.
+	if credential.redemptions == 1 && s.now().Sub(credential.redeemedAt) <= 2*time.Minute {
+		credential.redemptions = 2
+		s.pairing[token] = credential
+		return true
+	}
+	delete(s.pairing, token)
+	return false
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
