@@ -77,7 +77,7 @@ func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
 	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"running", "historical"} {
+	for _, id := range []string{"running", "historical", "requested"} {
 		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, ExecutionProfileID: profile.ID, Type: domain.OneOff}, now); err != nil {
 			t.Fatal(err)
 		}
@@ -93,6 +93,15 @@ func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
 	}
 	if err := db.DeleteTask(t.Context(), "historical"); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("historical delete error = %v", err)
+	}
+	if _, err := db.RecordDispatchAttempt(t.Context(), domain.DispatchAttempt{
+		ProviderAccountID: "codex-main", Trigger: "manual-task", Outcome: domain.DispatchWait,
+		RequestedTaskID: "requested", StartedAt: now, CompletedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(t.Context(), "requested"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("requested delete error = %v", err)
 	}
 }
 

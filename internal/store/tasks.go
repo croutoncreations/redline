@@ -267,7 +267,8 @@ func (d *DB) DeleteTask(ctx context.Context, id string) error {
 	if err := tx.QueryRowContext(ctx, `SELECT
 (SELECT COUNT(*) FROM runs WHERE task_id = ?) +
 (SELECT COUNT(*) FROM scheduler_decisions WHERE selected_task_id = ?) +
-(SELECT COUNT(*) FROM dispatch_attempts WHERE selected_task_id = ?)`, id, id, id).Scan(&references); err != nil {
+(SELECT COUNT(*) FROM dispatch_attempts WHERE selected_task_id = ?) +
+(SELECT COUNT(*) FROM dispatch_attempts WHERE requested_task_id = ?)`, id, id, id, id).Scan(&references); err != nil {
 		return fmt.Errorf("check task history: %w", err)
 	}
 	if references > 0 {

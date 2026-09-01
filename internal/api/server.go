@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,8 @@ type Server struct {
 	loopWorkers  sync.WaitGroup
 	startMu      sync.Mutex
 	started      bool
+	pairingMu    sync.Mutex
+	pairing      map[string]time.Time
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -183,6 +187,7 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
+		pairing:   make(map[string]time.Time),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -208,8 +213,10 @@ func newServer(
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
+	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
+	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
 	mux.HandleFunc("GET /v1/providers/{provider}/capacity", server.providerCapacity)
 	mux.HandleFunc("POST /v1/providers/{provider}/token-sync", server.syncProviderTokens)
@@ -244,6 +251,7 @@ func newServer(
 	mux.HandleFunc("PATCH /v1/tasks/{task}", server.updateTask)
 	mux.HandleFunc("DELETE /v1/tasks/{task}", server.deleteTask)
 	mux.HandleFunc("POST /v1/tasks/{task}/{control}", server.taskControl)
+	mux.HandleFunc("POST /v1/tasks/{task}/dispatch", server.dispatchTask)
 	mux.HandleFunc("POST /v1/scheduler/evaluate", server.evaluateScheduler)
 	mux.HandleFunc("POST /v1/scheduler/execute", server.executeScheduler)
 	mux.HandleFunc("GET /v1/scheduler/status", server.schedulerStatus)
@@ -260,7 +268,10 @@ func newServer(
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
+	mux.HandleFunc("GET /m", server.dashboardPage)
+	mux.HandleFunc("GET /sw.js", server.mobileServiceWorker)
 	mux.HandleFunc("GET /assets/{asset}", server.dashboardAsset)
+	mux.HandleFunc("GET /assets/mobile/{asset}", server.mobileDashboardAsset)
 	server.mux = mux
 	return server
 }
@@ -278,8 +289,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	if !loopbackHost(r.Host) {
-		writeJSON(w, http.StatusForbidden, problem{Error: "Redline only accepts loopback hosts"})
+	if loopbackHost(r.Host) && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) != "" {
+		writeJSON(w, http.StatusForbidden, problem{Error: "reverse proxies must preserve a configured trusted host"})
+		return
+	}
+	if !allowedHost(r.Host, s.config.API.TrustedHosts) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "Redline does not trust this host"})
 		return
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !sameOrigin(origin, r) {
@@ -301,25 +316,74 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 const apiSessionCookie = "redline_api_session"
 
+func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		writeError(w, fmt.Errorf("generate pairing token: %w", err))
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(bytes)
+	expiresAt := s.now().UTC().Add(10 * time.Minute)
+	s.pairingMu.Lock()
+	for existing, expiry := range s.pairing {
+		if !expiry.After(s.now()) {
+			delete(s.pairing, existing)
+		}
+	}
+	s.pairing[token] = expiresAt
+	s.pairingMu.Unlock()
+	writeJSON(w, http.StatusCreated, struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}{Token: token, ExpiresAt: expiresAt})
+}
+
+func (s *Server) consumePairingToken(token string) bool {
+	s.pairingMu.Lock()
+	defer s.pairingMu.Unlock()
+	expiresAt, ok := s.pairing[token]
+	if ok {
+		delete(s.pairing, token)
+	}
+	return ok && expiresAt.After(s.now())
+}
+
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard") {
+	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
 		return false
 	}
-	token := r.URL.Query().Get("access_token")
-	if token == "" {
+	accessToken := r.URL.Query().Get("access_token")
+	pairingToken := r.URL.Query().Get("pairing_token")
+	if accessToken == "" && pairingToken == "" {
 		return false
 	}
-	if !secureTokenEqual(token, s.config.APIToken) {
-		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+	if !loopbackHost(r.Host) && requestScheme(r) != "https" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires HTTPS"})
 		return true
+	}
+	if pairingToken != "" {
+		if !s.consumePairingToken(pairingToken) {
+			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
+			return true
+		}
+	} else {
+		if !loopbackHost(r.Host) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "remote Redline dashboard pairing requires a one-time pairing token"})
+			return true
+		}
+		if !secureTokenEqual(accessToken, s.config.APIToken) {
+			writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
+			return true
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
 	})
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
+	query.Del("pairing_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true
@@ -350,12 +414,48 @@ func loopbackHost(hostPort string) bool {
 	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
 }
 
+func allowedHost(hostPort string, trusted []string) bool {
+	if loopbackHost(hostPort) {
+		return true
+	}
+	host := hostPort
+	if parsed, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	for _, candidate := range trusted {
+		if strings.EqualFold(host, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	if strings.EqualFold(forwarded, "https") && loopbackRemote(r.RemoteAddr) {
+		return "https"
+	}
+	return "http"
+}
+
+func loopbackRemote(address string) bool {
+	host := address
+	if parsed, _, err := net.SplitHostPort(address); err == nil {
+		host = parsed
+	}
+	return net.ParseIP(strings.Trim(host, "[]")).IsLoopback()
+}
+
 func sameOrigin(origin string, r *http.Request) bool {
 	parsed, err := url.Parse(origin)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+	return strings.EqualFold(parsed.Scheme, requestScheme(r)) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func (s *Server) listTaskTemplates(w http.ResponseWriter, _ *http.Request) {
@@ -1107,6 +1207,7 @@ func (s *Server) taskControl(w http.ResponseWriter, r *http.Request) {
 type schedulerRequest struct {
 	ProviderAccountID string `json:"provider_account_id"`
 	CurrentRevision   string `json:"current_revision"`
+	RequestedTaskID   string `json:"-"`
 }
 
 type schedulerResponse struct {
@@ -1128,6 +1229,164 @@ func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, admitted, err := s.dispatch(r.Context(), request, "manual")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if response.Result.Mode == decision.ModePaused {
+		writeJSON(w, http.StatusConflict, problem{Error: "provider is paused"})
+		return
+	}
+	status := http.StatusOK
+	if admitted {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, response)
+}
+
+type candidateView struct {
+	TaskID   string `json:"task_id"`
+	Name     string `json:"name"`
+	Priority int    `json:"priority"`
+	Eligible bool   `json:"eligible"`
+	Reason   string `json:"reason"`
+}
+
+type candidatesResponse struct {
+	GeneratedAt        time.Time       `json:"generated_at"`
+	ProviderAccountID  string          `json:"provider_account_id"`
+	DispatchAvailable  bool            `json:"dispatch_available"`
+	ProviderReason     string          `json:"provider_reason"`
+	SnapshotObservedAt *time.Time      `json:"snapshot_observed_at,omitempty"`
+	SnapshotStale      bool            `json:"snapshot_stale"`
+	SelectedTaskID     string          `json:"selected_task_id,omitempty"`
+	Candidates         []candidateView `json:"candidates"`
+}
+
+type profileRevision struct {
+	revision string
+	err      error
+}
+
+func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("provider")
+	configured, ok := s.config.Providers[providerID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: fmt.Sprintf("provider %q is not configured", providerID)})
+		return
+	}
+	tasks, err := s.store.DispatchCandidates(r.Context(), providerID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response := candidatesResponse{GeneratedAt: s.now().UTC(), ProviderAccountID: providerID,
+		Candidates: make([]candidateView, 0, len(tasks))}
+	snapshot, _, err := s.store.LatestSnapshot(r.Context(), configured.Provider)
+	if errors.Is(err, store.ErrNotFound) {
+		response.ProviderReason = "no usage snapshot has been collected yet"
+		for _, task := range tasks {
+			response.Candidates = append(response.Candidates, candidateView{
+				TaskID: task.ID, Name: task.Name, Priority: task.Priority, Reason: response.ProviderReason,
+			})
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	base, err := s.evaluateStoredProvider(r.Context(), providerID, snapshot)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response.SnapshotObservedAt = &snapshot.ObservedAt
+	maxAge, _ := s.config.SnapshotAge()
+	age := s.now().Sub(snapshot.ObservedAt)
+	response.SnapshotStale = age > maxAge || age < 0
+	response.DispatchAvailable = base.Decision != decision.Unknown && !response.SnapshotStale
+	if !response.DispatchAvailable {
+		response.ProviderReason = base.Reason
+	}
+	paused, err := s.store.ProviderPaused(r.Context(), providerID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if paused {
+		response.DispatchAvailable = false
+		response.ProviderReason = "provider is paused"
+	} else if active, countErr := s.store.ActiveRunCount(r.Context(), providerID); countErr != nil {
+		writeError(w, countErr)
+		return
+	} else if concurrency, limitErr := s.effectiveProviderConcurrency(r.Context(), providerID); limitErr != nil {
+		writeError(w, limitErr)
+		return
+	} else if active >= concurrency.MaxConcurrentRuns {
+		response.DispatchAvailable = false
+		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", concurrency.MaxConcurrentRuns)
+	}
+	revisions := make(map[string]profileRevision)
+	for _, task := range tasks {
+		verdict, evaluateErr := s.evaluateCandidate(r.Context(), providerID, task, "", snapshot, base, revisions)
+		if evaluateErr != nil {
+			writeError(w, evaluateErr)
+			return
+		}
+		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
+			Eligible: verdict.Eligible, Reason: verdict.Reason}
+		response.Candidates = append(response.Candidates, view)
+		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
+			response.SelectedTaskID = task.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) dispatchTask(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		contents, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "read task dispatch request: " + err.Error()})
+			return
+		}
+		if strings.TrimSpace(string(contents)) != "" {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "task dispatch does not accept a request body"})
+			return
+		}
+	}
+	task, err := s.store.GetTask(r.Context(), r.PathValue("task"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !task.Enabled || task.State != domain.Queued {
+		reason := "task is disabled"
+		if task.Enabled {
+			reason = fmt.Sprintf("task state is %q, not queued", task.State)
+		}
+		now := s.now().UTC()
+		if _, err := s.store.RecordDispatchAttempt(r.Context(), domain.DispatchAttempt{
+			ProviderAccountID: profile.ProviderAccountID, Trigger: "manual-task",
+			RequestedTaskID: task.ID, Outcome: domain.DispatchWait,
+			Decision: string(decision.Wait), Reason: reason, StartedAt: now, CompletedAt: now,
+		}); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusConflict, problem{Error: reason})
+		return
+	}
+	response, admitted, err := s.dispatch(r.Context(), schedulerRequest{
+		ProviderAccountID: profile.ProviderAccountID, RequestedTaskID: task.ID,
+	}, "manual-task")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1176,7 +1435,8 @@ func (s *Server) dispatch(
 	}
 	attempt := domain.DispatchAttempt{
 		ProviderAccountID: request.ProviderAccountID, Trigger: trigger,
-		StartedAt: startedAt, CompletedAt: s.now().UTC(),
+		RequestedTaskID: request.RequestedTaskID,
+		StartedAt:       startedAt, CompletedAt: s.now().UTC(),
 		Decision: string(response.Result.Decision), Mode: string(response.Result.Mode),
 		Reason: response.Result.Reason,
 	}
@@ -1271,6 +1531,7 @@ func (s *Server) dispatchCore(
 	}
 	task, profile, revision, selectedResult, err := s.selectTask(
 		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
+		request.RequestedTaskID,
 	)
 	response.Result = selectedResult
 	if errors.Is(err, store.ErrNotFound) {
@@ -1279,6 +1540,7 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
+	response.SelectedTask = &task
 	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
@@ -1308,7 +1570,6 @@ func (s *Server) dispatchCore(
 		}
 		return response, false, err
 	}
-	response.SelectedTask = &task
 	response.Run = &run
 	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
 		log.Printf("redline run %s decision history failed: %v", run.ID, err)
@@ -1326,74 +1587,115 @@ func (s *Server) dispatchCore(
 func (s *Server) selectTask(
 	ctx context.Context, provider, suppliedRevision string,
 	snapshot decision.UsageSnapshot, base decision.Result,
+	requestedTaskID string,
 ) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
-	now := s.now()
+	return s.selectTaskCached(ctx, provider, suppliedRevision, snapshot, base, requestedTaskID,
+		make(map[string]profileRevision))
+}
+
+type candidateVerdict struct {
+	Profile  domain.ExecutionProfile
+	Revision string
+	Result   decision.Result
+	Eligible bool
+	Reason   string
+}
+
+func (s *Server) evaluateCandidate(
+	ctx context.Context, provider string, task domain.Task, suppliedRevision string,
+	snapshot decision.UsageSnapshot, base decision.Result, revisions map[string]profileRevision,
+) (candidateVerdict, error) {
+	verdict := candidateVerdict{Result: base}
+	if task.LastCompletedAt != nil && task.MinInterval > 0 {
+		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
+		if s.now().Before(eligibleAt) {
+			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			return verdict, nil
+		}
+	}
+	profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+	if err != nil {
+		return verdict, err
+	}
+	verdict.Profile = profile
+	verdict.Revision = suppliedRevision
+	if verdict.Revision == "" && profile.Repository != "" {
+		cached, ok := revisions[profile.ID]
+		if !ok {
+			cached.revision, cached.err = s.revision.Resolve(ctx, profile)
+			revisions[profile.ID] = cached
+		}
+		if cached.err == nil {
+			verdict.Revision = cached.revision
+		} else if task.RequireRepoChange {
+			verdict.Reason = "repository revision could not be read: " + cached.err.Error()
+			return verdict, nil
+		}
+	}
+	if task.RequireRepoChange {
+		switch {
+		case verdict.Revision == "":
+			verdict.Reason = "repository revision is unavailable"
+			return verdict, nil
+		case verdict.Revision == task.LastSuccessfulSourceRevision:
+			verdict.Reason = "repository has not changed since the last successful run"
+			return verdict, nil
+		}
+	}
+	result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
+	verdict.Result = result
+	if !eligible {
+		verdict.Reason = reason
+		if verdict.Reason == "" {
+			verdict.Reason = base.Reason
+		}
+		return verdict, nil
+	}
+	if reason, err := s.concurrencyRejection(ctx, provider, result.RequiredPools); err != nil {
+		return verdict, err
+	} else if reason != "" {
+		verdict.Reason = reason
+		return verdict, nil
+	}
+	if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
+		verdict.Reason = fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)
+		return verdict, nil
+	}
+	verdict.Eligible = true
+	return verdict, nil
+}
+
+func (s *Server) selectTaskCached(
+	ctx context.Context, provider, suppliedRevision string,
+	snapshot decision.UsageSnapshot, base decision.Result,
+	requestedTaskID string, revisions map[string]profileRevision,
+) (domain.Task, domain.ExecutionProfile, string, decision.Result, error) {
 	tasks, err := s.store.DispatchCandidates(ctx, provider)
 	if err != nil {
 		return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 	}
 	rejections := make([]decision.CandidateRejection, 0)
 	for _, task := range tasks {
-		if task.LastCompletedAt != nil && task.MinInterval > 0 {
-			eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
-			if now.Before(eligibleAt) {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"cooldown until "+eligibleAt.UTC().Format(time.RFC3339))
-				continue
-			}
+		if requestedTaskID != "" && task.ID != requestedTaskID {
+			continue
 		}
-		profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
+		verdict, err := s.evaluateCandidate(ctx, provider, task, suppliedRevision, snapshot, base, revisions)
 		if err != nil {
 			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
 		}
-		revision := suppliedRevision
-		if revision == "" && profile.Repository != "" {
-			resolved, resolveErr := s.revision.Resolve(ctx, profile)
-			if resolveErr == nil {
-				revision = resolved
-			} else if task.RequireRepoChange {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"repository revision could not be read: "+resolveErr.Error())
-				continue
-			}
-		}
-		if task.RequireRepoChange {
-			if revision == "" {
-				rejections = appendCandidateRejection(rejections, task.ID, "repository revision is unavailable")
-				continue
-			}
-			if revision == task.LastSuccessfulSourceRevision {
-				rejections = appendCandidateRejection(rejections, task.ID,
-					"repository has not changed since the last successful run")
-				continue
-			}
-		}
-		result, eligible, reason := s.evaluateCandidateBudget(provider, snapshot, base, profile)
-		if !eligible {
-			if reason != "" && len(rejections) < 20 {
-				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID, Reason: reason})
-			}
+		if !verdict.Eligible {
+			rejections = appendCandidateRejection(rejections, task.ID, verdict.Reason)
 			continue
 		}
-		if reason, err := s.concurrencyRejection(ctx, provider, result.RequiredPools); err != nil {
-			return domain.Task{}, domain.ExecutionProfile{}, "", base, err
-		} else if reason != "" {
-			rejections = appendCandidateRejection(rejections, task.ID, reason)
-			continue
-		}
-		if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
-			if len(rejections) < 20 {
-				rejections = append(rejections, decision.CandidateRejection{TaskID: task.ID,
-					Reason: fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)})
-			}
-			continue
-		}
-		result.CandidateRejections = rejections
-		result.TaskSelectionReason = "selected highest-priority eligible task"
-		return task, profile, revision, result, nil
+		verdict.Result.CandidateRejections = rejections
+		verdict.Result.TaskSelectionReason = "selected highest-priority eligible task"
+		return task, verdict.Profile, verdict.Revision, verdict.Result, nil
 	}
 	base.CandidateRejections = rejections
 	base.TaskSelectionReason = "no queued tasks are eligible"
+	if requestedTaskID != "" && len(rejections) > 0 {
+		base.Reason = rejections[0].Reason
+	}
 	return domain.Task{}, domain.ExecutionProfile{}, "", base,
 		fmt.Errorf("%w: no eligible task for provider %q", store.ErrNotFound, provider)
 }
@@ -1718,6 +2020,7 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 	response := schedulerResponse{Snapshot: snapshot, Result: result}
 	task, _, _, selectedResult, err := s.selectTask(
 		r.Context(), request.ProviderAccountID, request.CurrentRevision, snapshot, result,
+		"",
 	)
 	response.Result = selectedResult
 	if err == nil {
@@ -1874,21 +2177,28 @@ func (s *Server) evaluateProvider(
 	if err != nil {
 		return decision.UsageSnapshot{}, decision.Result{}, err
 	}
+	result, err := s.evaluateStoredProvider(ctx, providerID, snapshot)
+	return snapshot, result, err
+}
+
+func (s *Server) evaluateStoredProvider(
+	ctx context.Context, providerID string, snapshot decision.UsageSnapshot,
+) (decision.Result, error) {
 	selection, err := s.effectiveProviderPolicy(ctx, providerID)
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	thresholds, err := selection.Definition.DecisionThresholds()
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	maxAge, err := s.config.SnapshotAge()
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	estimate, err := s.calibration(ctx, providerID)
 	if err != nil {
-		return decision.UsageSnapshot{}, decision.Result{}, err
+		return decision.Result{}, err
 	}
 	result := decision.Evaluate(decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
@@ -1898,7 +2208,7 @@ func (s *Server) evaluateProvider(
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	})
 	result.Policy = selection.Policy
-	return snapshot, result, nil
+	return result, nil
 }
 
 func (s *Server) calibration(ctx context.Context, providerID string) (calibration.Estimate, error) {

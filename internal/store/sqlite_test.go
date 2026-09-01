@@ -123,6 +123,14 @@ ALTER TABLE runs DROP COLUMN actual_provider;
 ALTER TABLE runs DROP COLUMN actual_model;
 ALTER TABLE runs DROP COLUMN activity_read_at;
 ALTER TABLE usage_allowance_windows DROP COLUMN reset_inferred;
+ALTER TABLE dispatch_attempts DROP COLUMN requested_task_id;
+INSERT INTO dispatch_attempts (
+    provider_account_id, trigger, outcome, decision, mode, reason,
+    selected_task_id, run_id, error, started_at, completed_at
+) VALUES (
+    'codex-main', 'automatic', 'wait', 'WAIT', 'pace_threshold', 'legacy attempt',
+    NULL, NULL, '', '2026-07-21T17:00:00Z', '2026-07-21T17:00:01Z'
+);
 INSERT INTO usage_snapshots (
     provider, observed_at, short_remaining, short_resets_at,
     weekly_remaining, weekly_resets_at, source, confidence, raw_payload
@@ -141,6 +149,10 @@ FROM usage_snapshots LIMIT 1;`); err != nil {
 	got, err := db.ListSnapshots(t.Context(), "codex", 10)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("snapshots=%#v err=%v", got, err)
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 1 || attempts[0].RequestedTaskID != "" || attempts[0].Reason != "legacy attempt" {
+		t.Fatalf("legacy attempts=%#v err=%v", attempts, err)
 	}
 }
 

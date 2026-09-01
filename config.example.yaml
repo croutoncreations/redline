@@ -3,6 +3,13 @@ run_artifacts_dir: .redline/runs
 active_policy: standard
 max_snapshot_age: 15m
 
+# Optional HTTPS hostnames accepted through a trusted reverse proxy such as
+# Tailscale Serve. Exact matches only; do not include schemes, ports, or wildcards.
+api:
+  trusted_hosts: []
+  # trusted_hosts:
+  #   - macbook-pro.example.ts.net
+
 # Automatic dispatch is opt-in so installing or upgrading Redline cannot start
 # spending subscription capacity unexpectedly.
 scheduler:

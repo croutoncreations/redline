@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ type Config struct {
 	ActivePolicy    string              `yaml:"active_policy"`
 	MaxSnapshotAge  string              `yaml:"max_snapshot_age"`
 	Scheduler       Scheduler           `yaml:"scheduler"`
+	API             API                 `yaml:"api"`
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
@@ -56,6 +58,10 @@ func (c Config) NotificationEvents() map[string]bool {
 		result[event] = true
 	}
 	return result
+}
+
+type API struct {
+	TrustedHosts []string `yaml:"trusted_hosts"`
 }
 
 type Scheduler struct {
@@ -174,6 +180,30 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining" json:"min_weekly_remaining"`
 }
 
+func validTrustedHost(host string) bool {
+	if host == "" || strings.TrimSpace(host) != host {
+		return false
+	}
+	if net.ParseIP(host) != nil || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return false
+	}
+	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+				(character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -196,6 +226,12 @@ func Load(path string) (Config, error) {
 	}
 	if len(cfg.Providers) == 0 {
 		return Config{}, fmt.Errorf("at least one provider is required")
+	}
+	for index, host := range cfg.API.TrustedHosts {
+		if !validTrustedHost(host) {
+			return Config{}, fmt.Errorf("api trusted_host %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", host)
+		}
+		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
 	for name, provider := range cfg.Providers {
 		if provider.Provider == "" {

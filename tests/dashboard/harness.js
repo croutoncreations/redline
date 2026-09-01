@@ -9,6 +9,13 @@ const assets = {
   '/assets/dashboard.css': [fs.readFileSync(path.join(dashboardRoot, 'dashboard.css')), 'text/css'],
   '/assets/claude.svg': [fs.readFileSync(path.join(dashboardRoot, 'claude.svg')), 'image/svg+xml'],
   '/assets/codex.svg': [fs.readFileSync(path.join(dashboardRoot, 'codex.svg')), 'image/svg+xml'],
+  '/m': [fs.readFileSync(path.join(dashboardRoot, 'mobile.html')), 'text/html'],
+  '/assets/mobile/mobile.css': [fs.readFileSync(path.join(dashboardRoot, 'mobile.css')), 'text/css'],
+  '/assets/mobile/mobile.js': [fs.readFileSync(path.join(dashboardRoot, 'mobile.js')), 'text/javascript'],
+  '/assets/mobile/manifest.webmanifest': [fs.readFileSync(path.join(dashboardRoot, 'manifest.webmanifest')), 'application/manifest+json'],
+  '/sw.js': [fs.readFileSync(path.join(dashboardRoot, 'sw.js')), 'text/javascript'],
+  '/assets/mobile/icon-192.png': [fs.readFileSync(path.join(dashboardRoot, 'icon-192.png')), 'image/png'],
+  '/assets/mobile/icon-512.png': [fs.readFileSync(path.join(dashboardRoot, 'icon-512.png')), 'image/png'],
 };
 
 const FIXTURE_NOW = '2026-07-20T19:00:00Z';
@@ -252,4 +259,145 @@ async function loadDashboard(page, options = {}) {
   return state;
 }
 
-module.exports = { loadDashboard, dashboardFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
+function candidatesFixture(providerID = 'codex-main', opts = {}) {
+  const observed = FIXTURE_NOW;
+  const eligible = opts.eligible !== false;
+  return {
+    generated_at: observed,
+    provider_account_id: providerID,
+    dispatch_available: opts.dispatch_available !== false,
+    provider_reason: opts.provider_reason || '',
+    snapshot_observed_at: observed,
+    snapshot_stale: opts.snapshot_stale || false,
+    selected_task_id: eligible ? 'audit-auth' : '',
+    candidates: [
+      {
+        task_id: 'audit-auth', name: 'Audit authentication', priority: 70,
+        eligible: eligible,
+        reason: eligible ? '' : (opts.ineligible_reason || 'weekly remaining is below threshold'),
+      },
+      {
+        task_id: 'fix-perf', name: 'Fix performance regression', priority: 50,
+        eligible: false,
+        reason: opts.second_reason || 'concurrency limit reached',
+      },
+    ],
+  };
+}
+
+async function loadMobileDashboard(page, options = {}) {
+  const state = {
+    dashboard: dashboardFixture(),
+    candidates: {},
+    requests: [],
+    dashboardError: false,
+    waitForReady: true,
+    ...options,
+  };
+
+  // Default candidates per provider
+  if (!state.candidates['claude-main']) state.candidates['claude-main'] = candidatesFixture('claude-main');
+  if (!state.candidates['codex-main']) state.candidates['codex-main'] = candidatesFixture('codex-main');
+
+  await page.clock.install({ time: new Date(FIXTURE_NOW) });
+
+  await page.addInitScript(() => {
+    window.__redlineEventSources = [];
+    window.EventSource = class {
+      constructor(url) { this.url = url; this.listeners = {}; window.__redlineEventSources.push(this); queueMicrotask(() => this.onopen?.({})); }
+      addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
+      emit(name, data) { for (const listener of this.listeners[name] || []) listener({ data: JSON.stringify(data) }); }
+      fail() { this.onerror?.({}); }
+      close() {}
+    };
+  });
+
+  await page.route('http://redline.test/**', async route => {
+    const request = route.request(), url = new URL(request.url()), method = request.method();
+
+    if (assets[url.pathname]) {
+      const [body, contentType] = assets[url.pathname];
+      return route.fulfill({ status: 200, body, contentType });
+    }
+
+    const json = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+
+    if (url.pathname === '/v1/dashboard') {
+      return state.dashboardError
+        ? json(500, { error: 'dashboard unavailable' })
+        : json(200, state.dashboard);
+    }
+
+    const candidatesMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/candidates$/);
+    if (candidatesMatch) {
+      const id = decodeURIComponent(candidatesMatch[1]);
+      return json(200, state.candidates[id] || candidatesFixture(id));
+    }
+
+    const providerControlMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/(pause|resume|refresh)$/);
+    if (providerControlMatch && method === 'POST') {
+      const id = decodeURIComponent(providerControlMatch[1]), control = providerControlMatch[2];
+      state.requests.push({ method, path: url.pathname });
+      if (control === 'pause') {
+        const p = state.dashboard.providers.find(x => x.id === id);
+        if (p) p.paused = true;
+      } else if (control === 'resume') {
+        const p = state.dashboard.providers.find(x => x.id === id);
+        if (p) p.paused = false;
+      }
+      return json(200, { provider_account_id: id, paused: control === 'pause' });
+    }
+
+    const taskControlMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/(enable|disable|retry)$/);
+    if (taskControlMatch && method === 'POST') {
+      state.requests.push({ method, path: url.pathname });
+      return json(200, { id: decodeURIComponent(taskControlMatch[1]), enabled: taskControlMatch[2] !== 'disable' });
+    }
+
+    const readMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/read$/);
+    if (readMatch && method === 'POST') {
+      state.requests.push({ method, path: url.pathname });
+      return json(200, { read: true });
+    }
+    if (url.pathname === '/v1/runs/read-all' && method === 'POST') {
+      state.requests.push({ method, path: url.pathname });
+      return json(200, { read: true });
+    }
+
+    const eventsMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/events$/);
+    if (eventsMatch) {
+      return json(200, state.runEvents || [
+        { id: 'ev-1', type: 'run_started', occurred_at: FIXTURE_NOW, message: 'Run started' },
+        { id: 'ev-2', type: 'run_completed', occurred_at: FIXTURE_NOW, message: 'Run completed' },
+      ]);
+    }
+
+    const logsMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/logs$/);
+    if (logsMatch) {
+      const stream = url.searchParams.get('stream') || 'stdout';
+      return json(200, { run_id: logsMatch[1], stream, content: stream === 'stderr' ? 'warning: deprecated API call' : '{"type":"result","result":"ok"}' });
+    }
+
+    const taskDispatchMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/dispatch$/);
+    if (taskDispatchMatch && method === 'POST') {
+      state.requests.push({ method, path: url.pathname, taskID: decodeURIComponent(taskDispatchMatch[1]), body: request.postData() });
+      if (state.dispatchOutcome === 409) return json(409, { error: 'provider is paused' });
+      if (state.dispatchOutcome === 202) return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ result: { decision: 'RUN' }, run: { id: 'new-run-1' } }) });
+      return json(200, { result: { decision: 'WAIT', reason: 'candidate is no longer eligible' } });
+    }
+
+    return json(404, { error: `unhandled ${method} ${url.pathname}` });
+  });
+
+  await page.goto('http://redline.test/m');
+
+  if (state.waitForReady) {
+    await expect(page.locator('#m-usage-list')).toBeVisible();
+    // Wait for at least one provider card
+    await expect(page.locator('[data-testid="provider-card"]').first()).toBeVisible();
+  }
+
+  return state;
+}
+
+module.exports = { loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };

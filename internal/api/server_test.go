@@ -118,6 +118,52 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	}
 }
 
+func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	for _, test := range []struct {
+		path        string
+		contentType string
+		contains    string
+	}{
+		{path: "/m", contentType: "text/html", contains: "m-header"},
+		{path: "/m", contentType: "text/html", contains: "m-tabs"},
+		{path: "/m", contentType: "text/html", contains: "manifest.webmanifest"},
+		{path: "/m", contentType: "text/html", contains: "mobile.css"},
+		{path: "/m", contentType: "text/html", contains: "mobile.js"},
+		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "--bg"},
+		{path: "/assets/mobile/mobile.css", contentType: "text/css", contains: "m-header"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "connectSSE"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "/v1/dashboard"},
+		{path: "/assets/mobile/mobile.js", contentType: "text/javascript", contains: "serviceWorker"},
+		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "maskable"},
+		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "icon-192.png"},
+		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v1"},
+		{path: "/sw.js", contentType: "text/javascript", contains: "/v1/"},
+		{path: "/assets/mobile/icon-192.png", contentType: "image/png", contains: "\x89PNG"},
+		{path: "/assets/mobile/icon-512.png", contentType: "image/png", contains: "\x89PNG"},
+	} {
+		resp, err := http.Get(server.URL + test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := new(bytes.Buffer)
+		_, _ = body.ReadFrom(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), test.contentType) || !strings.Contains(body.String(), test.contains) {
+			t.Fatalf("GET %s: status=%d content-type=%q body contains %q not found in: %.200s",
+				test.path, resp.StatusCode, resp.Header.Get("Content-Type"), test.contains, body.String())
+		}
+	}
+	resp, err := http.Get(server.URL + "/assets/mobile/missing.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing mobile asset status = %d", resp.StatusCode)
+	}
+}
+
 func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	for _, test := range []struct {
@@ -162,6 +208,180 @@ func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Frame-Options") != "DENY" ||
 		!strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'self'") {
 		t.Fatalf("status=%d headers=%v", resp.StatusCode, resp.Header)
+	}
+}
+
+func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name       string
+		host       string
+		origin     string
+		token      string
+		wantStatus int
+	}{
+		{name: "trusted authenticated host", host: "macbook.example.ts.net", origin: "https://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusOK},
+		{name: "trusted host is case insensitive", host: "MACBOOK.EXAMPLE.TS.NET", origin: "https://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusOK},
+		{name: "trusted host still requires authentication", host: "macbook.example.ts.net", origin: "https://macbook.example.ts.net", wantStatus: http.StatusUnauthorized},
+		{name: "trusted host rejects another origin", host: "macbook.example.ts.net", origin: "https://attacker.test", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+		{name: "trusted HTTPS host rejects HTTP origin", host: "macbook.example.ts.net", origin: "http://macbook.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+		{name: "untrusted host stays forbidden", host: "other.example.ts.net", token: cfg.APIToken, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, requestErr := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			req.Host = test.host
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if strings.EqualFold(test.host, "macbook.example.ts.net") {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			}
+			if test.token != "" {
+				req.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			resp, requestErr := http.DefaultClient.Do(req)
+			if requestErr != nil {
+				t.Fatal(requestErr)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/v1/health", nil)
+	request.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("rewritten proxy host status=%d want=%d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?access_token="+url.QueryEscape(cfg.APIToken), nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.RemoteAddr = "100.101.102.103:54321"
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	pairing := httptest.NewRecorder()
+	pairingRequest := httptest.NewRequest(http.MethodPost, "http://macbook.example.ts.net/v1/pairing", nil)
+	pairingRequest.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	pairingRequest.Header.Set("X-Forwarded-Proto", "https")
+	pairingRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(pairing, pairingRequest)
+	if pairing.Code != http.StatusCreated {
+		t.Fatalf("pairing status=%d body=%s", pairing.Code, pairing.Body.String())
+	}
+	var pairingResponse struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(pairing.Body).Decode(&pairingResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(pairingResponse.Token) < 32 || !pairingResponse.ExpiresAt.After(apiNow) || pairingResponse.Token == cfg.APIToken {
+		t.Fatalf("pairing response=%#v", pairingResponse)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage&pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, req)
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	location, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSeeOther || location.Path != "/m" || location.Query().Get("view") != "usage" ||
+		location.Query().Has("pairing_token") {
+		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	cookies := resp.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || !cookies[0].HttpOnly ||
+		!cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("bootstrap cookies = %#v", cookies)
+	}
+
+	page := httptest.NewRecorder()
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?view=usage", nil)
+	pageRequest.Header.Set("X-Forwarded-Proto", "https")
+	pageRequest.RemoteAddr = "127.0.0.1:54321"
+	pageRequest.AddCookie(cookies[0])
+	handler.ServeHTTP(page, pageRequest)
+	if page.Code != http.StatusOK || !strings.Contains(page.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("mobile page status=%d content-type=%q", page.Code, page.Header().Get("Content-Type"))
+	}
+
+	reused := httptest.NewRecorder()
+	reusedRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?pairing_token="+url.QueryEscape(pairingResponse.Token), nil)
+	reusedRequest.Header.Set("X-Forwarded-Proto", "https")
+	reusedRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(reused, reusedRequest)
+	if reused.Code != http.StatusUnauthorized {
+		t.Fatalf("reused pairing token status=%d want=%d", reused.Code, http.StatusUnauthorized)
+	}
+
+	fullToken := httptest.NewRecorder()
+	fullTokenRequest := httptest.NewRequest(http.MethodGet, "http://macbook.example.ts.net/m?access_token="+url.QueryEscape(cfg.APIToken), nil)
+	fullTokenRequest.Header.Set("X-Forwarded-Proto", "https")
+	fullTokenRequest.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(fullToken, fullTokenRequest)
+	if fullToken.Code != http.StatusBadRequest {
+		t.Fatalf("remote full API token bootstrap status=%d want=%d", fullToken.Code, http.StatusBadRequest)
 	}
 }
 
@@ -2013,6 +2233,269 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 	}
 }
 
+func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "queued", Name: "Queued", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	handler := api.NewDemoServer(testConfig("http://usage.invalid"), db, func() time.Time { return apiNow }, nil,
+		&fakeHarnessDiscoverer{}, fakeExecutor{execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil }})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+		Candidates        []struct {
+			Eligible bool   `json:"eligible"`
+			Reason   string `json:"reason"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DispatchAvailable || response.ProviderReason == "" || response.SelectedTaskID != "" ||
+		len(response.Candidates) != 1 || response.Candidates[0].Eligible || response.Candidates[0].Reason == "" {
+		t.Fatalf("response=%#v", response)
+	}
+
+	stale := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow.Add(-time.Hour),
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), stale, []byte(`{"stale":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	staleRecorder := httptest.NewRecorder()
+	staleRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	staleRequest.Host = "localhost"
+	handler.ServeHTTP(staleRecorder, staleRequest)
+	var staleResponse struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SnapshotStale     bool   `json:"snapshot_stale"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(staleRecorder.Body).Decode(&staleResponse); err != nil {
+		t.Fatal(err)
+	}
+	if staleRecorder.Code != http.StatusOK || staleResponse.DispatchAvailable || !staleResponse.SnapshotStale ||
+		staleResponse.ProviderReason == "" || staleResponse.SelectedTaskID != "" {
+		t.Fatalf("stale response status=%d response=%#v", staleRecorder.Code, staleResponse)
+	}
+}
+
+func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://usage.invalid")
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "shared", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx", Repository: "/repo"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"first", "second"} {
+		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var calls atomic.Int32
+	handler := api.NewServerWithDependencies(cfg, db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, fakeRevisionResolver{revisions: map[string]string{"shared": "revision"}, calls: &calls})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("revision resolve calls=%d want=1", calls.Load())
+	}
+}
+
+func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://usage.invalid")
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []domain.Task{
+		{ID: "blocked", Name: "Blocked", Priority: 110, ExecutionProfileID: profile.ID, Type: domain.OneOff, RequireRepoChange: true},
+		{ID: "high", Name: "High", Priority: 100, ExecutionProfileID: profile.ID, Type: domain.OneOff},
+		{ID: "low", Name: "Low", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff},
+	} {
+		if err := db.CreateTask(t.Context(), task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executed := make(chan domain.Task, 1)
+	handler := api.NewDemoServer(cfg, db, func() time.Time { return apiNow },
+		map[string]decision.UsageSnapshot{"codex-main": snapshot}, &fakeHarnessDiscoverer{}, fakeExecutor{
+			execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+				executed <- task
+				return nil
+			},
+		})
+
+	requestWithBody := httptest.NewRecorder()
+	bodyRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", strings.NewReader(`{"current_revision":"forged"}`))
+	bodyRequest.Host = "localhost"
+	handler.ServeHTTP(requestWithBody, bodyRequest)
+	if requestWithBody.Code != http.StatusBadRequest {
+		t.Fatalf("dispatch body status=%d body=%s", requestWithBody.Code, requestWithBody.Body.String())
+	}
+
+	preview := httptest.NewRecorder()
+	previewRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	previewRequest.Host = "localhost"
+	handler.ServeHTTP(preview, previewRequest)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var candidates struct {
+		Candidates []struct {
+			TaskID   string `json:"task_id"`
+			Eligible bool   `json:"eligible"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(preview.Body).Decode(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates.Candidates) != 3 || candidates.Candidates[0].TaskID != "blocked" || candidates.Candidates[0].Eligible ||
+		candidates.Candidates[1].TaskID != "high" || candidates.Candidates[2].TaskID != "low" {
+		t.Fatalf("candidates=%#v", candidates.Candidates)
+	}
+	if attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10); err != nil || len(attempts) != 0 {
+		t.Fatalf("preview attempts=%#v err=%v", attempts, err)
+	}
+	if decisions, err := db.ListSchedulerDecisions(t.Context(), "codex-main", 10); err != nil || len(decisions) != 0 {
+		t.Fatalf("preview decisions=%#v err=%v", decisions, err)
+	}
+
+	blockedDispatch := httptest.NewRecorder()
+	blockedRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/blocked/dispatch", nil)
+	blockedRequest.Host = "localhost"
+	handler.ServeHTTP(blockedDispatch, blockedRequest)
+	if blockedDispatch.Code != http.StatusOK {
+		t.Fatalf("blocked dispatch status=%d body=%s", blockedDispatch.Code, blockedDispatch.Body.String())
+	}
+	var blockedResponse schedulerResponseForTest
+	if err := json.NewDecoder(blockedDispatch.Body).Decode(&blockedResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(blockedResponse.Result.Reason, "repository revision is unavailable") {
+		t.Fatalf("blocked reason=%q result=%#v", blockedResponse.Result.Reason, blockedResponse.Result)
+	}
+
+	if err := db.SetProviderPaused(t.Context(), "codex-main", true); err != nil {
+		t.Fatal(err)
+	}
+	pausedPreview := httptest.NewRecorder()
+	pausedPreviewRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	pausedPreviewRequest.Host = "localhost"
+	handler.ServeHTTP(pausedPreview, pausedPreviewRequest)
+	var pausedCandidates struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(pausedPreview.Body).Decode(&pausedCandidates); err != nil {
+		t.Fatal(err)
+	}
+	if pausedPreview.Code != http.StatusOK || pausedCandidates.DispatchAvailable ||
+		pausedCandidates.ProviderReason != "provider is paused" || pausedCandidates.SelectedTaskID != "" {
+		t.Fatalf("paused preview status=%d response=%#v", pausedPreview.Code, pausedCandidates)
+	}
+	pausedDispatch := httptest.NewRecorder()
+	pausedRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", nil)
+	pausedRequest.Host = "localhost"
+	handler.ServeHTTP(pausedDispatch, pausedRequest)
+	if pausedDispatch.Code != http.StatusConflict {
+		t.Fatalf("paused dispatch status=%d body=%s", pausedDispatch.Code, pausedDispatch.Body.String())
+	}
+	if err := db.SetProviderPaused(t.Context(), "codex-main", false); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatch := httptest.NewRecorder()
+	dispatchRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/low/dispatch", nil)
+	dispatchRequest.Host = "localhost"
+	handler.ServeHTTP(dispatch, dispatchRequest)
+	if dispatch.Code != http.StatusAccepted {
+		t.Fatalf("dispatch status=%d body=%s", dispatch.Code, dispatch.Body.String())
+	}
+	attempts, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil || len(attempts) != 3 || attempts[0].Trigger != "manual-task" ||
+		attempts[0].RequestedTaskID != "low" || attempts[0].SelectedTaskID != "low" ||
+		attempts[1].RequestedTaskID != "low" || attempts[1].Mode != string(decision.ModePaused) ||
+		attempts[2].RequestedTaskID != "blocked" || attempts[2].SelectedTaskID != "" {
+		t.Fatalf("attempts=%#v err=%v", attempts, err)
+	}
+	select {
+	case task := <-executed:
+		if task.ID != "low" {
+			t.Fatalf("executed task=%q", task.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("targeted executor was not started")
+	}
+	concurrencyPreview := httptest.NewRecorder()
+	concurrencyRequest := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	concurrencyRequest.Host = "localhost"
+	handler.ServeHTTP(concurrencyPreview, concurrencyRequest)
+	var concurrencyResponse struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+		SelectedTaskID    string `json:"selected_task_id"`
+	}
+	if err := json.NewDecoder(concurrencyPreview.Body).Decode(&concurrencyResponse); err != nil {
+		t.Fatal(err)
+	}
+	if concurrencyPreview.Code != http.StatusOK || concurrencyResponse.DispatchAvailable ||
+		!strings.Contains(concurrencyResponse.ProviderReason, "provider concurrency limit") || concurrencyResponse.SelectedTaskID != "" {
+		t.Fatalf("concurrency preview status=%d response=%#v", concurrencyPreview.Code, concurrencyResponse)
+	}
+}
+
 func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 	var usageRequests atomic.Int32
 	usageBarrier := make(chan struct{})
@@ -2600,9 +3083,13 @@ func (f *fakeHarnessDiscoverer) Discover(context.Context) discovery.Catalog {
 type fakeRevisionResolver struct {
 	revisions map[string]string
 	failures  map[string]error
+	calls     *atomic.Int32
 }
 
 func (f fakeRevisionResolver) Resolve(_ context.Context, profile domain.ExecutionProfile) (string, error) {
+	if f.calls != nil {
+		f.calls.Add(1)
+	}
 	if err := f.failures[profile.ID]; err != nil {
 		return "", err
 	}

@@ -219,6 +219,8 @@ go run ./cmd/redline profile list
 go run ./cmd/redline task list
 go run ./cmd/redline task disable add-tests
 go run ./cmd/redline task enable add-tests
+go run ./cmd/redline candidates --provider codex-main
+go run ./cmd/redline task dispatch add-tests
 ```
 
 Each task has a `dispatch_tier` that controls when it becomes eligible:
@@ -326,8 +328,10 @@ GET  /v1/health
 GET  /v1/health/details?window={duration}
 GET  /v1/dashboard
 GET  /v1/dashboard/events
+POST /v1/pairing
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
+GET  /v1/providers/{account}/candidates
 GET  /v1/providers/{account}/calibration
 GET  /v1/providers/{account}/capacity
 POST /v1/providers/{account}/token-sync
@@ -350,6 +354,7 @@ GET|POST /v1/tasks
 GET  /v1/task-templates
 GET|PATCH|DELETE /v1/tasks/{id}
 POST /v1/tasks/{id}/enable|disable|retry
+POST /v1/tasks/{id}/dispatch
 POST /v1/scheduler/evaluate
 POST /v1/scheduler/execute
 GET  /v1/scheduler/decisions?provider={account}
@@ -375,12 +380,15 @@ Each provider's usage detail includes a dispatch-policy selector. Selecting a na
 an override in SQLite; selecting **Default** returns to the provider-level YAML policy when present,
 or to `active_policy` otherwise.
 
-The service accepts loopback hosts only. On first service or app launch, Redline creates a random
-API credential named `api-token` beside the selected configuration with mode `0600`. The native
-app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
+The service accepts loopback hosts by default. On first service or app launch, Redline creates a
+random API credential named `api-token` beside the selected configuration with mode `0600`. The
+native app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
 automatically from the `--config` location (or the standard macOS Application Support location).
-Cross-origin requests and non-loopback Host headers are rejected independently. Do not copy the
-credential into logs or expose the service through a network proxy.
+Cross-origin requests and untrusted Host headers are rejected independently. Exact Tailscale
+MagicDNS hostnames may be added under `api.trusted_hosts` for HTTPS access through Tailscale Serve;
+keep Redline bound to loopback and proxy it with `tailscale serve --bg localhost:7436`. Remote
+session cookies are Secure. Do not copy the credential into logs or expose Redline publicly with
+Tailscale Funnel. See [Mobile dashboard setup](docs/mobile.md) for the HTTPS proxy and pairing flow.
 
 For a direct API call:
 
