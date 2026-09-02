@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jfox/redline/internal/apiauth"
 	"github.com/jfox/redline/internal/cli"
 )
 
@@ -617,5 +618,70 @@ func TestTokenSyncConsumesServiceAPI(t *testing.T) {
 	exit := cli.Run([]string{"--api", server.URL, "token", "sync", "--provider", "codex-main"}, &stdout, &stderr, time.Now)
 	if exit != 0 || !strings.Contains(stdout.String(), `"inserted": 3`) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTokenRotateRequiresConfirmation(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "redline.yaml")
+	if err := os.WriteFile(configPath, []byte("database: unused\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := apiauth.EnsureToken(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "token", "rotate"}, &stdout, &stderr, time.Now)
+	if exit != 1 || !strings.Contains(stderr.String(), "--yes") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	// An unconfirmed rotation must leave the credential untouched.
+	current, err := apiauth.ReadToken(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != original {
+		t.Fatal("unconfirmed rotation replaced the token")
+	}
+}
+
+func TestTokenRotateReplacesTokenWithConfirmation(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "redline.yaml")
+	if err := os.WriteFile(configPath, []byte("database: unused\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := apiauth.EnsureToken(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "token", "rotate", "--yes"}, &stdout, &stderr, time.Now)
+	if exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Rotated the Redline API token") ||
+		!strings.Contains(stdout.String(), "pair --qr") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	current, err := apiauth.ReadToken(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current == original {
+		t.Fatal("confirmed rotation did not replace the token")
+	}
+	// The secret must never be echoed to the terminal.
+	if strings.Contains(stdout.String(), current) || strings.Contains(stderr.String(), current) {
+		t.Fatal("rotation printed the new token")
+	}
+}
+
+func TestTokenUsageMentionsRotate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"token"}, &stdout, &stderr, time.Now)
+	if exit != 1 || !strings.Contains(stderr.String(), "rotate") {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
 	}
 }

@@ -68,10 +68,28 @@ which is not sent in HTTP requests or consumed by link previews. Tap **Pair this
 to redeem it once, create a Secure, HttpOnly, SameSite=Strict session cookie, and continue
 to `/m`.
 
+The session cookie lasts 30 days and is renewed on every authenticated request, so a
+browser that opens the dashboard at least once within any 30-day span stays paired without
+rescanning. A device left unused past that window, or one whose cookie was cleared, shows
+a "Session expired" prompt on `/m` and needs a fresh `pair --qr` scan.
+
 Until it is redeemed or expires, the QR can grant a browser the same API authority as the
-Redline CLI. Keep it private. To revoke an already
-paired browser, stop Redline, replace the protected `api-token` file beside the
-configuration, and pair devices again.
+Redline CLI. Keep it private.
+
+## Revoking access
+
+Redline does not track individual devices, so revocation is all-or-nothing: rotating the
+API token signs out every paired browser and invalidates saved CLI credentials. Because
+sessions renew on use, this is the only way to end an active session before its window
+lapses.
+
+```bash
+redline --config redline.yaml token rotate --yes
+```
+
+The command replaces the protected `api-token` file atomically and never prints the new
+secret. A running service keeps serving the previous token until it reloads, so **restart
+Redline** after rotating, then re-run `pair --qr` for each device you still want paired.
 
 ## Operational checks
 

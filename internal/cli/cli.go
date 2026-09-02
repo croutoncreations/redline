@@ -88,7 +88,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	case "metrics":
 		return runMetrics(client, remaining[1:], stdout, stderr)
 	case "token":
-		return runToken(client, remaining[1:], stdout, stderr)
+		return runToken(client, remaining[1:], *configPath, stdout, stderr)
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
@@ -120,6 +120,8 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
@@ -309,9 +311,12 @@ func runCapacity(client apiclient.Client, args []string, stdout, stderr io.Write
 	return 0
 }
 
-func runToken(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+func runToken(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "rotate" {
+		return runTokenRotate(args[1:], configPath, stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "sync" {
-		fmt.Fprintln(stderr, "usage: redline token sync --provider ID")
+		fmt.Fprintln(stderr, "usage: redline token <sync --provider ID|rotate>")
 		return 1
 	}
 	provider, _, ok := providerFlags("token sync", args[1:], stderr)
@@ -325,6 +330,41 @@ func runToken(client apiclient.Client, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	writeJSON(stdout, result)
+	return 0
+}
+
+func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("token rotate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	confirmed := flags.Bool("yes", false, "rotate without the interactive confirmation prompt")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	resolvedPath := configPath
+	if _, err := apiauth.ReadToken(resolvedPath); err != nil && configPath == "redline.yaml" {
+		// Match clientToken's fallback so `redline token rotate` run from an
+		// arbitrary directory rotates the token the app actually serves.
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
+			if _, standardErr := apiauth.ReadToken(standard); standardErr == nil {
+				resolvedPath = standard
+			}
+		}
+	}
+	tokenPath := apiauth.TokenPath(resolvedPath)
+	if !*confirmed {
+		fmt.Fprintf(stderr, "Rotating %s signs out every paired browser and invalidates saved API tokens.\n", tokenPath)
+		fmt.Fprintln(stderr, "Re-run with --yes to confirm.")
+		return 1
+	}
+	// The new token is intentionally not printed: it stays in the protected
+	// file, and `pair --qr` is the supported way to hand it to a device.
+	if _, err := apiauth.RotateToken(resolvedPath); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Rotated the Redline API token at %s\n", tokenPath)
+	fmt.Fprintln(stdout, "Restart Redline to load it, then run `redline pair --qr` to pair devices again.")
 	return 0
 }
 
