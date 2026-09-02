@@ -170,6 +170,15 @@ cp config.example.yaml redline.yaml
 go run ./cmd/redline --config redline.yaml serve
 ```
 
+If you already have the native app or another Redline instance running, port `7436` is taken and
+`serve` exits with `bind: address already in use`. Point the source build at a different port with
+`--listen`, then use a matching `--api` value for the CLI commands below:
+
+```bash
+go run ./cmd/redline --config redline.yaml serve --listen 127.0.0.1:17436
+go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
+```
+
 Prefer a guided setup? Copy the bounded prompt in
 [`docs/agent-install.md`](docs/agent-install.md) into a trusted local coding agent. It verifies the
 signed release, preserves safe defaults, discovers existing harnesses, and proposes a couple of
@@ -404,7 +413,7 @@ Redline can report exact automatic RUN/WAIT/UNKNOWN decisions and job outcomes, 
 coverage- and confidence-labeled estimates of allowance converted to completed work:
 
 ```bash
-redline metrics launch --days 21
+go run ./cmd/redline metrics launch --days 21
 ```
 
 See [the launch-metrics methodology](docs/launch-metrics.md) for definitions and caveats.

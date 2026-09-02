@@ -3,8 +3,8 @@
 Redline exposes an auditable metrics report through the service API and CLI:
 
 ```bash
-redline metrics launch --days 21
-redline metrics launch --days 7 --provider claude-main
+go run ./cmd/redline metrics launch --days 21
+go run ./cmd/redline metrics launch --days 7 --provider claude-main
 ```
 
 The equivalent authenticated service endpoint is `GET /v1/metrics/launch?days=21`.
