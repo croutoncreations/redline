@@ -55,6 +55,78 @@ func TestRuntimeConnectionValidationRejectsUnreachableGatewayDefinition(t *testi
 	}
 }
 
+// TestRuntimeConnectionValidationRejectsInvalidInputs exercises the branches
+// of validateRuntimeConnection that were not reached by the existing tests.
+// The bug class: a caller could persist a connection with an unsupported
+// runtime or transport, or omit the credential ref for file/environment
+// sources.  All of these would produce a silent misconfiguration that only
+// surfaces at dispatch time.
+func TestRuntimeConnectionValidationRejectsInvalidInputs(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/redline.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := domain.RuntimeConnection{
+		ID: "ok", Runtime: "hermes", Transport: "local",
+	}
+
+	cases := []struct {
+		name string
+		item domain.RuntimeConnection
+	}{
+		{
+			name: "missing id",
+			item: domain.RuntimeConnection{Runtime: "hermes", Transport: "local"},
+		},
+		{
+			name: "unsupported runtime",
+			item: domain.RuntimeConnection{ID: "x", Runtime: "unknown", Transport: "local"},
+		},
+		{
+			name: "unsupported transport",
+			item: domain.RuntimeConnection{ID: "x", Runtime: "hermes", Transport: "tcp"},
+		},
+		{
+			name: "negative max_concurrent_runs",
+			item: domain.RuntimeConnection{ID: "x", Runtime: "hermes", Transport: "local", MaxConcurrentRuns: -1},
+		},
+		{
+			name: "environment credential without ref",
+			item: domain.RuntimeConnection{
+				ID: "x", Runtime: "hermes", Transport: "gateway",
+				URL: "http://gw.test", CredentialSource: "environment",
+			},
+		},
+		{
+			name: "file credential without ref",
+			item: domain.RuntimeConnection{
+				ID: "x", Runtime: "hermes", Transport: "gateway",
+				URL: "http://gw.test", CredentialSource: "file",
+			},
+		},
+		{
+			name: "unsupported credential source",
+			item: domain.RuntimeConnection{
+				ID: "x", Runtime: "hermes", Transport: "local", CredentialSource: "vault",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := db.CreateRuntimeConnection(t.Context(), tc.item, time.Now()); err == nil {
+				t.Fatalf("expected validation error for %q, got nil", tc.name)
+			}
+		})
+	}
+
+	// Sanity check: the base valid connection must be accepted.
+	if err := db.CreateRuntimeConnection(t.Context(), base, time.Now()); err != nil {
+		t.Fatalf("valid connection rejected: %v", err)
+	}
+}
+
 func TestRuntimeConnectionAndAgentContextUpdateAndDelete(t *testing.T) {
 	db, err := store.Open(t.TempDir() + "/redline.db")
 	if err != nil {
