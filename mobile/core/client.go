@@ -71,17 +71,39 @@ func (c *Client) postNoBody(ctx context.Context, path string, output any) (int, 
 	return c.doWithStatus(ctx, http.MethodPost, path, nil, output)
 }
 
+// doCapturingResponse issues a request and hands back the response itself
+// rather than a decoded body.
+//
+// Pairing needs this because its result arrives as a Set-Cookie header, not as
+// JSON. The response body is drained and closed before returning, so the caller
+// only inspects headers.
+func (c *Client) doCapturingResponse(
+	ctx context.Context, method, path string, body any,
+) (*http.Response, error) {
+	response, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, c.errorFromResponse(response)
+	}
+	return response, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, output any) error {
 	_, err := c.doWithStatus(ctx, method, path, body, output)
 	return err
 }
 
-func (c *Client) doWithStatus(ctx context.Context, method, path string, body, output any) (int, error) {
+// send builds and issues one authenticated request. The caller closes the body.
+func (c *Client) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader *strings.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return 0, fmt.Errorf("encode request: %w", err)
+			return nil, fmt.Errorf("encode request: %w", err)
 		}
 		reader = strings.NewReader(string(encoded))
 	}
@@ -94,7 +116,7 @@ func (c *Client) doWithStatus(ctx context.Context, method, path string, body, ou
 		request, err = http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -109,19 +131,33 @@ func (c *Client) doWithStatus(ctx context.Context, method, path string, body, ou
 		// Transport failures are reachability problems, never auth problems;
 		// keeping them distinct is what lets the UI say "desktop unreachable"
 		// rather than "please pair again".
-		return 0, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
+		return nil, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
+	}
+	return response, nil
+}
+
+// errorFromResponse turns a non-2xx into an apiError carrying the service's own
+// explanation, so the UI can show why rather than a bare status code.
+func (c *Client) errorFromResponse(response *http.Response) error {
+	var problem struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&problem)
+	if problem.Error == "" {
+		problem.Error = response.Status
+	}
+	return &apiError{StatusCode: response.StatusCode, Message: problem.Error}
+}
+
+func (c *Client) doWithStatus(ctx context.Context, method, path string, body, output any) (int, error) {
+	response, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return 0, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var problem struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(response.Body).Decode(&problem)
-		if problem.Error == "" {
-			problem.Error = response.Status
-		}
-		return response.StatusCode, &apiError{StatusCode: response.StatusCode, Message: problem.Error}
+		return response.StatusCode, c.errorFromResponse(response)
 	}
 
 	if output != nil {

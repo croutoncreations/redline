@@ -49,6 +49,24 @@ class MainActivity : ComponentActivity() {
         val holder = CoreClientHolder(settings)
 
         setContent {
+            val pairingModel: PairingViewModel = viewModel(
+                factory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                        PairingViewModel(CorePairingSource(), settings) as T
+                },
+            )
+            val pairingState by pairingModel.state.collectAsState()
+
+            // Pairing state is read once at launch and then follows the view
+            // model, so a successful pairing moves straight to the app without
+            // needing a restart.
+            val paired = settings.isPaired || pairingState.isPaired
+            if (!paired) {
+                PairingScreen(state = pairingState, onScanned = pairingModel::pair)
+                return@setContent
+            }
+
             val usageModel: UsageViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")

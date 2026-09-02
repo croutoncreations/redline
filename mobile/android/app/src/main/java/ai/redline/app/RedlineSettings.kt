@@ -1,39 +1,98 @@
 package ai.redline.app
 
 import android.content.Context
+import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 
 /**
- * Where the app finds the Redline service.
+ * Where the app finds the Redline service, and the credential it uses.
  *
- * Phase 1 is direct-connection only, so this reads a base URL and bearer token
- * from shared preferences with defaults suited to a development emulator.
- * Phase 3 replaces this with QR pairing and keys held in the Android Keystore;
- * the token stored here is deliberately temporary.
+ * The credential is a bearer token with full API access, so it is held in
+ * [EncryptedSharedPreferences], keyed from the Android Keystore. The Keystore
+ * key is hardware-backed where the device offers it and never leaves the
+ * secure element, so the stored file is useless on its own — which matters
+ * because a plain preferences file is readable on a rooted or backed-up device.
+ *
+ * Storage falls back to plain preferences only if the encrypted store cannot be
+ * opened at all. That is rare, and being unable to run beats being unable to
+ * run *securely* only when the alternative is losing the app entirely; the
+ * fallback is recorded in [usingEncryptedStorage] so the UI can say so rather
+ * than quietly downgrading.
  */
-class RedlineSettings(context: Context) {
+/**
+ * The part of settings that pairing needs.
+ *
+ * Narrowed to one method so the pairing flow can be tested on the JVM: the real
+ * implementation needs a Context and the Android Keystore, neither of which
+ * exists in a unit test.
+ */
+interface RedlineSettingsWriter {
+    fun update(baseUrl: String, token: String)
+}
 
-    private val preferences =
-        context.getSharedPreferences("redline", Context.MODE_PRIVATE)
+class RedlineSettings(context: Context) : RedlineSettingsWriter {
+
+    private var encrypted = true
+
+    private val preferences: SharedPreferences = try {
+        val key = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context,
+            ENCRYPTED_FILE,
+            key,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    } catch (error: Exception) {
+        // A corrupt keystore entry or an unsupported device should not brick
+        // the app, but it must not pretend the credential is protected either.
+        encrypted = false
+        context.getSharedPreferences(PLAIN_FILE, Context.MODE_PRIVATE)
+    }
+
+    /** Whether the credential is actually held in Keystore-backed storage. */
+    val usingEncryptedStorage: Boolean get() = encrypted
 
     val baseUrl: String
-        get() = preferences.getString(KEY_BASE_URL, null) ?: DEFAULT_BASE_URL
+        get() = preferences.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_BASE_URL
 
     val token: String
         get() = preferences.getString(KEY_TOKEN, null) ?: ""
 
-    fun update(baseUrl: String, token: String) {
+    /** Whether this device has been paired with a Redline desktop. */
+    val isPaired: Boolean get() = token.isNotBlank()
+
+    override fun update(baseUrl: String, token: String) {
         preferences.edit()
             .putString(KEY_BASE_URL, baseUrl)
             .putString(KEY_TOKEN, token)
             .apply()
     }
 
+    /**
+     * Forgets the credential.
+     *
+     * Used when the desktop rejects it: keeping a credential the service has
+     * already refused only produces the same failure on every launch, and
+     * clearing it returns the app to the pairing screen where the fix is.
+     */
+    fun clear() {
+        preferences.edit().remove(KEY_TOKEN).remove(KEY_BASE_URL).apply()
+    }
+
     private companion object {
         const val KEY_BASE_URL = "base_url"
         const val KEY_TOKEN = "token"
 
-        // `adb reverse tcp:7436 tcp:7436` maps this to the developer machine's
-        // Redline instance, so a debug build works without configuration.
+        const val ENCRYPTED_FILE = "redline.secure"
+        const val PLAIN_FILE = "redline"
+
+        // Pairing supplies the real address. This default only matters for a
+        // debug build reached through `adb reverse tcp:7436 tcp:7436`.
         const val DEFAULT_BASE_URL = "http://127.0.0.1:7436"
     }
 }

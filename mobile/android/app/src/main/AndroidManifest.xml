@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Scanning the pairing QR code. Requested at the moment of pairing
+         rather than at launch, so the reason is obvious when it is asked. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application

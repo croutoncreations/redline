@@ -65,8 +65,23 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // Keystore-backed storage for the API token, which grants full access.
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // Camera and barcode scanning for QR pairing. ML Kit's bundled model keeps
+    // scanning on-device: shipping a pairing credential to a cloud recogniser
+    // would defeat the point of pairing.
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+
+    // On-device tests: the QR decoder and the Keystore both need a real device.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
