@@ -71,9 +71,25 @@ verify_distribution() {
 # it carries its own copy of the detach retry rather than sourcing
 # scripts/lib/macos-dmg.sh. hdiutil detach returns before the device is fully
 # released, so an immediate rmdir can fail on a still-busy mountpoint.
+# Resolve first: macOS lists the physical mountpoint, so a path under the /tmp
+# symlink appears as /private/tmp/... and an unresolved comparison never
+# matches.
+is_mounted() {
+  local mount_path="$1"
+  local resolved
+  resolved="$(cd -P "${mount_path}" 2>/dev/null && pwd -P)" || resolved=""
+  if [[ -n "${resolved}" ]] && mount | grep -qF " on ${resolved} "; then
+    return 0
+  fi
+  mount | grep -qF " on ${mount_path} "
+}
+
 detach_mount() {
   local mount_path="$1"
   local attempt
+  if ! is_mounted "${mount_path}"; then
+    return 0
+  fi
   for attempt in 1 2 3 4 5; do
     if hdiutil detach "${mount_path}" -quiet 2>/dev/null; then
       break
@@ -84,7 +100,7 @@ detach_mount() {
     fi
   done
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if ! mount | grep -q " on ${mount_path} "; then
+    if ! is_mounted "${mount_path}"; then
       return 0
     fi
     sleep 1
