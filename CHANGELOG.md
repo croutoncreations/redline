@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added a `redline demo` staging mode that seeds fully isolated, synthetic usage, discovery,
+  revision, Hermes, and execution state for screenshots, recordings, and release rehearsals, with
+  synthetic data clearly labeled in both the web dashboard and native menu-bar UI.
+- Added a mobile dashboard: a tailnet-only HTTPS `/m` PWA reachable over Tailscale, with strict
+  `.ts.net` host and proxy/origin checks, secure cookies, and one-time QR pairing. It offers
+  Usage, a provider-specific Queue, and Runs/detail views with an offline-capable service worker
+  and a Pixel 9 layout, plus new CLI commands for candidate preview and task-specific dispatch.
+- `redline pair` now accepts `--port` for Tailscale Serve setups where the dashboard can't run on
+  443; the pairing QR and endpoint label include the non-default port.
+- Added launch screenshots and a README gallery covering the CLI, dashboard, and native app,
+  captured entirely from the new demo staging mode so no personal repositories, paths, or live
+  data appear in the images.
+
+### Fixed
+
+- Corrected the app icon's redline arc, which was drawn from a different circle than the white
+  track and only met it at one end; the icon now shares one center, radius, and stroke width with
+  the live menu-bar gauge, and the needle pivots from the dial's actual center.
+- Replaced inverted "behind pace" wording with surplus-first copy in the dashboard's scheduling
+  labels and the native menu-bar queue, and top-aligned the Harness and Model controls in the
+  execution-profile editor.
+
 ## [0.1.6] - 2026-08-26
 
 ### Added
