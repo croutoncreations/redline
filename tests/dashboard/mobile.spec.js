@@ -603,3 +603,22 @@ test('account pools render when only allowances are present (no short/weekly fie
   expect(headings).toEqual(['5-hour window', 'Weekly allowance']);
   await expect(detail.locator('.m-meter-head').first()).toContainText('50% left');
 });
+
+test('a dropped SSE stream surfaces an expired session instead of reconnecting forever', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  // The session lapses while the tab sits open on a live stream.
+  state.sessionExpired = true;
+  await page.evaluate(() => window.__redlineEventSources[0].fail());
+  const banner = page.locator('#m-error-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText(/session expired/i);
+  await expect(banner).toContainText('redline pair');
+});
+
+test('a transient SSE drop does not report an expired session', async ({ page }) => {
+  await loadMobileDashboard(page);
+  // Stream drops but the session is still valid: no expiry guidance.
+  await page.evaluate(() => window.__redlineEventSources[0].fail());
+  await expect(page.locator('#m-live-pill')).toHaveAttribute('aria-label', /reconnecting/i);
+  await expect(page.locator('#m-error-banner')).toBeHidden();
+});

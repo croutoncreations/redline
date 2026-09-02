@@ -679,6 +679,11 @@ function handleExpiredSession() {
   sessionExpired = true;
   if (eventSource) { eventSource.close(); eventSource = null; }
   setLivePill('offline');
+  // Drop the cached shell so a device that re-pairs later cannot render markup
+  // cached under the previous session.
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({type: 'redline-clear-cache'});
+  }
   showError('Session expired. Run `redline pair --qr` on your Mac and scan the code to pair this device again.');
 }
 
@@ -740,7 +745,28 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill('offline');
+    // EventSource never exposes the HTTP status, so a stream that dropped
+    // because the session lapsed is indistinguishable from a network blip.
+    // Probe with a real request: a 401 routes into handleExpiredSession(),
+    // and anything else leaves the reconnecting state alone. Without this a
+    // tab left open shows "Reconnecting" forever and never offers re-pairing.
+    probeSessionAfterStreamFailure();
   };
+}
+
+let sessionProbePending = false;
+
+function probeSessionAfterStreamFailure() {
+  if (sessionProbePending || sessionExpired) return;
+  sessionProbePending = true;
+  apiFetch('/v1/dashboard').then(data => {
+    // The stream failed but the session is fine; keep the cached view fresh.
+    render(data);
+  }).catch(err => {
+    if (err.status === 401) handleExpiredSession();
+  }).finally(() => {
+    sessionProbePending = false;
+  });
 }
 
 // Visibility API: close when hidden, force GET + reconnect when visible.

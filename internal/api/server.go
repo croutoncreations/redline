@@ -389,6 +389,11 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 const dashboardSessionTTL = 30 * 24 * time.Hour
 
 func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+	// A response carrying the session cookie must never be stored by an
+	// intermediary: the cookie value is the API token, so a shared cache could
+	// hand it to another client. Enforce that here rather than relying on the
+	// caller to remember, so the invariant travels with the Set-Cookie itself.
+	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,

@@ -340,17 +340,7 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	resolvedPath := configPath
-	if _, err := apiauth.ReadToken(resolvedPath); err != nil && configPath == "redline.yaml" {
-		// Match clientToken's fallback so `redline token rotate` run from an
-		// arbitrary directory rotates the token the app actually serves.
-		if home, homeErr := os.UserHomeDir(); homeErr == nil {
-			standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
-			if _, standardErr := apiauth.ReadToken(standard); standardErr == nil {
-				resolvedPath = standard
-			}
-		}
-	}
+	resolvedPath := resolveTokenConfigPath(configPath)
 	tokenPath := apiauth.TokenPath(resolvedPath)
 	if !*confirmed {
 		fmt.Fprintf(stderr, "Rotating %s signs out every paired browser and invalidates saved API tokens.\n", tokenPath)
@@ -483,20 +473,36 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	return 0
 }
 
+// resolveTokenConfigPath returns the config path whose API token the running
+// service actually uses. When the caller did not override --config, an
+// installed app keeps its credential beside the standard Application Support
+// configuration rather than the working directory. Both credential readers and
+// `token rotate` share this so rotation can never target a different file than
+// the one the service reads.
+func resolveTokenConfigPath(configPath string) string {
+	if _, err := apiauth.ReadToken(configPath); err == nil {
+		return configPath
+	}
+	if configPath != "redline.yaml" {
+		return configPath
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return configPath
+	}
+	standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
+	if _, err := apiauth.ReadToken(standard); err != nil {
+		return configPath
+	}
+	return standard
+}
+
 func clientToken(configPath string) string {
 	if token := strings.TrimSpace(os.Getenv("REDLINE_API_TOKEN")); token != "" {
 		return token
 	}
-	if token, err := apiauth.ReadToken(configPath); err == nil {
+	if token, err := apiauth.ReadToken(resolveTokenConfigPath(configPath)); err == nil {
 		return token
-	}
-	if configPath == "redline.yaml" {
-		if home, err := os.UserHomeDir(); err == nil {
-			standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
-			if token, err := apiauth.ReadToken(standard); err == nil {
-				return token
-			}
-		}
 	}
 	return ""
 }
