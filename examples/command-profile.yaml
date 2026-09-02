@@ -1,9 +1,0 @@
-id: command-local
-provider_account_id: codex-main
-harness_type: command
-harness_command: ./scripts/run-background-agent
-workspace_provider: existing-directory
-repository: /absolute/path/to/repository
-require_clean: true
-cleanup_policy: never
-
