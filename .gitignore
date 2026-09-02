@@ -22,3 +22,8 @@ dist/
 # they are never portable between machines.
 .envrc
 .tmuxp.yaml
+
+# gomobile output. The AAR/XCFramework is ~19MB and is rebuilt from
+# mobile/core by scripts/build-mobile-core.sh.
+mobile/build/
+mobile/android/app/libs/*.aar
