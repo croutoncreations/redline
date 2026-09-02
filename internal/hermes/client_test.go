@@ -1,6 +1,7 @@
 package hermes_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +60,81 @@ func TestDiscoverReturnsProfilesProjectsAndOnlyAuthenticatedModels(t *testing.T)
 		options.Provider != "openai-codex" || options.Model != "gpt-5.5" ||
 		len(options.Providers[0].Models) != 2500 {
 		t.Fatalf("options = %#v", options)
+	}
+}
+
+func TestReadLoopDoesNotLeakWhenUnsolicitedEventsFillTheBuffer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"version": "0.17.0"})
+	})
+	mux.HandleFunc("GET /api/profiles", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"profiles": []map[string]any{{
+			"name": "default", "path": "/home/test/.hermes", "is_default": true,
+		}}})
+	})
+	mux.HandleFunc("POST /api/auth/ws-ticket", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"ticket": "one-shot-ticket"})
+	})
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+		socket, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer socket.CloseNow()
+		for {
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if err := wsjson.Read(r.Context(), socket, &request); err != nil {
+				return
+			}
+			if request.Method != "model.options" {
+				writeRPC(t, r.Context(), socket, request.ID, map[string]any{"projects": []map[string]any{}})
+				continue
+			}
+			// Flood past the gatewayClient's 64-entry event buffer with
+			// unsolicited events from other sessions before ever answering,
+			// simulating a busy Hermes Gateway. readLoop must not deadlock.
+			for range 80 {
+				writeRPCEvent(t, r.Context(), socket, map[string]any{
+					"type": "noise", "session_id": "other-session",
+				})
+			}
+			writeRPC(t, r.Context(), socket, request.ID, map[string]any{"providers": []map[string]any{}})
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := hermes.Client{HTTPClient: authenticatedClient(server.URL)}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := client.Discover(ctx, domain.RuntimeConnection{
+		ID: "test", Runtime: "hermes", Transport: "gateway", URL: server.URL,
+	}); err == nil {
+		t.Fatal("expected Discover to report the stalled model.options RPC")
+	}
+
+	// The blocked event send should be released once Discover calls
+	// gateway.close(), not linger forever. Poll the goroutine dump for the
+	// specific readLoop stack frame rather than comparing raw goroutine
+	// counts, which are noisy due to unrelated HTTP keep-alive goroutines.
+	const stackMarker = "gatewayClient).readLoop"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var buf bytes.Buffer
+		if err := pprof.Lookup("goroutine").WriteTo(&buf, 1); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), stackMarker) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("readLoop goroutine leaked after Discover returned:\n%s", buf.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

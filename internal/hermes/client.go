@@ -1073,7 +1073,11 @@ func (g *gatewayClient) readLoop() {
 				target <- frame
 			}
 		} else if frame.Method == "event" {
-			g.events <- frame
+			select {
+			case g.events <- frame:
+			case <-g.ctx.Done():
+				return
+			}
 		}
 	}
 }
