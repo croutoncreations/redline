@@ -344,3 +344,23 @@ func TestNewClientIsTheBoundConstructorAndWorks(t *testing.T) {
 		t.Fatal("NewClient should use a real clock and produce a positive countdown")
 	}
 }
+
+// Tokens arrive from files, clipboards, and QR scans, so they carry stray
+// whitespace. An untrimmed newline produces an invalid header value, which
+// surfaces as a baffling transport error instead of an auth failure.
+func TestNewClientTrimsWhitespaceFromToken(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	client := core.NewClient(server.URL, "secret-token\n")
+	if _, err := client.FetchRuns(); err != nil {
+		t.Fatalf("a token with a trailing newline must still work: %v", err)
+	}
+	if seen != "Bearer secret-token" {
+		t.Errorf("Authorization = %q, want the trimmed token", seen)
+	}
+}

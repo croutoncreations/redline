@@ -39,23 +39,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val Background = Color(0xFF0D0F12)
-private val Panel = Color(0xFF15181D)
-private val Line = Color(0xFF272C34)
-private val TextPrimary = Color(0xFFE6E9EE)
-private val TextMuted = Color(0xFF91989E)
-private val Accent = Color(0xFFFF5A52)
-private val Good = Color(0xFF72D9A4)
-private val Warn = Color(0xFFEFBD62)
-private val Danger = Color(0xFFFF7B72)
-
-/** Matches the web dashboard's thresholds so both surfaces agree. */
-private fun toneFor(percent: Int): Color = when {
-    percent < 15 -> Danger
-    percent < 35 -> Warn
-    else -> Good
-}
-
 @Composable
 fun UsageScreen(state: UsageUiState, onRetry: () -> Unit) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {

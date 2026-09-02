@@ -98,7 +98,7 @@ type dashboardPayload struct {
 
 // FetchUsage returns the capacity screen as JSON.
 func (c *Client) FetchUsage() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout())
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
 	var payload dashboardPayload
