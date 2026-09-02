@@ -401,27 +401,40 @@ type noStoreWriter struct {
 	written bool
 }
 
-func (w *noStoreWriter) WriteHeader(status int) {
+// assertNoStore runs before anything that can commit the response, since the
+// header is only mutable until the first byte is written.
+func (w *noStoreWriter) assertNoStore() {
 	if !w.written {
 		w.written = true
 		w.Header().Set("Cache-Control", "no-store")
 	}
+}
+
+func (w *noStoreWriter) WriteHeader(status int) {
+	w.assertNoStore()
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *noStoreWriter) Write(data []byte) (int, error) {
-	if !w.written {
-		w.written = true
-		w.Header().Set("Cache-Control", "no-store")
-	}
+	w.assertNoStore()
 	return w.ResponseWriter.Write(data)
 }
 
-// Flush preserves streaming for Server-Sent Events, which wrap this writer.
+// Flush preserves streaming for Server-Sent Events, which wrap this writer. A
+// flush before the first write commits the header block on its own, so the
+// header has to be asserted here too.
 func (w *noStoreWriter) Flush() {
+	w.assertNoStore()
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer, so wrapping
+// never silently disables features such as per-write deadlines on long-lived
+// event streams.
+func (w *noStoreWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {

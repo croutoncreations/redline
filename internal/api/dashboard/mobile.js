@@ -746,7 +746,6 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill('offline');
-    probeSessionAfterStreamFailure();
     // EventSource never exposes the HTTP status, so a stream that dropped
     // because the session lapsed is indistinguishable from a network blip.
     // Probe with a real request: a 401 routes into handleExpiredSession(),

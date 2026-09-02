@@ -3,7 +3,9 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -3353,5 +3356,104 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 	response.Body.Close()
 	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("bearer Cache-Control = %q, want the handler's no-cache", got)
+	}
+}
+
+// swShellFingerprint is the hash of every asset the service worker precaches,
+// paired with the cache name that was current when it was recorded.
+//
+// The mobile dashboard once shipped a fix that never reached installed PWAs:
+// the service worker served the shell cache-first under a fixed cache name, so
+// devices kept running the JavaScript they first cached. Bumping CACHE is what
+// releases a new shell, and nothing enforced that. This test fails when the
+// shell changes without a bump, turning operator memory into a tripwire.
+//
+// When this fails: bump CACHE in sw.js, then update wantCacheName and
+// wantFingerprint below.
+func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
+	const wantCacheName = "redline-mobile-v2"
+	const wantFingerprint = "c98ef22d08734fd8"
+
+	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheName := regexp.MustCompile(`const CACHE = '([^']+)'`).FindSubmatch(worker)
+	if cacheName == nil {
+		t.Fatal("sw.js no longer declares a CACHE constant")
+	}
+	if got := string(cacheName[1]); got != wantCacheName {
+		t.Fatalf("service worker cache = %q, want %q; update wantFingerprint too", got, wantCacheName)
+	}
+
+	shell := regexp.MustCompile(`'(/[^']*)'`).FindAllSubmatch(
+		regexp.MustCompile(`(?s)const SHELL = \[(.*?)\]`).FindSubmatch(worker)[1], -1)
+	if len(shell) == 0 {
+		t.Fatal("sw.js no longer lists SHELL assets")
+	}
+	digest := sha256.New()
+	for _, asset := range shell {
+		route := string(asset[1])
+		name := strings.TrimPrefix(route, "/assets/mobile/")
+		name = strings.TrimPrefix(name, "/assets/")
+		if route == "/m" {
+			name = "mobile.html"
+		}
+		contents, err := os.ReadFile(filepath.Join("dashboard", name))
+		if err != nil {
+			t.Fatalf("shell asset %q is not present: %v", route, err)
+		}
+		_, _ = digest.Write([]byte(route))
+		_, _ = digest.Write(contents)
+	}
+	if got := hex.EncodeToString(digest.Sum(nil))[:16]; got != wantFingerprint {
+		t.Fatalf("shell assets changed (fingerprint %s, recorded %s):\n"+
+			"bump CACHE in internal/api/dashboard/sw.js so installed PWAs pick up the new shell,\n"+
+			"then set wantCacheName=<new name> and wantFingerprint=%s in this test.", got, wantFingerprint, got)
+	}
+}
+
+// The event stream must stay uncacheable end to end: it carries the renewed
+// session cookie, and the wrapper has to survive a handler that sets its own
+// Cache-Control and then flushes.
+//
+// Note this asserts the routed behaviour only. dashboardEvents happens to
+// write before it flushes, so the flush-before-write branch of noStoreWriter
+// is not reachable from any current handler and is not covered here; it is
+// hardening for future streaming handlers.
+func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+
+	recorder := httptest.NewRecorder()
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/v1/dashboard/events", nil)
+	request.AddCookie(&http.Cookie{Name: "redline_api_session", Value: cfg.APIToken})
+	ctx, cancel := context.WithTimeout(request.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recorder, request.WithContext(ctx))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event stream did not finish")
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("event stream Cache-Control = %q, want no-store", got)
+	}
+	if len(recorder.Result().Cookies()) == 0 {
+		t.Fatal("event stream did not renew the session cookie")
+	}
+	if !strings.Contains(recorder.Body.String(), "event: dashboard") {
+		t.Fatal("event stream produced no events through the wrapper")
 	}
 }
