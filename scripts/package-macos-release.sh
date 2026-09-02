@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repository_root}/scripts/lib/macos-dmg.sh"
 version="${REDLINE_VERSION:-0.1.0}"
 sign_identity="${REDLINE_SIGN_IDENTITY:--}"
 notary_profile="${REDLINE_NOTARY_PROFILE:-}"
@@ -76,7 +77,7 @@ mkdir -p "${staging_path}"
 ditto "${app_path}" "${staging_path}/Redline.app"
 ln -s /Applications "${staging_path}/Applications"
 rm -f "${dmg_path}"
-hdiutil create -volname Redline -srcfolder "${staging_path}" -ov -format UDZO "${dmg_path}"
+create_dmg "${dmg_path}" "${staging_path}"
 
 if [[ "${sign_identity}" != "-" ]]; then
   codesign --force --sign "${sign_identity}" --timestamp "${dmg_path}"
