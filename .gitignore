@@ -16,3 +16,9 @@ playwright-report/
 test-results/
 macos/.build/
 dist/
+
+# Per-worktree developer scaffolding. These are generated per branch and
+# hardcode absolute worktree paths, local ports, and personal hostnames, so
+# they are never portable between machines.
+.envrc
+.tmuxp.yaml
