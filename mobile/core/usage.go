@@ -133,18 +133,15 @@ type dashboardPayload struct {
 	} `json:"providers"`
 }
 
-// FetchUsage returns the capacity screen as JSON.
-func (c *Client) FetchUsage() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancel()
-
-	var payload dashboardPayload
-	if err := c.get(ctx, "/v1/dashboard", &payload); err != nil {
-		return "", err
+// renderUsage turns a dashboard payload into the capacity screen.
+//
+// Shared by the polling and streaming paths so a live update and a manual
+// refresh cannot render differently.
+func renderUsage(payload dashboardPayload, now time.Time) UsageView {
+	view := UsageView{
+		GeneratedAt: payload.GeneratedAt,
+		Providers:   make([]ProviderUsage, 0, len(payload.Providers)),
 	}
-
-	now := c.now()
-	view := UsageView{GeneratedAt: payload.GeneratedAt, Providers: make([]ProviderUsage, 0, len(payload.Providers))}
 	for _, item := range payload.Providers {
 		provider := ProviderUsage{
 			ID:       item.ID,
@@ -165,8 +162,24 @@ func (c *Client) FetchUsage() (string, error) {
 		}
 		view.Providers = append(view.Providers, provider)
 	}
+	return view
+}
 
-	encoded, err := json.Marshal(view)
+// FetchUsage returns the capacity screen as JSON.
+func (c *Client) FetchUsage() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	var payload dashboardPayload
+	// The read model also carries every run, task, and dispatch attempt, which
+	// is roughly 97% of its weight and none of what this screen renders. Asking
+	// for the two members it uses keeps a refresh to a few kilobytes, which
+	// matters on mobile data and matters more through a relay.
+	if err := c.get(ctx, "/v1/dashboard?fields=providers,health", &payload); err != nil {
+		return "", err
+	}
+
+	encoded, err := json.Marshal(renderUsage(payload, c.now()))
 	if err != nil {
 		return "", fmt.Errorf("encode usage view: %w", err)
 	}

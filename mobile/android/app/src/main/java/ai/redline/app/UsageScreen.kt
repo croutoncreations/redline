@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -87,13 +88,42 @@ private fun Header(state: UsageUiState) {
                 letterSpacing = 1.sp,
             )
             Spacer(Modifier.weight(1f))
-            if (state.failure != null && state.hasData) {
+            when {
                 // Showing cached numbers without saying so would be misleading.
-                Text("Offline", color = Warn, fontSize = 12.sp)
+                state.failure != null && state.hasData ->
+                    Text("Offline", color = Warn, fontSize = 12.sp)
+
+                else -> LivePill(state.live)
             }
         }
         Spacer(Modifier.height(2.dp))
         Text("Capacity", color = TextMuted, fontSize = 12.sp)
+    }
+}
+
+/**
+ * Says whether the numbers are updating themselves.
+ *
+ * Without this, a stalled stream and a live one look identical, and the user
+ * has no way to know whether what they are reading is current.
+ */
+@Composable
+private fun LivePill(live: LiveState) {
+    val (label, tone) = when (live) {
+        LiveState.LIVE -> "live" to Good
+        LiveState.CONNECTING -> "connecting" to TextMuted
+        LiveState.RECONNECTING -> "reconnecting" to Warn
+        LiveState.OFFLINE -> return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(tone),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = tone, fontSize = 11.sp)
     }
 }
 

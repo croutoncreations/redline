@@ -117,6 +117,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Live updates run only while the capacity tab is actually on
+            // screen. A stream held open behind another tab, or while the app
+            // is backgrounded, would keep the radio awake for data nobody is
+            // reading. Refresh-on-resume remains the floor underneath it.
+            OnStartStop(
+                active = tab == Tab.CAPACITY,
+                onStart = usageModel::startLive,
+                onStop = usageModel::stopLive,
+            )
+
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f)) {
                     when (tab) {
@@ -193,6 +203,46 @@ private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit) {
                     modifier = Modifier.height(20.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * Keeps a subscription alive only while [active] and the screen is in the
+ * foreground.
+ *
+ * Both conditions matter: a stream left running behind another tab or a
+ * backgrounded app costs battery and data for something nobody is looking at.
+ */
+@Composable
+private fun OnStartStop(active: Boolean, onStart: () -> Unit, onStop: () -> Unit) {
+    val owner = LocalLifecycleOwner.current
+    val start by rememberUpdatedState(onStart)
+    val stop by rememberUpdatedState(onStop)
+
+    // Keyed on the lifecycle owner and the active flag only. Keying on
+    // anything that changes per frame would dispose and re-run this on every
+    // recomposition, and the disposal calls stop() -- which is how a live
+    // stream ends up reporting itself as offline while frames are arriving.
+    DisposableEffect(owner, active) {
+        if (!active) {
+            stop()
+            return@DisposableEffect onDispose { }
+        }
+        // addObserver replays the events already reached, so ON_START arrives
+        // on registration when the screen is foreground. Starting again here
+        // would tear down the subscription that had just been created.
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> start()
+                Lifecycle.Event.ON_STOP -> stop()
+                else -> Unit
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose {
+            owner.lifecycle.removeObserver(observer)
+            stop()
         }
     }
 }

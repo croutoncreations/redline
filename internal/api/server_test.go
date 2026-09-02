@@ -617,6 +617,98 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 	}
 }
 
+// The dashboard read model carries every run and task, which is most of its
+// weight. A phone renders only the providers and health, so it can ask for
+// those instead of downloading the rest to discard it.
+func TestDashboardFieldsSelectorTrimsTheResponse(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+
+	full := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &full)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health"} {
+		if _, ok := full[key]; !ok {
+			t.Fatalf("unfiltered response is missing %q", key)
+		}
+	}
+
+	trimmed := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard?fields=providers,health", &trimmed)
+
+	if _, ok := trimmed["providers"]; !ok {
+		t.Error("requested field providers is missing")
+	}
+	if _, ok := trimmed["health"]; !ok {
+		t.Error("requested field health is missing")
+	}
+	for _, omitted := range []string{"runs", "tasks", "attempts"} {
+		if _, ok := trimmed[omitted]; ok {
+			t.Errorf("field %q was not requested but was returned", omitted)
+		}
+	}
+
+	// generated_at identifies which snapshot this is, so it is always present:
+	// a client cannot tell stale data from fresh without it.
+	if _, ok := trimmed["generated_at"]; !ok {
+		t.Error("generated_at must always be present")
+	}
+}
+
+// An unknown field name is a client bug. Silently returning everything would
+// hide it until someone wondered why the phone was slow.
+func TestDashboardFieldsSelectorRejectsUnknownFields(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	requestStatus(t, http.MethodGet, server.URL+"/v1/dashboard?fields=providers,nonsense", "", http.StatusBadRequest)
+}
+
+// Without the parameter nothing changes, so the web dashboard keeps working.
+func TestDashboardWithoutFieldsIsUnchanged(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	body := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &body)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health", "scheduler"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("default response lost %q", key)
+		}
+	}
+}
+
+// The stream is where the saving compounds: it re-sends the whole read model
+// every few seconds, so a phone that only renders providers should not receive
+// every run each time.
+func TestDashboardEventsHonourTheFieldsSelector(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		server.URL+"/v1/dashboard/events?fields=providers,health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buffer := make([]byte, 16384)
+	n, err := resp.Body.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	body := string(buffer[:n])
+	if !strings.Contains(body, "event: dashboard\n") {
+		t.Fatalf("not an SSE frame: %q", body)
+	}
+	if !strings.Contains(body, `"providers"`) {
+		t.Error("requested field providers is missing from the stream")
+	}
+	if strings.Contains(body, `"runs"`) || strings.Contains(body, `"tasks"`) {
+		t.Errorf("stream carried fields that were not requested: %q", body)
+	}
+}
+
 func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {

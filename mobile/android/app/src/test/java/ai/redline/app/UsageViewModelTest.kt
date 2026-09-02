@@ -160,4 +160,33 @@ class UsageViewModelTest {
         assertNull(state.failure)
         assertEquals(62, state.view?.providers?.get(0)?.session?.remainingPercent)
     }
+
+    /**
+     * A refresh must not clobber the live connection status.
+     *
+     * refresh() runs on resume, which is moments after the stream connects, so
+     * a success path that rebuilds the state from scratch resets fields it
+     * knows nothing about and the pill goes dark while frames keep arriving.
+     */
+    @Test
+    fun refreshPreservesTheLiveConnectionState() = runTest(dispatcher) {
+        val source = object : UsageSource {
+            override fun fetchUsageJson(): String = validJson
+            override fun isUnauthorized(error: Throwable): Boolean = false
+        }
+        val model = UsageViewModel(source, dispatcher)
+
+        // Simulate the stream reporting itself live, then a resume refresh.
+        model.applyLiveStateForTest(LiveState.LIVE)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "a refresh must not reset the live state",
+            LiveState.LIVE,
+            model.state.value.live,
+        )
+        assertEquals(62, model.state.value.view?.providers?.get(0)?.session?.remainingPercent)
+    }
 }
+

@@ -14,5 +14,16 @@ class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
         client.client().controlProvider(providerAccountId, control)
     }
 
+    override fun stream(
+        onUsage: (String) -> Unit,
+        onState: (String) -> Unit,
+    ): AutoCloseable {
+        val stream = client.client().streamUsage(object : core.UsageStreamSink {
+            override fun onUsage(payload: String) = onUsage(payload)
+            override fun onState(state: String) = onState(state)
+        })
+        return AutoCloseable { stream.stop() }
+    }
+
     override fun isUnauthorized(error: Throwable): Boolean = client.isUnauthorized(error)
 }

@@ -21,10 +21,14 @@ import kotlinx.coroutines.withContext
  * [lastLoaded] survives a failure on purpose: when the desktop is asleep the
  * useful thing is yesterday's numbers marked stale, not an empty screen.
  */
+/** How the live connection is behaving, mirroring the core's stream states. */
+enum class LiveState { OFFLINE, CONNECTING, LIVE, RECONNECTING }
+
 data class UsageUiState(
     val loading: Boolean = false,
     val view: UsageView? = null,
     val failure: Failure? = null,
+    val live: LiveState = LiveState.OFFLINE,
 ) {
     enum class Failure { UNAUTHORIZED, UNREACHABLE }
 
@@ -37,6 +41,16 @@ data class UsageUiState(
     fun fail(reason: Failure): UsageUiState = copy(loading = false, failure = reason)
 }
 
+/** Maps the core's stream state strings onto [LiveState]. */
+internal fun liveStateOf(raw: String): LiveState = when (raw) {
+    "live" -> LiveState.LIVE
+    "connecting" -> LiveState.CONNECTING
+    "reconnecting" -> LiveState.RECONNECTING
+    // "unauthorized" and "stopped" both mean no live data is coming; the
+    // failure state carries the reason, so this only says the pill is dark.
+    else -> LiveState.OFFLINE
+}
+
 /**
  * Fetches usage through the shared Go core.
  *
@@ -46,6 +60,14 @@ data class UsageUiState(
 interface UsageSource {
     /** Pauses, resumes, or refreshes a provider. Default keeps tests terse. */
     fun controlProvider(providerAccountId: String, control: String) = Unit
+
+    /**
+     * Subscribes to live updates, returning a handle that stops it.
+     *
+     * Default is a no-op returning null, so tests that only exercise polling
+     * do not have to implement streaming.
+     */
+    fun stream(onUsage: (String) -> Unit, onState: (String) -> Unit): AutoCloseable? = null
 
     /** Returns the core's usage JSON, or throws. */
     fun fetchUsageJson(): String
@@ -71,6 +93,64 @@ class UsageViewModel(
      * so a slow stale result can overwrite a fresh one.
      */
     private var refreshJob: Job? = null
+    private var subscription: AutoCloseable? = null
+
+    /**
+     * Starts live updates, replacing any existing subscription.
+     *
+     * Live frames make the manual refresh redundant while connected, but
+     * refresh-on-resume stays as the floor: a stream that failed to connect
+     * must not leave the screen empty.
+     */
+    fun startLive() {
+        // Idempotent: lifecycle callbacks can fire more than once for the same
+        // visible screen, and tearing down a working stream to rebuild it
+        // would drop frames and flicker the pill.
+        if (subscription != null) return
+        subscription = source.stream(
+            onUsage = { raw ->
+                // A malformed frame is skipped rather than fatal: one bad
+                // payload is not a reason to stop rendering the ones after it.
+                val view = runCatching {
+                    redlineJson.decodeFromString(UsageView.serializer(), raw)
+                }.getOrNull() ?: return@stream
+                // A frame proves the desktop is reachable and the credential
+                // good, so it clears any earlier failure.
+                _state.update { it.copy(loading = false, view = view, failure = null) }
+            },
+            onState = { raw ->
+                _state.update { it.copy(live = liveStateOf(raw)) }
+                // The stream stops permanently on a rejected credential, and
+                // the user needs to be told to pair again rather than left
+                // watching a screen that quietly stopped updating.
+                if (raw == "unauthorized") {
+                    _state.update { it.fail(UsageUiState.Failure.UNAUTHORIZED) }
+                }
+            },
+        )
+    }
+
+    /**
+     * Sets the live state directly, for tests that need to simulate a stream
+     * without one.
+     */
+    internal fun applyLiveStateForTest(state: LiveState) {
+        _state.update { it.copy(live = state) }
+    }
+
+    /** Stops live updates. Called when the screen goes away. */
+    fun stopLive() {
+        runCatching { subscription?.close() }
+        subscription = null
+        _state.update { it.copy(live = LiveState.OFFLINE) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // A stream that outlived its view model would keep reconnecting in the
+        // background for a screen nobody is looking at.
+        stopLive()
+    }
 
     /**
      * Pauses, resumes, or refreshes a provider, then reloads.
@@ -115,7 +195,15 @@ class UsageViewModel(
                     runCatching { redlineJson.decodeFromString(UsageView.serializer(), raw) }.fold(
                         // A good load clears any earlier failure, or the header
                         // keeps saying "Offline" over live data.
-                        onSuccess = { view -> _state.value = UsageUiState(loading = false, view = view) },
+                        // Copied from the current state rather than built
+                        // fresh: a new instance would reset fields this path
+                        // knows nothing about, and silently drop the live
+                        // connection status the stream is maintaining.
+                        onSuccess = { view ->
+                            _state.update {
+                                it.copy(loading = false, view = view, failure = null)
+                            }
+                        },
                         // Malformed JSON from a reachable server is not an auth
                         // problem; treating it as one would tell the user to
                         // re-pair, which would not help.

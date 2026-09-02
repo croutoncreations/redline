@@ -22,6 +22,12 @@ func usagePayload(t *testing.T, body string) *httptest.Server {
 		if r.URL.Path != "/v1/dashboard" {
 			t.Errorf("path = %q, want /v1/dashboard", r.URL.Path)
 		}
+		// The read model carries every run and task; the capacity screen
+		// renders neither, so asking for the whole thing would download tens
+		// of times more data than it uses.
+		if got := r.URL.Query().Get("fields"); got != "providers,health" {
+			t.Errorf("fields = %q, want providers,health", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Errorf("authorization = %q", got)
 		}
