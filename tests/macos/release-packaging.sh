@@ -2,10 +2,11 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${repository_root}/scripts/lib/macos-dmg.sh"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/redline-release-test.XXXXXX")"
 mount_path="${test_root}/mounted"
 cleanup() {
-  hdiutil detach "${mount_path}" -quiet 2>/dev/null || true
+  detach_dmg "${mount_path}" || true
   rm -rf "${test_root}"
 }
 trap cleanup EXIT
@@ -86,7 +87,9 @@ if REDLINE_RELEASE_OUTPUT_DIR="${test_root}/release" \
 fi
 grep -q 'must contain a base64-encoded 32-byte Ed25519 private seed' "${test_root}/sparkle-key.stderr"
 
-hdiutil detach "${mount_path}" -quiet
+# The next packaging run creates another image, so wait for this one to be
+# fully released rather than racing its teardown.
+detach_dmg "${mount_path}"
 
 REDLINE_APP_OUTPUT_DIR="${test_root}/build" \
 REDLINE_RELEASE_OUTPUT_DIR="${test_root}/release" \

@@ -67,19 +67,45 @@ verify_distribution() {
   done
 }
 
+# This script runs inside the Tart guest without the repository checked out, so
+# it carries its own copy of the detach retry rather than sourcing
+# scripts/lib/macos-dmg.sh. hdiutil detach returns before the device is fully
+# released, so an immediate rmdir can fail on a still-busy mountpoint.
+detach_mount() {
+  local mount_path="$1"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if hdiutil detach "${mount_path}" -quiet 2>/dev/null; then
+      break
+    fi
+    sleep "${attempt}"
+    if hdiutil detach "${mount_path}" -force -quiet 2>/dev/null; then
+      break
+    fi
+  done
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if ! mount | grep -q " on ${mount_path} "; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'hdiutil detach did not release %s\n' "${mount_path}" >&2
+  return 1
+}
+
 install_dmg() {
   local dmg_path="$1"
   local mount_path
   mount_path="$(mktemp -d /tmp/redline-release-mount.XXXXXX)"
   hdiutil attach "${dmg_path}" -nobrowse -readonly -mountpoint "${mount_path}" -quiet
   if [[ ! -d "${mount_path}/Redline.app" ]]; then
-    hdiutil detach "${mount_path}" -quiet
+    detach_mount "${mount_path}" || true
     printf 'Redline.app is missing from %s\n' "${dmg_path}" >&2
     exit 1
   fi
   rm -rf "${application}"
   ditto "${mount_path}/Redline.app" "${application}"
-  hdiutil detach "${mount_path}" -quiet
+  detach_mount "${mount_path}"
   rmdir "${mount_path}"
 }
 
