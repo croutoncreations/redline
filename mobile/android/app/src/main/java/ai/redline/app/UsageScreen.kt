@@ -88,6 +88,12 @@ private fun Header(state: UsageUiState) {
                 letterSpacing = 1.sp,
             )
             Spacer(Modifier.weight(1f))
+            // A degraded scheduler explains why nothing is dispatching, so it
+            // outranks the connection status for space in the header.
+            state.view?.health?.takeIf { it.degraded }?.let { health ->
+                Text(health.status, color = Warn, fontSize = 11.sp)
+                Spacer(Modifier.width(10.dp))
+            }
             when {
                 // Showing cached numbers without saying so would be misleading.
                 state.failure != null && state.hasData ->
@@ -97,7 +103,12 @@ private fun Header(state: UsageUiState) {
             }
         }
         Spacer(Modifier.height(2.dp))
-        Text("Capacity", color = TextMuted, fontSize = 12.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Capacity", color = TextMuted, fontSize = 12.sp)
+            state.view?.health?.takeIf { it.degraded && it.detail.isNotBlank() }?.let {
+                Text(" · ${it.detail}", color = Warn, fontSize = 12.sp)
+            }
+        }
     }
 }
 

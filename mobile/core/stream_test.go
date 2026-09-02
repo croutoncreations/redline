@@ -204,13 +204,21 @@ func TestStreamStopEndsReconnection(t *testing.T) {
 	stream := client.StreamUsageWithBackoff(&recorder{}, 10)
 
 	time.Sleep(120 * time.Millisecond)
+	// Stop blocks until the reconnect goroutine has exited, so anything that
+	// arrives afterwards would be a leak rather than a race.
 	stream.Stop()
 
+	// A request already on the wire when Stop was called can still reach the
+	// handler, so settle before taking the baseline. Measuring immediately
+	// would count that in-flight request as a post-stop reconnect.
+	time.Sleep(150 * time.Millisecond)
 	mu.Lock()
 	afterStop := connections
 	mu.Unlock()
 
-	time.Sleep(200 * time.Millisecond)
+	// The retry delay is 10ms, so this window would fit many reconnects if the
+	// goroutine were still running.
+	time.Sleep(300 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()

@@ -18,5 +18,15 @@ class CoreRunsSource(private val client: CoreClientHolder) : RunsSource {
 
     override fun dispatchTask(taskId: String): String = client.client().dispatchTask(taskId)
 
+    override fun fetchRunEvents(runId: String): String = client.client().fetchRunEvents(runId)
+
+    override fun controlTask(taskId: String, control: String) {
+        client.client().controlTask(taskId, control)
+    }
+
+    override fun markAllRunsRead() {
+        client.client().markAllRunsRead()
+    }
+
     override fun isUnauthorized(error: Throwable): Boolean = client.isUnauthorized(error)
 }

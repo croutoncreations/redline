@@ -27,6 +27,15 @@ interface RunsSource {
     fun fetchRunLogs(runId: String, stream: String): String
     fun dispatchTask(taskId: String): String
     fun isUnauthorized(error: Throwable): Boolean
+
+    /** A run's timeline. Defaults keep tests that ignore it terse. */
+    fun fetchRunEvents(runId: String): String = """{"events":[]}"""
+
+    /** Enables or disables a task. */
+    fun controlTask(taskId: String, control: String) = Unit
+
+    /** Clears every unread run marker. */
+    fun markAllRunsRead() = Unit
 }
 
 data class RunsUiState(
@@ -35,6 +44,9 @@ data class RunsUiState(
     val tasks: TaskListView? = null,
     val logs: String? = null,
     val logsLoading: Boolean = false,
+    /** Which log stream is on screen: the service offers stdout and stderr. */
+    val logStream: String = "stdout",
+    val events: RunEventsView? = null,
     val dispatching: Boolean = false,
     val lastDispatch: DispatchView? = null,
     val failure: UsageUiState.Failure? = null,
@@ -123,7 +135,7 @@ class RunsViewModel(
     }
 
     /**
-     * Loads one log stream for a run.
+     * Loads one log stream for a run, plus its timeline.
      *
      * Opening one run and then another supersedes the first request, so a slow
      * response cannot arrive after the user has moved on and show the wrong
@@ -132,24 +144,77 @@ class RunsViewModel(
     fun loadLogs(runId: String, stream: String = "stdout") {
         logsJob?.cancel()
         logsJob = viewModelScope.launch {
-            _state.update { it.copy(logsLoading = true, logs = null) }
+            _state.update {
+                it.copy(logsLoading = true, logs = null, logStream = stream, events = null)
+            }
             val result = runCatching {
-                withContext(ioDispatcher) { source.fetchRunLogs(runId, stream) }
+                withContext(ioDispatcher) {
+                    val logs = source.fetchRunLogs(runId, stream)
+                    // The timeline is a nicety beside the logs, so a failure
+                    // to load it must not cost the logs themselves.
+                    val events = runCatching {
+                        redlineJson.decodeFromString(
+                            RunEventsView.serializer(),
+                            source.fetchRunEvents(runId),
+                        )
+                    }.getOrNull()
+                    logs to events
+                }
             }
             coroutineContext.ensureActive()
             result.fold(
-                onSuccess = { text ->
+                onSuccess = { (text, events) ->
                     // Reaching the service proves it is reachable, so an
                     // earlier failure must not keep claiming otherwise.
-                    _state.update { it.copy(logsLoading = false, logs = text, failure = null) }
+                    _state.update {
+                        it.copy(
+                            logsLoading = false,
+                            logs = text,
+                            events = events,
+                            failure = null,
+                        )
+                    }
                 },
                 onFailure = { error -> applyFailure(error) },
             )
         }
     }
 
+    /** Enables or disables a task, then reloads so the list reflects it. */
+    fun controlTask(taskId: String, control: String) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(ioDispatcher) { source.controlTask(taskId, control) }
+            }
+            coroutineContext.ensureActive()
+            result.fold(
+                onSuccess = { refresh(keepDispatchResult = false) },
+                onFailure = { error -> applyFailure(error) },
+            )
+        }
+    }
+
+    /**
+     * Clears every unread run marker.
+     *
+     * Marking read is what makes the badge meaningful: a count that only the
+     * web dashboard can reset would be permanently wrong on the phone.
+     */
+    fun markAllRead() {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(ioDispatcher) { source.markAllRunsRead() }
+            }
+            coroutineContext.ensureActive()
+            result.fold(
+                onSuccess = { refresh(keepDispatchResult = false) },
+                onFailure = { error -> applyFailure(error) },
+            )
+        }
+    }
+
     fun clearLogs() {
-        _state.update { it.copy(logs = null, logsLoading = false) }
+        _state.update { it.copy(logs = null, logsLoading = false, events = null) }
     }
 
     /**

@@ -63,6 +63,10 @@ type ProviderUsage struct {
 type UsageView struct {
 	GeneratedAt time.Time       `json:"generated_at"`
 	Providers   []ProviderUsage `json:"providers"`
+	// Health rides along because the same payload already carries it and the
+	// header shows a health pill; fetching it separately would ask the desktop
+	// twice for something it already sent.
+	Health *HealthView `json:"health,omitempty"`
 }
 
 // sourceLabel describes where a provider's numbers came from, how many runs it
@@ -114,7 +118,8 @@ func isCanonicalPool(allowance decision.AllowanceWindow) bool {
 // It deliberately does not embed the server's dashboardResponse, which is
 // unexported and carries scheduler and task detail the usage screen ignores.
 type dashboardPayload struct {
-	GeneratedAt time.Time `json:"generated_at"`
+	GeneratedAt time.Time      `json:"generated_at"`
+	Health      *healthPayload `json:"health,omitempty"`
 	Providers   []struct {
 		ID            string `json:"id"`
 		Provider      string `json:"provider"`
@@ -141,6 +146,10 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 	view := UsageView{
 		GeneratedAt: payload.GeneratedAt,
 		Providers:   make([]ProviderUsage, 0, len(payload.Providers)),
+	}
+	if payload.Health != nil {
+		health := payload.Health.render()
+		view.Health = &health
 	}
 	for _, item := range payload.Providers {
 		provider := ProviderUsage{

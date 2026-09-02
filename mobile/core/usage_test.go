@@ -438,3 +438,41 @@ func TestFetchUsageReportsPaused(t *testing.T) {
 		t.Errorf("source label = %q, want the active run count", view.Providers[0].SourceLabel)
 	}
 }
+
+// The capacity payload already carries health, and the header shows a health
+// pill, so carrying it through avoids a second request for something the app
+// has already been sent.
+func TestFetchUsageCarriesHealth(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"health":{"status":"degraded","failed_runs":3,
+	  "dispatch_errors":1},"providers":[{"id":"claude-main","provider":"claude",
+	  "usage_source":{"active":"openusage"},"active_runs":0,"max_concurrent_runs":1,
+	  "snapshot":{"provider":"claude","observed_at":%q,"source":"openusage",
+	    "weekly":{"remaining":0.8,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339), now.Format(time.RFC3339),
+		now.Add(48*time.Hour).Format(time.RFC3339))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatalf("FetchUsage: %v", err)
+	}
+	var view core.UsageView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Health == nil {
+		t.Fatal("health must be carried through")
+	}
+	if !view.Health.Degraded {
+		t.Error("a degraded scheduler must be marked")
+	}
+	if view.Health.Detail != "3 failed \u00b7 1 dispatch errors" {
+		t.Errorf("detail = %q", view.Health.Detail)
+	}
+}

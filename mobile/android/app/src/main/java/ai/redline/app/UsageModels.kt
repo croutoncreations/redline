@@ -16,6 +16,8 @@ import kotlinx.serialization.json.Json
 data class UsageView(
     @SerialName("generated_at") val generatedAt: String = "",
     val providers: List<ProviderUsage> = emptyList(),
+    /** Whether the scheduler itself is working, shown as a header pill. */
+    val health: HealthView? = null,
 )
 
 @Serializable

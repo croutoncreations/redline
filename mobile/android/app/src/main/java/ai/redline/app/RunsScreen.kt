@@ -63,9 +63,14 @@ fun RunsScreen(
     onDismissRun: () -> Unit,
     onDispatch: (String) -> Unit,
     onDismissDispatch: () -> Unit,
+    onSelectStream: (RunSummary, String) -> Unit = { _, _ -> },
+    onControlTask: (String, String) -> Unit = { _, _ -> },
 ) {
     var selected by remember { mutableStateOf<RunSummary?>(null) }
     var showTasks by remember { mutableStateOf(false) }
+    // Dispatch spends real capacity and can open a pull request, so it is
+    // confirmed rather than fired on a single tap, matching the web version.
+    var confirming by remember { mutableStateOf<TaskSummary?>(null) }
 
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -98,23 +103,91 @@ fun RunsScreen(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = Panel,
         ) {
-            RunDetail(run, state)
+            RunDetail(run, state) { stream -> onSelectStream(run, stream) }
         }
     }
 
+    // One sheet, two states. Dismissing one ModalBottomSheet and opening
+    // another in the same frame does not work: the outgoing sheet's animation
+    // swallows the incoming one, and neither appears.
     if (showTasks) {
         ModalBottomSheet(
-            onDismissRequest = { showTasks = false },
+            onDismissRequest = {
+                showTasks = false
+                confirming = null
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = Panel,
         ) {
-            TaskPicker(
-                tasks = state.tasks?.tasks.orEmpty(),
-                dispatching = state.dispatching,
-                onDispatch = { id ->
-                    showTasks = false
-                    onDispatch(id)
-                },
+            val pending = confirming
+            if (pending == null) {
+                TaskPicker(
+                    tasks = state.tasks?.tasks.orEmpty(),
+                    dispatching = state.dispatching,
+                    onDispatch = { task -> confirming = task },
+                    onControlTask = onControlTask,
+                )
+            } else {
+                DispatchConfirm(
+                    task = pending,
+                    onCancel = { confirming = null },
+                    onConfirm = {
+                        confirming = null
+                        showTasks = false
+                        onDispatch(pending.id)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Confirms a dispatch before spending capacity.
+ *
+ * A run consumes a subscription window and often opens a pull request, so a
+ * mis-tap has a cost that is not trivially undone.
+ */
+@Composable
+private fun DispatchConfirm(task: TaskSummary, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 28.dp),
+    ) {
+        Text("Run this task now?", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text(task.name.ifBlank { task.id }, color = TextPrimary, fontSize = 14.sp)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "This spends provider capacity. The scheduler can still hold it back.",
+            color = TextMuted,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(18.dp))
+        Row {
+            Text(
+                "Cancel",
+                color = TextPrimary,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Line)
+                    .clickable(onClick = onCancel)
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "Run now",
+                color = Accent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AccentSoft)
+                    .clickable(onClick = onConfirm)
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
             )
         }
     }
@@ -275,10 +348,17 @@ private fun statusTone(run: RunSummary): Color = when {
 }
 
 @Composable
-private fun RunDetail(run: RunSummary, state: RunsUiState) {
+private fun RunDetail(
+    run: RunSummary,
+    state: RunsUiState,
+    onSelectStream: (String) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxWidth()
+            // A run with a long summary and a full timeline is taller than the
+            // sheet, and without this the log controls below are unreachable.
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp)
             .padding(bottom = 24.dp),
     ) {
@@ -314,8 +394,48 @@ private fun RunDetail(run: RunSummary, state: RunsUiState) {
             Text(run.error, color = Danger, fontSize = 14.sp)
         }
 
+        // The timeline shows where a run spent its time, and where it stopped
+        // when it failed.
+        state.events?.events?.takeIf { it.isNotEmpty() }?.let { events ->
+            Spacer(Modifier.height(14.dp))
+            Text("Timeline", color = TextMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            events.forEach { event ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(event.label, color = TextPrimary, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        event.sinceStartLabel,
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+
         Spacer(Modifier.height(14.dp))
-        Text("Output", color = TextMuted, fontSize = 12.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Output", color = TextMuted, fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            // A failing run usually explains itself on stderr, so both streams
+            // need to be reachable rather than just the one.
+            listOf("stdout", "stderr").forEach { stream ->
+                val active = state.logStream == stream
+                Text(
+                    stream,
+                    color = if (active) Accent else TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (active) AccentSoft else Line)
+                        .clickable { onSelectStream(stream) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                )
+            }
+        }
         Spacer(Modifier.height(6.dp))
         when {
             state.logsLoading -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -334,16 +454,16 @@ private fun RunDetail(run: RunSummary, state: RunsUiState) {
                     .background(Background)
                     .padding(10.dp),
             ) {
-                // Logs are pre-formatted and often wide, so they scroll in both
-                // directions rather than being wrapped into unreadable soup.
+                // Logs are pre-formatted and often wide, so they scroll
+                // horizontally rather than being wrapped into unreadable soup.
+                // Vertical scrolling belongs to the sheet: nesting a second
+                // vertical scroller inside it would trap the gesture here.
                 Text(
                     state.logs,
                     color = TextPrimary,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .horizontalScroll(rememberScrollState()),
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
                 )
             }
         }
@@ -354,7 +474,8 @@ private fun RunDetail(run: RunSummary, state: RunsUiState) {
 private fun TaskPicker(
     tasks: List<TaskSummary>,
     dispatching: Boolean,
-    onDispatch: (String) -> Unit,
+    onDispatch: (TaskSummary) -> Unit,
+    onControlTask: (String, String) -> Unit,
 ) {
     Column(
         Modifier
@@ -380,36 +501,73 @@ private fun TaskPicker(
             return@Column
         }
 
-        // Only dispatchable tasks are offered: the service rejects the rest
-        // with a conflict, so showing them would be offering a guaranteed
-        // failure.
-        val runnable = tasks.filter { it.dispatchable }
-        if (runnable.isEmpty()) {
-            Text("No tasks are queued to run.", color = TextMuted, fontSize = 13.sp)
+        if (tasks.isEmpty()) {
+            Text("No tasks are configured.", color = TextMuted, fontSize = 13.sp)
             return@Column
         }
 
+        // Dispatchable tasks come first: they are what this sheet is for. The
+        // rest stay visible so they can be enabled without leaving the phone,
+        // which is the difference between viewing and operating.
+        val ordered = tasks.sortedByDescending { it.dispatchable }
+
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.heightIn(max = 400.dp),
+            modifier = Modifier.heightIn(max = 460.dp),
         ) {
-            items(runnable, key = { it.id }) { task ->
+            items(ordered, key = { it.id }) { task ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Background),
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onDispatch(task.id) },
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Column(Modifier.padding(12.dp)) {
+                    Row(
+                        Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                task.name.ifBlank { task.id },
+                                color = if (task.enabled) TextPrimary else TextMuted,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                if (task.enabled) task.type else "${task.type} · disabled",
+                                color = TextMuted,
+                                fontSize = 11.sp,
+                            )
+                        }
                         Text(
-                            task.name.ifBlank { task.id },
-                            color = TextPrimary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
+                            if (task.enabled) "Disable" else "Enable",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Line)
+                                .clickable {
+                                    onControlTask(
+                                        task.id,
+                                        if (task.enabled) "disable" else "enable",
+                                    )
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
                         )
-                        Spacer(Modifier.height(2.dp))
-                        Text(task.type, color = TextMuted, fontSize = 11.sp)
+                        if (task.dispatchable) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Run",
+                                color = Accent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(AccentSoft)
+                                    .clickable { onDispatch(task) }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            )
+                        }
                     }
                 }
             }

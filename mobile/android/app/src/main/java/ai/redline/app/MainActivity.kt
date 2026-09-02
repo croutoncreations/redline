@@ -157,6 +157,10 @@ class MainActivity : ComponentActivity() {
                             onDismissRun = runsModel::clearLogs,
                             onDispatch = runsModel::dispatch,
                             onDismissDispatch = runsModel::clearDispatchResult,
+                            onSelectStream = { run, stream ->
+                                runsModel.loadLogs(run.id, stream)
+                            },
+                            onControlTask = runsModel::controlTask,
                         )
                     }
                 }
@@ -169,7 +173,13 @@ class MainActivity : ComponentActivity() {
                         when (chosen) {
                             Tab.CAPACITY -> usageModel.refresh()
                             Tab.QUEUE -> queueModel.refresh()
-                            Tab.RUNS -> runsModel.refresh()
+                            Tab.RUNS -> {
+                                runsModel.refresh()
+                                // Opening the runs tab is the moment the user
+                                // has seen what happened, so the badge clears
+                                // here rather than needing its own gesture.
+                                runsModel.markAllRead()
+                            }
                         }
                     },
                 )

@@ -672,3 +672,145 @@ func TestFetchRunsSurvivesATaskLookupFailure(t *testing.T) {
 		t.Errorf("runs must still render, got %+v", view.Runs)
 	}
 }
+
+// The run timeline is how you see where a run spent its time, and where it
+// stopped when it failed.
+func TestFetchRunEventsBuildsATimeline(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	body := `[
+	  {"id":"1","run_id":"r","type":"run.started","occurred_at":"2026-09-02T11:00:00Z"},
+	  {"id":"2","run_id":"r","type":"harness.started","occurred_at":"2026-09-02T11:00:30Z"},
+	  {"id":"3","run_id":"r","type":"harness.completed","occurred_at":"2026-09-02T11:05:30Z"},
+	  {"id":"4","run_id":"r","type":"run.completed","occurred_at":"2026-09-02T11:06:00Z"}
+	]`
+	server, _ := runsServer(t, body, http.StatusOK)
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, err := client.FetchRunEvents("r")
+	if err != nil {
+		t.Fatalf("FetchRunEvents: %v", err)
+	}
+	var view RunEventsView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(view.Events) != 4 {
+		t.Fatalf("events = %d", len(view.Events))
+	}
+	// "harness.started" is machine vocabulary; the screen shows people words.
+	if view.Events[1].Label != "Harness started" {
+		t.Errorf("label = %q", view.Events[1].Label)
+	}
+	// How long each step took is the reason to look at a timeline at all.
+	if view.Events[1].SinceStartLabel != "30s" {
+		t.Errorf("since start = %q, want 30s", view.Events[1].SinceStartLabel)
+	}
+	if view.Events[3].SinceStartLabel != "6m" {
+		t.Errorf("last event since start = %q, want 6m", view.Events[3].SinceStartLabel)
+	}
+}
+
+// An event type the app has never seen must still render: the vocabulary grows
+// server-side and an unknown step is better shown than hidden.
+func TestFetchRunEventsKeepsUnknownTypes(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	body := `[{"id":"1","run_id":"r","type":"something.new","occurred_at":"2026-09-02T11:00:00Z"}]`
+	server, _ := runsServer(t, body, http.StatusOK)
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, _ := client.FetchRunEvents("r")
+	var view RunEventsView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(view.Events) != 1 {
+		t.Fatal("an unknown event type must still appear")
+	}
+	// Falls back to the raw type rather than an empty row.
+	if view.Events[0].Label != "something.new" {
+		t.Errorf("label = %q", view.Events[0].Label)
+	}
+}
+
+// Marking runs read is what clears the unread badge, so the app must be able
+// to do it rather than leaving a count that only the web version can reset.
+func TestMarkRunsRead(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	if err := client.MarkRunRead("run-1"); err != nil {
+		t.Fatalf("MarkRunRead: %v", err)
+	}
+	if err := client.MarkAllRunsRead(); err != nil {
+		t.Fatalf("MarkAllRunsRead: %v", err)
+	}
+	want := []string{"POST /v1/runs/run-1/read", "POST /v1/runs/read-all"}
+	if len(seen) != 2 || seen[0] != want[0] || seen[1] != want[1] {
+		t.Errorf("requests = %v, want %v", seen, want)
+	}
+}
+
+// The health summary answers "is the scheduler actually working", which is the
+// question behind the pill in the web dashboard's header.
+func TestFetchHealthSummarises(t *testing.T) {
+	body := `{"generated_at":"2026-09-02T12:00:00Z","health":{"status":"degraded",
+	  "window":"24h0m0s","active_runs":1,"completed_runs":20,"failed_runs":3,
+	  "dispatch_attempts":582,"dispatch_errors":4,"notification_failures":0}}`
+	server, _ := runsServer(t, body, http.StatusOK)
+
+	client := NewClient(server.URL, "token")
+	raw, err := client.FetchHealth()
+	if err != nil {
+		t.Fatalf("FetchHealth: %v", err)
+	}
+	var view HealthView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Status != "degraded" {
+		t.Errorf("status = %q", view.Status)
+	}
+	if !view.Degraded {
+		t.Error("anything other than healthy must read as degraded")
+	}
+	// The counts explain the status rather than making the user go looking.
+	if view.Detail != "3 failed \u00b7 4 dispatch errors" {
+		t.Errorf("detail = %q", view.Detail)
+	}
+}
+
+func TestFetchHealthReportsHealthy(t *testing.T) {
+	body := `{"health":{"status":"healthy","active_runs":0,"completed_runs":20,
+	  "failed_runs":0,"dispatch_attempts":582,"dispatch_errors":0}}`
+	server, _ := runsServer(t, body, http.StatusOK)
+
+	client := NewClient(server.URL, "token")
+	raw, _ := client.FetchHealth()
+	var view HealthView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Degraded {
+		t.Error("healthy must not read as degraded")
+	}
+}
+
+// The failure vocabulary is what a person reads when a run breaks, so those
+// types in particular must not appear as raw identifiers.
+func TestRunEventLabelsCoverFailures(t *testing.T) {
+	for _, eventType := range []string{
+		"run.failed", "harness.failed", "workspace.prepare_failed",
+		"finalize.failed", "cleanup.failed",
+	} {
+		if runEventLabels[eventType] == "" {
+			t.Errorf("no readable label for %q", eventType)
+		}
+	}
+}
