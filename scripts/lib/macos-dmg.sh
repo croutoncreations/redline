@@ -77,10 +77,13 @@ detach_dmg() {
 # hdiutil returns a generic non-zero exit code for every failure, so the message
 # is the only signal that separates "retry" from "give up". The match is
 # deliberately narrow: a real failure such as a full disk must surface
-# immediately rather than after three attempts. It is matched case-insensitively
-# on "busy" so a reworded or lowercased message still retries; if the wording
-# ever changes completely this degrades to failing fast, which is loud rather
-# than silent.
+# immediately rather than after three attempts.
+#
+# It matches "busy" only on hdiutil's own "create failed" diagnostic, and
+# case-insensitively, so a reworded or lowercased message ("Resource busy",
+# "device busy") still retries while the word appearing anywhere else in the
+# output does not. If the wording changes completely this degrades to failing
+# fast, which is loud rather than silent.
 create_dmg() {
   local dmg_path="$1"
   local staging_path="$2"
@@ -93,7 +96,7 @@ create_dmg() {
       printf '%s\n' "${output}"
       return 0
     fi
-    if [[ "$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')" != *busy* ]]; then
+    if ! printf '%s\n' "${output}" | grep -qi 'create failed.*busy'; then
       printf '%s\n' "${output}" >&2
       return 1
     fi
