@@ -408,3 +408,143 @@ func TestFetchRunLogsDropsATruncatedLeadingFragment(t *testing.T) {
 		t.Errorf("a truncated JSON fragment must not be shown, got:\n%s", logs)
 	}
 }
+
+// A log viewer must never claim there is no output when there is. Reducing a
+// transcript to nothing is worse than showing noise: "No output" reads as
+// "nothing happened" rather than "we hid it all".
+func TestFetchRunLogsNeverBlanksNonEmptyOutput(t *testing.T) {
+	// A transcript made entirely of entries the renderer treats as noise.
+	jsonl := strings.Join([]string{
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":50}`,
+		`{"type":"tool_progress","status":"running"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}`,
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := json.Marshal(map[string]string{"content": jsonl})
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	logs, err := client.FetchRunLogs("run-1", "stdout")
+	if err != nil {
+		t.Fatalf("FetchRunLogs: %v", err)
+	}
+	if strings.TrimSpace(logs) == "" {
+		t.Fatal("output that exists must never render as nothing")
+	}
+}
+
+// Ordinary output that happens to be JSON is not a transcript. Discarding it
+// because it parsed would delete exactly the report someone is looking for.
+func TestFetchRunLogsKeepsUnrelatedJSON(t *testing.T) {
+	jsonl := `{"failures":3,"suite":"integration"}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Investigating."}]}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := json.Marshal(map[string]string{"content": jsonl})
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	logs, err := client.FetchRunLogs("run-1", "stdout")
+	if err != nil {
+		t.Fatalf("FetchRunLogs: %v", err)
+	}
+	if !strings.Contains(logs, `"failures":3`) {
+		t.Errorf("unrelated JSON must survive, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "Investigating.") {
+		t.Errorf("transcript prose must still render, got:\n%s", logs)
+	}
+}
+
+// The final error of a failing run often arrives as a result entry. Dropping
+// unrecognised entry types would hide the one line that matters.
+func TestFetchRunLogsSurfacesResultEntries(t *testing.T) {
+	jsonl := `{"type":"result","subtype":"error","result":"build failed: undefined symbol"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := json.Marshal(map[string]string{"content": jsonl})
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	logs, err := client.FetchRunLogs("run-1", "stdout")
+	if err != nil {
+		t.Fatalf("FetchRunLogs: %v", err)
+	}
+	if !strings.Contains(logs, "build failed: undefined symbol") {
+		t.Errorf("a result entry carries the failure reason, got:\n%s", logs)
+	}
+}
+
+// A dispatch for a task that does not exist is not a transport failure. Saying
+// "check the desktop is awake" when the desktop answered is the same class of
+// lie the 200/202 split exists to avoid.
+func TestDispatchTaskExplainsUnknownTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"task not found"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	raw, err := client.DispatchTask("ghost")
+	if err != nil {
+		t.Fatalf("a 404 is an answer, not a transport error: %v", err)
+	}
+	var result DispatchView
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Started {
+		t.Error("nothing started")
+	}
+	if !result.Refused {
+		t.Error("an unknown task must read as refused")
+	}
+	if result.Reason != "task not found" {
+		t.Errorf("reason = %q, want the service's explanation", result.Reason)
+	}
+}
+
+// A 401 must stay an auth error so the UI can tell the user to pair again,
+// rather than being folded into the refusal path.
+func TestDispatchTaskStillReportsUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "bad")
+	if _, err := client.DispatchTask("nightly"); !IsUnauthorized(err) {
+		t.Errorf("401 must remain unauthorized, got %v", err)
+	}
+}
+
+// A 202 with no body still means a run started. Treating the empty body as a
+// decode failure would report a successful dispatch as an error.
+func TestDispatchTaskAcceptsEmptyBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+	raw, err := client.DispatchTask("nightly")
+	if err != nil {
+		t.Fatalf("an empty 202 body must not be an error: %v", err)
+	}
+	var result DispatchView
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.Started {
+		t.Error("202 means a run started, body or no body")
+	}
+}

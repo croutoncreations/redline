@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -123,7 +125,11 @@ func (c *Client) doWithStatus(ctx context.Context, method, path string, body, ou
 	}
 
 	if output != nil {
-		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
+		err := json.NewDecoder(response.Body).Decode(output)
+		// An empty body is a legitimate answer for a status that carries its
+		// own meaning, such as 202 for "accepted". Treating the absent body as
+		// a decode failure would report a successful request as an error.
+		if err != nil && !errors.Is(err, io.EOF) {
 			return response.StatusCode, fmt.Errorf("decode response: %w", err)
 		}
 	}

@@ -62,6 +62,8 @@ class RunsViewModel(
     val state: StateFlow<RunsUiState> = _state.asStateFlow()
 
     private var refreshJob: Job? = null
+    private var logsJob: Job? = null
+    private var dispatchJob: Job? = null
 
     /**
      * Reloads runs and tasks.
@@ -120,9 +122,16 @@ class RunsViewModel(
         }
     }
 
-    /** Loads one log stream for a run. */
+    /**
+     * Loads one log stream for a run.
+     *
+     * Opening one run and then another supersedes the first request, so a slow
+     * response cannot arrive after the user has moved on and show the wrong
+     * run's output.
+     */
     fun loadLogs(runId: String, stream: String = "stdout") {
-        viewModelScope.launch {
+        logsJob?.cancel()
+        logsJob = viewModelScope.launch {
             _state.update { it.copy(logsLoading = true, logs = null) }
             val result = runCatching {
                 withContext(ioDispatcher) { source.fetchRunLogs(runId, stream) }
@@ -130,7 +139,9 @@ class RunsViewModel(
             coroutineContext.ensureActive()
             result.fold(
                 onSuccess = { text ->
-                    _state.update { it.copy(logsLoading = false, logs = text) }
+                    // Reaching the service proves it is reachable, so an
+                    // earlier failure must not keep claiming otherwise.
+                    _state.update { it.copy(logsLoading = false, logs = text, failure = null) }
                 },
                 onFailure = { error -> applyFailure(error) },
             )
@@ -146,9 +157,13 @@ class RunsViewModel(
      *
      * The result is kept rather than assumed: the scheduler can decline, and
      * saying "started" when nothing did would be a lie the user acts on.
+     *
+     * A second dispatch supersedes the first so two rapid taps cannot leave the
+     * banner reporting the earlier of two answers.
      */
     fun dispatch(taskId: String) {
-        viewModelScope.launch {
+        dispatchJob?.cancel()
+        dispatchJob = viewModelScope.launch {
             _state.update { it.copy(dispatching = true, lastDispatch = null) }
             val result = runCatching {
                 withContext(ioDispatcher) {
@@ -161,7 +176,9 @@ class RunsViewModel(
             coroutineContext.ensureActive()
             result.fold(
                 onSuccess = { view ->
-                    _state.update { it.copy(dispatching = false, lastDispatch = view) }
+                    _state.update {
+                        it.copy(dispatching = false, lastDispatch = view, failure = null)
+                    }
                     // A started run should appear in the list without the user
                     // having to pull to refresh, but the banner explaining the
                     // outcome has to survive that reload.

@@ -234,10 +234,19 @@ func (c *Client) FetchRunLogs(runID, stream string) (string, error) {
 //
 // Agent harnesses emit JSONL transcripts. Rendering those raw fills the screen
 // with escaped JSON whose useful content is a few sentences of prose and the
-// names of the tools that ran. Lines that are not transcript JSON are passed
-// through untouched, because plenty of runs emit ordinary output such as test
-// results, and mangling those would lose the very thing being looked for.
+// names of the tools that ran.
+//
+// The guiding rule is that a log viewer must not lose lines. Only entries
+// positively recognised as bookkeeping are dropped; anything unrecognised is
+// kept, because the line nobody thought to handle is often the one being looked
+// for. If the whole reduction comes out empty, the raw content is returned
+// instead: "No output" for a run that produced 32KB would read as "nothing
+// happened" rather than "we hid it all".
 func renderLogs(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+
 	lines := strings.Split(content, "\n")
 	rendered := make([]string, 0, len(lines))
 
@@ -263,12 +272,25 @@ func renderLogs(content string) string {
 			rendered = append(rendered, line)
 			continue
 		}
-		if text := entry.render(); text != "" {
+		text, recognised := entry.render()
+		switch {
+		case !recognised:
+			// Valid JSON that is not a transcript entry: ordinary output that
+			// happens to be JSON, such as a test runner's report. Keep it.
+			rendered = append(rendered, line)
+		case text != "":
 			rendered = append(rendered, text)
 		}
 	}
 
-	return strings.Join(rendered, "\n")
+	result := strings.Join(rendered, "\n")
+	if strings.TrimSpace(result) == "" {
+		// Everything reduced away. Showing the raw tail is noisy, but it is
+		// honest, and it beats an empty screen over a run that did produce
+		// output.
+		return content
+	}
+	return result
 }
 
 // looksLikeJSONFragment reports whether a line is the tail end of a JSON object
@@ -286,6 +308,7 @@ func looksLikeJSONFragment(line string) bool {
 type transcriptEntry struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
+	Result  string `json:"result"`
 	Message struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -295,9 +318,12 @@ type transcriptEntry struct {
 	} `json:"message"`
 }
 
-// render reduces one transcript entry to the line worth showing, or "" for the
-// entries that are pure bookkeeping.
-func (e transcriptEntry) render() string {
+// render reduces one transcript entry to the line worth showing.
+//
+// The second return reports whether this was a transcript entry at all. An
+// unrecognised type is not noise to be dropped: it is ordinary JSON output that
+// belongs on screen unchanged.
+func (e transcriptEntry) render() (string, bool) {
 	switch e.Type {
 	case "assistant":
 		parts := make([]string, 0, len(e.Message.Content))
@@ -315,17 +341,24 @@ func (e transcriptEntry) render() string {
 				}
 			}
 		}
-		return strings.Join(parts, "\n")
+		return strings.Join(parts, "\n"), true
+	case "result":
+		// A failing run's final error usually arrives here, so this is the
+		// most important line on the screen rather than something to hide.
+		return strings.TrimSpace(e.Result), true
 	case "system":
-		// Token counts and progress pings are noise here.
 		if e.Subtype == "task_started" {
-			return "— task started —"
+			return "— task started —", true
 		}
-		return ""
+		// Token counts and progress pings genuinely are bookkeeping.
+		return "", true
+	case "user", "tool_progress":
+		// Tool results and progress pings are the bulk of a transcript and
+		// are echoed by the assistant entries around them.
+		return "", true
 	default:
-		// Tool results and progress entries are the bulk of a transcript and
-		// almost never the thing being looked for.
-		return ""
+		// Not a transcript entry. Keep it verbatim.
+		return "", false
 	}
 }
 
@@ -372,10 +405,16 @@ func (c *Client) DispatchTask(taskID string) (string, error) {
 	view := DispatchView{}
 	switch {
 	case err != nil:
-		// A conflict carries the service's explanation of why it will not run,
-		// which is exactly what the user needs to see.
+		// The service's own explanation of why it will not run is exactly what
+		// the user needs to see. A rejected request is an answer: reporting a
+		// missing task as "cannot reach Redline" would blame the network for
+		// something the desktop answered clearly, which is the same class of
+		// lie the started/held-back split exists to avoid.
+		//
+		// Authentication failures are excluded deliberately: those must stay
+		// errors so the UI can prompt to pair again.
 		var apiErr *apiError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == 409 {
+		if errors.As(err, &apiErr) && isRefusal(apiErr.StatusCode) {
 			view.Refused = true
 			view.Reason = apiErr.Message
 			break
@@ -400,6 +439,19 @@ func (c *Client) DispatchTask(taskID string) (string, error) {
 		return "", fmt.Errorf("encode dispatch result: %w", marshalErr)
 	}
 	return string(encoded), nil
+}
+
+// isRefusal reports whether a status means the service considered the request
+// and declined it, as opposed to failing to process it.
+//
+// Authentication failures are not refusals: they need the pairing prompt, not
+// an explanation on the runs screen. Server errors are not refusals either,
+// since nothing was decided.
+func isRefusal(status int) bool {
+	if status == 401 || status == 403 {
+		return false
+	}
+	return status >= 400 && status < 500
 }
 
 // TaskSummary is one row on the tasks screen.
