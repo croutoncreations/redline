@@ -23,6 +23,10 @@ data class RunSummary(
     val id: String,
     @SerialName("short_id") val shortId: String = "",
     @SerialName("task_id") val taskId: String = "",
+    /** The task's human name, or its id when the task no longer exists. */
+    val name: String = "",
+    /** The harness and model that actually ran. */
+    @SerialName("meta_label") val metaLabel: String = "",
     val state: String = "",
     val outcome: String = "",
     @SerialName("exit_code") val exitCode: Int = 0,

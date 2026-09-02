@@ -25,6 +25,8 @@ data class ProviderUsage(
     val paused: Boolean = false,
     val stale: Boolean = false,
     val error: String = "",
+    /** Where the numbers came from and how fresh they are. */
+    @SerialName("source_label") val sourceLabel: String = "",
     val session: Window? = null,
     val weekly: Window? = null,
     val pools: List<Pool> = emptyList(),

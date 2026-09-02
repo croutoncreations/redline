@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,7 +41,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun UsageScreen(state: UsageUiState, onRetry: () -> Unit) {
+fun UsageScreen(
+    state: UsageUiState,
+    onRetry: () -> Unit,
+    onControlProvider: (String, String) -> Unit = { _, _ -> },
+    onViewQueue: (String) -> Unit = {},
+) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Header(state)
@@ -49,7 +55,7 @@ fun UsageScreen(state: UsageUiState, onRetry: () -> Unit) {
                 // a refresh over existing data should not blank the screen.
                 state.loading && !state.hasData -> CenteredProgress()
                 !state.hasData && state.failure != null -> FailureMessage(state.failure, onRetry)
-                state.view != null -> ProviderList(state)
+                state.view != null -> ProviderList(state, onControlProvider, onViewQueue)
                 else -> CenteredProgress()
             }
         }
@@ -126,18 +132,28 @@ private fun FailureMessage(failure: UsageUiState.Failure, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun ProviderList(state: UsageUiState) {
+private fun ProviderList(
+    state: UsageUiState,
+    onControlProvider: (String, String) -> Unit,
+    onViewQueue: (String) -> Unit,
+) {
     val providers = state.view?.providers ?: emptyList()
     LazyColumn(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(providers, key = { it.id }) { provider -> ProviderCard(provider) }
+        items(providers, key = { it.id }) { provider ->
+            ProviderCard(provider, onControlProvider, onViewQueue)
+        }
     }
 }
 
 @Composable
-private fun ProviderCard(provider: ProviderUsage) {
+private fun ProviderCard(
+    provider: ProviderUsage,
+    onControlProvider: (String, String) -> Unit = { _, _ -> },
+    onViewQueue: (String) -> Unit = {},
+) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         colors = CardDefaults.cardColors(containerColor = Panel),
@@ -152,7 +168,18 @@ private fun ProviderCard(provider: ProviderUsage) {
                     fontSize = 16.sp,
                 )
                 Spacer(Modifier.weight(1f))
-                Text(providerStatus(provider), color = TextMuted, fontSize = 12.sp)
+                Text(
+                    providerStatus(provider),
+                    color = if (provider.paused) Warn else TextMuted,
+                    fontSize = 12.sp,
+                )
+            }
+
+            // Where the numbers came from and how fresh they are: the first
+            // thing to check when this and the desktop disagree.
+            if (provider.sourceLabel.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(provider.sourceLabel, color = TextMuted, fontSize = 11.sp)
             }
 
             if (provider.error.isNotEmpty()) {
@@ -172,8 +199,47 @@ private fun ProviderCard(provider: ProviderUsage) {
                 Spacer(Modifier.height(12.dp))
                 Meter(pool.label, pool.remainingPercent, pool.resetsInSeconds, pool.resetInferred)
             }
+
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CardAction("View queue") { onViewQueue(provider.id) }
+                Spacer(Modifier.width(8.dp))
+                // Pause is the emergency stop for a provider that is spending
+                // capacity on the wrong thing, so it is one tap from the
+                // numbers that prompt it.
+                CardAction(
+                    if (provider.paused) "Resume" else "Pause",
+                    emphasised = true,
+                ) {
+                    onControlProvider(provider.id, if (provider.paused) "resume" else "pause")
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Refresh",
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .clickable { onControlProvider(provider.id, "refresh") }
+                        .padding(8.dp),
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun CardAction(label: String, emphasised: Boolean = false, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (emphasised) Accent else TextPrimary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (emphasised) AccentSoft else Line)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 @Composable

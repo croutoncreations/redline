@@ -548,3 +548,127 @@ func TestDispatchTaskAcceptsEmptyBody(t *testing.T) {
 		t.Error("202 means a run started, body or no body")
 	}
 }
+
+// Past a couple of days, hours stop being a unit anyone reads: "317h 20m" is
+// arithmetic homework where "13 days" is an answer.
+func TestDurationLabelUsesDaysForLongWaits(t *testing.T) {
+	for _, testCase := range []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{45 * time.Second, "45s"},
+		{90 * time.Second, "1m 30s"},
+		{2 * time.Hour, "2h"},
+		{time.Duration(4.5 * float64(time.Hour)), "4h 30m"},
+		{47 * time.Hour, "47h"},
+		{49 * time.Hour, "2d"},
+		{317*time.Hour + 20*time.Minute, "13d"},
+	} {
+		if got := durationLabel(testCase.elapsed); got != testCase.want {
+			t.Errorf("durationLabel(%s) = %q, want %q", testCase.elapsed, got, testCase.want)
+		}
+	}
+}
+
+// The run record carries only a task id. The web dashboard shows the task's
+// human name, which is what someone recognises at a glance, so the core joins
+// the two rather than making each platform do it.
+func TestFetchRunsUsesTaskNamesWhenAvailable(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/runs"):
+			_, _ = w.Write([]byte(`[{"id":"a1-b2","task_id":"release-notes","state":"completed",
+			  "outcome":"completed","started_at":"2026-09-02T11:00:00Z",
+			  "completed_at":"2026-09-02T11:01:00Z",
+			  "actual_provider":"claude-code","actual_model":"sonnet"}]`))
+		case r.URL.Path == "/v1/tasks":
+			_, _ = w.Write([]byte(`[{"id":"release-notes","name":"Draft changelog and release notes",
+			  "enabled":true,"state":"queued"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, err := client.FetchRuns()
+	if err != nil {
+		t.Fatalf("FetchRuns: %v", err)
+	}
+	var view RunListView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	run := view.Runs[0]
+	if run.Name != "Draft changelog and release notes" {
+		t.Errorf("name = %q, want the task's human name", run.Name)
+	}
+	// The id stays available: it is what identifies the task in the API.
+	if run.TaskID != "release-notes" {
+		t.Errorf("task id = %q", run.TaskID)
+	}
+	// "claude-code · sonnet" tells you which harness and model actually ran,
+	// which matters when one is misbehaving.
+	if run.MetaLabel != "claude-code \u00b7 sonnet" {
+		t.Errorf("meta = %q", run.MetaLabel)
+	}
+}
+
+// A run whose task has since been deleted must still render, falling back to
+// the id rather than showing a blank row.
+func TestFetchRunsFallsBackToTaskIDWhenTheTaskIsGone(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/runs"):
+			_, _ = w.Write([]byte(`[{"id":"a1-b2","task_id":"deleted-task","state":"completed",
+			  "outcome":"completed","started_at":"2026-09-02T11:00:00Z",
+			  "completed_at":"2026-09-02T11:01:00Z"}]`))
+		case r.URL.Path == "/v1/tasks":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, _ := client.FetchRuns()
+	var view RunListView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Runs[0].Name != "deleted-task" {
+		t.Errorf("name = %q, want the id as a fallback", view.Runs[0].Name)
+	}
+}
+
+// Task lookup is a nicety. If it fails, the runs list must still render with
+// ids rather than failing entirely: the runs are the point, the names are
+// decoration.
+func TestFetchRunsSurvivesATaskLookupFailure(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/runs") {
+			_, _ = w.Write([]byte(`[{"id":"a1-b2","task_id":"t","state":"completed",
+			  "outcome":"completed","started_at":"2026-09-02T11:00:00Z",
+			  "completed_at":"2026-09-02T11:01:00Z"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, err := client.FetchRuns()
+	if err != nil {
+		t.Fatalf("a task lookup failure must not fail the runs list: %v", err)
+	}
+	var view RunListView
+	_ = json.Unmarshal([]byte(raw), &view)
+	if len(view.Runs) != 1 || view.Runs[0].Name != "t" {
+		t.Errorf("runs must still render, got %+v", view.Runs)
+	}
+}

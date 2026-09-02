@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
@@ -45,20 +46,48 @@ type Pool struct {
 
 // ProviderUsage is one provider's capacity as the app renders it.
 type ProviderUsage struct {
-	ID       string  `json:"id"`
-	Provider string  `json:"provider"`
-	Paused   bool    `json:"paused"`
-	Stale    bool    `json:"stale"`
-	Error    string  `json:"error,omitempty"`
-	Session  *Window `json:"session,omitempty"`
-	Weekly   *Window `json:"weekly,omitempty"`
-	Pools    []Pool  `json:"pools,omitempty"`
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Paused   bool   `json:"paused"`
+	Stale    bool   `json:"stale"`
+	Error    string `json:"error,omitempty"`
+	// SourceLabel says where the numbers came from and how fresh they are,
+	// which is what to check first when two surfaces disagree.
+	SourceLabel string  `json:"source_label,omitempty"`
+	Session     *Window `json:"session,omitempty"`
+	Weekly      *Window `json:"weekly,omitempty"`
+	Pools       []Pool  `json:"pools,omitempty"`
 }
 
 // UsageView is the whole capacity screen.
 type UsageView struct {
 	GeneratedAt time.Time       `json:"generated_at"`
 	Providers   []ProviderUsage `json:"providers"`
+}
+
+// sourceLabel describes where a provider's numbers came from, how many runs it
+// is carrying, and how recently it was sampled.
+//
+// This mirrors the line the web dashboard shows. When the phone and the
+// dashboard disagree, the first question is which snapshot each was looking at,
+// and this is the answer.
+func sourceLabel(usageSource, snapshotSource string, active, maximum int, observedAt, now time.Time) string {
+	source := usageSource
+	if source == "" {
+		source = snapshotSource
+	}
+
+	parts := make([]string, 0, 3)
+	if source != "" {
+		parts = append(parts, source+" source")
+	}
+	if maximum > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d active", active, maximum))
+	}
+	if !observedAt.IsZero() {
+		parts = append(parts, "sampled "+relativeLabel(observedAt, now))
+	}
+	return strings.Join(parts, " \u00b7 ")
 }
 
 // canonicalPoolKeys are the account pools the collectors also publish as the
@@ -87,12 +116,20 @@ func isCanonicalPool(allowance decision.AllowanceWindow) bool {
 type dashboardPayload struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Providers   []struct {
-		ID            string                  `json:"id"`
-		Provider      string                  `json:"provider"`
-		Paused        bool                    `json:"paused"`
-		SnapshotStale bool                    `json:"snapshot_stale"`
-		Error         string                  `json:"error,omitempty"`
-		Snapshot      *decision.UsageSnapshot `json:"snapshot,omitempty"`
+		ID            string `json:"id"`
+		Provider      string `json:"provider"`
+		Paused        bool   `json:"paused"`
+		SnapshotStale bool   `json:"snapshot_stale"`
+		Error         string `json:"error,omitempty"`
+		// usage_source is an object describing the collector in use, not a
+		// bare name: it also records when the collector last changed and how
+		// many times it has failed in a row.
+		UsageSource struct {
+			Active string `json:"active"`
+		} `json:"usage_source"`
+		ActiveRuns        int                     `json:"active_runs"`
+		MaxConcurrentRuns int                     `json:"max_concurrent_runs"`
+		Snapshot          *decision.UsageSnapshot `json:"snapshot,omitempty"`
 	} `json:"providers"`
 }
 
@@ -120,6 +157,11 @@ func (c *Client) FetchUsage() (string, error) {
 			provider.Session = shortWindow(item.Snapshot, now)
 			provider.Weekly = weeklyWindow(item.Snapshot, now)
 			provider.Pools = pools(item.Snapshot, now)
+			provider.SourceLabel = sourceLabel(
+				item.UsageSource.Active, item.Snapshot.Source,
+				item.ActiveRuns, item.MaxConcurrentRuns,
+				item.Snapshot.ObservedAt, now,
+			)
 		}
 		view.Providers = append(view.Providers, provider)
 	}

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,7 +37,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 
 /** The screens reachable from the bottom bar. */
 private enum class Tab(val label: String) {
-    CAPACITY("Capacity"),
+    CAPACITY("Usage"),
+    QUEUE("Queue"),
     RUNS("Runs"),
 }
 
@@ -81,10 +83,26 @@ class MainActivity : ComponentActivity() {
                         RunsViewModel(CoreRunsSource(holder)) as T
                 },
             )
+            val queueModel: QueueViewModel = viewModel(
+                factory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                        QueueViewModel(CoreQueueSource(holder)) as T
+                },
+            )
 
             var tab by remember { mutableStateOf(Tab.CAPACITY) }
             val usageState by usageModel.state.collectAsState()
             val runsState by runsModel.state.collectAsState()
+            val queueState by queueModel.state.collectAsState()
+
+            // The queue picker needs the provider list, which the usage screen
+            // already fetched. Passing it across avoids a second request for
+            // something the app knows.
+            val providerIds = usageState.view?.providers?.map { it.id }.orEmpty()
+            LaunchedEffect(providerIds) {
+                if (providerIds.isNotEmpty()) queueModel.setProviders(providerIds)
+            }
 
             // Refreshing on resume is the guaranteed floor: whatever background
             // work did or did not happen, the numbers are correct whenever the
@@ -94,6 +112,7 @@ class MainActivity : ComponentActivity() {
             OnResume {
                 when (tab) {
                     Tab.CAPACITY -> usageModel.refresh()
+                    Tab.QUEUE -> queueModel.refresh()
                     Tab.RUNS -> runsModel.refresh()
                 }
             }
@@ -104,6 +123,21 @@ class MainActivity : ComponentActivity() {
                         Tab.CAPACITY -> UsageScreen(
                             state = usageState,
                             onRetry = usageModel::refresh,
+                            onControlProvider = { id, control ->
+                                usageModel.controlProvider(id, control)
+                            },
+                            onViewQueue = { id ->
+                                queueModel.selectProvider(id)
+                                tab = Tab.QUEUE
+                            },
+                        )
+
+                        Tab.QUEUE -> QueueScreen(
+                            state = queueState,
+                            onSelectProvider = queueModel::selectProvider,
+                            onRefresh = queueModel::refreshUsage,
+                            onRun = { candidate -> runsModel.dispatch(candidate.taskId) },
+                            onRetry = queueModel::refresh,
                         )
 
                         Tab.RUNS -> RunsScreen(
@@ -124,6 +158,7 @@ class MainActivity : ComponentActivity() {
                         // was loaded the last time this tab was open.
                         when (chosen) {
                             Tab.CAPACITY -> usageModel.refresh()
+                            Tab.QUEUE -> queueModel.refresh()
                             Tab.RUNS -> runsModel.refresh()
                         }
                     },

@@ -21,12 +21,17 @@ const defaultRunLimit = 50
 // showing, with the interpretation already applied so each platform does not
 // repeat it.
 type RunSummary struct {
-	ID       string `json:"id"`
-	ShortID  string `json:"short_id"`
-	TaskID   string `json:"task_id"`
-	State    string `json:"state"`
-	Outcome  string `json:"outcome,omitempty"`
-	ExitCode int    `json:"exit_code"`
+	ID      string `json:"id"`
+	ShortID string `json:"short_id"`
+	TaskID  string `json:"task_id"`
+	// Name is the task's human name, or the id when the task is gone.
+	Name string `json:"name"`
+	// MetaLabel names the harness and model that actually ran, which is what
+	// to look at when one of them is misbehaving.
+	MetaLabel string `json:"meta_label,omitempty"`
+	State     string `json:"state"`
+	Outcome   string `json:"outcome,omitempty"`
+	ExitCode  int    `json:"exit_code"`
 
 	Running   bool `json:"running"`
 	Succeeded bool `json:"succeeded"`
@@ -50,16 +55,18 @@ type RunListView struct {
 
 // runRecord mirrors the fields of the service's run record that the phone uses.
 type runRecord struct {
-	ID          string     `json:"id"`
-	TaskID      string     `json:"task_id"`
-	State       string     `json:"state"`
-	Outcome     string     `json:"outcome"`
-	ExitCode    int        `json:"exit_code"`
-	StartedAt   time.Time  `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	Summary     string     `json:"summary"`
-	Error       string     `json:"error"`
-	Artifacts   []struct {
+	ID             string     `json:"id"`
+	TaskID         string     `json:"task_id"`
+	ActualProvider string     `json:"actual_provider"`
+	ActualModel    string     `json:"actual_model"`
+	State          string     `json:"state"`
+	Outcome        string     `json:"outcome"`
+	ExitCode       int        `json:"exit_code"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
+	Summary        string     `json:"summary"`
+	Error          string     `json:"error"`
+	Artifacts      []struct {
 		Type  string `json:"type"`
 		Label string `json:"label"`
 		URL   string `json:"url"`
@@ -77,10 +84,18 @@ func (c *Client) FetchRuns() (string, error) {
 		return "", err
 	}
 
+	// Run records carry only a task id, so names come from the task list. This
+	// is decoration: if the lookup fails the runs still render with ids, since
+	// the runs are the point.
+	names := c.taskNames(ctx)
+
 	now := c.now()
 	view := RunListView{Runs: make([]RunSummary, 0, len(records))}
 	for _, record := range records {
 		summary := summariseRun(record, now)
+		if name := names[record.TaskID]; name != "" {
+			summary.Name = name
+		}
 		view.Runs = append(view.Runs, summary)
 		view.TotalCount++
 		if summary.Running {
@@ -97,6 +112,22 @@ func (c *Client) FetchRuns() (string, error) {
 	return string(encoded), nil
 }
 
+// taskNames maps task ids to their human names, best effort.
+func (c *Client) taskNames(ctx context.Context) map[string]string {
+	var tasks []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := c.get(ctx, "/v1/tasks", &tasks); err != nil {
+		return nil
+	}
+	names := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		names[task.ID] = task.Name
+	}
+	return names
+}
+
 func summariseRun(record runRecord, now time.Time) RunSummary {
 	// A run with no completion time is still going. Treating the zero time as
 	// an end would render a long-running job as having taken no time at all.
@@ -107,9 +138,12 @@ func summariseRun(record runRecord, now time.Time) RunSummary {
 	}
 
 	summary := RunSummary{
-		ID:            record.ID,
-		ShortID:       shortRunID(record.ID),
-		TaskID:        record.TaskID,
+		ID:      record.ID,
+		ShortID: shortRunID(record.ID),
+		TaskID:  record.TaskID,
+		// Overwritten with the task's name when the lookup succeeds.
+		Name:          record.TaskID,
+		MetaLabel:     metaLabel(record),
 		State:         record.State,
 		Outcome:       record.Outcome,
 		ExitCode:      record.ExitCode,
@@ -129,6 +163,22 @@ func summariseRun(record runRecord, now time.Time) RunSummary {
 		}
 	}
 	return summary
+}
+
+// metaLabel names the harness and model that actually ran.
+//
+// These are the *actual* values rather than what the task requested, because
+// routing can substitute a different model and the substitution is exactly what
+// you want to see when output looks wrong.
+func metaLabel(record runRecord) string {
+	parts := make([]string, 0, 2)
+	if record.ActualProvider != "" {
+		parts = append(parts, record.ActualProvider)
+	}
+	if record.ActualModel != "" {
+		parts = append(parts, record.ActualModel)
+	}
+	return strings.Join(parts, " \u00b7 ")
 }
 
 // isSuccessfulRun trusts the service's own outcome rather than inferring
@@ -170,13 +220,17 @@ func durationLabel(elapsed time.Duration) string {
 			return fmt.Sprintf("%dm", minutes)
 		}
 		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	default:
+	case elapsed < 48*time.Hour:
 		hours := int(elapsed.Hours())
 		minutes := int(elapsed.Minutes()) % 60
 		if minutes == 0 {
 			return fmt.Sprintf("%dh", hours)
 		}
 		return fmt.Sprintf("%dh %dm", hours, minutes)
+	default:
+		// Past a couple of days hours stop being a unit anyone reads:
+		// "317h 20m" is arithmetic homework where "13d" is an answer.
+		return fmt.Sprintf("%dd", int(elapsed.Hours())/24)
 	}
 }
 

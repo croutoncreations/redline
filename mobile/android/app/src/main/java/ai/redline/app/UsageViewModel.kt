@@ -44,6 +44,9 @@ data class UsageUiState(
  * binding, which needs a device or emulator to load its native library.
  */
 interface UsageSource {
+    /** Pauses, resumes, or refreshes a provider. Default keeps tests terse. */
+    fun controlProvider(providerAccountId: String, control: String) = Unit
+
     /** Returns the core's usage JSON, or throws. */
     fun fetchUsageJson(): String
 
@@ -68,6 +71,33 @@ class UsageViewModel(
      * so a slow stale result can overwrite a fresh one.
      */
     private var refreshJob: Job? = null
+
+    /**
+     * Pauses, resumes, or refreshes a provider, then reloads.
+     *
+     * The numbers on screen describe the state before the control was applied,
+     * so leaving them would show a paused provider as running.
+     */
+    fun controlProvider(providerAccountId: String, control: String) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(ioDispatcher) { source.controlProvider(providerAccountId, control) }
+            }
+            coroutineContext.ensureActive()
+            result.fold(
+                onSuccess = { refresh() },
+                onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    val failure = if (source.isUnauthorized(error)) {
+                        UsageUiState.Failure.UNAUTHORIZED
+                    } else {
+                        UsageUiState.Failure.UNREACHABLE
+                    }
+                    _state.update { it.fail(failure) }
+                },
+            )
+        }
+    }
 
     fun refresh() {
         refreshJob?.cancel()

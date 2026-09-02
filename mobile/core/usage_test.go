@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,5 +363,72 @@ func TestNewClientTrimsWhitespaceFromToken(t *testing.T) {
 	}
 	if seen != "Bearer secret-token" {
 		t.Errorf("Authorization = %q, want the trimmed token", seen)
+	}
+}
+
+// The web dashboard shows "openusage source · 0/1 active · sampled 4 mins ago"
+// under each provider. That line answers where the numbers came from and how
+// much to trust them, which matters when two surfaces disagree.
+func TestFetchUsageReportsProvenance(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"claude-main","provider":"claude","paused":false,"snapshot_stale":false,
+	  "usage_source":{"active":"openusage","consecutive_failures":0},"active_runs":0,"max_concurrent_runs":1,
+	  "snapshot":{"provider":"claude","observed_at":%q,"source":"openusage",
+	    "weekly":{"remaining":80,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339),
+		now.Add(-4*time.Minute).Format(time.RFC3339),
+		now.Add(48*time.Hour).Format(time.RFC3339))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatalf("FetchUsage: %v", err)
+	}
+	var view core.UsageView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	provider := view.Providers[0]
+	if provider.SourceLabel != "openusage source \u00b7 0/1 active \u00b7 sampled 4m ago" {
+		t.Errorf("source label = %q", provider.SourceLabel)
+	}
+}
+
+// A provider the user has paused must say so: it explains why nothing is
+// dispatching, and it is the thing they would want to undo.
+func TestFetchUsageReportsPaused(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"codex-main","provider":"codex","paused":true,"usage_source":{"active":"native","consecutive_failures":0},
+	  "active_runs":1,"max_concurrent_runs":2,
+	  "snapshot":{"provider":"codex","observed_at":%q,"source":"native",
+	    "weekly":{"remaining":0,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339),
+		now.Format(time.RFC3339),
+		now.Add(96*time.Hour).Format(time.RFC3339))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
+	raw, _ := client.FetchUsage()
+	var view core.UsageView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !view.Providers[0].Paused {
+		t.Error("a paused provider must be marked")
+	}
+	if !strings.Contains(view.Providers[0].SourceLabel, "1/2 active") {
+		t.Errorf("source label = %q, want the active run count", view.Providers[0].SourceLabel)
 	}
 }

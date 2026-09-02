@@ -10,5 +10,9 @@ class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
 
     override fun fetchUsageJson(): String = client.client().fetchUsage()
 
+    override fun controlProvider(providerAccountId: String, control: String) {
+        client.client().controlProvider(providerAccountId, control)
+    }
+
     override fun isUnauthorized(error: Throwable): Boolean = client.isUnauthorized(error)
 }

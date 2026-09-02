@@ -192,15 +192,26 @@ private fun RunRow(run: RunSummary, onSelect: (RunSummary) -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(run)
                 Spacer(Modifier.width(10.dp))
+                // The task's name, not its id: it is what someone recognises
+                // without translating a slug in their head.
                 Text(
-                    run.taskId,
+                    run.name.ifBlank { run.taskId },
                     color = TextPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
                 )
+                Spacer(Modifier.width(8.dp))
                 Text(run.relativeLabel, color = TextMuted, fontSize = 12.sp)
             }
+
+            // A one-line preview of what the run concluded, which is often
+            // enough to avoid opening it at all.
+            if (run.summary.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(run.summary, color = TextMuted, fontSize = 12.sp, maxLines = 2)
+            }
+
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -213,6 +224,16 @@ private fun RunRow(run: RunSummary, onSelect: (RunSummary) -> Unit) {
                 Text(statusLabel(run), color = statusTone(run), fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
                 Text(run.durationLabel, color = TextMuted, fontSize = 12.sp)
+            }
+
+            if (run.metaLabel.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    run.metaLabel,
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
             // The failure reason is the whole point of the row, so it is shown
             // inline rather than hidden behind a tap.
@@ -261,7 +282,12 @@ private fun RunDetail(run: RunSummary, state: RunsUiState) {
             .padding(horizontal = 16.dp)
             .padding(bottom = 24.dp),
     ) {
-        Text(run.taskId, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(
+            run.name.ifBlank { run.taskId },
+            color = TextPrimary,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+        )
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(statusLabel(run), color = statusTone(run), fontSize = 13.sp)
