@@ -475,13 +475,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const dashboardRoot2 = path.join(__dirname, '..', '..', 'internal', 'api', 'dashboard');
 
-test('service worker source never intercepts /v1/ API requests', async () => {
-  const swText = fs.readFileSync(path.join(dashboardRoot2, 'sw.js'), 'utf8');
-  expect(swText).toContain('/v1/');
-  expect(swText).toContain('fetch(event.request)');
-  // Verify it has static shell caching but explicitly passes API through network
-  expect(swText).toContain("startsWith('/v1/')");
-});
+// Service worker behaviour is covered by sw.spec.js, which executes the real
+// worker; grepping its source could not catch any of the caching regressions
+// that actually shipped.
 
 test('manifest.webmanifest has maskable icon metadata', async () => {
   const manifestText = fs.readFileSync(path.join(dashboardRoot2, 'manifest.webmanifest'), 'utf8');
@@ -541,4 +537,102 @@ test('health pill is accessible and reflects health state', async ({ page }) => 
   dashboard2.health.status = 'degraded';
   await page.evaluate(d => window.__redlineEventSources[0].emit('dashboard', d), dashboard2);
   await expect(pill).toHaveAttribute('aria-label', /degraded/i);
+});
+
+test('expired pairing session shows re-pair guidance instead of a generic refresh error', async ({ page }) => {
+  await loadMobileDashboard(page, { sessionExpired: true, waitForReady: false });
+  const banner = page.locator('#m-error-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText(/session expired/i);
+  await expect(banner).toContainText('redline pair');
+  await expect(banner).not.toContainText('Dashboard refresh failed');
+  await expect(page.locator('#m-live-pill')).toHaveAttribute('aria-label', /reconnecting/i);
+});
+
+test('canonical session/weekly pools render once, not duplicated as account pools', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const snap = dashboard.providers[0].snapshot;
+  snap.short = { remaining: 1.0, resets_at: '2026-07-21T00:49:00Z' };
+  snap.weekly = { remaining: 0.93, resets_at: '2026-07-24T16:59:00Z' };
+  // Exactly what the OpenUsage and native collectors emit: they populate
+  // snapshot.Short/Weekly *and* append the same pools to allowances.
+  snap.allowances = [
+    { key: 'session', source_label: 'Session', scope: 'account', role: 'short', remaining: 1.0, resets_at: '2026-07-21T00:49:00Z', period_duration_seconds: 18000 },
+    { key: 'weekly', source_label: 'Weekly', scope: 'account', role: 'weekly', remaining: 0.93, resets_at: '2026-07-24T16:59:00Z', period_duration_seconds: 604800 },
+    { key: 'model:fable:weekly', source_label: 'Fable', scope: 'model', role: 'weekly', remaining: 1.0, resets_at: '2026-07-24T16:59:00Z', reset_inferred: true },
+  ];
+  await loadMobileDashboard(page, { dashboard });
+  const detail = page.locator('[data-testid="provider-detail-claude-main"]');
+  const headings = await detail.locator('.m-meter-head span').allTextContents();
+  expect(headings).toEqual(['5-hour window', 'Weekly allowance', 'Fable · reset inferred']);
+});
+
+test('extra account pools beyond session/weekly are still shown', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const snap = dashboard.providers[0].snapshot;
+  snap.allowances = [
+    { key: 'session', source_label: 'Session', scope: 'account', role: 'short', remaining: 1.0, resets_at: '2026-07-21T00:49:00Z' },
+    { key: 'weekly', source_label: 'Weekly', scope: 'account', role: 'weekly', remaining: 0.93, resets_at: '2026-07-24T16:59:00Z' },
+    { key: 'account:pro:weekly', source_label: 'Pro Account', scope: 'account', role: 'weekly', remaining: 0.8, resets_at: '2026-07-24T19:00:00Z' },
+  ];
+  await loadMobileDashboard(page, { dashboard });
+  const detail = page.locator('[data-testid="provider-detail-claude-main"]');
+  const headings = await detail.locator('.m-meter-head span').allTextContents();
+  expect(headings).toContain('Pro Account');
+  expect(headings.filter(h => h === 'Pro Account')).toHaveLength(1);
+  // Still deduped alongside the extra pool.
+  expect(headings.filter(h => /5-hour window|Session/.test(h))).toHaveLength(1);
+});
+
+test('account pools render when only allowances are present (no short/weekly fields)', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const snap = dashboard.providers[0].snapshot;
+  delete snap.short;
+  delete snap.weekly;
+  snap.allowances = [
+    { key: 'session', source_label: 'Session', scope: 'account', role: 'short', remaining: 0.5, resets_at: '2026-07-21T00:49:00Z' },
+    { key: 'weekly', source_label: 'Weekly', scope: 'account', role: 'weekly', remaining: 0.42, resets_at: '2026-07-24T16:59:00Z' },
+  ];
+  await loadMobileDashboard(page, { dashboard });
+  const detail = page.locator('[data-testid="provider-detail-claude-main"]');
+  const headings = await detail.locator('.m-meter-head span').allTextContents();
+  expect(headings).toEqual(['5-hour window', 'Weekly allowance']);
+  await expect(detail.locator('.m-meter-head').first()).toContainText('50% left');
+});
+
+test('a dropped SSE stream surfaces an expired session instead of reconnecting forever', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  // The session lapses while the tab sits open on a live stream.
+  state.sessionExpired = true;
+  await page.evaluate(() => window.__redlineEventSources[0].fail());
+  const banner = page.locator('#m-error-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText(/session expired/i);
+  await expect(banner).toContainText('redline pair');
+});
+
+test('a transient SSE drop probes the session but reports no expiry', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  const before = state.requests.filter(r => r.path === '/v1/dashboard').length;
+  // Stream drops but the session is still valid: the probe runs and stays quiet.
+  await page.evaluate(() => window.__redlineEventSources[0].fail());
+  await expect.poll(() => state.requests.filter(r => r.path === '/v1/dashboard').length)
+    .toBeGreaterThan(before);
+  await expect(page.locator('#m-live-pill')).toHaveAttribute('aria-label', /reconnecting/i);
+  await expect(page.locator('#m-error-banner')).toBeHidden();
+});
+
+test('repeated SSE reconnect failures probe the session only once', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  const before = state.requests.filter(r => r.path === '/v1/dashboard').length;
+  // A server that stays down fires onerror on every retry; probing each time
+  // would double the load it is already struggling under.
+  await page.evaluate(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      window.__redlineEventSources[0].fail();
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  });
+  await expect.poll(() => state.requests.filter(r => r.path === '/v1/dashboard').length)
+    .toBe(before + 1);
 });

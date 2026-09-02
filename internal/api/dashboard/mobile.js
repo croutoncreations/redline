@@ -39,7 +39,11 @@ let currentRunID = null; // for detail view
 async function apiFetch(path, opts = {}) {
   const resp = await fetch(path, {headers: {Accept: 'application/json', ...opts.headers}, ...opts});
   const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  if (!resp.ok) {
+    const error = new Error(data.error || `HTTP ${resp.status}`);
+    error.status = resp.status;
+    throw error;
+  }
   return data;
 }
 
@@ -138,24 +142,30 @@ function renderUsageDetail(item) {
   if (snap) {
     const lastKnown = stale ? 'Last known ' : '';
     const windows = [];
-    if (snap.short) {
-      const v = pct(snap.short.remaining), tone = v < 15 ? 'danger' : v < 35 ? 'warn' : '';
+    const accountPools = (snap.allowances || []).filter(a => a.scope === 'account');
+    // The canonical `session` and `weekly` pools are the same data as
+    // snap.short/snap.weekly — collectors populate both from a single source
+    // line — so render them once here and skip them in the generic list below.
+    const shortWindow = snap.short || accountPools.find(a => a.key === 'session') || null;
+    const weeklyWindow = snap.weekly || accountPools.find(a => a.key === 'weekly') || null;
+    if (shortWindow) {
+      const v = pct(shortWindow.remaining), tone = v < 15 ? 'danger' : v < 35 ? 'warn' : '';
       windows.push(`<div>
         <div class="m-meter-head"><span>${esc(lastKnown)}5-hour window</span><b>${v}% left</b></div>
         <progress class="m-meter-bar ${esc(tone)}" max="100" value="${v}" aria-label="${v}% remaining"></progress>
-        <div class="m-reset">Resets ${esc(relative(snap.short.resets_at))} · ${esc(shortTime(snap.short.resets_at))}</div>
+        <div class="m-reset">Resets ${esc(relative(shortWindow.resets_at))} · ${esc(shortTime(shortWindow.resets_at))}</div>
       </div>`);
     }
-    if (snap.weekly) {
-      const v = pct(snap.weekly.remaining), tone = v < 15 ? 'danger' : v < 35 ? 'warn' : '';
+    if (weeklyWindow) {
+      const v = pct(weeklyWindow.remaining), tone = v < 15 ? 'danger' : v < 35 ? 'warn' : '';
       windows.push(`<div>
         <div class="m-meter-head"><span>${esc(lastKnown)}Weekly allowance</span><b>${v}% left</b></div>
         <progress class="m-meter-bar ${esc(tone)}" max="100" value="${v}" aria-label="${v}% remaining"></progress>
-        <div class="m-reset">Resets ${esc(relative(snap.weekly.resets_at))} · ${esc(shortTime(snap.weekly.resets_at))}</div>
+        <div class="m-reset">Resets ${esc(relative(weeklyWindow.resets_at))} · ${esc(shortTime(weeklyWindow.resets_at))}</div>
       </div>`);
     }
-    // Account-level pools (allowances with scope="account")
-    (snap.allowances || []).filter(a => a.scope === 'account').forEach(a => {
+    // Remaining account-level pools (extra allowances beyond session/weekly)
+    accountPools.filter(a => a.key !== 'session' && a.key !== 'weekly').forEach(a => {
       const label = `${lastKnown}${esc(a.source_label || title(a.key))}${a.reset_inferred ? ' · reset inferred' : ''}`;
       const v = pct(a.remaining), tone = v < 15 ? 'danger' : v < 35 ? 'warn' : '';
       windows.push(`<div>
@@ -657,13 +667,38 @@ function showError(msg) {
   banner.hidden = !msg;
 }
 
+// ── Session expiry ────────────────────────────────────────────────────────────
+// The server slides the session cookie forward on every authenticated request,
+// so this is the fallback for a genuinely lapsed device (unused past the TTL,
+// cookie cleared, or the API token rotated). The cached PWA shell still loads,
+// so without this the only symptom is a generic refresh error.
+let sessionExpired = false;
+
+function handleExpiredSession() {
+  if (sessionExpired) return;
+  sessionExpired = true;
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  setLivePill('offline');
+  // Drop the cached shell so a device that re-pairs later cannot render markup
+  // cached under the previous session.
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({type: 'redline-clear-cache'});
+  }
+  showError('Session expired. Run `redline pair --qr` on your Mac and scan the code to pair this device again.');
+}
+
 // ── Dashboard refresh ─────────────────────────────────────────────────────────
 async function refreshDashboard() {
   try {
     const data = await apiFetch('/v1/dashboard');
+    sessionExpired = false;
     render(data);
     showError('');
   } catch (err) {
+    if (err.status === 401) {
+      handleExpiredSession();
+      return;
+    }
     showError(`Dashboard refresh failed: ${err.message}`);
   }
 }
@@ -684,6 +719,7 @@ function setLivePill(state) {
 
 function connectSSE() {
   if (eventSource) { eventSource.close(); eventSource = null; }
+  if (sessionExpired) return;
   setLivePill('connecting');
   const es = new EventSource('/v1/dashboard/events');
   eventSource = es;
@@ -696,6 +732,7 @@ function connectSSE() {
 
   es.onopen = () => {
     sseConnected = true;
+    sessionProbeDone = false;
     setLivePill('live');
   };
   es.addEventListener('dashboard', event => {
@@ -709,7 +746,36 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill('offline');
+    // EventSource never exposes the HTTP status, so a stream that dropped
+    // because the session lapsed is indistinguishable from a network blip.
+    // Probe with a real request: a 401 routes into handleExpiredSession(),
+    // and anything else leaves the reconnecting state alone. Without this a
+    // tab left open shows "Reconnecting" forever and never offers re-pairing.
+    probeSessionAfterStreamFailure();
   };
+}
+
+let sessionProbePending = false;
+let sessionProbeDone = false;
+
+// EventSource reconnects on its own timer and fires onerror on every failed
+// attempt, so probing on each one would add a second request per retry cycle
+// against a server that is already down. One probe per disconnection answers
+// the only question we have — did the session lapse — and connectSSE() resets
+// this when a stream opens again.
+function probeSessionAfterStreamFailure() {
+  if (sessionProbePending || sessionProbeDone || sessionExpired) return;
+  sessionProbePending = true;
+  sessionProbeDone = true;
+  apiFetch('/v1/dashboard').then(data => {
+    // Only adopt the probe snapshot while the stream is still down; a
+    // reconnected stream owns the view and may already have rendered newer data.
+    if (!sseConnected) render(data);
+  }).catch(err => {
+    if (err.status === 401) handleExpiredSession();
+  }).finally(() => {
+    sessionProbePending = false;
+  });
 }
 
 // Visibility API: close when hidden, force GET + reconnect when visible.
@@ -769,7 +835,9 @@ $('#m-run-confirm-ok').addEventListener('click', async () => {
       headers: {Accept: 'application/json'},
     });
     const data = await resp.json();
-    if (resp.status === 409) {
+    if (resp.status === 401) {
+      handleExpiredSession();
+    } else if (resp.status === 409) {
       showError(data.error || 'Provider is paused.');
     } else if (!resp.ok) {
       showError(data.error || `HTTP ${resp.status}`);

@@ -18,7 +18,7 @@ module.exports = defineConfig({
     },
     {
       name: 'mobile',
-      testMatch: /mobile(?:-screenshots)?\.spec\.js/,
+      testMatch: /mobile(?:-screenshots)?\.spec\.js|sw\.spec\.js/,
       use: {
         browserName: 'chromium',
         headless: true,

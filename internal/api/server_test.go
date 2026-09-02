@@ -3,7 +3,9 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -139,7 +142,9 @@ func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/assets/mobile/pair.js", contentType: "text/javascript", contains: "/v1/pairing/redeem"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "maskable"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "icon-192.png"},
-		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v1"},
+		// Assert the cache-name prefix rather than a pinned version so bumping
+		// the shell cache to invalidate stale PWA builds does not fail the suite.
+		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v"},
 		{path: "/sw.js", contentType: "text/javascript", contains: "/v1/"},
 		{path: "/assets/mobile/icon-192.png", contentType: "image/png", contains: "\x89PNG"},
 		{path: "/assets/mobile/icon-512.png", contentType: "image/png", contains: "\x89PNG"},
@@ -457,6 +462,105 @@ func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cookie status = %d", resp.StatusCode)
+	}
+}
+
+func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	clock := apiNow
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return clock }))
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(server.URL + "/m?access_token=" + url.QueryEscape(cfg.APIToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	issued := resp.Cookies()
+	if len(issued) != 1 || issued[0].MaxAge <= 0 || issued[0].Expires.IsZero() {
+		t.Fatalf("expected a persistent session cookie, got %#v", issued)
+	}
+
+	// A browser returning near the end of the window keeps its session: the
+	// expiry slides forward so active use never forces a manual re-pair.
+	clock = apiNow.Add(29 * 24 * time.Hour)
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/dashboard", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(issued[0])
+	renewedResponse, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedResponse.Body.Close()
+	if renewedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("renewal status = %d", renewedResponse.StatusCode)
+	}
+	renewed := renewedResponse.Cookies()
+	if len(renewed) != 1 || !renewed[0].Expires.After(issued[0].Expires) {
+		t.Fatalf("expiry did not slide forward: issued=%#v renewed=%#v", issued, renewed)
+	}
+	if renewed[0].Value != issued[0].Value || !renewed[0].HttpOnly ||
+		renewed[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("renewed cookie lost hardening: %#v", renewed[0])
+	}
+}
+
+func TestDashboardSessionRenewalOnlyAppliesToValidCookies(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	// Bearer clients hold the token directly and must not be handed a cookie.
+	bearer, err := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	bearerResponse, err := http.DefaultClient.Do(bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearerResponse.Body.Close()
+	if bearerResponse.StatusCode != http.StatusOK {
+		t.Fatalf("bearer status = %d", bearerResponse.StatusCode)
+	}
+	if cookies := bearerResponse.Cookies(); len(cookies) != 0 {
+		t.Fatalf("bearer request set a session cookie: %#v", cookies)
+	}
+
+	// A forged cookie is rejected and must never be renewed into a valid one.
+	forged, err := http.NewRequest(http.MethodGet, server.URL+"/v1/dashboard", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.AddCookie(&http.Cookie{Name: "redline_api_session", Value: "wrong-token-value-that-is-long-enough-here"})
+	forgedResponse, err := http.DefaultClient.Do(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedResponse.Body.Close()
+	if forgedResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("forged cookie status = %d, want 401", forgedResponse.StatusCode)
+	}
+	if cookies := forgedResponse.Cookies(); len(cookies) != 0 {
+		t.Fatalf("rejected request set a session cookie: %#v", cookies)
 	}
 }
 
@@ -3204,3 +3308,152 @@ const claudePayload = `{
     {"type":"progress","label":"Session","used":20,"limit":100,"resetsAt":"2026-07-16T20:00:00Z"},
     {"type":"progress","label":"Weekly","used":32,"limit":100,"resetsAt":"2026-07-17T17:00:00Z"}
   ]}`
+
+func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	// Handlers such as serveDashboardFile set their own Cache-Control, which
+	// would otherwise replace no-store on a response carrying the session
+	// cookie -- and the cookie value is the API token.
+	for _, path := range []string{"/m", "/assets/mobile/mobile.js", "/sw.js", "/v1/dashboard"} {
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(&http.Cookie{Name: "redline_api_session", Value: cfg.APIToken})
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if len(response.Cookies()) == 0 {
+			t.Fatalf("%s: expected a renewed session cookie", path)
+		}
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s: Cache-Control = %q, want no-store", path, got)
+		}
+	}
+
+	// A bearer request carries no cookie, so the handler's own caching policy
+	// must survive.
+	bearer, err := http.NewRequest(http.MethodGet, server.URL+"/assets/mobile/mobile.js", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	response, err := http.DefaultClient.Do(bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("bearer Cache-Control = %q, want the handler's no-cache", got)
+	}
+}
+
+// swShellFingerprint is the hash of every asset the service worker precaches,
+// paired with the cache name that was current when it was recorded.
+//
+// The mobile dashboard once shipped a fix that never reached installed PWAs:
+// the service worker served the shell cache-first under a fixed cache name, so
+// devices kept running the JavaScript they first cached. Bumping CACHE is what
+// releases a new shell, and nothing enforced that. This test fails when the
+// shell changes without a bump, turning operator memory into a tripwire.
+//
+// When this fails: bump CACHE in sw.js, then update wantCacheName and
+// wantFingerprint below.
+func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
+	const wantCacheName = "redline-mobile-v2"
+	const wantFingerprint = "c98ef22d08734fd8"
+
+	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheName := regexp.MustCompile(`const CACHE = '([^']+)'`).FindSubmatch(worker)
+	if cacheName == nil {
+		t.Fatal("sw.js no longer declares a CACHE constant")
+	}
+	if got := string(cacheName[1]); got != wantCacheName {
+		t.Fatalf("service worker cache = %q, want %q; update wantFingerprint too", got, wantCacheName)
+	}
+
+	shell := regexp.MustCompile(`'(/[^']*)'`).FindAllSubmatch(
+		regexp.MustCompile(`(?s)const SHELL = \[(.*?)\]`).FindSubmatch(worker)[1], -1)
+	if len(shell) == 0 {
+		t.Fatal("sw.js no longer lists SHELL assets")
+	}
+	digest := sha256.New()
+	for _, asset := range shell {
+		route := string(asset[1])
+		name := strings.TrimPrefix(route, "/assets/mobile/")
+		name = strings.TrimPrefix(name, "/assets/")
+		if route == "/m" {
+			name = "mobile.html"
+		}
+		contents, err := os.ReadFile(filepath.Join("dashboard", name))
+		if err != nil {
+			t.Fatalf("shell asset %q is not present: %v", route, err)
+		}
+		_, _ = digest.Write([]byte(route))
+		_, _ = digest.Write(contents)
+	}
+	if got := hex.EncodeToString(digest.Sum(nil))[:16]; got != wantFingerprint {
+		t.Fatalf("shell assets changed (fingerprint %s, recorded %s):\n"+
+			"bump CACHE in internal/api/dashboard/sw.js so installed PWAs pick up the new shell,\n"+
+			"then set wantCacheName=<new name> and wantFingerprint=%s in this test.", got, wantFingerprint, got)
+	}
+}
+
+// The event stream must stay uncacheable end to end: it carries the renewed
+// session cookie, and the wrapper has to survive a handler that sets its own
+// Cache-Control and then flushes.
+//
+// Note this asserts the routed behaviour only. dashboardEvents happens to
+// write before it flushes, so the flush-before-write branch of noStoreWriter
+// is not reachable from any current handler and is not covered here; it is
+// hardening for future streaming handlers.
+func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+
+	recorder := httptest.NewRecorder()
+	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/v1/dashboard/events", nil)
+	request.AddCookie(&http.Cookie{Name: "redline_api_session", Value: cfg.APIToken})
+	ctx, cancel := context.WithTimeout(request.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recorder, request.WithContext(ctx))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event stream did not finish")
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("event stream Cache-Control = %q, want no-store", got)
+	}
+	if len(recorder.Result().Cookies()) == 0 {
+		t.Fatal("event stream did not renew the session cookie")
+	}
+	if !strings.Contains(recorder.Body.String(), "event: dashboard") {
+		t.Fatal("event stream produced no events through the wrapper")
+	}
+}

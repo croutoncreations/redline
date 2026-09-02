@@ -311,10 +311,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bootstrapDashboardSession(w, r) {
 			return
 		}
-		if !s.authorized(r) {
+		authorized, viaCookie := s.authorized(r)
+		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
+		}
+		// Slide the expiry forward while the browser keeps using the dashboard.
+		if viaCookie {
+			s.setDashboardSessionCookie(w, r)
+			// Downstream handlers set their own Cache-Control, so re-assert
+			// no-store when the headers are actually written.
+			w = &noStoreWriter{ResponseWriter: w}
 		}
 	}
 	s.mux.ServeHTTP(w, r)
@@ -379,10 +387,66 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// dashboardSessionTTL keeps a paired mobile browser signed in across app
+// restarts; a session cookie would be dropped whenever the PWA is evicted.
+const dashboardSessionTTL = 30 * 24 * time.Hour
+
+// noStoreWriter re-asserts Cache-Control: no-store when the response headers
+// are finally written. Setting the header before dispatching to the mux is not
+// enough: handlers such as serveDashboardFile call Header().Set("Cache-Control",
+// "no-cache"), which replaces rather than merges and would silently downgrade a
+// token-bearing response to one an intermediary is allowed to store.
+type noStoreWriter struct {
+	http.ResponseWriter
+	written bool
+}
+
+// assertNoStore runs before anything that can commit the response, since the
+// header is only mutable until the first byte is written.
+func (w *noStoreWriter) assertNoStore() {
+	if !w.written {
+		w.written = true
+		w.Header().Set("Cache-Control", "no-store")
+	}
+}
+
+func (w *noStoreWriter) WriteHeader(status int) {
+	w.assertNoStore()
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *noStoreWriter) Write(data []byte) (int, error) {
+	w.assertNoStore()
+	return w.ResponseWriter.Write(data)
+}
+
+// Flush preserves streaming for Server-Sent Events, which wrap this writer. A
+// flush before the first write commits the header block on its own, so the
+// header has to be asserted here too.
+func (w *noStoreWriter) Flush() {
+	w.assertNoStore()
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer, so wrapping
+// never silently disables features such as per-write deadlines on long-lived
+// event streams.
+func (w *noStoreWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+	// A response carrying the session cookie must never be stored by an
+	// intermediary: the cookie value is the API token, so a shared cache could
+	// hand it to another client. Enforce that here rather than relying on the
+	// caller to remember, so the invariant travels with the Set-Cookie itself.
+	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
+		Expires: s.now().UTC().Add(dashboardSessionTTL), MaxAge: int(dashboardSessionTTL / time.Second),
 	})
 }
 
@@ -415,13 +479,20 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+// authorized reports whether the request carries valid credentials, and
+// whether it authenticated via the dashboard session cookie. Cookie-
+// authenticated requests get a refreshed expiry so an actively used browser
+// never has to re-pair; bearer clients hold the token directly and need none.
+func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
 	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
 		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
-		return true
+		return true, false
 	}
 	cookie, err := r.Cookie(apiSessionCookie)
-	return err == nil && secureTokenEqual(cookie.Value, s.config.APIToken)
+	if err == nil && secureTokenEqual(cookie.Value, s.config.APIToken) {
+		return true, true
+	}
+	return false, false
 }
 
 func secureTokenEqual(left, right string) bool {

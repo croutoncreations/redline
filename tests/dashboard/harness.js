@@ -293,6 +293,7 @@ async function loadMobileDashboard(page, options = {}) {
     candidates: {},
     requests: [],
     dashboardError: false,
+    sessionExpired: false,
     waitForReady: true,
     ...options,
   };
@@ -325,6 +326,8 @@ async function loadMobileDashboard(page, options = {}) {
     const json = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
     if (url.pathname === '/v1/dashboard') {
+      state.requests.push({ method, path: url.pathname });
+      if (state.sessionExpired) return json(401, { error: 'Redline API authentication is required' });
       return state.dashboardError
         ? json(500, { error: 'dashboard unavailable' })
         : json(200, state.dashboard);
