@@ -1,5 +1,5 @@
 // Redline mobile PWA service worker — caches static shell only, never /v1 API.
-const CACHE = 'redline-mobile-v1';
+const CACHE = 'redline-mobile-v2';
 const SHELL = [
   '/m',
   '/assets/mobile/mobile.css',
@@ -32,8 +32,24 @@ self.addEventListener('fetch', event => {
     event.respondWith(fetch(event.request));
     return;
   }
-  // For shell resources: cache-first, fall back to network.
+  // Only GET requests are cacheable.
+  if (event.request.method !== 'GET') {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+  // Shell resources: stale-while-revalidate. Serve the cached copy for speed,
+  // but always refresh it in the background so a redeployed dashboard reaches
+  // installed PWAs on the next load instead of being pinned to a stale build.
   event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request))
+    caches.match(event.request).then(cached => {
+      const network = fetch(event.request).then(response => {
+        if (response && response.ok && response.type === 'basic') {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put(event.request, copy)).catch(() => {});
+        }
+        return response;
+      }).catch(() => cached);
+      return cached || network;
+    })
   );
 });
