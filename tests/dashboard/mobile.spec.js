@@ -615,10 +615,28 @@ test('a dropped SSE stream surfaces an expired session instead of reconnecting f
   await expect(banner).toContainText('redline pair');
 });
 
-test('a transient SSE drop does not report an expired session', async ({ page }) => {
-  await loadMobileDashboard(page);
-  // Stream drops but the session is still valid: no expiry guidance.
+test('a transient SSE drop probes the session but reports no expiry', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  const before = state.requests.filter(r => r.path === '/v1/dashboard').length;
+  // Stream drops but the session is still valid: the probe runs and stays quiet.
   await page.evaluate(() => window.__redlineEventSources[0].fail());
+  await expect.poll(() => state.requests.filter(r => r.path === '/v1/dashboard').length)
+    .toBeGreaterThan(before);
   await expect(page.locator('#m-live-pill')).toHaveAttribute('aria-label', /reconnecting/i);
   await expect(page.locator('#m-error-banner')).toBeHidden();
+});
+
+test('repeated SSE reconnect failures probe the session only once', async ({ page }) => {
+  const state = await loadMobileDashboard(page);
+  const before = state.requests.filter(r => r.path === '/v1/dashboard').length;
+  // A server that stays down fires onerror on every retry; probing each time
+  // would double the load it is already struggling under.
+  await page.evaluate(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      window.__redlineEventSources[0].fail();
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  });
+  await expect.poll(() => state.requests.filter(r => r.path === '/v1/dashboard').length)
+    .toBe(before + 1);
 });

@@ -732,6 +732,7 @@ function connectSSE() {
 
   es.onopen = () => {
     sseConnected = true;
+    sessionProbeDone = false;
     setLivePill('live');
   };
   es.addEventListener('dashboard', event => {
@@ -745,6 +746,7 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill('offline');
+    probeSessionAfterStreamFailure();
     // EventSource never exposes the HTTP status, so a stream that dropped
     // because the session lapsed is indistinguishable from a network blip.
     // Probe with a real request: a 401 routes into handleExpiredSession(),
@@ -755,13 +757,21 @@ function connectSSE() {
 }
 
 let sessionProbePending = false;
+let sessionProbeDone = false;
 
+// EventSource reconnects on its own timer and fires onerror on every failed
+// attempt, so probing on each one would add a second request per retry cycle
+// against a server that is already down. One probe per disconnection answers
+// the only question we have — did the session lapse — and connectSSE() resets
+// this when a stream opens again.
 function probeSessionAfterStreamFailure() {
-  if (sessionProbePending || sessionExpired) return;
+  if (sessionProbePending || sessionProbeDone || sessionExpired) return;
   sessionProbePending = true;
+  sessionProbeDone = true;
   apiFetch('/v1/dashboard').then(data => {
-    // The stream failed but the session is fine; keep the cached view fresh.
-    render(data);
+    // Only adopt the probe snapshot while the stream is still down; a
+    // reconnected stream owns the view and may already have rendered newer data.
+    if (!sseConnected) render(data);
   }).catch(err => {
     if (err.status === 401) handleExpiredSession();
   }).finally(() => {

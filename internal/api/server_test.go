@@ -3305,3 +3305,53 @@ const claudePayload = `{
     {"type":"progress","label":"Session","used":20,"limit":100,"resetsAt":"2026-07-16T20:00:00Z"},
     {"type":"progress","label":"Weekly","used":32,"limit":100,"resetsAt":"2026-07-17T17:00:00Z"}
   ]}`
+
+func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	// Handlers such as serveDashboardFile set their own Cache-Control, which
+	// would otherwise replace no-store on a response carrying the session
+	// cookie -- and the cookie value is the API token.
+	for _, path := range []string{"/m", "/assets/mobile/mobile.js", "/sw.js", "/v1/dashboard"} {
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(&http.Cookie{Name: "redline_api_session", Value: cfg.APIToken})
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if len(response.Cookies()) == 0 {
+			t.Fatalf("%s: expected a renewed session cookie", path)
+		}
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s: Cache-Control = %q, want no-store", path, got)
+		}
+	}
+
+	// A bearer request carries no cookie, so the handler's own caching policy
+	// must survive.
+	bearer, err := http.NewRequest(http.MethodGet, server.URL+"/assets/mobile/mobile.js", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	response, err := http.DefaultClient.Do(bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("bearer Cache-Control = %q, want the handler's no-cache", got)
+	}
+}

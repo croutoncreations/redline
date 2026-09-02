@@ -55,8 +55,10 @@ self.addEventListener('fetch', event => {
   // settles, which would otherwise kill the background cache write and pin
   // installed PWAs to a stale build.
   event.waitUntil(network.catch(() => {}));
+  // Fall back to any cached copy if the network fails, so an offline load still
+  // resolves rather than rejecting respondWith.
   event.respondWith(
-    caches.match(event.request).then(cached => cached || network)
+    caches.match(event.request).then(cached => cached || network.catch(() => cached))
   );
 });
 

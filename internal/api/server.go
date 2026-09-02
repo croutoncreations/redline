@@ -320,6 +320,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Slide the expiry forward while the browser keeps using the dashboard.
 		if viaCookie {
 			s.setDashboardSessionCookie(w, r)
+			// Downstream handlers set their own Cache-Control, so re-assert
+			// no-store when the headers are actually written.
+			w = &noStoreWriter{ResponseWriter: w}
 		}
 	}
 	s.mux.ServeHTTP(w, r)
@@ -387,6 +390,39 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 // dashboardSessionTTL keeps a paired mobile browser signed in across app
 // restarts; a session cookie would be dropped whenever the PWA is evicted.
 const dashboardSessionTTL = 30 * 24 * time.Hour
+
+// noStoreWriter re-asserts Cache-Control: no-store when the response headers
+// are finally written. Setting the header before dispatching to the mux is not
+// enough: handlers such as serveDashboardFile call Header().Set("Cache-Control",
+// "no-cache"), which replaces rather than merges and would silently downgrade a
+// token-bearing response to one an intermediary is allowed to store.
+type noStoreWriter struct {
+	http.ResponseWriter
+	written bool
+}
+
+func (w *noStoreWriter) WriteHeader(status int) {
+	if !w.written {
+		w.written = true
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *noStoreWriter) Write(data []byte) (int, error) {
+	if !w.written {
+		w.written = true
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+// Flush preserves streaming for Server-Sent Events, which wrap this writer.
+func (w *noStoreWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
 
 func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
 	// A response carrying the session cookie must never be stored by an
