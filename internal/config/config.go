@@ -79,11 +79,7 @@ func (c Config) UsageMonitorInterval() (time.Duration, error) {
 	if c.UsageMonitor.PollInterval == "" {
 		return 5 * time.Minute, nil
 	}
-	interval, err := time.ParseDuration(c.UsageMonitor.PollInterval)
-	if err != nil || interval <= 0 {
-		return 0, fmt.Errorf("usage_monitor poll_interval must be a positive duration")
-	}
-	return interval, nil
+	return positiveDuration("usage_monitor poll_interval", c.UsageMonitor.PollInterval)
 }
 
 func (c Config) ArtifactsDirectory() string {
@@ -97,11 +93,7 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 	if c.Scheduler.PollInterval == "" {
 		return 5 * time.Minute, nil
 	}
-	interval, err := time.ParseDuration(c.Scheduler.PollInterval)
-	if err != nil || interval <= 0 {
-		return 0, fmt.Errorf("scheduler poll_interval must be a positive duration")
-	}
-	return interval, nil
+	return positiveDuration("scheduler poll_interval", c.Scheduler.PollInterval)
 }
 
 type Provider struct {
@@ -213,71 +205,78 @@ func Load(path string) (Config, error) {
 	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
+		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
+	if err := cfg.validate(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func (cfg *Config) validate() error {
 	if cfg.Database == "" {
-		return Config{}, fmt.Errorf("config database is required")
+		return fmt.Errorf("database is required")
 	}
 	if cfg.ActivePolicy == "" {
-		return Config{}, fmt.Errorf("config active_policy is required")
+		return fmt.Errorf("active_policy is required")
 	}
 	if _, ok := cfg.Policies[cfg.ActivePolicy]; !ok {
-		return Config{}, fmt.Errorf("active policy %q is not defined", cfg.ActivePolicy)
+		return fmt.Errorf("active_policy %q is not defined under policies", cfg.ActivePolicy)
 	}
 	if len(cfg.Providers) == 0 {
-		return Config{}, fmt.Errorf("at least one provider is required")
+		return fmt.Errorf("at least one provider is required")
 	}
 	for index, host := range cfg.API.TrustedHosts {
 		if !validTrustedHost(host) {
-			return Config{}, fmt.Errorf("api trusted_host %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", host)
+			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
 		}
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
 	for name, provider := range cfg.Providers {
 		if provider.Provider == "" {
-			return Config{}, fmt.Errorf("provider %q requires provider", name)
+			return fmt.Errorf("provider %q requires provider", name)
 		}
 		source := provider.EffectiveUsageSource()
 		if source != "auto" && source != "openusage" && source != "native" {
-			return Config{}, fmt.Errorf("provider %q usage_source must be auto, openusage, or native", name)
+			return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
 		}
 		if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
-			return Config{}, fmt.Errorf("provider %q openusage source requires openusage_url", name)
+			return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
 		}
 		if err := fraction("window_weekly_cost", provider.WindowWeeklyCost); err != nil {
-			return Config{}, fmt.Errorf("provider %q: %w", name, err)
+			return fmt.Errorf("provider %q: %w", name, err)
 		}
 		if provider.WindowWeeklyCost == 0 {
-			return Config{}, fmt.Errorf("provider %q: window_weekly_cost must be greater than zero", name)
+			return fmt.Errorf("provider %q: window_weekly_cost must be greater than zero, got 0", name)
 		}
 		if provider.Policy != "" {
 			if _, ok := cfg.Policies[provider.Policy]; !ok {
-				return Config{}, fmt.Errorf("provider %q: policy %q is not defined", name, provider.Policy)
+				return fmt.Errorf("provider %q: policy %q is not defined under policies", name, provider.Policy)
 			}
 		}
 		if provider.MaxConcurrentRuns < 0 {
-			return Config{}, fmt.Errorf("provider %q: max_concurrent_runs must be greater than zero", name)
+			return fmt.Errorf("provider %q: max_concurrent_runs must not be negative, got %d", name, provider.MaxConcurrentRuns)
 		}
 		for pool, limit := range provider.PoolConcurrency {
 			if strings.TrimSpace(pool) == "" {
-				return Config{}, fmt.Errorf("provider %q: pool_concurrency key is required", name)
+				return fmt.Errorf("provider %q: pool_concurrency has an empty key", name)
 			}
 			if limit <= 0 {
-				return Config{}, fmt.Errorf("provider %q: pool_concurrency %q must be greater than zero", name, pool)
+				return fmt.Errorf("provider %q: pool_concurrency %q must be greater than zero, got %d", name, pool, limit)
 			}
 		}
 		aliases := make(map[string]string)
 		for groupName, group := range provider.EffectiveModelGroups() {
 			if groupName == "" {
-				return Config{}, fmt.Errorf("provider %q: model group name is required", name)
+				return fmt.Errorf("provider %q: model_groups has an empty group name", name)
 			}
 			for _, alias := range group.Aliases {
 				normalized := strings.ToLower(strings.TrimSpace(alias))
 				if normalized == "" {
-					return Config{}, fmt.Errorf("provider %q model group %q: alias is required", name, groupName)
+					return fmt.Errorf("provider %q model group %q: has an empty alias", name, groupName)
 				}
 				if existing, ok := aliases[normalized]; ok && existing != groupName {
-					return Config{}, fmt.Errorf("provider %q: model alias %q belongs to both %q and %q", name, alias, existing, groupName)
+					return fmt.Errorf("provider %q: model alias %q belongs to both %q and %q", name, alias, existing, groupName)
 				}
 				aliases[normalized] = groupName
 			}
@@ -285,57 +284,56 @@ func Load(path string) (Config, error) {
 	}
 	for name, policy := range cfg.Policies {
 		if err := fraction("trigger_margin", policy.TriggerMargin); err != nil {
-			return Config{}, fmt.Errorf("policy %q: %w", name, err)
+			return fmt.Errorf("policy %q: %w", name, err)
 		}
 		if err := fraction("rolling_reserve", policy.RollingReserve); err != nil {
-			return Config{}, fmt.Errorf("policy %q: %w", name, err)
+			return fmt.Errorf("policy %q: %w", name, err)
 		}
 		if policy.PaceGapTrigger != nil {
 			if err := fraction("pace_gap_trigger", *policy.PaceGapTrigger); err != nil {
-				return Config{}, fmt.Errorf("policy %q: %w", name, err)
+				return fmt.Errorf("policy %q: %w", name, err)
 			}
 		}
 		if _, err := policy.DecisionThresholds(); err != nil {
-			return Config{}, fmt.Errorf("policy %q: %w", name, err)
+			return fmt.Errorf("policy %q: %w", name, err)
 		}
 	}
 	if _, err := cfg.SnapshotAge(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if _, err := cfg.SchedulerInterval(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if cfg.UsageMonitor.Enabled && strings.TrimSpace(cfg.UsageMonitor.GatepostDatabase) == "" {
-		return Config{}, fmt.Errorf("enabled usage_monitor requires gatepost_database")
+		return fmt.Errorf("usage_monitor is enabled but gatepost_database is empty")
 	}
 	if cfg.Notifications.Timeout != "" {
-		timeout, err := time.ParseDuration(cfg.Notifications.Timeout)
-		if err != nil || timeout <= 0 {
-			return Config{}, fmt.Errorf("notifications timeout must be a positive duration")
+		if _, err := positiveDuration("notifications timeout", cfg.Notifications.Timeout); err != nil {
+			return err
 		}
 	}
 	if cfg.Notifications.Enabled && strings.TrimSpace(cfg.Notifications.Command) == "" {
-		return Config{}, fmt.Errorf("enabled notifications require command")
+		return fmt.Errorf("notifications are enabled but command is empty")
 	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return Config{}, fmt.Errorf("unknown notification event %q", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error)", event)
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {
 	thresholds := make([]decision.PaceThreshold, 0, len(p.PaceThresholds))
-	for _, configured := range p.PaceThresholds {
-		duration, err := time.ParseDuration(configured.TimeRemaining)
-		if err != nil || duration <= 0 {
-			return nil, fmt.Errorf("pace threshold time_remaining must be a positive duration")
+	for index, configured := range p.PaceThresholds {
+		duration, err := positiveDuration(fmt.Sprintf("pace_thresholds[%d] time_remaining", index), configured.TimeRemaining)
+		if err != nil {
+			return nil, err
 		}
-		if err := fraction("pace threshold min_weekly_remaining", configured.MinWeeklyRemaining); err != nil {
+		if err := fraction(fmt.Sprintf("pace_thresholds[%d] min_weekly_remaining", index), configured.MinWeeklyRemaining); err != nil {
 			return nil, err
 		}
 		thresholds = append(thresholds, decision.PaceThreshold{
@@ -350,16 +348,26 @@ func (c Config) SnapshotAge() (time.Duration, error) {
 	if c.MaxSnapshotAge == "" {
 		return 15 * time.Minute, nil
 	}
-	duration, err := time.ParseDuration(c.MaxSnapshotAge)
-	if err != nil || duration <= 0 {
-		return 0, fmt.Errorf("max_snapshot_age must be a positive duration")
+	return positiveDuration("max_snapshot_age", c.MaxSnapshotAge)
+}
+
+// positiveDuration parses raw as a time.Duration for the named config field,
+// distinguishing an unparseable value from a parsed-but-non-positive one so
+// the error always shows what was actually configured.
+func positiveDuration(name, raw string) (time.Duration, error) {
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a valid duration: %w", name, raw, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s %q must be positive", name, raw)
 	}
 	return duration, nil
 }
 
 func fraction(name string, value float64) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
-		return fmt.Errorf("%s must be between 0 and 1", name)
+		return fmt.Errorf("%s must be between 0 and 1, got %v", name, value)
 	}
 	return nil
 }

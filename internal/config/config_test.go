@@ -81,8 +81,14 @@ func TestLoadRejectsInvalidSchedulerInterval(t *testing.T) {
 scheduler:
   enabled: true
   poll_interval: immediately`, 1)
-	if _, err := config.Load(writeConfig(t, configured)); err == nil {
+	_, err := config.Load(writeConfig(t, configured))
+	if err == nil {
 		t.Fatal("expected invalid scheduler interval")
+	}
+	for _, want := range []string{"scheduler poll_interval", `"immediately"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }
 
@@ -180,8 +186,14 @@ func TestLoadRejectsUnknownUsageSource(t *testing.T) {
 
 func TestLoadRejectsInvalidFractions(t *testing.T) {
 	path := writeConfig(t, strings.Replace(validConfig, "window_weekly_cost: 0.10", "window_weekly_cost: 1.10", 1))
-	if _, err := config.Load(path); err == nil {
+	_, err := config.Load(path)
+	if err == nil {
 		t.Fatal("expected invalid-fraction error")
+	}
+	for _, want := range []string{path, "window_weekly_cost", "1.1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }
 
@@ -242,10 +254,18 @@ func TestLoadRejectsInvalidPolicyPaceGapTrigger(t *testing.T) {
 func TestLoadRejectsInvalidPaceThreshold(t *testing.T) {
 	withThreshold := strings.Replace(validConfig, "    rolling_reserve: 0.25", `    rolling_reserve: 0.25
     pace_thresholds:
+      - time_remaining: 72h
+        min_weekly_remaining: 0.50
       - time_remaining: never
         min_weekly_remaining: 0.50`, 1)
-	if _, err := config.Load(writeConfig(t, withThreshold)); err == nil {
+	_, err := config.Load(writeConfig(t, withThreshold))
+	if err == nil {
 		t.Fatal("expected invalid pace threshold error")
+	}
+	for _, want := range []string{`policy "standard"`, "pace_thresholds[1] time_remaining", `"never"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }
 
@@ -353,6 +373,31 @@ func TestProviderConcurrencyDefaultsAndValidation(t *testing.T) {
 			"    window_weekly_cost: 0.10\n"+invalid, 1)
 		if _, err := config.Load(writeConfig(t, candidate)); err == nil {
 			t.Fatalf("expected invalid concurrency error for %q", invalid)
+		}
+	}
+}
+
+func TestLoadValidationErrorsIncludeConfigPath(t *testing.T) {
+	path := writeConfig(t, strings.Replace(validConfig, "database: redline.db\n", "", 1))
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected missing-database error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error = %q, want it to contain config path %q", err.Error(), path)
+	}
+}
+
+func TestLoadRejectsNegativeMaxConcurrentRuns(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    max_concurrent_runs: -2`, 1)
+	_, err := config.Load(writeConfig(t, configured))
+	if err == nil {
+		t.Fatal("expected negative max_concurrent_runs error")
+	}
+	for _, want := range []string{`provider "codex-main"`, "max_concurrent_runs", "-2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
 		}
 	}
 }
