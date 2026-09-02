@@ -139,7 +139,9 @@ func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
 		{path: "/assets/mobile/pair.js", contentType: "text/javascript", contains: "/v1/pairing/redeem"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "maskable"},
 		{path: "/assets/mobile/manifest.webmanifest", contentType: "application/manifest+json", contains: "icon-192.png"},
-		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v1"},
+		// Assert the cache-name prefix rather than a pinned version so bumping
+		// the shell cache to invalidate stale PWA builds does not fail the suite.
+		{path: "/sw.js", contentType: "text/javascript", contains: "redline-mobile-v"},
 		{path: "/sw.js", contentType: "text/javascript", contains: "/v1/"},
 		{path: "/assets/mobile/icon-192.png", contentType: "image/png", contains: "\x89PNG"},
 		{path: "/assets/mobile/icon-512.png", contentType: "image/png", contains: "\x89PNG"},
@@ -457,6 +459,105 @@ func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cookie status = %d", resp.StatusCode)
+	}
+}
+
+func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	clock := apiNow
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return clock }))
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(server.URL + "/m?access_token=" + url.QueryEscape(cfg.APIToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	issued := resp.Cookies()
+	if len(issued) != 1 || issued[0].MaxAge <= 0 || issued[0].Expires.IsZero() {
+		t.Fatalf("expected a persistent session cookie, got %#v", issued)
+	}
+
+	// A browser returning near the end of the window keeps its session: the
+	// expiry slides forward so active use never forces a manual re-pair.
+	clock = apiNow.Add(29 * 24 * time.Hour)
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/dashboard", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(issued[0])
+	renewedResponse, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedResponse.Body.Close()
+	if renewedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("renewal status = %d", renewedResponse.StatusCode)
+	}
+	renewed := renewedResponse.Cookies()
+	if len(renewed) != 1 || !renewed[0].Expires.After(issued[0].Expires) {
+		t.Fatalf("expiry did not slide forward: issued=%#v renewed=%#v", issued, renewed)
+	}
+	if renewed[0].Value != issued[0].Value || !renewed[0].HttpOnly ||
+		renewed[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("renewed cookie lost hardening: %#v", renewed[0])
+	}
+}
+
+func TestDashboardSessionRenewalOnlyAppliesToValidCookies(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	// Bearer clients hold the token directly and must not be handed a cookie.
+	bearer, err := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	bearerResponse, err := http.DefaultClient.Do(bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearerResponse.Body.Close()
+	if bearerResponse.StatusCode != http.StatusOK {
+		t.Fatalf("bearer status = %d", bearerResponse.StatusCode)
+	}
+	if cookies := bearerResponse.Cookies(); len(cookies) != 0 {
+		t.Fatalf("bearer request set a session cookie: %#v", cookies)
+	}
+
+	// A forged cookie is rejected and must never be renewed into a valid one.
+	forged, err := http.NewRequest(http.MethodGet, server.URL+"/v1/dashboard", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.AddCookie(&http.Cookie{Name: "redline_api_session", Value: "wrong-token-value-that-is-long-enough-here"})
+	forgedResponse, err := http.DefaultClient.Do(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedResponse.Body.Close()
+	if forgedResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("forged cookie status = %d, want 401", forgedResponse.StatusCode)
+	}
+	if cookies := forgedResponse.Cookies(); len(cookies) != 0 {
+		t.Fatalf("rejected request set a session cookie: %#v", cookies)
 	}
 }
 

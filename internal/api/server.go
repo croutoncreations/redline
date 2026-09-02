@@ -311,10 +311,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bootstrapDashboardSession(w, r) {
 			return
 		}
-		if !s.authorized(r) {
+		authorized, viaCookie := s.authorized(r)
+		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
+		}
+		// Slide the expiry forward while the browser keeps using the dashboard.
+		if viaCookie {
+			s.setDashboardSessionCookie(w, r)
 		}
 	}
 	s.mux.ServeHTTP(w, r)
@@ -379,10 +384,15 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// dashboardSessionTTL keeps a paired mobile browser signed in across app
+// restarts; a session cookie would be dropped whenever the PWA is evicted.
+const dashboardSessionTTL = 30 * 24 * time.Hour
+
 func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
+		Expires: s.now().UTC().Add(dashboardSessionTTL), MaxAge: int(dashboardSessionTTL / time.Second),
 	})
 }
 
@@ -415,13 +425,20 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+// authorized reports whether the request carries valid credentials, and
+// whether it authenticated via the dashboard session cookie. Cookie-
+// authenticated requests get a refreshed expiry so an actively used browser
+// never has to re-pair; bearer clients hold the token directly and need none.
+func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
 	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
 		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
-		return true
+		return true, false
 	}
 	cookie, err := r.Cookie(apiSessionCookie)
-	return err == nil && secureTokenEqual(cookie.Value, s.config.APIToken)
+	if err == nil && secureTokenEqual(cookie.Value, s.config.APIToken) {
+		return true, true
+	}
+	return false, false
 }
 
 func secureTokenEqual(left, right string) bool {
