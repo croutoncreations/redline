@@ -228,6 +228,49 @@ func TestPromptFileIsReadRelativeToWorkspace(t *testing.T) {
 	}
 }
 
+func TestPromptFileRejectsAbsolutePath(t *testing.T) {
+	outsideFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("do not leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := harness.Adapter{Runner: &captureRunner{}}
+	_, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-5", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: outsideFile},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: t.TempDir()},
+	})
+	if err == nil {
+		t.Fatal("expected error for absolute prompt_file path")
+	}
+	if !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("error = %v, want mention of absolute path", err)
+	}
+}
+
+func TestPromptFileRejectsTraversalOutsideWorkspace(t *testing.T) {
+	workspaceDir := t.TempDir()
+	parentDir := filepath.Dir(workspaceDir)
+	outsideFile := filepath.Join(parentDir, "traversal-secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("do not leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(outsideFile)
+	adapter := harness.Adapter{Runner: &captureRunner{}}
+	_, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-6", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: "../" + filepath.Base(outsideFile)},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: workspaceDir},
+	})
+	if err == nil {
+		t.Fatal("expected error for prompt_file path escaping workspace")
+	}
+	if !strings.Contains(err.Error(), "escapes workspace") {
+		t.Fatalf("error = %v, want mention of escaping workspace", err)
+	}
+}
+
 func TestHermesHarnessUsesAgentContextAndPersistsExternalSession(t *testing.T) {
 	contexts := fakeContexts{
 		context: domain.AgentContext{

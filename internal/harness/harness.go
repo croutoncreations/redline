@@ -348,9 +348,13 @@ func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
 	if task.PromptFile == "" {
 		return "", fmt.Errorf("task requires prompt or prompt_file")
 	}
-	path := task.PromptFile
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(workspaceDirectory, path)
+	if filepath.IsAbs(task.PromptFile) {
+		return "", fmt.Errorf("prompt_file must be relative to the workspace, got absolute path %q", task.PromptFile)
+	}
+	path := filepath.Join(workspaceDirectory, task.PromptFile)
+	relative, err := filepath.Rel(workspaceDirectory, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("prompt_file %q escapes workspace directory", task.PromptFile)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
