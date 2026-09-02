@@ -40,21 +40,25 @@ self.addEventListener('fetch', event => {
   // Shell resources: stale-while-revalidate. Serve the cached copy for speed,
   // but always refresh it in the background so a redeployed dashboard reaches
   // installed PWAs on the next load instead of being pinned to a stale build.
+  // Track the cache write separately from the response so a cache miss never
+  // waits on it: the request should be served as soon as the bytes arrive.
+  let cacheWrite = null;
   const network = fetch(event.request).then(response => {
     if (response && response.ok && response.type === 'basic') {
       const copy = response.clone();
-      return caches.open(CACHE)
+      cacheWrite = caches.open(CACHE)
         .then(cache => cache.put(event.request, copy))
-        .catch(() => {})
-        .then(() => response);
+        .catch(() => {});
     }
     return response;
   });
-  // Keep the revalidation alive independently of the response promise. The
-  // browser may terminate an idle service worker as soon as respondWith
-  // settles, which would otherwise kill the background cache write and pin
-  // installed PWAs to a stale build.
-  event.waitUntil(network.catch(() => {}));
+  // Keep the revalidation and its cache write alive independently of the
+  // response promise. The browser may terminate an idle service worker as soon
+  // as respondWith settles, which would otherwise kill the background write and
+  // pin installed PWAs to a stale build.
+  event.waitUntil(
+    network.then(() => cacheWrite).catch(() => {})
+  );
   // Fall back to any cached copy if the network fails, so an offline load still
   // resolves rather than rejecting respondWith.
   event.respondWith(
