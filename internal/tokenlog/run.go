@@ -12,6 +12,7 @@ import (
 
 	"github.com/jfox/redline/internal/capacity"
 	"github.com/jfox/redline/internal/domain"
+	"github.com/jfox/redline/internal/store"
 )
 
 type runUsage struct {
@@ -177,11 +178,7 @@ func nonzeroObservations(items []capacity.TokenObservation) []capacity.TokenObse
 	return result
 }
 
-type TokenObservationStore interface {
-	SaveTokenObservations(context.Context, []capacity.TokenObservation) (int, error)
-}
-
-type RunUsageRecorder struct{ Store TokenObservationStore }
+type RunUsageRecorder struct{ Store *store.DB }
 
 func (r RunUsageRecorder) RecordRunUsage(
 	ctx context.Context,
