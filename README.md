@@ -361,6 +361,7 @@ GET  /v1/scheduler/decisions?provider={account}
 GET  /v1/scheduler/status
 GET  /v1/usage-monitor/status
 GET  /v1/scheduler/attempts?provider={account}
+GET  /v1/metrics/launch?days={n}&provider={account}
 GET  /v1/runs
 GET  /v1/runs/{id}
 GET  /v1/runs/{id}/events?limit={n}
