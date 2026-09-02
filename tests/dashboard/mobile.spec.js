@@ -475,13 +475,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const dashboardRoot2 = path.join(__dirname, '..', '..', 'internal', 'api', 'dashboard');
 
-test('service worker source never intercepts /v1/ API requests', async () => {
-  const swText = fs.readFileSync(path.join(dashboardRoot2, 'sw.js'), 'utf8');
-  expect(swText).toContain('/v1/');
-  expect(swText).toContain('fetch(event.request)');
-  // Verify it has static shell caching but explicitly passes API through network
-  expect(swText).toContain("startsWith('/v1/')");
-});
+// Service worker behaviour is covered by sw.spec.js, which executes the real
+// worker; grepping its source could not catch any of the caching regressions
+// that actually shipped.
 
 test('manifest.webmanifest has maskable icon metadata', async () => {
   const manifestText = fs.readFileSync(path.join(dashboardRoot2, 'manifest.webmanifest'), 'utf8');
