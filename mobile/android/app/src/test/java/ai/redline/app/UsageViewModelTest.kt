@@ -112,4 +112,52 @@ class UsageViewModelTest {
 
         assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
     }
+
+    /**
+     * A refresh that succeeds after an earlier failure must clear the failure,
+     * or the header keeps saying "Offline" over live data.
+     */
+    @Test
+    fun successfulRefreshClearsAPreviousFailure() = runTest(dispatcher) {
+        var payload: Result<String> = Result.failure(RuntimeException("desktop asleep"))
+        val source = object : UsageSource {
+            override fun fetchUsageJson(): String = payload.getOrThrow()
+            override fun isUnauthorized(error: Throwable): Boolean = false
+        }
+        val model = UsageViewModel(source, dispatcher)
+
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+
+        payload = Result.success(validJson)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertNull("a good refresh must clear the stale failure", model.state.value.failure)
+        assertEquals(62, model.state.value.view?.providers?.get(0)?.session?.remainingPercent)
+    }
+
+    /**
+     * refresh() runs on every ON_RESUME, so overlapping calls are routine.
+     * They must not leave the spinner stuck or lose the newest result.
+     */
+    @Test
+    fun overlappingRefreshesSettleCorrectly() = runTest(dispatcher) {
+        val source = object : UsageSource {
+            override fun fetchUsageJson(): String = validJson
+            override fun isUnauthorized(error: Throwable): Boolean = false
+        }
+        val model = UsageViewModel(source, dispatcher)
+
+        model.refresh()
+        model.refresh()
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = model.state.value
+        assertFalse("loading must not remain stuck after concurrent refreshes", state.loading)
+        assertNull(state.failure)
+        assertEquals(62, state.view?.providers?.get(0)?.session?.remainingPercent)
+    }
 }

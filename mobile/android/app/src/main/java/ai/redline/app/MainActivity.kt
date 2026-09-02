@@ -27,7 +27,7 @@ class MainActivity : ComponentActivity() {
                 factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                        UsageViewModel(CoreUsageSource(settings.baseUrl, settings.token)) as T
+                        UsageViewModel(CoreUsageSource(settings)) as T
                 },
             )
             val state by model.state.collectAsState()

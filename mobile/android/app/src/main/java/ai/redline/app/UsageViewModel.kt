@@ -2,11 +2,16 @@ package ai.redline.app
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -24,6 +29,12 @@ data class UsageUiState(
     enum class Failure { UNAUTHORIZED, UNREACHABLE }
 
     val hasData: Boolean get() = view != null
+
+    /**
+     * Records a failure while keeping any data already on screen: when the
+     * desktop goes away, the last numbers marked stale beat an empty screen.
+     */
+    fun fail(reason: Failure): UsageUiState = copy(loading = false, failure = reason)
 }
 
 /**
@@ -48,34 +59,48 @@ class UsageViewModel(
     private val _state = MutableStateFlow(UsageUiState())
     val state: StateFlow<UsageUiState> = _state.asStateFlow()
 
+    /**
+     * The in-flight refresh, so a new one supersedes it.
+     *
+     * refresh() runs on every ON_RESUME, so overlap is routine rather than
+     * exceptional. Without this, two refreshes race on read-modify-write of the
+     * state and whichever finishes last wins regardless of which fetched last,
+     * so a slow stale result can overwrite a fresh one.
+     */
+    private var refreshJob: Job? = null
+
     fun refresh() {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true)
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            _state.update { it.copy(loading = true) }
+
             val result = runCatching { withContext(ioDispatcher) { source.fetchUsageJson() } }
-            _state.value = result.fold(
+
+            // A cancelled refresh was superseded, so it must leave the state to
+            // its replacement rather than reporting a failure.
+            coroutineContext.ensureActive()
+
+            result.fold(
                 onSuccess = { raw ->
                     runCatching { redlineJson.decodeFromString(UsageView.serializer(), raw) }.fold(
-                        onSuccess = { view -> UsageUiState(loading = false, view = view) },
+                        // A good load clears any earlier failure, or the header
+                        // keeps saying "Offline" over live data.
+                        onSuccess = { view -> _state.value = UsageUiState(loading = false, view = view) },
                         // Malformed JSON from a reachable server is not an auth
                         // problem; treating it as one would tell the user to
                         // re-pair, which would not help.
-                        onFailure = {
-                            _state.value.copy(
-                                loading = false,
-                                failure = UsageUiState.Failure.UNREACHABLE,
-                            )
-                        },
+                        onFailure = { _state.update { it.fail(UsageUiState.Failure.UNREACHABLE) } },
                     )
                 },
                 onFailure = { error ->
-                    _state.value.copy(
-                        loading = false,
-                        failure = if (source.isUnauthorized(error)) {
-                            UsageUiState.Failure.UNAUTHORIZED
-                        } else {
-                            UsageUiState.Failure.UNREACHABLE
-                        },
-                    )
+                    // Cancellation is control flow, not a transport failure.
+                    if (error is CancellationException) throw error
+                    val failure = if (source.isUnauthorized(error)) {
+                        UsageUiState.Failure.UNAUTHORIZED
+                    } else {
+                        UsageUiState.Failure.UNREACHABLE
+                    }
+                    _state.update { it.fail(failure) }
                 },
             )
         }
