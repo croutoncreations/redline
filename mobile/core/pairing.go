@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,9 +18,16 @@ import (
 const apiSessionCookie = "redline_api_session"
 
 // PairingRequest is what a scanned Redline QR code contains.
+//
+// DesktopKey and RelayURL are optional: older desktops that have not yet been
+// updated will not include them, and the app falls back to Tailscale-direct
+// access in that case. When present, DesktopKey is the base64-encoded static
+// Noise public key used to establish an end-to-end encrypted relay session.
 type PairingRequest struct {
 	BaseURL      string `json:"base_url"`
 	PairingToken string `json:"pairing_token"`
+	DesktopKey   string `json:"desktop_key,omitempty"`
+	RelayURL     string `json:"relay_url,omitempty"`
 }
 
 // ParsePairingURL reads a scanned QR code and returns the pairing details as
@@ -34,6 +42,40 @@ type PairingRequest struct {
 // A camera will happily scan any code it is pointed at, so anything that is not
 // a Redline pairing URL is rejected with a reason rather than producing a
 // client aimed at nothing.
+// safeRelayURL returns the relay URL only if it is one we are willing to dial,
+// and "" otherwise.
+//
+// A QR code is whatever the camera was pointed at, so this value is
+// attacker-controlled. Noise keeps the contents unreadable wherever the frames
+// go, but an unvalidated URL would still let a hostile poster choose a cleartext
+// transport, or aim the phone at an internal address such as a cloud metadata
+// endpoint. Dropping the field degrades to direct-only pairing, which is a
+// working app rather than a broken one.
+func safeRelayURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return ""
+	}
+	// HTTPS only. The relay is on the public internet by definition, so there
+	// is no loopback exception to make here.
+	if !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" {
+		return ""
+	}
+	// A literal IP as a relay host is never something we publish, and it is how
+	// link-local and metadata addresses would arrive.
+	if net.ParseIP(parsed.Hostname()) != nil {
+		return ""
+	}
+	if parsed.User != nil {
+		return ""
+	}
+	return trimmed
+}
+
 func ParsePairingURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -58,15 +100,29 @@ func ParsePairingURL(raw string) (string, error) {
 			token = values
 		}
 	}
-	pairingToken := token.Get("pairing_token")
+	// The QR token parameter name changed from "pairing_token" (old format) to
+	// "token" (new format) to keep the URL shorter. Accept both so an updated
+	// phone can pair with a desktop that has not yet been rebuilt.
+	pairingToken := token.Get("token")
+	if pairingToken == "" {
+		pairingToken = token.Get("pairing_token")
+	}
 	if pairingToken == "" {
 		return "", errors.New("this pairing code is incomplete; generate a new one")
 	}
 
 	base := url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+
+	// Base64 standard encoding uses '+' and '/', but url.ParseQuery decodes '+'
+	// as a space. Undo that: spaces are never valid in base64, so replacing them
+	// back recovers any key that was not percent-encoded before concatenation.
+	desktopKey := strings.ReplaceAll(token.Get("key"), " ", "+")
+
 	encoded, err := json.Marshal(PairingRequest{
 		BaseURL:      strings.TrimRight(base.String(), "/"),
 		PairingToken: pairingToken,
+		DesktopKey:   desktopKey,
+		RelayURL:     safeRelayURL(token.Get("relay")),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode pairing request: %w", err)
