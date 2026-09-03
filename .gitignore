@@ -34,3 +34,7 @@ mobile/android/build/
 mobile/android/app/build/
 mobile/android/local.properties
 .gstack/
+
+# The relay's dev dependencies include the ~135MB workerd runtime binary.
+relay/node_modules/
+relay/.wrangler/
