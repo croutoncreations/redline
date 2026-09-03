@@ -25,6 +25,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,10 +58,44 @@ fun UsageScreen(
                 // a refresh over existing data should not blank the screen.
                 state.loading && !state.hasData -> CenteredProgress()
                 !state.hasData && state.failure != null -> FailureMessage(state.failure, onRetry)
-                state.view != null -> ProviderList(state, onControlProvider, onViewQueue)
+                state.view != null -> RefreshableProviderList(
+                    state,
+                    onRetry,
+                    onControlProvider,
+                    onViewQueue,
+                )
                 else -> CenteredProgress()
             }
         }
+    }
+}
+
+/**
+ * The provider list, refreshable by pulling down.
+ *
+ * The screen already refreshes on resume and streams live updates, but a pull
+ * is the gesture people reach for when they want to know the number in front of
+ * them is current -- and after a failed refresh, when "Offline" is showing over
+ * stale data, it is the obvious way to ask again.
+ *
+ * The spinner is driven by the same loading flag as every other refresh, so a
+ * pull cannot show a spinner that outlives the request or hide one that is
+ * still running.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RefreshableProviderList(
+    state: UsageUiState,
+    onRefresh: () -> Unit,
+    onControlProvider: (String, String) -> Unit,
+    onViewQueue: (String) -> Unit,
+) {
+    PullToRefreshBox(
+        isRefreshing = state.loading,
+        onRefresh = onRefresh,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        ProviderList(state, onControlProvider, onViewQueue)
     }
 }
 
@@ -307,12 +343,13 @@ private fun Meter(
     resetInferred: Boolean,
     resetsAt: String = "",
 ) {
-    val countdown = formatCountdown(resetsInSeconds)
+    val resetSentence = resetLabel(resetsInSeconds, resetInferred)
     // Only computed for display; an unparseable or absent timestamp yields "".
     val absolute = formatResetAt(resetsAt)
     Column(modifier = Modifier.semantics {
         contentDescription = buildString {
-            append("$label: $percent percent remaining, resets $countdown")
+            // Same sentence a sighted reader gets, so the two cannot drift.
+            append("$label: $percent percent remaining. $resetSentence")
             if (absolute.isNotEmpty()) append(", at $absolute")
         }
     }) {
@@ -337,9 +374,9 @@ private fun Meter(
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                // An inferred reset is a guess, and saying so is cheaper than
-                // being subtly wrong.
-                if (resetInferred) "Resets ~$countdown" else "Resets in $countdown",
+                // Assembled in one place: the countdown and the sentence around
+                // it have to agree, or a due reset reads "Resets in now".
+                resetSentence,
                 color = TextMuted,
                 fontSize = 11.sp,
             )

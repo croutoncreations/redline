@@ -97,6 +97,32 @@ class UsageModelsTest {
     }
 
     /**
+     * The countdown is built into a sentence by the caller, so a value that
+     * reads correctly alone can still be wrong in place: "now" produced
+     * "Resets in now", and an inferred reset produced "Resets ~now".
+     *
+     * The label is therefore assembled in one place that knows about both.
+     */
+    @Test
+    fun `an imminent reset reads as a sentence`() {
+        assertEquals("Resets now", resetLabel(seconds = 0, inferred = false))
+        assertEquals("Resets now", resetLabel(seconds = -30, inferred = false))
+        assertEquals("Resets now", resetLabel(seconds = 20, inferred = false))
+
+        // An inferred reset is a guess and still has to say so, without
+        // becoming "Resets ~now".
+        assertEquals("Resets about now", resetLabel(seconds = 0, inferred = true))
+        assertEquals("Resets about now", resetLabel(seconds = 20, inferred = true))
+    }
+
+    @Test
+    fun `an ordinary reset keeps the countdown`() {
+        assertEquals("Resets in 2h 30m", resetLabel(seconds = 2 * 3600 + 30 * 60, inferred = false))
+        assertEquals("Resets ~2h 30m", resetLabel(seconds = 2 * 3600 + 30 * 60, inferred = true))
+        assertEquals("Resets in 1d 14h", resetLabel(seconds = 38 * 3600, inferred = false))
+    }
+
+    /**
      * The absolute time answers the other question people ask: not "how long"
      * but "when", which is what you match against a calendar.
      */

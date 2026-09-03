@@ -137,3 +137,22 @@ fun formatResetAt(
         else -> target.format(java.time.format.DateTimeFormatter.ofPattern("MMM d,")) + " $time"
     }
 }
+
+/**
+ * Builds the whole "Resets ..." line.
+ *
+ * The countdown and the sentence around it have to be decided together. Left
+ * apart, a value that reads correctly on its own becomes wrong in place: a
+ * reset that is due produced "Resets in now", and an inferred one produced
+ * "Resets ~now". A window about to roll over is the moment someone is most
+ * likely to be reading this line, so it is the worst place to sound broken.
+ */
+fun resetLabel(seconds: Long, inferred: Boolean): String {
+    // Under a minute there is nothing useful left to count, and "in 12s" is a
+    // precision the upstream data does not really have.
+    if (seconds < 60) {
+        return if (inferred) "Resets about now" else "Resets now"
+    }
+    val countdown = formatCountdown(seconds)
+    return if (inferred) "Resets ~$countdown" else "Resets in $countdown"
+}
