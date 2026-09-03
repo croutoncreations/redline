@@ -460,7 +460,11 @@ func (s *server) runEvents(ctx context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, Output{}, err
 	}
 	total := len(items)
-	items = truncate(items, limit)
+	if total > limit {
+		// The API already returns only the most recent limit+1 rows, oldest
+		// first; drop the oldest of those to keep the most recent `limit`.
+		items = items[total-limit:]
+	}
 	views := make([]runEventView, 0, len(items))
 	for _, item := range items {
 		views = append(views, viewRunEvent(item))
