@@ -453,6 +453,25 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
+
+	// Remote access is opt-in, so this loop exists only for a user who asked
+	// for it. It dials out to the relay rather than listening, which is what
+	// lets a phone reach a desktop behind a router nobody configured.
+	var relayDone chan struct{}
+	if cfg.Relay.Enabled {
+		dialer, err := newRelayDialer(cfg, listener.Addr().String())
+		if err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Relay enabled via %s\n", cfg.Relay.URL)
+		relayDone = make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			dialer.Run(ctx)
+		}()
+	}
+
 	errors := make(chan error, 1)
 	go func() { errors <- server.Serve(listener) }()
 	select {
@@ -472,7 +491,43 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		}
 		apiServer.Wait()
 	}
+	// The dialer stops on the same cancelled context; waiting for it keeps a
+	// half-open relay session from outliving the process that owns it.
+	if relayDone != nil {
+		select {
+		case <-relayDone:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	return 0
+}
+
+// newRelayDialer builds the outbound relay leg for a service that has remote
+// access enabled.
+//
+// The session id is persisted in config rather than minted per start, because a
+// phone paired against one id would otherwise be stranded on an id nothing
+// answers after the next restart.
+func newRelayDialer(cfg config.Config, localAddr string) (*relay.Dialer, error) {
+	keypair, err := relay.LoadOrCreateKeypair(
+		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
+	)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := cfg.Relay.SessionID
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("relay.session_id is required; run `redline pair --qr` to set one up")
+	}
+	return relay.NewDialer(relay.DialerOptions{
+		RelayURL:         cfg.Relay.URL,
+		SessionID:        sessionID,
+		Keypair:          keypair,
+		EntitlementToken: cfg.Relay.EntitlementToken,
+		// Requests are replayed against this service's own listener, so the
+		// phone reaches exactly the API a local browser would.
+		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),
+	}), nil
 }
 
 // resolveTokenConfigPath returns the config path whose API token the running
