@@ -30,6 +30,13 @@ data class ProviderUsage(
     /** Where the numbers came from and how fresh they are. */
     @SerialName("source_label") val sourceLabel: String = "",
     val session: Window? = null,
+    /**
+     * The five hour window exists but its number could not be read.
+     *
+     * Absent from an older desktop, hence the default: the row is then simply
+     * missing, as it was before, rather than making a claim either way.
+     */
+    @SerialName("session_unknown") val sessionUnknown: Boolean = false,
     val weekly: Window? = null,
     val pools: List<Pool> = emptyList(),
 )

@@ -55,8 +55,16 @@ type ProviderUsage struct {
 	// which is what to check first when two surfaces disagree.
 	SourceLabel string  `json:"source_label,omitempty"`
 	Session     *Window `json:"session,omitempty"`
-	Weekly      *Window `json:"weekly,omitempty"`
-	Pools       []Pool  `json:"pools,omitempty"`
+	// SessionUnknown marks a five hour window that exists but could not be
+	// read. OpenUsage reports it without a reset time while provider state is
+	// refreshing, and the collector drops it rather than inventing one, so the
+	// screen has to distinguish "this provider has no such limit" from "this
+	// limit exists and the number is missing right now". Omitting the row for
+	// both looks like the limit does not exist, which is the wrong thing to
+	// tell someone deciding whether to start a run.
+	SessionUnknown bool    `json:"session_unknown,omitempty"`
+	Weekly         *Window `json:"weekly,omitempty"`
+	Pools          []Pool  `json:"pools,omitempty"`
 }
 
 // UsageView is the whole capacity screen.
@@ -161,6 +169,12 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 		}
 		if item.Snapshot != nil {
 			provider.Session = shortWindow(item.Snapshot, now)
+			// A provider that reports a short window at all is expected to keep
+			// reporting one, so its absence here is a gap rather than a
+			// permanent property. Claude sends one and Codex never does, and
+			// the difference is what stops Codex growing a phantom row.
+			provider.SessionUnknown = provider.Session == nil &&
+				providesShortWindow(item.Snapshot)
 			provider.Weekly = weeklyWindow(item.Snapshot, now)
 			provider.Pools = pools(item.Snapshot, now)
 			provider.SourceLabel = sourceLabel(
@@ -312,4 +326,34 @@ func (e *apiError) Unwrap() error {
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+// providesShortWindow reports whether this provider is one that has a five
+// hour window at all.
+//
+// The distinction matters because the row must appear as "unknown" for a
+// provider whose window is temporarily unreadable, and must not appear at all
+// for one that has no such limit. Claude has a five hour window; Codex has
+// only a weekly allowance, and a phantom "unknown" row on Codex would be its
+// own kind of wrong.
+//
+// The desktop says so directly: ShortWindowUnavailable is set by the collector
+// at the one point that knows a window was offered and refused.
+//
+// Confidence is deliberately not used, though it is tempting. The collector
+// does drop to "medium" when it skips a short window, but it also drops to
+// "medium" when a model weekly reset is inferred, and keying off it gave Codex
+// -- which has no five hour window at all -- a phantom "unknown" row.
+//
+// An older desktop sends neither field, so this reads false and the row is
+// simply absent: the behaviour before this existed, rather than a wrong claim.
+func providesShortWindow(snapshot *decision.UsageSnapshot) bool {
+	if snapshot.ShortWindowUnavailable {
+		return true
+	}
+	if snapshot.Short != nil {
+		return true
+	}
+	_, ok := snapshot.Allowance("session")
+	return ok
 }

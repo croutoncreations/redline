@@ -99,6 +99,61 @@ func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
 	if got.Confidence != "medium" {
 		t.Fatalf("confidence = %q, want medium", got.Confidence)
 	}
+	// Dropping the window silently leaves every client unable to tell "this
+	// provider has no five hour limit" from "it has one and we could not read
+	// it", and they render those two very differently. Confidence cannot carry
+	// this: it also drops to medium for an inferred model weekly reset.
+	if !got.ShortWindowUnavailable {
+		t.Fatal("a dropped short window must be reported as unavailable")
+	}
+}
+
+// A provider that simply has no five hour window must not be marked
+// unavailable, or every client grows a permanent "unknown" row for it.
+func TestParseDoesNotMarkAbsentShortWindowUnavailable(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShortWindowUnavailable {
+		t.Fatal("a provider with no short window must not be marked unavailable")
+	}
+}
+
+// An inferred model weekly reset also lowers confidence to medium. That must
+// not be mistaken for a missing five hour window.
+func TestParseKeepsInferredModelResetSeparateFromAMissingShortWindow(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"5-hour","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-07-26T04:00:00Z"},
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"},
+        {"type":"progress","label":"Fable","used":10,"limit":100,"periodDurationMs":604800000,"resetsAt":""}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium", got.Confidence)
+	}
+	if got.ShortWindowUnavailable {
+		t.Fatal("an inferred model reset must not mark the short window unavailable")
+	}
+	if got.Short == nil {
+		t.Fatal("the short window was present and must be kept")
+	}
 }
 
 func TestParsePreservesClaudeFableAllowance(t *testing.T) {

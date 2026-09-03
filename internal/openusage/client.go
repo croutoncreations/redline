@@ -154,7 +154,13 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 			// The short window is optional and OpenUsage can briefly report it
 			// without a reset while provider state is refreshing. Preserve the
 			// valid weekly snapshot rather than inventing a reset or failing over.
+			//
+			// Say so rather than dropping it silently. This is the only place
+			// that knows the window was offered and refused; downstream can
+			// only see an absence, which looks the same as a provider that has
+			// no five hour limit at all.
 			snapshot.Confidence = "medium"
+			snapshot.ShortWindowUnavailable = true
 			continue
 		}
 		resetInferred := false

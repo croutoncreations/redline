@@ -97,7 +97,13 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     // On-device tests: the QR decoder and the Keystore both need a real device.
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.02"))
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // Renders composables on device so a screen state can be asserted and
+    // photographed without needing a paired desktop behind it.
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    // Provides the empty activity the Compose test rule launches into.
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     androidTestImplementation("androidx.test:runner:1.6.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

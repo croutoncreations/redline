@@ -407,6 +407,105 @@ func TestFetchUsageReportsProvenance(t *testing.T) {
 	}
 }
 
+// OpenUsage can report the five hour window without a reset time while
+// provider state is refreshing, and the collector drops it rather than
+// inventing a reset. The phone then had nothing to show and silently omitted
+// the row, so the most-watched number on the screen disappeared while the
+// header still said "Live".
+//
+// A row that says it does not know is honest. A missing row looks like the
+// limit does not exist, which is the wrong conclusion to hand someone deciding
+// whether to start a run.
+func TestAMissingShortWindowIsReportedRatherThanHidden(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 57, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"claude-main","provider":"claude","paused":false,
+	  "active_runs":1,"max_concurrent_runs":1,
+	  "usage_source":{"active":"openusage","consecutive_failures":0},
+	  "snapshot":{"provider":"claude","observed_at":%q,"source":"openusage","confidence":"medium","short_window_unavailable":true,
+	    "weekly":{"remaining":0.54,"resets_at":%q},
+	    "allowances":[{"key":"weekly","source_label":"Weekly","scope":"account","role":"weekly","remaining":0.54,"resets_at":%q}]}}]}`,
+		now.Format(time.RFC3339), now.Add(-4*time.Minute).Format(time.RFC3339),
+		now.Add(26*time.Hour).Format(time.RFC3339), now.Add(26*time.Hour).Format(time.RFC3339))
+
+	view := fetchView(t, payload, now)
+	provider := view.Providers[0]
+
+	if provider.Session != nil {
+		t.Fatal("a window with no reset must not be invented as a real one")
+	}
+	// The screen needs to know the difference between "no such limit" and
+	// "this limit exists and we cannot read it right now".
+	if !provider.SessionUnknown {
+		t.Fatal("the missing five hour window should be flagged as unknown")
+	}
+	// The weekly numbers are still good and must not be discarded with it.
+	if provider.Weekly == nil || provider.Weekly.RemainingPercent != 54 {
+		t.Fatalf("weekly was lost: %#v", provider.Weekly)
+	}
+}
+
+// A provider that genuinely has no five hour limit must not grow a phantom
+// "unknown" row. Codex is exactly this case: weekly only.
+func TestAProviderWithNoShortWindowIsNotFlagged(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 57, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"codex-main","provider":"codex","paused":false,
+	  "usage_source":{"active":"openusage","consecutive_failures":0},
+	  "snapshot":{"provider":"codex","observed_at":%q,"source":"openusage","confidence":"high",
+	    "weekly":{"remaining":0,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(96*time.Hour).Format(time.RFC3339))
+
+	if fetchView(t, payload, now).Providers[0].SessionUnknown {
+		t.Fatal("codex has no five hour window and must not be flagged as unknown")
+	}
+}
+
+// When the window is present the flag must stay off, or every screen would
+// carry a permanent warning.
+func TestAPresentShortWindowIsNotFlagged(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 57, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"claude-main","provider":"claude","paused":false,
+	  "usage_source":{"active":"openusage","consecutive_failures":0},
+	  "snapshot":{"provider":"claude","observed_at":%q,"source":"openusage","confidence":"high",
+	    "short":{"remaining":0.21,"resets_at":%q},
+	    "weekly":{"remaining":0.54,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339), now.Format(time.RFC3339),
+		now.Add(3*time.Hour).Format(time.RFC3339), now.Add(26*time.Hour).Format(time.RFC3339))
+
+	provider := fetchView(t, payload, now).Providers[0]
+	if provider.SessionUnknown {
+		t.Fatal("a present window must not be flagged unknown")
+	}
+	if provider.Session == nil || provider.Session.RemainingPercent != 21 {
+		t.Fatalf("session: %#v", provider.Session)
+	}
+}
+
+// fetchView serves one payload and returns the rendered capacity screen.
+func fetchView(t *testing.T, payload string, now time.Time) core.UsageView {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatalf("FetchUsage: %v", err)
+	}
+	var view core.UsageView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(view.Providers) == 0 {
+		t.Fatal("no providers in the rendered view")
+	}
+	return view
+}
+
 // A provider the user has paused must say so: it explains why nothing is
 // dispatching, and it is the thing they would want to undo.
 func TestFetchUsageReportsPaused(t *testing.T) {

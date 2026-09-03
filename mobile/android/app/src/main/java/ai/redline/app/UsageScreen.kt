@@ -278,6 +278,13 @@ private fun ProviderCard(
                     it.resetInferred, it.resetsAt,
                 )
             }
+            // The window exists but the number could not be read. Showing
+            // nothing here reads as "there is no 5-hour limit", which is the
+            // wrong thing to tell someone deciding whether to start a run.
+            if (provider.sessionUnknown) {
+                Spacer(Modifier.height(12.dp))
+                UnknownMeter("5-hour window")
+            }
             provider.weekly?.let {
                 Spacer(Modifier.height(12.dp))
                 Meter(
@@ -333,6 +340,47 @@ private fun CardAction(label: String, emphasised: Boolean = false, onClick: () -
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
     )
+}
+
+/**
+ * A limit that exists but whose number is currently unreadable.
+ *
+ * Deliberately not a zeroed progress bar: an empty bar means "none left",
+ * which is the opposite of "we do not know" and would be the more damaging
+ * misreading of the two.
+ */
+@Composable
+private fun UnknownMeter(label: String) {
+    Column(modifier = Modifier.semantics {
+        contentDescription = "$label: not available right now"
+    }) {
+        Row {
+            Text(label, color = TextPrimary, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "not available",
+                color = TextMuted,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        // A flat track with no fill: there is a bar here, and it has no value.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(Line),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Provider did not report this window",
+            color = TextMuted,
+            fontSize = 11.sp,
+        )
+    }
 }
 
 @Composable

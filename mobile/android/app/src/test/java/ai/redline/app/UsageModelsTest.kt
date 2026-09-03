@@ -1,6 +1,7 @@
 package ai.redline.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -163,6 +164,48 @@ class UsageModelsTest {
         val now = java.time.Instant.parse("2026-09-02T21:00:00Z")
         assertEquals("", formatResetAt("", zone, now))
         assertEquals("", formatResetAt("not a timestamp", zone, now))
+    }
+
+    /**
+     * A five hour window the provider could not report must decode as unknown
+     * rather than as absent, because the screen renders those differently: an
+     * absent row says the limit does not exist, and that is the wrong thing to
+     * tell someone deciding whether to start a run.
+     */
+    @Test
+    fun `an unreadable session window decodes as unknown`() {
+        val raw = """
+            {"generated_at":"2026-09-03T14:57:00Z","providers":[
+              {"id":"claude-main","provider":"claude","session_unknown":true,
+               "weekly":{"remaining_percent":54,"resets_in_seconds":93600}}
+            ]}
+        """.trimIndent()
+
+        val view = redlineJson.decodeFromString(UsageView.serializer(), raw)
+        val provider = view.providers[0]
+
+        assertNull("the window must not be invented", provider.session)
+        assertTrue("the row should be shown as unknown", provider.sessionUnknown)
+        // The weekly numbers were fine and must survive.
+        assertEquals(54, provider.weekly?.remainingPercent)
+        // Nothing here is an error or staleness: the data was fresh, one field
+        // of it was simply missing.
+        assertEquals("Live", providerStatus(provider))
+    }
+
+    /** An older desktop sends no such field, and the row stays absent. */
+    @Test
+    fun `an older desktop payload leaves the row absent`() {
+        val raw = """
+            {"generated_at":"2026-09-03T14:57:00Z","providers":[
+              {"id":"codex-main","provider":"codex",
+               "weekly":{"remaining_percent":0,"resets_in_seconds":300000}}
+            ]}
+        """.trimIndent()
+
+        val provider = redlineJson.decodeFromString(UsageView.serializer(), raw).providers[0]
+        assertNull(provider.session)
+        assertFalse(provider.sessionUnknown)
     }
 
     /** Error outranks paused: without data there is nothing to label paused. */
