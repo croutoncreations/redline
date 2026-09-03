@@ -58,6 +58,10 @@ type UsageSnapshot struct {
 	// that says it does not know. Confidence cannot carry the distinction
 	// because it also drops to medium for an inferred model weekly reset.
 	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
+	// BankedResets counts quota resets the account can spend on demand to
+	// refill an exhausted window. Nil when the provider does not report them,
+	// which is different from zero: none banked versus not known.
+	BankedResets *int `json:"banked_resets,omitempty"`
 }
 
 func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {

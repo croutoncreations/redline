@@ -37,6 +37,12 @@ data class ProviderUsage(
      * missing, as it was before, rather than making a claim either way.
      */
     @SerialName("session_unknown") val sessionUnknown: Boolean = false,
+    /**
+     * Quota resets the account can spend on demand to refill an exhausted
+     * window. Null when the provider does not report them, which is not the
+     * same as having none.
+     */
+    @SerialName("banked_resets") val bankedResets: Int? = null,
     val weekly: Window? = null,
     val pools: List<Pool> = emptyList(),
 )

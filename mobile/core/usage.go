@@ -62,9 +62,13 @@ type ProviderUsage struct {
 	// limit exists and the number is missing right now". Omitting the row for
 	// both looks like the limit does not exist, which is the wrong thing to
 	// tell someone deciding whether to start a run.
-	SessionUnknown bool    `json:"session_unknown,omitempty"`
-	Weekly         *Window `json:"weekly,omitempty"`
-	Pools          []Pool  `json:"pools,omitempty"`
+	SessionUnknown bool `json:"session_unknown,omitempty"`
+	// BankedResets counts quota resets the account can spend on demand.
+	// Absent when the provider does not report them, which is not the same as
+	// having none.
+	BankedResets *int    `json:"banked_resets,omitempty"`
+	Weekly       *Window `json:"weekly,omitempty"`
+	Pools        []Pool  `json:"pools,omitempty"`
 }
 
 // UsageView is the whole capacity screen.
@@ -175,6 +179,7 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 			// the difference is what stops Codex growing a phantom row.
 			provider.SessionUnknown = provider.Session == nil &&
 				providesShortWindow(item.Snapshot)
+			provider.BankedResets = item.Snapshot.BankedResets
 			provider.Weekly = weeklyWindow(item.Snapshot, now)
 			provider.Pools = pools(item.Snapshot, now)
 			provider.SourceLabel = sourceLabel(

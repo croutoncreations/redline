@@ -156,21 +156,27 @@ func TestParseKeepsInferredModelResetSeparateFromAMissingShortWindow(t *testing.
 	}
 }
 
-// Codex names its five hour window "Spark", not "Session". The label was not
-// in the mapping, so it fell through to the default and was silently dropped:
-// the phone showed Codex with a weekly allowance and no short window, which
-// reads as "this provider has no five hour limit" when it plainly does.
+// Spark is a separate allowance, not Codex's version of Claude's Session.
 //
-// The period is the giveaway -- 18000000ms is five hours -- and it is the same
-// window Claude calls Session, so it maps to the same key.
-func TestParseAcceptsCodexSparkAsTheShortWindow(t *testing.T) {
+// OpenAI's pricing page: GPT-5.3-Codex-Spark "runs on specialized low-latency
+// hardware [so] usage is governed by a separate usage limit". Users confirm the
+// direction that matters here -- "I always use it once I'm out of weekly" -- and
+// a bug report shows Spark at 100% while the weekly sat at 37%. The two move
+// independently, and Spark remains usable after the weekly is gone.
+//
+// So Spark must NOT populate the account short window. Doing that labelled it
+// "5-hour window" on the phone, which claims Codex has a general five hour
+// limit it does not have, and puts a separate product's budget in the slot
+// people read as their main allowance.
+func TestParseKeepsSparkOutOfTheAccountShortWindow(t *testing.T) {
 	payload := `{
       "providerId":"codex",
       "plan":"Pro 5x",
       "fetchedAt":"2026-09-03T18:00:00Z",
       "lines":[
         {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
-        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"}
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"},
+        {"type":"progress","label":"Spark Weekly","used":40,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-10T19:46:33.000Z"}
       ]
     }`
 
@@ -178,25 +184,19 @@ func TestParseAcceptsCodexSparkAsTheShortWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Short == nil {
-		t.Fatal("Spark is a five hour window and must populate the short window")
+	if got.Short != nil {
+		t.Fatalf("Codex has no general five hour window; got %#v", got.Short)
 	}
-	assertClose(t, got.Short.Remaining, .8)
-	allowance, ok := got.Allowance("session")
-	if !ok {
-		t.Fatal("Spark must also appear as the session allowance")
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatal("Spark must not occupy the session allowance")
 	}
-	assertClose(t, allowance.Remaining, .8)
-	// Nothing here was guessed, so confidence must not drop.
-	if got.Confidence == "medium" {
-		t.Fatal("a fully reported snapshot should not be marked medium confidence")
-	}
+	// The account weekly is the real Weekly line, untouched by Spark Weekly.
+	assertClose(t, got.Weekly.Remaining, 0)
 }
 
-// "Spark Weekly" is a different window that happens to share a prefix. Reading
-// it as the short one would report a seven day figure as a five hour figure,
-// which is worse than dropping it.
-func TestParseDoesNotConfuseSparkWeeklyWithSpark(t *testing.T) {
+// Both Spark windows are carried as their own model-scoped allowances, the way
+// Claude's Fable is, so the screen can name them instead of guessing.
+func TestParseCarriesBothSparkWindowsAsTheirOwnAllowances(t *testing.T) {
 	payload := `{
       "providerId":"codex",
       "fetchedAt":"2026-09-03T18:00:00Z",
@@ -211,14 +211,32 @@ func TestParseDoesNotConfuseSparkWeeklyWithSpark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Short == nil {
-		t.Fatal("the short window should still come from Spark")
+
+	short, ok := got.Allowance("model:spark:short")
+	if !ok {
+		t.Fatalf("Spark five hour allowance missing: %#v", got.Allowances)
 	}
-	// Spark is 80% remaining; Spark Weekly is 60%. Getting 0.6 here would mean
-	// the weekly line overwrote the short one.
-	assertClose(t, got.Short.Remaining, .8)
-	// And the account weekly must remain the real Weekly line, not Spark Weekly.
-	assertClose(t, got.Weekly.Remaining, 0)
+	assertClose(t, short.Remaining, .8)
+	if short.SourceLabel != "Spark" {
+		t.Fatalf("Spark should keep its own name, got %q", short.SourceLabel)
+	}
+	if short.Scope != "model" {
+		t.Fatalf("Spark is a model-scoped allowance, got scope %q", short.Scope)
+	}
+
+	weekly, ok := got.Allowance("model:spark:weekly")
+	if !ok {
+		t.Fatalf("Spark weekly allowance missing: %#v", got.Allowances)
+	}
+	assertClose(t, weekly.Remaining, .6)
+	if weekly.SourceLabel != "Spark Weekly" {
+		t.Fatalf("Spark Weekly should keep its own name, got %q", weekly.SourceLabel)
+	}
+	// The two must stay distinct: 0.8 and 0.6 arriving in one bucket would mean
+	// one overwrote the other.
+	if short.ResetsAt.Equal(weekly.ResetsAt) {
+		t.Fatal("the two Spark windows must keep their own reset times")
+	}
 }
 
 func TestParsePreservesClaudeFableAllowance(t *testing.T) {
@@ -346,4 +364,81 @@ func assertClose(t *testing.T, got, want float64) {
 	if got < want-1e-9 || got > want+1e-9 {
 		t.Fatalf("got %v, want %v", got, want)
 	}
+}
+
+// "Rate Limit Resets" is the count of banked quota resets the account can spend
+// on demand to refill an exhausted window. It is genuinely useful when the
+// weekly is gone -- it is the thing that gets you running again -- so it is
+// worth surfacing, but only if it is labelled as what it is. Shown as a bare
+// number it reads like another usage meter.
+func TestParseReadsBankedRateLimitResets(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"2 available"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil {
+		t.Fatal("banked resets should be reported when the provider sends them")
+	}
+	if *got.BankedResets != 2 {
+		t.Fatalf("banked resets = %d, want 2", *got.BankedResets)
+	}
+}
+
+// None available is a real answer and different from "not reported": one says
+// you have no resets to spend, the other says we do not know.
+func TestParseDistinguishesZeroResetsFromAbsent(t *testing.T) {
+	withZero := `{
+      "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"0 available"}
+      ]}`
+	got, err := openusage.Parse([]byte(withZero), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil || *got.BankedResets != 0 {
+		t.Fatalf("zero available must be reported as zero, got %v", got.BankedResets)
+	}
+
+	without := `{
+      "providerId":"claude","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"}
+      ]}`
+	got, err = openusage.Parse([]byte(without), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("a provider that does not report resets must stay nil, got %v", *got.BankedResets)
+	}
+}
+
+// The value is prose from another system, so an unexpected shape must not fail
+// the whole snapshot: the usage numbers matter more than this one extra.
+func TestParseIgnoresUnreadableResetText(t *testing.T) {
+	payload := `{
+      "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"see dashboard"}
+      ]}`
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatalf("unreadable reset text must not fail the snapshot: %v", err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("unparseable text should report nothing, got %v", *got.BankedResets)
+	}
+	assertClose(t, got.Weekly.Remaining, .5)
 }

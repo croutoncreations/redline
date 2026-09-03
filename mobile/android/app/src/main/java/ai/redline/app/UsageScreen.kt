@@ -377,6 +377,22 @@ private fun ProviderCard(
                     it.resetInferred, it.resetsAt,
                 )
             }
+            // Worth showing beside an exhausted window, because spending one is
+            // what gets work moving again. Labelled in full: a bare number here
+            // would read as yet another usage meter.
+            provider.bankedResets?.let { resets ->
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (resets == 1) "1 available" else "$resets available",
+                        color = if (resets > 0) TextPrimary else TextMuted,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
             provider.pools.forEach { pool ->
                 Spacer(Modifier.height(12.dp))
                 Meter(
