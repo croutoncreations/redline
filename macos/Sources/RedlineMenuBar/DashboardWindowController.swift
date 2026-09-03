@@ -8,14 +8,20 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
     private static let refreshIdentifier = NSToolbarItem.Identifier("RedlineRefresh")
     private static let statusIdentifier = NSToolbarItem.Identifier("RedlineConnectionStatus")
     private static let browserIdentifier = NSToolbarItem.Identifier("RedlineOpenBrowser")
+    private static let menuIdentifier = NSToolbarItem.Identifier("RedlineDashboardMenu")
 
     private let dashboardURL: URL
+    /// What the overflow menu can ask the app to do. Supplied by the owner so
+    /// this window does not need its own copy of the pairing or update
+    /// machinery.
+    private let actions: DashboardMenuActions
     private let navigationPolicy: DashboardNavigationPolicy
     private let webView: WKWebView
     private let connectionLabel = NSTextField(labelWithString: "Connecting…")
 
-    init(dashboardURL: URL) {
+    init(dashboardURL: URL, actions: DashboardMenuActions = DashboardMenuActions()) {
         self.dashboardURL = dashboardURL
+        self.actions = actions
         navigationPolicy = DashboardNavigationPolicy(dashboardURL: dashboardURL)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
@@ -65,6 +71,59 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
         NSWorkspace.shared.open(dashboardURL)
     }
 
+    /// Pops the overflow menu under its toolbar button.
+    @objc private func showOverflowMenu(_ sender: NSButton) {
+        let menu = buildMenu()
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: sender.bounds.height + 4),
+            in: sender
+        )
+    }
+
+    /// The tag is the command's position in the shared list, set when the menu
+    /// was built, so the two cannot disagree about which entry was clicked.
+    @objc private func runMenuAction(_ sender: NSMenuItem) {
+        let commands = DashboardMenu.items.compactMap(\.action)
+        guard sender.tag >= 0, sender.tag < commands.count else { return }
+        perform(commands[sender.tag])
+    }
+
+    private func perform(_ action: DashboardMenu.Action) {
+        switch action {
+        case .pairDevice: actions.pairDevice()
+        case .checkForUpdates: actions.checkForUpdates()
+        case .showAppSetup: actions.showAppSetup()
+        case .openInBrowser: openInBrowser()
+        case .openMoreTools: NSWorkspace.shared.open(ProductLinks.moreTools)
+        case .openBuilderUpdates: NSWorkspace.shared.open(ProductLinks.builderUpdates)
+        }
+    }
+
+    /// Builds the overflow menu from the shared definition, so this window and
+    /// the menu bar cannot drift apart on what they offer.
+    private func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        var commandIndex = 0
+        for item in DashboardMenu.items {
+            switch item {
+            case .separator:
+                menu.addItem(.separator())
+            case .command(let title, _):
+                let menuItem = NSMenuItem(
+                    title: title,
+                    action: #selector(runMenuAction(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.tag = commandIndex
+                menu.addItem(menuItem)
+                commandIndex += 1
+            }
+        }
+        return menu
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         connectionLabel.stringValue = "Connecting…"
         connectionLabel.textColor = .secondaryLabelColor
@@ -106,11 +165,11 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.refreshIdentifier, .flexibleSpace, Self.statusIdentifier, Self.browserIdentifier]
+        [Self.refreshIdentifier, .flexibleSpace, Self.statusIdentifier, Self.browserIdentifier, Self.menuIdentifier]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.refreshIdentifier, .flexibleSpace, Self.statusIdentifier, Self.browserIdentifier]
+        [Self.refreshIdentifier, .flexibleSpace, Self.statusIdentifier, Self.browserIdentifier, Self.menuIdentifier]
     }
 
     func toolbar(
@@ -140,8 +199,46 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
             item.target = self
             item.action = #selector(openInBrowser)
             return item
+        case Self.menuIdentifier:
+            // A plain item hosting a button rather than NSMenuToolbarItem,
+            // which did not appear in this toolbar at runtime. A button that
+            // pops its own menu is one less framework behaviour to rely on,
+            // and it renders identically.
+            let button = NSButton(
+                image: NSImage(
+                    systemSymbolName: "ellipsis.circle",
+                    accessibilityDescription: "More actions"
+                ) ?? NSImage(),
+                target: self,
+                action: #selector(showOverflowMenu(_:))
+            )
+            button.bezelStyle = .texturedRounded
+            button.setAccessibilityLabel("More actions")
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "More"
+            item.view = button
+            // Keeps the item reachable from the overflow chevron when the
+            // window is too narrow to show every button.
+            item.menuFormRepresentation = NSMenuItem(
+                title: "More",
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.menuFormRepresentation?.submenu = buildMenu()
+            return item
         default:
             return nil
         }
     }
+}
+
+/// Handlers the dashboard window calls when its menu is used.
+///
+/// Passed in rather than reached for, so the window stays a view: pairing and
+/// updates are owned by the menu bar controller, which already has them.
+@MainActor
+struct DashboardMenuActions {
+    var pairDevice: () -> Void = {}
+    var checkForUpdates: () -> Void = {}
+    var showAppSetup: () -> Void = {}
 }

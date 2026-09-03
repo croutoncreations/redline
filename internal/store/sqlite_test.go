@@ -340,8 +340,8 @@ func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
 
 	withZero := decision.UsageSnapshot{
 		Provider: "codex", ObservedAt: base,
-		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
-		Source:     "openusage", Confidence: "high", BankedResets: &zero,
+		Weekly: decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source: "openusage", Confidence: "high", BankedResets: &zero,
 	}
 	if err := db.SaveSnapshot(context.Background(), withZero, nil); err != nil {
 		t.Fatal(err)
@@ -356,8 +356,8 @@ func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
 
 	absent := decision.UsageSnapshot{
 		Provider: "claude", ObservedAt: base,
-		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
-		Source:     "openusage", Confidence: "high",
+		Weekly: decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source: "openusage", Confidence: "high",
 	}
 	if err := db.SaveSnapshot(context.Background(), absent, nil); err != nil {
 		t.Fatal(err)

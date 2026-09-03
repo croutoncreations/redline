@@ -12,7 +12,16 @@ final class MenuBarController: NSObject {
     private let popoverModel: PopoverViewModel
     private let updates: NativeUpdateController
     private let dashboardURL: URL
-    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
+    private lazy var dashboardWindow = DashboardWindowController(
+        dashboardURL: dashboardURL,
+        // The same handlers the menu bar uses, so the two menus cannot do
+        // subtly different things under the same labels.
+        actions: DashboardMenuActions(
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
+            checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
+            showAppSetup: { [weak self] in self?.showAppSetup() }
+        )
+    )
     private lazy var runLogWindow = RunLogWindowController(client: client)
     private lazy var pairDeviceWindow = PairDeviceWindowController(client: client, configURL: configURL)
     private lazy var notifications = NativeNotificationController(
