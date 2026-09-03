@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,41 @@ func TestRunEventsBoundLargePayloads(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"payload_truncated":true`) {
 		t.Fatalf("event result does not explain truncation: %s", encoded)
+	}
+}
+
+func TestRunEventsReturnsMostRecentWhenTruncated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs/run-1/events", func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		all := []map[string]any{
+			{"id": 1, "run_id": "run-1", "type": "run.started", "occurred_at": "2026-07-24T12:00:00Z", "payload": map[string]any{}},
+			{"id": 2, "run_id": "run-1", "type": "run.progress", "occurred_at": "2026-07-24T12:01:00Z", "payload": map[string]any{}},
+			{"id": 3, "run_id": "run-1", "type": "run.completed", "occurred_at": "2026-07-24T12:02:00Z", "payload": map[string]any{}},
+		}
+		// Mirrors store.ListRunEvents: server-side truncation keeps the most
+		// recent `limit` rows, returned oldest-to-newest.
+		if limit < len(all) {
+			all = all[len(all)-limit:]
+		}
+		_ = json.NewEncoder(w).Encode(all)
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_run_events", map[string]any{
+		"run_id": "run-1", "limit": 2,
+	})
+	if result.IsError {
+		t.Fatalf("events error: %s", contentText(result))
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"run.completed"`) {
+		t.Fatalf("run_events with limit=2 dropped the most recent event: %s", encoded)
 	}
 }
 
