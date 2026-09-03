@@ -71,6 +71,14 @@ public struct RedlineAPIClient: Sendable {
         _ = try await request(endpoint(["v1", "runs", runID, "read"]), method: "POST", as: ReadResult.self)
     }
 
+    /// Mints a short-lived pairing token.
+    ///
+    /// The same endpoint `redline pair --qr` uses, so a code from the menu bar
+    /// and a code from the terminal are interchangeable.
+    public func createPairingToken() async throws -> PairingToken {
+        try await request(baseURL.appending(path: "v1/pairing"), method: "POST", as: PairingToken.self)
+    }
+
     public func markAllRunsRead() async throws {
         _ = try await request(endpoint(["v1", "runs", "read-all"]), method: "POST", as: ReadResult.self)
     }
@@ -108,6 +116,35 @@ public struct RedlineAPIClient: Sendable {
 }
 
 private struct ReadResult: Codable { let read: Bool }
+
+/// A single-use credential a phone exchanges for a durable API token.
+public struct PairingToken: Codable, Sendable {
+    public let token: String
+    /// RFC 3339, kept as a string because the shared decoder has no date
+    /// strategy and every other timestamp in this client is handled the same
+    /// way. Changing that globally to serve one field would risk every
+    /// existing model.
+    public let expiresAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case token = "pairing_token"
+        case expiresAt = "expires_at"
+    }
+
+    /// The expiry as a date, or nil if the service sent something unparseable.
+    ///
+    /// The formatter is built per call rather than shared, because
+    /// ISO8601DateFormatter is not Sendable and this runs once per window.
+    public var expiry: Date? {
+        let formatter = ISO8601DateFormatter()
+        // The service includes fractional seconds, which the default options
+        // reject outright rather than ignoring.
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: expiresAt) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: expiresAt)
+    }
+}
 
 public struct ProviderControlResult: Codable, Sendable {
     public let providerAccountID: String

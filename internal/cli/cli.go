@@ -865,6 +865,13 @@ func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessio
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
 	}
 	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
+	// Built with RawFragment below rather than assigning Values.Encode() to
+	// Fragment: Fragment holds a DECODED value and re-escapes on the way out,
+	// so an already-encoded string is escaped twice and %2B arrives as %252B.
+	// Tokens are base64url today and contain none of those characters, so this
+	// never fired -- but a QR is exactly the wrong place to keep a latent
+	// encoding bug, since the failure would be a phone that pairs against a
+	// token the desktop never issued.
 	fragment := url.Values{}
 	fragment.Set("pairing_token", token)
 	if relayURL != "" && desktopKey != "" && sessionID != "" {
@@ -875,7 +882,15 @@ func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessio
 		fragment.Set("key", desktopKey)
 		fragment.Set("session", sessionID)
 	}
-	pairingURL.Fragment = fragment.Encode()
+	// Fragment holds the decoded form and RawFragment the encoded one; they
+	// have to agree or url.URL falls back to re-escaping Fragment.
+	encoded := fragment.Encode()
+	decoded, err := url.PathUnescape(encoded)
+	if err != nil {
+		decoded = encoded
+	}
+	pairingURL.Fragment = decoded
+	pairingURL.RawFragment = encoded
 	return pairingURL.String()
 }
 

@@ -51,6 +51,35 @@ func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
 	}
 }
 
+// A token is base64url today, so none of these characters occur in practice.
+// The QR is still the wrong place to keep a latent encoding bug: a phone would
+// redeem a token the desktop never issued, and the only symptom would be a
+// pairing that fails for no visible reason.
+//
+// The expected value is also what the macOS app produces, so the two surfaces
+// cannot drift into emitting different codes for the same token.
+func TestMobilePairingURLEscapesTokensExactlyOnce(t *testing.T) {
+	got := mobilePairingURL("mac.example.ts.net", 443, "a+b/c=d&e", "", "", "")
+	want := "https://mac.example.ts.net/pair#pairing_token=a%2Bb%2Fc%3Dd%26e"
+	if got != want {
+		t.Fatalf("pairing URL = %q, want %q", got, want)
+	}
+
+	// And it must survive the round trip the phone actually performs, which
+	// reads the raw fragment rather than Go's decoded one.
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	values, err := url.ParseQuery(parsed.RawFragment)
+	if err != nil {
+		t.Fatalf("parse fragment: %v", err)
+	}
+	if token := values.Get("pairing_token"); token != "a+b/c=d&e" {
+		t.Fatalf("token did not survive the round trip: %q", token)
+	}
+}
+
 func TestMobilePairingURLIncludesNonDefaultHTTPSPort(t *testing.T) {
 	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "")
 	want := "https://macbook-pro.tail2e5d9.ts.net:8443/pair#pairing_token=one-time-token"

@@ -6,6 +6,7 @@ final class MenuBarController: NSObject {
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let showAppSetup: @MainActor () -> Void
+    private let configURL: URL
     private let installationIssue: @MainActor () -> InstallationIssue?
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
@@ -13,6 +14,7 @@ final class MenuBarController: NSObject {
     private let dashboardURL: URL
     private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
     private lazy var runLogWindow = RunLogWindowController(client: client)
+    private lazy var pairDeviceWindow = PairDeviceWindowController(client: client, configURL: configURL)
     private lazy var notifications = NativeNotificationController(
         onOpenRun: { [weak self] runID in self?.openRun(runID) }
     )
@@ -27,6 +29,7 @@ final class MenuBarController: NSObject {
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAgentPermissionHelp: { [weak self] in self?.showAgentPermissionHelp() },
             showAppSetup: showAppSetup,
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
             quit: { NSApplication.shared.terminate(nil) }
         )
     )
@@ -37,13 +40,15 @@ final class MenuBarController: NSObject {
         apiToken: String,
         supervisor: ServiceSupervisor,
         installationIssue: @escaping @MainActor () -> InstallationIssue? = { nil },
-        showAppSetup: @escaping @MainActor () -> Void = {}
+        showAppSetup: @escaping @MainActor () -> Void = {},
+        configURL: URL
     ) {
         client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
         dashboardURL = APICredentialStore.authenticatedDashboardURL(baseURL: apiURL, token: apiToken)
         self.supervisor = supervisor
         self.installationIssue = installationIssue
         self.showAppSetup = showAppSetup
+        self.configURL = configURL
         popoverModel = PopoverViewModel(client: client)
         updates = NativeUpdateController()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
