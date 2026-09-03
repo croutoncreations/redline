@@ -227,5 +227,5 @@ func parseTime(name, value string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse %s: %w", name, err)
 	}
-	return parsed, nil
+	return parsed.UTC(), nil
 }

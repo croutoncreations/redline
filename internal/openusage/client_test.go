@@ -173,6 +173,31 @@ func TestParseAcceptsProviderWithoutShortWindow(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, 0.67)
 }
 
+func TestParseNormalizesNonUTCTimestampsToUTC(t *testing.T) {
+	// "-04:00" is the same instant as "2026-07-16T22:00:00Z" but every other
+	// usage source in this codebase normalizes to UTC before storing a
+	// snapshot; ObservedAt/ResetsAt must match that invariant so downstream
+	// lexicographic sorting (e.g. SQLite's `ORDER BY observed_at`) stays
+	// consistent with actual chronological order.
+	payload := `[{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00-04:00","lines":[
+      {"type":"progress","label":"Session","used":70,"limit":100,"resetsAt":"2026-07-16T18:00:00-04:00"},
+      {"type":"progress","label":"Weekly","used":53,"limit":100,"resetsAt":"2026-07-17T01:00:00-04:00"}
+    ]}]`
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedAt.Location() != time.UTC {
+		t.Fatalf("ObservedAt location = %v, want UTC", got.ObservedAt.Location())
+	}
+	if got.Short.ResetsAt.Location() != time.UTC {
+		t.Fatalf("Short.ResetsAt location = %v, want UTC", got.Short.ResetsAt.Location())
+	}
+	if got.Weekly.ResetsAt.Location() != time.UTC {
+		t.Fatalf("Weekly.ResetsAt location = %v, want UTC", got.Weekly.ResetsAt.Location())
+	}
+}
+
 func TestParseRejectsMissingWeeklyWindow(t *testing.T) {
 	payload := `[{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[]}]`
 	if _, err := openusage.Parse([]byte(payload), "codex"); err == nil {
