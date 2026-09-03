@@ -80,7 +80,7 @@ class PairingViewModel(
                     // Stored even when empty, so re-pairing with a desktop that
                     // has dropped its relay clears the stale details rather
                     // than leaving the phone aimed at a relay nobody answers.
-                    settings.updateRelay(request.relayUrl, request.desktopKey)
+                    settings.updateRelay(request.relayUrl, request.desktopKey, request.relaySession)
                     _state.value = PairingUiState(working = false, pairedTo = baseUrl)
                 },
                 onFailure = { error ->

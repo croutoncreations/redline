@@ -13,6 +13,7 @@ data class PairingRequest(
     // pairing must still work, it just leaves the relay unavailable.
     @SerialName("relay_url") val relayUrl: String = "",
     @SerialName("desktop_key") val desktopKey: String = "",
+    @SerialName("relay_session") val relaySession: String = "",
 )
 
 /**

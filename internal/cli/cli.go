@@ -515,9 +515,9 @@ func newRelayDialer(cfg config.Config, localAddr string) (*relay.Dialer, error) 
 	if err != nil {
 		return nil, err
 	}
-	sessionID := cfg.Relay.SessionID
-	if strings.TrimSpace(sessionID) == "" {
-		return nil, fmt.Errorf("relay.session_id is required; run `redline pair --qr` to set one up")
+	sessionID := strings.TrimSpace(cfg.Relay.SessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("relay.session_id is required in the config when relay.enabled is true")
 	}
 	return relay.NewDialer(relay.DialerOptions{
 		RelayURL:         cfg.Relay.URL,
@@ -819,17 +819,25 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	// key that identifies it. Loading the keypair here rather than generating
 	// one means the identity in the QR is the same one the relay leg will
 	// present; a fresh key per QR would authenticate against nothing.
-	relayURL, desktopKey := "", ""
+	relayURL, desktopKey, sessionID := "", "", ""
 	if cfg.Relay.Enabled {
 		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
 		if err != nil {
 			fmt.Fprintln(stderr, "load relay identity:", err)
 			return 1
 		}
+		// Without the session id the phone knows where the relay is and has no
+		// idea which session on it belongs to this desktop, so all three travel
+		// together or none of them do.
+		sessionID = strings.TrimSpace(cfg.Relay.SessionID)
+		if sessionID == "" {
+			fmt.Fprintln(stderr, "relay.enabled is set but relay.session_id is empty; add one to the config")
+			return 1
+		}
 		relayURL = cfg.Relay.URL
 		desktopKey = core.DesktopPublicKey(keypair)
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey)
+	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey, sessionID)
 	code, err := qrcode.New(pairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
@@ -851,7 +859,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 // turned on. Omitting them entirely, rather than sending empty values, keeps a
 // QR from a relay-less desktop byte-identical to the one this has always
 // produced, so an older phone and a newer one read it the same way.
-func mobilePairingURL(host string, port int, token, relayURL, desktopKey string) string {
+func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessionID string) string {
 	endpoint := host
 	if port != 443 {
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
@@ -859,11 +867,13 @@ func mobilePairingURL(host string, port int, token, relayURL, desktopKey string)
 	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
 	fragment := url.Values{}
 	fragment.Set("pairing_token", token)
-	if relayURL != "" && desktopKey != "" {
-		// Both or neither: a relay address without a key gives the phone
-		// somewhere to connect and no way to verify who answers.
+	if relayURL != "" && desktopKey != "" && sessionID != "" {
+		// All three or none. A relay address without a key gives the phone
+		// somewhere to connect and no way to verify who answers; without a
+		// session id it cannot find this desktop on the relay at all.
 		fragment.Set("relay", relayURL)
 		fragment.Set("key", desktopKey)
+		fragment.Set("session", sessionID)
 	}
 	pairingURL.Fragment = fragment.Encode()
 	return pairingURL.String()

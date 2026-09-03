@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -168,6 +170,46 @@ func TestDialerRetriesAnUnavailableRelay(t *testing.T) {
 	// certainly not dozens, which would be the tight loop this guards against.
 	if got > 10 {
 		t.Fatalf("dialer retried %d times in 3s, which is a hot loop", got)
+	}
+}
+
+// An idle timeout is how a session normally ends: the phone went away. It must
+// not be treated as a failure, because the accrued backoff would then make the
+// desktop slow to answer the next time someone opened the app -- punishing the
+// user for having put their phone down.
+func TestIdleTimeoutIsNotTreatedAsAFailure(t *testing.T) {
+	if !errors.Is(fmtErrorfIdle(), errIdle) {
+		t.Fatal("an idle timeout must be recognisable as such by the caller")
+	}
+
+	// A real failure must remain distinguishable from it, or the two would
+	// collapse back into one behaviour.
+	if errors.Is(errors.New("connection refused"), errIdle) {
+		t.Fatal("an ordinary failure must not look like an idle timeout")
+	}
+}
+
+func fmtErrorfIdle() error {
+	return fmt.Errorf("%w after %v", errIdle, 5*time.Minute)
+}
+
+// A connection that worked for an hour and then dropped should retry promptly.
+// Reusing the backoff from a previous outage would leave a healthy desktop
+// unreachable for half a minute for no reason.
+func TestBackoffResetsAfterAConnectionThatWorked(t *testing.T) {
+	b := newBackoff()
+	for i := 0; i < 8; i++ {
+		b.next()
+	}
+	grown := b.next()
+	b.reset()
+	afterReset := b.next()
+
+	if afterReset >= grown {
+		t.Fatalf("backoff did not reset after a working connection: %v then %v", grown, afterReset)
+	}
+	if afterReset > 5*time.Second {
+		t.Fatalf("first retry after a working connection should be prompt, got %v", afterReset)
 	}
 }
 

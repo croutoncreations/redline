@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -42,6 +43,12 @@ type Dialer struct {
 	opts DialerOptions
 }
 
+// errIdle marks the ordinary end of a session, where no phone has sent
+// anything for the idle timeout. It is separated from real failures because
+// the two deserve opposite responses: reconnect promptly after a quiet spell,
+// back off after an outage.
+var errIdle = errors.New("idle timeout")
+
 // NewDialer creates a Dialer from the given options.
 func NewDialer(opts DialerOptions) *Dialer {
 	return &Dialer{opts: opts}
@@ -63,7 +70,15 @@ func (d *Dialer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			// Any other error means the relay is unavailable or dropped us.
+			// An idle timeout is the ordinary end of a session: the phone put
+			// itself away. Treating it as a failure would grow the backoff, so
+			// a desktop that had merely been quiet would then be slow to answer
+			// the next time someone opened the app.
+			if errors.Is(err, errIdle) {
+				bo.reset()
+				continue
+			}
+			// Anything else means the relay is unavailable or dropped us.
 			// Sleep the backoff, then try again.
 			wait := bo.next()
 			select {
@@ -136,7 +151,10 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 			// fired. Close normally and let Run reconnect (or wait for a phone
 			// to come back).
 			_ = conn.Close(websocket.StatusNormalClosure, "idle timeout")
-			return fmt.Errorf("idle timeout after %v", handler.IdleSince(connectedAt))
+			// IdleSince returns an instant, so report the elapsed time rather
+			// than a wall clock timestamp, which read as if it were a duration.
+			idleFor := time.Since(handler.IdleSince(connectedAt)).Round(time.Second)
+			return fmt.Errorf("%w after %v", errIdle, idleFor)
 		}
 
 		reply, err := handler.HandleFrame(ctx, frame)

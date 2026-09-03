@@ -14,7 +14,7 @@ import (
 func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 	got := mobilePairingURL(
 		"macbook.example.ts.net", 443, "one-time-token",
-		"https://relay.example.com", "ZGVza3RvcC1rZXk=",
+		"https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123",
 	)
 
 	parsed, err := url.Parse(got)
@@ -34,12 +34,17 @@ func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 	if fragment.Get("key") != "ZGVza3RvcC1rZXk=" {
 		t.Fatalf("key: %q", fragment.Get("key"))
 	}
+	// Without this the phone knows where the relay is but not which session
+	// on it belongs to this desktop.
+	if fragment.Get("session") != "session-abcdefghij0123" {
+		t.Fatalf("session: %q", fragment.Get("session"))
+	}
 }
 
 // With the relay off, the QR must look exactly as it always has, so a phone
 // paired against an older desktop and a newer one behave identically.
 func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
-	got := mobilePairingURL("macbook.example.ts.net", 443, "one-time-token", "", "")
+	got := mobilePairingURL("macbook.example.ts.net", 443, "one-time-token", "", "", "")
 	want := "https://macbook.example.ts.net/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
@@ -47,12 +52,12 @@ func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
 }
 
 func TestMobilePairingURLIncludesNonDefaultHTTPSPort(t *testing.T) {
-	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "")
+	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "")
 	want := "https://macbook-pro.tail2e5d9.ts.net:8443/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
 	}
-	if defaultPort := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
+	if defaultPort := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
 		t.Fatalf("default pairing URL = %q", defaultPort)
 	}
 }

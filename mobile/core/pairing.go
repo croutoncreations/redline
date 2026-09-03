@@ -28,6 +28,9 @@ type PairingRequest struct {
 	PairingToken string `json:"pairing_token"`
 	DesktopKey   string `json:"desktop_key,omitempty"`
 	RelayURL     string `json:"relay_url,omitempty"`
+	// RelaySession names this desktop's session on the relay. Without it the
+	// phone knows where the relay is but not which conversation is its own.
+	RelaySession string `json:"relay_session,omitempty"`
 }
 
 // ParsePairingURL reads a scanned QR code and returns the pairing details as
@@ -51,6 +54,26 @@ type PairingRequest struct {
 // transport, or aim the phone at an internal address such as a cloud metadata
 // endpoint. Dropping the field degrades to direct-only pairing, which is a
 // working app rather than a broken one.
+// safeSessionID returns the relay session id only if it has the shape the
+// relay itself accepts, and "" otherwise.
+//
+// Mirroring the relay's own rule here means a malformed QR fails at the scan,
+// where the message can say so, rather than at the first connection attempt.
+func safeSessionID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 16 || len(trimmed) > 128 {
+		return ""
+	}
+	for _, r := range trimmed {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return ""
+		}
+	}
+	return trimmed
+}
+
 func safeRelayURL(raw string) string {
 	if err := ValidateRelayURL(raw); err != nil {
 		return ""
@@ -144,6 +167,7 @@ func ParsePairingURL(raw string) (string, error) {
 		PairingToken: pairingToken,
 		DesktopKey:   desktopKey,
 		RelayURL:     safeRelayURL(token.Get("relay")),
+		RelaySession: safeSessionID(token.Get("session")),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode pairing request: %w", err)

@@ -526,6 +526,51 @@ func TestHostileRelayURLsAreRejected(t *testing.T) {
 	}
 }
 
+// A relay address is useless without knowing which session on it belongs to
+// this desktop, so the id travels in the QR and is validated the same way the
+// relay validates it -- failing at the scan, where a message can explain, not
+// at the first connection attempt.
+func TestPairingCarriesTheRelaySession(t *testing.T) {
+	raw, err := ParsePairingURL(
+		"https://host.ts.net:8443/pair#token=abc" +
+			"&relay=" + url.QueryEscape("https://relay.example.com") +
+			"&session=session-abcdefghij0123",
+	)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var req PairingRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.RelaySession != "session-abcdefghij0123" {
+		t.Fatalf("relay session: %q", req.RelaySession)
+	}
+}
+
+func TestMalformedRelaySessionsAreDropped(t *testing.T) {
+	for _, bad := range []string{
+		"short",                     // too short to be unguessable
+		"has spaces in it here now", // not the relay's alphabet
+		"../../etc/passwd",          // path-like
+		strings.Repeat("x", 200),    // too long
+	} {
+		got, err := ParsePairingURL(
+			"https://host.ts.net:8443/pair#token=abc&session=" + url.QueryEscape(bad),
+		)
+		if err != nil {
+			continue
+		}
+		var req PairingRequest
+		if err := json.Unmarshal([]byte(got), &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if req.RelaySession != "" {
+			t.Fatalf("accepted a malformed session id %q as %q", bad, req.RelaySession)
+		}
+	}
+}
+
 // One validator, three callers: the phone reading a QR, the desktop loading
 // config, and the dialer. They must agree, so the rule is tested once here
 // rather than three times in three shapes.

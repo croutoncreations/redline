@@ -1,5 +1,20 @@
 package ai.redline.app
 
+/*
+ * Transport policy for reaching the desktop.
+ *
+ * STATUS: the decisions in this file are settled and tested, but the phone
+ * cannot yet dial the relay -- mobile/core has the Noise session and the
+ * pairing parser, and no WebSocket client. Until that exists, chooseTransport
+ * is only ever called with directReachable = true, and the "relayed" marker in
+ * UsageScreen cannot appear.
+ *
+ * This is deliberate rather than forgotten. The desktop leg, the relay, and the
+ * pairing hand-off are each proven end to end; the phone's dialer is the one
+ * remaining piece, and the policy it will need is easier to get right in
+ * isolation than tangled into a ViewModel.
+ */
+
 /**
  * How the phone is currently reaching the desktop.
  *

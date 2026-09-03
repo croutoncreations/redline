@@ -29,14 +29,16 @@ class PairingViewModelTest {
         var token: String? = null
         var relayUrl: String? = null
         var desktopKey: String? = null
+        var relaySession: String? = null
         override fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
             this.token = token
         }
 
-        override fun updateRelay(relayUrl: String, desktopKey: String) {
+        override fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String) {
             this.relayUrl = relayUrl
             this.desktopKey = desktopKey
+            this.relaySession = relaySession
         }
     }
 
@@ -57,7 +59,7 @@ class PairingViewModelTest {
                     """{"base_url":"https://macbook.example.ts.net",
                         "pairing_token":"one-time-token",
                         "relay_url":"https://relay.example.com",
-                        "desktop_key":"ZGVza3RvcC1wdWJsaWMta2V5LWJhc2U2NA=="}"""
+                        "desktop_key":"ZGVza3RvcC1wdWJsaWMta2V5LWJhc2U2NA==","relay_session":"session-abcdefghij0123"}"""
                         .trimIndent().replace("\n", "").replace("  ", "")
                 },
             ),
@@ -70,6 +72,9 @@ class PairingViewModelTest {
 
         assertEquals("https://relay.example.com", settings.relayUrl)
         assertEquals("ZGVza3RvcC1wdWJsaWMta2V5LWJhc2U2NA==", settings.desktopKey)
+        // Without the session id the phone knows where the relay is but not
+        // which conversation on it is its own.
+        assertEquals("session-abcdefghij0123", settings.relaySession)
     }
 
     /**

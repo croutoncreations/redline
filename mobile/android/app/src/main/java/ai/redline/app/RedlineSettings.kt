@@ -37,7 +37,7 @@ interface RedlineSettingsWriter {
      * and pairing must still work without them: no relay simply means direct
      * only, which is what every existing paired phone already does.
      */
-    fun updateRelay(relayUrl: String, desktopKey: String)
+    fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String)
 }
 
 class RedlineSettings(context: Context) : RedlineSettingsWriter {
@@ -85,14 +85,19 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
     val desktopKey: String
         get() = preferences.getString(KEY_DESKTOP_KEY, null) ?: ""
 
+    /** This desktop's session on the relay, or "" when it published none. */
+    val relaySession: String
+        get() = preferences.getString(KEY_RELAY_SESSION, null) ?: ""
+
     /** Whether a relayed fallback is possible at all. */
     val relayConfigured: Boolean
-        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank()
+        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank()
 
-    override fun updateRelay(relayUrl: String, desktopKey: String) {
+    override fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String) {
         preferences.edit()
             .putString(KEY_RELAY_URL, relayUrl)
             .putString(KEY_DESKTOP_KEY, desktopKey)
+            .putString(KEY_RELAY_SESSION, relaySession)
             .apply()
     }
 
@@ -119,6 +124,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
             .remove(KEY_BASE_URL)
             .remove(KEY_RELAY_URL)
             .remove(KEY_DESKTOP_KEY)
+            .remove(KEY_RELAY_SESSION)
             .apply()
     }
 
@@ -127,6 +133,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
         const val KEY_TOKEN = "token"
         const val KEY_RELAY_URL = "relay_url"
         const val KEY_DESKTOP_KEY = "desktop_key"
+        const val KEY_RELAY_SESSION = "relay_session"
 
         const val ENCRYPTED_FILE = "redline.secure"
         const val PLAIN_FILE = "redline"
