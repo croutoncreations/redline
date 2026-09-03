@@ -57,7 +57,12 @@ data class Pool(
 val redlineJson: Json = Json { ignoreUnknownKeys = true }
 
 /**
- * Formats a countdown for display, e.g. "5h 12m" or "3 days".
+ * Formats a countdown for display, e.g. "5h 12m" or "1d 6h".
+ *
+ * Each unit keeps the one below it. Collapsing to a bare "1 day" covered
+ * everything from 24 to 47 hours, which is a 23 hour ambiguity on exactly the
+ * number someone is planning around. Minutes are dropped past a day, where
+ * they are noise beside the hours.
  *
  * Kept as a pure function so it is unit-testable without a device.
  */
@@ -67,7 +72,10 @@ fun formatCountdown(seconds: Long): String {
     val hours = minutes / 60
     val days = hours / 24
     return when {
-        days >= 1 -> if (days == 1L) "1 day" else "$days days"
+        days >= 1 -> {
+            val remainingHours = hours % 24
+            if (remainingHours == 0L) "${days}d" else "${days}d ${remainingHours}h"
+        }
         hours >= 1 -> {
             val remainingMinutes = minutes % 60
             if (remainingMinutes == 0L) "${hours}h" else "${hours}h ${remainingMinutes}m"
@@ -88,4 +96,44 @@ fun providerStatus(provider: ProviderUsage): String = when {
     provider.paused -> "Paused"
     provider.stale -> "Stale"
     else -> "Live"
+}
+
+/**
+ * Formats when a window reopens, in the reader's own timezone.
+ *
+ * A countdown answers "how long"; this answers "when", which is the question
+ * you match against a calendar. Showing both covers the two ways people hold a
+ * future time in their head, and the phone has room for it.
+ *
+ * The wording narrows as the date approaches: a weekday is meaningless for
+ * something later today, and ambiguous beyond a week.
+ *
+ * @param resetsAt an RFC 3339 timestamp from the core, or "" when unknown
+ * @param zone the display timezone, injected so tests do not depend on the
+ *   machine's own
+ * @param now the instant to measure from, injected for the same reason
+ */
+fun formatResetAt(
+    resetsAt: String,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    now: java.time.Instant = java.time.Instant.now(),
+): String {
+    // A malformed or absent timestamp is not worth crashing over, and showing
+    // nothing beats showing junk beside a real countdown.
+    val instant = runCatching { java.time.Instant.parse(resetsAt) }.getOrNull() ?: return ""
+
+    val target = instant.atZone(zone)
+    val today = now.atZone(zone).toLocalDate()
+    val resetDay = target.toLocalDate()
+    val daysAhead = java.time.temporal.ChronoUnit.DAYS.between(today, resetDay)
+
+    val time = target.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a"))
+    return when {
+        daysAhead <= 0L -> time
+        daysAhead == 1L -> "Tomorrow $time"
+        // Within the week a weekday is the most natural handle.
+        daysAhead < 7L -> target.format(java.time.format.DateTimeFormatter.ofPattern("EEE")) + " $time"
+        // Beyond that "Friday" could be any of several, so name the date.
+        else -> target.format(java.time.format.DateTimeFormatter.ofPattern("MMM d,")) + " $time"
+    }
 }

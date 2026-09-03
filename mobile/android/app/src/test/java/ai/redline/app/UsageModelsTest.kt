@@ -73,8 +73,70 @@ class UsageModelsTest {
         assertEquals("5m", formatCountdown(5 * 60))
         assertEquals("2h", formatCountdown(2 * 3600))
         assertEquals("2h 30m", formatCountdown(2 * 3600 + 30 * 60))
-        assertEquals("1 day", formatCountdown(24 * 3600))
-        assertEquals("4 days", formatCountdown(4 * 24 * 3600))
+    }
+
+    /**
+     * Days must keep their hours.
+     *
+     * "1 day" covered everything from 24 to 47 hours, which is a 23 hour
+     * ambiguity on exactly the number someone is planning around: whether a
+     * window reopens tonight or tomorrow evening changes what you do next.
+     */
+    @Test
+    fun countdownsOverADayKeepTheirHoursAndMinutes() {
+        assertEquals("1d", formatCountdown(24 * 3600))
+        assertEquals("1d 1h", formatCountdown(25 * 3600))
+        assertEquals("1d 23h", formatCountdown(47 * 3600))
+        assertEquals("2d", formatCountdown(48 * 3600))
+        assertEquals("4d 6h", formatCountdown(4 * 24 * 3600 + 6 * 3600))
+        // Minutes still matter just under a day, where the wait is short
+        // enough to wait out.
+        assertEquals("23h 45m", formatCountdown(23 * 3600 + 45 * 60))
+        // Past a day, minutes are noise beside the hours.
+        assertEquals("3d 2h", formatCountdown(3 * 24 * 3600 + 2 * 3600 + 45 * 60))
+    }
+
+    /**
+     * The absolute time answers the other question people ask: not "how long"
+     * but "when", which is what you match against a calendar.
+     */
+    @Test
+    fun formatsTheAbsoluteResetTime() {
+        // A fixed instant so the assertion does not depend on today.
+        val friday = "2026-09-04T21:00:00Z"
+        val zone = java.time.ZoneId.of("America/Los_Angeles")
+        val now = java.time.Instant.parse("2026-09-02T21:00:00Z")
+
+        // Two days out: named day plus time, because "Friday" is how people
+        // hold a date in their head.
+        assertEquals("Fri 2:00 PM", formatResetAt(friday, zone, now))
+
+        // Later today: the day name would be noise.
+        assertEquals(
+            "8:30 PM",
+            formatResetAt("2026-09-03T03:30:00Z", zone, java.time.Instant.parse("2026-09-03T01:00:00Z")),
+        )
+
+        // Tomorrow is worth naming as such rather than by weekday.
+        assertEquals(
+            "Tomorrow 2:00 PM",
+            formatResetAt("2026-09-03T21:00:00Z", zone, now),
+        )
+
+        // Beyond a week a weekday alone is ambiguous, so use a date.
+        assertEquals(
+            "Sep 30, 2:00 PM",
+            formatResetAt("2026-09-30T21:00:00Z", zone, now),
+        )
+    }
+
+    /** A missing or unparseable timestamp must not crash or show junk. */
+    @Test
+    fun absoluteResetTimeToleratesBadInput() {
+        val zone = java.time.ZoneId.of("America/Los_Angeles")
+        val now = java.time.Instant.parse("2026-09-02T21:00:00Z")
+        assertEquals("", formatResetAt("", zone, now))
+        assertEquals("", formatResetAt("not a timestamp", zone, now))
     }
 
     /** Error outranks paused: without data there is nothing to label paused. */

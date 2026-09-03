@@ -230,15 +230,24 @@ private fun ProviderCard(
 
             provider.session?.let {
                 Spacer(Modifier.height(12.dp))
-                Meter("5-hour window", it.remainingPercent, it.resetsInSeconds, it.resetInferred)
+                Meter(
+                    "5-hour window", it.remainingPercent, it.resetsInSeconds,
+                    it.resetInferred, it.resetsAt,
+                )
             }
             provider.weekly?.let {
                 Spacer(Modifier.height(12.dp))
-                Meter("Weekly allowance", it.remainingPercent, it.resetsInSeconds, it.resetInferred)
+                Meter(
+                    "Weekly allowance", it.remainingPercent, it.resetsInSeconds,
+                    it.resetInferred, it.resetsAt,
+                )
             }
             provider.pools.forEach { pool ->
                 Spacer(Modifier.height(12.dp))
-                Meter(pool.label, pool.remainingPercent, pool.resetsInSeconds, pool.resetInferred)
+                Meter(
+                    pool.label, pool.remainingPercent, pool.resetsInSeconds,
+                    pool.resetInferred, pool.resetsAt,
+                )
             }
 
             Spacer(Modifier.height(14.dp))
@@ -284,9 +293,21 @@ private fun CardAction(label: String, emphasised: Boolean = false, onClick: () -
 }
 
 @Composable
-private fun Meter(label: String, percent: Int, resetsInSeconds: Long, resetInferred: Boolean) {
+private fun Meter(
+    label: String,
+    percent: Int,
+    resetsInSeconds: Long,
+    resetInferred: Boolean,
+    resetsAt: String = "",
+) {
+    val countdown = formatCountdown(resetsInSeconds)
+    // Only computed for display; an unparseable or absent timestamp yields "".
+    val absolute = formatResetAt(resetsAt)
     Column(modifier = Modifier.semantics {
-        contentDescription = "$label: $percent percent remaining, resets ${formatCountdown(resetsInSeconds)}"
+        contentDescription = buildString {
+            append("$label: $percent percent remaining, resets $countdown")
+            if (absolute.isNotEmpty()) append(", at $absolute")
+        }
     }) {
         Row {
             Text(label, color = TextPrimary, fontSize = 13.sp)
@@ -307,17 +328,23 @@ private fun Meter(label: String, percent: Int, resetsInSeconds: Long, resetInfer
             trackColor = Line,
         )
         Spacer(Modifier.height(4.dp))
-        Text(
-            // An inferred reset is a guess, and saying so is cheaper than
-            // being subtly wrong.
-            if (resetInferred) {
-                "Resets ~${formatCountdown(resetsInSeconds)}"
-            } else {
-                "Resets in ${formatCountdown(resetsInSeconds)}"
-            },
-            color = TextMuted,
-            fontSize = 11.sp,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                // An inferred reset is a guess, and saying so is cheaper than
+                // being subtly wrong.
+                if (resetInferred) "Resets ~$countdown" else "Resets in $countdown",
+                color = TextMuted,
+                fontSize = 11.sp,
+            )
+            // The absolute time answers "when", which is the question you
+            // match against a calendar; the countdown answers "how long".
+            // People reach for one or the other depending on what they are
+            // deciding, and there is room here for both.
+            if (absolute.isNotEmpty()) {
+                Spacer(Modifier.weight(1f))
+                Text(absolute, color = TextMuted, fontSize = 11.sp)
+            }
+        }
     }
 }
 
