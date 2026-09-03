@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -236,6 +237,48 @@ func TestReadToolsBoundListsAndLogTails(t *testing.T) {
 	}
 	if requestedTail != 32*1024 {
 		t.Fatalf("tail_bytes = %d, want %d", requestedTail, 32*1024)
+	}
+}
+
+func TestRunsListForwardsRequestedLimit(t *testing.T) {
+	var requestedQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		requestedQuery = r.URL.RawQuery
+		// Mirrors the real store: honors a `limit` query param, defaulting to 50 when absent.
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			limit, _ = strconv.Atoi(v)
+		}
+		const totalRuns = 200
+		if limit > totalRuns {
+			limit = totalRuns
+		}
+		runs := make([]map[string]any, 0, limit)
+		for i := 0; i < limit; i++ {
+			runs = append(runs, map[string]any{
+				"id": fmt.Sprintf("run-%d", i), "task_id": "task-1", "state": "succeeded",
+				"started_at": "2026-07-24T12:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	})
+	session := connect(t, mux)
+
+	result := callTool(t, session, "redline_runs_list", map[string]any{"limit": 100})
+	if result.IsError {
+		t.Fatalf("runs error: %s", contentText(result))
+	}
+	if requestedQuery == "" {
+		t.Fatalf("runs_list did not forward the requested limit to /v1/runs (query was empty)")
+	}
+	var output struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Count != 100 || !output.Truncated {
+		t.Fatalf("runs output = %#v, want 100 items reported as truncated", output)
 	}
 }
 

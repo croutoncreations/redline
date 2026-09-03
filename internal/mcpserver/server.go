@@ -437,8 +437,10 @@ func (s *server) profileGet(ctx context.Context, _ *mcp.CallToolRequest, input i
 }
 
 func (s *server) runsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
+	limit := boundedLimit(input.Limit)
 	var items []domain.Run
-	if err := s.client.Do(ctx, http.MethodGet, "/v1/runs", nil, &items); err != nil {
+	path := "/v1/runs?limit=" + strconv.Itoa(limit+1)
+	if err := s.client.Do(ctx, http.MethodGet, path, nil, &items); err != nil {
 		return nil, Output{}, err
 	}
 	return listOutput("run", items, input.Limit)
