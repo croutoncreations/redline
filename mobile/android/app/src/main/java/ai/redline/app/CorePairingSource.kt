@@ -9,6 +9,10 @@ import kotlinx.serialization.Serializable
 data class PairingRequest(
     @SerialName("base_url") val baseUrl: String,
     @SerialName("pairing_token") val pairingToken: String,
+    // Absent from an older desktop's QR, which is why both default to empty:
+    // pairing must still work, it just leaves the relay unavailable.
+    @SerialName("relay_url") val relayUrl: String = "",
+    @SerialName("desktop_key") val desktopKey: String = "",
 )
 
 /**

@@ -29,6 +29,14 @@ data class UsageUiState(
     val view: UsageView? = null,
     val failure: Failure? = null,
     val live: LiveState = LiveState.OFFLINE,
+    /**
+     * How the desktop is being reached.
+     *
+     * Surfaced because a relayed session is slower, metered, and crosses a
+     * third party; someone who expected to be on their own network deserves
+     * to see that they are not.
+     */
+    val transport: Transport = Transport.Direct,
 ) {
     enum class Failure { UNAUTHORIZED, UNREACHABLE }
 

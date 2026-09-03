@@ -69,14 +69,18 @@ class PairingViewModel(
                         source.parsePairingUrl(scanned),
                     )
                     val token = source.redeem(request.baseUrl, request.pairingToken)
-                    request.baseUrl to token
+                    Triple(request.baseUrl, token, request)
                 }
             }
             coroutineContext.ensureActive()
 
             result.fold(
-                onSuccess = { (baseUrl, token) ->
+                onSuccess = { (baseUrl, token, request) ->
                     settings.update(baseUrl, token)
+                    // Stored even when empty, so re-pairing with a desktop that
+                    // has dropped its relay clears the stale details rather
+                    // than leaving the phone aimed at a relay nobody answers.
+                    settings.updateRelay(request.relayUrl, request.desktopKey)
                     _state.value = PairingUiState(working = false, pairedTo = baseUrl)
                 },
                 onFailure = { error ->

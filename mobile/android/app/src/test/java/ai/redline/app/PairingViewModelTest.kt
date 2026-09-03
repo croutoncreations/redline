@@ -27,14 +27,71 @@ class PairingViewModelTest {
     private class FakeSettings : RedlineSettingsWriter {
         var baseUrl: String? = null
         var token: String? = null
+        var relayUrl: String? = null
+        var desktopKey: String? = null
         override fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
             this.token = token
+        }
+
+        override fun updateRelay(relayUrl: String, desktopKey: String) {
+            this.relayUrl = relayUrl
+            this.desktopKey = desktopKey
         }
     }
 
     private val validScan =
         "https://macbook.example.ts.net/pair#pairing_token=one-time-token"
+
+    /**
+     * A desktop that publishes a relay must have those details stored, or the
+     * fallback silently never happens and the phone simply fails away from
+     * home with no clue why.
+     */
+    @Test
+    fun storesRelayDetailsWhenTheDesktopPublishesThem() = runTest(dispatcher) {
+        val settings = FakeSettings()
+        val model = PairingViewModel(
+            source = source(
+                parse = {
+                    """{"base_url":"https://macbook.example.ts.net",
+                        "pairing_token":"one-time-token",
+                        "relay_url":"https://relay.example.com",
+                        "desktop_key":"ZGVza3RvcC1wdWJsaWMta2V5LWJhc2U2NA=="}"""
+                        .trimIndent().replace("\n", "").replace("  ", "")
+                },
+            ),
+            settings = settings,
+            ioDispatcher = dispatcher,
+        )
+
+        model.pair(validScan)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("https://relay.example.com", settings.relayUrl)
+        assertEquals("ZGVza3RvcC1wdWJsaWMta2V5LWJhc2U2NA==", settings.desktopKey)
+    }
+
+    /**
+     * An older desktop publishes neither. Pairing must still succeed; only the
+     * relay is unavailable.
+     */
+    @Test
+    fun pairsWithoutRelayDetails() = runTest(dispatcher) {
+        val settings = FakeSettings()
+        val model = PairingViewModel(
+            source = source(),
+            settings = settings,
+            ioDispatcher = dispatcher,
+        )
+
+        model.pair(validScan)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("durable-api-token", settings.token)
+        assertEquals("", settings.relayUrl ?: "")
+        assertEquals("", settings.desktopKey ?: "")
+    }
 
     private fun source(
         parse: (String) -> String = {

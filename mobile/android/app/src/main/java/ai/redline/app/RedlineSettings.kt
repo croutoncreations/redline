@@ -29,6 +29,15 @@ import androidx.security.crypto.MasterKey
  */
 interface RedlineSettingsWriter {
     fun update(baseUrl: String, token: String)
+
+    /**
+     * Records how to reach this desktop when it is not directly reachable.
+     *
+     * Kept separate from update() because an older desktop supplies neither,
+     * and pairing must still work without them: no relay simply means direct
+     * only, which is what every existing paired phone already does.
+     */
+    fun updateRelay(relayUrl: String, desktopKey: String)
 }
 
 class RedlineSettings(context: Context) : RedlineSettingsWriter {
@@ -63,6 +72,30 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
     val token: String
         get() = preferences.getString(KEY_TOKEN, null) ?: ""
 
+    /** Where to reach the relay, or "" when this desktop published none. */
+    val relayUrl: String
+        get() = preferences.getString(KEY_RELAY_URL, null) ?: ""
+
+    /**
+     * The desktop's Noise static public key.
+     *
+     * Without it there is nothing to authenticate the far end of a relayed
+     * session against, so a relay connection must not be attempted.
+     */
+    val desktopKey: String
+        get() = preferences.getString(KEY_DESKTOP_KEY, null) ?: ""
+
+    /** Whether a relayed fallback is possible at all. */
+    val relayConfigured: Boolean
+        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank()
+
+    override fun updateRelay(relayUrl: String, desktopKey: String) {
+        preferences.edit()
+            .putString(KEY_RELAY_URL, relayUrl)
+            .putString(KEY_DESKTOP_KEY, desktopKey)
+            .apply()
+    }
+
     /** Whether this device has been paired with a Redline desktop. */
     val isPaired: Boolean get() = token.isNotBlank()
 
@@ -81,12 +114,19 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
      * clearing it returns the app to the pairing screen where the fix is.
      */
     fun clear() {
-        preferences.edit().remove(KEY_TOKEN).remove(KEY_BASE_URL).apply()
+        preferences.edit()
+            .remove(KEY_TOKEN)
+            .remove(KEY_BASE_URL)
+            .remove(KEY_RELAY_URL)
+            .remove(KEY_DESKTOP_KEY)
+            .apply()
     }
 
     private companion object {
         const val KEY_BASE_URL = "base_url"
         const val KEY_TOKEN = "token"
+        const val KEY_RELAY_URL = "relay_url"
+        const val KEY_DESKTOP_KEY = "desktop_key"
 
         const val ENCRYPTED_FILE = "redline.secure"
         const val PLAIN_FILE = "redline"

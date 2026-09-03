@@ -105,6 +105,13 @@ private fun Header(state: UsageUiState) {
         Spacer(Modifier.height(2.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Capacity", color = TextMuted, fontSize = 12.sp)
+            // Worth saying out loud. A relayed session is slower, costs money,
+            // and crosses a third party, so someone seeing an unexpected
+            // "relayed" here has a real reason to check why the direct route
+            // is not working.
+            if (state.transport == Transport.Relay) {
+                Text(" · relayed", color = Warn, fontSize = 12.sp)
+            }
             state.view?.health?.takeIf { it.degraded && it.detail.isNotBlank() }?.let {
                 Text(" · ${it.detail}", color = Warn, fontSize = 12.sp)
             }
