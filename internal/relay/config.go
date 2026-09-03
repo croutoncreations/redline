@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 // Config holds the optional relay configuration for the desktop service.
@@ -24,4 +26,16 @@ func NewSessionID() (string, error) {
 		return "", fmt.Errorf("generate session id: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// DefaultKeypairPath returns where the desktop's relay identity lives when the
+// config does not name a location.
+//
+// It sits beside the database rather than in a temp directory because losing it
+// unpairs every phone.
+func DefaultKeypairPath(configured, databasePath string) string {
+	if strings.TrimSpace(configured) != "" {
+		return configured
+	}
+	return filepath.Join(filepath.Dir(databasePath), "relay-identity.json")
 }

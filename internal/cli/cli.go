@@ -33,8 +33,10 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/mcpserver"
+	"github.com/jfox/redline/internal/relay"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
+	core "github.com/jfox/redline/mobile/core"
 	"gopkg.in/yaml.v3"
 )
 
@@ -758,7 +760,21 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
 		return 1
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token)
+	// A relay-enabled desktop publishes where to reach it from outside and the
+	// key that identifies it. Loading the keypair here rather than generating
+	// one means the identity in the QR is the same one the relay leg will
+	// present; a fresh key per QR would authenticate against nothing.
+	relayURL, desktopKey := "", ""
+	if cfg.Relay.Enabled {
+		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
+		if err != nil {
+			fmt.Fprintln(stderr, "load relay identity:", err)
+			return 1
+		}
+		relayURL = cfg.Relay.URL
+		desktopKey = core.DesktopPublicKey(keypair)
+	}
+	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey)
 	code, err := qrcode.New(pairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
@@ -774,7 +790,13 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	return 0
 }
 
-func mobilePairingURL(host string, port int, token string) string {
+// mobilePairingURL builds the URL encoded into the pairing QR.
+//
+// relayURL and desktopKey are included only when the desktop has remote access
+// turned on. Omitting them entirely, rather than sending empty values, keeps a
+// QR from a relay-less desktop byte-identical to the one this has always
+// produced, so an older phone and a newer one read it the same way.
+func mobilePairingURL(host string, port int, token, relayURL, desktopKey string) string {
 	endpoint := host
 	if port != 443 {
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
@@ -782,6 +804,12 @@ func mobilePairingURL(host string, port int, token string) string {
 	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
 	fragment := url.Values{}
 	fragment.Set("pairing_token", token)
+	if relayURL != "" && desktopKey != "" {
+		// Both or neither: a relay address without a key gives the phone
+		// somewhere to connect and no way to verify who answers.
+		fragment.Set("relay", relayURL)
+		fragment.Set("key", desktopKey)
+	}
 	pairingURL.Fragment = fragment.Encode()
 	return pairingURL.String()
 }
