@@ -195,4 +195,38 @@ class RunsViewModelTest {
         assertNull(model.state.value.failure)
         assertEquals(2, model.state.value.runs?.runs?.size)
     }
+
+    /**
+     * A refresh must not wipe the open run's detail.
+     *
+     * refresh() runs on every resume, and the detail sheet's visibility is
+     * composable-local while its contents live here. Backgrounding the phone
+     * while reading a failed run's stderr is exactly when someone is looking,
+     * and rebuilding the state from scratch blanks the sheet and silently
+     * resets the selected stream back to stdout.
+     */
+    @Test
+    fun refreshPreservesOpenRunDetail() = runTest(dispatcher) {
+        val model = RunsViewModel(source(), dispatcher)
+
+        model.loadLogs("aaaa1111-2222", "stderr")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("stderr", model.state.value.logStream)
+        assertEquals("log line\n", model.state.value.logs)
+
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "a refresh must not reset the selected log stream",
+            "stderr",
+            model.state.value.logStream,
+        )
+        assertEquals(
+            "a refresh must not blank the open run's logs",
+            "log line\n",
+            model.state.value.logs,
+        )
+    }
 }
+

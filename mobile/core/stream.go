@@ -23,6 +23,11 @@ const (
 	// StreamStateUnauthorized means the credential was rejected. Terminal:
 	// retrying would hammer the desktop and never succeed.
 	StreamStateUnauthorized = "unauthorized"
+	// StreamStateFailed means the stream cannot work as configured, such as a
+	// frame too large to read. Terminal for the same reason: the next attempt
+	// would hit exactly the same wall, and sitting on "reconnecting" forever
+	// would never explain why nothing arrives.
+	StreamStateFailed = "failed"
 	// StreamStateStopped means the caller stopped the stream.
 	StreamStateStopped = "stopped"
 )
@@ -32,9 +37,22 @@ const (
 // short enough to feel immediate without spinning while it is away.
 const defaultReconnectDelayMillis = 2000
 
+// maxReconnectDelayMillis caps the backoff.
+//
+// A desktop that is reachable but erroring should not be retried at a fixed
+// rate forever: that drains the phone and loads the machine that is already
+// unwell. The delay grows to this ceiling and stays there, so a desktop that
+// recovers is still picked up within half a minute.
+const maxReconnectDelayMillis = 30000
+
 // UsageStreamSink receives rendered views and connection state.
 //
 // Implemented on the platform side; gomobile turns this into a Java interface.
+//
+// Callbacks run on the stream's own goroutine, so they must return promptly and
+// must not call [UsageStream.Stop]: Stop waits for that goroutine to finish, so
+// stopping from inside a callback would wait for itself. Hand the value to the
+// UI and return.
 type UsageStreamSink interface {
 	// OnUsage receives a rendered UsageView as JSON, the same shape FetchUsage
 	// returns, so the UI has one thing to render rather than two.
@@ -53,7 +71,8 @@ type UsageStream struct {
 // Stop ends the stream and any pending reconnection.
 //
 // Safe to call more than once, because a screen can be torn down along more
-// than one path.
+// than one path. Blocks until the stream's goroutine has exited, so it must not
+// be called from a [UsageStreamSink] callback, which runs on that goroutine.
 func (s *UsageStream) Stop() {
 	s.once.Do(func() {
 		s.cancel()
@@ -77,7 +96,12 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 
 	go func() {
 		defer close(stream.done)
-		delay := time.Duration(reconnectDelayMillis) * time.Millisecond
+		baseDelay := time.Duration(reconnectDelayMillis) * time.Millisecond
+		maxDelay := time.Duration(maxReconnectDelayMillis) * time.Millisecond
+		if baseDelay > maxDelay {
+			maxDelay = baseDelay
+		}
+		delay := baseDelay
 
 		for {
 			if ctx.Err() != nil {
@@ -86,7 +110,9 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 			}
 
 			sink.OnState(StreamStateConnecting)
-			err := c.consumeUsageStream(ctx, sink)
+			// A connection that delivers resets the backoff, so a desktop that
+			// flaps briefly is not punished with an ever-growing delay.
+			err := c.consumeUsageStream(ctx, sink, func() { delay = baseDelay })
 
 			switch {
 			case ctx.Err() != nil:
@@ -96,6 +122,11 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 				// The credential will not become valid by trying again, and
 				// retrying would hammer the desktop forever.
 				sink.OnState(StreamStateUnauthorized)
+				return
+			case errors.Is(err, bufio.ErrTooLong):
+				// The next frame would be just as unreadable, so retrying
+				// makes no progress and never says why.
+				sink.OnState(StreamStateFailed)
 				return
 			}
 
@@ -109,6 +140,14 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 				return
 			case <-time.After(delay):
 			}
+			// Back off toward the cap so a desktop that is down for a while is
+			// not polled at full rate the entire time.
+			if delay < maxDelay {
+				delay *= 2
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+			}
 		}
 	}()
 
@@ -117,7 +156,12 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 
 // consumeUsageStream reads one connection to exhaustion, returning why it
 // ended.
-func (c *Client) consumeUsageStream(ctx context.Context, sink UsageStreamSink) error {
+//
+// onLive runs once the connection is established and delivering, so the caller
+// can treat a working connection as a fresh start.
+func (c *Client) consumeUsageStream(
+	ctx context.Context, sink UsageStreamSink, onLive func(),
+) error {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodGet,
 		// The stream re-sends the whole read model every few seconds, so
@@ -148,6 +192,11 @@ func (c *Client) consumeUsageStream(ctx context.Context, sink UsageStreamSink) e
 	}
 
 	sink.OnState(StreamStateLive)
+	// A connection that delivered is healthy, so the next drop starts from the
+	// short delay again rather than inheriting a long one.
+	if onLive != nil {
+		onLive()
+	}
 
 	scanner := bufio.NewScanner(response.Body)
 	// Frames carry a whole dashboard payload, which is far larger than the

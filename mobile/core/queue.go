@@ -60,11 +60,12 @@ func (c *Client) FetchQueue(providerAccountID string) (string, error) {
 		ProviderReason     string    `json:"provider_reason"`
 		SelectedTaskID     string    `json:"selected_task_id"`
 		Candidates         []struct {
-			TaskID   string `json:"task_id"`
-			Name     string `json:"name"`
-			Priority int    `json:"priority"`
-			Eligible bool   `json:"eligible"`
-			Reason   string `json:"reason"`
+			TaskID     string     `json:"task_id"`
+			Name       string     `json:"name"`
+			Priority   int        `json:"priority"`
+			Eligible   bool       `json:"eligible"`
+			Reason     string     `json:"reason"`
+			EligibleAt *time.Time `json:"eligible_at"`
 		} `json:"candidates"`
 	}
 
@@ -92,7 +93,7 @@ func (c *Client) FetchQueue(providerAccountID string) (string, error) {
 			Name:     candidate.Name,
 			Priority: candidate.Priority,
 			Eligible: candidate.Eligible,
-			Reason:   humaniseQueueReason(candidate.Reason, now),
+			Reason:   queueReason(candidate.Reason, candidate.EligibleAt, now),
 			IsNextUp: candidate.TaskID != "" && candidate.TaskID == payload.SelectedTaskID,
 		}
 		if entry.IsNextUp {
@@ -111,6 +112,29 @@ func (c *Client) FetchQueue(providerAccountID string) (string, error) {
 		return "", fmt.Errorf("encode queue: %w", err)
 	}
 	return string(encoded), nil
+}
+
+// queueReason renders why a candidate is blocked.
+//
+// A cooldown arrives as a timestamp, which is turned into a wait: "cooldown
+// until 2026-09-03T02:32:31Z" asks the reader to do UTC arithmetic on a phone.
+// Older services send only the prose, so that is parsed as a fallback rather
+// than losing the feature against a desktop that has not been updated.
+func queueReason(reason string, eligibleAt *time.Time, now time.Time) string {
+	if eligibleAt != nil && !eligibleAt.IsZero() {
+		return cooldownLabel(eligibleAt.Sub(now))
+	}
+	return humaniseQueueReason(reason, now)
+}
+
+// cooldownLabel words a remaining cooldown.
+func cooldownLabel(remaining time.Duration) string {
+	if remaining <= 0 {
+		// The cooldown has passed but the snapshot predates that, so the task
+		// is about to become eligible rather than blocked for a negative time.
+		return "cooldown just ended"
+	}
+	return "cooldown for " + durationLabel(remaining)
 }
 
 // cooldownPrefix is how the scheduler words a cooldown block.
@@ -133,13 +157,7 @@ func humaniseQueueReason(reason string, now time.Time) string {
 		// the fact that the task is blocked.
 		return trimmed
 	}
-	remaining := until.Sub(now)
-	if remaining <= 0 {
-		// The cooldown has passed but the snapshot predates that, so the task
-		// is about to become eligible rather than blocked for a negative time.
-		return "cooldown just ended"
-	}
-	return "cooldown for " + durationLabel(remaining)
+	return cooldownLabel(until.Sub(now))
 }
 
 // providerControls are the actions the service accepts for a provider.

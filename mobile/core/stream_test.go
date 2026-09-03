@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -285,5 +286,84 @@ func TestStreamUsageSkipsMalformedFrames(t *testing.T) {
 	if view.Providers[0].Weekly.RemainingPercent != 70 {
 		t.Errorf("the good frame after a bad one must still arrive, got %d%%",
 			view.Providers[0].Weekly.RemainingPercent)
+	}
+}
+
+// A desktop that is reachable but erroring must not be hammered at a fixed
+// rate forever. Retrying every two seconds indefinitely is a battery and data
+// drain, and it puts load on the very machine that is already unwell.
+func TestStreamUsageBacksOffBetweenAttempts(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	var attempts []time.Time
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts = append(attempts, time.Now())
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	stream := client.StreamUsageWithBackoff(&recorder{}, 20)
+	defer stream.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(attempts)
+		mu.Unlock()
+		if count >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) < 4 {
+		t.Fatalf("expected several attempts, got %d", len(attempts))
+	}
+	first := attempts[1].Sub(attempts[0])
+	later := attempts[3].Sub(attempts[2])
+	if later <= first {
+		t.Errorf("delay must grow: first gap %s, later gap %s", first, later)
+	}
+}
+
+// A frame the reader cannot buffer will be just as unreadable next time, so
+// reconnecting forever makes no progress and never tells anyone why. The pill
+// would sit on "reconnecting" indefinitely over a stream that can never work.
+func TestStreamUsageStopsOnAnUnreadableFrame(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	var connections int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		connections++
+		mu.Unlock()
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		// One line far larger than the reader's buffer.
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, strings.Repeat("x", 6*1024*1024))
+		fmt.Fprint(w, "\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	sink := &recorder{}
+	stream := client.StreamUsageWithBackoff(sink, 10)
+	defer stream.Stop()
+
+	sink.waitForState(t, StreamStateFailed)
+
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if connections > 1 {
+		t.Errorf("an unreadable frame must not be retried forever, got %d attempts", connections)
 	}
 }

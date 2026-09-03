@@ -119,12 +119,17 @@ class RunsViewModel(
 
             result.fold(
                 onSuccess = { (runs, tasks) ->
-                    // A good load clears any earlier failure.
+                    // Copied rather than rebuilt. A fresh instance would reset
+                    // every field this path does not name, including the open
+                    // run's logs, timeline, and selected stream -- and refresh
+                    // runs on resume, which is exactly when someone is reading
+                    // them. A good load also clears any earlier failure.
                     _state.update {
-                        RunsUiState(
+                        it.copy(
                             loading = false,
                             runs = runs,
                             tasks = tasks,
+                            failure = null,
                             lastDispatch = if (keepDispatchResult) it.lastDispatch else null,
                         )
                     }

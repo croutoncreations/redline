@@ -201,3 +201,24 @@ func TestControlTaskRejectsUnknownControls(t *testing.T) {
 		t.Error("an unsupported task control must be refused")
 	}
 }
+
+// The structured timestamp is preferred over the prose, so the wording of the
+// reason is not an accidental part of the API.
+func TestFetchQueuePrefersTheStructuredCooldown(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	body := `{"provider_account_id":"c","dispatch_available":true,"candidates":[
+	  {"task_id":"t","name":"T","priority":70,"eligible":false,
+	   "reason":"some future rewording nobody parsed",
+	   "eligible_at":"2026-09-02T16:30:00Z"}]}`
+	server, _ := runsServer(t, body, http.StatusOK)
+
+	client := NewClientWithClock(server.URL, "token", fixedClock(now))
+	raw, _ := client.FetchQueue("c")
+	var view QueueView
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Candidates[0].Reason != "cooldown for 4h 30m" {
+		t.Errorf("reason = %q, want the wait derived from eligible_at", view.Candidates[0].Reason)
+	}
+}

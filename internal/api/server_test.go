@@ -620,6 +620,72 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 // The dashboard read model carries every run and task, which is most of its
 // weight. A phone renders only the providers and health, so it can ask for
 // those instead of downloading the rest to discard it.
+// A blocked candidate carries its cooldown as a timestamp, not only inside a
+// sentence. Clients that want to say "cooldown for 4h 20m" should not have to
+// parse English out of the reason and re-derive the time.
+// seedCooldownTask creates a recurring task that is inside its cooldown.
+func seedCooldownTask(t *testing.T, db *store.DB) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "cooldown-profile", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	lastCompleted := apiNow.Add(-time.Hour)
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "cooling-down", Name: "Cooling down", Priority: 100,
+		ExecutionProfileID: "cooldown-profile", Type: domain.Recurring,
+		MinInterval: 24 * time.Hour, LastCompletedAt: &lastCompleted,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	// Candidates are only evaluated once a snapshot exists; without one the
+	// handler short-circuits and never reaches the cooldown check.
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow, Source: "native",
+		Weekly: decision.UsageWindow{Remaining: 0.8, ResetsAt: apiNow.Add(48 * time.Hour)},
+	}, []byte(codexPayload)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidatesExposeCooldownAsATimestamp(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	seedCooldownTask(t, db)
+
+	var response struct {
+		Candidates []struct {
+			TaskID     string     `json:"task_id"`
+			Eligible   bool       `json:"eligible"`
+			Reason     string     `json:"reason"`
+			EligibleAt *time.Time `json:"eligible_at"`
+		} `json:"candidates"`
+	}
+	getJSON(t, server.URL+"/v1/providers/codex-main/candidates", &response)
+
+	var found bool
+	for _, candidate := range response.Candidates {
+		if candidate.TaskID != "cooling-down" {
+			continue
+		}
+		found = true
+		if candidate.Eligible {
+			t.Fatal("a task inside its cooldown is not eligible")
+		}
+		if candidate.EligibleAt == nil {
+			t.Fatalf("a cooldown must be exposed as a timestamp; reason was %q", candidate.Reason)
+		}
+		// The prose stays for existing readers.
+		if !strings.Contains(candidate.Reason, "cooldown until") {
+			t.Errorf("reason = %q", candidate.Reason)
+		}
+	}
+	if !found {
+		t.Fatal("seeded task missing from the candidate list")
+	}
+}
+
 func TestDashboardFieldsSelectorTrimsTheResponse(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 

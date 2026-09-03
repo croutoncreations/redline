@@ -1351,6 +1351,11 @@ type candidateView struct {
 	Priority int    `json:"priority"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
+	// EligibleAt is when a cooldown lifts, so a client can render the wait in
+	// its own words and timezone. Reason states the same thing in prose;
+	// parsing a timestamp back out of that sentence would make the wording an
+	// accidental API.
+	EligibleAt *time.Time `json:"eligible_at,omitempty"`
 }
 
 type candidatesResponse struct {
@@ -1437,7 +1442,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
-			Eligible: verdict.Eligible, Reason: verdict.Reason}
+			Eligible: verdict.Eligible, Reason: verdict.Reason, EligibleAt: verdict.EligibleAt}
 		response.Candidates = append(response.Candidates, view)
 		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
 			response.SelectedTaskID = task.ID
@@ -1700,6 +1705,8 @@ type candidateVerdict struct {
 	Result   decision.Result
 	Eligible bool
 	Reason   string
+	// EligibleAt is set when the block is a cooldown with a known end.
+	EligibleAt *time.Time
 }
 
 func (s *Server) evaluateCandidate(
@@ -1711,6 +1718,8 @@ func (s *Server) evaluateCandidate(
 		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			stamp := eligibleAt.UTC()
+			verdict.EligibleAt = &stamp
 			return verdict, nil
 		}
 	}
