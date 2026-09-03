@@ -207,7 +207,11 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 
 func normalizeLabel(label string) (key, scope, role string) {
 	switch strings.ToLower(strings.TrimSpace(label)) {
-	case "session", "5-hour", "5 hour", "five-hour", "five hour":
+	// "spark" is what Codex calls its five hour window; Claude calls the same
+	// thing "session". Matched exactly rather than by prefix, because Codex
+	// also reports "Spark Weekly", and reading a seven day figure as a five
+	// hour one would be worse than dropping it.
+	case "session", "spark", "5-hour", "5 hour", "five-hour", "five hour":
 		return "session", "account", "short"
 	case "weekly", "7-day", "7 day", "seven-day", "seven day":
 		return "weekly", "account", "weekly"

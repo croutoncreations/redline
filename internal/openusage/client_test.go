@@ -156,6 +156,71 @@ func TestParseKeepsInferredModelResetSeparateFromAMissingShortWindow(t *testing.
 	}
 }
 
+// Codex names its five hour window "Spark", not "Session". The label was not
+// in the mapping, so it fell through to the default and was silently dropped:
+// the phone showed Codex with a weekly allowance and no short window, which
+// reads as "this provider has no five hour limit" when it plainly does.
+//
+// The period is the giveaway -- 18000000ms is five hours -- and it is the same
+// window Claude calls Session, so it maps to the same key.
+func TestParseAcceptsCodexSparkAsTheShortWindow(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "plan":"Pro 5x",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Short == nil {
+		t.Fatal("Spark is a five hour window and must populate the short window")
+	}
+	assertClose(t, got.Short.Remaining, .8)
+	allowance, ok := got.Allowance("session")
+	if !ok {
+		t.Fatal("Spark must also appear as the session allowance")
+	}
+	assertClose(t, allowance.Remaining, .8)
+	// Nothing here was guessed, so confidence must not drop.
+	if got.Confidence == "medium" {
+		t.Fatal("a fully reported snapshot should not be marked medium confidence")
+	}
+}
+
+// "Spark Weekly" is a different window that happens to share a prefix. Reading
+// it as the short one would report a seven day figure as a five hour figure,
+// which is worse than dropping it.
+func TestParseDoesNotConfuseSparkWeeklyWithSpark(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"},
+        {"type":"progress","label":"Spark Weekly","used":40,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-10T19:46:33.000Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Short == nil {
+		t.Fatal("the short window should still come from Spark")
+	}
+	// Spark is 80% remaining; Spark Weekly is 60%. Getting 0.6 here would mean
+	// the weekly line overwrote the short one.
+	assertClose(t, got.Short.Remaining, .8)
+	// And the account weekly must remain the real Weekly line, not Spark Weekly.
+	assertClose(t, got.Weekly.Remaining, 0)
+}
+
 func TestParsePreservesClaudeFableAllowance(t *testing.T) {
 	payload := `{
       "providerId":"claude",
