@@ -10,6 +10,28 @@ import (
 	"github.com/flynn/noise"
 )
 
+// Rules for a client built on this package, learned from the desktop leg and
+// written down before the phone's relay client exists:
+//
+//  1. A session is single-use. Any decrypt failure, any transport close, and
+//     any failed handshake ends it for good. Open a new session and handshake
+//     again; there is no resumption.
+//
+//  2. Frames must arrive exactly once and in order. Noise advances a nonce per
+//     message, so a dropped, duplicated, or reordered frame fails to decrypt
+//     and every frame after it fails too. The relay preserves order but drops
+//     frames when the other peer is absent, which is precisely the window
+//     during a reconnect.
+//
+//  3. Never resend a sealed frame on a new session. The bytes were sealed
+//     under cipher states that no longer exist, so the far end cannot read
+//     them. Treat an in-flight request as failed, re-handshake, and seal it
+//     again if it is safe to repeat.
+//
+//  4. Set the transport's read limit to the largest frame the tunnel allows.
+//     A library default below that closes the socket mid-message rather than
+//     failing one request, which then looks like an unstable relay.
+//
 // cipherSuite is the single algorithm choice for every Noise session.
 //
 // ChaChaPoly is chosen over AES-GCM because ChaCha is constant-time in

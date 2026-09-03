@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -105,7 +106,12 @@ func (d *Dialer) connect(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return fmt.Errorf("dial relay: %w", err)
+		// The library puts the full URL in its error, which carries the
+		// entitlement token. Nothing logs this today, and that is exactly why
+		// it is stripped here: the leak stays invisible until someone adds a
+		// log line, and then it is a credential in a file. Redacting at the
+		// source is one change; remembering in every future caller is not.
+		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), d.opts.EntitlementToken))
 	}
 	defer conn.CloseNow()
 
@@ -195,6 +201,19 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 }
 
 // sessionURL builds the relay WebSocket URL for this session.
+// redactToken removes an entitlement token from a message.
+//
+// Takes the token rather than pattern-matching a URL, so it cannot be fooled by
+// a different encoding of the same value.
+func redactToken(message, token string) string {
+	if token == "" {
+		return message
+	}
+	message = strings.ReplaceAll(message, token, "[redacted]")
+	// The URL in an error is escaped, so the escaped form has to go too.
+	return strings.ReplaceAll(message, url.QueryEscape(token), "[redacted]")
+}
+
 // sessionURL builds the address this desktop dials.
 //
 // Built through net/url rather than concatenated. An entitlement token is

@@ -406,6 +406,40 @@ func TestEntitlementTokenSurvivesTheQueryString(t *testing.T) {
 	}
 }
 
+// A dial failure must not carry the entitlement token in its message.
+//
+// Nothing logs this error today, which is exactly why it is worth fixing now:
+// the leak is invisible until someone adds a log line, and then it is a
+// credential in a file. The safe place to strip it is where it is created, not
+// in every future caller.
+func TestDialErrorsDoNotCarryTheEntitlementToken(t *testing.T) {
+	keypair, err := core.NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	const token = "eyJleHAiOjF9.c2lnbmF0dXJlLXZhbHVl"
+	dialer := NewDialer(DialerOptions{
+		// Port 1 is closed, so the dial fails immediately.
+		RelayURL:         "http://127.0.0.1:1",
+		SessionID:        "test-session-id-0123456789",
+		EntitlementToken: token,
+		Keypair:          keypair,
+		Forwarder:        NewForwarder("http://127.0.0.1:1", http.DefaultClient),
+	})
+
+	dialErr := dialer.connect(context.Background())
+	if dialErr == nil {
+		t.Fatal("dialling a closed port should fail")
+	}
+	if strings.Contains(dialErr.Error(), token) {
+		t.Fatalf("the entitlement token appears in a dial error:\n%v", dialErr)
+	}
+	// The error still has to be useful for diagnosis.
+	if !strings.Contains(dialErr.Error(), "relay") {
+		t.Fatalf("the error no longer says what failed: %v", dialErr)
+	}
+}
+
 // A session id is generated, but a hostile or corrupted config value must not
 // be able to add query parameters or climb the path.
 func TestSessionIDCannotInjectIntoTheDialURL(t *testing.T) {

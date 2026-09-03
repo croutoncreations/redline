@@ -164,6 +164,8 @@ func TestHostilePathsNeverReachAnythingButTheLocalAPI(t *testing.T) {
 		"/v1/x#@example.com",    // fragment hiding a host
 		"/v1/x\r\nX-Evil: 1",    // header injection
 		"/v1/x\tsplit",          // control character
+		"/%5Cexample.com/x",     // encoded backslash
+		"/a%5C..%5Cb",           // encoded backslash traversal
 		"relative/path",         // not rooted
 		"",                      // empty
 	}
@@ -187,6 +189,49 @@ func TestHostilePathsNeverReachAnythingButTheLocalAPI(t *testing.T) {
 			strings.Contains(got, "\\") || strings.Contains(got, "etc/pw") {
 			t.Errorf("a hostile path reached the local API: %q", got)
 		}
+	}
+}
+
+// The two size limits have to be consistent with each other, or the largest
+// body the encoder accepts produces a frame the transport refuses.
+//
+// That failure is worse than it sounds: the sealing side's nonce has already
+// advanced, so the dropped frame leaves the Noise session permanently out of
+// step and every later frame fails too. It also only bites at the maximum
+// size, so it would pass any casual test.
+func TestTheLargestAllowedBodyFitsInAFrame(t *testing.T) {
+	// Base64 in JSON expands by 4/3, and the envelope, headers, and AEAD tag
+	// all sit on top of that.
+	body := make([]byte, maxTunnelBody)
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/json")
+	// A realistic set of headers rather than none.
+	rec.Header().Set("Date", "Tue, 02 Sep 2026 21:00:00 GMT")
+	rec.Header().Set("Cache-Control", "no-store")
+	rec.WriteHeader(http.StatusOK)
+	rec.Write(body)
+
+	encoded, err := EncodeResponse(rec.Result())
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// Plus the Noise AEAD tag that Seal adds.
+	const aeadTag = 16
+	sealed := len(encoded) + aeadTag
+	if sealed > maxTunnelFrame {
+		t.Fatalf("a maximum-size body does not fit in a frame: %d bytes sealed, limit %d (over by %d)",
+			sealed, maxTunnelFrame, sealed-maxTunnelFrame)
+	}
+}
+
+// The frame limit must also stay under the Durable Object's own message cap,
+// or the relay drops frames the desktop considered valid.
+func TestFrameLimitStaysUnderTheDurableObjectCap(t *testing.T) {
+	const durableObjectMessageCap = 1024 * 1024
+	if maxTunnelFrame > durableObjectMessageCap {
+		t.Fatalf("frame limit %d exceeds the relay's %d message cap",
+			maxTunnelFrame, durableObjectMessageCap)
 	}
 }
 

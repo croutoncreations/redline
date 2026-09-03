@@ -13,21 +13,30 @@ import (
 	"strings"
 )
 
+// maxTunnelFrame bounds a whole frame on the wire and is what the socket's
+// read limit is set to. The ceiling is the Durable Object's own 1 MB WebSocket
+// message cap: a larger frame is dropped by the relay, not by us.
+const maxTunnelFrame = 1024 * 1024
+
+// tunnelEnvelopeSlack reserves room for everything wrapped around the body:
+// the JSON envelope, response headers, and the 16-byte AEAD tag Seal adds.
+// Headers are the variable part, so the reservation is generous.
+const tunnelEnvelopeSlack = 16 * 1024
+
 // maxTunnelBody is the largest response body forwarded in a single frame.
 //
-// There is no chunking: one request is one frame and one response is one
-// frame. The binding constraint is the Durable Object's 1 MB WebSocket
-// message limit, so the body ceiling sits below it with room for the JSON
-// envelope, headers, and the Noise tag. A response larger than this is
-// refused rather than truncated, because a silently short log is worse than
-// a visible failure.
-const maxTunnelBody = 768 * 1024
-
-// maxTunnelFrame bounds a whole frame on the wire, and is what the socket's
-// read limit is set to. It allows for base64 expansion and the encrypted
-// envelope around a maxTunnelBody payload while staying under the Durable
-// Object's own 1 MB cap.
-const maxTunnelFrame = 1024 * 1024
+// There is no chunking: one request is one frame, one response is one frame.
+// The size is derived rather than chosen, because base64 in JSON expands the
+// body by 4/3 and a body picked to look round overshoots. A 768 KB body
+// encodes to exactly maxTunnelFrame with nothing left for the envelope, so
+// the largest permitted response produced a frame the relay would drop -- and
+// since the sealing side's nonce has already advanced by then, that dropped
+// frame would leave the Noise session permanently out of step rather than
+// merely failing one request.
+//
+// A response above this is refused rather than truncated: a silently short
+// log is worse than a visible failure.
+const maxTunnelBody = ((maxTunnelFrame - tunnelEnvelopeSlack) / 4) * 3
 
 // TunnelRequest is an HTTP request encoded for transit through a Noise frame.
 //
@@ -274,6 +283,13 @@ func resolvePath(raw string) (string, error) {
 	for _, r := range parsed.Path {
 		if r < 0x20 || r == 0x7f {
 			return "", fmt.Errorf("path contains an encoded control character")
+		}
+		// %5C survives the check on the raw string for the same reason %0d
+		// does. The local API is Go today and treats a backslash as an
+		// ordinary byte, but the whole point of refusing them is that parsers
+		// disagree, and the next listener may not be Go.
+		if r == '\\' {
+			return "", fmt.Errorf("path contains an encoded backslash")
 		}
 	}
 
