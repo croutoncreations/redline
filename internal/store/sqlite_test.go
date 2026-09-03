@@ -289,3 +289,84 @@ func usageSnapshot(observed time.Time, weekly float64) decision.UsageSnapshot {
 		Confidence: "high",
 	}
 }
+
+// Banked resets must survive being stored and read back.
+//
+// The snapshot table has explicit columns rather than a JSON blob, so a new
+// field is silently dropped on write unless a column is added for it. The
+// symptom is subtle: the API's refresh endpoint returns the value, the
+// dashboard does not, and the two disagree for no visible reason.
+func TestSQLiteRoundTripsBankedResets(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	resets := 2
+	snapshot := decision.UsageSnapshot{
+		Provider:     "codex",
+		ObservedAt:   time.Now().UTC().Truncate(time.Second),
+		Weekly:       decision.UsageWindow{Remaining: 0.5, ResetsAt: time.Now().UTC().Add(48 * time.Hour)},
+		Source:       "openusage",
+		Confidence:   "high",
+		BankedResets: &resets,
+	}
+	if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil {
+		t.Fatal("banked resets were dropped on the way through the store")
+	}
+	if *got.BankedResets != 2 {
+		t.Fatalf("banked resets = %d, want 2", *got.BankedResets)
+	}
+}
+
+// Zero and absent are different answers and must stay different across a
+// round trip: none banked versus not reported.
+func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	zero := 0
+	base := time.Now().UTC().Truncate(time.Second)
+
+	withZero := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: base,
+		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source:     "openusage", Confidence: "high", BankedResets: &zero,
+	}
+	if err := db.SaveSnapshot(context.Background(), withZero, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil || *got.BankedResets != 0 {
+		t.Fatalf("zero must round trip as zero, got %v", got.BankedResets)
+	}
+
+	absent := decision.UsageSnapshot{
+		Provider: "claude", ObservedAt: base,
+		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source:     "openusage", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(context.Background(), absent, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = db.LatestSnapshot(context.Background(), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("absent must stay absent, got %d", *got.BankedResets)
+	}
+}

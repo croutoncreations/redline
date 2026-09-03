@@ -27,6 +27,51 @@ class UnknownWindowScreenTest {
         weekly = Window(remainingPercent = 54, resetsInSeconds = 93_600),
     )
 
+    /**
+     * Codex as it really is: no general five hour window, a spent weekly, both
+     * Spark pools under their own names, and the count of banked resets that
+     * could refill the weekly.
+     *
+     * The resets row is the one that went missing in practice, because the Go
+     * core was edited without rebuilding the native library the app bundles.
+     * A test that renders the composable would not have caught that either --
+     * only the on-device path exercises the real AAR.
+     */
+    @Test
+    fun showsSparkPoolsAndBankedResets() {
+        val codex = ProviderUsage(
+            id = "codex-main",
+            provider = "codex",
+            sourceLabel = "openusage source · 0/1 active · sampled 1m ago",
+            session = null,
+            bankedResets = 0,
+            weekly = Window(remainingPercent = 0, resetsInSeconds = 275_000),
+            pools = listOf(
+                Pool(key = "model:spark:short", label = "Spark", remainingPercent = 98, resetsInSeconds = 12_780),
+                Pool(key = "model:spark:weekly", label = "Spark Weekly", remainingPercent = 99, resetsInSeconds = 599_000),
+            ),
+        )
+
+        compose.setContent {
+            UsageScreen(
+                state = UsageUiState(
+                    view = UsageView(providers = listOf(codex)),
+                    live = LiveState.LIVE,
+                ),
+                onRetry = {},
+            )
+        }
+
+        compose.onNodeWithText("Spark").assertIsDisplayed()
+        compose.onNodeWithText("Spark Weekly").assertIsDisplayed()
+        compose.onNodeWithText("Banked quota resets").assertIsDisplayed()
+        compose.onNodeWithText("0 available").assertIsDisplayed()
+
+        if (InstrumentationRegistry.getArguments().getString("holdForScreenshot") != null) {
+            Thread.sleep(20_000)
+        }
+    }
+
     @Test
     fun showsTheWindowAsUnavailableRatherThanHidingIt() {
         compose.setContent {

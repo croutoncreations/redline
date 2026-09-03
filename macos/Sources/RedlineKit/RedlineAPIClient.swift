@@ -110,7 +110,12 @@ public struct RedlineAPIClient: Sendable {
         }
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw Error.invalidResponse }
-        guard response.statusCode == 200 else { throw Error.status(response.statusCode) }
+        // Any 2xx, not just 200: creating a pairing token answers 201, and
+        // insisting on 200 made the pairing window fail every time with
+        // "Redline returned HTTP 201".
+        guard (200..<300).contains(response.statusCode) else {
+            throw Error.status(response.statusCode)
+        }
         return try JSONDecoder().decode(type, from: data)
     }
 }

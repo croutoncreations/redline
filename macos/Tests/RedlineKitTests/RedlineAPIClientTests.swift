@@ -107,3 +107,81 @@ private final class RetryStubURLProtocol: URLProtocol, @unchecked Sendable {
         "http://127.0.0.1:7436/v1/tasks/failed%2Ftask/retry",
     ])
 }
+
+/// A stub that always answers 201 with a pairing token.
+///
+/// Each pairing test gets its own class rather than sharing one with a mutable
+/// handler: a process-global handler is a race between concurrently running
+/// tests, and marking them serialized narrows that window without closing it.
+final class PairingCreatedStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(
+            #"{"pairing_token":"8G-y7DyZw3yx","expires_at":"2026-09-03T19:44:05.604714Z"}"#.utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// A stub that always answers 401.
+final class PairingUnauthorizedStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// The pairing endpoint answers 201 Created, not 200.
+///
+/// The client accepted only 200, so every attempt to open the pairing window
+/// would have failed with "Redline returned HTTP 201". Nothing caught it
+/// because the surrounding tests never exercised the real status code.
+@Test func apiClientAcceptsTheCreatedStatusFromPairing() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingCreatedStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    let pairing = try await client.createPairingToken()
+    #expect(pairing.token == "8G-y7DyZw3yx")
+    // The timestamp carries fractional seconds, which the default ISO 8601
+    // options reject outright rather than ignoring.
+    #expect(pairing.expiry != nil)
+}
+
+/// A genuine failure must still be reported rather than swallowed by a wider
+/// success range.
+@Test func apiClientStillRejectsErrorStatuses() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingUnauthorizedStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    await #expect(throws: RedlineAPIClient.Error.self) {
+        _ = try await client.createPairingToken()
+    }
+}
