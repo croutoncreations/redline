@@ -24,6 +24,24 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+        working-directory: relay
+      # The relay is the untrusted part of the system. These tests assert that
+      # it forwards frames it cannot read and that its entitlement check cannot
+      # be talked out of by the caller, so a regression here is a security
+      # regression rather than a broken feature.
+      - run: npm test
+        working-directory: relay
+
   dashboard:
     runs-on: ubuntu-latest
     steps:
