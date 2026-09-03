@@ -13,13 +13,21 @@ import (
 	"strings"
 )
 
-// maxTunnelBody is the largest response body we will forward in a single
-// frame. A Durable Object WebSocket message is capped at 1 MB, but we size
-// this larger so chunked responses can be assembled server-side without
-// hitting the wire limit on every hop. The real ceiling is memory safety on
-// the phone: a 4 MB frame is already larger than any normal API response
-// and smaller than an embarrassing OOM.
-const maxTunnelBody = 4 * 1024 * 1024
+// maxTunnelBody is the largest response body forwarded in a single frame.
+//
+// There is no chunking: one request is one frame and one response is one
+// frame. The binding constraint is the Durable Object's 1 MB WebSocket
+// message limit, so the body ceiling sits below it with room for the JSON
+// envelope, headers, and the Noise tag. A response larger than this is
+// refused rather than truncated, because a silently short log is worse than
+// a visible failure.
+const maxTunnelBody = 768 * 1024
+
+// maxTunnelFrame bounds a whole frame on the wire, and is what the socket's
+// read limit is set to. It allows for base64 expansion and the encrypted
+// envelope around a maxTunnelBody payload while staying under the Durable
+// Object's own 1 MB cap.
+const maxTunnelFrame = 1024 * 1024
 
 // TunnelRequest is an HTTP request encoded for transit through a Noise frame.
 //

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -173,24 +175,71 @@ func TestDialerRetriesAnUnavailableRelay(t *testing.T) {
 	}
 }
 
+// A relay that accepts a connection and immediately drops it -- flapping, being
+// restarted, or actively hostile -- must not make the desktop hammer it.
+//
+// This is the failure the "unavailable relay" test above does not reach: that
+// one is refused before the upgrade, so the dial fails and backs off. Here the
+// dial SUCCEEDS and the read fails, which is a different branch. Treating that
+// branch as an idle timeout retried with no delay produced twenty thousand
+// dials in three seconds, which would bill the relay's owner for the privilege
+// of being attacked.
+func TestDialerBacksOffWhenTheRelayDropsAnAcceptedConnection(t *testing.T) {
+	var attempts int
+	var mu sync.Mutex
+	flapping := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.CloseNow()
+	}))
+	defer flapping.Close()
+
+	keypair, _ := core.NewDesktopKeypair()
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  strings.Replace(flapping.URL, "http://", "ws://", 1),
+		SessionID: "test-session-id-0123456789",
+		Keypair:   keypair,
+		Forwarder: NewForwarder("http://127.0.0.1:1", http.DefaultClient),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	dialer.Run(ctx)
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got > 10 {
+		t.Fatalf("hot loop: %d connections in 3s against a relay that drops them", got)
+	}
+}
+
 // An idle timeout is how a session normally ends: the phone went away. It must
 // not be treated as a failure, because the accrued backoff would then make the
 // desktop slow to answer the next time someone opened the app -- punishing the
 // user for having put their phone down.
-func TestIdleTimeoutIsNotTreatedAsAFailure(t *testing.T) {
-	if !errors.Is(fmtErrorfIdle(), errIdle) {
+//
+// The distinction has to be drawn from the real read deadline rather than from
+// "any error after connecting", or every dropped socket becomes an instant
+// retry.
+func TestOnlyARealDeadlineCountsAsIdle(t *testing.T) {
+	if !errors.Is(fmt.Errorf("%w after %v", errIdle, 5*time.Minute), errIdle) {
 		t.Fatal("an idle timeout must be recognisable as such by the caller")
 	}
-
-	// A real failure must remain distinguishable from it, or the two would
-	// collapse back into one behaviour.
-	if errors.Is(errors.New("connection refused"), errIdle) {
-		t.Fatal("an ordinary failure must not look like an idle timeout")
+	for _, notIdle := range []error{
+		errors.New("connection refused"),
+		io.EOF,
+		context.Canceled,
+	} {
+		if errors.Is(notIdle, errIdle) {
+			t.Fatalf("%v must not look like an idle timeout", notIdle)
+		}
 	}
-}
-
-func fmtErrorfIdle() error {
-	return fmt.Errorf("%w after %v", errIdle, 5*time.Minute)
 }
 
 // A connection that worked for an hour and then dropped should retry promptly.
@@ -210,6 +259,170 @@ func TestBackoffResetsAfterAConnectionThatWorked(t *testing.T) {
 	}
 	if afterReset > 5*time.Second {
 		t.Fatalf("first retry after a working connection should be prompt, got %v", afterReset)
+	}
+}
+
+// A run's logs are routinely larger than a WebSocket library's default read
+// limit, and the tunnel advertises a 4 MB ceiling. Without raising the limit on
+// the connection the real ceiling was 32 KB, and exceeding it did not fail the
+// request -- it tore down the socket, which then fed the reconnect loop.
+func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
+	// A response comfortably past the 32 KB default but inside the ceiling.
+	big := strings.Repeat("x", 200*1024)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(big))
+	}))
+	defer local.Close()
+
+	keypair, err := core.NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+
+	done := make(chan error, 1)
+	var once sync.Once
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		once.Do(func() {
+			// The stand-in relay must not be the thing that truncates.
+			conn.SetReadLimit(8 << 20)
+			go func() {
+				ctx := context.Background()
+				phone, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+				if err != nil {
+					done <- err
+					return
+				}
+				first, err := phone.StartHandshake()
+				if err != nil {
+					done <- err
+					return
+				}
+				if err := conn.Write(ctx, websocket.MessageBinary, first); err != nil {
+					done <- err
+					return
+				}
+				_, reply, err := conn.Read(ctx)
+				if err != nil {
+					done <- err
+					return
+				}
+				if err := phone.FinishHandshake(reply); err != nil {
+					done <- err
+					return
+				}
+
+				// A request body large enough to exceed the default limit in
+				// the other direction too.
+				body := []byte(strings.Repeat("y", 100*1024))
+				request, err := EncodeRequestParts(http.MethodPost, "/v1/logs", nil, body)
+				if err != nil {
+					done <- err
+					return
+				}
+				sealed, err := phone.Seal(request)
+				if err != nil {
+					done <- err
+					return
+				}
+				if err := conn.Write(ctx, websocket.MessageBinary, sealed); err != nil {
+					done <- err
+					return
+				}
+				_, frame, err := conn.Read(ctx)
+				if err != nil {
+					done <- err
+					return
+				}
+				opened, err := phone.Open(frame)
+				if err != nil {
+					done <- err
+					return
+				}
+				resp, err := DecodeResponse(opened)
+				if err != nil {
+					done <- err
+					return
+				}
+				if resp.Status != http.StatusOK {
+					done <- fmt.Errorf("status %d", resp.Status)
+					return
+				}
+				if len(resp.Body) != len(big) {
+					done <- fmt.Errorf("body truncated: got %d bytes, want %d", len(resp.Body), len(big))
+					return
+				}
+				done <- nil
+			}()
+		})
+	})
+	defer relay.Close()
+
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  strings.Replace(relay.URL, "http://", "ws://", 1),
+		SessionID: "test-session-id-0123456789",
+		Keypair:   keypair,
+		Forwarder: NewForwarder(local.URL, local.Client()),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go dialer.Run(ctx)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("large frame did not survive the tunnel: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out carrying a large frame")
+	}
+}
+
+// Entitlement tokens are standard base64, whose alphabet includes '+' -- which
+// a query string decodes as a space. Concatenating one unescaped would corrupt
+// roughly half of all real tokens, and the symptom would be a paying customer
+// told they had not paid.
+func TestEntitlementTokenSurvivesTheQueryString(t *testing.T) {
+	token := "eyJleHAiOjE3ODg1MTM4MDN9.Pb8j33+KIif5vCjENO2yby9Q38q4=="
+	dialer := NewDialer(DialerOptions{
+		RelayURL:         "https://relay.example.com",
+		SessionID:        "test-session-id-0123456789",
+		EntitlementToken: token,
+	})
+
+	parsed, err := url.Parse(dialer.sessionURL())
+	if err != nil {
+		t.Fatalf("the dial URL does not parse: %v", err)
+	}
+	if got := parsed.Query().Get("entitlement"); got != token {
+		t.Fatalf("token was mangled in the URL:\n got %q\nwant %q", got, token)
+	}
+	if got := parsed.Query().Get("role"); got != "host" {
+		t.Fatalf("role: %q", got)
+	}
+	if parsed.Path != "/v1/session/test-session-id-0123456789" {
+		t.Fatalf("path: %q", parsed.Path)
+	}
+}
+
+// A session id is generated, but a hostile or corrupted config value must not
+// be able to add query parameters or climb the path.
+func TestSessionIDCannotInjectIntoTheDialURL(t *testing.T) {
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  "https://relay.example.com",
+		SessionID: "evil?role=client&x=/../../admin",
+	})
+
+	parsed, err := url.Parse(dialer.sessionURL())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := parsed.Query().Get("role"); got != "host" {
+		t.Fatalf("the session id overrode the role: %q", got)
+	}
+	if strings.Contains(parsed.Path, "..") {
+		t.Fatalf("the session id climbed the path: %q", parsed.Path)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"path"
 	"time"
 
 	"github.com/coder/websocket"
@@ -107,6 +109,12 @@ func (d *Dialer) connect(ctx context.Context) error {
 	}
 	defer conn.CloseNow()
 
+	// coder/websocket defaults to a 32 KB read limit, which a run's logs pass
+	// routinely. Exceeding it does not fail the request: it closes the socket,
+	// so the tunnel would drop mid-download and reconnect. Sized to the frame
+	// ceiling plus room for Noise and JSON overhead.
+	conn.SetReadLimit(maxTunnelFrame)
+
 	// A fresh SessionHandler for every connection: a resumed connection must
 	// never reuse cipher states. A reconnect after a network blip creates a
 	// new Noise session with the same static keypair, not a continuation of
@@ -141,13 +149,23 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 		// means a slow local API call does not trigger an idle disconnect.
 		readCtx, cancelRead := context.WithTimeout(ctx, idleTimeout)
 		_, frame, err := conn.Read(readCtx)
+		readExpired := readCtx.Err() != nil && ctx.Err() == nil
 		cancelRead()
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 				return nil
 			}
-			// A deadline exceeded on the read ctx means the idle timeout
+			if !readExpired {
+				// The socket failed rather than went quiet: the relay dropped
+				// us, the network reset, or the object was evicted. This must
+				// back off. Calling it idle and retrying immediately produced
+				// twenty thousand dials in three seconds against a relay that
+				// accepts and hangs up.
+				_ = conn.CloseNow()
+				return fmt.Errorf("read frame: %w", err)
+			}
+			// Only a genuine read deadline means the idle timeout
 			// fired. Close normally and let Run reconnect (or wait for a phone
 			// to come back).
 			_ = conn.Close(websocket.StatusNormalClosure, "idle timeout")
@@ -177,13 +195,29 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 }
 
 // sessionURL builds the relay WebSocket URL for this session.
+// sessionURL builds the address this desktop dials.
+//
+// Built through net/url rather than concatenated. An entitlement token is
+// standard base64, whose alphabet includes '+', and a query string decodes
+// that as a space -- so concatenation would corrupt about half of all real
+// tokens and tell a paying customer they had not paid. Encoding the path
+// segment likewise stops a corrupted session id from adding its own query
+// parameters or climbing out of the path.
+//
+// The returned URL carries a credential and must not be logged.
 func (d *Dialer) sessionURL() string {
-	base := d.opts.RelayURL
-	u := base + "/v1/session/" + d.opts.SessionID + "?role=host"
-	if d.opts.EntitlementToken != "" {
-		// The token is not logged: sessionURL is called without printing u,
-		// and Run does not log the returned URL.
-		u += "&entitlement=" + d.opts.EntitlementToken
+	base, err := url.Parse(d.opts.RelayURL)
+	if err != nil {
+		// Validated at config load, so this is unreachable in practice; a
+		// deliberately broken URL simply fails to dial and backs off.
+		return d.opts.RelayURL
 	}
-	return u
+	base.Path = path.Join(base.Path, "/v1/session", d.opts.SessionID)
+	query := url.Values{}
+	query.Set("role", "host")
+	if d.opts.EntitlementToken != "" {
+		query.Set("entitlement", d.opts.EntitlementToken)
+	}
+	base.RawQuery = query.Encode()
+	return base.String()
 }
