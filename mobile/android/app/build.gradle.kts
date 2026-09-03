@@ -46,6 +46,14 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // Current devices such as the Pixel 9 use 16KB memory pages, and
+            // Android warns on every launch when a bundled library is packed
+            // for 4KB. Storing the libraries uncompressed and page-aligned is
+            // what makes the alignment survive packaging; linking them for
+            // 16KB is necessary but not sufficient on its own.
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -68,13 +76,22 @@ dependencies {
     // Keystore-backed storage for the API token, which grants full access.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // Camera and barcode scanning for QR pairing. ML Kit's bundled model keeps
-    // scanning on-device: shipping a pairing credential to a cloud recogniser
-    // would defeat the point of pairing.
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    // Camera and barcode scanning for QR pairing.
+    //
+    // CameraX 1.4+ is required for 16KB memory pages: 1.3.x shipped a
+    // libimage_processing_util_jni.so linked for 4KB, which current devices
+    // such as the Pixel 9 reject as incompatible.
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+
+    // The Play Services variant rather than the bundled one. Both recognise
+    // barcodes entirely on the device -- a pairing credential is never sent to
+    // a cloud recogniser either way -- but this variant keeps the model in
+    // Play Services instead of bundling libbarhopper_v3.so, which is not 16KB
+    // aligned and is not something this project can rebuild. It also drops
+    // several megabytes from the APK.
+    implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")

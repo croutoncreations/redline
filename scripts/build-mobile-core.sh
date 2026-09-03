@@ -55,7 +55,14 @@ case "${target}" in
   android)
     output="${output_root}/redlinecore.aar"
     # API 26 matches the app's minSdk.
-    gomobile bind -target=android -androidapi 26 -o "${output}" ./mobile/core
+    #
+    # The 16KB max-page-size flag matters on current hardware: devices such as
+    # the Pixel 9 use 16KB memory pages, and a library linked for 4KB pages
+    # makes Android warn on every launch that the app is not compatible.
+    # Go's linker does not set this itself, so it is passed to the NDK linker.
+    gomobile bind -target=android -androidapi 26 \
+      -ldflags "-extldflags=-Wl,-z,max-page-size=16384" \
+      -o "${output}" ./mobile/core
     ;;
   ios)
     output="${output_root}/RedlineCore.xcframework"
