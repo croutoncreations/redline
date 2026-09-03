@@ -422,6 +422,30 @@ test('opening a run marks it read and shows run detail', async ({ page }) => {
   await expect.poll(() => state.requests.some(r => r.path === '/v1/runs/run-1/read')).toBe(true);
 });
 
+test('opening an already-read run does not decrement the badge for other unread runs', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.runs.push({
+    id: 'run-2', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed',
+    started_at: '2026-07-20T19:00:00Z', completed_at: '2026-07-20T19:00:00Z',
+    activity_read_at: '2026-07-20T18:00:00Z', summary: 'Already seen.',
+  });
+  // Only run-1 is unread; run-2 was already read before this session started.
+  dashboard.unread_runs = 1;
+  const state = await loadMobileDashboard(page, { dashboard });
+  await page.locator('#m-tab-runs').click();
+  const badge = page.locator('#m-runs-badge');
+  await expect(badge).toContainText('1');
+  await Promise.all([
+    page.waitForResponse(resp => resp.url().includes('/v1/runs/run-2/events')),
+    page.locator('[data-testid="run-item-run-2"]').click(),
+  ]);
+  await expect(page.locator('#m-run-detail')).toHaveClass(/visible/);
+  // run-2 was already read, so opening it must not call /read or touch the badge.
+  expect(state.requests.some(r => r.path === '/v1/runs/run-2/read')).toBe(false);
+  // run-1 is still unread, so the badge must still read 1.
+  await expect(badge).toContainText('1');
+});
+
 test('run detail shows summary, route, artifacts, and events', async ({ page }) => {
   await loadMobileDashboard(page);
   await page.locator('#m-tab-runs').click();
