@@ -356,7 +356,22 @@ func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("prompt_file %q escapes workspace directory", task.PromptFile)
 	}
-	data, err := os.ReadFile(path)
+	// The lexical check above does not see through symlinks a workspace can
+	// legitimately contain (e.g. checked into the repository), so resolve
+	// both sides before trusting the result and re-check confinement.
+	resolvedRoot, err := filepath.EvalSymlinks(workspaceDirectory)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace directory: %w", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve prompt_file %q: %w", task.PromptFile, err)
+	}
+	resolvedRelative, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("prompt_file %q escapes workspace directory", task.PromptFile)
+	}
+	data, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		return "", fmt.Errorf("read task prompt: %w", err)
 	}
