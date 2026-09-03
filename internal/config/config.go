@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ type Config struct {
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
+	Relay           Relay               `yaml:"relay"`
 	APIToken        string              `yaml:"-"`
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
@@ -62,6 +64,26 @@ func (c Config) NotificationEvents() map[string]bool {
 
 type API struct {
 	TrustedHosts []string `yaml:"trusted_hosts"`
+}
+
+// Relay configures reaching this desktop from outside the tailnet, through an
+// untrusted forwarding service.
+//
+// It is off unless the user turns it on. Everything below only takes effect
+// while Enabled is true, so a user who never opts in is in exactly the position
+// they were before the relay existed.
+type Relay struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
+	// SessionID is persisted so a restart rejoins the same session rather than
+	// stranding a paired phone on an id nothing will ever answer.
+	SessionID string `yaml:"session_id"`
+	// KeypairPath holds the desktop's Noise static identity, which every paired
+	// phone trusts. Empty means a default beside the database.
+	KeypairPath string `yaml:"keypair_path"`
+	// EntitlementToken authorises use of the relay. It says nothing about who
+	// the user is; the relay checks only that it is signed and unexpired.
+	EntitlementToken string `yaml:"entitlement_token"`
 }
 
 type Scheduler struct {
@@ -172,11 +194,27 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining" json:"min_weekly_remaining"`
 }
 
-func validTrustedHost(host string) bool {
+// validTrustedHost reports whether host may be trusted by the API.
+//
+// The .ts.net requirement predates the relay, when Tailscale was the only way
+// in and a publicly resolvable trusted host would have been an opening. With
+// the relay enabled a non-Tailscale name is legitimate, so the suffix rule
+// relaxes -- but only then, and nothing else about the check relaxes with it: a
+// bare IP, a wildcard, a port, or a malformed label is still refused either
+// way, so turning the relay on cannot be used to smuggle in a host that was
+// never a valid name to begin with.
+func validTrustedHost(host string, relayEnabled bool) bool {
 	if host == "" || strings.TrimSpace(host) != host {
 		return false
 	}
-	if net.ParseIP(host) != nil || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	if !relayEnabled && !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return false
+	}
+	// A name with no dot is a bare label, not a fully qualified host.
+	if relayEnabled && !strings.Contains(host, ".") {
 		return false
 	}
 	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
@@ -227,10 +265,18 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("at least one provider is required")
 	}
 	for index, host := range cfg.API.TrustedHosts {
-		if !validTrustedHost(host) {
+		if !validTrustedHost(host, cfg.Relay.Enabled) {
+			if cfg.Relay.Enabled {
+				return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified domain name", index, host)
+			}
 			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
 		}
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
+	}
+	if cfg.Relay.Enabled {
+		if err := validRelayURL(cfg.Relay.URL); err != nil {
+			return fmt.Errorf("relay url: %w", err)
+		}
 	}
 	for name, provider := range cfg.Providers {
 		if provider.Provider == "" {
@@ -368,6 +414,34 @@ func positiveDuration(name, raw string) (time.Duration, error) {
 func fraction(name string, value float64) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
 		return fmt.Errorf("%s must be between 0 and 1, got %v", name, value)
+	}
+	return nil
+}
+
+// validRelayURL checks the relay address the desktop will dial.
+//
+// The relay is on the public internet by definition, so unlike the local API
+// there is no loopback exception to make: plain HTTP would expose which
+// desktop is talking to which relay, and a bare IP is never something we
+// publish.
+func validRelayURL(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("is required when the relay is enabled")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid URL", raw)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("%q must use https", raw)
+	}
+	host := parsed.Hostname()
+	if host == "" || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+		return fmt.Errorf("%q must name a fully qualified host", raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%q must not contain credentials", raw)
 	}
 	return nil
 }

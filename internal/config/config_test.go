@@ -25,6 +25,72 @@ api:
 	}
 }
 
+// The .ts.net restriction exists because Tailscale was the only transport, and
+// a trusted host that anyone can resolve would otherwise be a way in. The relay
+// adds a second transport, so the restriction has to relax -- but only for a
+// user who has explicitly turned remote access on. Someone who never enables
+// the relay must be left exactly where they were.
+func TestNonTailscaleTrustedHostsRequireRemoteAccess(t *testing.T) {
+	withRelay := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - redline-relay.example.com
+relay:
+  enabled: true
+  url: https://redline-relay.example.com`, 1)
+	if _, err := config.Load(writeConfig(t, withRelay)); err != nil {
+		t.Fatalf("a non-Tailscale host should be allowed once the relay is on: %v", err)
+	}
+
+	withoutRelay := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - redline-relay.example.com`, 1)
+	if _, err := config.Load(writeConfig(t, withoutRelay)); err == nil {
+		t.Fatal("a non-Tailscale trusted host must be refused while remote access is off")
+	}
+}
+
+// Relaxing the rule must not mean abandoning it: the host still has to be a
+// plausible name, so a typo or an injected value is still caught.
+func TestRelaxedTrustedHostsAreStillValidated(t *testing.T) {
+	for _, host := range []string{
+		"*.example.com", "example.com:443", "user@example.com",
+		"exa mple.com", "-example.com", ".example.com", "example..com",
+		"192.0.2.1", "localhost", "http://example.com",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - `+host+`
+relay:
+  enabled: true
+  url: https://redline-relay.example.com`, 1)
+		if _, err := config.Load(writeConfig(t, configured)); err == nil {
+			t.Fatalf("accepted an invalid trusted host %q even with the relay on", host)
+		}
+	}
+}
+
+// Enabling the relay without a usable address, or with one that would expose
+// the connection, must fail loudly at load rather than at first use.
+func TestRelayURLIsValidated(t *testing.T) {
+	for _, relayBlock := range []string{
+		"relay:\n  enabled: true",
+		"relay:\n  enabled: true\n  url: http://relay.example.com",
+		"relay:\n  enabled: true\n  url: ws://relay.example.com",
+		"relay:\n  enabled: true\n  url: https://192.0.2.1",
+		"relay:\n  enabled: true\n  url: https://relay",
+		"relay:\n  enabled: true\n  url: not-a-url",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard",
+			"active_policy: standard\n"+strings.ReplaceAll(relayBlock, "\\n", "\n"), 1)
+		if _, err := config.Load(writeConfig(t, configured)); err == nil {
+			t.Fatalf("accepted a bad relay config:\n%s", relayBlock)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidTrustedAPIHosts(t *testing.T) {
 	for _, host := range []string{
 		"https://macbook.example.ts.net", "*.example.ts.net", "macbook.example.ts.net:443", "",
