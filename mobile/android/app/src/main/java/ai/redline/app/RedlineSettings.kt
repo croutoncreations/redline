@@ -31,6 +31,15 @@ interface RedlineSettingsWriter {
     fun update(baseUrl: String, token: String)
 
     /**
+     * Forgets everything about the paired desktop.
+     *
+     * Part of the interface so unpairing can be tested without a device. The
+     * risk being guarded against is a partial clear, which leaves a phone that
+     * looks unpaired but is still carrying one desktop's relay details.
+     */
+    fun clear()
+
+    /**
      * Records how to reach this desktop when it is not directly reachable.
      *
      * Kept separate from update() because an older desktop supplies neither,
@@ -39,6 +48,14 @@ interface RedlineSettingsWriter {
      */
     fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String)
 }
+
+/**
+ * Alias used by tests that only care about storing and clearing a pairing.
+ *
+ * Named for the role rather than the implementation, so a test reads as being
+ * about the pairing store rather than about Android preferences.
+ */
+typealias PairingStore = RedlineSettingsWriter
 
 class RedlineSettings(context: Context) : RedlineSettingsWriter {
 
@@ -126,7 +143,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
      * already refused only produces the same failure on every launch, and
      * clearing it returns the app to the pairing screen where the fix is.
      */
-    fun clear() {
+    override fun clear() {
         preferences.edit()
             .remove(KEY_TOKEN)
             .remove(KEY_BASE_URL)

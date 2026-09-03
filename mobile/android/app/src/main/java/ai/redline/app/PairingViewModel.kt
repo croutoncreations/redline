@@ -49,6 +49,21 @@ class PairingViewModel(
     private var pairingJob: Job? = null
 
     /**
+     * Returns to the unpaired state after the credential has been cleared.
+     *
+     * The model holds its own success from the last pairing, so without this
+     * the app would forget the credential and still believe it was paired,
+     * leaving a dashboard on screen that can no longer fetch anything. Any
+     * in-flight scan is cancelled too: its result would write a credential back
+     * moments after the user asked to remove one.
+     */
+    fun forget() {
+        pairingJob?.cancel()
+        pairingJob = null
+        _state.value = PairingUiState()
+    }
+
+    /**
      * Pairs using a scanned code.
      *
      * The camera delivers a stream of frames and will report the same code many

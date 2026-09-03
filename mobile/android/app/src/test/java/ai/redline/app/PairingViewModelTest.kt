@@ -40,10 +40,40 @@ class PairingViewModelTest {
             this.desktopKey = desktopKey
             this.relaySession = relaySession
         }
+
+        override fun clear() {
+            baseUrl = null
+            token = null
+            relayUrl = null
+            desktopKey = null
+            relaySession = null
+        }
     }
 
     private val validScan =
         "https://macbook.example.ts.net/pair#pairing_token=one-time-token"
+
+    /**
+     * After unpairing, the view model must stop claiming the device is paired.
+     *
+     * It holds its own success state from the last pairing, so without this the
+     * app would clear the credential and immediately decide it was still paired
+     * -- showing a dashboard it can no longer fetch.
+     */
+    @Test
+    fun forgettingReturnsToTheUnpairedState() = runTest(dispatcher) {
+        val settings = FakeSettings()
+        val model = PairingViewModel(source(), settings, dispatcher)
+
+        model.pair(validScan)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertTrue(model.state.value.isPaired)
+
+        model.forget()
+
+        assertFalse("the model must not still report a pairing", model.state.value.isPaired)
+        assertNull("a stale error would show on the pairing screen", model.state.value.error)
+    }
 
     /**
      * A desktop that publishes a relay must have those details stored, or the

@@ -27,6 +27,15 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,12 +56,13 @@ import androidx.compose.ui.unit.sp
 fun UsageScreen(
     state: UsageUiState,
     onRetry: () -> Unit,
+    onUnpair: (() -> Unit)? = null,
     onControlProvider: (String, String) -> Unit = { _, _ -> },
     onViewQueue: (String) -> Unit = {},
 ) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Header(state)
+            Header(state, onUnpair)
             when {
                 // Only show a spinner with nothing behind it on a cold start;
                 // a refresh over existing data should not blank the screen.
@@ -100,7 +110,7 @@ private fun RefreshableProviderList(
 }
 
 @Composable
-private fun Header(state: UsageUiState) {
+private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -137,6 +147,12 @@ private fun Header(state: UsageUiState) {
 
                 else -> LivePill(state.live)
             }
+            // Unpairing lives behind the overflow rather than on the surface:
+            // it is rare, destructive, and next to controls people press often.
+            onUnpair?.let {
+                Spacer(Modifier.width(4.dp))
+                UnpairMenu(onUnpair = it)
+            }
         }
         Spacer(Modifier.height(2.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -161,6 +177,75 @@ private fun Header(state: UsageUiState) {
  * Without this, a stalled stream and a live one look identical, and the user
  * has no way to know whether what they are reading is current.
  */
+/**
+ * The overflow menu holding "Unpair this device".
+ *
+ * Confirmation is not ceremony here. The pairing token is single use, so a
+ * phone that unpairs by accident cannot undo it from the phone: recovering
+ * means walking back to the Mac and running `redline pair --qr` again. The
+ * dialog says that, because "are you sure?" on its own tells someone nothing
+ * they can weigh.
+ */
+@Composable
+private fun UnpairMenu(onUnpair: () -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirming by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(
+            onClick = { menuOpen = true },
+            modifier = Modifier.size(28.dp).semantics {
+                contentDescription = "More options"
+            },
+        ) {
+            Text("\u22EE", color = TextMuted, fontSize = 18.sp)
+        }
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+            modifier = Modifier.background(PanelRaised),
+        ) {
+            DropdownMenuItem(
+                text = { Text("Unpair this device", color = TextPrimary, fontSize = 14.sp) },
+                onClick = {
+                    menuOpen = false
+                    confirming = true
+                },
+            )
+        }
+    }
+
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            containerColor = PanelRaised,
+            title = { Text("Unpair this device?", color = TextPrimary) },
+            text = {
+                Text(
+                    "This phone will forget its Redline credential and return to " +
+                        "the pairing screen. To use it again, run redline pair --qr " +
+                        "on your Mac and scan the new code.",
+                    color = TextMuted,
+                    fontSize = 13.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirming = false
+                    onUnpair()
+                }) {
+                    Text("Unpair", color = Danger)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = false }) {
+                    Text("Cancel", color = TextMuted)
+                }
+            },
+        )
+    }
+}
+
 @Composable
 private fun LivePill(live: LiveState) {
     val (label, tone) = when (live) {

@@ -3,6 +3,7 @@ package ai.redline.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -60,10 +61,18 @@ class MainActivity : ComponentActivity() {
             )
             val pairingState by pairingModel.state.collectAsState()
 
+            // Bumped when the credential is cleared, which re-reads settings
+            // and drops straight back to the pairing screen. Without it the
+            // app would keep showing a dashboard it can no longer fetch, since
+            // settings.isPaired is a plain read rather than observable state.
+            var pairingGeneration by remember { mutableIntStateOf(0) }
+
             // Pairing state is read once at launch and then follows the view
             // model, so a successful pairing moves straight to the app without
             // needing a restart.
-            val paired = settings.isPaired || pairingState.isPaired
+            val paired = remember(pairingGeneration, pairingState.isPaired) {
+                settings.isPaired || pairingState.isPaired
+            }
             if (!paired) {
                 PairingScreen(state = pairingState, onScanned = pairingModel::pair)
                 return@setContent
@@ -139,6 +148,17 @@ class MainActivity : ComponentActivity() {
                             onViewQueue = { id ->
                                 queueModel.selectProvider(id)
                                 tab = Tab.QUEUE
+                            },
+                            onUnpair = {
+                                // Drop the relayed session too: it was
+                                // authenticated with the credential being
+                                // forgotten, so holding it open would leave a
+                                // live tunnel to a desktop this phone is no
+                                // longer paired with.
+                                holder.dropRelay()
+                                settings.clear()
+                                pairingModel.forget()
+                                pairingGeneration++
                             },
                         )
 
