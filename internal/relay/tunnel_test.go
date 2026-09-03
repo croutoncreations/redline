@@ -190,6 +190,50 @@ func TestHostilePathsNeverReachAnythingButTheLocalAPI(t *testing.T) {
 	}
 }
 
+// Percent-encoding is where a path can mean two things at once. These cases
+// are not host escapes, so they are not SSRF, but each one made the desktop
+// issue a different request than the phone sent -- which is its own bug and
+// makes a log a poor record of what happened.
+func TestAmbiguouslyEncodedPathsAreRefusedOrForwardedVerbatim(t *testing.T) {
+	var seen []string
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.RequestURI())
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer local.Close()
+
+	forwarder := NewForwarder(local.URL, local.Client())
+
+	// Encoded control characters pass a scan of the raw string untouched and
+	// only become dangerous once decoded.
+	for _, path := range []string{"/v1/x%0d%0ay", "/v1/runs%00", "/v1/a%09b"} {
+		resp, err := forwarder.Forward(context.Background(), TunnelRequest{
+			Method: http.MethodGet,
+			Path:   path,
+		})
+		if err == nil && resp.Status < 400 {
+			t.Errorf("encoded control character in %q was accepted", path)
+		}
+	}
+
+	// Double encoding must reach the API exactly as written. Forwarding the
+	// decoded form would turn %2561 into %61, a different request.
+	before := len(seen)
+	resp, err := forwarder.Forward(context.Background(), TunnelRequest{
+		Method: http.MethodGet,
+		Path:   "/v1/%2561",
+	})
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	if resp.Status == http.StatusOK && len(seen) > before {
+		if got := seen[len(seen)-1]; got != "/v1/%2561" {
+			t.Fatalf("double-encoded path was rewritten in transit: sent %q, server saw %q",
+				"/v1/%2561", got)
+		}
+	}
+}
+
 // Ordinary paths must survive the hardening: over-strict validation that
 // breaks real requests is its own kind of failure.
 func TestOrdinaryPathsStillWork(t *testing.T) {

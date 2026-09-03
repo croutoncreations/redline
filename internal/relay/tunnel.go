@@ -220,7 +220,8 @@ func resolvePath(raw string) (string, error) {
 	// desktop into a proxy for the network it sits on, so the rule is an
 	// allowlist: anything not obviously an ordinary local API path is refused.
 
-	// Control characters would also enable request smuggling on the way out.
+	// Control characters would enable request smuggling on the way out. Checked
+	// again after decoding below, since %0d%0a passes this scan untouched.
 	for _, r := range raw {
 		if r < 0x20 || r == 0x7f {
 			return "", fmt.Errorf("path contains a control character")
@@ -257,14 +258,27 @@ func resolvePath(raw string) (string, error) {
 	if strings.Contains(parsed.Path, "..") {
 		return "", fmt.Errorf("path contains a traversal sequence")
 	}
-	// An encoded separator (%2F) decodes into a path segment boundary that the
-	// sender took care to hide. Whatever the intent, the decoded and undecoded
-	// forms address different things, and a request whose meaning depends on
-	// which parser reads it is one to refuse rather than resolve.
-	if parsed.Path != parsed.EscapedPath() && strings.Contains(parsed.Path, "/") {
-		if decoded := strings.Count(parsed.Path, "/"); decoded != strings.Count(parsed.EscapedPath(), "/") {
-			return "", fmt.Errorf("path contains an encoded separator")
+	// Now that the path is decoded, scan it again. An encoded control character
+	// (%0d%0a, %00) passes the check on the raw string untouched and only
+	// becomes dangerous here. Without this, such a path is caught by chance
+	// further down when net/url refuses to build the request, which surfaces as
+	// a transport error rather than the refusal it should be.
+	for _, r := range parsed.Path {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("path contains an encoded control character")
 		}
+	}
+
+	// Any difference between the decoded and encoded forms means the path says
+	// one thing to one parser and something else to another: %2F decodes into a
+	// segment boundary the sender took care to hide, and %2561 decodes to %61,
+	// which would then be forwarded as a different string than either the phone
+	// sent or a reader of the logs would expect. Refuse rather than pick a
+	// winner. Percent-encoding that survives decoding unchanged (a space, a
+	// UTF-8 character) is unaffected, because for those the two forms agree once
+	// re-encoded.
+	if parsed.EscapedPath() != escapePathPreservingSlashes(parsed.Path) {
+		return "", fmt.Errorf("path is ambiguously encoded")
 	}
 	cleaned := path.Clean(parsed.Path)
 	if !strings.HasPrefix(cleaned, "/") || strings.HasPrefix(cleaned, "//") {
@@ -285,10 +299,33 @@ func resolvePath(raw string) (string, error) {
 		return "", fmt.Errorf("path contains a fragment")
 	}
 
-	// Rebuild from the validated parts.
-	out := cleaned
+	// Forward the path exactly as the phone wrote it, not the decoded form.
+	//
+	// Validation above works on the decoded path, because that is where an
+	// attack is legible. Forwarding that same decoded form would be a second
+	// bug: "/v1/%2561" decodes to "/v1/%61", so the desktop would issue a
+	// different request than the phone sent and than anyone reading a log would
+	// expect. Validate decoded, forward verbatim.
+	out := parsed.EscapedPath()
+	if path.Clean(out) != out {
+		// The encoded form has to be canonical too, or the two disagree again.
+		return "", fmt.Errorf("path is not in canonical form")
+	}
 	if parsed.RawQuery != "" {
 		out += "?" + parsed.RawQuery
 	}
 	return out, nil
+}
+
+// escapePathPreservingSlashes re-encodes a decoded path the way url.EscapedPath
+// would, so the two can be compared to detect ambiguous encoding.
+//
+// url.PathEscape escapes "/" as %2F, which is exactly the character that must
+// stay literal here, so the path is escaped segment by segment and rejoined.
+func escapePathPreservingSlashes(decoded string) string {
+	segments := strings.Split(decoded, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }

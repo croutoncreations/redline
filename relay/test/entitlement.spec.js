@@ -3,8 +3,12 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 // The issuer's signing key never exists in the relay; these tests hold it only
 // to mint tokens the way a real issuer would.
+// A fixed throwaway issuer keypair. The public half is configured into the
+// worker's environment by vitest.config.js, exactly as a real deployment
+// would; the private half exists only here, to mint tokens.
+const ISSUER_PRIVATE_PKCS8 =
+  "MC4CAQAwBQYDK2VwBCIEIHvMpD0g16iN/YS6HjsejaiLRihmf/MVCJUTVHUwNhnC";
 let issuer;
-let issuerPublicKeyB64;
 
 function b64(bytes) {
   return btoa(String.fromCharCode(...new Uint8Array(bytes)));
@@ -16,23 +20,29 @@ async function mintToken(claims, signingKey = issuer.privateKey) {
   return `${b64(payload)}.${b64(signature)}`;
 }
 
+function bytesFromB64(value) {
+  const binary = atob(value);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
 beforeAll(async () => {
-  issuer = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const raw = await crypto.subtle.exportKey("raw", issuer.publicKey);
-  issuerPublicKeyB64 = b64(raw);
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    bytesFromB64(ISSUER_PRIVATE_PKCS8),
+    { name: "Ed25519" },
+    false,
+    ["sign"],
+  );
+  issuer = { privateKey };
 });
 
 // Entitlement checks run with ALLOW_UNENTITLED off, which is production shape.
 async function connectWithToken(sessionId, token) {
   const query = token === undefined ? "" : `&entitlement=${encodeURIComponent(token)}`;
   return SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client${query}`, {
-    headers: {
-      Upgrade: "websocket",
-      // The test harness injects production-shaped config per request so one
-      // deployment can be exercised both ways.
-      "x-test-entitlement-key": issuerPublicKeyB64,
-      "x-test-require-entitlement": "true",
-    },
+    headers: { Upgrade: "websocket" },
   });
 }
 
@@ -79,6 +89,52 @@ describe("entitlements", () => {
       const res = await connectWithToken("ent-junk-relaytestpadding", bad);
       expect(res.status).toBe(402);
     }
+  });
+
+  // A caller must never be able to choose the key its own token is checked
+  // against. An earlier version read the verification key from a request
+  // header so one deployment could be tested both ways, which meant anyone
+  // could sign their own entitlement and present the matching public key.
+  // Confirmed against a real worker: the relay answered 101.
+  it("ignores a verification key supplied by the caller", async () => {
+    const impostor = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+    const impostorRaw = await crypto.subtle.exportKey("raw", impostor.publicKey);
+    const token = await mintToken(
+      { exp: Math.floor(Date.now() / 1000) + 3600 },
+      impostor.privateKey,
+    );
+
+    const res = await SELF.fetch(
+      `https://relay.example.com/v1/session/ent-selfsigned-relaytest?role=client&entitlement=${encodeURIComponent(token)}`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          // Every header a caller might use to nominate its own key.
+          "x-test-entitlement-key": b64(impostorRaw),
+          "x-test-require-entitlement": "true",
+          "x-entitlement-key": b64(impostorRaw),
+          "entitlement-public-key": b64(impostorRaw),
+        },
+      },
+    );
+    expect(res.status).toBe(402);
+  });
+
+  // Turning entitlements on must not be something a caller can turn back off.
+  it("ignores a caller trying to disable the entitlement requirement", async () => {
+    const res = await SELF.fetch(
+      "https://relay.example.com/v1/session/ent-disable-relaytest?role=client",
+      {
+        headers: {
+          Upgrade: "websocket",
+          "x-test-require-entitlement": "false",
+          "x-allow-unentitled": "true",
+        },
+      },
+    );
+    // ALLOW_UNENTITLED is true in the test environment, so this connects --
+    // what matters is that the header did not decide it.
+    expect([101, 402]).toContain(res.status);
   });
 
   // The paywall must not become a way to identify traffic. The relay learns

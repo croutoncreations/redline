@@ -52,7 +52,7 @@ export default {
       return new Response("expected a websocket upgrade", { status: 426 });
     }
 
-    const entitlement = await checkEntitlement(request, env, url);
+    const entitlement = await checkEntitlement(env, url);
     if (!entitlement.ok) {
       // 402 rather than 401: nothing is wrong with the caller's identity, they
       // simply are not entitled to relay. The app distinguishes the two.
@@ -72,17 +72,15 @@ export default {
  * turning the paywall on cannot turn the relay into a way to track who is
  * talking to whom. Everything about who paid lives in the issuer.
  */
-async function checkEntitlement(request, env, url) {
-  // The test harness injects production-shaped config per request so a single
-  // deployment can be exercised both open and closed. Real deployments carry
-  // these as environment vars.
-  const testKey = request.headers.get("x-test-entitlement-key");
-  const testRequire = request.headers.get("x-test-require-entitlement") === "true";
-
-  const publicKeyB64 = testKey || env.ENTITLEMENT_PUBLIC_KEY || "";
-  const allowUnentitled = testRequire
-    ? false
-    : String(env.ALLOW_UNENTITLED).toLowerCase() === "true";
+async function checkEntitlement(env, url) {
+  // Configuration comes only from the environment. An earlier version let a
+  // request header supply the verification key so one deployment could be
+  // exercised both open and closed, which meant a caller could sign its own
+  // entitlement and hand over the matching public key -- the relay would then
+  // dutifully verify the token against the attacker's key and let them in.
+  // Nothing a caller sends may influence how that caller is authorised.
+  const publicKeyB64 = env.ENTITLEMENT_PUBLIC_KEY || "";
+  const allowUnentitled = String(env.ALLOW_UNENTITLED).toLowerCase() === "true";
 
   if (allowUnentitled) {
     return { ok: true };

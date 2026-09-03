@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
+	core "github.com/jfox/redline/mobile/core"
 	"gopkg.in/yaml.v3"
 )
 
@@ -420,28 +420,8 @@ func fraction(name string, value float64) error {
 
 // validRelayURL checks the relay address the desktop will dial.
 //
-// The relay is on the public internet by definition, so unlike the local API
-// there is no loopback exception to make: plain HTTP would expose which
-// desktop is talking to which relay, and a bare IP is never something we
-// publish.
+// The rule itself lives in mobile/core so the phone, the desktop, and the
+// relay dialer cannot drift apart on what counts as a safe relay.
 func validRelayURL(raw string) error {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return fmt.Errorf("is required when the relay is enabled")
-	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return fmt.Errorf("%q is not a valid URL", raw)
-	}
-	if !strings.EqualFold(parsed.Scheme, "https") {
-		return fmt.Errorf("%q must use https", raw)
-	}
-	host := parsed.Hostname()
-	if host == "" || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
-		return fmt.Errorf("%q must name a fully qualified host", raw)
-	}
-	if parsed.User != nil {
-		return fmt.Errorf("%q must not contain credentials", raw)
-	}
-	return nil
+	return core.ValidateRelayURL(raw)
 }

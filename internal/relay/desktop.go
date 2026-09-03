@@ -94,30 +94,35 @@ func (h *SessionHandler) HandleFrameAt(ctx context.Context, frame []byte, at tim
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 
-	req, err := core_DecodeRequest(plaintext)
+	// A frame that decrypted is authenticated traffic from the paired phone,
+	// whatever happens to it next. The idle clock is about whether anyone is
+	// still there, so it advances here rather than only on success -- otherwise
+	// a phone actively retrying while the local API is down would be reaped as
+	// idle, which is exactly the outage the sealed 502 path exists to survive.
+	h.updateLastSeen(at)
+
+	req, err := DecodeRequest(plaintext)
 	if err != nil {
 		// A frame that decrypted successfully but does not contain a valid
 		// request is a client bug rather than a relay attack. Return a sealed
 		// error response so the phone sees a legible failure; do not close the
 		// session.
-		return h.sealResponse(ctx, TunnelResponse{Status: http.StatusBadRequest})
+		return h.sealResponse(TunnelResponse{Status: http.StatusBadRequest})
 	}
 
 	resp, err := h.forwarder.Forward(ctx, req)
 	if err != nil {
 		// A local API failure (handler down, network error) is not the phone's
 		// fault and does not compromise the session. Return a sealed 502.
-		return h.sealResponse(ctx, TunnelResponse{Status: http.StatusBadGateway})
+		return h.sealResponse(TunnelResponse{Status: http.StatusBadGateway})
 	}
 
-	h.updateLastSeen(at)
-	return h.sealResponse(ctx, resp)
+	return h.sealResponse(resp)
 }
 
-// sealResponse encodes a TunnelResponse and seals it for the phone. It must
-// be called while h.mu is held because Seal holds the session mutex
-// internally.
-func (h *SessionHandler) sealResponse(_ context.Context, resp TunnelResponse) ([]byte, error) {
+// sealResponse encodes a TunnelResponse and seals it for the phone. It must be
+// called while h.mu is held.
+func (h *SessionHandler) sealResponse(resp TunnelResponse) ([]byte, error) {
 	encoded, err := json.Marshal(resp)
 	if err != nil {
 		return nil, fmt.Errorf("encode response: %w", err)
@@ -148,13 +153,6 @@ func (h *SessionHandler) IdleSince(fallback time.Time) time.Time {
 		return fallback
 	}
 	return h.lastSeen
-}
-
-// core_DecodeRequest wraps DecodeRequest so that the noise session's mutex
-// does not need to be re-entrant. It is a plain call to the tunnel package's
-// existing decoder.
-func core_DecodeRequest(frame []byte) (TunnelRequest, error) {
-	return DecodeRequest(frame)
 }
 
 // EncodeRequestParts encodes an HTTP request's parts into a tunnel frame.

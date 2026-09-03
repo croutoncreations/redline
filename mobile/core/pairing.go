@@ -52,28 +52,49 @@ type PairingRequest struct {
 // endpoint. Dropping the field degrades to direct-only pairing, which is a
 // working app rather than a broken one.
 func safeRelayURL(raw string) string {
+	if err := ValidateRelayURL(raw); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(raw)
+}
+
+// ValidateRelayURL reports whether raw is a relay address we are willing to
+// dial, and why not if it is not.
+//
+// This lives here because all three callers -- the phone reading a QR, the
+// desktop loading its config, and the relay package dialing out -- must agree.
+// Three hand-maintained copies of a security predicate is how one of them
+// quietly gets left behind when the rule tightens.
+func ValidateRelayURL(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return ""
+		return errors.New("a relay URL is required")
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		return ""
+		return fmt.Errorf("%q is not a valid URL", raw)
 	}
 	// HTTPS only. The relay is on the public internet by definition, so there
 	// is no loopback exception to make here.
-	if !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" {
-		return ""
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("%q must use https", raw)
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("%q has no host", raw)
 	}
 	// A literal IP as a relay host is never something we publish, and it is how
 	// link-local and metadata addresses would arrive.
-	if net.ParseIP(parsed.Hostname()) != nil {
-		return ""
+	if net.ParseIP(host) != nil {
+		return fmt.Errorf("%q must name a host rather than an address", raw)
+	}
+	if !strings.Contains(host, ".") {
+		return fmt.Errorf("%q must be a fully qualified host", raw)
 	}
 	if parsed.User != nil {
-		return ""
+		return fmt.Errorf("%q must not contain credentials", raw)
 	}
-	return trimmed
+	return nil
 }
 
 func ParsePairingURL(raw string) (string, error) {

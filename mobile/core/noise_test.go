@@ -526,6 +526,38 @@ func TestHostileRelayURLsAreRejected(t *testing.T) {
 	}
 }
 
+// One validator, three callers: the phone reading a QR, the desktop loading
+// config, and the dialer. They must agree, so the rule is tested once here
+// rather than three times in three shapes.
+func TestValidateRelayURL(t *testing.T) {
+	for _, bad := range []string{
+		"", "   ",
+		"http://relay.example.com",          // cleartext
+		"ws://relay.example.com",            // cleartext websocket
+		"relay.example.com",                 // no scheme
+		"https://",                          // no host
+		"https://192.0.2.1",                 // literal address
+		"https://[::1]",                     // literal address, v6
+		"https://relay",                     // not fully qualified
+		"https://user:pw@relay.example.com", // credentials in the URL
+		"://nonsense",
+	} {
+		if err := ValidateRelayURL(bad); err == nil {
+			t.Errorf("accepted a bad relay URL %q", bad)
+		}
+	}
+
+	for _, good := range []string{
+		"https://redline-relay.croutoncreations.com",
+		"https://relay.example.com:8443",
+		"  https://relay.example.com  ", // surrounding space is the caller's, not an error
+	} {
+		if err := ValidateRelayURL(good); err != nil {
+			t.Errorf("rejected a good relay URL %q: %v", good, err)
+		}
+	}
+}
+
 func TestHttpsRelayURLIsAccepted(t *testing.T) {
 	got, err := ParsePairingURL("https://host.ts.net:8443/pair#token=abc&relay=" + url.QueryEscape("https://relay.example.com"))
 	if err != nil {
