@@ -26,6 +26,17 @@ class CoreClientHolder(private val settings: RedlineSettings) {
 
     private var cached: Client? = null
     private var credentials: Pair<String, String>? = null
+    private var relay: core.RelayClient? = null
+
+    /**
+     * The transport in use, for the UI to report.
+     *
+     * Starts as Direct because that is what is attempted first; it only becomes
+     * Relay after a direct attempt has actually failed.
+     */
+    @Volatile
+    var transport: Transport = Transport.Direct
+        private set
 
     /**
      * Returns a client for the current credentials, rebuilding it if they have
@@ -46,6 +57,50 @@ class CoreClientHolder(private val settings: RedlineSettings) {
         cached = created
         credentials = current
         return created
+    }
+
+    /**
+     * Reaches the desktop through the relay after a direct attempt failed.
+     *
+     * Returns null when there is nothing to fall back to, which the caller must
+     * report as plain unreachability rather than a relay fault: someone who
+     * never set up a relay should not be sent looking for one.
+     *
+     * A relayed session is single-use by the core's contract, so a failure here
+     * discards it rather than retrying on the same session; the next attempt
+     * dials afresh.
+     */
+    @Synchronized
+    fun relayClient(): core.RelayClient? {
+        if (!settings.relayConfigured) return null
+
+        relay?.let { return it }
+        return runCatching {
+            Core.dialRelay(
+                settings.relayUrl,
+                settings.relaySession,
+                settings.desktopKey,
+                settings.entitlementToken,
+            ).also {
+                it.setAuthToken(settings.token)
+                relay = it
+                transport = Transport.Relay
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Discards a relayed session after a failure.
+     *
+     * Noise sessions do not resume: once a frame fails to decrypt, every later
+     * frame on that session fails too, so keeping it would turn one bad frame
+     * into a permanently broken app.
+     */
+    @Synchronized
+    fun dropRelay() {
+        runCatching { relay?.close() }
+        relay = null
+        transport = Transport.Direct
     }
 
     /** Reports whether an error means the credential was rejected. */

@@ -89,6 +89,14 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
     val relaySession: String
         get() = preferences.getString(KEY_RELAY_SESSION, null) ?: ""
 
+    /**
+     * Authorises use of the relay. Empty while the relay is free to use; the
+     * relay says nothing about who the token belongs to, only that it is
+     * signed and unexpired.
+     */
+    val entitlementToken: String
+        get() = preferences.getString(KEY_ENTITLEMENT, null) ?: ""
+
     /** Whether a relayed fallback is possible at all. */
     val relayConfigured: Boolean
         get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank()
@@ -125,6 +133,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
             .remove(KEY_RELAY_URL)
             .remove(KEY_DESKTOP_KEY)
             .remove(KEY_RELAY_SESSION)
+            .remove(KEY_ENTITLEMENT)
             .apply()
     }
 
@@ -134,6 +143,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
         const val KEY_RELAY_URL = "relay_url"
         const val KEY_DESKTOP_KEY = "desktop_key"
         const val KEY_RELAY_SESSION = "relay_session"
+        const val KEY_ENTITLEMENT = "entitlement_token"
 
         const val ENCRYPTED_FILE = "redline.secure"
         const val PLAIN_FILE = "redline"

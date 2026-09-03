@@ -126,3 +126,41 @@ fun relayStatusMessage(status: RelayStatus): String = when (status) {
     RelayStatus.Busy -> "Another device is already connected to this desktop"
     RelayStatus.Unavailable -> "The relay is unreachable. Your desktop is fine; try again shortly."
 }
+
+/**
+ * The chosen transport and the rules that follow from it.
+ *
+ * Bundled together because they are one decision: choosing the relay also means
+ * accepting a slower cadence and an idle timeout, and letting those drift apart
+ * is how a relayed session quietly ends up polling at the direct rate.
+ */
+data class TransportPlan(
+    val transport: Transport,
+    val liveCadenceSeconds: Int,
+    val dropWhenIdle: Boolean,
+) {
+    /** Whether the caller should attempt a relay connection. */
+    val shouldTryRelay: Boolean get() = transport == Transport.Relay
+}
+
+/**
+ * Decides how to reach the desktop.
+ *
+ * [previous] is accepted but deliberately not used to make the choice: direct
+ * is retried every time, so walking back onto the home network stops costing
+ * money without needing the app restarted. It is part of the signature because
+ * callers naturally have it and would otherwise be tempted to add their own
+ * stickiness.
+ */
+fun planTransport(
+    directReachable: Boolean,
+    relayConfigured: Boolean,
+    previous: Transport = Transport.Direct,
+): TransportPlan {
+    val transport = chooseTransport(directReachable, relayConfigured)
+    return TransportPlan(
+        transport = transport,
+        liveCadenceSeconds = liveCadenceSeconds(transport),
+        dropWhenIdle = shouldDropWhenIdle(transport),
+    )
+}
