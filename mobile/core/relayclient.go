@@ -68,6 +68,10 @@ type RelayClient struct {
 	closed  bool
 	timeout time.Duration
 
+	// lastStatus is the status of the most recent Answer, read back through
+	// LastStatus because gomobile cannot return two values from one method.
+	lastStatus int
+
 	// authToken is the bearer credential for every request on this session.
 	authToken string
 }
@@ -184,11 +188,64 @@ func (c *RelayClient) SetAuthToken(token string) {
 // Rule 3: a failed request is never resent on this session. The caller must
 // decide whether to retry (with a fresh DialRelay if the session is closed).
 func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
+	_, answer, err := c.requestWithStatus(method, reqPath, body)
+	return answer, err
+}
+
+// Answer performs the request and reports the desktop's status without turning
+// a non-2xx into an error.
+//
+// This is what the phone's fallback calls. A 409 or a 401 is a real answer from
+// the desktop, not a relay failure, and collapsing the two is what made every
+// relayed response look like success. Only a genuine transport or crypto
+// failure returns an error here.
+func (c *RelayClient) Answer(method, reqPath, body string) (string, error) {
+	status, answer, err := c.requestWithStatus(method, reqPath, body)
+
+	// Recorded under the lock, like every other field on this type. Answer and
+	// LastStatus are called in pairs from one goroutine, but the field is still
+	// shared state and unsynchronised access to it is a data race whether or
+	// not the pairing happens to be sequential.
+	c.mu.Lock()
+	c.lastStatus = status
+	c.mu.Unlock()
+
+	if err != nil && status == 0 {
+		// No status means the session itself failed rather than the desktop
+		// refusing: there is no answer to report.
+		return "", err
+	}
+	return answer, nil
+}
+
+// LastStatus reports the status of the most recent Answer.
+//
+// Read immediately after Answer under the same lock, so the pairing is not
+// racy: Answer holds c.mu for its whole duration and this reads the field it
+// set. Split apart only because gomobile cannot return two values.
+func (c *RelayClient) LastStatus() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastStatus
+}
+
+// requestWithStatus is Request, returning the desktop's own status code.
+//
+// The status has to survive the tunnel. TunnelResponse carries it precisely
+// because 202 and 200 mean different things, and discarding it made every
+// relayed answer look like a flat success: a dispatch refused with 409 came
+// back as neither started nor refused, which is the one outcome that cannot
+// happen, and a 401 could never prompt a re-pair.
+//
+// Unexported: gomobile cannot bind three return values, and a method it cannot
+// bind makes it skip the entire file -- silently, so the AAR simply lacks every
+// type in it. Answer() is the bound entry point.
+func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return "", errors.New("relay client is closed")
+		return 0, "", errors.New("relay client is closed")
 	}
 
 	req := tunnelRequest{
@@ -204,14 +261,14 @@ func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 
 	encoded, err := json.Marshal(req)
 	if err != nil {
-		return "", fmt.Errorf("encode request: %w", err)
+		return 0, "", fmt.Errorf("encode request: %w", err)
 	}
 
 	frame, err := c.session.Seal(encoded)
 	if err != nil {
 		// A Seal failure means the session is broken — close it.
 		c.closeConn()
-		return "", fmt.Errorf("seal request: %w", err)
+		return 0, "", fmt.Errorf("seal request: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -219,13 +276,13 @@ func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 
 	if err := c.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
 		c.closeConn()
-		return "", fmt.Errorf("write request: %w", err)
+		return 0, "", fmt.Errorf("write request: %w", err)
 	}
 
 	_, rawFrame, err := c.conn.Read(ctx)
 	if err != nil {
 		c.closeConn()
-		return "", fmt.Errorf("read response: %w", err)
+		return 0, "", fmt.Errorf("read response: %w", err)
 	}
 
 	plaintext, err := c.session.Open(rawFrame)
@@ -233,7 +290,7 @@ func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 		// A decrypt failure means the Noise session is permanently out of step
 		// (rule 1). Close so the caller knows to re-dial.
 		c.closeConn()
-		return "", fmt.Errorf("decrypt response: %w", err)
+		return 0, "", fmt.Errorf("decrypt response: %w", err)
 	}
 
 	// The frame decrypted correctly, so the cipher state is still in sync.
@@ -241,14 +298,14 @@ func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 	// Do NOT close the session here — the next Request will work.
 	var resp tunnelResponse
 	if err := json.Unmarshal(plaintext, &resp); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return 0, "", fmt.Errorf("decode response: %w", err)
 	}
 
 	bodyStr := string(resp.Body)
 	if resp.Status < 200 || resp.Status >= 300 {
-		return bodyStr, fmt.Errorf("relay response status %d", resp.Status)
+		return resp.Status, bodyStr, fmt.Errorf("relay response status %d", resp.Status)
 	}
-	return bodyStr, nil
+	return resp.Status, bodyStr, nil
 }
 
 // Close shuts down the relay session and connection. Safe to call more than

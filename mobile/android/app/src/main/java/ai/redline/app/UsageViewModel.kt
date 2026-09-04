@@ -22,7 +22,13 @@ import kotlinx.coroutines.withContext
  * useful thing is yesterday's numbers marked stale, not an empty screen.
  */
 /** How the live connection is behaving, mirroring the core's stream states. */
-enum class LiveState { OFFLINE, CONNECTING, LIVE, RECONNECTING }
+/**
+ * RELAYED means the screen is updating by polling because the desktop is only
+ * reachable through the relay, which cannot carry a live stream. Distinct from
+ * OFFLINE (nothing is arriving) and from RECONNECTING (a live connection is
+ * still expected), because over a relay it never is.
+ */
+enum class LiveState { OFFLINE, CONNECTING, LIVE, RECONNECTING, RELAYED }
 
 data class UsageUiState(
     val loading: Boolean = false,
@@ -54,6 +60,10 @@ internal fun liveStateOf(raw: String): LiveState = when (raw) {
     "live" -> LiveState.LIVE
     "connecting" -> LiveState.CONNECTING
     "reconnecting" -> LiveState.RECONNECTING
+    // Terminal and not a failure: polling keeps the screen current at the
+    // slower relayed cadence, so the pill reports the route rather than going
+    // dark or promising a reconnection that cannot happen.
+    "relayed" -> LiveState.RELAYED
     // "unauthorized" and "stopped" both mean no live data is coming; the
     // failure state carries the reason, so this only says the pill is dark.
     else -> LiveState.OFFLINE

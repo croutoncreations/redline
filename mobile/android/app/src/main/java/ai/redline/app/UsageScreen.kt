@@ -252,6 +252,10 @@ private fun LivePill(live: LiveState) {
         LiveState.LIVE -> "live" to Good
         LiveState.CONNECTING -> "connecting" to TextMuted
         LiveState.RECONNECTING -> "reconnecting" to Warn
+        // Named for the route rather than the cadence: "relayed" tells the user
+        // why updates are slower and that it is expected, where "polling" would
+        // describe the symptom and leave the cause a mystery.
+        LiveState.RELAYED -> "relayed" to Warn
         LiveState.OFFLINE -> return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {

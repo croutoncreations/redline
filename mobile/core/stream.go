@@ -28,6 +28,15 @@ const (
 	// would hit exactly the same wall, and sitting on "reconnecting" forever
 	// would never explain why nothing arrives.
 	StreamStateFailed = "failed"
+	// StreamStateRelayed means the desktop is reachable only through the relay,
+	// which cannot carry a long-lived event stream: the tunnel is
+	// request/response, and holding it open for an endless response would pin a
+	// Durable Object and bill for every idle minute.
+	//
+	// Terminal, and not a failure. The UI polls instead, so the screen keeps
+	// updating at the slower relayed cadence rather than sitting on
+	// "reconnecting" promising a live connection that cannot arrive.
+	StreamStateRelayed = "relayed"
 	// StreamStateStopped means the caller stopped the stream.
 	StreamStateStopped = "stopped"
 )
@@ -128,6 +137,12 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 				// makes no progress and never says why.
 				sink.OnState(StreamStateFailed)
 				return
+			case errors.Is(err, errStreamRelayed):
+				// Only the relay is reachable, and it cannot carry a stream.
+				// Terminal so the UI switches to polling rather than promising
+				// a live connection that cannot arrive.
+				sink.OnState(StreamStateRelayed)
+				return
 			}
 
 			// Any other end is a dropped connection: a sleeping desktop, a
@@ -153,6 +168,11 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 
 	return stream
 }
+
+// errStreamRelayed marks a stream that cannot run because only the relay is
+// reachable. Distinct from a dropped connection: retrying cannot help, and the
+// UI has a working alternative in polling.
+var errStreamRelayed = errors.New("stream unavailable over the relay")
 
 // consumeUsageStream reads one connection to exhaustion, returning why it
 // ended.
@@ -183,6 +203,16 @@ func (c *Client) consumeUsageStream(
 	streamClient := &http.Client{Transport: c.httpClient.Transport}
 	response, err := streamClient.Do(request)
 	if err != nil {
+		// The direct route is gone. Unlike every other request, this one cannot
+		// fall back: the tunnel carries one request and one response, so an
+		// endless stream would never complete.
+		//
+		// Reported rather than retried. Reconnecting forever was the observed
+		// behaviour with the tailnet down, and it promised a recovery that
+		// could not happen while the relay sat available for polling.
+		if c.relay != nil {
+			return errStreamRelayed
+		}
 		return err
 	}
 	defer response.Body.Close()

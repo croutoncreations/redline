@@ -367,3 +367,46 @@ func TestStreamUsageStopsOnAnUnreadableFrame(t *testing.T) {
 		t.Errorf("an unreadable frame must not be retried forever, got %d attempts", connections)
 	}
 }
+
+// A relayed session cannot carry the event stream.
+//
+// consumeUsageStream opens its own long-lived connection rather than going
+// through send(), so it never falls back. Left as it was, the stream sat on
+// "reconnecting" forever whenever the tailnet was gone -- which is exactly the
+// symptom the relay was meant to cure, showing on the screen that has the live
+// pill.
+//
+// The honest behaviour is to stop trying and say so, letting the UI fall back
+// to polling over the relay. Sitting on "reconnecting" claims a recovery that
+// cannot happen.
+func TestStreamReportsRelayedRatherThanReconnectingForever(t *testing.T) {
+	client := NewClient("http://127.0.0.1:1", "token")
+	client.SetRelayFallback(RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			return 200, `{"providers":[]}`, nil
+		}))
+
+	states := make(chan string, 8)
+	stream := client.StreamUsage(stateRecorder{states: states})
+	defer stream.Stop()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case state := <-states:
+			if state == StreamStateRelayed {
+				return // The stream said it cannot run live over the relay.
+			}
+			if state == StreamStateReconnecting {
+				t.Fatal("the stream must not sit on reconnecting when only a relay is available")
+			}
+		case <-deadline:
+			t.Fatal("the stream never reported a terminal state")
+		}
+	}
+}
+
+type stateRecorder struct{ states chan string }
+
+func (s stateRecorder) OnUsage(payload string) {}
+func (s stateRecorder) OnState(state string)   { s.states <- state }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -190,3 +191,32 @@ class UsageViewModelTest {
     }
 }
 
+
+/**
+ * A stream that cannot run over the relay must say so.
+ *
+ * The tunnel is request/response, so a long-lived event stream cannot cross
+ * it. Falling through to OFFLINE would darken the pill with no explanation,
+ * while the screen kept updating by polling -- live data with a dead
+ * indicator. RELAYED says the cadence is slower and the reason is the route.
+ */
+class StreamRelayedStateTest {
+
+    @Test
+    fun `the relayed stream state is its own thing, not offline`() {
+        assertEquals(LiveState.RELAYED, liveStateOf("relayed"))
+    }
+
+    @Test
+    fun `relayed is distinct from reconnecting`() {
+        // Reconnecting promises a live connection is coming. Over a relay it
+        // is not, and saying so was the bug: the pill sat on "reconnecting"
+        // forever with the tailnet down.
+        assertNotEquals(liveStateOf("relayed"), liveStateOf("reconnecting"))
+    }
+
+    @Test
+    fun `an unknown state is still offline`() {
+        assertEquals(LiveState.OFFLINE, liveStateOf("something-new"))
+    }
+}
