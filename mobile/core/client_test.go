@@ -200,3 +200,54 @@ func TestClientReportsWhichRouteItUsed(t *testing.T) {
 		t.Error("a direct request must not report the relay")
 	}
 }
+
+// A malformed relay answer is a bug, not a 200.
+//
+// splitRelayAnswer degraded an unparseable prefix to success. FormatRelayAnswer
+// is the only producer and always emits a valid decimal, so a malformed prefix
+// can only mean the encoding broke -- and reporting that as a successful
+// response would hand the UI a body it would try to render as data. This
+// session has been bitten three times by a failure that looked like success;
+// this one is cheap to make loud.
+func TestMalformedRelayAnswerIsAnErrorNotASuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer string
+	}{
+		{"no status prefix at all", `{"providers":[]}`},
+		{"non-numeric prefix", `oops {"providers":[]}`},
+		{"status out of range", `999 {"providers":[]}`},
+		{"empty", ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := core.NewClient("http://127.0.0.1:1", "token")
+			client.SetRelayFallback(core.RelayFallbackRaw(
+				func(method, path, body string) (string, error) { return tc.answer, nil }))
+
+			_, err := client.FetchHealth()
+			if err == nil {
+				t.Fatal("a malformed relay answer must be an error")
+			}
+			if core.IsUnauthorized(err) {
+				t.Error("a malformed answer is not an auth failure")
+			}
+		})
+	}
+}
+
+// A well-formed answer still works, including a body that itself starts with
+// something status-shaped: only the first space is consumed.
+func TestRelayAnswerWithAStatusShapedBody(t *testing.T) {
+	client := core.NewClient("http://127.0.0.1:1", "token")
+	client.SetRelayFallback(core.RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			return 200, `404 not the status`, nil
+		}))
+
+	// The body is not JSON, so decoding fails -- but it must fail as a decode
+	// problem on a 200, proving the prefix was read as 200 and not as 404.
+	_, err := client.FetchHealth()
+	if err != nil && strings.Contains(err.Error(), "404") {
+		t.Errorf("the body was parsed as the status: %v", err)
+	}
+}

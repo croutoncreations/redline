@@ -66,19 +66,28 @@ type RelayFallback interface {
 
 // splitRelayAnswer separates the status from the body.
 //
-// Returns 200 when the prefix is missing or unparseable, so a fallback that
-// reports no status still works rather than failing every request with a
-// status of zero.
-func splitRelayAnswer(answer string) (int, string) {
+// A malformed prefix is an error rather than an assumed 200. FormatRelayAnswer
+// is the only producer and always emits a valid decimal, so a prefix that will
+// not parse means the encoding itself broke -- and calling that success would
+// hand the UI a body it would try to render as data. A failure that looks like
+// success is the exact shape of bug this code has been bitten by repeatedly,
+// and it costs nothing to make this one loud.
+//
+// Only the first space is consumed, so a body that itself begins with
+// something status-shaped is returned intact.
+func splitRelayAnswer(answer string) (int, string, error) {
 	space := strings.IndexByte(answer, ' ')
 	if space <= 0 {
-		return http.StatusOK, answer
+		return 0, "", fmt.Errorf("relay answer has no status prefix")
 	}
 	status, err := strconv.Atoi(answer[:space])
-	if err != nil || status < 100 || status > 599 {
-		return http.StatusOK, answer
+	if err != nil {
+		return 0, "", fmt.Errorf("relay answer has an unreadable status")
 	}
-	return status, answer[space+1:]
+	if status < 100 || status > 599 {
+		return 0, "", fmt.Errorf("relay answer has an out-of-range status %d", status)
+	}
+	return status, answer[space+1:], nil
 }
 
 // FormatRelayAnswer builds the "<status> <body>" string a RelayFallback returns.
@@ -105,6 +114,14 @@ type relayFallbackFunc func(method, path, body string) (string, error)
 
 func (f relayFallbackFunc) Do(method, path, body string) (string, error) {
 	return f(method, path, body)
+}
+
+// RelayFallbackRaw adapts a function that returns the encoded answer itself.
+//
+// For tests that need to produce a malformed answer on purpose; real callers
+// should use RelayFallbackWithStatus, which cannot get the encoding wrong.
+func RelayFallbackRaw(f func(method, path, body string) (string, error)) RelayFallback {
+	return relayFallbackFunc(f)
 }
 
 // LastRequestWasRelayed reports whether the most recent request went over the
@@ -282,7 +299,10 @@ func (c *Client) relayRequest(method, path string, body any) (*http.Response, er
 	if err != nil {
 		return nil, err
 	}
-	status, decoded := splitRelayAnswer(answer)
+	status, decoded, err := splitRelayAnswer(answer)
+	if err != nil {
+		return nil, err
+	}
 	return &http.Response{
 		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(decoded)),
