@@ -54,6 +54,8 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	var result []capacity.TokenObservation
+	var codexInput, codexOutput, codexCacheRead int64
+	var sawCodexTurn bool
 	for scanner.Scan() {
 		var record runRecord
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
@@ -66,19 +68,20 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			}
 			result = claudeRunObservations(record, runID, configuredModel, observedAt)
 		case "codex-cli":
+			// codex exec emits one turn.completed event per turn in the
+			// session, each carrying that turn's own usage, so totals must
+			// be summed across every turn rather than keeping only the last.
 			if record.Type != "turn.completed" {
 				continue
 			}
+			sawCodexTurn = true
 			input := record.Usage.InputTokens - record.Usage.CachedInputTokens
 			if input < 0 {
 				input = 0
 			}
-			result = []capacity.TokenObservation{{
-				Provider: "codex", Source: "redline-run", SourceID: runID,
-				ObservedAt: observedAt.UTC(), Model: configuredModel, InputTokens: input,
-				OutputTokens: record.Usage.OutputTokens, CacheReadTokens: record.Usage.CachedInputTokens,
-				Confidence: "high",
-			}}
+			codexInput += input
+			codexOutput += record.Usage.OutputTokens
+			codexCacheRead += record.Usage.CachedInputTokens
 		case "hermes":
 			if record.Type != "hermes.result" {
 				continue
@@ -117,6 +120,14 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read run artifact: %w", err)
+	}
+	if sawCodexTurn {
+		result = []capacity.TokenObservation{{
+			Provider: "codex", Source: "redline-run", SourceID: runID,
+			ObservedAt: observedAt.UTC(), Model: configuredModel, InputTokens: codexInput,
+			OutputTokens: codexOutput, CacheReadTokens: codexCacheRead,
+			Confidence: "high",
+		}}
 	}
 	return nonzeroObservations(result), nil
 }
