@@ -260,3 +260,102 @@ class EntitlementFailureTest {
         assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
     }
 }
+
+/**
+ * The screen has to say when it is on the relay.
+ *
+ * CoreClientHolder tracked the transport and nothing ever read it, so
+ * UsageUiState.transport stayed Direct forever and the "relayed" marker in
+ * UsageScreen could not appear. Requests would silently succeed over the paid
+ * route with the UI still claiming the tailnet -- the same shape as the bug
+ * this whole change set exists to fix: a value maintained and never consulted.
+ */
+class TransportReportingTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class RoutedSource(private val route: Transport) : UsageSource {
+        override fun fetchUsageJson(): String = EMPTY_USAGE_JSON
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun transport(): Transport = route
+    }
+
+    @Test
+    fun `a relayed refresh reports the relay`() = runTest(dispatcher) {
+        val model = UsageViewModel(RoutedSource(Transport.Relay), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Transport.Relay, model.state.value.transport)
+    }
+
+    @Test
+    fun `a direct refresh reports direct`() = runTest(dispatcher) {
+        val model = UsageViewModel(RoutedSource(Transport.Direct), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Transport.Direct, model.state.value.transport)
+    }
+
+    private companion object {
+        const val EMPTY_USAGE_JSON = """{"providers":[],"health":{"scheduler_enabled":false}}"""
+    }
+}
+
+/**
+ * A stream that stopped because only the relay was reachable must restart when
+ * the tailnet comes back.
+ *
+ * StreamStateRelayed is terminal in the core: the goroutine returns and never
+ * retries. The Kotlin handle stayed non-null, and startLive() returns early
+ * when it is -- so after a flap the live pill wedged on "relayed" and polled
+ * forever, even with the tailnet healthy, until the screen was recreated.
+ */
+class StreamRestartAfterRelayTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class CountingStreamSource : UsageSource {
+        var subscriptions = 0
+        var lastOnState: ((String) -> Unit)? = null
+        override fun fetchUsageJson(): String =
+            """{"providers":[],"health":{"scheduler_enabled":false}}"""
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun stream(
+            onUsage: (String) -> Unit,
+            onState: (String) -> Unit,
+        ): AutoCloseable {
+            subscriptions += 1
+            lastOnState = onState
+            return AutoCloseable { }
+        }
+    }
+
+    @Test
+    fun `a relayed stream can be restarted once direct returns`() = runTest(dispatcher) {
+        val source = CountingStreamSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.startLive()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1, source.subscriptions)
+
+        // The core reports the terminal relayed state and stops.
+        source.lastOnState?.invoke("relayed")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(LiveState.RELAYED, model.state.value.live)
+
+        // The tailnet returns and the screen resumes: a new stream must start
+        // rather than the stale handle blocking it.
+        model.startLive()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("a terminal relayed stream must not block a restart", 2, source.subscriptions)
+    }
+}

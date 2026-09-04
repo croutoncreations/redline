@@ -31,4 +31,6 @@ class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
 
     override fun isEntitlementRefused(error: Throwable): Boolean =
         client.isEntitlementRefused(error)
+
+    override fun transport(): Transport = client.transport
 }

@@ -93,6 +93,15 @@ interface UsageSource {
     fun isEntitlementRefused(error: Throwable): Boolean = false
 
     /**
+     * How the last request actually reached the desktop.
+     *
+     * Default Direct so existing sources and tests are unaffected. Read after
+     * every refresh rather than pushed, because the route is decided deep in
+     * the core and only the holder above it knows what happened.
+     */
+    fun transport(): Transport = Transport.Direct
+
+    /**
      * Subscribes to live updates, returning a handle that stops it.
      *
      * Default is a no-op returning null, so tests that only exercise polling
@@ -156,6 +165,15 @@ class UsageViewModel(
                 // watching a screen that quietly stopped updating.
                 if (raw == "unauthorized") {
                     _state.update { it.fail(UsageUiState.Failure.UNAUTHORIZED) }
+                }
+                // "relayed" is terminal in the core: the stream cannot run over
+                // a tunnel that carries one request and one response, so the
+                // goroutine returns. Releasing the handle lets the next resume
+                // start a fresh stream once the tailnet is back -- otherwise
+                // the stale handle makes startLive() return early and the pill
+                // wedges on "relayed" until the screen is recreated.
+                if (raw == "relayed") {
+                    subscription = null
                 }
             },
         )
@@ -232,8 +250,18 @@ class UsageViewModel(
                         // knows nothing about, and silently drop the live
                         // connection status the stream is maintaining.
                         onSuccess = { view ->
+                            // The route is read here rather than tracked
+                            // separately: a paid relayed request must be
+                            // visible on screen, and a value nothing reads is
+                            // how the fallback went missing in the first place.
+                            val route = source.transport()
                             _state.update {
-                                it.copy(loading = false, view = view, failure = null)
+                                it.copy(
+                                    loading = false,
+                                    view = view,
+                                    failure = null,
+                                    transport = route,
+                                )
                             }
                         },
                         // Malformed JSON from a reachable server is not an auth

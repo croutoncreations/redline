@@ -1,6 +1,9 @@
 package core_test
 
 import (
+	"net/http"
+	"net/http/httptest"
+
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -155,5 +158,45 @@ func TestConcurrentRelayedRequestsKeepTheirOwnStatus(t *testing.T) {
 
 	if crossed != 0 {
 		t.Errorf("%d of 200 concurrent relayed dispatches got the wrong answer", crossed)
+	}
+}
+
+// The route has to be readable, and has to clear when direct comes back.
+//
+// Tracking it in the Kotlin holder latched on Relay forever: only a session
+// failure reset it, so returning to the tailnet still showed the paid route.
+func TestClientReportsWhichRouteItUsed(t *testing.T) {
+	client := core.NewClient("http://127.0.0.1:1", "token")
+	if client.LastRequestWasRelayed() {
+		t.Error("a fresh client has not relayed anything")
+	}
+
+	client.SetRelayFallback(core.RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			return 200, `{"providers":[]}`, nil
+		}))
+	if _, err := client.FetchHealth(); err != nil {
+		t.Fatalf("relayed fetch: %v", err)
+	}
+	if !client.LastRequestWasRelayed() {
+		t.Error("a request served by the relay must report the relay")
+	}
+
+	// Direct comes back: a live server the client can actually reach.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"scheduler_enabled":false}`))
+	}))
+	defer server.Close()
+	healed := core.NewClient(server.URL, "token")
+	healed.SetRelayFallback(core.RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			t.Error("the relay must not be used while direct works")
+			return 200, "{}", nil
+		}))
+	if _, err := healed.FetchHealth(); err != nil {
+		t.Fatalf("direct fetch: %v", err)
+	}
+	if healed.LastRequestWasRelayed() {
+		t.Error("a direct request must not report the relay")
 	}
 }

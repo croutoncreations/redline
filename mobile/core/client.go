@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,11 @@ type Client struct {
 	// relay carries requests when the direct route is unreachable. Nil means
 	// direct only, which is every desktop paired before relays existed.
 	relay RelayFallback
+
+	// lastRelayed records whether the most recent request went over the relay.
+	// Guarded because concurrent refreshes share one client.
+	relayedMu   sync.Mutex
+	lastRelayed bool
 }
 
 // RelayFallback carries one request over a relayed tunnel.
@@ -99,6 +105,28 @@ type relayFallbackFunc func(method, path, body string) (string, error)
 
 func (f relayFallbackFunc) Do(method, path, body string) (string, error) {
 	return f(method, path, body)
+}
+
+// LastRequestWasRelayed reports whether the most recent request went over the
+// relay rather than the tailnet.
+//
+// Read by the app after a refresh so the screen can say which route it used: a
+// relayed request costs money and crosses a third party, and someone who
+// expected to be on their own network deserves to see that they are not.
+//
+// Set by send() on every request, so returning to the tailnet clears it
+// without needing a restart. Tracking it in the Kotlin holder instead latched
+// on Relay forever, because only a session failure ever reset it.
+func (c *Client) LastRequestWasRelayed() bool {
+	c.relayedMu.Lock()
+	defer c.relayedMu.Unlock()
+	return c.lastRelayed
+}
+
+func (c *Client) setRelayed(relayed bool) {
+	c.relayedMu.Lock()
+	c.lastRelayed = relayed
+	c.relayedMu.Unlock()
 }
 
 // SetRelayFallback installs the route used when the direct one fails.
@@ -223,6 +251,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		// get the same answer more slowly.
 		if c.relay != nil {
 			if relayed, relayErr := c.relayRequest(method, path, body); relayErr == nil {
+				c.setRelayed(true)
 				return relayed, nil
 			}
 		}
@@ -231,6 +260,9 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		// rather than "please pair again".
 		return nil, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
 	}
+	// Cleared on every direct success, so walking back onto the tailnet stops
+	// the screen claiming a relayed route.
+	c.setRelayed(false)
 	return response, nil
 }
 

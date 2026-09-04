@@ -29,14 +29,15 @@ class CoreClientHolder(private val settings: RedlineSettings) {
     private var relay: core.RelayClient? = null
 
     /**
-     * The transport in use, for the UI to report.
+     * The transport the last request actually used, for the UI to report.
      *
-     * Starts as Direct because that is what is attempted first; it only becomes
-     * Relay after a direct attempt has actually failed.
+     * Asked of the core rather than tracked here. A field set when the relay
+     * was dialled latched on Relay forever, because only a session failure
+     * reset it -- so walking back onto the tailnet still showed the paid
+     * route. The core sets it on every request, direct or relayed.
      */
-    @Volatile
-    var transport: Transport = Transport.Direct
-        private set
+    val transport: Transport
+        get() = if (cached?.lastRequestWasRelayed() == true) Transport.Relay else Transport.Direct
 
     /**
      * Returns a client for the current credentials, rebuilding it if they have
@@ -120,23 +121,10 @@ class CoreClientHolder(private val settings: RedlineSettings) {
             ).also {
                 it.setAuthToken(settings.token)
                 relay = it
-                transport = Transport.Relay
             }
         }.getOrNull()
     }
 
-    /**
-     * Runs one request, over the direct route when it works and the relay when
-     * it does not.
-     *
-     * Every call from every source goes through here, so the fallback cannot
-     * be present on one screen and missing on another. It was previously
-     * missing from all three: relayClient() existed and nothing called it.
-     *
-     * The relay leg takes a path and returns the raw JSON body, which is what
-     * the tunnel carries; the direct leg is whatever binding method the caller
-     * would have used anyway.
-     */
     /**
      * Discards a relayed session after a failure.
      *
@@ -148,7 +136,6 @@ class CoreClientHolder(private val settings: RedlineSettings) {
     fun dropRelay() {
         runCatching { relay?.close() }
         relay = null
-        transport = Transport.Direct
     }
 
     /**
