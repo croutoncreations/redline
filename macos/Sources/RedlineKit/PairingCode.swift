@@ -29,8 +29,15 @@ public enum PairingCode {
         }
         components.path = "/pair"
 
-        // Escaped to match Go's url.Values.Encode, which is what the CLI uses,
-        // so both surfaces produce byte-identical codes for the same token.
+        // Escaped the way Go's url.Values.Encode does for every character a
+        // pairing token can contain. Tokens are base64url (A-Za-z0-9-_), and
+        // both encoders leave that alphabet literal, so the two surfaces
+        // produce identical codes for every token either one can issue.
+        //
+        // They are not identical for arbitrary text: Go writes a space as '+',
+        // this writes '%20'. Both decode to the same value, and a token cannot
+        // contain a space, so the difference is unreachable -- but the claim is
+        // "agrees on the token alphabet", not "byte-identical for all input".
         //
         // Not URLComponents' own query encoding: it leaves '+' and '/' literal,
         // and a literal '+' decodes back as a space, so the phone would redeem
@@ -90,30 +97,95 @@ public enum PairingCode {
         return port
     }
 
+    /// Finds the first entry of `api.trusted_hosts`.
+    ///
+    /// Deliberately narrow rather than a general YAML parser: it tracks the
+    /// `api:` section and its indentation, so another section with a key of the
+    /// same name cannot decide where a phone connects. That is not theoretical
+    /// now that a `relay:` section exists.
+    ///
+    /// Line endings are split on \n only, then a trailing \r is trimmed.
+    /// Splitting on `.newlines` treats CRLF as two breaks, which made a
+    /// perfectly valid Windows-saved config report no host at all.
     private static func firstTrustedHostEntry(inConfiguration yaml: String) -> String? {
+        var inAPISection = false
+        var apiIndent = 0
         var inTrustedHosts = false
-        for rawLine in yaml.components(separatedBy: .newlines) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("#") { continue }
+        var listIndent = 0
+
+        for rawLine in yaml.components(separatedBy: "\n") {
+            let line = stripComment(from: rawLine.replacingOccurrences(of: "\r", with: ""))
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            let indent = line.prefix { $0 == " " || $0 == "\t" }.count
 
             if inTrustedHosts {
-                guard line.hasPrefix("- ") else {
-                    // The list ended without yielding a host.
-                    return nil
+                if trimmed.hasPrefix("- ") || trimmed == "-" {
+                    let value = trimmed.dropFirst(1)
+                        .trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    return value.isEmpty ? nil : value
                 }
-                let value = line.dropFirst(2)
+                // Any other key at or above the list's indentation ends it.
+                if indent <= listIndent { inTrustedHosts = false } else { continue }
+            }
+
+            if inAPISection && indent <= apiIndent && !trimmed.hasPrefix("-") {
+                // Dedented back out of api:, so anything further is a different
+                // section and its trusted_hosts is not ours.
+                inAPISection = false
+            }
+
+            if trimmed.hasPrefix("api:") {
+                inAPISection = true
+                apiIndent = indent
+                continue
+            }
+
+            guard inAPISection, trimmed.hasPrefix("trusted_hosts:") else { continue }
+
+            let remainder = trimmed
+                .dropFirst("trusted_hosts:".count)
+                .trimmingCharacters(in: .whitespaces)
+            if remainder.hasPrefix("[") {
+                // Inline flow list: take the first element, or nothing if empty.
+                let inner = remainder.dropFirst().prefix { $0 != "]" }
+                let first = inner
+                    .split(separator: ",")
+                    .first?
                     .trimmingCharacters(in: .whitespaces)
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                return value.isEmpty ? nil : value
+                return (first?.isEmpty ?? true) ? nil : first
             }
-            if line.hasPrefix("trusted_hosts:") {
-                // An inline empty list means there is nothing to find.
-                let remainder = line.dropFirst("trusted_hosts:".count).trimmingCharacters(in: .whitespaces)
-                if remainder == "[]" { return nil }
-                inTrustedHosts = true
-            }
+            if !remainder.isEmpty { return nil }
+            inTrustedHosts = true
+            listIndent = indent
         }
         return nil
+    }
+
+    /// Removes a trailing `#` comment.
+    ///
+    /// Only outside quotes, so a host that legitimately contains a hash inside
+    /// a quoted value survives.
+    private static func stripComment(from line: String) -> String {
+        var inQuotes = false
+        var quote: Character = " "
+        for (offset, character) in line.enumerated() {
+            if character == "\"" || character == "'" {
+                if !inQuotes {
+                    inQuotes = true
+                    quote = character
+                } else if character == quote {
+                    inQuotes = false
+                }
+            }
+            if character == "#" && !inQuotes {
+                return String(line.prefix(offset))
+            }
+        }
+        return line
     }
 
     #if canImport(AppKit)

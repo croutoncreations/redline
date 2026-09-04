@@ -134,6 +134,73 @@ struct PairingTests {
         #expect(PairingCode.trustedPort(inConfiguration: yaml, default: 443) == 443)
     }
 
+    /// The property that actually matters: every character a real token can
+    /// contain survives untouched, so the QR carries exactly what the service
+    /// issued.
+    ///
+    /// Tokens are base64.RawURLEncoding, whose alphabet is A-Za-z0-9-_ . The
+    /// two encoders diverge on a space (Go writes '+', this writes '%20'), which
+    /// is why the claim is scoped to the token alphabet rather than to all
+    /// input -- a space cannot occur in a token.
+    @Test("Leaves the whole base64url alphabet untouched")
+    func leavesBase64urlUntouched() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        let url = PairingCode.url(host: "h.ts.net", port: 443, token: alphabet)
+        #expect(url == "https://h.ts.net/pair#pairing_token=" + alphabet)
+    }
+
+    /// A config saved with Windows line endings is still a valid config, and
+    /// splitting on `.newlines` treats CRLF as two breaks -- so the line after
+    /// `trusted_hosts:` came back empty and the whole lookup failed. The user
+    /// was told no host was configured while looking at one that was.
+    @Test("Reads a config with CRLF line endings")
+    func readsCRLFConfig() {
+        let yaml = "api:\r\n  trusted_hosts:\r\n    - macbook.example.ts.net\r\n"
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
+    }
+
+    /// A trailing comment is not part of the host name.
+    @Test("Strips a trailing comment from the entry")
+    func stripsTrailingComment() {
+        let yaml = """
+        api:
+          trusted_hosts:
+            - macbook.example.ts.net # primary
+        """
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
+    }
+
+    /// The parser must find api.trusted_hosts specifically. Taking the first
+    /// key of that name anywhere would let an unrelated section decide where a
+    /// phone connects -- and this codebase now has a `relay:` section that could
+    /// plausibly grow one.
+    @Test("Takes the api section, not another section with the same key")
+    func takesTheAPISection() {
+        let yaml = """
+        relay:
+          trusted_hosts:
+            - relay.example.com
+        api:
+          trusted_hosts:
+            - macbook.example.ts.net
+        """
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
+    }
+
+    /// A blank line between the key and its first entry is ordinary YAML.
+    @Test("Tolerates a blank line before the first entry")
+    func toleratesBlankLine() {
+        let yaml = "api:\n  trusted_hosts:\n\n    - macbook.example.ts.net\n"
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
+    }
+
+    /// An inline flow list is valid YAML and people do write it.
+    @Test("Reads an inline list")
+    func readsInlineList() {
+        let yaml = "api:\n  trusted_hosts: [macbook.example.ts.net, other.ts.net]\n"
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
+    }
+
     /// The QR has to encode without throwing for a realistic URL, and produce
     /// an image with actual pixels rather than an empty placeholder.
     @Test("Renders a QR image at the requested size")

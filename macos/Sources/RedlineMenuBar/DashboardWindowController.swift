@@ -19,7 +19,7 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
     private let webView: WKWebView
     private let connectionLabel = NSTextField(labelWithString: "Connecting…")
 
-    init(dashboardURL: URL, actions: DashboardMenuActions = DashboardMenuActions()) {
+    init(dashboardURL: URL, actions: DashboardMenuActions) {
         self.dashboardURL = dashboardURL
         self.actions = actions
         navigationPolicy = DashboardNavigationPolicy(dashboardURL: dashboardURL)
@@ -234,11 +234,13 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
 
 /// Handlers the dashboard window calls when its menu is used.
 ///
-/// Passed in rather than reached for, so the window stays a view: pairing and
-/// updates are owned by the menu bar controller, which already has them.
+/// Every field is required. Defaulting them to no-ops meant a caller that
+/// forgot one got a menu entry that looked alive and did nothing, with no
+/// compiler or test complaint -- and the menu's own tests only assert its
+/// contents, so nothing else would have caught it.
 @MainActor
 struct DashboardMenuActions {
-    var pairDevice: () -> Void = {}
-    var checkForUpdates: () -> Void = {}
-    var showAppSetup: () -> Void = {}
+    let pairDevice: () -> Void
+    let checkForUpdates: () -> Void
+    let showAppSetup: () -> Void
 }

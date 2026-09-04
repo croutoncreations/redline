@@ -158,17 +158,25 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
-		if strings.TrimSpace(line.ResetsAt) == "" && scope == "account" && role == "short" {
-			// The short window is optional and OpenUsage can briefly report it
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" {
+			// A short window is optional and OpenUsage can briefly report one
 			// without a reset while provider state is refreshing. Preserve the
-			// valid weekly snapshot rather than inventing a reset or failing over.
+			// rest of the snapshot rather than inventing a reset or failing
+			// over: the weekly is usually fine and is what most of the screen
+			// is made of.
 			//
-			// Say so rather than dropping it silently. This is the only place
-			// that knows the window was offered and refused; downstream can
-			// only see an absence, which looks the same as a provider that has
-			// no five hour limit at all.
+			// This covers model-scoped short windows (Codex's Spark) as well as
+			// the account one. Guarding only on scope == "account" meant a
+			// resetless Spark line rejected the entire Codex snapshot, so the
+			// screen showed nothing at all -- the same asymmetry this branch
+			// exists to prevent, one scope over.
 			snapshot.Confidence = "medium"
-			snapshot.ShortWindowUnavailable = true
+			if scope == "account" {
+				// Only the account window drives the "not available" row; a
+				// missing model pool is simply absent, as it is for a provider
+				// that has no such pool.
+				snapshot.ShortWindowUnavailable = true
+			}
 			continue
 		}
 		resetInferred := false
@@ -270,6 +278,13 @@ func bankedResets(line usageLine) (int, bool) {
 	fields := strings.Fields(strings.TrimSpace(line.Value))
 	if len(fields) == 0 {
 		return 0, false
+	}
+	// "none" is the other spelling of zero this field uses. Reading it costs
+	// one comparison and avoids the row vanishing the day upstream rewords
+	// "0 available", which is the failure mode of parsing someone else's
+	// presentation string.
+	if strings.EqualFold(fields[0], "none") {
+		return 0, true
 	}
 	count, err := strconv.Atoi(fields[0])
 	if err != nil || count < 0 {

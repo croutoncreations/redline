@@ -370,3 +370,44 @@ func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
 		t.Fatalf("absent must stay absent, got %d", *got.BankedResets)
 	}
 }
+
+// ListSnapshots must carry banked resets too.
+//
+// The value was written, read by LatestSnapshot, and silently dropped by this
+// one query. Nothing failed, because no current caller renders it -- which is
+// exactly how the same field went missing end to end earlier in this work.
+func TestListSnapshotsCarriesBankedResets(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	resets := 3
+	base := time.Now().UTC().Truncate(time.Second)
+	snapshot := decision.UsageSnapshot{
+		Provider:     "codex",
+		ObservedAt:   base,
+		Weekly:       decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source:       "openusage",
+		Confidence:   "high",
+		BankedResets: &resets,
+	}
+	if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := db.ListSnapshots(context.Background(), "codex", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected one snapshot, got %d", len(listed))
+	}
+	if listed[0].BankedResets == nil {
+		t.Fatal("banked resets were dropped by ListSnapshots")
+	}
+	if *listed[0].BankedResets != 3 {
+		t.Fatalf("banked resets = %d, want 3", *listed[0].BankedResets)
+	}
+}
