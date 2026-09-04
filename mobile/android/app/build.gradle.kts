@@ -108,3 +108,65 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
+
+/**
+ * Fails the build when the bundled Go core is older than its source.
+ *
+ * The app links a compiled AAR, not the Go source, so editing mobile/core and
+ * forgetting to rebuild produces an app that reads fields the native library
+ * never emits. That has happened: `banked_resets` was added, every test on both
+ * sides passed, and the row was missing on a real phone until the built .so was
+ * grepped and found not to contain the string at all.
+ *
+ * Nothing else catches it. The AAR is gitignored, so a fresh checkout has none
+ * and CI never builds this module, which leaves the mistake purely local and
+ * silent.
+ */
+val checkCoreFreshness by tasks.registering {
+    group = "verification"
+    description = "Fails if mobile/core is newer than the bundled redlinecore.aar."
+
+    val aar = layout.projectDirectory.file("libs/redlinecore.aar").asFile
+    val coreDir = rootProject.layout.projectDirectory.dir("../../mobile/core").asFile
+    val buildScript = "scripts/build-mobile-core.sh"
+
+    // Declared so Gradle can skip the task when neither side has changed.
+    //
+    // The AAR is registered as an optional file collection rather than
+    // inputs.file: a missing AAR is the case this task exists to explain, and
+    // inputs.file rejects it during configuration with a plumbing error before
+    // doLast can say anything useful.
+    inputs.dir(coreDir).withPropertyName("goCore").withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.files(project.files(aar)).withPropertyName("coreAar")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .optional()
+
+    doLast {
+        if (!aar.exists()) {
+            throw GradleException(
+                "The Go core has not been built.\n" +
+                    "  Run: ./$buildScript android && cp mobile/build/redlinecore.aar mobile/android/app/libs/"
+            )
+        }
+
+        // Only .go files matter: a change to a test fixture or a README beside
+        // the core does not alter the compiled library.
+        val newest = coreDir.walkTopDown()
+            .filter { it.isFile && it.extension == "go" && !it.name.endsWith("_test.go") }
+            .maxByOrNull { it.lastModified() }
+            ?: return@doLast
+
+        if (newest.lastModified() > aar.lastModified()) {
+            throw GradleException(
+                "The bundled Go core is stale: ${newest.name} is newer than redlinecore.aar.\n" +
+                    "  The app would run against the previous native library, so a field added to\n" +
+                    "  mobile/core would be missing at runtime with every test still passing.\n" +
+                    "  Run: ./$buildScript android && cp mobile/build/redlinecore.aar mobile/android/app/libs/"
+            )
+        }
+    }
+}
+
+// Runs before compilation, so the failure arrives before a stale build is
+// installed rather than after someone notices a missing value on a phone.
+tasks.named("preBuild") { dependsOn(checkCoreFreshness) }
