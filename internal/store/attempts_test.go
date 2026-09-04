@@ -45,6 +45,33 @@ func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 	}
 }
 
+func TestDispatchAttemptsOrderingAcrossWholeSecondBoundary(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for _, attempt := range []domain.DispatchAttempt{
+		// Completes exactly on a whole second (zero nanoseconds).
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start},
+		// Completes 500ms later, i.e. chronologically after the attempt above.
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start.Add(500 * time.Millisecond)},
+	} {
+		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListDispatchAttempts(context.Background(), "codex-main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("attempts = %#v", got)
+	}
+	if !got[0].CompletedAt.After(got[1].CompletedAt) {
+		t.Fatalf("expected newest-first order, got %v then %v", got[0].CompletedAt, got[1].CompletedAt)
+	}
+}
+
 func TestDispatchAttemptValidation(t *testing.T) {
 	db := openTaskDB(t)
 	_, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{})
