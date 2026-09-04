@@ -201,6 +201,68 @@ struct PairingTests {
         #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook.example.ts.net")
     }
 
+    /// api: must be a top-level key, matching the config schema. A nested
+    /// `api:` belongs to something else, and reading its hosts would let an
+    /// unrelated section decide where a phone connects -- returning a wrong
+    /// host, which is worse than returning none.
+    @Test("Ignores an api section nested under another key")
+    func ignoresNestedAPISection() {
+        let yaml = """
+        outer:
+          api:
+            trusted_hosts:
+              - nested.example.com
+        """
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == nil)
+    }
+
+    /// trusted_hosts must sit directly under api:, as the schema defines it.
+    /// A deeper key of that name is a different setting.
+    @Test("Ignores trusted_hosts nested deeper than the api section")
+    func ignoresDeeplyNestedTrustedHosts() {
+        let yaml = """
+        api:
+          inner:
+            trusted_hosts:
+              - deep.example.com
+        """
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == nil)
+    }
+
+    /// The real config shape must keep working, which is the point of all the
+    /// narrowing above.
+    @Test("Reads the shape of the actual config file")
+    func readsTheRealConfigShape() {
+        let yaml = """
+        database: redline.db
+        active_policy: standard
+        api:
+          trusted_hosts:
+            - macbook-pro.tail2e5d9.ts.net
+
+        scheduler:
+          enabled: true
+        """
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "macbook-pro.tail2e5d9.ts.net")
+    }
+
+    /// A stray apostrophe inside a value is not an opening quote. Treating it
+    /// as one swallowed the rest of the line, so the trailing comment stayed
+    /// attached and the host came out malformed.
+    @Test("Strips a comment after a value containing an apostrophe")
+    func stripsCommentAfterApostrophe() {
+        let yaml = "api:\n  trusted_hosts:\n    - prod-host.ts.net # jim's box\n"
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "prod-host.ts.net")
+    }
+
+    /// A quoted value may legitimately contain a hash, and quoting it is how
+    /// YAML says so.
+    @Test("Keeps a hash inside a quoted host")
+    func keepsHashInsideQuotes() {
+        let yaml = "api:\n  trusted_hosts:\n    - \"h#ash.ts.net\"\n"
+        #expect(PairingCode.trustedHost(inConfiguration: yaml) == "h#ash.ts.net")
+    }
+
     /// The QR has to encode without throwing for a realistic URL, and produce
     /// an image with actual pixels rather than an empty placeholder.
     @Test("Renders a QR image at the requested size")

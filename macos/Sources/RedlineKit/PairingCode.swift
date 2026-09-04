@@ -110,6 +110,7 @@ public enum PairingCode {
     private static func firstTrustedHostEntry(inConfiguration yaml: String) -> String? {
         var inAPISection = false
         var apiIndent = 0
+        var childIndent: Int?
         var inTrustedHosts = false
         var listIndent = 0
 
@@ -133,17 +134,34 @@ public enum PairingCode {
 
             if inAPISection && indent <= apiIndent && !trimmed.hasPrefix("-") {
                 // Dedented back out of api:, so anything further is a different
-                // section and its trusted_hosts is not ours.
+                // section and its trusted_hosts is not ours. The child
+                // indentation is forgotten with it, or a later section's first
+                // key would be measured against this one's style.
                 inAPISection = false
+                childIndent = nil
             }
 
-            if trimmed.hasPrefix("api:") {
+            // Only a top-level api:, because that is where the schema puts it.
+            // A nested one belongs to something else, and reading its hosts
+            // would let an unrelated section decide where a phone connects.
+            if trimmed.hasPrefix("api:") && indent == 0 {
                 inAPISection = true
                 apiIndent = indent
                 continue
             }
 
+            // The first key inside api: establishes what one level of
+            // indentation means in this file, so depth is measured against the
+            // file's own style rather than an assumed number of spaces.
+            if inAPISection && indent > apiIndent && childIndent == nil {
+                childIndent = indent
+            }
+
             guard inAPISection, trimmed.hasPrefix("trusted_hosts:") else { continue }
+
+            // Directly under api:, not deeper. A trusted_hosts key further down
+            // is a different setting that happens to share a name.
+            guard indent == childIndent else { continue }
 
             let remainder = trimmed
                 .dropFirst("trusted_hosts:".count)
@@ -169,20 +187,27 @@ public enum PairingCode {
     ///
     /// Only outside quotes, so a host that legitimately contains a hash inside
     /// a quoted value survives.
+    ///
+    /// A quote only opens one when it begins a value, which is where YAML
+    /// allows quoting. Treating any apostrophe as an opener meant a stray one
+    /// mid-value swallowed the rest of the line, so "prod's.host # note" kept
+    /// its comment and produced a malformed host.
     private static func stripComment(from line: String) -> String {
-        var inQuotes = false
-        var quote: Character = " "
+        var quote: Character?
+        var atValueStart = true
         for (offset, character) in line.enumerated() {
-            if character == "\"" || character == "'" {
-                if !inQuotes {
-                    inQuotes = true
-                    quote = character
-                } else if character == quote {
-                    inQuotes = false
-                }
+            if let open = quote {
+                if character == open { quote = nil }
+                continue
             }
-            if character == "#" && !inQuotes {
+            if character == "#" {
                 return String(line.prefix(offset))
+            }
+            if atValueStart, character == "\"" || character == "'" {
+                quote = character
+            }
+            if !character.isWhitespace && character != "-" {
+                atValueStart = false
             }
         }
         return line
