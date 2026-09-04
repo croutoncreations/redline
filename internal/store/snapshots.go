@@ -17,10 +17,12 @@ func (d *DB) ListSnapshots(ctx context.Context, provider string, limit int) ([]d
 		limit = 500
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider, observed_at, short_remaining,
-short_resets_at, weekly_remaining, weekly_resets_at, source, confidence, banked_resets
+short_resets_at, weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable
 FROM (
     SELECT id, provider, observed_at, short_remaining, short_resets_at,
-           weekly_remaining, weekly_resets_at, source, confidence, banked_resets
+           weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+           short_window_unavailable
     FROM usage_snapshots WHERE provider = ?
     ORDER BY observed_at DESC, id DESC LIMIT ?
 ) ORDER BY observed_at ASC, id ASC`, provider, limit)
@@ -42,6 +44,7 @@ FROM (
 			&snapshot.Provider, &observedAt, &shortRemaining, &shortReset,
 			&snapshot.Weekly.Remaining, &weeklyReset, &snapshot.Source, &snapshot.Confidence,
 			&bankedResets,
+			&snapshot.ShortWindowUnavailable,
 		); err != nil {
 			return nil, fmt.Errorf("scan usage snapshot: %w", err)
 		}

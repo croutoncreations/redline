@@ -462,6 +462,29 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (24)`); err != nil {
 			return fmt.Errorf("record banked resets migration: %w", err)
 		}
+		version = 24
+	}
+	if version < 25 {
+		// Not nullable: a snapshot either reported the window as unavailable
+		// or it did not, and rows written before this column existed did not.
+		hasTable, err := tableExists(ctx, tx, "usage_snapshots")
+		if err != nil {
+			return err
+		}
+		hasColumn := false
+		if hasTable {
+			if hasColumn, err = columnExists(ctx, tx, "usage_snapshots", "short_window_unavailable"); err != nil {
+				return err
+			}
+		}
+		if hasTable && !hasColumn {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_snapshots ADD COLUMN short_window_unavailable INTEGER NOT NULL DEFAULT 0;`); err != nil {
+				return fmt.Errorf("add short window unavailable: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (25)`); err != nil {
+			return fmt.Errorf("record short window unavailable migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -550,6 +573,7 @@ CREATE TABLE usage_snapshots_v2 (
     source TEXT NOT NULL,
     confidence TEXT NOT NULL DEFAULT '',
     banked_resets INTEGER,
+    short_window_unavailable INTEGER NOT NULL DEFAULT 0,
     raw_payload BLOB,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`); err != nil {
@@ -610,8 +634,9 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	defer tx.Rollback()
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, banked_resets, raw_payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable, raw_payload
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -624,6 +649,7 @@ weekly_remaining, weekly_resets_at, source, confidence, banked_resets, raw_paylo
 		s.Source,
 		s.Confidence,
 		bankedResetsValue(s.BankedResets),
+		s.ShortWindowUnavailable,
 		raw,
 	)
 	if err != nil {
@@ -675,7 +701,8 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, banked_resets, raw_payload
+weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable, raw_payload
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -701,6 +728,7 @@ FROM usage_snapshots WHERE provider = ?`
 		&s.Source,
 		&s.Confidence,
 		&bankedResets,
+		&s.ShortWindowUnavailable,
 		&raw,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
