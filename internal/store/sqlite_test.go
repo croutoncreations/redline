@@ -41,6 +41,37 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestSQLiteLatestSnapshotAcrossWholeSecondBoundary(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	// Lands exactly on a whole second (zero nanoseconds).
+	first := usageSnapshot(time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC), 0.9)
+	// Chronologically later, 500ms after the first, in the same second.
+	second := usageSnapshot(first.ObservedAt.Add(500*time.Millisecond), 0.1)
+	if err := db.SaveSnapshot(ctx, first, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(ctx, second, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, raw, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(second.ObservedAt) || got.Weekly.Remaining != 0.1 {
+		t.Fatalf("latest = %#v, want second (later) snapshot", got)
+	}
+	if string(raw) != `{"sequence":2}` {
+		t.Fatalf("raw = %s", raw)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
