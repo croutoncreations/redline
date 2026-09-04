@@ -6,6 +6,13 @@ compatibility_date = "2025-08-01"
 # nothing here to protect beyond the entitlement public key, which is public by
 # construction.
 
+# custom_domain rather than a route pattern: this subdomain exists only to
+# serve the relay, so Cloudflare should own its DNS record and certificate
+# outright instead of us hanging a pattern off an existing record.
+[[routes]]
+pattern = "redline-relay.croutoncreations.com"
+custom_domain = true
+
 [[durable_objects.bindings]]
 name = "SESSIONS"
 class_name = "RelaySession"
