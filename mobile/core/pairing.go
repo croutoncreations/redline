@@ -31,6 +31,11 @@ type PairingRequest struct {
 	// RelaySession names this desktop's session on the relay. Without it the
 	// phone knows where the relay is but not which conversation is its own.
 	RelaySession string `json:"relay_session,omitempty"`
+	// EntitlementToken authorises the phone's own leg of a relayed session.
+	// The relay refuses an unentitled connection with 402, so without this a
+	// configured relay fails every time and looks like a broken relay rather
+	// than a missing credential.
+	EntitlementToken string `json:"entitlement_token,omitempty"`
 }
 
 // ParsePairingURL reads a scanned QR code and returns the pairing details as
@@ -168,6 +173,10 @@ func ParsePairingURL(raw string) (string, error) {
 		DesktopKey:   desktopKey,
 		RelayURL:     safeRelayURL(token.Get("relay")),
 		RelaySession: safeSessionID(token.Get("session")),
+		// Carried verbatim: it is opaque to the phone, which only presents it
+		// to the relay. Validating its shape here would couple the pairing
+		// parser to a token format the relay owns.
+		EntitlementToken: strings.TrimSpace(token.Get("entitlement")),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode pairing request: %w", err)

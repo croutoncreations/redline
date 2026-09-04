@@ -14,7 +14,7 @@ import (
 func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 	got := mobilePairingURL(
 		"macbook.example.ts.net", 443, "one-time-token",
-		"https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123",
+		"https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123", "ent-token",
 	)
 
 	parsed, err := url.Parse(got)
@@ -44,7 +44,7 @@ func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 // With the relay off, the QR must look exactly as it always has, so a phone
 // paired against an older desktop and a newer one behave identically.
 func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
-	got := mobilePairingURL("macbook.example.ts.net", 443, "one-time-token", "", "", "")
+	got := mobilePairingURL("macbook.example.ts.net", 443, "one-time-token", "", "", "", "")
 	want := "https://macbook.example.ts.net/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
@@ -59,7 +59,7 @@ func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
 // The expected value is also what the macOS app produces, so the two surfaces
 // cannot drift into emitting different codes for the same token.
 func TestMobilePairingURLEscapesTokensExactlyOnce(t *testing.T) {
-	got := mobilePairingURL("mac.example.ts.net", 443, "a+b/c=d&e", "", "", "")
+	got := mobilePairingURL("mac.example.ts.net", 443, "a+b/c=d&e", "", "", "", "")
 	want := "https://mac.example.ts.net/pair#pairing_token=a%2Bb%2Fc%3Dd%26e"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
@@ -81,12 +81,12 @@ func TestMobilePairingURLEscapesTokensExactlyOnce(t *testing.T) {
 }
 
 func TestMobilePairingURLIncludesNonDefaultHTTPSPort(t *testing.T) {
-	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "")
+	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "", "")
 	want := "https://macbook-pro.tail2e5d9.ts.net:8443/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
 	}
-	if defaultPort := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
+	if defaultPort := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", "", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
 		t.Fatalf("default pairing URL = %q", defaultPort)
 	}
 }
@@ -98,5 +98,54 @@ func TestRenderTerminalQRUsesFalseBitmapCellsAsDarkModules(t *testing.T) {
 	renderTerminalQR(&output, bitmap)
 	if !strings.Contains(output.String(), "  ▀▄  ") {
 		t.Fatalf("rendered QR has incorrect module polarity:\n%s", output.String())
+	}
+}
+
+// The QR carries the relay address, the desktop key and the session id, but
+// not the entitlement -- so a phone that fell back to the relay dialled a
+// closed relay with an empty token and got 402. Relay fallback could not work
+// at all, and the app reported plain unreachability.
+//
+// All four travel together for the same reason the other three do: any one
+// missing leaves the phone unable to complete a relayed session.
+func TestPairingURLCarriesTheEntitlement(t *testing.T) {
+	got := mobilePairingURL(
+		"desk.example.ts.net", 443, "pair-token",
+		"https://relay.example.com", "desktop-key", "session-id", "entitlement-token",
+	)
+
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	fields, err := url.ParseQuery(parsed.Fragment)
+	if err != nil {
+		t.Fatalf("parse fragment: %v", err)
+	}
+	if fields.Get("entitlement") != "entitlement-token" {
+		t.Errorf("entitlement = %q, want the token; a relayed session cannot start without it",
+			fields.Get("entitlement"))
+	}
+}
+
+func TestPairingURLOmitsRelayFieldsWhenTheEntitlementIsMissing(t *testing.T) {
+	// An entitlement-less relay is a relay the phone will be refused by. Better
+	// to publish no relay at all and have the app say "not reachable" than to
+	// send it somewhere that will answer 402 and look like a relay fault.
+	got := mobilePairingURL(
+		"desk.example.ts.net", 443, "pair-token",
+		"https://relay.example.com", "desktop-key", "session-id", "",
+	)
+
+	parsed, _ := url.Parse(got)
+	fields, _ := url.ParseQuery(parsed.Fragment)
+	for _, key := range []string{"relay", "key", "session", "entitlement"} {
+		if fields.Get(key) != "" {
+			t.Errorf("%s = %q, want empty: all four travel together or none do",
+				key, fields.Get(key))
+		}
+	}
+	if fields.Get("pairing_token") != "pair-token" {
+		t.Error("the pairing token must still be published; direct pairing does not need a relay")
 	}
 }

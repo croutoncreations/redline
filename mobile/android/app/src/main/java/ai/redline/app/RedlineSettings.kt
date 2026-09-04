@@ -46,7 +46,12 @@ interface RedlineSettingsWriter {
      * and pairing must still work without them: no relay simply means direct
      * only, which is what every existing paired phone already does.
      */
-    fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String)
+    fun updateRelay(
+        relayUrl: String,
+        desktopKey: String,
+        relaySession: String,
+        entitlementToken: String,
+    )
 }
 
 /**
@@ -116,11 +121,18 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
 
     /** Whether a relayed fallback is possible at all. */
     val relayConfigured: Boolean
-        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank()
+        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank() &&
+            entitlementToken.isNotBlank()
 
-    override fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String) {
+    override fun updateRelay(
+        relayUrl: String,
+        desktopKey: String,
+        relaySession: String,
+        entitlementToken: String,
+    ) {
         preferences.edit()
             .putString(KEY_RELAY_URL, relayUrl)
+            .putString(KEY_ENTITLEMENT, entitlementToken)
             .putString(KEY_DESKTOP_KEY, desktopKey)
             .putString(KEY_RELAY_SESSION, relaySession)
             .apply()

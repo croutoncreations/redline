@@ -125,3 +125,24 @@ func TestRedeemPairingFailsWithoutACredential(t *testing.T) {
 		t.Fatal("a redeem without a credential must be an error")
 	}
 }
+
+// The QR now carries an entitlement, and the parser has to surface it or the
+// phone stores an empty one and every relayed session is refused with 402.
+func TestParsePairingURLCarriesTheEntitlement(t *testing.T) {
+	code := "https://desk.example.ts.net/pair#pairing_token=tok&relay=https%3A%2F%2Frelay.example.com" +
+		"&key=ZGVza3RvcC1rZXk%3D&session=session-abcdefghij0123&entitlement=ent.token"
+
+	encoded, err := ParsePairingURL(code)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var got struct {
+		EntitlementToken string `json:"entitlement_token"`
+	}
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.EntitlementToken != "ent.token" {
+		t.Errorf("entitlement_token = %q, want %q", got.EntitlementToken, "ent.token")
+	}
+}

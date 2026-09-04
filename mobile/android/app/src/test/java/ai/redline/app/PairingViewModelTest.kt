@@ -30,15 +30,22 @@ class PairingViewModelTest {
         var relayUrl: String? = null
         var desktopKey: String? = null
         var relaySession: String? = null
+        var entitlementToken: String? = null
         override fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
             this.token = token
         }
 
-        override fun updateRelay(relayUrl: String, desktopKey: String, relaySession: String) {
+        override fun updateRelay(
+            relayUrl: String,
+            desktopKey: String,
+            relaySession: String,
+            entitlementToken: String,
+        ) {
             this.relayUrl = relayUrl
             this.desktopKey = desktopKey
             this.relaySession = relaySession
+            this.entitlementToken = entitlementToken
         }
 
         override fun clear() {

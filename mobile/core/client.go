@@ -23,6 +23,37 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 	clock      func() time.Time
+	// relay carries requests when the direct route is unreachable. Nil means
+	// direct only, which is every desktop paired before relays existed.
+	relay RelayFallback
+}
+
+// RelayFallback carries one request over a relayed tunnel.
+//
+// An interface rather than a func type because gomobile binds interfaces but
+// not function values, and the Android implementation lives in Kotlin.
+type RelayFallback interface {
+	// Do performs the request and returns the raw response body.
+	Do(method, path, body string) (string, error)
+}
+
+// RelayFallbackFunc adapts a function to RelayFallback, for tests and for Go
+// callers that have no object to hang the method on.
+type RelayFallbackFunc func(method, path, body string) (string, error)
+
+// Do implements RelayFallback.
+func (f RelayFallbackFunc) Do(method, path, body string) (string, error) {
+	return f(method, path, body)
+}
+
+// SetRelayFallback installs the route used when the direct one fails.
+//
+// Set at the client rather than at each call site: every request already
+// funnels through send, so one place covers all ~65 endpoints. The earlier
+// attempt wired fallback into individual screens, which meant each had to
+// reproduce its own request shape and anything missed kept failing silently.
+func (c *Client) SetRelayFallback(fallback RelayFallback) {
+	c.relay = fallback
 }
 
 // NewClient returns a client for the given Redline base URL and bearer token.
@@ -128,12 +159,47 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
+		// The direct route is unreachable. If a relay is configured, try it
+		// before giving up: this is the whole point of having one, and it is
+		// exactly the case where the phone has left the tailnet.
+		//
+		// Only transport failures fall back. An HTTP error response means the
+		// desktop answered, so the relay would only reach the same desktop and
+		// get the same answer more slowly.
+		if c.relay != nil {
+			if relayed, relayErr := c.relayRequest(method, path, body); relayErr == nil {
+				return relayed, nil
+			}
+		}
 		// Transport failures are reachability problems, never auth problems;
 		// keeping them distinct is what lets the UI say "desktop unreachable"
 		// rather than "please pair again".
 		return nil, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
 	}
 	return response, nil
+}
+
+// relayRequest replays one request through the relay and shapes the answer
+// like an http.Response so callers cannot tell the routes apart.
+func (c *Client) relayRequest(method, path string, body any) (*http.Response, error) {
+	encoded := ""
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode request: %w", err)
+		}
+		encoded = string(raw)
+	}
+
+	answer, err := c.relay.Do(method, path, encoded)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(answer)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}, nil
 }
 
 // errorFromResponse turns a non-2xx into an apiError carrying the service's own

@@ -14,6 +14,7 @@ data class PairingRequest(
     @SerialName("relay_url") val relayUrl: String = "",
     @SerialName("desktop_key") val desktopKey: String = "",
     @SerialName("relay_session") val relaySession: String = "",
+    @SerialName("entitlement_token") val entitlementToken: String = "",
 )
 
 /**

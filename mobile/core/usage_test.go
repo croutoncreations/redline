@@ -575,3 +575,40 @@ func TestFetchUsageCarriesHealth(t *testing.T) {
 		t.Errorf("detail = %q", view.Health.Detail)
 	}
 }
+
+// A relayed request returns the raw dashboard payload, so the phone needs the
+// same rendering the direct path applies. Without it the relay leg would hand
+// the UI a shape it does not understand, and fallback would "work" while
+// showing nothing.
+//
+// Rendering lives in the core rather than being reimplemented per platform,
+// for the same reason the direct path's rendering does.
+func TestRenderUsageFromPayloadMatchesTheDirectPath(t *testing.T) {
+	raw := `{"providers":[{"provider":"claude","snapshot":{"provider":"claude",
+"observed_at":"2026-09-04T00:00:00Z","weekly":{"remaining":0.31,
+"resets_at":"2026-09-06T00:00:00Z"},"source":"openusage","confidence":"high"}}],
+"health":{"scheduler_enabled":false}}`
+
+	rendered, err := core.RenderUsageFromPayload(raw)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	var view struct {
+		Providers []struct {
+			Provider string `json:"provider"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &view); err != nil {
+		t.Fatalf("decode rendered view: %v", err)
+	}
+	if len(view.Providers) != 1 || view.Providers[0].Provider != "claude" {
+		t.Fatalf("rendered view did not carry the provider: %s", rendered)
+	}
+}
+
+func TestRenderUsageFromPayloadRejectsGarbage(t *testing.T) {
+	if _, err := core.RenderUsageFromPayload("not json"); err == nil {
+		t.Error("garbage from the relay must be an error, not an empty screen")
+	}
+}

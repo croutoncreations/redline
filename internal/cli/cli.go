@@ -825,7 +825,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	// key that identifies it. Loading the keypair here rather than generating
 	// one means the identity in the QR is the same one the relay leg will
 	// present; a fresh key per QR would authenticate against nothing.
-	relayURL, desktopKey, sessionID := "", "", ""
+	relayURL, desktopKey, sessionID, entitlement := "", "", "", ""
 	if cfg.Relay.Enabled {
 		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
 		if err != nil {
@@ -842,8 +842,12 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		}
 		relayURL = cfg.Relay.URL
 		desktopKey = core.DesktopPublicKey(keypair)
+		// The phone presents this to the relay as its own authorisation. It
+		// says nothing about who the user is, so handing it to a paired device
+		// grants relay access and nothing else.
+		entitlement = strings.TrimSpace(cfg.Relay.EntitlementToken)
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey, sessionID)
+	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey, sessionID, entitlement)
 	code, err := qrcode.New(pairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
@@ -865,7 +869,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 // turned on. Omitting them entirely, rather than sending empty values, keeps a
 // QR from a relay-less desktop byte-identical to the one this has always
 // produced, so an older phone and a newer one read it the same way.
-func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessionID string) string {
+func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessionID, entitlement string) string {
 	endpoint := host
 	if port != 443 {
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
@@ -880,13 +884,19 @@ func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessio
 	// token the desktop never issued.
 	fragment := url.Values{}
 	fragment.Set("pairing_token", token)
-	if relayURL != "" && desktopKey != "" && sessionID != "" {
-		// All three or none. A relay address without a key gives the phone
+	if relayURL != "" && desktopKey != "" && sessionID != "" && entitlement != "" {
+		// All four or none. A relay address without a key gives the phone
 		// somewhere to connect and no way to verify who answers; without a
-		// session id it cannot find this desktop on the relay at all.
+		// session id it cannot find this desktop on the relay at all; and
+		// without an entitlement a closed relay refuses it with 402, which the
+		// app would report as a relay fault rather than a missing credential.
+		//
+		// Publishing three of the four is worse than publishing none: the
+		// phone would believe it had a fallback and fail every time it tried.
 		fragment.Set("relay", relayURL)
 		fragment.Set("key", desktopKey)
 		fragment.Set("session", sessionID)
+		fragment.Set("entitlement", entitlement)
 	}
 	// Fragment holds the decoded form and RawFragment the encoded one; they
 	// have to agree or url.URL falls back to re-escaping Fragment.

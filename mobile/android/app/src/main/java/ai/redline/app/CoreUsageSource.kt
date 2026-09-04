@@ -8,6 +8,8 @@ package ai.redline.app
  */
 class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
 
+    // Relay fallback lives inside the core's client, below every one of these
+    // methods, so nothing here has to know which route carried the request.
     override fun fetchUsageJson(): String = client.client().fetchUsage()
 
     override fun controlProvider(providerAccountId: String, control: String) {

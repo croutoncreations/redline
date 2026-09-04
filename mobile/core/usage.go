@@ -193,6 +193,29 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 	return view
 }
 
+// RenderUsageFromPayload turns a raw dashboard payload into the capacity
+// screen, applying exactly the interpretation FetchUsage applies.
+//
+// A relayed request returns the payload rather than the rendered view, because
+// the tunnel carries the API's own response. Without this the relay leg would
+// hand the UI a shape it does not understand and fallback would appear to work
+// while showing nothing.
+//
+// Exported so the phone can call it after a relayed fetch. The rendering stays
+// here rather than being reimplemented per platform, for the same reason the
+// direct path's rendering does.
+func RenderUsageFromPayload(raw string) (string, error) {
+	var payload dashboardPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", fmt.Errorf("decode dashboard payload: %w", err)
+	}
+	encoded, err := json.Marshal(renderUsage(payload, time.Now()))
+	if err != nil {
+		return "", fmt.Errorf("encode usage view: %w", err)
+	}
+	return string(encoded), nil
+}
+
 // FetchUsage returns the capacity screen as JSON.
 func (c *Client) FetchUsage() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)

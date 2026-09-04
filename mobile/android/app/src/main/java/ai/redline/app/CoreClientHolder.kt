@@ -54,9 +54,36 @@ class CoreClientHolder(private val settings: RedlineSettings) {
             return existing
         }
         val created = Core.newClient(current.first, current.second)
+        // Installed on every client, so fallback cannot be present on one
+        // screen and missing on another. The core calls this only after a
+        // direct transport failure; an HTTP error means the desktop answered
+        // and the relay would only reach the same desktop more slowly.
+        created.setRelayFallback(RelayFallback())
         cached = created
         credentials = current
         return created
+    }
+
+    /**
+     * Carries a request over the relay on the core's behalf.
+     *
+     * Returning an error rather than null when nothing is paired keeps the
+     * core's direct failure as the one the user sees: someone who never set up
+     * a relay should not be sent looking for a relay fault.
+     */
+    private inner class RelayFallback : core.RelayFallback {
+        override fun do_(method: String, path: String, body: String): String {
+            val relay = relayClient() ?: throw IllegalStateException("no relay is paired")
+            return try {
+                relay.request(method, path, body)
+            } catch (error: Exception) {
+                // Noise sessions do not resume: once a frame fails, every later
+                // frame on that session fails too. Discard it so the next
+                // attempt dials afresh rather than retrying into a dead one.
+                dropRelay()
+                throw error
+            }
+        }
     }
 
     /**
@@ -89,6 +116,18 @@ class CoreClientHolder(private val settings: RedlineSettings) {
         }.getOrNull()
     }
 
+    /**
+     * Runs one request, over the direct route when it works and the relay when
+     * it does not.
+     *
+     * Every call from every source goes through here, so the fallback cannot
+     * be present on one screen and missing on another. It was previously
+     * missing from all three: relayClient() existed and nothing called it.
+     *
+     * The relay leg takes a path and returns the raw JSON body, which is what
+     * the tunnel carries; the direct leg is whatever binding method the caller
+     * would have used anyway.
+     */
     /**
      * Discards a relayed session after a failure.
      *
