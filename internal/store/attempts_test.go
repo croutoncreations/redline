@@ -73,3 +73,31 @@ func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
 		t.Fatalf("attempts = %#v", got)
 	}
 }
+
+// RFC3339Nano trims trailing zero fractional digits, so a whole-second
+// timestamp ("...:00Z") and a fractional one in the same second
+// ("...:00.5Z") do not compare correctly as SQLite TEXT: '.' sorts before
+// the digits/'Z' that follow a whole second, so the fractional timestamp
+// sorts as earlier even though it happened later. That breaks the range
+// query's completed_at >= ? AND completed_at < ? filter.
+func TestListDispatchAttemptsRangeHandlesSameSecondFraction(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	for _, attempt := range []domain.DispatchAttempt{
+		{ProviderAccountID: "claude", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT",
+			StartedAt: start, CompletedAt: start},
+		{ProviderAccountID: "claude", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT",
+			StartedAt: start, CompletedAt: start.Add(500 * time.Millisecond)},
+	} {
+		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListDispatchAttemptsRange(context.Background(), "automatic", start, start.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("attempts = %#v, want 2 (both fall within [start, start+1s))", got)
+	}
+}

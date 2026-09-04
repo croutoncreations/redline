@@ -41,6 +41,39 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// RFC3339Nano trims trailing zero fractional digits, so a whole-second
+// timestamp ("...:00Z") and a fractional one in the same second
+// ("...:00.5Z") do not compare correctly as SQLite TEXT: '.' sorts before
+// the digits/'Z' that follow a whole second, so the later, fractional
+// snapshot would sort as "earlier" and latestSnapshot's ORDER BY observed_at
+// DESC would return the stale whole-second snapshot instead.
+func TestSQLiteReturnsLatestSnapshotAcrossSameSecondFraction(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	base := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	first := usageSnapshot(base, 0.47)
+	second := usageSnapshot(base.Add(500*time.Millisecond), 0.46)
+	if err := db.SaveSnapshot(ctx, first, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(ctx, second, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(second.ObservedAt) || got.Weekly.Remaining != 0.46 {
+		t.Fatalf("latest = %#v, want second (later, fractional-second) snapshot", got)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {

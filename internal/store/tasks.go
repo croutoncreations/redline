@@ -612,7 +612,13 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// Fixed-width fractions preserve chronological order in SQLite TEXT keys;
+// time.RFC3339Nano trims trailing zero digits (and the decimal point when
+// nanoseconds are exactly 0), which breaks byte-wise ordering between a
+// whole-second timestamp and a fractional one in the same second.
+func formatTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 func parseStoredTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
