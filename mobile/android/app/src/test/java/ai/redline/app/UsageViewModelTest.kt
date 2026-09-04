@@ -515,3 +515,55 @@ class RelayedPollingTest {
         )
     }
 }
+
+/**
+ * A screen showing an unreachable error must keep trying.
+ *
+ * The poll was hung off the stream's terminal "relayed" state, so it only ran
+ * when a stream had started and then given up. A refresh that failed on its
+ * own -- which is what happens when the tailnet drops while the desktop is
+ * mid-reconnect -- set UNREACHABLE and stopped, and the screen sat there with
+ * a working relay one attempt away. Observed on a real phone: "relayed" in the
+ * header, "Cannot reach Redline" in the body, unchanged for minutes.
+ */
+class UnreachableScreenRetriesTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class FailsThenWorksSource : UsageSource {
+        var fetches = 0
+        override fun fetchUsageJson(): String {
+            fetches += 1
+            if (fetches == 1) throw RuntimeException("reach redline: no route to host")
+            return """{"providers":[],"health":{"scheduler_enabled":false},"relayed":true}"""
+        }
+        override fun isUnauthorized(error: Throwable): Boolean = false
+    }
+
+    @Test
+    fun `a failed refresh retries on its own and recovers`() = runTest(dispatcher) {
+        val source = FailsThenWorksSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.refresh()
+        dispatcher.scheduler.runCurrent()
+        assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+
+        // Nobody touches the phone. The screen must recover by itself.
+        dispatcher.scheduler.advanceTimeBy(35_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertNull(
+            "an unreachable screen must retry without the user swiping",
+            model.state.value.failure,
+        )
+        assertEquals(Transport.Relay, model.state.value.transport)
+
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+    }
+}

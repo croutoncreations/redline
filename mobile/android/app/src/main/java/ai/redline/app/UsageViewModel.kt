@@ -201,12 +201,32 @@ class UsageViewModel(
      * trip through a third party, and the numbers themselves only change every
      * few minutes.
      */
-    private fun startRelayedPolling() {
+    private fun startRelayedPolling() = startRecoveryPolling()
+
+    /**
+     * Retries in the background until the screen is healthy again.
+     *
+     * One loop serves both cases that need it: a stream that cannot run over
+     * the relay, and a refresh that failed outright. From the user's side they
+     * are the same situation -- a screen that will not update itself unless
+     * something retries.
+     *
+     * Stops once a refresh succeeds and the stream is live again, so a
+     * recovered screen costs nothing. A relayed screen has no live stream by
+     * definition, so its loop continues, which is what keeps the numbers
+     * moving over the relay.
+     */
+    private fun startRecoveryPolling() {
         if (relayedPollJob?.isActive == true) return
         relayedPollJob = viewModelScope.launch {
-            while (isActive) {
+            var attempts = 0
+            while (isActive && attempts < RECOVERY_ATTEMPTS) {
+                attempts += 1
                 delay(RELAYED_POLL_MILLIS)
-                refresh()
+                refresh(armRecovery = false)
+                if (_state.value.failure == null && _state.value.live == LiveState.LIVE) {
+                    break
+                }
             }
         }
     }
@@ -260,12 +280,37 @@ class UsageViewModel(
                         else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }
+                    // Keep trying. A screen that cannot reach the desktop is
+                    // exactly the screen that must retry on its own: the usual
+                    // cause is transient -- the tailnet dropping while the
+                    // desktop reconnects to the relay -- and it clears within
+                    // seconds. Hanging the retry off the stream's terminal
+                    // state was not enough, because a refresh that fails by
+                    // itself never starts a stream, so the error sat there with
+                    // a working relay one attempt away.
+                    //
+                    // Not for auth or entitlement: neither is fixed by waiting,
+                    // and retrying would hammer the desktop while telling the
+                    // user nothing new.
+                    if (failure == UsageUiState.Failure.UNREACHABLE) {
+                        startRecoveryPolling()
+                    }
                 },
             )
         }
     }
 
-    fun refresh() {
+    fun refresh() = refresh(armRecovery = true)
+
+    /**
+     * Refreshes, optionally arming the background retry on failure.
+     *
+     * The retry loop calls this with armRecovery = false. Without that, a
+     * failing retry would arm another retry from inside the loop that is
+     * already running -- the guard checks whether a job is active, and the job
+     * asking is that job -- so the bound would never be reached.
+     */
+    private fun refresh(armRecovery: Boolean) {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             _state.update { it.copy(loading = true) }
@@ -319,6 +364,21 @@ class UsageViewModel(
                         else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }
+                    // Keep trying. A screen that cannot reach the desktop is
+                    // exactly the screen that must retry on its own: the usual
+                    // cause is transient -- the tailnet dropping while the
+                    // desktop reconnects to the relay -- and it clears within
+                    // seconds. Hanging the retry off the stream's terminal
+                    // state was not enough, because a refresh that fails by
+                    // itself never starts a stream, so the error sat there with
+                    // a working relay one attempt away.
+                    //
+                    // Not for auth or entitlement: neither is fixed by waiting,
+                    // and retrying would hammer the desktop while telling the
+                    // user nothing new.
+                    if (armRecovery && failure == UsageUiState.Failure.UNREACHABLE) {
+                        startRecoveryPolling()
+                    }
                 },
             )
         }
@@ -332,6 +392,22 @@ class UsageViewModel(
          * only change every few minutes.
          */
         const val RELAYED_POLL_MILLIS = 30_000L
+
+        /**
+         * How many times to retry before leaving it to the user.
+         *
+         * Bounded rather than endless. The case this exists for is transient --
+         * the desktop reconnecting to the relay after the tailnet drops --
+         * and five minutes of cover is generous for that. A screen still
+         * broken after ten tries is not going to be fixed by an eleventh, and
+         * an unbounded poll would keep paying for metered relayed requests on
+         * a screen nobody is watching.
+         *
+         * Terminating also keeps the view model honest under test: a coroutine
+         * that never ends makes advanceUntilIdle hang, and a hang in a shared
+         * JVM reports nothing rather than failing.
+         */
+        const val RECOVERY_ATTEMPTS = 10
     }
 
 }
