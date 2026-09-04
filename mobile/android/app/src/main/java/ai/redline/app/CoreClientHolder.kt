@@ -151,6 +151,17 @@ class CoreClientHolder(private val settings: RedlineSettings) {
         transport = Transport.Direct
     }
 
+    /**
+     * Reports whether the relay declined for lack of a current subscription.
+     *
+     * Distinct from unreachability: the desktop may be healthy and the network
+     * fine, and the remedy is to renew rather than to check the network.
+     */
+    fun isEntitlementRefused(error: Throwable): Boolean {
+        val exception = error as? Exception ?: return false
+        return runCatching { Core.isEntitlementRefused(exception) }.getOrDefault(false)
+    }
+
     /** Reports whether an error means the credential was rejected. */
     fun isUnauthorized(error: Throwable): Boolean {
         // gomobile surfaces Go errors as Exception; anything else came from the

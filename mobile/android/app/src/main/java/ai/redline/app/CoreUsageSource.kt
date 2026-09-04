@@ -28,4 +28,7 @@ class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
     }
 
     override fun isUnauthorized(error: Throwable): Boolean = client.isUnauthorized(error)
+
+    override fun isEntitlementRefused(error: Throwable): Boolean =
+        client.isEntitlementRefused(error)
 }

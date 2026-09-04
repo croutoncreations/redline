@@ -284,6 +284,11 @@ private fun FailureMessage(failure: UsageUiState.Failure, onRetry: () -> Unit) {
             "Redline rejected this device's credentials. Pair it again from the desktop app."
         UsageUiState.Failure.UNREACHABLE ->
             "Cannot reach Redline. Check that the desktop app is running and on the same network."
+        // Names the remedy. "Cannot reach Redline" would send someone to look
+        // at their network when the desktop is fine and the subscription is not.
+        UsageUiState.Failure.ENTITLEMENT_REFUSED ->
+            "Remote access needs a current subscription. Renew it to reach Redline from " +
+                "outside your tailnet; on your own network the app still works."
     }
     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

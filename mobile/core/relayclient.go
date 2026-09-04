@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -84,6 +85,21 @@ type RelayClient struct {
 // end did not hold the expected desktop private key: an impostor relay or a
 // misconfigured desktop is caught here rather than silently passing requests to
 // the wrong party.
+// ErrEntitlementRefused means the relay declined the session because the
+// entitlement was missing, expired, or not signed by the issuer it trusts.
+//
+// Distinct from unreachability: the desktop may be perfectly healthy and the
+// network fine. The user's action is to renew, not to investigate their
+// connection.
+var ErrEntitlementRefused = errors.New("this relay requires a current subscription")
+
+// IsEntitlementRefused reports whether the relay declined for lack of a valid
+// entitlement.
+//
+// A function rather than a bound sentinel because gomobile cannot express
+// errors.Is across the FFI boundary.
+func IsEntitlementRefused(err error) bool { return errors.Is(err, ErrEntitlementRefused) }
+
 func DialRelay(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
 	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
 		return nil, err
@@ -96,8 +112,22 @@ func DialRelay(relayURL, sessionID, desktopPublicKey, entitlementToken string) (
 
 	target := buildSessionURL(relayURL, sessionID, entitlementToken)
 
-	conn, _, err := websocket.Dial(context.Background(), target, nil)
+	conn, handshake, err := websocket.Dial(context.Background(), target, nil)
 	if err != nil {
+		// A 402 is a billing answer, not a network one. Discarding the
+		// handshake response made an expired subscription read as "check that
+		// the desktop is running and on the same network", sending the user to
+		// look at their wifi when the remedy is to renew. That is the message
+		// every lapsed subscriber will see, so it has to be its own thing.
+		//
+		// The status only; the relay's wording is not surfaced, because it
+		// comes from the relay rather than the desktop and nothing downstream
+		// should start depending on it.
+		if handshake != nil && handshake.StatusCode == http.StatusPaymentRequired {
+			return nil, ErrEntitlementRefused
+		}
+		// Deliberately not wrapped: the library puts the full URL in its error
+		// and the URL carries the entitlement token.
 		return nil, fmt.Errorf("dial relay: connect failed")
 	}
 

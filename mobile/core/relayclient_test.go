@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/base64"
+
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -324,5 +326,60 @@ func TestAFailedRequestDoesNotCorruptLaterOnes(t *testing.T) {
 	}
 	if !strings.Contains(got, "ok") {
 		t.Fatalf("second response: %q", got)
+	}
+}
+
+// An unpaid or expired entitlement must not read as a network problem.
+//
+// The relay refuses at the WebSocket upgrade with 402, before any tunnel
+// exists. DialRelay discarded the response carrying that status and returned
+// a flat "connect failed", so the app told the user to check that the desktop
+// was running and on the same network -- when the actual remedy is to renew.
+// Verified against the live deployed relay before fixing.
+//
+// This matters more the day the fee turns on, because it is the message every
+// lapsed subscriber sees.
+func TestDialRelayReportsAnEntitlementRefusalAsItsOwnThing(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "this relay requires an entitlement", http.StatusPaymentRequired)
+	}))
+	defer relay.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"expired.token",
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if !IsEntitlementRefused(err) {
+		t.Errorf("a 402 must be recognisable as an entitlement refusal, got: %v", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "connect failed") {
+		t.Errorf("a 402 must not read as a connection failure: %v", err)
+	}
+}
+
+// Everything that is not a 402 stays a plain connection failure, so a real
+// network problem is not mislabelled as a billing one.
+func TestDialRelayKeepsOtherFailuresAsConnectionFailures(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer relay.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"some.token",
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if IsEntitlementRefused(err) {
+		t.Errorf("a 500 is not an entitlement problem: %v", err)
 	}
 }

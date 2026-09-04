@@ -256,6 +256,8 @@ private fun QueueFailure(failure: UsageUiState.Failure, onRetry: () -> Unit) {
                 when (failure) {
                     UsageUiState.Failure.UNAUTHORIZED -> "Redline rejected this device"
                     UsageUiState.Failure.UNREACHABLE -> "Cannot reach Redline"
+                    UsageUiState.Failure.ENTITLEMENT_REFUSED ->
+                        "Remote access needs a current subscription"
                 },
                 color = TextPrimary,
                 fontSize = 16.sp,
@@ -265,6 +267,8 @@ private fun QueueFailure(failure: UsageUiState.Failure, onRetry: () -> Unit) {
                 when (failure) {
                     UsageUiState.Failure.UNAUTHORIZED -> "Pair this device again."
                     UsageUiState.Failure.UNREACHABLE -> "Check the desktop is awake. Tap to retry."
+                    UsageUiState.Failure.ENTITLEMENT_REFUSED ->
+                        "Renew to use the relay. Your own network still works."
                 },
                 color = TextMuted,
                 fontSize = 13.sp,

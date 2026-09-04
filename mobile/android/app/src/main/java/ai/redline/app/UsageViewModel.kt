@@ -44,7 +44,12 @@ data class UsageUiState(
      */
     val transport: Transport = Transport.Direct,
 ) {
-    enum class Failure { UNAUTHORIZED, UNREACHABLE }
+    /**
+     * ENTITLEMENT_REFUSED is separate from UNREACHABLE because the remedy is
+     * different: the desktop may be healthy and the network fine, and the user
+     * needs to renew rather than investigate their wifi.
+     */
+    enum class Failure { UNAUTHORIZED, UNREACHABLE, ENTITLEMENT_REFUSED }
 
     val hasData: Boolean get() = view != null
 
@@ -78,6 +83,14 @@ internal fun liveStateOf(raw: String): LiveState = when (raw) {
 interface UsageSource {
     /** Pauses, resumes, or refreshes a provider. Default keeps tests terse. */
     fun controlProvider(providerAccountId: String, control: String) = Unit
+
+    /**
+     * Reports whether the relay declined for lack of a current subscription.
+     *
+     * Default false so existing sources and tests are unaffected; only the
+     * core-backed source can actually tell.
+     */
+    fun isEntitlementRefused(error: Throwable): Boolean = false
 
     /**
      * Subscribes to live updates, returning a handle that stops it.
@@ -186,10 +199,11 @@ class UsageViewModel(
                 onSuccess = { refresh() },
                 onFailure = { error ->
                     if (error is CancellationException) throw error
-                    val failure = if (source.isUnauthorized(error)) {
-                        UsageUiState.Failure.UNAUTHORIZED
-                    } else {
-                        UsageUiState.Failure.UNREACHABLE
+                    val failure = when {
+                        source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
+                        source.isEntitlementRefused(error) ->
+                            UsageUiState.Failure.ENTITLEMENT_REFUSED
+                        else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }
                 },
@@ -231,10 +245,11 @@ class UsageViewModel(
                 onFailure = { error ->
                     // Cancellation is control flow, not a transport failure.
                     if (error is CancellationException) throw error
-                    val failure = if (source.isUnauthorized(error)) {
-                        UsageUiState.Failure.UNAUTHORIZED
-                    } else {
-                        UsageUiState.Failure.UNREACHABLE
+                    val failure = when {
+                        source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
+                        source.isEntitlementRefused(error) ->
+                            UsageUiState.Failure.ENTITLEMENT_REFUSED
+                        else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }
                 },

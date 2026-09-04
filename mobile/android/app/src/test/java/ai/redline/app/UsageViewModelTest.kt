@@ -220,3 +220,43 @@ class StreamRelayedStateTest {
         assertEquals(LiveState.OFFLINE, liveStateOf("something-new"))
     }
 }
+
+/**
+ * An expired subscription is not a network problem.
+ *
+ * The relay refuses with 402 before any tunnel exists. Reported as UNREACHABLE
+ * the app said "check that the desktop app is running and on the same
+ * network", which sends a lapsed subscriber to look at their wifi. Verified
+ * against the live relay: the dial returned a flat "connect failed".
+ */
+class EntitlementFailureTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class RefusingSource(private val refused: Boolean) : UsageSource {
+        override fun fetchUsageJson(): String = throw RuntimeException("dial relay: refused")
+        override fun controlProvider(providerAccountId: String, control: String) = Unit
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun isEntitlementRefused(error: Throwable): Boolean = refused
+    }
+
+    @Test
+    fun `a refused entitlement is its own failure, not unreachable`() = runTest(dispatcher) {
+        val model = UsageViewModel(RefusingSource(refused = true), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.ENTITLEMENT_REFUSED, model.state.value.failure)
+    }
+
+    @Test
+    fun `an ordinary failure is still unreachable`() = runTest(dispatcher) {
+        val model = UsageViewModel(RefusingSource(refused = false), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+    }
+}
