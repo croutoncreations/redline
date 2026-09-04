@@ -50,26 +50,55 @@ export class RelaySession extends DurableObject {
   }
 
   /**
-   * Tell the other peer when one side goes away.
+   * Let one peer leave without ending the other's connection.
    *
-   * Without this a phone waits for a reply that can never arrive, which looks
-   * like a hang rather than a disconnection.
+   * The two legs are not alike. The desktop holds a single long-lived outbound
+   * socket and cannot be dialled; the phone connects when someone opens the
+   * app and goes away when they close it. Closing the desktop because the
+   * phone left cost it a full reconnect on every relayed session, and its
+   * backoff -- 2.3s, then 4.9s, then 7.6s -- was long enough that the next
+   * refresh arrived while nothing was listening. Observed on a real phone as
+   * "relayed", then "offline".
+   *
+   * Hibernation makes the survivor cheap: an accepted socket with no traffic
+   * bills nothing, so keeping the desktop attached costs only the memory the
+   * runtime may evict anyway.
+   *
+   * The departing socket is already closing, and getWebSockets stops returning
+   * it, so the role frees up for the same peer to return.
    */
-  webSocketClose(ws, code, reason) {
-    const partner = this.partnerOf(ws);
-    if (partner) {
-      // 1000 regardless of the incoming code: some codes are not valid to
-      // send onward, and the partner only needs to know the session ended.
-      try {
-        partner.close(1000, "peer disconnected");
-      } catch {
-        // Already closing; nothing to do.
-      }
-    }
+  webSocketClose(ws) {
+    this.releasePartner(ws);
   }
 
   webSocketError(ws) {
-    this.webSocketClose(ws);
+    this.releasePartner(ws);
+  }
+
+  /**
+   * Close the partner only when the departing peer was the desktop.
+   *
+   * The direction matters. A phone waiting on a desktop that has gone would
+   * sit forever on a reply that cannot come, so it has to be told. A desktop
+   * whose phone has gone simply has nothing to answer, and telling it costs a
+   * reconnect it did not need.
+   */
+  releasePartner(ws) {
+    const tags = this.ctx.getTags(ws);
+    if (!tags.includes("host")) {
+      return;
+    }
+    const partner = this.peerForRole("client");
+    if (!partner) {
+      return;
+    }
+    // 1000 regardless of the incoming code: some codes are not valid to send
+    // onward, and the partner only needs to know the session ended.
+    try {
+      partner.close(1000, "peer disconnected");
+    } catch {
+      // Already closing; nothing to do.
+    }
   }
 
   peerForRole(role) {

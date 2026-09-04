@@ -148,3 +148,51 @@ describe("health", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// A phone hanging up must not take the desktop's leg with it.
+//
+// The desktop holds one long-lived outbound connection and cannot be dialled;
+// the phone comes and goes. Closing the desktop when the phone leaves meant
+// every relayed session cost the desktop a reconnect, and its backoff --
+// 2.3s, then 4.9s, then 7.6s -- was long enough that the next refresh found
+// nobody home. Observed on a real phone: "relayed", then "offline".
+//
+// Only the departing peer closes. The survivor keeps its socket, so the next
+// phone to arrive is paired immediately.
+describe("a peer leaving", () => {
+  it("leaves the other peer connected", async () => {
+    const session = "session-survives-a-departure-0123";
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+
+    let hostClosed = false;
+    host.addEventListener("close", () => {
+      hostClosed = true;
+    });
+
+    // The phone goes away, as it does whenever the screen is closed.
+    client.close(1000, "done");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(hostClosed).toBe(false);
+
+    // And the desktop is still paired: a new phone reaches it without the
+    // desktop having to redial.
+    const secondClient = await connectSocket(session, "client");
+    secondClient.send("still here");
+    expect(await nextMessage(host)).toBe("still here");
+  });
+
+  it("still frees the role so the same peer can return", async () => {
+    const session = "session-frees-the-role-abcdefgh12";
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    client.close(1000, "done");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The slot must be free, or a returning phone gets 409 forever.
+    const res = await connect(session, "client");
+    expect(res.status).toBe(101);
+    host.close();
+  });
+});

@@ -227,10 +227,22 @@ func TestRequestsBeforeTheHandshakeAreRefused(t *testing.T) {
 	}
 }
 
-// Once a phone has authenticated, a second handshake on the same session would
-// be either a bug or an attempt to reset state; either way it is not something
-// to serve.
-func TestSecondHandshakeOnAnEstablishedSessionIsRefused(t *testing.T) {
+// A second phone may take over an established session, but only with the
+// pairing credential.
+//
+// This replaces a test that refused any second handshake. That was right while
+// the desktop's connection died with each phone: a second handshake could only
+// be a bug or a state-reset attempt. It stopped being right once the relay
+// kept the desktop attached across phones, because then a returning phone's
+// opening message arrives on a live session and refusing it made one
+// connection serve exactly one phone, forever.
+//
+// The credential is what still gates entry. A handshake must be a valid Noise
+// IK message encrypted to the desktop's static key, so an attacker without it
+// cannot produce one. Someone who HAS it could already pair as the client
+// directly, since the relay allows one client at a time and the previous one
+// has gone -- so allowing the restart grants no capability they lacked.
+func TestASecondPhoneMayTakeOverWithTheCredential(t *testing.T) {
 	keypair, _ := core.NewDesktopKeypair()
 	handler := NewSessionHandler(keypair, NewForwarder("http://127.0.0.1:1", http.DefaultClient))
 
@@ -242,8 +254,33 @@ func TestSecondHandshakeOnAnEstablishedSessionIsRefused(t *testing.T) {
 
 	other, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
 	second, _ := other.StartHandshake()
-	if _, err := handler.HandleFrame(context.Background(), second); err == nil {
-		t.Fatal("a second handshake was accepted on an established session")
+	reply, err := handler.HandleFrame(context.Background(), second)
+	if err != nil {
+		t.Fatalf("a returning phone must be able to start a new session: %v", err)
+	}
+	if err := other.FinishHandshake(reply); err != nil {
+		t.Fatalf("the new session must be usable: %v", err)
+	}
+}
+
+// Without the credential a handshake is still refused, which is what makes the
+// takeover above safe rather than an open door.
+func TestAHandshakeWithTheWrongKeyIsStillRefused(t *testing.T) {
+	keypair, _ := core.NewDesktopKeypair()
+	handler := NewSessionHandler(keypair, NewForwarder("http://127.0.0.1:1", http.DefaultClient))
+
+	phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	first, _ := phone.StartHandshake()
+	if _, err := handler.HandleFrame(context.Background(), first); err != nil {
+		t.Fatalf("first handshake: %v", err)
+	}
+
+	// An impostor that does not hold this desktop's key.
+	impostorKeypair, _ := core.NewDesktopKeypair()
+	impostor, _ := core.NewInitiatorSession(core.DesktopPublicKey(impostorKeypair))
+	forged, _ := impostor.StartHandshake()
+	if _, err := handler.HandleFrame(context.Background(), forged); err == nil {
+		t.Fatal("a handshake encrypted to a different desktop key was accepted")
 	}
 }
 

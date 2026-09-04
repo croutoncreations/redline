@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -663,4 +664,111 @@ func mustTestKeypair(t *testing.T) noise.DHKey {
 		t.Fatalf("keypair: %v", err)
 	}
 	return kp
+}
+
+// A bad frame from a phone must not make the desktop unreachable.
+//
+// A decrypt failure ends the Noise session, so the desktop reconnects -- but it
+// treated that like a relay outage and backed off, reaching 22 seconds. The
+// cause is a phone that dialled with a stale session; the phone is about to
+// retry with a fresh handshake, and it finds nobody listening.
+//
+// Backing off protects the relay from a hot loop. A frame error is not that:
+// the socket was healthy enough to deliver it, and reconnecting is cheap and
+// immediately useful.
+func TestDialerDoesNotBackOffAfterABadFrame(t *testing.T) {
+	rec := &recordingLog{}
+	var dials int32
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		atomic.AddInt32(&dials, 1)
+		// Garbage that cannot decrypt, as a stale session's frame would be.
+		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("not a noise frame"))
+		time.Sleep(50 * time.Millisecond)
+		conn.CloseNow()
+	})
+	defer relay.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  relay.URL,
+		SessionID: "test-session",
+		Keypair:   mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+		Logf:      rec.log,
+	})
+	go dialer.Run(ctx)
+
+	// Three dials inside two seconds is only possible without a growing
+	// backoff: the old behaviour reached 2.3s after the first failure alone.
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&dials) < 3 {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("only %d dials in two seconds; a frame error is still backing off.\nlog:\n%s",
+				atomic.LoadInt32(&dials), rec.all())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+}
+
+// One connection must be able to serve a second phone.
+//
+// The relay no longer closes the desktop when a phone leaves, which is what
+// stopped every disconnect costing a reconnect. But the desktop built one
+// Noise session per CONNECTION, and an established session refuses a second
+// handshake as a replay -- correctly, in isolation. Together those two facts
+// meant the surviving connection could serve exactly one phone, and the next
+// one got "message authentication failed" on every attempt.
+//
+// A handshake on an established session is the phone starting over, not an
+// attack: the relay only ever pairs one client at a time, and a client that
+// has gone cannot send anything. So the desktop starts a fresh session rather
+// than refusing.
+func TestDesktopServesASecondPhoneOnOneConnection(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer local.Close()
+
+	handler := NewSessionHandler(keypair, NewForwarder(local.URL, local.Client()))
+
+	// The first phone completes a handshake.
+	first, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMsg, err := first.StartHandshake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := handler.HandleFrame(context.Background(), firstMsg)
+	if err != nil {
+		t.Fatalf("first handshake: %v", err)
+	}
+	if err := first.FinishHandshake(reply); err != nil {
+		t.Fatalf("first finish: %v", err)
+	}
+
+	// That phone goes away. A second one arrives on the same connection,
+	// because the relay no longer tears the desktop down in between.
+	second, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMsg, err := second.StartHandshake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReply, err := handler.HandleFrame(context.Background(), secondMsg)
+	if err != nil {
+		t.Fatalf("a second phone must be able to handshake on the same connection: %v", err)
+	}
+	if err := second.FinishHandshake(secondReply); err != nil {
+		t.Fatalf("second finish: %v", err)
+	}
 }

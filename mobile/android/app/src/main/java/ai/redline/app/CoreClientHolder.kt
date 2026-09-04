@@ -100,7 +100,16 @@ class CoreClientHolder(private val settings: RedlineSettings) {
     fun relayClient(): core.RelayClient? {
         if (!settings.relayConfigured) return null
 
-        relay?.let { return it }
+        // A cached session is only worth reusing while it can still carry a
+        // request. Noise sessions do not resume, so a spent one fails every
+        // time -- which on a real phone read as "relayed", then "offline" on
+        // the next refresh, with re-pairing unable to help because the cache
+        // outlived the session.
+        relay?.let { existing ->
+            if (!existing.isSpent) return existing
+            runCatching { existing.close() }
+            relay = null
+        }
         return runCatching {
             Core.dialRelay(
                 settings.relayUrl,

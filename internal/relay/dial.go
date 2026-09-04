@@ -62,6 +62,13 @@ type Dialer struct {
 // back off after an outage.
 var errIdle = errors.New("idle timeout")
 
+// errBadFrame marks a frame this desktop could not read, which ends the Noise
+// session but says nothing about the relay's health.
+//
+// Separated from a transport failure because the two deserve opposite
+// responses: reconnect at once after a bad frame, back off after an outage.
+var errBadFrame = errors.New("handle frame")
+
 // NewDialer creates a Dialer from the given options.
 func NewDialer(opts DialerOptions) *Dialer {
 	return &Dialer{opts: opts}
@@ -99,8 +106,12 @@ func (d *Dialer) Run(ctx context.Context) {
 			// itself away. Treating it as a failure would grow the backoff, so
 			// a desktop that had merely been quiet would then be slow to answer
 			// the next time someone opened the app.
-			if errors.Is(err, errIdle) {
+			if errors.Is(err, errIdle) || errors.Is(err, errBadFrame) {
+				// Neither is a relay problem. An idle timeout is a phone that
+				// went away; a bad frame is a phone whose session was stale.
+				// Both want this desktop listening again immediately.
 				bo.reset()
+				d.logf("relay: %v; reconnecting", err)
 				continue
 			}
 			// Anything else means the relay is unavailable or dropped us.
@@ -218,8 +229,15 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 			// states are out of sync and every subsequent frame would be
 			// wrong. Close and reconnect so the phone can start a fresh
 			// handshake.
+			//
+			// Wrapped as errBadFrame so the loop reconnects promptly. Backing
+			// off exists to protect the relay from a hot dial loop, and this is
+			// not that: the socket was healthy enough to deliver a frame, the
+			// fault is one phone's stale session, and that phone is about to
+			// retry with a fresh handshake. Treating it as an outage grew the
+			// delay to twenty seconds and the phone found nobody listening.
 			_ = conn.Close(websocket.StatusProtocolError, "frame error")
-			return fmt.Errorf("handle frame: %w", err)
+			return fmt.Errorf("%w: %w", errBadFrame, err)
 		}
 
 		if err := conn.Write(ctx, websocket.MessageBinary, reply); err != nil {

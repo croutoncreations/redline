@@ -35,7 +35,14 @@ const relayClientRequestTimeout = 30 * time.Second
 // right answer in both cases: fail fast and let the caller decide.
 // 5 seconds is generous for a successful handshake over any reasonable
 // connection, and fast enough for unit tests.
-const relayClientHandshakeTimeout = 5 * time.Second
+// relayClientHandshakeTimeout bounds the wait for the desktop's Noise reply.
+//
+// The desktop now keeps its connection across phones, so the usual reason for
+// a slow reply is a busy desktop rather than one mid-reconnect. Three seconds
+// leaves room for that while keeping a genuinely absent desktop from stalling
+// a refresh: DialRelay retries, so this bounds one attempt rather than the
+// whole wait.
+const relayClientHandshakeTimeout = 3 * time.Second
 
 // tunnelRequest is the wire format for a request going phone → desktop.
 // Must match internal/relay.TunnelRequest.
@@ -85,6 +92,51 @@ type RelayClient struct {
 // end did not hold the expected desktop private key: an impostor relay or a
 // misconfigured desktop is caught here rather than silently passing requests to
 // the wrong party.
+// DialRelay opens a relayed session, retrying briefly while the desktop is
+// still reconnecting.
+//
+// Establishing the session is what races, not the socket. Closing a relayed
+// session ends the desktop's leg too, and it redials within a fraction of a
+// second; a phone that tried once inside that window connected to the relay
+// fine and then timed out waiting for a Noise reply from a partner that had
+// not arrived yet. Retrying the whole handshake is what covers it -- retrying
+// only the dial does not, because the dial was never the part that failed.
+//
+// An entitlement refusal is an answer rather than a race, so it returns at
+// once instead of being repeated three times.
+func DialRelay(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
+	var err error
+	for attempt := 0; attempt < dialAttempts; attempt++ {
+		var client *RelayClient
+		client, err = dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken)
+		if err == nil {
+			return client, nil
+		}
+		if errors.Is(err, ErrEntitlementRefused) {
+			return nil, err
+		}
+		if attempt < dialAttempts-1 {
+			time.Sleep(dialRetryDelay)
+		}
+	}
+	return nil, err
+}
+
+// dialAttempts and dialRetryDelay bound the wait for the desktop to reappear.
+//
+// Closing a relayed session ends the desktop's leg too, and it redials within
+// a fraction of a second. A phone that dialled once inside that window found
+// nobody paired and reported the desktop unreachable -- seen as "relayed",
+// then "offline" on the very next refresh.
+//
+// Three attempts over roughly a second: long enough to cover the reconnect,
+// short enough that a genuinely absent desktop still fails while someone is
+// looking at the screen.
+const (
+	dialAttempts   = 3
+	dialRetryDelay = 400 * time.Millisecond
+)
+
 // ErrEntitlementRefused means the relay declined the session because the
 // entitlement was missing, expired, or not signed by the issuer it trusts.
 //
@@ -100,7 +152,7 @@ var ErrEntitlementRefused = errors.New("this relay requires a current subscripti
 // errors.Is across the FFI boundary.
 func IsEntitlementRefused(err error) bool { return errors.Is(err, ErrEntitlementRefused) }
 
-func DialRelay(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
+func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
 	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
 		return nil, err
 	}
@@ -216,6 +268,19 @@ func (c *RelayClient) SetAuthToken(token string) {
 func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 	_, answer, err := c.requestWithStatus(method, reqPath, body)
 	return answer, err
+}
+
+// IsSpent reports whether this session can no longer carry a request.
+//
+// A Noise session does not resume: any transport close or decrypt failure ends
+// it for good. A caller that caches the client -- which the phone does, to
+// avoid a handshake per request -- has no other way to tell a live session
+// from a dead one, and reusing a dead one fails every time. On a real phone
+// that read as "relayed", then "offline" on the next refresh.
+func (c *RelayClient) IsSpent() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // Answer performs the request and returns "<status> <body>", the encoding

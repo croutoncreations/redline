@@ -27,6 +27,10 @@ type SessionHandler struct {
 	mu        sync.Mutex
 	session   *core.NoiseSession
 	forwarder *Forwarder
+	// keypair is retained so a second phone arriving on the same connection can
+	// be given a fresh session. The desktop's connection now outlives any one
+	// phone, so one handler must be able to serve several in turn.
+	keypair noise.DHKey
 
 	// lastSeen is the time of the most recent frame (handshake or application).
 	// It is zero until the first frame arrives; callers use IdleSince to
@@ -49,7 +53,27 @@ func NewSessionHandler(keypair noise.DHKey, forwarder *Forwarder) *SessionHandle
 	return &SessionHandler{
 		session:   session,
 		forwarder: forwarder,
+		keypair:   keypair,
 	}
+}
+
+// restartHandshake treats an undecryptable frame as a new phone's opening
+// message, replacing the session if it turns out to be one.
+//
+// Returns false when the frame is not a valid handshake, leaving the original
+// decrypt failure to be reported. The caller holds h.mu.
+func (h *SessionHandler) restartHandshake(frame []byte, at time.Time) ([]byte, bool) {
+	fresh, err := core.NewResponderSession(h.keypair)
+	if err != nil {
+		return nil, false
+	}
+	reply, err := fresh.ReadHandshake(frame)
+	if err != nil {
+		return nil, false
+	}
+	h.session = fresh
+	h.updateLastSeen(at)
+	return reply, true
 }
 
 // HandleFrame drives the session state machine with a single frame, using the
@@ -88,9 +112,21 @@ func (h *SessionHandler) HandleFrameAt(ctx context.Context, frame []byte, at tim
 	// right answer in both cases.
 	plaintext, err := h.session.Open(frame)
 	if err != nil {
-		// A decrypt failure terminates the session: the nonce advanced and the
-		// cipher states are now out of sync. Continuing would produce wrong
-		// results on every subsequent frame, which is worse than closing.
+		// A frame that will not decrypt on an established session is, in
+		// practice, the next phone starting over: the relay pairs one client at
+		// a time and the previous one has gone, so nothing else can be sending.
+		// Since the desktop's connection now survives a phone leaving, refusing
+		// here meant one connection could serve exactly one phone and every
+		// later arrival failed with an authentication error.
+		//
+		// Retried as a handshake rather than trusted: a forged or corrupt frame
+		// still fails, one step further on, and the phone is authenticated by
+		// the same static key as before.
+		if reply, restarted := h.restartHandshake(frame, at); restarted {
+			return reply, nil
+		}
+		// Not a handshake either: the session is spent, the nonce advanced, and
+		// every later frame would be wrong. Closing beats continuing.
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 

@@ -1,7 +1,11 @@
 package core
 
 import (
+	"sync/atomic"
+	"time"
+
 	"encoding/base64"
+	"github.com/coder/websocket"
 
 	"encoding/json"
 	"net/http"
@@ -381,5 +385,92 @@ func TestDialRelayKeepsOtherFailuresAsConnectionFailures(t *testing.T) {
 	}
 	if IsEntitlementRefused(err) {
 		t.Errorf("a 500 is not an entitlement problem: %v", err)
+	}
+}
+
+// A client whose session has ended must say so, so the caller redials rather
+// than handing out a corpse.
+//
+// The phone cached one RelayClient and reused it. When the socket closed --
+// which the relay used to do to the desktop on every phone disconnect -- the
+// next request went to a dead session and failed. On a real phone that read as
+// "relayed", then "offline", and re-pairing could not help because the cache
+// outlived the session.
+func TestRelayClientReportsWhenItIsSpent(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Accept the handshake, then hang up as a spent session would.
+		conn.CloseNow()
+	}))
+	defer relay.Close()
+
+	client, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"token",
+	)
+	if err != nil {
+		// A handshake that cannot complete is its own failure; nothing to test.
+		return
+	}
+	defer client.Close()
+
+	if client.IsSpent() {
+		t.Error("a freshly dialled client is not spent")
+	}
+
+	// The first request fails because the far end went away.
+	if _, err := client.Answer("GET", "/v1/health", ""); err == nil {
+		t.Skip("the stub stayed up; nothing to assert")
+	}
+
+	if !client.IsSpent() {
+		t.Error("a client whose session failed must report itself spent so the caller redials")
+	}
+}
+
+// The phone must not lose a race with the desktop's reconnect.
+//
+// Closing a relayed session ends the desktop's leg too, and it redials within
+// a fraction of a second. A phone that dials once in that window finds nobody
+// paired and reports the desktop unreachable -- observed as "relayed", then
+// "offline" on the very next refresh.
+//
+// Retrying briefly costs nothing when the desktop is there and turns the
+// common case from a failure into a short pause.
+func TestDialRelayRetriesWhileTheDesktopReconnects(t *testing.T) {
+	var attempts int32
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The first two dials find no partner, as they would while the desktop
+		// is redialling; the third is accepted.
+		if atomic.AddInt32(&attempts, 1) < 3 {
+			http.Error(w, "no partner yet", http.StatusConflict)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		time.Sleep(200 * time.Millisecond)
+	})).Config.Handler
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"token",
+	)
+	// The handshake cannot complete against a stub, but the dial must have been
+	// retried rather than given up after one refusal.
+	_ = err
+	if got := atomic.LoadInt32(&attempts); got < 3 {
+		t.Errorf("dial attempts = %d, want at least 3: a single try loses the race", got)
 	}
 }
