@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -126,6 +128,7 @@ class UsageViewModel(
      */
     private var refreshJob: Job? = null
     private var subscription: AutoCloseable? = null
+    private var relayedPollJob: Job? = null
 
     /**
      * Starts live updates, replacing any existing subscription.
@@ -178,9 +181,34 @@ class UsageViewModel(
                 // wedges on "relayed" until the screen is recreated.
                 if (raw == "relayed") {
                     subscription = null
+                    startRelayedPolling()
                 }
             },
         )
+    }
+
+    /**
+     * Keeps the screen current when the stream cannot run.
+     *
+     * Over a relay the stream is terminal by design: the tunnel carries one
+     * request and one response, so there is nothing to hold open. Without this
+     * the screen depended entirely on a manual pull, and the first attempt
+     * after the tailnet drops normally fails while the desktop reconnects --
+     * so a "Cannot reach Redline" body sat under a "relayed" header until
+     * someone thought to swipe.
+     *
+     * Slower than the direct cadence because every poll is a metered round
+     * trip through a third party, and the numbers themselves only change every
+     * few minutes.
+     */
+    private fun startRelayedPolling() {
+        if (relayedPollJob?.isActive == true) return
+        relayedPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(RELAYED_POLL_MILLIS)
+                refresh()
+            }
+        }
     }
 
     /**
@@ -195,6 +223,10 @@ class UsageViewModel(
     fun stopLive() {
         runCatching { subscription?.close() }
         subscription = null
+        // The poll exists only while the stream cannot run; a stopped screen
+        // must not keep paying for relayed round trips in the background.
+        relayedPollJob?.cancel()
+        relayedPollJob = null
         _state.update { it.copy(live = LiveState.OFFLINE) }
     }
 
@@ -291,4 +323,15 @@ class UsageViewModel(
             )
         }
     }
+    private companion object {
+        /**
+         * How often to poll while only the relay is reachable.
+         *
+         * Thirty seconds, not the five the stream uses: each poll is a metered
+         * round trip through a third party, and the provider numbers behind it
+         * only change every few minutes.
+         */
+        const val RELAYED_POLL_MILLIS = 30_000L
+    }
+
 }

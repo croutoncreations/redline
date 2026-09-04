@@ -342,15 +342,23 @@ class StreamRestartAfterRelayTest {
         assertEquals(1, source.subscriptions)
 
         // The core reports the terminal relayed state and stops.
+        //
+        // runCurrent, not advanceUntilIdle, from here on: the relayed state
+        // starts a polling loop that never goes idle, so advancing to idle
+        // would hang this test -- and, because the suite shares a JVM, take
+        // every later test with it rather than failing loudly.
         source.lastOnState?.invoke("relayed")
-        dispatcher.scheduler.advanceUntilIdle()
+        dispatcher.scheduler.runCurrent()
         assertEquals(LiveState.RELAYED, model.state.value.live)
 
         // The tailnet returns and the screen resumes: a new stream must start
         // rather than the stale handle blocking it.
         model.startLive()
-        dispatcher.scheduler.advanceUntilIdle()
+        dispatcher.scheduler.runCurrent()
         assertEquals("a terminal relayed stream must not block a restart", 2, source.subscriptions)
+
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
     }
 }
 
@@ -411,6 +419,99 @@ class LiveFreshnessTest {
             "a live frame can only be direct, so it must clear a stale relayed route",
             Transport.Direct,
             model.state.value.transport,
+        )
+    }
+}
+
+/**
+ * Once the stream cannot run, something has to keep fetching.
+ *
+ * Over a relay the stream is terminal by design: the tunnel carries one
+ * request and one response. The screen then depended entirely on a manual
+ * pull, so a single failed attempt -- the normal case while the desktop
+ * reconnects -- stayed on screen indefinitely. That is the "relayed" header
+ * over a "Cannot reach Redline" body, reported from a real phone.
+ */
+class RelayedPollingTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class CountingSource : UsageSource {
+        var fetches = 0
+        var onState: ((String) -> Unit)? = null
+        override fun fetchUsageJson(): String {
+            fetches += 1
+            return """{"providers":[],"health":{"scheduler_enabled":false},"relayed":true}"""
+        }
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun stream(
+            onUsage: (String) -> Unit,
+            onState: (String) -> Unit,
+        ): AutoCloseable {
+            this.onState = onState
+            return AutoCloseable { }
+        }
+    }
+
+    @Test
+    fun `a relayed screen keeps fetching after the stream gives up`() = runTest(dispatcher) {
+        val source = CountingSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.startLive()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        // The core reports it cannot stream over the relay.
+        source.onState?.invoke("relayed")
+        // runCurrent, not advanceUntilIdle: the poll loop never goes idle, so
+        // advancing to idle would spin forever.
+        dispatcher.scheduler.runCurrent()
+
+        val afterGivingUp = source.fetches
+        // Time passes as it would with the screen open.
+        dispatcher.scheduler.advanceTimeBy(70_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertTrue(
+            "a relayed screen must poll; it fetched $afterGivingUp times and never again",
+            source.fetches > afterGivingUp,
+        )
+
+        // Leave no live coroutine behind: runTest waits for the scheduler to
+        // drain, and an endless poll would hang the whole suite rather than
+        // fail it. That hang is what made this look like a failing assertion.
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+    }
+
+    @Test
+    fun `stopping the screen stops the polling`() = runTest(dispatcher) {
+        val source = CountingSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.startLive()
+        dispatcher.scheduler.advanceUntilIdle()
+        source.onState?.invoke("relayed")
+        dispatcher.scheduler.runCurrent()
+
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+        val afterStopping = source.fetches
+
+        // A closed screen must not keep paying for relayed round trips. One
+        // full interval is enough to prove the loop is gone; advancing further
+        // would only spin the scheduler against a job that no longer exists.
+        dispatcher.scheduler.advanceTimeBy(60_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertEquals(
+            "a stopped screen must not keep polling in the background",
+            afterStopping,
+            source.fetches,
         )
     }
 }
