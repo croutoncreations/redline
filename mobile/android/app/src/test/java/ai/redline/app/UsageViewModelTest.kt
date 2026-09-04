@@ -264,11 +264,9 @@ class EntitlementFailureTest {
 /**
  * The screen has to say when it is on the relay.
  *
- * CoreClientHolder tracked the transport and nothing ever read it, so
- * UsageUiState.transport stayed Direct forever and the "relayed" marker in
- * UsageScreen could not appear. Requests would silently succeed over the paid
- * route with the UI still claiming the tailnet -- the same shape as the bug
- * this whole change set exists to fix: a value maintained and never consulted.
+ * The route now travels in the payload rather than being asked of the client:
+ * three view models share one client, so a flag on it is last-write-wins and
+ * another screen's refresh could change what this one reports.
  */
 class TransportReportingTest {
 
@@ -278,30 +276,26 @@ class TransportReportingTest {
 
     @After fun tearDown() = Dispatchers.resetMain()
 
-    private class RoutedSource(private val route: Transport) : UsageSource {
-        override fun fetchUsageJson(): String = EMPTY_USAGE_JSON
+    private class RoutedSource(private val relayed: Boolean) : UsageSource {
+        override fun fetchUsageJson(): String =
+            """{"providers":[],"health":{"scheduler_enabled":false},"relayed":$relayed}"""
         override fun isUnauthorized(error: Throwable): Boolean = false
-        override fun transport(): Transport = route
     }
 
     @Test
-    fun `a relayed refresh reports the relay`() = runTest(dispatcher) {
-        val model = UsageViewModel(RoutedSource(Transport.Relay), ioDispatcher = dispatcher)
+    fun `a relayed payload reports the relay`() = runTest(dispatcher) {
+        val model = UsageViewModel(RoutedSource(relayed = true), ioDispatcher = dispatcher)
         model.refresh()
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(Transport.Relay, model.state.value.transport)
     }
 
     @Test
-    fun `a direct refresh reports direct`() = runTest(dispatcher) {
-        val model = UsageViewModel(RoutedSource(Transport.Direct), ioDispatcher = dispatcher)
+    fun `a direct payload reports direct`() = runTest(dispatcher) {
+        val model = UsageViewModel(RoutedSource(relayed = false), ioDispatcher = dispatcher)
         model.refresh()
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(Transport.Direct, model.state.value.transport)
-    }
-
-    private companion object {
-        const val EMPTY_USAGE_JSON = """{"providers":[],"health":{"scheduler_enabled":false}}"""
     }
 }
 

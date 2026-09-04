@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 
@@ -161,46 +162,6 @@ func TestConcurrentRelayedRequestsKeepTheirOwnStatus(t *testing.T) {
 	}
 }
 
-// The route has to be readable, and has to clear when direct comes back.
-//
-// Tracking it in the Kotlin holder latched on Relay forever: only a session
-// failure reset it, so returning to the tailnet still showed the paid route.
-func TestClientReportsWhichRouteItUsed(t *testing.T) {
-	client := core.NewClient("http://127.0.0.1:1", "token")
-	if client.LastRequestWasRelayed() {
-		t.Error("a fresh client has not relayed anything")
-	}
-
-	client.SetRelayFallback(core.RelayFallbackWithStatus(
-		func(method, path, body string) (int, string, error) {
-			return 200, `{"providers":[]}`, nil
-		}))
-	if _, err := client.FetchHealth(); err != nil {
-		t.Fatalf("relayed fetch: %v", err)
-	}
-	if !client.LastRequestWasRelayed() {
-		t.Error("a request served by the relay must report the relay")
-	}
-
-	// Direct comes back: a live server the client can actually reach.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"scheduler_enabled":false}`))
-	}))
-	defer server.Close()
-	healed := core.NewClient(server.URL, "token")
-	healed.SetRelayFallback(core.RelayFallbackWithStatus(
-		func(method, path, body string) (int, string, error) {
-			t.Error("the relay must not be used while direct works")
-			return 200, "{}", nil
-		}))
-	if _, err := healed.FetchHealth(); err != nil {
-		t.Fatalf("direct fetch: %v", err)
-	}
-	if healed.LastRequestWasRelayed() {
-		t.Error("a direct request must not report the relay")
-	}
-}
-
 // A malformed relay answer is a bug, not a 200.
 //
 // splitRelayAnswer degraded an unparseable prefix to success. FormatRelayAnswer
@@ -249,5 +210,67 @@ func TestRelayAnswerWithAStatusShapedBody(t *testing.T) {
 	_, err := client.FetchHealth()
 	if err != nil && strings.Contains(err.Error(), "404") {
 		t.Errorf("the body was parsed as the status: %v", err)
+	}
+}
+
+// The route must belong to the response, not to the client.
+//
+// A client-wide flag read back through a second call is the same defect as the
+// status race fixed earlier, one layer up: three view models share one client,
+// so a Runs refresh going direct could clear the flag a Usage refresh had just
+// set, and the pill would claim the tailnet over data that crossed the paid
+// relay. Runs and Queue never read the flag but every one of their requests
+// writes it.
+//
+// Carrying it in the payload leaves nothing to interleave.
+func TestUsageViewCarriesItsOwnRoute(t *testing.T) {
+	relayed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"providers":[],"health":{"scheduler_enabled":false}}`))
+	}))
+	defer relayed.Close()
+
+	// Direct is dead, so this fetch is served by the relay.
+	client := core.NewClient("http://127.0.0.1:1", "token")
+	client.SetRelayFallback(core.RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			return 200, `{"providers":[],"health":{"scheduler_enabled":false}}`, nil
+		}))
+
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	var view struct {
+		Relayed bool `json:"relayed"`
+	}
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !view.Relayed {
+		t.Error("a relayed fetch must say so in its own payload")
+	}
+
+	// A direct fetch on a live server must report direct in its payload, even
+	// if some other request relayed in between.
+	directClient := core.NewClient(relayed.URL, "token")
+	directClient.SetRelayFallback(core.RelayFallbackWithStatus(
+		func(method, path, body string) (int, string, error) {
+			return 200, `{}`, nil
+		}))
+	rawDirect, err := directClient.FetchUsage()
+	if err != nil {
+		t.Fatalf("direct fetch: %v", err)
+	}
+	// A fresh struct: 'relayed' is omitempty, so decoding a direct payload
+	// into the previous value would leave the earlier true in place and the
+	// test would pass while reading nothing.
+	var directView struct {
+		Relayed bool `json:"relayed"`
+	}
+	if err := json.Unmarshal([]byte(rawDirect), &directView); err != nil {
+		t.Fatalf("decode direct: %v", err)
+	}
+	if directView.Relayed {
+		t.Error("a direct fetch must not claim the relay")
 	}
 }

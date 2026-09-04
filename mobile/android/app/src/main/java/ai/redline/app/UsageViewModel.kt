@@ -92,14 +92,6 @@ interface UsageSource {
      */
     fun isEntitlementRefused(error: Throwable): Boolean = false
 
-    /**
-     * How the last request actually reached the desktop.
-     *
-     * Default Direct so existing sources and tests are unaffected. Read after
-     * every refresh rather than pushed, because the route is decided deep in
-     * the core and only the holder above it knows what happened.
-     */
-    fun transport(): Transport = Transport.Direct
 
     /**
      * Subscribes to live updates, returning a handle that stops it.
@@ -250,11 +242,14 @@ class UsageViewModel(
                         // knows nothing about, and silently drop the live
                         // connection status the stream is maintaining.
                         onSuccess = { view ->
-                            // The route is read here rather than tracked
-                            // separately: a paid relayed request must be
-                            // visible on screen, and a value nothing reads is
-                            // how the fallback went missing in the first place.
-                            val route = source.transport()
+                            // The route comes from the payload this fetch
+                            // returned, not from the client. Three view models
+                            // share one client, so a flag on it is
+                            // last-write-wins: a Runs refresh going direct
+                            // would clear what this one set, and the pill would
+                            // claim the tailnet over relayed data.
+                            val route =
+                                if (view.relayed) Transport.Relay else Transport.Direct
                             _state.update {
                                 it.copy(
                                     loading = false,

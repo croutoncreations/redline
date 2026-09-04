@@ -18,6 +18,14 @@ data class UsageView(
     val providers: List<ProviderUsage> = emptyList(),
     /** Whether the scheduler itself is working, shown as a header pill. */
     val health: HealthView? = null,
+    /**
+     * Whether this response crossed the relay rather than the tailnet.
+     *
+     * Part of the payload rather than asked of the client afterwards: three
+     * view models share one client, so a flag on the client is last-write-wins
+     * and another screen's refresh could change what this one reports.
+     */
+    val relayed: Boolean = false,
 )
 
 @Serializable

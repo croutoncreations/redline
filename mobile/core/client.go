@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -28,11 +27,6 @@ type Client struct {
 	// relay carries requests when the direct route is unreachable. Nil means
 	// direct only, which is every desktop paired before relays existed.
 	relay RelayFallback
-
-	// lastRelayed records whether the most recent request went over the relay.
-	// Guarded because concurrent refreshes share one client.
-	relayedMu   sync.Mutex
-	lastRelayed bool
 }
 
 // RelayFallback carries one request over a relayed tunnel.
@@ -124,26 +118,29 @@ func RelayFallbackRaw(f func(method, path, body string) (string, error)) RelayFa
 	return relayFallbackFunc(f)
 }
 
-// LastRequestWasRelayed reports whether the most recent request went over the
-// relay rather than the tailnet.
+// routeKey marks the context value carrying how one request was served.
 //
-// Read by the app after a refresh so the screen can say which route it used: a
-// relayed request costs money and crosses a third party, and someone who
-// expected to be on their own network deserves to see that they are not.
-//
-// Set by send() on every request, so returning to the tailnet clears it
-// without needing a restart. Tracking it in the Kotlin holder instead latched
-// on Relay forever, because only a session failure ever reset it.
-func (c *Client) LastRequestWasRelayed() bool {
-	c.relayedMu.Lock()
-	defer c.relayedMu.Unlock()
-	return c.lastRelayed
+// Per-request rather than per-client: three view models share one client, so a
+// field on the client is last-write-wins, and a Runs refresh going direct
+// would clear what a Usage refresh had just set. The request that took the
+// route is the only thing that can truthfully report it.
+type routeKey struct{}
+
+// routeRecorder collects the route for one request.
+type routeRecorder struct{ relayed bool }
+
+// withRoute returns a context that records how its request was served.
+func withRoute(ctx context.Context) (context.Context, *routeRecorder) {
+	recorder := &routeRecorder{}
+	return context.WithValue(ctx, routeKey{}, recorder), recorder
 }
 
-func (c *Client) setRelayed(relayed bool) {
-	c.relayedMu.Lock()
-	c.lastRelayed = relayed
-	c.relayedMu.Unlock()
+// markRelayed records that this request crossed the relay. A request with no
+// recorder -- every caller that does not care -- is unaffected.
+func markRelayed(ctx context.Context) {
+	if recorder, ok := ctx.Value(routeKey{}).(*routeRecorder); ok {
+		recorder.relayed = true
+	}
 }
 
 // SetRelayFallback installs the route used when the direct one fails.
@@ -268,7 +265,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		// get the same answer more slowly.
 		if c.relay != nil {
 			if relayed, relayErr := c.relayRequest(method, path, body); relayErr == nil {
-				c.setRelayed(true)
+				markRelayed(ctx)
 				return relayed, nil
 			}
 		}
@@ -277,9 +274,6 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		// rather than "please pair again".
 		return nil, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
 	}
-	// Cleared on every direct success, so walking back onto the tailnet stops
-	// the screen claiming a relayed route.
-	c.setRelayed(false)
 	return response, nil
 }
 

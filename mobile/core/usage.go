@@ -79,6 +79,16 @@ type UsageView struct {
 	// header shows a health pill; fetching it separately would ask the desktop
 	// twice for something it already sent.
 	Health *HealthView `json:"health,omitempty"`
+	// Relayed says this particular response crossed the relay rather than the
+	// tailnet, so the screen can report the route it actually used.
+	//
+	// Carried in the payload rather than read back from the client afterwards.
+	// Three view models share one client, so a flag on the client is
+	// last-write-wins: a Runs refresh going direct would clear what a Usage
+	// refresh had just set, and the pill would claim the tailnet over data
+	// that crossed the paid relay. This is the same defect as the status race,
+	// one layer up, and the same cure -- travel with the answer.
+	Relayed bool `json:"relayed,omitempty"`
 }
 
 // sourceLabel describes where a provider's numbers came from, how many runs it
@@ -221,6 +231,11 @@ func (c *Client) FetchUsage() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
+	// The route is recorded against this request, so the answer reports the
+	// way it actually travelled rather than whatever another screen's refresh
+	// did most recently.
+	ctx, route := withRoute(ctx)
+
 	var payload dashboardPayload
 	// The read model also carries every run, task, and dispatch attempt, which
 	// is roughly 97% of its weight and none of what this screen renders. Asking
@@ -230,7 +245,9 @@ func (c *Client) FetchUsage() (string, error) {
 		return "", err
 	}
 
-	encoded, err := json.Marshal(renderUsage(payload, c.now()))
+	view := renderUsage(payload, c.now())
+	view.Relayed = route.relayed
+	encoded, err := json.Marshal(view)
 	if err != nil {
 		return "", fmt.Errorf("encode usage view: %w", err)
 	}

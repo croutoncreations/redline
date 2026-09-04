@@ -29,17 +29,6 @@ class CoreClientHolder(private val settings: RedlineSettings) {
     private var relay: core.RelayClient? = null
 
     /**
-     * The transport the last request actually used, for the UI to report.
-     *
-     * Asked of the core rather than tracked here. A field set when the relay
-     * was dialled latched on Relay forever, because only a session failure
-     * reset it -- so walking back onto the tailnet still showed the paid
-     * route. The core sets it on every request, direct or relayed.
-     */
-    val transport: Transport
-        get() = if (cached?.lastRequestWasRelayed() == true) Transport.Relay else Transport.Direct
-
-    /**
      * Returns a client for the current credentials, rebuilding it if they have
      * changed.
      *
