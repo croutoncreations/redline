@@ -459,7 +459,12 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	// lets a phone reach a desktop behind a router nobody configured.
 	var relayDone chan struct{}
 	if cfg.Relay.Enabled {
-		dialer, err := newRelayDialer(cfg, listener.Addr().String())
+		// Relay progress goes to stderr, not stdout: it is diagnostic chatter
+		// that arrives at unpredictable times, and stdout here is the startup
+		// banner a caller may be parsing.
+		dialer, err := newRelayDialer(cfg, listener.Addr().String(), func(format string, args ...any) {
+			fmt.Fprintf(stderr, format+"\n", args...)
+		})
 		if err != nil {
 			fmt.Fprintln(stderr, "relay:", err)
 			return 1
@@ -508,7 +513,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 // The session id is persisted in config rather than minted per start, because a
 // phone paired against one id would otherwise be stranded on an id nothing
 // answers after the next restart.
-func newRelayDialer(cfg config.Config, localAddr string) (*relay.Dialer, error) {
+func newRelayDialer(cfg config.Config, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
@@ -524,6 +529,7 @@ func newRelayDialer(cfg config.Config, localAddr string) (*relay.Dialer, error) 
 		SessionID:        sessionID,
 		Keypair:          keypair,
 		EntitlementToken: cfg.Relay.EntitlementToken,
+		Logf:             logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.
 		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),

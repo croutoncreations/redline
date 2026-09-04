@@ -35,6 +35,16 @@ type DialerOptions struct {
 	// checks only that it is signed and unexpired, not who the holder is.
 	// Left empty during development with ALLOW_UNENTITLED=true on the relay.
 	EntitlementToken string
+
+	// Logf reports connection state to the operator. Nil means silent, which
+	// is what every test that does not care about output gets.
+	//
+	// The dial loop used to have no output at all, and a relay that was
+	// working looked exactly like one refusing every connection: the only way
+	// to tell them apart was to open a second session and see whether the
+	// relay answered 409. Every line written here passes through redactToken
+	// first, because the session URL carries the entitlement.
+	Logf func(format string, args ...any)
 }
 
 // Dialer is the desktop's outbound relay connection manager.
@@ -55,6 +65,18 @@ var errIdle = errors.New("idle timeout")
 // NewDialer creates a Dialer from the given options.
 func NewDialer(opts DialerOptions) *Dialer {
 	return &Dialer{opts: opts}
+}
+
+// logf reports to the operator, with the entitlement token stripped.
+//
+// Redaction happens here rather than at each call site so that adding a log
+// line later cannot leak the credential: the only way to write output from
+// this type is through a function that has already removed it.
+func (d *Dialer) logf(format string, args ...any) {
+	if d.opts.Logf == nil {
+		return
+	}
+	d.opts.Logf("%s", redactToken(fmt.Sprintf(format, args...), d.opts.EntitlementToken))
 }
 
 // Run dials the relay and serves frames until ctx is cancelled.
@@ -84,6 +106,10 @@ func (d *Dialer) Run(ctx context.Context) {
 			// Anything else means the relay is unavailable or dropped us.
 			// Sleep the backoff, then try again.
 			wait := bo.next()
+			// Reported at every attempt rather than only the first: a relay
+			// that is down stays down quietly, and the growing interval is
+			// the only signal that retries are still happening at all.
+			d.logf("relay: %v; retrying in %s", err, wait.Round(time.Millisecond))
 			select {
 			case <-ctx.Done():
 				return
@@ -114,6 +140,11 @@ func (d *Dialer) connect(ctx context.Context) error {
 		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), d.opts.EntitlementToken))
 	}
 	defer conn.CloseNow()
+
+	// The session id, not the URL: the URL carries the entitlement, and while
+	// logf would redact it, naming the session is what an operator actually
+	// needs to correlate this desktop with a phone or a relay-side 409.
+	d.logf("relay: connected, session %s", d.opts.SessionID)
 
 	// coder/websocket defaults to a 32 KB read limit, which a run's logs pass
 	// routinely. Exceeding it does not fail the request: it closes the socket,

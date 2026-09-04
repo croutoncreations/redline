@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/flynn/noise"
 	core "github.com/jfox/redline/mobile/core"
 )
 
@@ -498,4 +499,168 @@ func (e contextError) Error() string {
 
 func errContext(message string, status int, body string) error {
 	return contextError{message: message, status: status, body: body}
+}
+
+// The dial loop was completely silent: no line on connect, failure, or
+// backoff. A deployed relay that was working looked identical to one that was
+// refusing every connection, and the only way to tell them apart was to open a
+// second session and see whether the relay answered 409. An operator should
+// not have to do that.
+//
+// These tests pin the observable behaviour rather than exact wording: that
+// something is reported, that it reaches the caller's own sink, and that a
+// credential never appears in it.
+
+// recordingLog collects lines for assertions.
+type recordingLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *recordingLog) log(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingLog) all() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.lines, "\n")
+}
+
+func TestDialerReportsWhenItConnects(t *testing.T) {
+	rec := &recordingLog{}
+	connected := make(chan struct{})
+	var once sync.Once
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		once.Do(func() { close(connected) })
+		<-time.After(2 * time.Second)
+		conn.CloseNow()
+	})
+	defer relay.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  relay.URL,
+		SessionID: "test-session",
+		Keypair:   mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+		Logf:      rec.log,
+	})
+	go dialer.Run(ctx)
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("relay never saw a connection")
+	}
+	// Give the dialer a moment to write its line.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if got := rec.all(); !strings.Contains(strings.ToLower(got), "connect") {
+		t.Errorf("connecting was not reported; log was:\n%s", got)
+	}
+}
+
+func TestDialerReportsAFailureAndItsRetry(t *testing.T) {
+	rec := &recordingLog{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Port 1 refuses immediately, so this is a dial failure rather than a
+	// dropped session.
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  "http://127.0.0.1:1",
+		SessionID: "test-session",
+		Keypair:   mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+		Logf:      rec.log,
+	})
+	go dialer.Run(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if strings.Contains(strings.ToLower(rec.all()), "retry") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("a failure and its retry were never reported; log was:\n%s", rec.all())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	got := strings.ToLower(rec.all())
+	if !strings.Contains(got, "relay") {
+		t.Errorf("the failure did not mention the relay; log was:\n%s", rec.all())
+	}
+}
+
+func TestDialerNeverLogsTheEntitlementToken(t *testing.T) {
+	rec := &recordingLog{}
+	const secret = "eyJleHAiOjE4MjAwMzc4ODB9.c2VjcmV0LXNpZ25hdHVyZQ=="
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dialer := NewDialer(DialerOptions{
+		RelayURL:         "http://127.0.0.1:1",
+		SessionID:        "test-session",
+		Keypair:          mustTestKeypair(t),
+		Forwarder:        NewForwarder("http://127.0.0.1:1", nil),
+		EntitlementToken: secret,
+		Logf:             rec.log,
+	})
+	go dialer.Run(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if strings.Contains(strings.ToLower(rec.all()), "retry") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("nothing was logged; log was:\n%s", rec.all())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	got := rec.all()
+	if strings.Contains(got, secret) {
+		t.Errorf("the entitlement token appeared in the log:\n%s", got)
+	}
+	// The signature half alone is just as bad.
+	if strings.Contains(got, "c2VjcmV0LXNpZ25hdHVyZQ==") {
+		t.Errorf("part of the entitlement token appeared in the log:\n%s", got)
+	}
+}
+
+func TestDialerWithNoLoggerDoesNotPanic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	// Logf left nil: every existing caller constructs DialerOptions without it.
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  "http://127.0.0.1:1",
+		SessionID: "test-session",
+		Keypair:   mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+	})
+	dialer.Run(ctx)
+}
+
+// mustTestKeypair builds a desktop Noise identity for these tests.
+func mustTestKeypair(t *testing.T) noise.DHKey {
+	t.Helper()
+	kp, err := core.NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	return kp
 }
