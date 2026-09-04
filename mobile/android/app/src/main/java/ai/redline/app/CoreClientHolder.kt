@@ -72,27 +72,23 @@ class CoreClientHolder(private val settings: RedlineSettings) {
      * a relay should not be sent looking for a relay fault.
      */
     private inner class RelayFallback : core.RelayFallback {
-        /** The status of the most recent [do_], read back by the core. */
-        @Volatile
-        private var status: Int = 0
-
-        override fun statusOf(): Long = status.toLong()
-
         override fun do_(method: String, path: String, body: String): String {
             val relay = relayClient() ?: throw IllegalStateException("no relay is paired")
             return try {
                 // answer(), not request(): a 409 or a 401 is a real reply from
                 // the desktop rather than a relay failure, and the status has
                 // to survive or a refused dispatch reads as an accepted one.
-                val answered = relay.answer(method, path, body)
-                status = relay.lastStatus().toInt()
-                answered
+                //
+                // The status is encoded into the returned string by the core.
+                // Holding it in a field here and reading it back separately is
+                // what raced: one holder serves three view models, each
+                // refreshing on its own thread.
+                relay.answer(method, path, body)
             } catch (error: Exception) {
                 // Only a genuine transport or crypto failure reaches here.
                 // Noise sessions do not resume: once a frame fails, every later
                 // frame on that session fails too, so discard it and let the
                 // next attempt dial afresh.
-                status = 0
                 dropRelay()
                 throw error
             }

@@ -68,10 +68,6 @@ type RelayClient struct {
 	closed  bool
 	timeout time.Duration
 
-	// lastStatus is the status of the most recent Answer, read back through
-	// LastStatus because gomobile cannot return two values from one method.
-	lastStatus int
-
 	// authToken is the bearer credential for every request on this session.
 	authToken string
 }
@@ -192,41 +188,25 @@ func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
 	return answer, err
 }
 
-// Answer performs the request and reports the desktop's status without turning
-// a non-2xx into an error.
+// Answer performs the request and returns "<status> <body>", the encoding
+// RelayFallback expects.
 //
-// This is what the phone's fallback calls. A 409 or a 401 is a real answer from
-// the desktop, not a relay failure, and collapsing the two is what made every
-// relayed response look like success. Only a genuine transport or crypto
-// failure returns an error here.
+// A 409 or a 401 is a real answer from the desktop, not a relay failure, and
+// collapsing the two is what made every relayed response look like success.
+// Only a genuine transport or crypto failure returns an error here.
+//
+// The status is encoded into the returned string rather than read back through
+// a second call. Two calls meant two operations on shared state, which raced:
+// one client serves three view models on the phone, each on its own thread, so
+// a dispatch could report the status of a refresh that finished in between.
 func (c *RelayClient) Answer(method, reqPath, body string) (string, error) {
 	status, answer, err := c.requestWithStatus(method, reqPath, body)
-
-	// Recorded under the lock, like every other field on this type. Answer and
-	// LastStatus are called in pairs from one goroutine, but the field is still
-	// shared state and unsynchronised access to it is a data race whether or
-	// not the pairing happens to be sequential.
-	c.mu.Lock()
-	c.lastStatus = status
-	c.mu.Unlock()
-
 	if err != nil && status == 0 {
 		// No status means the session itself failed rather than the desktop
 		// refusing: there is no answer to report.
 		return "", err
 	}
-	return answer, nil
-}
-
-// LastStatus reports the status of the most recent Answer.
-//
-// Read immediately after Answer under the same lock, so the pairing is not
-// racy: Answer holds c.mu for its whole duration and this reads the field it
-// set. Split apart only because gomobile cannot return two values.
-func (c *RelayClient) LastStatus() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.lastStatus
+	return FormatRelayAnswer(status, answer), nil
 }
 
 // requestWithStatus is Request, returning the desktop's own status code.

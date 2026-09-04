@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,55 +38,68 @@ type Client struct {
 // survive the tunnel or every relayed answer reads as a flat success: a
 // dispatch refused with 409 would come back as neither started nor refused,
 // and a 401 could never prompt a re-pair.
-// The status is returned out-of-band through StatusOf rather than alongside
-// the body, because gomobile can bind neither multiple return values nor a
-// proxied method returning a struct: an interface it cannot proxy makes it
-// skip the whole file, silently, leaving the AAR without every type in it.
+// The status travels with the body, encoded into one string, because gomobile
+// binds neither multiple return values nor a proxied method returning a
+// struct -- and when it cannot bind something it skips the whole file,
+// silently, leaving the AAR without every type in it.
+//
+// An earlier version read the status back through a second call. That is two
+// operations on shared state, and it raced: one shared client serves three
+// view models on the phone, each refreshing on its own thread, so a dispatch
+// could report the status of a usage refresh that finished between the calls.
+// A probe crossed 4 of 200 concurrent dispatches and -race confirmed it.
+// Returning both together leaves nothing to interleave.
 type RelayFallback interface {
-	// Do performs the request and returns the raw response body. A non-2xx
-	// status is NOT an error here: an error means the relay itself failed.
-	Do(method, path, body string) (string, error)
-
-	// StatusOf reports the status of the most recent Do on this fallback.
+	// Do performs the request and returns "<status> <body>": the decimal
+	// status, one space, then the raw body.
 	//
-	// Called immediately after Do on the same goroutine, holding the same lock
-	// the implementation used, so the pairing is not racy in practice. Zero
-	// means "no status available", which is treated as 200.
-	StatusOf() int
+	// A non-2xx status is NOT an error here -- it is the desktop's own answer.
+	// An error means the relay itself failed.
+	Do(method, path, body string) (string, error)
+}
+
+// splitRelayAnswer separates the status from the body.
+//
+// Returns 200 when the prefix is missing or unparseable, so a fallback that
+// reports no status still works rather than failing every request with a
+// status of zero.
+func splitRelayAnswer(answer string) (int, string) {
+	space := strings.IndexByte(answer, ' ')
+	if space <= 0 {
+		return http.StatusOK, answer
+	}
+	status, err := strconv.Atoi(answer[:space])
+	if err != nil || status < 100 || status > 599 {
+		return http.StatusOK, answer
+	}
+	return status, answer[space+1:]
+}
+
+// FormatRelayAnswer builds the "<status> <body>" string a RelayFallback returns.
+//
+// Exported so the phone's implementation cannot get the encoding subtly wrong
+// in a way that silently reads every answer as 200.
+func FormatRelayAnswer(status int, body string) string {
+	return strconv.Itoa(status) + " " + body
 }
 
 // RelayFallbackWithStatus adapts a function to RelayFallback, for tests and
 // for Go callers with no object to hang the method on.
 func RelayFallbackWithStatus(f func(method, path, body string) (int, string, error)) RelayFallback {
-	return &relayFallbackFunc{fn: f}
+	return relayFallbackFunc(func(method, path, body string) (string, error) {
+		status, answer, err := f(method, path, body)
+		if err != nil {
+			return "", err
+		}
+		return FormatRelayAnswer(status, answer), nil
+	})
 }
 
-type relayFallbackFunc struct {
-	fn     func(method, path, body string) (int, string, error)
-	status int
-}
+type relayFallbackFunc func(method, path, body string) (string, error)
 
-func (f *relayFallbackFunc) Do(method, path, body string) (string, error) {
-	status, answer, err := f.fn(method, path, body)
-	f.status = status
-	return answer, err
-}
-
-func (f *relayFallbackFunc) StatusOf() int { return f.status }
-
-// RelayFallbackFunc adapts a body-only function, treating every answer as 200.
-//
-// Kept for callers that genuinely have no status to report; anything reaching
-// a real desktop should use RelayFallbackWithStatus.
-type RelayFallbackFunc func(method, path, body string) (string, error)
-
-// Do implements RelayFallback.
-func (f RelayFallbackFunc) Do(method, path, body string) (string, error) {
+func (f relayFallbackFunc) Do(method, path, body string) (string, error) {
 	return f(method, path, body)
 }
-
-// StatusOf implements RelayFallback, reporting success for every answer.
-func (f RelayFallbackFunc) StatusOf() int { return http.StatusOK }
 
 // SetRelayFallback installs the route used when the direct one fails.
 //
@@ -236,16 +250,10 @@ func (c *Client) relayRequest(method, path string, body any) (*http.Response, er
 	if err != nil {
 		return nil, err
 	}
-	status := c.relay.StatusOf()
-	if status == 0 {
-		// A fallback that reports nothing is treated as success rather than as
-		// a zero status, which would fail the range check below and turn a
-		// working relay into a permanent error.
-		status = http.StatusOK
-	}
+	status, decoded := splitRelayAnswer(answer)
 	return &http.Response{
 		StatusCode: status,
-		Body:       io.NopCloser(strings.NewReader(answer)),
+		Body:       io.NopCloser(strings.NewReader(decoded)),
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}, nil
 }
