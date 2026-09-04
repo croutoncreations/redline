@@ -145,7 +145,7 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
                 state.failure != null && state.hasData ->
                     Text("Offline", color = Warn, fontSize = 12.sp)
 
-                else -> LivePill(state.live)
+                else -> LivePill(state.live, state.view?.sampledAgeSeconds ?: 0)
             }
             // Unpairing lives behind the overflow rather than on the surface:
             // it is rare, destructive, and next to controls people press often.
@@ -246,8 +246,39 @@ private fun UnpairMenu(onUnpair: () -> Unit) {
     }
 }
 
+/**
+ * How stale the numbers may be before the pill says so.
+ *
+ * The collector polls every five minutes, so anything under that is the normal
+ * resting state and calling it out would train the user to ignore the label.
+ * Past it, the numbers are older than one collection cycle and worth naming.
+ */
+private const val STALE_AFTER_SECONDS = 300
+
 @Composable
-private fun LivePill(live: LiveState) {
+private fun LivePill(live: LiveState, sampledAgeSeconds: Int) {
+    // "live" describes the connection, not the numbers, and the two move at
+    // very different speeds: frames arrive every few seconds while the provider
+    // is sampled every few minutes. Saying only "live" over minutes-old numbers
+    // reads as a claim about the data, which is how it was misread.
+    if (live == LiveState.LIVE && sampledAgeSeconds >= STALE_AFTER_SECONDS) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(Warn),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "live · sampled ${sampledAgeSeconds / 60}m ago",
+                color = Warn,
+                fontSize = 12.sp,
+            )
+        }
+        return
+    }
+
     val (label, tone) = when (live) {
         LiveState.LIVE -> "live" to Good
         LiveState.CONNECTING -> "connecting" to TextMuted

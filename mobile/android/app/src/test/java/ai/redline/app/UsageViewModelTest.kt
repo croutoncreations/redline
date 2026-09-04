@@ -353,3 +353,64 @@ class StreamRestartAfterRelayTest {
         assertEquals("a terminal relayed stream must not block a restart", 2, source.subscriptions)
     }
 }
+
+/**
+ * The pill describes the connection, and must not be read as describing the
+ * numbers.
+ *
+ * The stream pushes every five seconds but the collector polls the provider
+ * every five minutes, so "live" sat above data that was four minutes old and
+ * looked like a lie. Both facts were true and the screen only showed one.
+ *
+ * The relayed route is folded in here too: a live frame can only arrive over
+ * the tailnet, because the tunnel cannot carry a stream. Leaving transport
+ * untouched on a frame let a relayed refresh's Relay linger over direct data.
+ */
+class LiveFreshnessTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class StreamingSource : UsageSource {
+        var onUsage: ((String) -> Unit)? = null
+        var onState: ((String) -> Unit)? = null
+        override fun fetchUsageJson(): String =
+            """{"providers":[],"health":{"scheduler_enabled":false},"relayed":true}"""
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun stream(
+            onUsage: (String) -> Unit,
+            onState: (String) -> Unit,
+        ): AutoCloseable {
+            this.onUsage = onUsage
+            this.onState = onState
+            return AutoCloseable { }
+        }
+    }
+
+    @Test
+    fun `a live frame returns the route to direct`() = runTest(dispatcher) {
+        val source = StreamingSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        // A relayed refresh puts the pill on the relay.
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Transport.Relay, model.state.value.transport)
+
+        // The tailnet returns and a live frame arrives. A stream cannot cross
+        // the relay, so this frame is direct by construction.
+        model.startLive()
+        dispatcher.scheduler.advanceUntilIdle()
+        source.onUsage?.invoke("""{"providers":[],"health":{"scheduler_enabled":false}}""")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "a live frame can only be direct, so it must clear a stale relayed route",
+            Transport.Direct,
+            model.state.value.transport,
+        )
+    }
+}

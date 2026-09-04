@@ -148,7 +148,19 @@ class UsageViewModel(
                 }.getOrNull() ?: return@stream
                 // A frame proves the desktop is reachable and the credential
                 // good, so it clears any earlier failure.
-                _state.update { it.copy(loading = false, view = view, failure = null) }
+                //
+                // It also proves the route: the tunnel carries one request and
+                // one response, so a stream can only exist over the tailnet.
+                // Without this a relayed refresh's route lingered over direct
+                // data until the next manual refresh.
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        view = view,
+                        failure = null,
+                        transport = Transport.Direct,
+                    )
+                }
             },
             onState = { raw ->
                 _state.update { it.copy(live = liveStateOf(raw)) }

@@ -575,3 +575,76 @@ func TestFetchUsageCarriesHealth(t *testing.T) {
 		t.Errorf("detail = %q", view.Health.Detail)
 	}
 }
+
+// The header needs to know how old the numbers are, not just whether the
+// connection is up.
+//
+// The stream pushes every five seconds while the collector polls the provider
+// every five minutes, so "live" sat above four-minute-old data and read as a
+// lie. Both facts were true; the screen showed only the connection.
+//
+// Exposed as seconds rather than a formatted string so the app can decide when
+// staleness is worth mentioning, and so the wording lives with the UI.
+func TestUsageViewReportsHowOldTheNumbersAre(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"providers":[{"provider":"claude","snapshot":{
+"provider":"claude","observed_at":%q,
+"weekly":{"remaining":0.5,"resets_at":%q},
+"source":"openusage","confidence":"high"}}]}`,
+		now.Add(-4*time.Minute).Format(time.RFC3339),
+		now.Add(48*time.Hour).Format(time.RFC3339))
+
+	rendered, err := renderThroughClient(t, payload, now)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var view struct {
+		SampledAgeSeconds int `json:"sampled_age_seconds"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.SampledAgeSeconds != 240 {
+		t.Errorf("sampled_age_seconds = %d, want 240", view.SampledAgeSeconds)
+	}
+}
+
+// With several providers the age is the oldest of them: the header speaks for
+// the whole screen, and claiming the freshest would overstate the rest.
+func TestUsageViewAgeIsTheOldestProvider(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"providers":[
+{"provider":"claude","snapshot":{"provider":"claude","observed_at":%q,
+"weekly":{"remaining":0.5,"resets_at":%q},"source":"openusage","confidence":"high"}},
+{"provider":"codex","snapshot":{"provider":"codex","observed_at":%q,
+"weekly":{"remaining":0.5,"resets_at":%q},"source":"openusage","confidence":"high"}}]}`,
+		now.Add(-30*time.Second).Format(time.RFC3339), now.Add(48*time.Hour).Format(time.RFC3339),
+		now.Add(-6*time.Minute).Format(time.RFC3339), now.Add(48*time.Hour).Format(time.RFC3339))
+
+	rendered, err := renderThroughClient(t, payload, now)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var view struct {
+		SampledAgeSeconds int `json:"sampled_age_seconds"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.SampledAgeSeconds != 360 {
+		t.Errorf("sampled_age_seconds = %d, want 360 (the oldest)", view.SampledAgeSeconds)
+	}
+}
+
+// renderThroughClient drives the real FetchUsage against a stub desktop, so
+// these tests exercise the shipped path rather than a test-only entry point.
+func renderThroughClient(t *testing.T, payload string, now time.Time) (string, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(payload))
+	}))
+	t.Cleanup(server.Close)
+
+	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
+	return client.FetchUsage()
+}

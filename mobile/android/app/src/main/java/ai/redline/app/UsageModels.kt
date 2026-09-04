@@ -19,6 +19,14 @@ data class UsageView(
     /** Whether the scheduler itself is working, shown as a header pill. */
     val health: HealthView? = null,
     /**
+     * How old the oldest provider's numbers are.
+     *
+     * The stream pushes every few seconds but the collector polls the provider
+     * every few minutes, so a connected stream can sit above numbers that are
+     * minutes old.
+     */
+    @SerialName("sampled_age_seconds") val sampledAgeSeconds: Int = 0,
+    /**
      * Whether this response crossed the relay rather than the tailnet.
      *
      * Part of the payload rather than asked of the client afterwards: three

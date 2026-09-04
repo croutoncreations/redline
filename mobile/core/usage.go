@@ -79,6 +79,17 @@ type UsageView struct {
 	// header shows a health pill; fetching it separately would ask the desktop
 	// twice for something it already sent.
 	Health *HealthView `json:"health,omitempty"`
+	// SampledAgeSeconds is how old the oldest provider's numbers are.
+	//
+	// The stream pushes every five seconds while the collector polls the
+	// provider every five minutes, so a connected stream sat above numbers
+	// that were minutes old and the header said only "live". Both facts were
+	// true and the screen showed one of them.
+	//
+	// The oldest rather than the freshest, because the header speaks for the
+	// whole screen and claiming the freshest would overstate the rest.
+	// Seconds rather than a phrase, so the wording stays with the UI.
+	SampledAgeSeconds int `json:"sampled_age_seconds,omitempty"`
 	// Relayed says this particular response crossed the relay rather than the
 	// tailnet, so the screen can report the route it actually used.
 	//
@@ -182,6 +193,13 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 			Error:    item.Error,
 		}
 		if item.Snapshot != nil {
+			// The oldest sample across providers, so the header can say how
+			// stale the numbers are rather than only that the stream is up.
+			if observed := item.Snapshot.ObservedAt; !observed.IsZero() {
+				if age := int(now.Sub(observed).Seconds()); age > view.SampledAgeSeconds {
+					view.SampledAgeSeconds = age
+				}
+			}
 			provider.Session = shortWindow(item.Snapshot, now)
 			// A provider that reports a short window at all is expected to keep
 			// reporting one, so its absence here is a gap rather than a
