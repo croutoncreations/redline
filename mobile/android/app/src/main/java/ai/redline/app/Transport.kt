@@ -23,3 +23,4 @@ enum class Transport {
     /** Nothing is reachable: no direct route and no relay to fall back to. */
     None,
 }
+

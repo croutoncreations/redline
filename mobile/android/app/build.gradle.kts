@@ -170,3 +170,74 @@ val checkCoreFreshness by tasks.registering {
 // Runs before compilation, so the failure arrives before a stale build is
 // installed rather than after someone notices a missing value on a phone.
 tasks.named("preBuild") { dependsOn(checkCoreFreshness) }
+
+/**
+ * Fails the build when a declaration is referenced only by its own tests.
+ *
+ * This is the bug shape that recurred four times in the relay work, each time
+ * shipping green: relayClient() was written and never called, nine Transport.kt
+ * helpers were kept alive solely by their tests, CoreClientHolder.transport was
+ * written on every dial and read by nothing, and a UsageSource seam let a source
+ * under-report by taking a default. Every one of them had passing tests.
+ *
+ * An unused branch that looks tested is worse than an absent one, because it
+ * reads as covered. The Kotlin compiler does not warn on unused internal
+ * declarations, so nothing caught these.
+ *
+ * Deliberately narrow: it checks declarations in the app's own package that no
+ * main-source file mentions. Compose entry points, serializable models and
+ * anything reached by reflection or the framework are exempt, because "no
+ * caller in main" is normal for those and a guard that cries wolf gets muted.
+ */
+val checkNoTestOnlyDeclarations by tasks.registering {
+    group = "verification"
+    description = "Fails if a declaration is referenced only from tests."
+
+    val mainDir = layout.projectDirectory.dir("src/main/java/ai/redline/app").asFile
+    val testDir = layout.projectDirectory.dir("src/test/java/ai/redline/app").asFile
+
+    inputs.dir(mainDir).withPropertyName("mainSources").withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(testDir).withPropertyName("testSources").withPathSensitivity(PathSensitivity.RELATIVE)
+
+    doLast {
+        val mainFiles = mainDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+        val testFiles = testDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+        if (mainFiles.isEmpty() || testFiles.isEmpty()) return@doLast
+
+        val mainText = mainFiles.associateWith { it.readText() }
+        val testText = testFiles.joinToString("\n") { it.readText() }
+
+        // Top-level functions only. Classes and properties have too many
+        // legitimate framework-only references to judge this way.
+        val declaration = Regex("""^(?:internal |private )?fun ([a-z][A-Za-z0-9_]*)\s*\(""", RegexOption.MULTILINE)
+
+        val offenders = mutableListOf<String>()
+        for ((file, text) in mainText) {
+            for (match in declaration.findAll(text)) {
+                val name = match.groupValues[1]
+                // Composables and lifecycle overrides are called by the
+                // framework, never by name from our own sources.
+                if (name.startsWith("on") || name == "main") continue
+                val calledInMain = mainText.any { (other, otherText) ->
+                    val body = if (other == file) otherText.replace(match.value, "") else otherText
+                    body.contains("$name(")
+                }
+                if (calledInMain) continue
+                if (!testText.contains("$name(")) continue
+                offenders += "${file.name}: $name"
+            }
+        }
+
+        if (offenders.isNotEmpty()) {
+            throw GradleException(
+                "These declarations are referenced only by tests:\n" +
+                    offenders.joinToString("\n") { "  $it" } +
+                    "\n\nEither wire them into the app or delete them. Code kept alive by its\n" +
+                    "own tests reads as covered while doing nothing, which is how the relay\n" +
+                    "fallback shipped missing four separate times."
+            )
+        }
+    }
+}
+
+tasks.named("check") { dependsOn(checkNoTestOnlyDeclarations) }
