@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,6 +207,18 @@ type PaceThreshold struct {
 func validTrustedHost(host string, relayEnabled bool) bool {
 	if host == "" || strings.TrimSpace(host) != host {
 		return false
+	}
+	// An entry may name the port a phone should use ("name.ts.net:8443"),
+	// which is how a Tailscale Serve front end off 443 is written down. The
+	// service composes the pairing code and has to know; the request-matching
+	// side already ignored a port here. Split before the host checks so a
+	// port cannot smuggle a bad host past them.
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		port, err := strconv.Atoi(host[i+1:])
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+		host = host[:i]
 	}
 	if net.ParseIP(host) != nil {
 		return false

@@ -550,6 +550,14 @@ func allowedHost(hostPort string, trusted []string) bool {
 	}
 	host = strings.Trim(host, "[]")
 	for _, candidate := range trusted {
+		// An entry may carry the port a phone should pair on. That is advice
+		// for composing the pairing code, not a constraint on which port a
+		// request may arrive by: Tailscale Serve terminates TLS and forwards
+		// on loopback, so the port the request names is not the one it came
+		// in on anyway.
+		if parsed, _, err := net.SplitHostPort(candidate); err == nil {
+			candidate = parsed
+		}
 		if strings.EqualFold(host, candidate) {
 			return true
 		}

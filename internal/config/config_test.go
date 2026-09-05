@@ -55,9 +55,12 @@ api:
 // plausible name, so a typo or an injected value is still caught.
 func TestRelaxedTrustedHostsAreStillValidated(t *testing.T) {
 	for _, host := range []string{
-		"*.example.com", "example.com:443", "user@example.com",
+		"*.example.com", "user@example.com",
 		"exa mple.com", "-example.com", ".example.com", "example..com",
 		"192.0.2.1", "localhost", "http://example.com",
+		// A port must be a port.
+		"example.com:", "example.com:abc", "example.com:0", "example.com:70000",
+		"example.com:443:8443",
 	} {
 		configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 api:
@@ -68,6 +71,34 @@ relay:
   url: https://redline-relay.example.com`, 1)
 		if _, err := config.Load(writeConfig(t, configured)); err == nil {
 			t.Fatalf("accepted an invalid trusted host %q even with the relay on", host)
+		}
+	}
+}
+
+// A trusted host may say which port the phone should use.
+//
+// Tailscale Serve commonly fronts on 8443 rather than 443, and the service is
+// what composes the pairing code, so it has to know. Without this the CLI
+// needed --port on every run and the menu bar quietly guessed 8443 -- a QR
+// built for the wrong port is a phone that cannot connect with nothing on
+// screen to say why. The host-matching side already ignored a port, so this
+// only widens what the validator lets through.
+func TestTrustedHostsMayCarryAPort(t *testing.T) {
+	for _, host := range []string{
+		"macbook.example.ts.net:8443",
+		"macbook.example.ts.net:443",
+		"macbook.example.ts.net",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - `+host, 1)
+		cfg, err := config.Load(writeConfig(t, configured))
+		if err != nil {
+			t.Fatalf("refused trusted host %q: %v", host, err)
+		}
+		if len(cfg.API.TrustedHosts) != 1 || cfg.API.TrustedHosts[0] != host {
+			t.Fatalf("trusted host %q was not kept verbatim: %v", host, cfg.API.TrustedHosts)
 		}
 	}
 }
@@ -93,7 +124,7 @@ func TestRelayURLIsValidated(t *testing.T) {
 
 func TestLoadRejectsInvalidTrustedAPIHosts(t *testing.T) {
 	for _, host := range []string{
-		"https://macbook.example.ts.net", "*.example.ts.net", "macbook.example.ts.net:443", "",
+		"https://macbook.example.ts.net", "*.example.ts.net", "",
 		"mac book.example.ts.net", "user@example.ts.net", `macbook\\name.example.ts.net`,
 		".example.ts.net", "macbook..example.ts.net", "example.ts.net.", "-macbook.example.ts.net",
 		"100.101.102.103", "redline.example.com",

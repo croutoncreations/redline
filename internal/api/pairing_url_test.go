@@ -200,3 +200,29 @@ func TestPairingResponseOmitsTheURLWhenNoRouteExists(t *testing.T) {
 		t.Errorf("routes = %v, want none", routes)
 	}
 }
+
+// A trusted host may now carry a port, and requests must still match it.
+//
+// allowedHost stripped the port from the incoming Host header and compared
+// the bare name against the configured entry verbatim -- so the moment a
+// port went into the config, every request from the tailnet was refused as
+// untrusted. Config validation and request matching have to agree on what an
+// entry means.
+func TestTrustedHostWithAPortStillAdmitsRequests(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := pairingHandler(t, cfg)
+
+	for _, hostHeader := range []string{"macbook.example.ts.net:8443", "macbook.example.ts.net"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "https://"+hostHeader+"/v1/dashboard", nil)
+		request.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+		request.Header.Set("X-Forwarded-Proto", "https")
+		request.RemoteAddr = "100.101.102.103:54321"
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code == http.StatusForbidden {
+			t.Errorf("Host %q was refused against trusted entry with a port: %s", hostHeader, recorder.Body.String())
+		}
+	}
+}
