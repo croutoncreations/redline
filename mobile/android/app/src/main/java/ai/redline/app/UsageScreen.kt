@@ -140,13 +140,7 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
                 Text(health.status, color = Warn, fontSize = 11.sp)
                 Spacer(Modifier.width(10.dp))
             }
-            when {
-                // Showing cached numbers without saying so would be misleading.
-                state.failure != null && state.hasData ->
-                    Text("Offline", color = Warn, fontSize = 12.sp)
-
-                else -> LivePill(state.live, state.view?.sampledAgeSeconds ?: 0)
-            }
+            ConnectionPill(state.connection, state.view?.sampledAgeSeconds ?: 0)
             // Unpairing lives behind the overflow rather than on the surface:
             // it is rare, destructive, and next to controls people press often.
             onUnpair?.let {
@@ -160,8 +154,9 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
             // Worth saying out loud. A relayed session is slower, costs money,
             // and crosses a third party, so someone seeing an unexpected
             // "relayed" here has a real reason to check why the direct route
-            // is not working.
-            if (state.transport == Transport.Relay) {
+            // is not working. Derived from the same status as the pill, so
+            // the two lines of the header cannot disagree.
+            if (state.connection == ConnectionStatus.RELAYED) {
                 Text(" · relayed", color = Warn, fontSize = 12.sp)
             }
             state.view?.health?.takeIf { it.degraded && it.detail.isNotBlank() }?.let {
@@ -256,12 +251,12 @@ private fun UnpairMenu(onUnpair: () -> Unit) {
 private const val STALE_AFTER_SECONDS = 300
 
 @Composable
-private fun LivePill(live: LiveState, sampledAgeSeconds: Int) {
+private fun ConnectionPill(connection: ConnectionStatus, sampledAgeSeconds: Int) {
     // "live" describes the connection, not the numbers, and the two move at
     // very different speeds: frames arrive every few seconds while the provider
     // is sampled every few minutes. Saying only "live" over minutes-old numbers
     // reads as a claim about the data, which is how it was misread.
-    if (live == LiveState.LIVE && sampledAgeSeconds >= STALE_AFTER_SECONDS) {
+    if (connection == ConnectionStatus.LIVE && sampledAgeSeconds >= STALE_AFTER_SECONDS) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -279,15 +274,19 @@ private fun LivePill(live: LiveState, sampledAgeSeconds: Int) {
         return
     }
 
-    val (label, tone) = when (live) {
-        LiveState.LIVE -> "live" to Good
-        LiveState.CONNECTING -> "connecting" to TextMuted
-        LiveState.RECONNECTING -> "reconnecting" to Warn
+    val (label, tone) = when (connection) {
+        ConnectionStatus.LIVE -> "live" to Good
+        ConnectionStatus.CONNECTING -> "connecting" to TextMuted
+        ConnectionStatus.RECONNECTING -> "reconnecting" to Warn
         // Named for the route rather than the cadence: "relayed" tells the user
         // why updates are slower and that it is expected, where "polling" would
         // describe the symptom and leave the cause a mystery.
-        LiveState.RELAYED -> "relayed" to Warn
-        LiveState.OFFLINE -> return
+        ConnectionStatus.RELAYED -> "relayed" to Warn
+        // Showing cached numbers without saying so would be misleading.
+        ConnectionStatus.STALE -> "offline" to Warn
+        // The body carries the failure and the retry; a second copy here
+        // would only compete with it.
+        ConnectionStatus.UNREACHABLE, ConnectionStatus.NONE -> return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(

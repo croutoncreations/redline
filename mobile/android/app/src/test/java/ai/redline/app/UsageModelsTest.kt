@@ -220,3 +220,79 @@ class UsageModelsTest {
         assertEquals("Live", providerStatus(ProviderUsage()))
     }
 }
+
+/**
+ * The header must describe what is actually happening, derived from all of
+ * the state rather than from the stream's opinion alone.
+ *
+ * Three fields each told a partial truth. The stream said "relayed" the moment
+ * it found a relay configured -- before any relayed request had succeeded --
+ * so on a real phone the pill read "relayed" above "Cannot reach Redline" for
+ * a day while the relay had never carried a byte. Meanwhile [UsageUiState.transport]
+ * knew the last successful route and [UsageUiState.failure] knew the last
+ * attempt had failed, and neither was consulted.
+ *
+ * A route is only a fact once a request has travelled it.
+ */
+class ConnectionStatusTest {
+
+    private val data = UsageView()
+
+    @Test
+    fun `a configured relay that has never carried data is not relayed`() {
+        val state = UsageUiState(live = LiveState.RELAYED, failure = UsageUiState.Failure.UNREACHABLE)
+        assertEquals(ConnectionStatus.UNREACHABLE, state.connection)
+    }
+
+    @Test
+    fun `relayed means a relayed request succeeded`() {
+        val state = UsageUiState(live = LiveState.RELAYED, view = data, transport = Transport.Relay)
+        assertEquals(ConnectionStatus.RELAYED, state.connection)
+    }
+
+    @Test
+    fun `a failure over good data is stale, whichever route carried the data`() {
+        for (route in Transport.values()) {
+            val state = UsageUiState(
+                live = LiveState.RELAYED,
+                view = data,
+                transport = route,
+                failure = UsageUiState.Failure.UNREACHABLE,
+            )
+            assertEquals("route $route", ConnectionStatus.STALE, state.connection)
+        }
+    }
+
+    @Test
+    fun `a live stream outranks everything`() {
+        val state = UsageUiState(live = LiveState.LIVE, view = data, transport = Transport.Direct)
+        assertEquals(ConnectionStatus.LIVE, state.connection)
+    }
+
+    @Test
+    fun `connecting and reconnecting are reported while there is nothing to contradict them`() {
+        assertEquals(ConnectionStatus.CONNECTING, UsageUiState(live = LiveState.CONNECTING).connection)
+        assertEquals(
+            ConnectionStatus.RECONNECTING,
+            UsageUiState(live = LiveState.RECONNECTING, view = data).connection,
+        )
+    }
+
+    @Test
+    fun `direct data with no stream yet is neither live nor offline`() {
+        // First load succeeded over the tailnet but the stream has not reported.
+        val state = UsageUiState(live = LiveState.OFFLINE, view = data, transport = Transport.Direct)
+        assertEquals(ConnectionStatus.CONNECTING, state.connection)
+    }
+
+    @Test
+    fun `nothing loaded and nothing failing is quiet`() {
+        assertEquals(ConnectionStatus.NONE, UsageUiState().connection)
+    }
+
+    @Test
+    fun `a failure with nothing on screen is unreachable`() {
+        val state = UsageUiState(failure = UsageUiState.Failure.UNREACHABLE)
+        assertEquals(ConnectionStatus.UNREACHABLE, state.connection)
+    }
+}

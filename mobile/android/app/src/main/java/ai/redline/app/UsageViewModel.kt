@@ -56,11 +56,55 @@ data class UsageUiState(
     val hasData: Boolean get() = view != null
 
     /**
+     * What the header should say, derived from everything this state knows.
+     *
+     * Kept here rather than in the screen so the rule is testable without
+     * Compose and so no widget can consult one field and ignore the others.
+     * That was the fault: the pill read [live] alone, and the stream reports
+     * "relayed" the moment it finds a relay configured -- before any relayed
+     * request has succeeded -- so a phone with an unusable relay showed
+     * "relayed" above "Cannot reach Redline" while the relay had never carried
+     * a byte. A route is only a fact once a request has travelled it, and that
+     * fact lives in [transport], which is set only from a successful response.
+     *
+     * Precedence, most specific first:
+     *  - a failure wins, because it describes the most recent attempt;
+     *  - a live stream is the strongest positive claim;
+     *  - a relayed route is reported only over data that arrived by it;
+     *  - the stream's connecting/reconnecting states pass through;
+     *  - data with no stream verdict yet is still connecting, not offline.
+     */
+    val connection: ConnectionStatus
+        get() = when {
+            failure != null && hasData -> ConnectionStatus.STALE
+            failure != null -> ConnectionStatus.UNREACHABLE
+            live == LiveState.LIVE -> ConnectionStatus.LIVE
+            hasData && transport == Transport.Relay -> ConnectionStatus.RELAYED
+            live == LiveState.RECONNECTING -> ConnectionStatus.RECONNECTING
+            live == LiveState.CONNECTING -> ConnectionStatus.CONNECTING
+            // RELAYED from the stream without relayed data means only that a
+            // relay is configured and the direct route is down; the poll has
+            // not answered yet. That is a connection in progress.
+            live == LiveState.RELAYED -> ConnectionStatus.CONNECTING
+            hasData -> ConnectionStatus.CONNECTING
+            else -> ConnectionStatus.NONE
+        }
+
+    /**
      * Records a failure while keeping any data already on screen: when the
      * desktop goes away, the last numbers marked stale beat an empty screen.
      */
     fun fail(reason: Failure): UsageUiState = copy(loading = false, failure = reason)
 }
+
+/**
+ * The one thing the header says about the connection.
+ *
+ * STALE is a failure over data that is still on screen: the numbers are real
+ * but no longer current. UNREACHABLE is a failure with nothing to show. NONE
+ * is the quiet state before the first attempt has reported.
+ */
+enum class ConnectionStatus { NONE, CONNECTING, LIVE, RECONNECTING, RELAYED, STALE, UNREACHABLE }
 
 /** Maps the core's stream state strings onto [LiveState]. */
 internal fun liveStateOf(raw: String): LiveState = when (raw) {
