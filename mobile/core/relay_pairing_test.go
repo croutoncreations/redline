@@ -268,3 +268,30 @@ func TestRelayFullResponseKeepsOnlyTheHeadersThatStillMeanSomething(t *testing.T
 		}
 	}
 }
+
+// A fallback that reaches RedeemPairingVia across gomobile arrives as a
+// proxy for the DECLARED parameter type and nothing more. If that type is
+// RelayFallback, a type assertion to RelayFallbackFull fails on every real
+// phone -- while passing in every Go test, where the fake satisfies both. The
+// cookie is silently dropped and pairing reports "accepted but returned no
+// credential". Seen on a Pixel, from the desktop app's pairing sheet.
+//
+// So the parameter must be RelayFallbackFull itself. This test hands in a
+// value that is ONLY a RelayFallbackFull through the narrowest possible
+// static type and checks the cookie still arrives -- and, since Go cannot
+// express "proxy that hides methods", it also pins the signature by
+// assignment, so narrowing it back to RelayFallback is a compile error.
+func TestRedeemPairingViaDemandsTheFullFallbackByType(t *testing.T) {
+	var redeem func(string, string, RelayFallbackFull) (string, error) = RedeemPairingVia
+	fallback := &fullFallback{
+		status: 204,
+		header: http.Header{"Set-Cookie": {"redline_api_session=cred; Path=/"}},
+	}
+	cred, err := redeem("https://10.255.255.1:9", "tok", fallback)
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	if cred != "cred" {
+		t.Errorf("credential = %q", cred)
+	}
+}

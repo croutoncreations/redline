@@ -320,11 +320,16 @@ func RedeemPairing(baseURL, pairingToken string) (string, error) {
 // have already worked.
 //
 // The credential arrives as a Set-Cookie header, which the compact relay
-// encoding drops. When fallback implements RelayFallbackFull the header
-// survives, and response.Cookies() finds the cookie.
+// encoding drops, so the fallback must be the header-preserving kind -- and
+// must be declared as such here, not detected. A value that crosses gomobile
+// arrives as a proxy for the parameter's declared type and nothing more: with
+// RelayFallback declared, a Kotlin object that implemented RelayFallbackFull
+// still failed the type assertion on every real phone, while every Go test
+// passed because its fake satisfied both. The cookie was dropped and pairing
+// reported "accepted but returned no credential".
 //
 // fallback may be nil, in which case the call is identical to RedeemPairing.
-func RedeemPairingVia(baseURL, pairingToken string, fallback RelayFallback) (string, error) {
+func RedeemPairingVia(baseURL, pairingToken string, fallback RelayFallbackFull) (string, error) {
 	if strings.TrimSpace(pairingToken) == "" {
 		return "", errors.New("pairing token is required")
 	}

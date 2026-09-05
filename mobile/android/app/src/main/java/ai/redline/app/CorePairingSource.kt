@@ -1,5 +1,6 @@
 package ai.redline.app
 
+import android.util.Log
 import core.Core
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -39,6 +40,11 @@ class CorePairingSource : PairingSource {
      * it will not use.
      */
     override fun redeem(request: PairingRequest): String {
+        Log.i(
+            TAG,
+            "redeem: base=${request.baseUrl.ifEmpty { "(none)" }} relay=${request.hasRelay} " +
+                "token=${request.pairingToken.take(6)}…",
+        )
         if (!request.hasRelay) {
             return Core.redeemPairing(request.baseUrl, request.pairingToken)
         }
@@ -51,7 +57,10 @@ class CorePairingSource : PairingSource {
                         request.relaySession,
                         request.desktopKey,
                         request.entitlementToken,
-                    ).also { relay = it }
+                    ).also {
+                        relay = it
+                        Log.i(TAG, "redeem: relay session established")
+                    }
 
                 override fun do_(method: String, path: String, body: String): String =
                     session().answer(method, path, body)
@@ -60,12 +69,23 @@ class CorePairingSource : PairingSource {
                 // the compact answer discards; this is the one caller that
                 // needs the full reply.
                 override fun doFull(method: String, path: String, body: String): String =
-                    session().answerFull(method, path, body)
+                    session().answerFull(method, path, body).also {
+                        Log.i(TAG, "redeem: relay carried $method $path -> ${it.take(40)}")
+                    }
             }
-            return Core.redeemPairingVia(request.baseUrl, request.pairingToken, fallback)
+            return Core.redeemPairingVia(request.baseUrl, request.pairingToken, fallback).also {
+                Log.i(TAG, "redeem: credential received (${it.length} chars)")
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "redeem failed: ${error.message}")
+            throw error
         } finally {
             runCatching { relay?.close() }
         }
+    }
+
+    private companion object {
+        const val TAG = "RedlineRelay"
     }
 }
 
