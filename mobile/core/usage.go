@@ -31,6 +31,12 @@ type Window struct {
 	// ResetsInSeconds counts down to the reset and never goes negative.
 	ResetsInSeconds int64     `json:"resets_in_seconds"`
 	ResetsAt        time.Time `json:"resets_at"`
+	// ElapsedPercent is how far through the window now is, 0-100. It is what
+	// makes RemainingPercent readable: half left is on pace at the midpoint,
+	// comfortable near the end, and a problem near the start. The UI draws it
+	// as a mark on the bar. Computed here, like the countdown, so both
+	// platforms put the mark in the same place for the same snapshot.
+	ElapsedPercent int `json:"elapsed_percent"`
 	// ResetInferred marks a reset the collector guessed rather than read.
 	// Notification scheduling must skip these.
 	ResetInferred bool `json:"reset_inferred,omitempty"`
@@ -258,23 +264,29 @@ func (c *Client) FetchUsage() (string, error) {
 // asymmetry that made the two paths behave differently.
 func shortWindow(snapshot *decision.UsageSnapshot, now time.Time) *Window {
 	if snapshot.Short != nil && !snapshot.Short.ResetsAt.IsZero() {
-		return newWindow(snapshot.Short.Remaining, snapshot.Short.ResetsAt, false, now)
+		// The canonical short window has no period of its own on the wire; it
+		// is the five-hour window by definition.
+		return newWindow(snapshot.Short.Remaining, snapshot.Short.ResetsAt, decision.ShortWindowDuration, false, now)
 	}
 	return allowanceWindow(snapshot, "session", now)
 }
 
 func weeklyWindow(snapshot *decision.UsageSnapshot, now time.Time) *Window {
 	if !snapshot.Weekly.ResetsAt.IsZero() {
-		return newWindow(snapshot.Weekly.Remaining, snapshot.Weekly.ResetsAt, false, now)
+		return newWindow(snapshot.Weekly.Remaining, snapshot.Weekly.ResetsAt, weeklyPeriod, false, now)
 	}
 	return allowanceWindow(snapshot, "weekly", now)
 }
+
+// weeklyPeriod is the length of the canonical weekly window, which the wire
+// format states only for allowances.
+const weeklyPeriod = 7 * 24 * time.Hour
 
 // allowanceWindow finds a canonical account allowance by key.
 func allowanceWindow(snapshot *decision.UsageSnapshot, key string, now time.Time) *Window {
 	for _, allowance := range snapshot.Allowances {
 		if allowance.Key == key {
-			return newWindow(allowance.Remaining, allowance.ResetsAt, allowance.ResetInferred, now)
+			return newWindow(allowance.Remaining, allowance.ResetsAt, allowancePeriod(allowance), allowance.ResetInferred, now)
 		}
 	}
 	return nil
@@ -296,19 +308,46 @@ func pools(snapshot *decision.UsageSnapshot, now time.Time) []Pool {
 			Key:    allowance.Key,
 			Label:  label,
 			Scope:  allowance.Scope,
-			Window: *newWindow(allowance.Remaining, allowance.ResetsAt, allowance.ResetInferred, now),
+			Window: *newWindow(allowance.Remaining, allowance.ResetsAt, allowancePeriod(allowance), allowance.ResetInferred, now),
 		})
 	}
 	return result
 }
 
-func newWindow(remaining float64, resetsAt time.Time, inferred bool, now time.Time) *Window {
+// allowancePeriod is the window length an allowance states for itself, or the
+// canonical length for its role when it states none. Every allowance the
+// desktop validates has a period; the fallback is for one that arrived from
+// an older or looser source.
+func allowancePeriod(allowance decision.AllowanceWindow) time.Duration {
+	if allowance.PeriodDurationSeconds > 0 {
+		return time.Duration(allowance.PeriodDurationSeconds) * time.Second
+	}
+	if allowance.Role == "weekly" {
+		return weeklyPeriod
+	}
+	return decision.ShortWindowDuration
+}
+
+func newWindow(remaining float64, resetsAt time.Time, period time.Duration, inferred bool, now time.Time) *Window {
 	return &Window{
 		RemainingPercent: percent(remaining),
 		ResetsInSeconds:  secondsUntil(resetsAt, now),
 		ResetsAt:         resetsAt,
 		ResetInferred:    inferred,
+		ElapsedPercent:   elapsedPercent(resetsAt, period, now),
 	}
+}
+
+// elapsedPercent places now within the window that ends at resetsAt, clamped
+// to 0-100: before the window began reads as 0, past the reset as 100, and a
+// window with no usable period as 0 rather than a division by nothing.
+func elapsedPercent(resetsAt time.Time, period time.Duration, now time.Time) int {
+	if period <= 0 || resetsAt.IsZero() {
+		return 0
+	}
+	started := resetsAt.Add(-period)
+	fraction := float64(now.Sub(started)) / float64(period)
+	return percent(fraction)
 }
 
 // percent clamps to 0-100 so a provider reporting a value outside that range

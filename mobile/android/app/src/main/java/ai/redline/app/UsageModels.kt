@@ -69,6 +69,12 @@ data class Window(
     @SerialName("resets_in_seconds") val resetsInSeconds: Long = 0,
     @SerialName("resets_at") val resetsAt: String = "",
     @SerialName("reset_inferred") val resetInferred: Boolean = false,
+    /**
+     * How far through the window now is, 0-100. Zero from an older desktop
+     * that does not send it, which draws the pace mark at the full end where
+     * it says nothing wrong.
+     */
+    @SerialName("elapsed_percent") val elapsedPercent: Int = 0,
 )
 
 @Serializable
@@ -80,7 +86,33 @@ data class Pool(
     @SerialName("resets_in_seconds") val resetsInSeconds: Long = 0,
     @SerialName("resets_at") val resetsAt: String = "",
     @SerialName("reset_inferred") val resetInferred: Boolean = false,
+    @SerialName("elapsed_percent") val elapsedPercent: Int = 0,
 )
+
+/**
+ * Where the remaining bar's edge would sit if the window were being spent
+ * evenly: what is left of the time is what would be left of the allowance.
+ */
+fun paceMarkPercent(elapsedPercent: Int): Int = (100 - elapsedPercent).coerceIn(0, 100)
+
+/** How the spend compares with the clock. */
+enum class Pace { AHEAD, ON_PACE, BEHIND }
+
+/**
+ * A few points either side of the mark is on pace: both numbers are rounded,
+ * and a mark that flipped colour on every percent would read as noise rather
+ * than as a warning.
+ */
+private const val PACE_TOLERANCE = 5
+
+fun paceOf(remainingPercent: Int, elapsedPercent: Int): Pace {
+    val mark = paceMarkPercent(elapsedPercent)
+    return when {
+        remainingPercent > mark + PACE_TOLERANCE -> Pace.AHEAD
+        remainingPercent < mark - PACE_TOLERANCE -> Pace.BEHIND
+        else -> Pace.ON_PACE
+    }
+}
 
 /** Lenient so a newer desktop adding fields cannot break an older app. */
 val redlineJson: Json = Json { ignoreUnknownKeys = true }

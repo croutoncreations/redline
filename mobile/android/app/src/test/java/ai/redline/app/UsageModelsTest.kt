@@ -296,3 +296,55 @@ class ConnectionStatusTest {
         assertEquals(ConnectionStatus.UNREACHABLE, state.connection)
     }
 }
+
+/**
+ * The pace mark: where the remaining bar's edge would be if usage were spread
+ * evenly across the window. The bar shows what is left, so the mark sits at
+ * 100 minus the elapsed fraction, and the two are read together -- bar past the
+ * mark means there is more left than the clock would suggest; bar short of it
+ * means the window is being spent faster than it is passing.
+ */
+class PaceTest {
+
+    @Test
+    fun `the mark is where the bar would be on an even spend`() {
+        assertEquals(80, paceMarkPercent(elapsedPercent = 20))
+        assertEquals(50, paceMarkPercent(elapsedPercent = 50))
+        assertEquals(0, paceMarkPercent(elapsedPercent = 100))
+    }
+
+    @Test
+    fun `more left than the clock suggests is ahead`() {
+        assertEquals(Pace.AHEAD, paceOf(remainingPercent = 70, elapsedPercent = 50))
+    }
+
+    @Test
+    fun `less left than the clock suggests is behind`() {
+        assertEquals(Pace.BEHIND, paceOf(remainingPercent = 30, elapsedPercent = 50))
+    }
+
+    @Test
+    fun `within a few points either way is on pace`() {
+        assertEquals(Pace.ON_PACE, paceOf(remainingPercent = 50, elapsedPercent = 50))
+        assertEquals(Pace.ON_PACE, paceOf(remainingPercent = 53, elapsedPercent = 50))
+        assertEquals(Pace.ON_PACE, paceOf(remainingPercent = 47, elapsedPercent = 50))
+    }
+
+    @Test
+    fun `the window model carries the elapsed fraction`() {
+        val window = redlineJson.decodeFromString(
+            Window.serializer(),
+            """{"remaining_percent":58,"resets_in_seconds":3600,"elapsed_percent":42}""",
+        )
+        assertEquals(42, window.elapsedPercent)
+    }
+
+    @Test
+    fun `an older desktop that sends no elapsed reads as the window start`() {
+        val window = redlineJson.decodeFromString(
+            Window.serializer(),
+            """{"remaining_percent":58,"resets_in_seconds":3600}""",
+        )
+        assertEquals(0, window.elapsedPercent)
+    }
+}

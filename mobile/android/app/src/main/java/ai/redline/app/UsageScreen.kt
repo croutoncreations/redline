@@ -5,6 +5,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -399,7 +402,7 @@ private fun ProviderCard(
                 Spacer(Modifier.height(12.dp))
                 Meter(
                     "5-hour window", it.remainingPercent, it.resetsInSeconds,
-                    it.resetInferred, it.resetsAt,
+                    it.resetInferred, it.resetsAt, it.elapsedPercent,
                 )
             }
             // The window exists but the number could not be read. Showing
@@ -413,7 +416,7 @@ private fun ProviderCard(
                 Spacer(Modifier.height(12.dp))
                 Meter(
                     "Weekly allowance", it.remainingPercent, it.resetsInSeconds,
-                    it.resetInferred, it.resetsAt,
+                    it.resetInferred, it.resetsAt, it.elapsedPercent,
                 )
             }
             // Worth showing beside an exhausted window, because spending one is
@@ -436,7 +439,7 @@ private fun ProviderCard(
                 Spacer(Modifier.height(12.dp))
                 Meter(
                     pool.label, pool.remainingPercent, pool.resetsInSeconds,
-                    pool.resetInferred, pool.resetsAt,
+                    pool.resetInferred, pool.resetsAt, pool.elapsedPercent,
                 )
             }
 
@@ -530,15 +533,27 @@ private fun Meter(
     resetsInSeconds: Long,
     resetInferred: Boolean,
     resetsAt: String = "",
+    elapsedPercent: Int = 0,
 ) {
     val resetSentence = resetLabel(resetsInSeconds, resetInferred)
     // Only computed for display; an unparseable or absent timestamp yields "".
     val absolute = formatResetAt(resetsAt)
+    val pace = paceOf(percent, elapsedPercent)
     Column(modifier = Modifier.semantics {
         contentDescription = buildString {
             // Same sentence a sighted reader gets, so the two cannot drift.
             append("$label: $percent percent remaining. $resetSentence")
             if (absolute.isNotEmpty()) append(", at $absolute")
+            // The pace mark is visual; this is its sentence.
+            if (elapsedPercent > 0) {
+                append(
+                    when (pace) {
+                        Pace.AHEAD -> ". Ahead of pace"
+                        Pace.BEHIND -> ". Behind pace"
+                        Pace.ON_PACE -> ". On pace"
+                    },
+                )
+            }
         }
     }) {
         Row {
@@ -553,12 +568,42 @@ private fun Meter(
             )
         }
         Spacer(Modifier.height(6.dp))
-        LinearProgressIndicator(
-            progress = { percent / 100f },
-            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-            color = toneFor(percent),
-            trackColor = Line,
-        )
+        // The bar is what is left; the mark is where its edge would be if the
+        // window were being spent evenly. Bar past the mark: more left than
+        // the clock suggests. Bar short of it: spending faster than time is
+        // passing. Half left means nothing on its own -- it is comfortable
+        // near the end of a window and a problem near the start -- and this
+        // is the one glance that tells which.
+        BoxWithConstraints(Modifier.fillMaxWidth().height(10.dp)) {
+            LinearProgressIndicator(
+                progress = { percent / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = toneFor(percent),
+                trackColor = Line,
+            )
+            // Drawn only when the desktop sent an elapsed fraction: an older
+            // one leaves the mark at the very end, where it says nothing.
+            if (elapsedPercent > 0) {
+                val mark = paceMarkPercent(elapsedPercent)
+                Box(
+                    Modifier
+                        .offset(x = maxWidth * mark / 100f - 1.dp)
+                        .width(2.dp)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(
+                            when (pace) {
+                                Pace.BEHIND -> Warn
+                                else -> TextPrimary
+                            },
+                        ),
+                )
+            }
+        }
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -590,8 +635,8 @@ private fun UsageScreenPreview() {
                     ProviderUsage(
                         id = "claude-main",
                         provider = "claude",
-                        session = Window(remainingPercent = 100, resetsInSeconds = 18000),
-                        weekly = Window(remainingPercent = 93, resetsInSeconds = 259200),
+                        session = Window(remainingPercent = 100, resetsInSeconds = 18000, elapsedPercent = 15),
+                        weekly = Window(remainingPercent = 93, resetsInSeconds = 259200, elapsedPercent = 57),
                         pools = listOf(
                             Pool(
                                 key = "model:fable:weekly",
@@ -605,7 +650,7 @@ private fun UsageScreenPreview() {
                     ProviderUsage(
                         id = "codex-main",
                         provider = "codex",
-                        weekly = Window(remainingPercent = 47, resetsInSeconds = 432000),
+                        weekly = Window(remainingPercent = 47, resetsInSeconds = 432000, elapsedPercent = 29),
                     ),
                 ),
             ),

@@ -648,3 +648,103 @@ func renderThroughClient(t *testing.T, payload string, now time.Time) (string, e
 	client := core.NewClientWithClock(server.URL, "token", func() time.Time { return now })
 	return client.FetchUsage()
 }
+
+// A bar of what is left says nothing about whether that is a lot or a little.
+// Halfway through the window, half left is exactly on pace; with an hour to go
+// it is comfortable; in the first ten minutes it is a problem. The window's
+// elapsed fraction is what makes the remaining fraction readable, so it
+// travels with it. Computed in Go, like the countdown, so both platforms draw
+// the same mark for the same snapshot.
+func TestWindowReportsHowMuchOfItHasElapsed(t *testing.T) {
+	// fixedNow is 19:00. Session resets at 23:00, so it began at 18:00 and is
+	// one fifth through; the week resets in four days, so it is three sevenths
+	// through.
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "claude-main", "provider": "claude",
+			"snapshot": {
+				"short": {"remaining": 1, "resets_at": "2026-07-20T23:00:00Z"},
+				"weekly": {"remaining": 0.5, "resets_at": "2026-07-24T19:00:00Z"}
+			}
+		}]
+	}`)
+
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := decodeUsage(t, raw)
+
+	if got := view.Providers[0].Session.ElapsedPercent; got != 20 {
+		t.Errorf("session elapsed = %d%%, want 20 (1h of a 5h window)", got)
+	}
+	if got := view.Providers[0].Weekly.ElapsedPercent; got != 43 {
+		t.Errorf("weekly elapsed = %d%%, want 43 (3d of 7d)", got)
+	}
+}
+
+// A model pool's period comes from the allowance itself, which is the only
+// place a non-standard length can be stated.
+func TestPoolElapsedUsesTheAllowancePeriod(t *testing.T) {
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "codex-main", "provider": "codex",
+			"snapshot": {
+				"weekly": {"remaining": 0.5, "resets_at": "2026-07-24T19:00:00Z"},
+				"allowances": [{
+					"key": "spark", "source_label": "Spark", "scope": "model", "role": "short",
+					"remaining": 1, "resets_at": "2026-07-21T01:00:00Z",
+					"period_duration_seconds": 86400
+				}]
+			}
+		}]
+	}`)
+
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := decodeUsage(t, raw)
+
+	var spark *core.Pool
+	for i := range view.Providers[0].Pools {
+		if view.Providers[0].Pools[i].Key == "spark" {
+			spark = &view.Providers[0].Pools[i]
+		}
+	}
+	if spark == nil {
+		t.Fatal("spark pool missing")
+	}
+	// Resets 01:00 tomorrow with a 24h period: began 01:00 today; at 19:00
+	// that is 18h in, 75%.
+	if spark.ElapsedPercent != 75 {
+		t.Errorf("spark elapsed = %d%%, want 75", spark.ElapsedPercent)
+	}
+}
+
+// Past the reset, the window is over; the tick sits at the end rather than
+// running off it.
+func TestElapsedClampsAtTheReset(t *testing.T) {
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "claude-main", "provider": "claude",
+			"snapshot": {
+				"short": {"remaining": 0.2, "resets_at": "2026-07-20T18:00:00Z"},
+				"weekly": {"remaining": 0.5, "resets_at": "2026-07-24T19:00:00Z"}
+			}
+		}]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeUsage(t, raw).Providers[0].Session.ElapsedPercent; got != 100 {
+		t.Errorf("elapsed past reset = %d%%, want 100", got)
+	}
+}
