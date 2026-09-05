@@ -445,10 +445,16 @@ func validateRelayURLForDial(raw string) error {
 	host := parsed.Hostname()
 
 	switch scheme {
-	case "wss":
-		// Always allowed.
-	case "ws":
-		// Only for loopback — tests use httptest.Server which gives http/ws.
+	case "wss", "https":
+		// Both name the same endpoint. The desktop's own config validator
+		// requires https, because it describes an address net/http will dial,
+		// and the QR publishes that value verbatim -- so a correctly configured
+		// desktop handed every phone a URL this function used to refuse, and
+		// the fallback failed before a packet moved. Which spelling is correct
+		// depends only on which library opens the connection, which is not
+		// something a pairing payload should have to know.
+	case "ws", "http":
+		// Only for loopback — tests use httptest.Server, which gives http/ws.
 		if !isLoopbackHost(host) && host != "127.0.0.1" && host != "::1" {
 			return fmt.Errorf("%q must use wss:// for non-loopback hosts", raw)
 		}
@@ -474,6 +480,15 @@ func buildSessionURL(relayURL, sessionID, entitlementToken string) string {
 	base, err := url.Parse(relayURL)
 	if err != nil {
 		return relayURL
+	}
+	// Normalised to the WebSocket spelling. The desktop publishes https,
+	// because that is what its own config validates, and the library dialling
+	// here wants wss for the same endpoint.
+	switch strings.ToLower(base.Scheme) {
+	case "https":
+		base.Scheme = "wss"
+	case "http":
+		base.Scheme = "ws"
 	}
 	base.Path = path.Join(base.Path, "/v1/session", sessionID)
 	query := url.Values{}

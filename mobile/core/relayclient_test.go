@@ -474,3 +474,43 @@ func TestDialRelayRetriesWhileTheDesktopReconnects(t *testing.T) {
 		t.Errorf("dial attempts = %d, want at least 3: a single try loses the race", got)
 	}
 }
+
+// The desktop and the phone disagreed about how to spell the relay URL.
+//
+// config.Config requires https:// -- it validates an address the desktop will
+// dial with net/http -- and the QR publishes that value verbatim. DialRelay
+// requires wss://, because it opens a WebSocket. So a correctly configured
+// desktop handed every phone a URL its own core would refuse, and the fallback
+// failed before a single packet moved. On screen that read as "relayed" in the
+// header and "Cannot reach Redline" underneath.
+//
+// Accepting both is right rather than lenient: they name the same endpoint,
+// and which spelling is correct depends only on which library is opening the
+// connection. Rejecting one of them is an implementation detail leaking into
+// a pairing payload.
+func TestDialRelayAcceptsTheURLTheDesktopPublishes(t *testing.T) {
+	for _, raw := range []string{
+		"https://relay.example.com",
+		"wss://relay.example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := DialRelay(raw, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				base64.StdEncoding.EncodeToString(make([]byte, 32)), "tok")
+			// The dial fails -- nothing is listening -- but it must fail on
+			// reaching the host, never on the shape of the URL.
+			if err != nil && strings.Contains(err.Error(), "must use wss") {
+				t.Errorf("%s was rejected for its scheme: %v", raw, err)
+			}
+		})
+	}
+}
+
+// http:// stays refused for a public host: the entitlement rides in the query
+// string, and sending it in clear would hand it to anyone on the path.
+func TestDialRelayStillRefusesCleartext(t *testing.T) {
+	_, err := DialRelay("http://relay.example.com", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)), "tok")
+	if err == nil || !strings.Contains(err.Error(), "wss") {
+		t.Errorf("cleartext to a public host must be refused, got: %v", err)
+	}
+}
