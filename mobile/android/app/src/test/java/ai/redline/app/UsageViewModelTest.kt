@@ -567,3 +567,101 @@ class UnreachableScreenRetriesTest {
         dispatcher.scheduler.runCurrent()
     }
 }
+
+/**
+ * A relayed screen must keep polling, and must not strand a stale failure.
+ *
+ * Two defects met here, and together they put "Offline" above perfectly good
+ * relayed data -- reported from a real phone after re-pairing.
+ *
+ * The poll stopped only when the stream was LIVE, which cannot happen over a
+ * relay: the tunnel carries one request and one response, so the state is
+ * RELAYED forever. It therefore ran its ten attempts and stopped, leaving
+ * nothing to refresh the screen.
+ *
+ * And the header shows "Offline" whenever a failure is set and data exists.
+ * One transient failure inside that window -- the desktop reconnecting -- was
+ * enough to set it, and once the poll had stopped nothing ever cleared it.
+ */
+class RelayedScreenStaysCurrentTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    /** Succeeds, then fails once, then succeeds again. */
+    private class BlipSource : UsageSource {
+        var fetches = 0
+        var onState: ((String) -> Unit)? = null
+        override fun fetchUsageJson(): String {
+            fetches += 1
+            if (fetches == 2) throw RuntimeException("reach redline: connection reset")
+            return """{"providers":[],"health":{"scheduler_enabled":false},"relayed":true}"""
+        }
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun stream(
+            onUsage: (String) -> Unit,
+            onState: (String) -> Unit,
+        ): AutoCloseable {
+            this.onState = onState
+            return AutoCloseable { }
+        }
+    }
+
+    @Test
+    fun `a blip over the relay does not strand Offline over good data`() = runTest(dispatcher) {
+        val source = BlipSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.startLive()
+        dispatcher.scheduler.runCurrent()
+        source.onState?.invoke("relayed")
+        dispatcher.scheduler.runCurrent()
+
+        // First poll succeeds, second fails, third must recover.
+        repeat(3) {
+            dispatcher.scheduler.advanceTimeBy(31_000)
+            dispatcher.scheduler.runCurrent()
+        }
+
+        assertNull(
+            "a later success must clear the blip, or the header reads Offline over live data",
+            model.state.value.failure,
+        )
+
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+    }
+
+    @Test
+    fun `a relayed screen is still polling after the recovery budget`() = runTest(dispatcher) {
+        val source = BlipSource()
+        val model = UsageViewModel(source, ioDispatcher = dispatcher)
+
+        model.startLive()
+        dispatcher.scheduler.runCurrent()
+        source.onState?.invoke("relayed")
+        dispatcher.scheduler.runCurrent()
+
+        // Well past ten attempts.
+        repeat(14) {
+            dispatcher.scheduler.advanceTimeBy(31_000)
+            dispatcher.scheduler.runCurrent()
+        }
+        val afterBudget = source.fetches
+
+        dispatcher.scheduler.advanceTimeBy(31_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertTrue(
+            "a relayed screen has no live stream, so its poll is the only thing keeping it " +
+                "current and must not expire; it stopped at $afterBudget fetches",
+            source.fetches > afterBudget,
+        )
+
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+    }
+}

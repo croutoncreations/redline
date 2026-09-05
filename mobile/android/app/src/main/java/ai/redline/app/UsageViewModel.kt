@@ -220,11 +220,28 @@ class UsageViewModel(
         if (relayedPollJob?.isActive == true) return
         relayedPollJob = viewModelScope.launch {
             var attempts = 0
-            while (isActive && attempts < RECOVERY_ATTEMPTS) {
-                attempts += 1
+            while (isActive) {
                 delay(RELAYED_POLL_MILLIS)
                 refresh(armRecovery = false)
-                if (_state.value.failure == null && _state.value.live == LiveState.LIVE) {
+
+                val state = _state.value
+                // A relayed screen has no live stream by definition -- the
+                // tunnel carries one request and one response -- so this poll
+                // is the only thing keeping it current. It must not expire, or
+                // the numbers freeze and one later blip strands "Offline" over
+                // them with nothing left to clear it.
+                if (state.live == LiveState.RELAYED) {
+                    attempts = 0
+                    continue
+                }
+                // Otherwise this is recovery from a failure: stop once the
+                // screen is healthy, or after a bounded number of tries, so a
+                // genuinely unreachable desktop is not polled forever.
+                if (state.failure == null) {
+                    break
+                }
+                attempts += 1
+                if (attempts >= RECOVERY_ATTEMPTS) {
                     break
                 }
             }
