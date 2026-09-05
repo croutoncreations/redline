@@ -35,6 +35,7 @@ import (
 	"github.com/jfox/redline/internal/nativeusage"
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
+	"github.com/jfox/redline/internal/pairing"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/tasktemplate"
@@ -335,7 +336,7 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
-func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
@@ -351,10 +352,38 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	}
 	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
-	writeJSON(w, http.StatusCreated, struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}{Token: token, ExpiresAt: expiresAt})
+
+	// The service composes the code, so the CLI, the menu bar and any later
+	// surface all show the same one. Each used to build its own, and when the
+	// format grew relay fields one of them was not told.
+	//
+	// A desktop with no route still gets its token: the web /pair page on
+	// this machine redeems it from a browser. It just gets no URL, and the
+	// empty route list says why.
+	response := struct {
+		Token      string          `json:"pairing_token"`
+		ExpiresAt  time.Time       `json:"expires_at"`
+		PairingURL string          `json:"pairing_url,omitempty"`
+		Routes     []pairing.Route `json:"routes"`
+		Endpoint   string          `json:"endpoint,omitempty"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}}
+
+	code, err := pairing.Compose(s.config, token, pairing.Options{
+		RelayOnly: r.URL.Query().Get("relay_only") == "1",
+	})
+	switch {
+	case err == nil:
+		response.PairingURL = code.URL
+		response.Routes = code.Routes
+		response.Endpoint = code.Endpoint
+	case errors.Is(err, pairing.ErrNoRoute):
+		// Reported through the empty route list rather than a failure: the
+		// token is good, there is simply nowhere to point a phone.
+	default:
+		writeError(w, fmt.Errorf("compose pairing code: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) consumePairingToken(token string) bool {

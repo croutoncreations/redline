@@ -54,7 +54,7 @@ final class PairDeviceWindowController: NSObject, NSWindowDelegate {
 final class PairDeviceModel: ObservableObject {
     enum State {
         case loading
-        case ready(url: String, host: String, expiresAt: Date?)
+        case ready(url: String, routes: [PairingRoute], endpoint: String?, expiresAt: Date?)
         case failed(String)
     }
 
@@ -68,36 +68,55 @@ final class PairDeviceModel: ObservableObject {
         self.configURL = configURL
     }
 
+    /// Asks the service for a code and shows exactly what it was handed.
+    ///
+    /// The service composes the URL from its own config and relay identity.
+    /// This window used to build one itself from the trusted host and the
+    /// token, and nothing else; when the QR grew relay fields the CLI got them
+    /// and this did not, so every phone paired from here had no relay and no
+    /// way to know. Reading YAML for a host is no longer this window's job.
     func load() async {
         state = .loading
-
-        // The host has to come from configuration. A code aimed at localhost
-        // looks right on screen and cannot be reached from a phone.
-        guard
-            let yaml = try? String(contentsOf: configURL, encoding: .utf8),
-            let host = PairingCode.trustedHost(inConfiguration: yaml)
-        else {
-            state = .failed(
-                "No trusted host is configured. Add your Tailscale name under "
-                    + "api.trusted_hosts in redline.yaml, then try again."
-            )
-            return
-        }
-
         do {
             let pairing = try await client.createPairingToken()
+            guard let url = pairing.pairingURL else {
+                // A token was minted but there is nowhere to point a phone.
+                state = .failed(
+                    "Redline has no way for a phone to reach it. Add your Tailscale "
+                        + "name under api.trusted_hosts in redline.yaml, or turn on the "
+                        + "relay, then try again."
+                )
+                return
+            }
             state = .ready(
-                url: PairingCode.url(
-                    host: host,
-                    port: PairingCode.trustedPort(inConfiguration: yaml),
-                    token: pairing.token
-                ),
-                host: host,
+                url: url,
+                routes: pairing.routes,
+                endpoint: pairing.endpoint,
                 expiresAt: pairing.expiry
             )
         } catch {
             state = .failed(error.localizedDescription)
         }
+    }
+}
+
+/// The one line under the code that says how the phone will connect.
+///
+/// Worth saying: a relayed session is slower, metered, and crosses a third
+/// party, and a code with no direct route is exactly what a user who never set
+/// up Tailscale should expect to see -- not an error.
+func pairingRouteDescription(routes: [PairingRoute], endpoint: String?) -> String {
+    let direct = routes.contains(.direct)
+    let relay = routes.contains(.relay)
+    switch (direct, relay) {
+    case (true, true):
+        return "Pairs over your tailnet (\(endpoint ?? "")) and falls back to the relay"
+    case (true, false):
+        return "Pairs over your tailnet (\(endpoint ?? ""))"
+    case (false, true):
+        return "Pairs over the relay only — no Tailscale needed"
+    case (false, false):
+        return ""
     }
 }
 
@@ -112,7 +131,7 @@ private struct PairDeviceView: View {
                 ProgressView().controlSize(.large)
                 Spacer()
 
-            case .ready(let url, let host, let expiresAt):
+            case .ready(let url, let routes, let endpoint, let expiresAt):
                 Text("Scan with the Redline app")
                     .font(.system(size: 15, weight: .semibold))
 
@@ -129,8 +148,10 @@ private struct PairDeviceView: View {
                 }
 
                 VStack(spacing: 3) {
-                    Text(host).font(.system(size: 11, design: .monospaced))
+                    Text(pairingRouteDescription(routes: routes, endpoint: endpoint))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                     if let expiresAt {
                         Text("Code expires \(expiresAt, style: .relative) from now")
                             .font(.system(size: 11))

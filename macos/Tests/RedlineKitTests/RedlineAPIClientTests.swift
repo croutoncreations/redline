@@ -132,6 +132,54 @@ final class PairingCreatedStub: URLProtocol {
     override func stopLoading() {}
 }
 
+/// What the service answers when a tailnet host and a relay are both set up.
+final class PairingWithRelayStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(
+            #"""
+            {"pairing_token":"8G-y7DyZw3yx","expires_at":"2026-09-03T19:44:05.604714Z",
+             "pairing_url":"https://macbook.example.ts.net:8443/pair#pairing_token=8G-y7DyZw3yx&relay=https%3A%2F%2Frelay.example&key=ds%2Bl3Fu%2BI5pT&session=s",
+             "routes":["direct","relay"],"endpoint":"macbook.example.ts.net:8443"}
+            """#.utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// What the service answers for a desktop with a relay and no tailnet.
+final class PairingRelayOnlyStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(
+            #"""
+            {"pairing_token":"8G-y7DyZw3yx","expires_at":"2026-09-03T19:44:05.604714Z",
+             "pairing_url":"https://relay/pair#pairing_token=8G-y7DyZw3yx&relay=https%3A%2F%2Frelay.example&key=k&session=s",
+             "routes":["relay"]}
+            """#.utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 /// A stub that always answers 401.
 final class PairingUnauthorizedStub: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -168,6 +216,62 @@ final class PairingUnauthorizedStub: URLProtocol {
     // The timestamp carries fractional seconds, which the default ISO 8601
     // options reject outright rather than ignoring.
     #expect(pairing.expiry != nil)
+}
+
+/// The service composes the pairing URL, and the client carries it through
+/// untouched.
+///
+/// The menu bar used to build its own URL from the trusted host and the
+/// token, and nothing else. When the QR grew relay fields the CLI got them
+/// and the sheet did not, so every phone paired from the desktop app had no
+/// relay and no way to know. The service is the one builder now; this client
+/// must not have an opinion about the URL's shape.
+@Test func apiClientCarriesTheServiceComposedPairingURL() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingWithRelayStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    let pairing = try await client.createPairingToken()
+    #expect(pairing.pairingURL == "https://macbook.example.ts.net:8443/pair#pairing_token=8G-y7DyZw3yx&relay=https%3A%2F%2Frelay.example&key=ds%2Bl3Fu%2BI5pT&session=s")
+    #expect(pairing.routes == [.direct, .relay])
+    #expect(pairing.endpoint == "macbook.example.ts.net:8443")
+}
+
+/// An older service answers without the new fields. The sheet must still work
+/// against it, and must say plainly that it cannot build a code rather than
+/// showing an empty QR.
+@Test func apiClientToleratesAServiceWithoutAPairingURL() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingCreatedStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    let pairing = try await client.createPairingToken()
+    #expect(pairing.pairingURL == nil)
+    #expect(pairing.routes.isEmpty)
+}
+
+/// A relay-only user has no trusted host, and the pairing URL says so.
+@Test func apiClientReadsARelayOnlyPairing() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingRelayOnlyStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    let pairing = try await client.createPairingToken()
+    #expect(pairing.routes == [.relay])
+    #expect(pairing.endpoint == nil)
+    #expect(pairing.pairingURL?.hasPrefix("https://relay/pair#") == true)
 }
 
 /// A genuine failure must still be reported rather than swallowed by a wider

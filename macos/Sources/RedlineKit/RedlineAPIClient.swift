@@ -122,7 +122,24 @@ public struct RedlineAPIClient: Sendable {
 
 private struct ReadResult: Codable { let read: Bool }
 
-/// A single-use credential a phone exchanges for a durable API token.
+/// A way a phone can reach the desktop, as the service names them.
+///
+/// Decoded leniently: an unknown route from a newer service is dropped rather
+/// than failing the whole pairing, since the URL is still good.
+public enum PairingRoute: String, Codable, Sendable {
+    case direct
+    case relay
+}
+
+/// A single-use credential a phone exchanges for a durable API token, and the
+/// code that carries it.
+///
+/// The service composes `pairingURL`, so this client has no opinion about its
+/// shape. The menu bar used to build the URL itself from a trusted host and
+/// the token, and nothing else; when the QR grew relay fields the CLI got them
+/// and the sheet did not, so every phone paired from the desktop app had no
+/// relay and no way to know. One builder now, and every surface renders what
+/// it is handed.
 public struct PairingToken: Codable, Sendable {
     public let token: String
     /// RFC 3339, kept as a string because the shared decoder has no date
@@ -130,10 +147,41 @@ public struct PairingToken: Codable, Sendable {
     /// way. Changing that globally to serve one field would risk every
     /// existing model.
     public let expiresAt: String
+    /// What the phone scans. Absent from an older service, and from a desktop
+    /// with neither a trusted host nor a relay -- a token is still minted for
+    /// the web pair page, but there is nowhere to send a phone.
+    public let pairingURL: String?
+    /// The routes the code offers, for the sheet to say out loud.
+    public let routes: [PairingRoute]
+    /// The direct host:port the code names, or nil for a relay-only code.
+    public let endpoint: String?
 
     enum CodingKeys: String, CodingKey {
         case token = "pairing_token"
         case expiresAt = "expires_at"
+        case pairingURL = "pairing_url"
+        case routes
+        case endpoint
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decode(String.self, forKey: .token)
+        expiresAt = try container.decode(String.self, forKey: .expiresAt)
+        pairingURL = try container.decodeIfPresent(String.self, forKey: .pairingURL)
+        endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint)
+        // Unknown route names are skipped, not fatal: a newer service adding a
+        // route must not stop an older app from showing a code that works.
+        let names = try container.decodeIfPresent([String].self, forKey: .routes) ?? []
+        routes = names.compactMap(PairingRoute.init(rawValue:))
+    }
+
+    public init(token: String, expiresAt: String, pairingURL: String?, routes: [PairingRoute], endpoint: String?) {
+        self.token = token
+        self.expiresAt = expiresAt
+        self.pairingURL = pairingURL
+        self.routes = routes
+        self.endpoint = endpoint
     }
 
     /// The expiry as a date, or nil if the service sent something unparseable.
