@@ -27,6 +27,13 @@ type Client struct {
 	// relay carries requests when the direct route is unreachable. Nil means
 	// direct only, which is every desktop paired before relays existed.
 	relay RelayFallback
+	// relayFull is the same fallback when it was installed as the
+	// header-preserving kind. Recorded at install time from the setter's
+	// declared type, never rediscovered by asserting on relay: a value that
+	// crossed gomobile is a proxy for what it was declared as, and an
+	// assertion to anything wider fails on a phone while passing in every Go
+	// test whose fake implements both.
+	relayFull RelayFallbackFull
 }
 
 // A rule for every interface in this file that crosses gomobile:
@@ -174,6 +181,18 @@ func markRelayed(ctx context.Context) {
 // reproduce its own request shape and anything missed kept failing silently.
 func (c *Client) SetRelayFallback(fallback RelayFallback) {
 	c.relay = fallback
+	c.relayFull = nil
+}
+
+// SetRelayFallbackFull installs a fallback that carries the desktop's headers
+// as well as its body. The one caller that needs it is pairing, whose
+// credential arrives as a Set-Cookie; every data endpoint is served by the
+// compact kind. Declared as its own setter so the choice of route is made by
+// the parameter type, which survives gomobile, and not by a runtime
+// assertion, which does not.
+func (c *Client) SetRelayFallbackFull(fallback RelayFallbackFull) {
+	c.relay = fallback
+	c.relayFull = fallback
 }
 
 // NewClient returns a client for the given Redline base URL and bearer token.
@@ -335,11 +354,10 @@ func (c *Client) relayRequest(method, path string, body any) (*http.Response, er
 		encoded = string(raw)
 	}
 
-	// Prefer the full-envelope path when available. This is a type assertion
-	// at call time rather than at SetRelayFallback time so any existing
-	// fallback that has been wired in already continues to work unchanged.
-	if full, ok := c.relay.(RelayFallbackFull); ok {
-		return c.relayRequestFull(full, method, path, encoded)
+	// The full route only when it was installed as such. Not an assertion on
+	// c.relay: see relayFull.
+	if c.relayFull != nil {
+		return c.relayRequestFull(c.relayFull, method, path, encoded)
 	}
 
 	answer, err := c.relay.Do(method, path, encoded)

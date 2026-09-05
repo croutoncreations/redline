@@ -341,7 +341,7 @@ func RedeemPairingVia(baseURL, pairingToken string, fallback RelayFallbackFull) 
 	// with an empty token: redeeming is how the credential is obtained.
 	client := NewClient(baseURL, "")
 	if fallback != nil {
-		client.SetRelayFallback(fallback)
+		client.SetRelayFallbackFull(fallback)
 	}
 	body := map[string]string{"pairing_token": pairingToken}
 

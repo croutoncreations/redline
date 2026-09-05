@@ -248,7 +248,7 @@ func TestRelayFullResponseKeepsOnlyTheHeadersThatStillMeanSomething(t *testing.T
 		},
 	}
 	client := NewClient("", "")
-	client.SetRelayFallback(fallback)
+	client.SetRelayFallbackFull(fallback)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -296,5 +296,58 @@ func TestRedeemPairingViaDemandsTheFullFallbackByType(t *testing.T) {
 	}
 	if cred != "cred" {
 		t.Errorf("credential = %q", cred)
+	}
+}
+
+// The full-envelope route must be chosen by the type a fallback was declared
+// with when it was installed, not rediscovered by asserting on it later.
+//
+// relayRequest asserted c.relay to RelayFallbackFull at call time. That is the
+// same shape as the fault RedeemPairingVia had: a value that crossed gomobile
+// is a proxy for the declared type, and an assertion to anything wider fails
+// on a phone while passing in every Go test. It happened to hold here only
+// because RedeemPairingVia now declares the full type, so the proxy that
+// reaches this code implements both -- correct by coincidence, which is how
+// the last one shipped. The full route is now recorded when the fallback is
+// installed, by a setter whose parameter type IS the contract.
+func TestSetRelayFallbackFullRoutesByDeclaredType(t *testing.T) {
+	var install func(*Client, RelayFallbackFull) = (*Client).SetRelayFallbackFull
+
+	fallback := &fullFallback{
+		status: 204,
+		header: http.Header{"Set-Cookie": {"redline_api_session=cred; Path=/"}},
+	}
+	client := NewClient("", "")
+	install(client, fallback)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	response, err := client.doCapturingResponse(ctx, http.MethodPost, "/v1/pairing/redeem", map[string]string{"pairing_token": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Header.Get("Set-Cookie"); !strings.Contains(got, "cred") {
+		t.Errorf("the full route was not taken for a fallback installed as full: %q", got)
+	}
+}
+
+// And the narrow setter must never take the full route, even for a value that
+// happens to implement it: what was declared is what is used.
+func TestSetRelayFallbackNarrowStaysCompact(t *testing.T) {
+	fallback := &fullFallback{
+		status: 204,
+		header: http.Header{"Set-Cookie": {"redline_api_session=cred; Path=/"}},
+	}
+	client := NewClient("", "")
+	client.SetRelayFallback(fallback)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	response, err := client.doCapturingResponse(ctx, http.MethodPost, "/v1/pairing/redeem", map[string]string{"pairing_token": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Header.Get("Set-Cookie"); got != "" {
+		t.Errorf("a fallback installed as the narrow type must not be widened by assertion: %q", got)
 	}
 }
