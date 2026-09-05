@@ -609,7 +609,7 @@ func TestRelayClientAnswerFullKeepsTheDesktopHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("answer full: %v", err)
 	}
-	var full relayFullResponse
+	var full tunnelResponse
 	if err := json.Unmarshal([]byte(answer), &full); err != nil {
 		t.Fatalf("AnswerFull must return the JSON envelope DoFull promises, got %q: %v", answer, err)
 	}
@@ -664,7 +664,7 @@ func TestRelayClientAnswerFullCarriesARefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a refusal is an answer, not a relay failure: %v", err)
 	}
-	var full relayFullResponse
+	var full tunnelResponse
 	json.Unmarshal([]byte(answer), &full)
 	if full.Status != 401 || !strings.Contains(string(full.Body), "pairing token") {
 		t.Errorf("refusal did not survive: status=%d body=%q", full.Status, full.Body)

@@ -54,19 +54,16 @@ type tunnelRequest struct {
 	Body   []byte              `json:"body,omitempty"`
 }
 
-// tunnelResponse is the wire format for a reply going desktop → phone.
-// Must match internal/relay.TunnelResponse.
-type tunnelResponse struct {
-	Status int         `json:"status"`
-	Header http.Header `json:"header,omitempty"`
-	Body   []byte      `json:"body,omitempty"`
-}
-
-// relayFullResponse is the envelope returned by RelayFallbackFull.DoFull.
+// tunnelResponse is the wire format for a reply going desktop → phone, and
+// also the envelope RelayFallbackFull.DoFull hands back across the FFI. Must
+// match internal/relay.TunnelResponse.
 //
-// Separate from tunnelResponse so the two wire formats can evolve
-// independently; this one is read by the phone-side Go only.
-type relayFullResponse struct {
+// One type for both on purpose. They were two identical structs "so the wire
+// formats could evolve independently", which meant a field added to one and
+// not the other would have been a silent drop at the boundary between them --
+// the shape of fault this package has had enough of. If they ever genuinely
+// diverge, split them then, with a test that says how.
+type tunnelResponse struct {
 	Status int         `json:"status"`
 	Header http.Header `json:"header,omitempty"`
 	Body   []byte      `json:"body,omitempty"`
@@ -360,7 +357,7 @@ func (c *RelayClient) AnswerFull(method, reqPath, body string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	encoded, err := json.Marshal(relayFullResponse{
+	encoded, err := json.Marshal(tunnelResponse{
 		Status: resp.Status,
 		Header: resp.Header,
 		Body:   resp.Body,

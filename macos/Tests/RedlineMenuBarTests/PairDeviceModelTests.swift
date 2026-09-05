@@ -54,22 +54,35 @@ struct PairDeviceModelTests {
         #expect(!PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(margin), expiresAt: expires, started: started))
     }
 
-    /// The client must not out-wait the service. The service forgets a redeem
-    /// a minute after it happens; a client that polled past that would read a
-    /// real redeem as expired. The constant is checked against its documented
-    /// twin so a change to one without the other fails here.
+    /// Two numbers here mirror two in the service, with nothing but these
+    /// assertions holding them together.
+    ///
+    /// The margin must not exceed what the service remembers (redeemedMemory,
+    /// one minute): a client that polled past that would read a real redeem as
+    /// expired. The lifetime must not be shorter than the service's (ten
+    /// minutes, createPairingToken): a client that assumed less would give up
+    /// on a code the service still honoured. Each is pinned in the direction
+    /// that matters, so a change to the service without a matching change here
+    /// fails in the test rather than on a user's screen.
     @Test("The client margin does not exceed what the service remembers")
-    func marginMatchesTheService() {
-        // redeemedMemory in internal/api/server.go is one minute.
+    func marginDoesNotExceedServerMemory() {
         #expect(PairDeviceModel.redeemMemoryMargin <= 60)
     }
 
-    /// A service that sent no expiry still gets a bounded poll.
+    @Test("The client lifetime is not shorter than the service's")
+    func lifetimeIsNotShorterThanTheServers() {
+        #expect(PairDeviceModel.pairingTokenLifetime >= 10 * 60)
+    }
+
+    /// A service that sent no expiry still gets a bounded poll, and the bound
+    /// is the token's lifetime plus the same margin -- pinned at the edge.
     @Test("Polling is bounded even without an expiry from the service")
     func pollingIsBoundedWithoutAnExpiry() {
         let started = Date(timeIntervalSince1970: 1_000)
+        let limit = PairDeviceModel.pairingTokenLifetime + PairDeviceModel.redeemMemoryMargin
         #expect(PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(60), expiresAt: nil, started: started))
-        #expect(!PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(20 * 60), expiresAt: nil, started: started))
+        #expect(PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(limit - 1), expiresAt: nil, started: started))
+        #expect(!PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(limit), expiresAt: nil, started: started))
     }
 
     @Test("The confirmation says how the phone will connect")

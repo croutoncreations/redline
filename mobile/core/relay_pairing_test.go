@@ -217,7 +217,7 @@ func (f *fullFallback) Do(method, path, body string) (string, error) {
 }
 
 func (f *fullFallback) DoFull(method, path, body string) (string, error) {
-	resp := relayFullResponse{
+	resp := tunnelResponse{
 		Status: f.status,
 		Header: f.header,
 		Body:   []byte(f.body),

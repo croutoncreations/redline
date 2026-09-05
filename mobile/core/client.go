@@ -54,7 +54,7 @@ type Client struct {
 // headers so RedeemPairingVia can find the cookie. Every other path uses Do.
 type RelayFallbackFull interface {
 	RelayFallback
-	// DoFull performs the request and returns a JSON-encoded relayFullResponse
+	// DoFull performs the request and returns a JSON-encoded tunnelResponse
 	// {"status":N,"header":{...},"body":"..."}.
 	DoFull(method, path, body string) (string, error)
 }
@@ -382,7 +382,7 @@ func (c *Client) relayRequestFull(full RelayFallbackFull, method, path, encoded 
 	if err != nil {
 		return nil, err
 	}
-	var env relayFullResponse
+	var env tunnelResponse
 	if err := json.Unmarshal([]byte(answer), &env); err != nil {
 		return nil, fmt.Errorf("decode full relay response: %w", err)
 	}

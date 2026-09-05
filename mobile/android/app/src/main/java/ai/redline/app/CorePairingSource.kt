@@ -90,18 +90,20 @@ class CorePairingSource : PairingSource {
 
     private companion object {
         const val TAG = "RedlineRelay"
-
-        /**
-         * The status from a full relay envelope, without parsing the rest of
-         * it. Matches Go's json.Marshal output exactly -- no space after the
-         * colon -- which is the only producer.
-         */
-        private val STATUS = Regex("\"status\":(\\d{3})")
-
-        fun statusOf(envelope: String): String =
-            STATUS.find(envelope)?.groupValues?.get(1) ?: "?"
     }
 }
+
+/**
+ * The status from a full relay envelope, without parsing the rest of it.
+ *
+ * Matches Go's json.Marshal output exactly -- no space after the colon --
+ * which is the only producer. Exactly three digits or "?": the envelope also
+ * carries the credential, and this is the one part of it a log may show.
+ */
+private val STATUS = Regex("\"status\":(\\d{3})")
+
+internal fun statusOf(envelope: String): String =
+    STATUS.find(envelope)?.groupValues?.get(1) ?: "?"
 
 /** Whether the code carried enough to reach the desktop through a relay. */
 val PairingRequest.hasRelay: Boolean
