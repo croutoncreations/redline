@@ -28,6 +28,47 @@ class CorePairingSource : PairingSource {
 
     override fun parsePairingUrl(raw: String): String = Core.parsePairingURL(raw)
 
-    override fun redeem(baseUrl: String, pairingToken: String): String =
-        Core.redeemPairing(baseUrl, pairingToken)
+    /**
+     * Redeems directly when the code names an endpoint, and over the relay
+     * otherwise -- or when direct fails and the code carried a relay.
+     *
+     * The relay session is built from the scanned code, not from settings:
+     * nothing has been stored yet, and this is the request that earns the
+     * right to store anything. It is dialled lazily and closed afterwards,
+     * so a code with a direct endpoint that answers never opens a relay leg
+     * it will not use.
+     */
+    override fun redeem(request: PairingRequest): String {
+        if (!request.hasRelay) {
+            return Core.redeemPairing(request.baseUrl, request.pairingToken)
+        }
+        var relay: core.RelayClient? = null
+        try {
+            val fallback = object : core.RelayFallbackFull {
+                private fun session(): core.RelayClient =
+                    relay ?: Core.dialRelay(
+                        request.relayUrl,
+                        request.relaySession,
+                        request.desktopKey,
+                        request.entitlementToken,
+                    ).also { relay = it }
+
+                override fun do_(method: String, path: String, body: String): String =
+                    session().answer(method, path, body)
+
+                // Pairing's credential arrives as a Set-Cookie header, which
+                // the compact answer discards; this is the one caller that
+                // needs the full reply.
+                override fun doFull(method: String, path: String, body: String): String =
+                    session().answerFull(method, path, body)
+            }
+            return Core.redeemPairingVia(request.baseUrl, request.pairingToken, fallback)
+        } finally {
+            runCatching { relay?.close() }
+        }
+    }
 }
+
+/** Whether the code carried enough to reach the desktop through a relay. */
+val PairingRequest.hasRelay: Boolean
+    get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank()

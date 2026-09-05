@@ -57,8 +57,19 @@ type tunnelRequest struct {
 // tunnelResponse is the wire format for a reply going desktop → phone.
 // Must match internal/relay.TunnelResponse.
 type tunnelResponse struct {
-	Status int    `json:"status"`
-	Body   []byte `json:"body,omitempty"`
+	Status int         `json:"status"`
+	Header http.Header `json:"header,omitempty"`
+	Body   []byte      `json:"body,omitempty"`
+}
+
+// relayFullResponse is the envelope returned by RelayFallbackFull.DoFull.
+//
+// Separate from tunnelResponse so the two wire formats can evolve
+// independently; this one is read by the phone-side Go only.
+type relayFullResponse struct {
+	Status int         `json:"status"`
+	Header http.Header `json:"header,omitempty"`
+	Body   []byte      `json:"body,omitempty"`
 }
 
 // RelayClient is the phone's end of the Noise-encrypted relay tunnel.
@@ -321,11 +332,53 @@ func (c *RelayClient) Answer(method, reqPath, body string) (string, error) {
 // bind makes it skip the entire file -- silently, so the AAR simply lacks every
 // type in it. Answer() is the bound entry point.
 func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, string, error) {
+	resp, err := c.exchange(method, reqPath, body)
+	if err != nil {
+		return 0, "", err
+	}
+	bodyStr := string(resp.Body)
+	if resp.Status < 200 || resp.Status >= 300 {
+		return resp.Status, bodyStr, fmt.Errorf("relay response status %d", resp.Status)
+	}
+	return resp.Status, bodyStr, nil
+}
+
+// AnswerFull carries one request and returns the desktop's whole reply --
+// status, headers and body -- as the JSON envelope RelayFallbackFull.DoFull
+// promises.
+//
+// Answer folds the reply to "<status> <body>", which is all any data endpoint
+// needs. Pairing is the exception: the credential arrives as a Set-Cookie
+// header, so without this method the relay could carry every request except
+// the first one a phone ever makes. As with Answer, a non-2xx status is the
+// desktop's own answer and is returned, not raised.
+func (c *RelayClient) AnswerFull(method, reqPath, body string) (string, error) {
+	resp, err := c.exchange(method, reqPath, body)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(relayFullResponse{
+		Status: resp.Status,
+		Header: resp.Header,
+		Body:   resp.Body,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode relay answer: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// exchange seals one request, sends it, and opens the reply.
+//
+// The mutex is held for the whole round trip: Noise nonces advance with every
+// frame, so a second request interleaved between this write and its read
+// would put the cipher state out of step and poison every later frame.
+func (c *RelayClient) exchange(method, reqPath, body string) (tunnelResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return 0, "", errors.New("relay client is closed")
+		return tunnelResponse{}, errors.New("relay client is closed")
 	}
 
 	req := tunnelRequest{
@@ -341,14 +394,14 @@ func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, stri
 
 	encoded, err := json.Marshal(req)
 	if err != nil {
-		return 0, "", fmt.Errorf("encode request: %w", err)
+		return tunnelResponse{}, fmt.Errorf("encode request: %w", err)
 	}
 
 	frame, err := c.session.Seal(encoded)
 	if err != nil {
 		// A Seal failure means the session is broken — close it.
 		c.closeConn()
-		return 0, "", fmt.Errorf("seal request: %w", err)
+		return tunnelResponse{}, fmt.Errorf("seal request: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -356,13 +409,13 @@ func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, stri
 
 	if err := c.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
 		c.closeConn()
-		return 0, "", fmt.Errorf("write request: %w", err)
+		return tunnelResponse{}, fmt.Errorf("write request: %w", err)
 	}
 
 	_, rawFrame, err := c.conn.Read(ctx)
 	if err != nil {
 		c.closeConn()
-		return 0, "", fmt.Errorf("read response: %w", err)
+		return tunnelResponse{}, fmt.Errorf("read response: %w", err)
 	}
 
 	plaintext, err := c.session.Open(rawFrame)
@@ -370,7 +423,7 @@ func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, stri
 		// A decrypt failure means the Noise session is permanently out of step
 		// (rule 1). Close so the caller knows to re-dial.
 		c.closeConn()
-		return 0, "", fmt.Errorf("decrypt response: %w", err)
+		return tunnelResponse{}, fmt.Errorf("decrypt response: %w", err)
 	}
 
 	// The frame decrypted correctly, so the cipher state is still in sync.
@@ -378,14 +431,9 @@ func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, stri
 	// Do NOT close the session here — the next Request will work.
 	var resp tunnelResponse
 	if err := json.Unmarshal(plaintext, &resp); err != nil {
-		return 0, "", fmt.Errorf("decode response: %w", err)
+		return tunnelResponse{}, fmt.Errorf("decode response: %w", err)
 	}
-
-	bodyStr := string(resp.Body)
-	if resp.Status < 200 || resp.Status >= 300 {
-		return resp.Status, bodyStr, fmt.Errorf("relay response status %d", resp.Status)
-	}
-	return resp.Status, bodyStr, nil
+	return resp, nil
 }
 
 // Close shuts down the relay session and connection. Safe to call more than

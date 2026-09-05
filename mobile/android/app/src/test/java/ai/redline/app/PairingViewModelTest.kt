@@ -139,11 +139,53 @@ class PairingViewModelTest {
         parse: (String) -> String = {
             """{"base_url":"https://macbook.example.ts.net","pairing_token":"one-time-token"}"""
         },
-        redeem: (String, String) -> String = { _, _ -> "durable-api-token" },
+        redeem: (PairingRequest) -> String = { "durable-api-token" },
     ) = object : PairingSource {
         override fun parsePairingUrl(raw: String): String = parse(raw)
-        override fun redeem(baseUrl: String, pairingToken: String): String =
-            redeem(baseUrl, pairingToken)
+        override fun redeem(request: PairingRequest): String = redeem(request)
+    }
+
+    /**
+     * A relay-only code has no direct endpoint, so the redeem itself must go
+     * over the relay. The source can only choose that route if it is handed
+     * everything the QR carried -- the relay URL, the desktop key, the session
+     * and the entitlement -- rather than a base URL that is empty.
+     *
+     * Pairing was the one request that could not fall back to the relay,
+     * because it ran before any client with a fallback existed. That made a
+     * tailnet a prerequisite for a product whose point is that it is optional.
+     */
+    @Test
+    fun redeemsARelayOnlyCodeWithTheRelayDetailsItCarried() = runTest(dispatcher) {
+        val settings = FakeSettings()
+        var seen: PairingRequest? = null
+        val model = PairingViewModel(
+            source(
+                parse = {
+                    """{"base_url":"","pairing_token":"one-time-token",""" +
+                        """"relay_url":"https://relay.example","desktop_key":"key==",""" +
+                        """"relay_session":"session","entitlement_token":"ent"}"""
+                },
+                redeem = { request -> seen = request; "durable-api-token" },
+            ),
+            settings,
+            dispatcher,
+        )
+
+        model.pair("https://relay/pair#...")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val request = seen ?: error("redeem was never called")
+        assertEquals("", request.baseUrl)
+        assertEquals("https://relay.example", request.relayUrl)
+        assertEquals("key==", request.desktopKey)
+        assertEquals("session", request.relaySession)
+        assertEquals("ent", request.entitlementToken)
+
+        assertEquals("", settings.baseUrl)
+        assertEquals("durable-api-token", settings.token)
+        assertEquals("https://relay.example", settings.relayUrl)
+        assertTrue(model.state.value.isPaired)
     }
 
     @Test
@@ -169,7 +211,7 @@ class PairingViewModelTest {
     fun redeemsOnlyOnceWhenTheCameraRepeatsAScan() = runTest(dispatcher) {
         var redeemCount = 0
         val model = PairingViewModel(
-            source(redeem = { _, _ -> redeemCount++; "durable-api-token" }),
+            source(redeem = { redeemCount++; "durable-api-token" }),
             FakeSettings(),
             dispatcher,
         )
@@ -208,7 +250,7 @@ class PairingViewModelTest {
     @Test
     fun surfacesTheServiceExplanationForAnExpiredCode() = runTest(dispatcher) {
         val model = PairingViewModel(
-            source(redeem = { _, _ ->
+            source(redeem = {
                 throw RuntimeException("invalid or expired Redline pairing token")
             }),
             FakeSettings(),
@@ -229,7 +271,7 @@ class PairingViewModelTest {
     fun storesNothingWhenPairingFails() = runTest(dispatcher) {
         val settings = FakeSettings()
         val model = PairingViewModel(
-            source(redeem = { _, _ -> throw RuntimeException("nope") }),
+            source(redeem = { throw RuntimeException("nope") }),
             settings,
             dispatcher,
         )

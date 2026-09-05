@@ -25,8 +25,16 @@ interface PairingSource {
     /** Parses a scanned code, returning the pairing details as JSON. */
     fun parsePairingUrl(raw: String): String
 
-    /** Exchanges the one-time token for the durable credential. */
-    fun redeem(baseUrl: String, pairingToken: String): String
+    /**
+     * Exchanges the one-time token for the durable credential.
+     *
+     * Given the whole request rather than a base URL and a token, because the
+     * route is chosen from what the code carried: a code with a direct
+     * endpoint redeems there and falls back to the relay; a relay-only code
+     * has nowhere else to go. Pairing was the one request that could not fall
+     * back, since it ran before any client with a fallback existed.
+     */
+    fun redeem(request: PairingRequest): String
 }
 
 data class PairingUiState(
@@ -83,7 +91,7 @@ class PairingViewModel(
                         PairingRequest.serializer(),
                         source.parsePairingUrl(scanned),
                     )
-                    val token = source.redeem(request.baseUrl, request.pairingToken)
+                    val token = source.redeem(request)
                     Triple(request.baseUrl, token, request)
                 }
             }

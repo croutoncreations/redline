@@ -128,24 +128,82 @@ func TestPairingURLCarriesTheEntitlement(t *testing.T) {
 	}
 }
 
-func TestPairingURLOmitsRelayFieldsWhenTheEntitlementIsMissing(t *testing.T) {
-	// An entitlement-less relay is a relay the phone will be refused by. Better
-	// to publish no relay at all and have the app say "not reachable" than to
-	// send it somewhere that will answer 402 and look like a relay fault.
+// Updated from the original "all four or none" rule: entitlement is now
+// optional so that self-hosted relays (ALLOW_UNENTITLED=true) can still
+// publish the three structural relay fields. The three structural fields
+// (relay, key, session) still travel together or not at all; an empty
+// entitlement is simply omitted rather than suppressing the whole group.
+func TestPairingURLPublishesRelayFieldsEvenWithEmptyEntitlement(t *testing.T) {
 	got := mobilePairingURL(
 		"desk.example.ts.net", 443, "pair-token",
 		"https://relay.example.com", "desktop-key", "session-id", "",
 	)
 
 	parsed, _ := url.Parse(got)
-	fields, _ := url.ParseQuery(parsed.Fragment)
-	for _, key := range []string{"relay", "key", "session", "entitlement"} {
-		if fields.Get(key) != "" {
-			t.Errorf("%s = %q, want empty: all four travel together or none do",
-				key, fields.Get(key))
+	fields, _ := url.ParseQuery(parsed.RawFragment)
+	for _, key := range []string{"relay", "key", "session"} {
+		if fields.Get(key) == "" {
+			t.Errorf("%s is missing; the three structural relay fields must be published when non-empty", key)
 		}
+	}
+	// Entitlement must be absent (not an empty value -- absent).
+	if _, ok := fields["entitlement"]; ok {
+		t.Errorf("entitlement should be omitted when empty, not published as empty string")
 	}
 	if fields.Get("pairing_token") != "pair-token" {
 		t.Error("the pairing token must still be published; direct pairing does not need a relay")
+	}
+}
+
+// A relay-only QR has the sentinel host "relay" so ParsePairingURL on the
+// phone side knows there is no direct endpoint to try.
+func TestMobilePairingURLRelayOnlyUsesRelayHost(t *testing.T) {
+	got := mobilePairingURL(
+		"relay", 443, "one-time-token",
+		"https://redline-relay.example.com", "ZGVza3RvcC1rZXk=", "sess-abc", "",
+	)
+	// The QR must carry a valid URL with host "relay".
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Host != "relay" {
+		t.Fatalf("host = %q, want \"relay\"", parsed.Host)
+	}
+	fragment, err := url.ParseQuery(parsed.RawFragment)
+	if err != nil {
+		t.Fatalf("parse fragment: %v", err)
+	}
+	if fragment.Get("relay") != "https://redline-relay.example.com" {
+		t.Fatalf("relay = %q", fragment.Get("relay"))
+	}
+}
+
+// A self-hosted relay (ALLOW_UNENTITLED=true) has no entitlement to carry,
+// but the other three relay fields are still meaningful. They must be published
+// so the phone can reach the relay even without an entitlement token.
+func TestMobilePairingURLPublishesRelayWithoutEntitlement(t *testing.T) {
+	got := mobilePairingURL(
+		"desk.example.ts.net", 443, "pair-token",
+		"https://my-relay.example.com", "desktop-key", "session-id", "",
+	)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	fields, err := url.ParseQuery(parsed.RawFragment)
+	if err != nil {
+		t.Fatalf("parse fragment: %v", err)
+	}
+	// The three structural fields must appear.
+	for _, key := range []string{"relay", "key", "session"} {
+		if fields.Get(key) != "" {
+			continue
+		}
+		t.Errorf("%s is missing; self-hosted relay needs relay+key+session even without an entitlement", key)
+	}
+	// Entitlement must be absent (not an empty value, absent).
+	if _, ok := fields["entitlement"]; ok {
+		t.Errorf("entitlement should be absent for self-hosted relay, got %q", fields.Get("entitlement"))
 	}
 }

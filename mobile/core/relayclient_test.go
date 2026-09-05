@@ -514,3 +514,122 @@ func TestDialRelayStillRefusesCleartext(t *testing.T) {
 		t.Errorf("cleartext to a public host must be refused, got: %v", err)
 	}
 }
+
+// Pairing over the relay needs the desktop's Set-Cookie, which the compact
+// "<status> <body>" answer throws away. AnswerFull keeps the headers.
+//
+// Without a RelayClient method that produces the full envelope, the
+// RelayFallbackFull interface can only ever be satisfied by a test fake --
+// the Kotlin side would have nothing real to call, and relayed pairing would
+// be "written but never wired", which is the shape of every fault this branch
+// has shipped.
+func TestRelayClientAnswerFullKeepsTheDesktopHeaders(t *testing.T) {
+	desktopKey, err := NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+
+	server := relayPair(t, func(send func([]byte), recv func() []byte) {
+		responder, err := NewResponderSession(desktopKey)
+		if err != nil {
+			return
+		}
+		reply, err := responder.ReadHandshake(recv())
+		if err != nil {
+			return
+		}
+		send(reply)
+		if _, err := responder.Open(recv()); err != nil {
+			return
+		}
+		// What the redeem handler really sends: 204, a cookie, no body.
+		body, _ := json.Marshal(map[string]any{
+			"status": 204,
+			"header": map[string][]string{
+				"Set-Cookie": {"redline_api_session=the-credential; Path=/; HttpOnly"},
+			},
+		})
+		sealed, err := responder.Seal(body)
+		if err != nil {
+			return
+		}
+		send(sealed)
+	})
+	defer server.Close()
+
+	client, err := DialRelay(
+		strings.Replace(server.URL, "http://", "ws://", 1),
+		"phone-session-0123456789abc",
+		DesktopPublicKey(desktopKey),
+		"",
+	)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer client.Close()
+
+	answer, err := client.AnswerFull("POST", "/v1/pairing/redeem", `{"pairing_token":"x"}`)
+	if err != nil {
+		t.Fatalf("answer full: %v", err)
+	}
+	var full relayFullResponse
+	if err := json.Unmarshal([]byte(answer), &full); err != nil {
+		t.Fatalf("AnswerFull must return the JSON envelope DoFull promises, got %q: %v", answer, err)
+	}
+	if full.Status != 204 {
+		t.Errorf("status = %d, want 204", full.Status)
+	}
+	if got := full.Header.Get("Set-Cookie"); !strings.Contains(got, "redline_api_session=the-credential") {
+		t.Errorf("Set-Cookie did not survive the relay: %q", got)
+	}
+}
+
+// A non-2xx status is the desktop's own answer and must reach the caller
+// intact, the same rule Answer follows: a 401 on redeem means "bad pairing
+// token", which is a different remedy from "the relay is down".
+func TestRelayClientAnswerFullCarriesARefusal(t *testing.T) {
+	desktopKey, err := NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	server := relayPair(t, func(send func([]byte), recv func() []byte) {
+		responder, err := NewResponderSession(desktopKey)
+		if err != nil {
+			return
+		}
+		reply, err := responder.ReadHandshake(recv())
+		if err != nil {
+			return
+		}
+		send(reply)
+		if _, err := responder.Open(recv()); err != nil {
+			return
+		}
+		body, _ := json.Marshal(map[string]any{
+			"status": 401,
+			"body":   []byte(`{"error":"invalid or expired Redline pairing token"}`),
+		})
+		sealed, _ := responder.Seal(body)
+		send(sealed)
+	})
+	defer server.Close()
+
+	client, err := DialRelay(
+		strings.Replace(server.URL, "http://", "ws://", 1),
+		"phone-session-0123456789abc", DesktopPublicKey(desktopKey), "",
+	)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer client.Close()
+
+	answer, err := client.AnswerFull("POST", "/v1/pairing/redeem", `{}`)
+	if err != nil {
+		t.Fatalf("a refusal is an answer, not a relay failure: %v", err)
+	}
+	var full relayFullResponse
+	json.Unmarshal([]byte(answer), &full)
+	if full.Status != 401 || !strings.Contains(string(full.Body), "pairing token") {
+		t.Errorf("refusal did not survive: status=%d body=%q", full.Status, full.Body)
+	}
+}

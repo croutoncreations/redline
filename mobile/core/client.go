@@ -29,6 +29,20 @@ type Client struct {
 	relay RelayFallback
 }
 
+// RelayFallbackFull is RelayFallback extended with header-preserving transport.
+//
+// Most endpoints only need the status and body, which the compact
+// "<status> <body>" encoding covers. Pairing is the exception: the credential
+// arrives as a Set-Cookie header, which the compact encoding drops. A fallback
+// that implements this interface hands back a JSON envelope that includes
+// headers so RedeemPairingVia can find the cookie. Every other path uses Do.
+type RelayFallbackFull interface {
+	RelayFallback
+	// DoFull performs the request and returns a JSON-encoded relayFullResponse
+	// {"status":N,"header":{...},"body":"..."}.
+	DoFull(method, path, body string) (string, error)
+}
+
 // RelayFallback carries one request over a relayed tunnel.
 //
 // An interface rather than a func type because gomobile binds interfaces but
@@ -226,7 +240,25 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any) 
 }
 
 // send builds and issues one authenticated request. The caller closes the body.
+//
+// When baseURL is empty the client has no tailnet address to dial, and going
+// straight to the relay avoids the 20-second default dial timeout that would
+// otherwise fire before every relayed call. This is the case for a phone that
+// paired from a relay-only QR.
 func (c *Client) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	// Relay-only mode: no direct endpoint, skip straight to the fallback.
+	if c.baseURL == "" {
+		if c.relay == nil {
+			return nil, errors.New("no direct endpoint and no relay configured")
+		}
+		relayed, err := c.relayRequest(method, path, body)
+		if err != nil {
+			return nil, err
+		}
+		markRelayed(ctx)
+		return relayed, nil
+	}
+
 	var reader *strings.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -279,6 +311,11 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 
 // relayRequest replays one request through the relay and shapes the answer
 // like an http.Response so callers cannot tell the routes apart.
+//
+// When the fallback implements RelayFallbackFull, the full response envelope
+// (including headers) is decoded so response.Cookies() works. The compact
+// path is the default: every endpoint except pairing redeem only needs the
+// body.
 func (c *Client) relayRequest(method, path string, body any) (*http.Response, error) {
 	encoded := ""
 	if body != nil {
@@ -287,6 +324,13 @@ func (c *Client) relayRequest(method, path string, body any) (*http.Response, er
 			return nil, fmt.Errorf("encode request: %w", err)
 		}
 		encoded = string(raw)
+	}
+
+	// Prefer the full-envelope path when available. This is a type assertion
+	// at call time rather than at SetRelayFallback time so any existing
+	// fallback that has been wired in already continues to work unchanged.
+	if full, ok := c.relay.(RelayFallbackFull); ok {
+		return c.relayRequestFull(full, method, path, encoded)
 	}
 
 	answer, err := c.relay.Do(method, path, encoded)
@@ -301,6 +345,34 @@ func (c *Client) relayRequest(method, path string, body any) (*http.Response, er
 		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(decoded)),
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}, nil
+}
+
+// relayRequestFull uses the header-preserving DoFull path, populating
+// http.Response.Header so the caller can read cookies and other headers.
+func (c *Client) relayRequestFull(full RelayFallbackFull, method, path, encoded string) (*http.Response, error) {
+	answer, err := full.DoFull(method, path, encoded)
+	if err != nil {
+		return nil, err
+	}
+	var env relayFullResponse
+	if err := json.Unmarshal([]byte(answer), &env); err != nil {
+		return nil, fmt.Errorf("decode full relay response: %w", err)
+	}
+	if env.Status < 100 || env.Status > 599 {
+		return nil, fmt.Errorf("relay full response has invalid status %d", env.Status)
+	}
+	hdr := env.Header
+	if hdr == nil {
+		hdr = http.Header{}
+	}
+	if hdr.Get("Content-Type") == "" {
+		hdr.Set("Content-Type", "application/json")
+	}
+	return &http.Response{
+		StatusCode: env.Status,
+		Body:       io.NopCloser(strings.NewReader(string(env.Body))),
+		Header:     hdr,
 	}, nil
 }
 

@@ -131,6 +131,13 @@ func recoverBase64Plus(value string) string {
 	return strings.ReplaceAll(value, " ", "+")
 }
 
+// relayOnlyHost is the sentinel URL host that means "no direct endpoint".
+//
+// A relay-only QR has the shape https://relay/pair#... so that the URL is
+// valid and scannable by any camera, while the phone knows not to attempt a
+// direct connection. Any other hostname is treated as the tailnet address.
+const relayOnlyHost = "relay"
+
 func ParsePairingURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -148,6 +155,12 @@ func ParsePairingURL(raw string) (string, error) {
 	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
 		return "", errors.New("pairing over plain HTTP is only allowed to this device")
 	}
+
+	// The sentinel host "relay" means the desktop has no tailnet address to
+	// publish. The phone stores an empty base URL so Client skips the direct
+	// attempt rather than waiting for a 20-second dial timeout before each
+	// relayed request.
+	isRelayOnly := strings.EqualFold(parsed.Hostname(), relayOnlyHost)
 
 	// Parsed from the escaped fragment, the text as it appeared in the code.
 	//
@@ -178,7 +191,11 @@ func ParsePairingURL(raw string) (string, error) {
 		return "", errors.New("this pairing code is incomplete; generate a new one")
 	}
 
-	base := url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+	// For a relay-only code, store an empty base URL.
+	var base url.URL
+	if !isRelayOnly {
+		base = url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+	}
 
 	// Spaces are never valid in base64, so a space can only be a '+' that a
 	// QR built by plain concatenation left unencoded and ParseQuery turned
@@ -189,12 +206,23 @@ func ParsePairingURL(raw string) (string, error) {
 	desktopKey := recoverBase64Plus(token.Get("key"))
 	entitlementToken := recoverBase64Plus(token.Get("entitlement"))
 
+	// A relay-only code must carry the relay fields: without them the phone has
+	// no direct endpoint and no relay to fall back to, and would be permanently
+	// unreachable. A missing entitlement is tolerable only when the relay is
+	// open (ALLOW_UNENTITLED=true in the Worker); relay URL + key + session are
+	// all required.
+	relayURLVal := safeRelayURL(token.Get("relay"))
+	relaySessionVal := safeSessionID(token.Get("session"))
+	if isRelayOnly && (relayURLVal == "" || desktopKey == "" || relaySessionVal == "") {
+		return "", errors.New("relay-only pairing code is missing relay fields (relay, key, session)")
+	}
+
 	encoded, err := json.Marshal(PairingRequest{
 		BaseURL:      strings.TrimRight(base.String(), "/"),
 		PairingToken: pairingToken,
 		DesktopKey:   desktopKey,
-		RelayURL:     safeRelayURL(token.Get("relay")),
-		RelaySession: safeSessionID(token.Get("session")),
+		RelayURL:     relayURLVal,
+		RelaySession: relaySessionVal,
 		// Carried verbatim: it is opaque to the phone, which only presents it
 		// to the relay. Validating its shape here would couple the pairing
 		// parser to a token format the relay owns.
@@ -271,6 +299,23 @@ func CreatePairingToken(baseURL, apiToken string) (string, error) {
 // QR code. The service answers with the credential as a session cookie, which
 // is the same exchange the web dashboard performs.
 func RedeemPairing(baseURL, pairingToken string) (string, error) {
+	return RedeemPairingVia(baseURL, pairingToken, nil)
+}
+
+// RedeemPairingVia is RedeemPairing with an optional relay fallback.
+//
+// Pairing is the one request that cannot use the standard relay path: the
+// fallback is installed on a Client, and the Client is what pairing produces.
+// A chicken-and-egg that leaves relay-only users permanently stuck -- the
+// first request needs the relay, and the relay needs the first request to
+// have already worked.
+//
+// The credential arrives as a Set-Cookie header, which the compact relay
+// encoding drops. When fallback implements RelayFallbackFull the header
+// survives, and response.Cookies() finds the cookie.
+//
+// fallback may be nil, in which case the call is identical to RedeemPairing.
+func RedeemPairingVia(baseURL, pairingToken string, fallback RelayFallback) (string, error) {
 	if strings.TrimSpace(pairingToken) == "" {
 		return "", errors.New("pairing token is required")
 	}
@@ -281,6 +326,9 @@ func RedeemPairing(baseURL, pairingToken string) (string, error) {
 	// No stored credential exists yet, so this deliberately builds a client
 	// with an empty token: redeeming is how the credential is obtained.
 	client := NewClient(baseURL, "")
+	if fallback != nil {
+		client.SetRelayFallback(fallback)
+	}
 	body := map[string]string{"pairing_token": pairingToken}
 
 	response, err := client.doCapturingResponse(ctx, http.MethodPost, "/v1/pairing/redeem", body)

@@ -685,3 +685,226 @@ func TestTokenUsageMentionsRotate(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
 	}
 }
+
+// writeRelayOnlyConfig writes a config that has relay enabled but no
+// api.trusted_hosts, matching a user who is relay-only and has no tailnet.
+func writeRelayOnlyConfig(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	configPath := filepath.Join(root, "redline.yaml")
+	token := strings.Repeat("relay-only-secret-", 3)
+	contents := fmt.Sprintf(`database: redline.db
+active_policy: standard
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.1
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+relay:
+  enabled: true
+  url: https://redline-relay.example.com
+  session_id: "test-session-abcdef"
+  keypair_path: %s
+`, filepath.Join(root, "identity.json"))
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api-token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, token
+}
+
+// When neither a host is given nor a tailnet is detectable, but relay is
+// enabled, pair --qr must succeed and emit a relay-only code rather than
+// failing with "no Tailscale name found".
+func TestPairQRRelayOnlyWhenNoTailnet(t *testing.T) {
+	configPath, token := writeRelayOnlyConfig(t)
+	pairingToken := strings.Repeat("relay-only-pairing-", 3)
+	server := pairingAPIServer(t, token, pairingToken)
+	defer server.Close()
+
+	// Stub tailscale to fail — simulating no tailnet.
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	if exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	// Must say relay-only, not mention a tailnet host.
+	if !strings.Contains(stdout.String(), "relay only") {
+		t.Fatalf("expected relay-only message; got: %s", stdout.String())
+	}
+	// The QR content cannot be read from the terminal art; the exact URL shape
+	// is verified in TestMobilePairingURLRelayOnlyUsesRelayHost in qr_test.go.
+}
+
+// --relay-only forces the relay-only form even when a tailnet host is
+// available, so users and operators can test the relay path explicitly.
+func TestPairQRRelayOnlyFlagForcesRelayEvenWithTailnet(t *testing.T) {
+	configPath, token := writeRelayOnlyConfig(t)
+	pairingToken := strings.Repeat("forced-relay-pairing-", 3)
+	server := pairingAPIServer(t, token, pairingToken)
+	defer server.Close()
+
+	// Tailscale is available.
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"mydesk.example.ts.net.\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--relay-only"}, &stdout, &stderr, time.Now)
+	if exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "relay only") {
+		t.Fatalf("expected relay-only message with --relay-only flag; got: %s", stdout.String())
+	}
+	// Should NOT mention the tailnet host.
+	if strings.Contains(stdout.String(), "mydesk.example.ts.net") {
+		t.Fatalf("--relay-only should not mention the tailnet host; got: %s", stdout.String())
+	}
+}
+
+// When a tailnet host IS found and relay is also available, the message must
+// say both routes are available.
+func TestPairQRMessageWithBothTailnetAndRelay(t *testing.T) {
+	// Config with a trusted host AND relay.
+	root := t.TempDir()
+	configPath := filepath.Join(root, "redline.yaml")
+	token := strings.Repeat("both-routes-secret-", 3)
+	contents := fmt.Sprintf(`database: redline.db
+active_policy: standard
+api:
+  trusted_hosts:
+    - mydesk.example.ts.net
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.1
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+relay:
+  enabled: true
+  url: https://redline-relay.example.com
+  session_id: "test-session-xyz"
+  keypair_path: %s
+`, filepath.Join(root, "identity.json"))
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api-token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pairingToken := strings.Repeat("both-routes-pairing-", 3)
+	server := pairingAPIServer(t, token, pairingToken)
+	defer server.Close()
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"mydesk.example.ts.net.\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--port", "8443"}, &stdout, &stderr, time.Now)
+	if exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	// Must mention both routes.
+	if !strings.Contains(stdout.String(), "mydesk.example.ts.net") {
+		t.Fatalf("expected tailnet host in message; got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "relay") {
+		t.Fatalf("expected relay mention in message; got: %s", stdout.String())
+	}
+}
+
+// Tailnet-only (no relay): message says "pairs over your tailnet".
+func TestPairQRMessageTailnetOnly(t *testing.T) {
+	configPath, token := writePairingConfig(t, []string{"mydesk.example.ts.net"})
+	pairingToken := strings.Repeat("tailnet-only-pairing-", 3)
+	server := pairingAPIServer(t, token, pairingToken)
+	defer server.Close()
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"mydesk.example.ts.net.\"}}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	if exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "tailnet") {
+		t.Fatalf("expected tailnet-only message; got: %s", stdout.String())
+	}
+	// Must NOT say "relay" (relay not configured).
+	if strings.Contains(stdout.String(), "relay") {
+		t.Fatalf("unexpected relay mention in tailnet-only message; got: %s", stdout.String())
+	}
+}
+
+// When neither tailnet nor relay is available, pair --qr must still fail
+// with a clear message.
+func TestPairQRFailsWhenNeitherTailnetNorRelayAvailable(t *testing.T) {
+	// Config with no relay, no trusted hosts.
+	root := t.TempDir()
+	configPath := filepath.Join(root, "redline.yaml")
+	token := strings.Repeat("neither-secret-", 3)
+	contents := `database: redline.db
+active_policy: standard
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.1
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+`
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "api-token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", "http://127.0.0.1:0", "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	if exit != 1 {
+		t.Fatalf("expected failure, got exit=%d stdout=%s", exit, stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("no output expected on failure; got: %s", stdout.String())
+	}
+}

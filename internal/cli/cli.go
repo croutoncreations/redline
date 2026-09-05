@@ -774,6 +774,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
 	host := flags.String("host", "", "Tailscale MagicDNS hostname")
 	port := flags.Int("port", 443, "Tailscale Serve HTTPS port")
+	relayOnly := flags.Bool("relay-only", false, "emit a relay-only code even when a tailnet host is available")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -790,41 +791,9 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	selectedHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))
-	if selectedHost == "" {
-		selectedHost, err = tailscaleDNSName()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-	}
-	trusted := false
-	for _, configuredHost := range cfg.API.TrustedHosts {
-		if strings.EqualFold(configuredHost, selectedHost) {
-			trusted = true
-			break
-		}
-	}
-	if !trusted {
-		fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
-		return 1
-	}
-	var pairing struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &pairing); err != nil {
-		fmt.Fprintln(stderr, "create pairing token:", err)
-		return 1
-	}
-	if pairing.Token == "" || !pairing.ExpiresAt.After(time.Now()) {
-		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
-		return 1
-	}
-	// A relay-enabled desktop publishes where to reach it from outside and the
-	// key that identifies it. Loading the keypair here rather than generating
-	// one means the identity in the QR is the same one the relay leg will
-	// present; a fresh key per QR would authenticate against nothing.
+
+	// Load relay fields first so we know whether the relay path is available
+	// before deciding whether a tailnet host is required.
 	relayURL, desktopKey, sessionID, entitlement := "", "", "", ""
 	if cfg.Relay.Enabled {
 		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
@@ -844,20 +813,107 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		desktopKey = core.DesktopPublicKey(keypair)
 		// The phone presents this to the relay as its own authorisation. It
 		// says nothing about who the user is, so handing it to a paired device
-		// grants relay access and nothing else.
+		// grants relay access and nothing else. Left empty for self-hosted
+		// relays running with ALLOW_UNENTITLED=true.
 		entitlement = strings.TrimSpace(cfg.Relay.EntitlementToken)
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token, relayURL, desktopKey, sessionID, entitlement)
+
+	// Resolve which host the phone should try directly. Three cases:
+	//   1. --relay-only: skip the direct route entirely.
+	//   2. --host given: use it, must be in api.trusted_hosts.
+	//   3. No host: detect from Tailscale if possible; fall back to relay-only
+	//      when relay is enabled and no tailnet is found.
+	selectedHost := ""
+	hasRelay := relayURL != "" && desktopKey != "" && sessionID != ""
+
+	if !*relayOnly {
+		selectedHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))
+		if selectedHost == "" {
+			// Auto-detect from Tailscale. A failure is only fatal when there is
+			// no relay to fall back to.
+			detected, detErr := tailscaleDNSName()
+			if detErr != nil && !hasRelay {
+				fmt.Fprintln(stderr, detErr)
+				return 1
+			}
+			if detErr == nil {
+				// Only use the detected name when it is in api.trusted_hosts;
+				// an untrusted auto-detected host is treated the same as none.
+				for _, configuredHost := range cfg.API.TrustedHosts {
+					if strings.EqualFold(configuredHost, detected) {
+						selectedHost = detected
+						break
+					}
+				}
+			}
+		} else {
+			// Explicit --host: must be trusted.
+			trusted := false
+			for _, configuredHost := range cfg.API.TrustedHosts {
+				if strings.EqualFold(configuredHost, selectedHost) {
+					trusted = true
+					break
+				}
+			}
+			if !trusted {
+				fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
+				return 1
+			}
+		}
+	}
+
+	// At this point selectedHost is empty either because --relay-only was set
+	// or because no usable tailnet host was found. If we also have no relay,
+	// there is nowhere to send the phone.
+	if selectedHost == "" && !hasRelay {
+		fmt.Fprintln(stderr, "no Tailscale host is available and relay is not enabled; add a host to api.trusted_hosts or enable relay")
+		return 1
+	}
+
+	var pairing struct {
+		Token     string    `json:"pairing_token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &pairing); err != nil {
+		fmt.Fprintln(stderr, "create pairing token:", err)
+		return 1
+	}
+	if pairing.Token == "" || !pairing.ExpiresAt.After(time.Now()) {
+		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
+		return 1
+	}
+
+	// The sentinel host "relay" signals to the phone that there is no direct
+	// tailnet endpoint -- it skips the direct attempt entirely rather than
+	// waiting for a 20-second dial timeout on every request.
+	qrHost := selectedHost
+	if qrHost == "" {
+		qrHost = "relay"
+	}
+	pairingURL := mobilePairingURL(qrHost, *port, pairing.Token, relayURL, desktopKey, sessionID, entitlement)
 	code, err := qrcode.New(pairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	endpoint := selectedHost
-	if *port != 443 {
-		endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+
+	// Tell the user exactly which routes the code they are about to scan offers.
+	switch {
+	case selectedHost != "" && hasRelay:
+		endpoint := selectedHost
+		if *port != 443 {
+			endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+		}
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s) and falls back to the relay:\n", endpoint)
+	case selectedHost != "":
+		endpoint := selectedHost
+		if *port != 443 {
+			endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+		}
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s):\n", endpoint)
+	default:
+		fmt.Fprintln(stdout, "Scan this QR code to pair — pairs over the relay only:")
 	}
-	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
 	renderTerminalQR(stdout, code.Bitmap())
 	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
 	return 0
@@ -884,19 +940,22 @@ func mobilePairingURL(host string, port int, token, relayURL, desktopKey, sessio
 	// token the desktop never issued.
 	fragment := url.Values{}
 	fragment.Set("pairing_token", token)
-	if relayURL != "" && desktopKey != "" && sessionID != "" && entitlement != "" {
-		// All four or none. A relay address without a key gives the phone
-		// somewhere to connect and no way to verify who answers; without a
-		// session id it cannot find this desktop on the relay at all; and
-		// without an entitlement a closed relay refuses it with 402, which the
-		// app would report as a relay fault rather than a missing credential.
+	if relayURL != "" && desktopKey != "" && sessionID != "" {
+		// Relay, key, and session travel together or not at all: without the
+		// key the phone cannot verify who answers; without the session it
+		// cannot find this desktop on the relay.
 		//
-		// Publishing three of the four is worse than publishing none: the
-		// phone would believe it had a fallback and fail every time it tried.
+		// Entitlement is published when present but is not required for the
+		// other three to be published. A self-hosted relay run with
+		// ALLOW_UNENTITLED=true has no entitlement to carry; the phone omits
+		// it from the WebSocket handshake when it arrives empty, and an open
+		// relay simply does not check.
 		fragment.Set("relay", relayURL)
 		fragment.Set("key", desktopKey)
 		fragment.Set("session", sessionID)
-		fragment.Set("entitlement", entitlement)
+		if entitlement != "" {
+			fragment.Set("entitlement", entitlement)
+		}
 	}
 	// Fragment holds the decoded form and RawFragment the encoded one; they
 	// have to agree or url.URL falls back to re-escaping Fragment.
