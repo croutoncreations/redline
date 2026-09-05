@@ -96,6 +96,18 @@ type Server struct {
 // Longer than the sheet's poll interval by a wide margin, and long enough
 // that a redeem in the token's last second is not read as an expiry by the
 // next poll; short enough that the map cannot grow without bound.
+//
+// A minute is enough only because every surface that shows a code mints a
+// fresh token each time it opens (the menu-bar sheet does so in
+// PairDeviceWindowController.show; the CLI runs once). Nothing asks about a
+// token it did not just mint, so nothing needs the answer later than this.
+// A surface that kept a token across opens would need a longer memory, and
+// this is the line to change.
+//
+// Kept in memory with the tokens themselves, so a service restart forgets a
+// redeem along with everything else: a sheet open across a restart reads
+// "expired" for a code the phone actually spent. The phone is paired either
+// way; the sheet is merely wrong about it once.
 const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {

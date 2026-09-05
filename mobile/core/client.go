@@ -29,6 +29,15 @@ type Client struct {
 	relay RelayFallback
 }
 
+// A rule for every interface in this file that crosses gomobile:
+//
+// A value handed in from Kotlin or Swift arrives as a proxy for the parameter
+// type as DECLARED, and nothing more. Asserting it to a wider interface at
+// runtime always fails on a real phone, and always passes in a Go test whose
+// fake happens to implement both. If a function needs the wider type, it must
+// declare the wider type. RedeemPairingVia learned this by dropping the
+// credential on every phone while every test stayed green.
+//
 // RelayFallbackFull is RelayFallback extended with header-preserving transport.
 //
 // Most endpoints only need the status and body, which the compact

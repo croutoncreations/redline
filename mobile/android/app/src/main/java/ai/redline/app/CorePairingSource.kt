@@ -70,7 +70,11 @@ class CorePairingSource : PairingSource {
                 // needs the full reply.
                 override fun doFull(method: String, path: String, body: String): String =
                     session().answerFull(method, path, body).also {
-                        Log.i(TAG, "redeem: relay carried $method $path -> ${it.take(40)}")
+                        // Status and size only. The envelope carries the
+                        // Set-Cookie that IS the credential, and a prefix of
+                        // it stayed out of the log only because another
+                        // header happened to sort first.
+                        Log.i(TAG, "redeem: relay carried $method $path -> ${statusOf(it)} (${it.length} chars)")
                     }
             }
             return Core.redeemPairingVia(request.baseUrl, request.pairingToken, fallback).also {
@@ -86,6 +90,10 @@ class CorePairingSource : PairingSource {
 
     private companion object {
         const val TAG = "RedlineRelay"
+
+        /** The status from a full relay envelope, without parsing the rest of it. */
+        fun statusOf(envelope: String): String =
+            Regex("\"status\":(\\d{3})").find(envelope)?.groupValues?.get(1) ?: "?"
     }
 }
 

@@ -287,7 +287,10 @@ func TestRedeemPairingViaDemandsTheFullFallbackByType(t *testing.T) {
 		status: 204,
 		header: http.Header{"Set-Cookie": {"redline_api_session=cred; Path=/"}},
 	}
-	cred, err := redeem("https://10.255.255.1:9", "tok", fallback)
+	// No direct endpoint, so the request goes straight to the fallback. A
+	// black-hole address here proved the same thing twenty seconds slower,
+	// by waiting out the client timeout first.
+	cred, err := redeem("", "tok", fallback)
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}

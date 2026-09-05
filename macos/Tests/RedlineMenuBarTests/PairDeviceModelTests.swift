@@ -37,6 +37,27 @@ struct PairDeviceModelTests {
         }
     }
 
+    /// The poll must end on its own. It normally stops when the service says
+    /// the code is spent or expired -- but with the service down every poll
+    /// fails and is skipped, and the only other exit was the window closing.
+    /// A deadline just past the code's own expiry makes the loop provably
+    /// finite whatever the service does.
+    @Test("Polling gives up a little after the code itself expires")
+    func pollingHasADeadline() {
+        let expires = Date(timeIntervalSince1970: 1_000)
+        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(-60), expiresAt: expires))
+        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(10), expiresAt: expires))
+        #expect(!PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(120), expiresAt: expires))
+    }
+
+    /// A service that sent no expiry still gets a bounded poll.
+    @Test("Polling is bounded even without an expiry from the service")
+    func pollingIsBoundedWithoutAnExpiry() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        #expect(PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(60), expiresAt: nil, started: started))
+        #expect(!PairDeviceModel.shouldKeepPolling(now: started.addingTimeInterval(20 * 60), expiresAt: nil, started: started))
+    }
+
     @Test("The confirmation says how the phone will connect")
     func pairedDescriptionNamesTheRoute() {
         #expect(pairedDescription(routes: [.relay]).contains("relay"))

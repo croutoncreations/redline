@@ -102,7 +102,7 @@ final class PairDeviceModel: ObservableObject {
                 expiresAt: pairing.expiry
             )
             watch = Task { [weak self] in
-                await self?.watchForRedeem(of: pairing.token, routes: pairing.routes)
+                await self?.watchForRedeem(of: pairing.token, routes: pairing.routes, expiresAt: pairing.expiry)
             }
         } catch {
             state = .failed(error.localizedDescription)
@@ -117,8 +117,17 @@ final class PairDeviceModel: ObservableObject {
     /// a response to the scan and slow enough to be nothing to a local
     /// service. A poll that fails is skipped, not fatal: the code is still
     /// good, and a blip on loopback should not take the QR off the screen.
-    private func watchForRedeem(of token: String, routes: [PairingRoute]) async {
-        while !Task.isCancelled {
+    ///
+    /// Bounded by the code's own expiry plus a margin, so the loop ends on its
+    /// own even if the service never answers. Without that, a sheet opened
+    /// while the service was down polled every two seconds until the window
+    /// closed -- with the only guarantee of that being deinit.
+    private func watchForRedeem(of token: String, routes: [PairingRoute], expiresAt: Date?) async {
+        let started = Date()
+        while !Task.isCancelled,
+              PairDeviceModel.shouldKeepPolling(now: Date(), expiresAt: expiresAt, started: started) {
+            // Task.sleep throws on cancellation; that is swallowed here and
+            // read back on the next line, so the two must stay adjacent.
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
             guard let status = try? await client.pairingStatus(of: token) else { continue }
@@ -127,6 +136,25 @@ final class PairDeviceModel: ObservableObject {
                 return
             }
         }
+        // Past the deadline without a verdict: the code is spent by time if
+        // by nothing else, and saying so beats showing it for ever.
+        if !Task.isCancelled {
+            state = .expired
+        }
+    }
+
+    /// Whether the poll should carry on, given the clock.
+    ///
+    /// The code's expiry plus a minute covers a redeem in its last seconds
+    /// that the service still remembers. With no expiry from the service the
+    /// bound falls back to the token's known lifetime plus the same margin,
+    /// measured from when polling began.
+    static func shouldKeepPolling(now: Date, expiresAt: Date?, started: Date = .distantPast) -> Bool {
+        let margin: TimeInterval = 60
+        if let expiresAt {
+            return now < expiresAt.addingTimeInterval(margin)
+        }
+        return now < started.addingTimeInterval(10 * 60 + margin)
     }
 
     /// What a status means for the window, or nil to keep showing the code.
