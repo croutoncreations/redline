@@ -192,7 +192,10 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 		if handshake != nil && handshake.StatusCode == http.StatusPaymentRequired {
 			reason, _ := io.ReadAll(io.LimitReader(handshake.Body, 256))
 			handshake.Body.Close()
-			return nil, fmt.Errorf("%w (relay said: %s)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
+			// Quoted: this is relay-controlled text on its way to a log, and
+			// %q turns an embedded newline into two characters rather than a
+			// forged second line.
+			return nil, fmt.Errorf("%w (relay said: %q)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
 		}
 		// Deliberately not wrapped: the library puts the full URL in its error
 		// and the URL carries the entitlement token.

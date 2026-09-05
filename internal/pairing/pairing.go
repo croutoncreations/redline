@@ -22,10 +22,9 @@ import (
 )
 
 // RelayOnlyHost is the sentinel a relay-only code carries in place of a
-// tailnet host. The phone reads it as "there is no direct endpoint" and goes
-// straight to the relay rather than dialling nothing and waiting for it to
-// time out before every request.
-const RelayOnlyHost = "relay"
+// tailnet host. Defined by the phone's parser, since that is what reads it;
+// re-exported here so callers on this side have one name for it.
+const RelayOnlyHost = core.RelayOnlyHost
 
 // Route names one way a phone can reach the desktop.
 type Route string
@@ -66,6 +65,11 @@ type Code struct {
 	// Endpoint is the direct host:port the code names, or empty for a
 	// relay-only code.
 	Endpoint string
+	// Notice is something the caller should tell the user that did not stop a
+	// code from being produced. Today: tailnet detection failed and a trusted
+	// host or the relay was used instead, so the code is fine but Tailscale
+	// on this machine may not be.
+	Notice string
 }
 
 // Compose builds the pairing code for token against this configuration.
@@ -98,7 +102,7 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 	}
 	hasRelay := relayURL != "" && desktopKey != "" && sessionID != ""
 
-	host, port, err := chooseDirect(cfg, options, hasRelay)
+	host, port, notice, err := chooseDirect(cfg, options, hasRelay)
 	if err != nil {
 		return Code{}, err
 	}
@@ -106,7 +110,7 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 		return Code{}, ErrNoRoute
 	}
 
-	code := Code{}
+	code := Code{Notice: notice}
 	qrHost := host
 	if host != "" {
 		code.Routes = append(code.Routes, RouteDirect)
@@ -125,55 +129,65 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 	return code, nil
 }
 
-// chooseDirect picks the tailnet endpoint, or none.
+// chooseDirect picks the tailnet endpoint, or none, and says if anything
+// worth mentioning happened on the way.
 //
-// A trusted host may carry its own port ("name.ts.net:8443"), which is how a
-// Tailscale Serve front end off 443 is written down; that port wins over the
-// option, because the option is a default and the config is a fact.
-func chooseDirect(cfg config.Config, options Options, hasRelay bool) (string, int, error) {
+// Precedence: an explicit host, then a detected tailnet name that is trusted,
+// then the first trusted host. A trusted host may carry its own port
+// ("name.ts.net:8443"), which is how a Tailscale Serve front end off 443 is
+// written down; that port wins over the option, because the option is a
+// default and the config is a fact.
+func chooseDirect(cfg config.Config, options Options, hasRelay bool) (host string, port int, notice string, err error) {
 	if options.RelayOnly {
-		return "", 0, nil
+		return "", 0, "", nil
 	}
-	port := options.Port
+	port = options.Port
 	if port == 0 {
 		port = 443
 	}
 	if options.Host != "" {
-		host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(options.Host), "."))
-		trustedHost, trustedPort, ok := trusted(cfg, host)
+		wanted := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(options.Host), "."))
+		trustedHost, trustedPort, ok := trusted(cfg, wanted)
 		if !ok {
-			return "", 0, errors.New("host " + strconv.Quote(host) + " is not listed in api.trusted_hosts")
+			return "", 0, "", errors.New("host " + strconv.Quote(wanted) + " is not listed in api.trusted_hosts")
 		}
-		if trustedPort != 0 {
-			port = trustedPort
-		}
-		return trustedHost, port, nil
+		return trustedHost, portOr(trustedPort, port), "", nil
 	}
 	if options.DetectHost != nil {
-		detected, err := options.DetectHost()
-		if err != nil && !hasRelay && len(cfg.API.TrustedHosts) == 0 {
-			return "", 0, err
-		}
-		if err == nil {
+		detected, detectErr := options.DetectHost()
+		if detectErr == nil {
 			if trustedHost, trustedPort, ok := trusted(cfg, detected); ok {
-				if trustedPort != 0 {
-					port = trustedPort
-				}
-				return trustedHost, port, nil
+				return trustedHost, portOr(trustedPort, port), "", nil
 			}
+		} else if len(cfg.API.TrustedHosts) == 0 && !hasRelay {
+			// Nothing to fall back to, so the detection failure is the answer.
+			return "", 0, "", detectErr
+		} else {
+			// A code can still be produced, so this is not a failure -- but
+			// the reason detection failed is usually "Tailscale is not
+			// running", which the person about to scan a tailnet code would
+			// want to know. Dropping it here is how a real fault hides behind
+			// a working fallback.
+			notice = "could not detect the Tailscale name (" + detectErr.Error() + "); using the configured host"
 		}
 	}
 	for _, entry := range cfg.API.TrustedHosts {
-		host, entryPort := splitHostPort(entry)
-		if host == "" {
+		entryHost, entryPort := splitHostPort(entry)
+		if entryHost == "" {
 			continue
 		}
-		if entryPort != 0 {
-			port = entryPort
-		}
-		return host, port, nil
+		return entryHost, portOr(entryPort, port), notice, nil
 	}
-	return "", 0, nil
+	return "", 0, notice, nil
+}
+
+// portOr returns the port a trusted-host entry named, or the default when it
+// named none.
+func portOr(fromEntry, fallback int) int {
+	if fromEntry != 0 {
+		return fromEntry
+	}
+	return fallback
 }
 
 // trusted reports whether host is in api.trusted_hosts, and the port that

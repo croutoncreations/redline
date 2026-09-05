@@ -43,8 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showAppSetup: { [weak self, weak installation] in
                 if let installation { installation.presentSetup() }
                 else { self?.presentInstallationFailure() }
-            },
-            configURL: configURL
+            }
         )
         installation?.onMigrationCompleted = { [weak controller] in
             await controller?.reconnectAfterServiceMigration()

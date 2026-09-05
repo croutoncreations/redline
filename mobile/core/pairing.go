@@ -136,7 +136,16 @@ func recoverBase64Plus(value string) string {
 // A relay-only QR has the shape https://relay/pair#... so that the URL is
 // valid and scannable by any camera, while the phone knows not to attempt a
 // direct connection. Any other hostname is treated as the tailnet address.
-const relayOnlyHost = "relay"
+// RelayOnlyHost is the host a relay-only pairing code carries in place of a
+// tailnet name. It means "there is no direct endpoint": the phone stores no
+// base URL and goes straight to the relay, rather than dialling nothing and
+// waiting for it to time out before every request.
+//
+// A wire contract, so defined once. The desktop side that composes the code
+// (internal/pairing) imports this rather than spelling it again; a bare label
+// with no dot can never pass the trusted-host validator, which is what makes
+// it safe as a sentinel.
+const RelayOnlyHost = "relay"
 
 func ParsePairingURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
@@ -160,7 +169,7 @@ func ParsePairingURL(raw string) (string, error) {
 	// publish. The phone stores an empty base URL so Client skips the direct
 	// attempt rather than waiting for a 20-second dial timeout before each
 	// relayed request.
-	isRelayOnly := strings.EqualFold(parsed.Hostname(), relayOnlyHost)
+	isRelayOnly := strings.EqualFold(parsed.Hostname(), RelayOnlyHost)
 
 	// Parsed from the escaped fragment, the text as it appeared in the code.
 	//

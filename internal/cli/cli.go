@@ -836,6 +836,9 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
+	if code.Notice != "" {
+		fmt.Fprintln(stderr, "note:", code.Notice)
+	}
 
 	// Says exactly which routes the code offers, because "from a device on
 	// your tailnet" was wrong for two of the three.

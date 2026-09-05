@@ -12,11 +12,9 @@ import SwiftUI
 final class PairDeviceWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let client: RedlineAPIClient
-    private let configURL: URL
 
-    init(client: RedlineAPIClient, configURL: URL) {
+    init(client: RedlineAPIClient) {
         self.client = client
-        self.configURL = configURL
     }
 
     func show() {
@@ -26,7 +24,7 @@ final class PairDeviceWindowController: NSObject, NSWindowDelegate {
             return
         }
 
-        let model = PairDeviceModel(client: client, configURL: configURL)
+        let model = PairDeviceModel(client: client)
         let hosting = NSHostingController(rootView: PairDeviceView(model: model))
         let window = NSWindow(contentViewController: hosting)
         window.title = "Pair a device"
@@ -61,11 +59,9 @@ final class PairDeviceModel: ObservableObject {
     @Published private(set) var state: State = .loading
 
     private let client: RedlineAPIClient
-    private let configURL: URL
 
-    init(client: RedlineAPIClient, configURL: URL) {
+    init(client: RedlineAPIClient) {
         self.client = client
-        self.configURL = configURL
     }
 
     /// Asks the service for a code and shows exactly what it was handed.

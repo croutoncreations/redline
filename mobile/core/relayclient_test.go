@@ -364,6 +364,39 @@ func TestDialRelayReportsAnEntitlementRefusalAsItsOwnThing(t *testing.T) {
 	if strings.Contains(strings.ToLower(err.Error()), "connect failed") {
 		t.Errorf("a 402 must not read as a connection failure: %v", err)
 	}
+	// The relay's own reason travels with the error. Missing, malformed, bad
+	// signature and expired all used to arrive as one sentence, and telling
+	// them apart is what a day of diagnosis came down to.
+	if !strings.Contains(err.Error(), "this relay requires an entitlement") {
+		t.Errorf("the relay's reason must reach the caller, got: %v", err)
+	}
+}
+
+// The reason is relay-controlled text on its way to a log. Bound its size, and
+// quote it so an embedded newline or escape cannot forge a second log line.
+func TestDialRelayBoundsAndQuotesTheRefusalReason(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte("line one\nW RedlineRelay: forged line " + strings.Repeat("x", 1000)))
+	}))
+	defer relay.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"tok",
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Errorf("a raw newline from the relay reached the error: %q", msg)
+	}
+	if len(msg) > 400 {
+		t.Errorf("the reason was not bounded: %d bytes", len(msg))
+	}
 }
 
 // Everything that is not a 402 stays a plain connection failure, so a real

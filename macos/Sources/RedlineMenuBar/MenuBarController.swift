@@ -6,7 +6,6 @@ final class MenuBarController: NSObject {
     private let client: RedlineAPIClient
     private let supervisor: ServiceSupervisor
     private let showAppSetup: @MainActor () -> Void
-    private let configURL: URL
     private let installationIssue: @MainActor () -> InstallationIssue?
     private let statusItem: NSStatusItem
     private let popoverModel: PopoverViewModel
@@ -23,7 +22,7 @@ final class MenuBarController: NSObject {
         )
     )
     private lazy var runLogWindow = RunLogWindowController(client: client)
-    private lazy var pairDeviceWindow = PairDeviceWindowController(client: client, configURL: configURL)
+    private lazy var pairDeviceWindow = PairDeviceWindowController(client: client)
     private lazy var notifications = NativeNotificationController(
         onOpenRun: { [weak self] runID in self?.openRun(runID) }
     )
@@ -49,15 +48,13 @@ final class MenuBarController: NSObject {
         apiToken: String,
         supervisor: ServiceSupervisor,
         installationIssue: @escaping @MainActor () -> InstallationIssue? = { nil },
-        showAppSetup: @escaping @MainActor () -> Void = {},
-        configURL: URL
+        showAppSetup: @escaping @MainActor () -> Void = {}
     ) {
         client = RedlineAPIClient(baseURL: apiURL, token: apiToken)
         dashboardURL = APICredentialStore.authenticatedDashboardURL(baseURL: apiURL, token: apiToken)
         self.supervisor = supervisor
         self.installationIssue = installationIssue
         self.showAppSetup = showAppSetup
-        self.configURL = configURL
         popoverModel = PopoverViewModel(client: client)
         updates = NativeUpdateController()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

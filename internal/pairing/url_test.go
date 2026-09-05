@@ -1,8 +1,11 @@
 package pairing
 
 import (
+	"encoding/json"
 	"net/url"
 	"testing"
+
+	core "github.com/jfox/redline/mobile/core"
 )
 
 func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
@@ -182,5 +185,70 @@ func TestMobilePairingURLPublishesRelayWithoutEntitlement(t *testing.T) {
 	// Entitlement must be absent (not an empty value, absent).
 	if _, ok := fields["entitlement"]; ok {
 		t.Errorf("entitlement should be absent for self-hosted relay, got %q", fields.Get("entitlement"))
+	}
+}
+
+// Compose on the desktop, parse on the phone, compare.
+//
+// The double-decode bug lived between two suites that each passed: the
+// desktop's tests checked the URL it wrote, the phone's checked the URL it
+// read, and neither fed one to the other. Every '+' in a base64 value was lost
+// on the way across. This is the test that would have failed.
+func TestWhatTheDesktopComposesIsWhatThePhoneReads(t *testing.T) {
+	cases := map[string]struct {
+		host, relay, key, session, entitlement string
+	}{
+		"tailnet and relay": {
+			host: "macbook.example.ts.net", relay: "https://relay.example",
+			key: "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E=", session: "session-0123456789abcdefghijkl",
+			entitlement: "eyJleHAiOjF9.T1jh+dnP/igZ0kpVoQFJ2+/==",
+		},
+		"relay only": {
+			host: RelayOnlyHost, relay: "https://relay.example",
+			key: "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E=", session: "session-0123456789abcdefghijkl",
+			entitlement: "eyJleHAiOjF9.T1jh+dnP/igZ0kpVoQFJ2+/==",
+		},
+		"relay only, self-hosted, no entitlement": {
+			host: RelayOnlyHost, relay: "https://relay.example",
+			key: "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E=", session: "session-0123456789abcdefghijkl",
+		},
+		"tailnet only": {host: "macbook.example.ts.net"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			composed := URL(c.host, 8443, "one-time-token", c.relay, c.key, c.session, c.entitlement)
+
+			parsed, err := core.ParsePairingURL(composed)
+			if err != nil {
+				t.Fatalf("the phone refused what the desktop composed: %v\n%s", err, composed)
+			}
+			var read struct {
+				BaseURL     string `json:"base_url"`
+				Token       string `json:"pairing_token"`
+				Relay       string `json:"relay_url"`
+				Key         string `json:"desktop_key"`
+				Session     string `json:"relay_session"`
+				Entitlement string `json:"entitlement_token"`
+			}
+			if err := json.Unmarshal([]byte(parsed), &read); err != nil {
+				t.Fatal(err)
+			}
+
+			wantBase := "https://" + c.host + ":8443"
+			if c.host == RelayOnlyHost {
+				wantBase = ""
+			}
+			if read.BaseURL != wantBase {
+				t.Errorf("base_url = %q, want %q", read.BaseURL, wantBase)
+			}
+			if read.Token != "one-time-token" {
+				t.Errorf("token = %q", read.Token)
+			}
+			if read.Relay != c.relay || read.Key != c.key || read.Session != c.session || read.Entitlement != c.entitlement {
+				t.Errorf("relay fields did not survive the trip:\n got  %q %q %q %q\n want %q %q %q %q",
+					read.Relay, read.Key, read.Session, read.Entitlement,
+					c.relay, c.key, c.session, c.entitlement)
+			}
+		})
 	}
 }

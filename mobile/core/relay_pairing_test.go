@@ -11,6 +11,7 @@ package core
 // the subagent report.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -226,4 +227,44 @@ func (f *fullFallback) DoFull(method, path, body string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// The full envelope carries the desktop's headers so the pairing cookie can
+// cross the relay. It must not carry the ones that describe a wire the body
+// no longer travelled on: the body was re-serialised into JSON, so the
+// desktop's Content-Length is wrong, and Transfer-Encoding and Connection
+// describe a hop that does not exist here. Nothing reads them today; the
+// point is that nothing ever can.
+func TestRelayFullResponseKeepsOnlyTheHeadersThatStillMeanSomething(t *testing.T) {
+	fallback := &fullFallback{
+		status: 204,
+		header: http.Header{
+			"Set-Cookie":        {"redline_api_session=cred; Path=/"},
+			"Content-Type":      {"application/json"},
+			"Content-Length":    {"9999"},
+			"Transfer-Encoding": {"chunked"},
+			"Connection":        {"keep-alive"},
+			"X-Anything":        {"else"},
+		},
+	}
+	client := NewClient("", "")
+	client.SetRelayFallback(fallback)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	response, err := client.doCapturingResponse(ctx, http.MethodPost, "/v1/pairing/redeem", map[string]string{"pairing_token": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Header.Get("Set-Cookie"); !strings.Contains(got, "redline_api_session=cred") {
+		t.Errorf("the cookie is the whole point and was dropped: %q", got)
+	}
+	if response.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type should survive: %q", response.Header.Get("Content-Type"))
+	}
+	for _, dropped := range []string{"Content-Length", "Transfer-Encoding", "Connection", "X-Anything"} {
+		if v := response.Header.Get(dropped); v != "" {
+			t.Errorf("%s = %q should not have crossed the relay", dropped, v)
+		}
+	}
 }

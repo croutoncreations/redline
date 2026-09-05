@@ -213,12 +213,22 @@ func validTrustedHost(host string, relayEnabled bool) bool {
 	// service composes the pairing code and has to know; the request-matching
 	// side already ignored a port here. Split before the host checks so a
 	// port cannot smuggle a bad host past them.
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		port, err := strconv.Atoi(host[i+1:])
+	//
+	// net.SplitHostPort rather than a hand-rolled split on the last colon:
+	// the pairing package splits entries the same way, and the two must agree
+	// on what an entry means or the validator admits what the composer cannot
+	// read. It also handles a bracketed IPv6 literal, which then fails the IP
+	// check below for the right reason.
+	if strings.Contains(host, ":") {
+		bare, portText, err := net.SplitHostPort(host)
+		if err != nil {
+			return false
+		}
+		port, err := strconv.Atoi(portText)
 		if err != nil || port < 1 || port > 65535 {
 			return false
 		}
-		host = host[:i]
+		host = bare
 	}
 	if net.ParseIP(host) != nil {
 		return false

@@ -362,9 +362,17 @@ func (c *Client) relayRequestFull(full RelayFallbackFull, method, path, encoded 
 	if env.Status < 100 || env.Status > 599 {
 		return nil, fmt.Errorf("relay full response has invalid status %d", env.Status)
 	}
-	hdr := env.Header
-	if hdr == nil {
-		hdr = http.Header{}
+	// Only the headers that still mean something after the trip. The body
+	// was re-serialised into a JSON envelope, so the desktop's Content-Length
+	// is a lie; Transfer-Encoding and Connection describe a hop that does not
+	// exist here. An allowlist rather than a hop-by-hop blocklist, because
+	// the one consumer needs exactly one header and a future one that wants
+	// more should have to say so.
+	hdr := http.Header{}
+	for _, name := range relayedResponseHeaders {
+		if values := env.Header.Values(name); len(values) > 0 {
+			hdr[name] = values
+		}
 	}
 	if hdr.Get("Content-Type") == "" {
 		hdr.Set("Content-Type", "application/json")
@@ -375,6 +383,11 @@ func (c *Client) relayRequestFull(full RelayFallbackFull, method, path, encoded 
 		Header:     hdr,
 	}, nil
 }
+
+// relayedResponseHeaders is what a relayed reply may carry back to a caller.
+// Set-Cookie is how pairing delivers the credential; Content-Type tells the
+// decoder what the body is.
+var relayedResponseHeaders = []string{"Set-Cookie", "Content-Type"}
 
 // errorFromResponse turns a non-2xx into an apiError carrying the service's own
 // explanation, so the UI can show why rather than a bare status code.
