@@ -85,7 +85,18 @@ type Server struct {
 	started      bool
 	pairingMu    sync.Mutex
 	pairing      map[string]time.Time
+	// redeemed remembers a spent token for a short while after the fact, so
+	// the surface that showed the code can learn the phone got in. Without
+	// this a redeem was a deletion and nothing more: the sheet kept showing
+	// a dead code and had no way to say "paired".
+	redeemed map[string]time.Time
 }
+
+// redeemedMemory is how long a spent token stays reportable as redeemed.
+// Longer than the sheet's poll interval by a wide margin, and long enough
+// that a redeem in the token's last second is not read as an expiry by the
+// next poll; short enough that the map cannot grow without bound.
+const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
@@ -189,6 +200,7 @@ func newServer(
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
 		pairing:   make(map[string]time.Time),
+		redeemed:  make(map[string]time.Time),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -215,6 +227,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
@@ -345,11 +358,7 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, expiry := range s.pairing {
-		if !expiry.After(s.now()) {
-			delete(s.pairing, existing)
-		}
-	}
+	s.sweepPairingLocked()
 	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
 
@@ -393,7 +402,59 @@ func (s *Server) consumePairingToken(token string) bool {
 	if ok {
 		delete(s.pairing, token)
 	}
-	return ok && expiresAt.After(s.now())
+	live := ok && expiresAt.After(s.now())
+	if live {
+		s.redeemed[token] = s.now().Add(redeemedMemory)
+	}
+	return live
+}
+
+// sweepPairingLocked forgets tokens and redeem records that are past their
+// time. Called under pairingMu wherever the maps are written.
+func (s *Server) sweepPairingLocked() {
+	now := s.now()
+	for token, expiry := range s.pairing {
+		if !expiry.After(now) {
+			delete(s.pairing, token)
+		}
+	}
+	for token, until := range s.redeemed {
+		if !until.After(now) {
+			delete(s.redeemed, token)
+		}
+	}
+}
+
+// pairingStatus reports where a pairing token is in its life: pending,
+// redeemed, or expired (which also covers "never issued" -- the two are
+// indistinguishable and the remedy is the same, a new code).
+//
+// The token travels in a header. It is a full-access credential for ten
+// minutes, and a path or query string lands in access logs. The caller must
+// also hold the API token: knowing a pairing token is meant to let a phone
+// spend it, not to unlock questions on the desktop.
+func (s *Server) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.Header.Get("X-Redline-Pairing-Token"))
+	if token == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "X-Redline-Pairing-Token header is required"})
+		return
+	}
+	s.pairingMu.Lock()
+	s.sweepPairingLocked()
+	_, pending := s.pairing[token]
+	_, redeemed := s.redeemed[token]
+	s.pairingMu.Unlock()
+
+	status := "expired"
+	switch {
+	case redeemed:
+		status = "redeemed"
+	case pending:
+		status = "pending"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: status})
 }
 
 func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {

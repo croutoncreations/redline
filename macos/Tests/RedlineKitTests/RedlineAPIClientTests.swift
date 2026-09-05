@@ -180,6 +180,47 @@ final class PairingRelayOnlyStub: URLProtocol {
     override func stopLoading() {}
 }
 
+/// Answers GET /v1/pairing/status with "redeemed" and records what it was asked.
+final class PairingStatusStub: URLProtocol {
+    nonisolated(unsafe) static var sawHeader: String?
+    nonisolated(unsafe) static var sawPath: String?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        PairingStatusStub.sawHeader = request.value(forHTTPHeaderField: "X-Redline-Pairing-Token")
+        PairingStatusStub.sawPath = request.url?.path
+        let body = Data(#"{"status":"redeemed"}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// Answers with a status this build has never heard of.
+final class PairingUnknownStatusStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(#"{"status":"something-new"}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 /// A stub that always answers 401.
 final class PairingUnauthorizedStub: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -272,6 +313,38 @@ final class PairingUnauthorizedStub: URLProtocol {
     #expect(pairing.routes == [.relay])
     #expect(pairing.endpoint == nil)
     #expect(pairing.pairingURL?.hasPrefix("https://relay/pair#") == true)
+}
+
+/// The sheet asks whether its code has been scanned, sending the pairing token
+/// in a header rather than the URL so it stays out of access logs.
+@Test func apiClientAsksForPairingStatusWithTheTokenInAHeader() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PairingStatusStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+
+    let status = try await client.pairingStatus(of: "8G-y7DyZw3yx")
+    #expect(status == .redeemed)
+    #expect(PairingStatusStub.sawHeader == "8G-y7DyZw3yx")
+    #expect(PairingStatusStub.sawPath == "/v1/pairing/status")
+}
+
+/// A status this client does not know is reported as expired, not as a crash:
+/// the remedy -- offer a new code -- is the same.
+@Test func apiClientTreatsAnUnknownPairingStatusAsExpired() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    // Its own stub: tests run in parallel, and a status shared through a
+    // static on one stub class is a race between them.
+    configuration.protocolClasses = [PairingUnknownStatusStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+    #expect(try await client.pairingStatus(of: "x") == .expired)
 }
 
 /// A genuine failure must still be reported rather than swallowed by a wider

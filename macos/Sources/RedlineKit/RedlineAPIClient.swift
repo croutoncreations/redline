@@ -79,6 +79,24 @@ public struct RedlineAPIClient: Sendable {
         try await request(baseURL.appending(path: "v1/pairing"), method: "POST", as: PairingToken.self)
     }
 
+    /// Where a pairing code is in its life, so the sheet can stop showing a
+    /// spent one and say the phone got in.
+    ///
+    /// The pairing token goes in a header: it is a full-access credential for
+    /// ten minutes, and a path or query string lands in access logs.
+    public func pairingStatus(of pairingToken: String) async throws -> PairingStatus {
+        let answer: PairingStatusAnswer = try await request(
+            baseURL.appending(path: "v1/pairing/status"),
+            method: "GET",
+            as: PairingStatusAnswer.self,
+            headers: ["X-Redline-Pairing-Token": pairingToken]
+        )
+        // Anything this build does not recognise reads as expired: the remedy
+        // -- offer a new code -- is the same, and a newer service must not be
+        // able to wedge an older sheet.
+        return PairingStatus(rawValue: answer.status) ?? .expired
+    }
+
     public func markAllRunsRead() async throws {
         _ = try await request(endpoint(["v1", "runs", "read-all"]), method: "POST", as: ReadResult.self)
     }
@@ -98,11 +116,16 @@ public struct RedlineAPIClient: Sendable {
         return URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + encoded.joined(separator: "/"))!
     }
 
-    private func request<T: Decodable>(_ url: URL, method: String, as type: T.Type) async throws -> T {
+    private func request<T: Decodable>(
+        _ url: URL, method: String, as type: T.Type, headers: [String: String] = [:]
+    ) async throws -> T {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         if method == "POST" {
             request.httpBody = Data("{}".utf8)
@@ -121,6 +144,19 @@ public struct RedlineAPIClient: Sendable {
 }
 
 private struct ReadResult: Codable { let read: Bool }
+
+private struct PairingStatusAnswer: Codable { let status: String }
+
+/// Where a pairing code is in its life.
+public enum PairingStatus: String, Sendable {
+    /// Minted, not yet scanned.
+    case pending
+    /// A phone spent it and holds the credential.
+    case redeemed
+    /// Past its ten minutes, or never issued; either way, a new code is the
+    /// answer.
+    case expired
+}
 
 /// A way a phone can reach the desktop, as the service names them.
 ///

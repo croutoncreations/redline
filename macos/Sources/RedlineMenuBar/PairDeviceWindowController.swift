@@ -53,15 +53,25 @@ final class PairDeviceModel: ObservableObject {
     enum State {
         case loading
         case ready(url: String, routes: [PairingRoute], endpoint: String?, expiresAt: Date?)
+        /// A phone spent the code and holds the credential.
+        case paired(routes: [PairingRoute])
+        /// The code ran out unscanned. Distinct from failed: nothing is wrong,
+        /// the person just needs a fresh one.
+        case expired
         case failed(String)
     }
 
     @Published private(set) var state: State = .loading
 
     private let client: RedlineAPIClient
+    private var watch: Task<Void, Never>?
 
     init(client: RedlineAPIClient) {
         self.client = client
+    }
+
+    deinit {
+        watch?.cancel()
     }
 
     /// Asks the service for a code and shows exactly what it was handed.
@@ -72,6 +82,7 @@ final class PairDeviceModel: ObservableObject {
     /// and this did not, so every phone paired from here had no relay and no
     /// way to know. Reading YAML for a host is no longer this window's job.
     func load() async {
+        watch?.cancel()
         state = .loading
         do {
             let pairing = try await client.createPairingToken()
@@ -90,8 +101,43 @@ final class PairDeviceModel: ObservableObject {
                 endpoint: pairing.endpoint,
                 expiresAt: pairing.expiry
             )
+            watch = Task { [weak self] in
+                await self?.watchForRedeem(of: pairing.token, routes: pairing.routes)
+            }
         } catch {
             state = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Polls until the code is spent or runs out, then says which.
+    ///
+    /// A scanned code is dead -- the token is single-use -- so leaving it on
+    /// screen after the phone got in shows something useless and says nothing
+    /// about whether pairing worked. Two seconds is quick enough to feel like
+    /// a response to the scan and slow enough to be nothing to a local
+    /// service. A poll that fails is skipped, not fatal: the code is still
+    /// good, and a blip on loopback should not take the QR off the screen.
+    private func watchForRedeem(of token: String, routes: [PairingRoute]) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { return }
+            guard let status = try? await client.pairingStatus(of: token) else { continue }
+            if let next = PairDeviceModel.stateAfter(status: status, routes: routes) {
+                state = next
+                return
+            }
+        }
+    }
+
+    /// What a status means for the window, or nil to keep showing the code.
+    ///
+    /// Separate from the polling so the rule is testable without a window or
+    /// a clock.
+    static func stateAfter(status: PairingStatus, routes: [PairingRoute]) -> State? {
+        switch status {
+        case .pending: return nil
+        case .redeemed: return .paired(routes: routes)
+        case .expired: return .expired
         }
     }
 }
@@ -113,6 +159,25 @@ func pairingRouteDescription(routes: [PairingRoute], endpoint: String?) -> Strin
         return "Pairs over the relay only — no Tailscale needed"
     case (false, false):
         return ""
+    }
+}
+
+/// What to tell someone whose phone just got in.
+///
+/// Names the route so a relay-only pairing is seen for what it is: expected,
+/// working, and metered.
+func pairedDescription(routes: [PairingRoute]) -> String {
+    let direct = routes.contains(.direct)
+    let relay = routes.contains(.relay)
+    switch (direct, relay) {
+    case (true, true):
+        return "Your phone can reach Redline over your tailnet, and through the relay when it is away from it."
+    case (true, false):
+        return "Your phone can reach Redline over your tailnet."
+    case (false, true):
+        return "Your phone reaches Redline through the relay."
+    case (false, false):
+        return "Your phone is connected."
     }
 }
 
@@ -164,6 +229,38 @@ private struct PairDeviceView: View {
 
                 Button("New code") { Task { await model.load() } }
                     .buttonStyle(.bordered)
+
+            case .paired(let routes):
+                Spacer()
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.green)
+                Text("Paired")
+                    .font(.system(size: 17, weight: .semibold))
+                Text(pairedDescription(routes: routes))
+                    .font(.system(size: 12))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                // The code that was here is spent, so there is nothing to go
+                // back to; the only forward action is another device.
+                Button("Pair another device") { Task { await model.load() } }
+                    .buttonStyle(.bordered)
+                Spacer()
+
+            case .expired:
+                Spacer()
+                Image(systemName: "clock.badge.xmark")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.secondary)
+                Text("That code has expired")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Codes last ten minutes. Nothing went wrong -- just make a new one.")
+                    .font(.system(size: 12))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button("New code") { Task { await model.load() } }
+                    .buttonStyle(.borderedProminent)
+                Spacer()
 
             case .failed(let message):
                 Spacer()

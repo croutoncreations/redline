@@ -226,3 +226,123 @@ func TestTrustedHostWithAPortStillAdmitsRequests(t *testing.T) {
 		}
 	}
 }
+
+// The pairing sheet asks whether its code has been used.
+//
+// A scanned code is spent -- the token is single-use -- so leaving the QR on
+// screen after a successful scan shows a dead code and says nothing about
+// whether the phone got in. The sheet polls this and swaps the code for a
+// confirmation the moment the redeem lands.
+func pairingStatus(t *testing.T, handler http.Handler, cfg config.Config, pairingToken string) (int, string) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7436/v1/pairing/status", nil)
+	request.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	// In a header rather than the path or query: the token is a full-access
+	// credential for the next ten minutes, and paths land in access logs.
+	request.Header.Set("X-Redline-Pairing-Token", pairingToken)
+	request.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, request)
+	var body struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder.Code, body.Status
+}
+
+func redeem(t *testing.T, handler http.Handler, pairingToken string) int {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	body := strings.NewReader(`{"pairing_token":"` + pairingToken + `"}`)
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7436/v1/pairing/redeem", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, request)
+	return recorder.Code
+}
+
+func TestPairingStatusFollowsTheTokenThroughItsLife(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := pairingHandler(t, cfg)
+
+	_, minted := createPairing(t, handler, cfg, "")
+	token := minted["pairing_token"].(string)
+
+	if code, status := pairingStatus(t, handler, cfg, token); code != http.StatusOK || status != "pending" {
+		t.Fatalf("fresh token: %d %q, want 200 pending", code, status)
+	}
+	if code := redeem(t, handler, token); code != http.StatusNoContent {
+		t.Fatalf("redeem: %d", code)
+	}
+	if code, status := pairingStatus(t, handler, cfg, token); code != http.StatusOK || status != "redeemed" {
+		t.Fatalf("after redeem: %d %q, want 200 redeemed", code, status)
+	}
+}
+
+// A token the service never issued, or has forgotten, is reported as such --
+// not as "pending", which would leave the sheet waiting forever.
+func TestPairingStatusOfAnUnknownTokenIsExpired(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := pairingHandler(t, cfg)
+
+	if code, status := pairingStatus(t, handler, cfg, "never-issued"); code != http.StatusOK || status != "expired" {
+		t.Fatalf("unknown token: %d %q, want 200 expired", code, status)
+	}
+}
+
+// Asking about a code requires the desktop's own credential, like minting one.
+// The pairing token alone must not be enough: it is meant to be spent by a
+// phone, not to unlock questions on the desktop.
+func TestPairingStatusRequiresTheAPIToken(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	handler := pairingHandler(t, cfg)
+	_, minted := createPairing(t, handler, cfg, "")
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7436/v1/pairing/status", nil)
+	request.Header.Set("X-Redline-Pairing-Token", minted["pairing_token"].(string))
+	request.RemoteAddr = "127.0.0.1:54321"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status without the API token: %d", recorder.Code)
+	}
+}
+
+// Redeemed is remembered past the token's own expiry, or a redeem in the last
+// second races the sheet's next poll and reads as expired.
+func TestPairingStatusRemembersARedeemAfterTheTokenWouldHaveExpired(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	current := apiNow
+	handler := api.NewServer(cfg, db, func() time.Time { return current })
+
+	_, minted := createPairing(t, handler, cfg, "")
+	token := minted["pairing_token"].(string)
+	// Redeemed just inside the ten minutes.
+	current = apiNow.Add(9*time.Minute + 59*time.Second)
+	if code := redeem(t, handler, token); code != http.StatusNoContent {
+		t.Fatalf("redeem: %d", code)
+	}
+	// The sheet polls a few seconds later, after the token's own expiry.
+	current = apiNow.Add(10*time.Minute + 5*time.Second)
+	if _, status := pairingStatus(t, handler, cfg, token); status != "redeemed" {
+		t.Fatalf("a redeem must be remembered past expiry, got %q", status)
+	}
+	// But not forever.
+	current = apiNow.Add(12 * time.Minute)
+	if _, status := pairingStatus(t, handler, cfg, token); status != "expired" {
+		t.Fatalf("a redeem is remembered for a minute, not for good; got %q", status)
+	}
+}
