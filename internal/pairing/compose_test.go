@@ -55,3 +55,22 @@ func TestComposeReturnsTheDetectionErrorWhenItIsAllThereIs(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// Without a detector there is nothing to fail, so nothing to notice. The
+// service composes codes without one -- it has no tailnet CLI to ask and no
+// terminal to print a note on -- and so it never has a Notice to surface. The
+// menu-bar sheet is correct not to look for one. If the service ever gains a
+// detector, this test is the reminder that the response and the sheet need a
+// place for what it says.
+func TestComposeWithoutADetectorNeverHasANotice(t *testing.T) {
+	cfg := config.Config{}
+	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
+
+	code, err := Compose(cfg, "tok", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code.Notice != "" {
+		t.Errorf("a notice with no detector to fail: %q", code.Notice)
+	}
+}

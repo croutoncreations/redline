@@ -377,7 +377,8 @@ func TestDialRelayReportsAnEntitlementRefusalAsItsOwnThing(t *testing.T) {
 func TestDialRelayBoundsAndQuotesTheRefusalReason(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)
-		w.Write([]byte("line one\nW RedlineRelay: forged line " + strings.Repeat("x", 1000)))
+		// Newlines to forge a line, and bytes %q must escape at full width.
+		w.Write([]byte("line one\nW RedlineRelay: forged line " + strings.Repeat("\x00", 1000)))
 	}))
 	defer relay.Close()
 
@@ -394,7 +395,10 @@ func TestDialRelayBoundsAndQuotesTheRefusalReason(t *testing.T) {
 	if strings.Contains(msg, "\n") {
 		t.Errorf("a raw newline from the relay reached the error: %q", msg)
 	}
-	if len(msg) > 400 {
+	// The reader takes 256 bytes and %q can spend four characters on each of
+	// them, so the honest ceiling is a little over 1KB -- still a bound, and
+	// still one log line.
+	if len(msg) > 1200 {
 		t.Errorf("the reason was not bounded: %d bytes", len(msg))
 	}
 }
