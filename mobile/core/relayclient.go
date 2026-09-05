@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -172,11 +173,15 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 		// look at their wifi when the remedy is to renew. That is the message
 		// every lapsed subscriber will see, so it has to be its own thing.
 		//
-		// The status only; the relay's wording is not surfaced, because it
-		// comes from the relay rather than the desktop and nothing downstream
-		// should start depending on it.
+		// The relay's own reason travels in the 402 body: missing, malformed,
+		// bad signature, or expired. Attached so a log can tell those apart
+		// -- one of them cost a full day to diagnose while every client
+		// showed the same words. errors.Is still matches the sentinel, so
+		// nothing downstream branches on the wording.
 		if handshake != nil && handshake.StatusCode == http.StatusPaymentRequired {
-			return nil, ErrEntitlementRefused
+			reason, _ := io.ReadAll(io.LimitReader(handshake.Body, 256))
+			handshake.Body.Close()
+			return nil, fmt.Errorf("%w (relay said: %s)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
 		}
 		// Deliberately not wrapped: the library puts the full URL in its error
 		// and the URL carries the entitlement token.

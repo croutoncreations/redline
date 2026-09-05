@@ -1,5 +1,6 @@
 package ai.redline.app
 
+import android.util.Log
 import core.Client
 import core.Core
 
@@ -23,6 +24,10 @@ import core.Core
  * an encrypted session, which removes the question.
  */
 class CoreClientHolder(private val settings: RedlineSettings) {
+
+    private companion object {
+        const val TAG = "RedlineRelay"
+    }
 
     private var cached: Client? = null
     private var credentials: Pair<String, String>? = null
@@ -63,7 +68,11 @@ class CoreClientHolder(private val settings: RedlineSettings) {
      */
     private inner class RelayFallback : core.RelayFallback {
         override fun do_(method: String, path: String, body: String): String {
-            val relay = relayClient() ?: throw IllegalStateException("no relay is paired")
+            val relay = relayClient()
+            if (relay == null) {
+                Log.w(TAG, "relay fallback for $method $path: nothing to dial (configured=${settings.relayConfigured})")
+                throw IllegalStateException("no relay is paired")
+            }
             return try {
                 // answer(), not request(): a 409 or a 401 is a real reply from
                 // the desktop rather than a relay failure, and the status has
@@ -73,8 +82,11 @@ class CoreClientHolder(private val settings: RedlineSettings) {
                 // Holding it in a field here and reading it back separately is
                 // what raced: one holder serves three view models, each
                 // refreshing on its own thread.
-                relay.answer(method, path, body)
+                relay.answer(method, path, body).also {
+                    Log.i(TAG, "relay carried $method $path: ${it.take(3)} ${it.length} bytes")
+                }
             } catch (error: Exception) {
+                Log.w(TAG, "relay request $method $path failed: ${error.message}")
                 // Only a genuine transport or crypto failure reaches here.
                 // Noise sessions do not resume: once a frame fails, every later
                 // frame on that session fails too, so discard it and let the
@@ -119,7 +131,14 @@ class CoreClientHolder(private val settings: RedlineSettings) {
             ).also {
                 it.setAuthToken(settings.token)
                 relay = it
+                Log.i(TAG, "relay session established via ${settings.relayUrl}")
             }
+        }.onFailure {
+            // The dial reason must reach the log. Swallowing it here left the
+            // phone reporting "cannot reach Redline" for a URL-scheme mismatch,
+            // a rejected entitlement, and a missing config alike -- three
+            // different faults with one message, and nothing to tell them apart.
+            Log.w(TAG, "relay dial to ${settings.relayUrl} failed: ${it.message}")
         }.getOrNull()
     }
 

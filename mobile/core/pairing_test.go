@@ -146,3 +146,58 @@ func TestParsePairingURLCarriesTheEntitlement(t *testing.T) {
 		t.Errorf("entitlement_token = %q, want %q", got.EntitlementToken, "ent.token")
 	}
 }
+
+// The relay refused every phone with "malformed entitlement" while the very
+// same token, presented from a desktop process, was accepted.
+//
+// The signature half of an entitlement token is standard base64, which uses
+// '+'. The QR carries it in a URL fragment, and url.ParseQuery decodes '+' as
+// a space -- the same hazard the desktop key had, and which the parser already
+// undoes for the key alone. The entitlement went through untouched, so one in
+// every ~64 signature bytes arrived as a space, base64 decoding failed on the
+// relay, and the phone heard only "requires a current subscription".
+//
+// Any token whose signature happens to contain no '+' pairs fine, which is why
+// this survived: it depends on the bytes of one particular signature.
+func TestParsePairingURLPreservesPlusInTheEntitlement(t *testing.T) {
+	const entitlement = "eyJleHAiOjF9.T1jh+dnP/igZ0kpV+oQ=="
+	raw := "https://desk.example:8443/pair#token=abc" +
+		"&relay=https%3A%2F%2Frelay.example" +
+		"&key=" + strings.ReplaceAll("ds+l3Fu+I5pT/wmwTna7cMnK+P4LZulXpQz7f+9v5+E=", "+", "%2B") +
+		"&session=s" +
+		"&entitlement=" + strings.NewReplacer("+", "%2B", "/", "%2F", "=", "%3D").Replace(entitlement)
+
+	out, err := ParsePairingURL(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var req PairingRequest
+	if err := json.Unmarshal([]byte(out), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.EntitlementToken != entitlement {
+		t.Errorf("entitlement arrived as %q, want %q", req.EntitlementToken, entitlement)
+	}
+}
+
+// The desktop key already had this protection; keep it honest in the same test
+// file so the two cannot drift apart again.
+func TestParsePairingURLRecoversPlusWhenTheQRDidNotEncodeIt(t *testing.T) {
+	// A QR built by simple concatenation rather than url.Values.
+	const key = "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E="
+	const entitlement = "eyJleHAiOjF9.T1jh+dnP"
+	raw := "https://desk.example:8443/pair#token=abc&key=" + key + "&entitlement=" + entitlement
+
+	out, err := ParsePairingURL(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var req PairingRequest
+	json.Unmarshal([]byte(out), &req)
+	if req.DesktopKey != key {
+		t.Errorf("key arrived as %q", req.DesktopKey)
+	}
+	if req.EntitlementToken != entitlement {
+		t.Errorf("entitlement arrived as %q, want %q", req.EntitlementToken, entitlement)
+	}
+}

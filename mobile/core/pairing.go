@@ -125,6 +125,12 @@ func ValidateRelayURL(raw string) error {
 	return nil
 }
 
+// recoverBase64Plus undoes ParseQuery's '+'-to-space decoding for a value that
+// is known to be base64, where a space cannot otherwise occur.
+func recoverBase64Plus(value string) string {
+	return strings.ReplaceAll(value, " ", "+")
+}
+
 func ParsePairingURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -143,8 +149,20 @@ func ParsePairingURL(raw string) (string, error) {
 		return "", errors.New("pairing over plain HTTP is only allowed to this device")
 	}
 
+	// Parsed from the escaped fragment, the text as it appeared in the code.
+	//
+	// url.Parse has already percent-decoded Fragment, so feeding that to
+	// ParseQuery decodes a second time: "%2B" became "+" in the first pass
+	// and a space in the second. That double decode ate the '+' from every
+	// base64 value the QR carried -- the relay refused each phone with
+	// "malformed entitlement" while the desktop's copy of the same token was
+	// accepted -- and a percent-encoded QR was mangled exactly as badly as a
+	// bare one. Parsing the escaped text once is what the encoder assumed.
+	//
+	// EscapedFragment rather than RawFragment: the latter is empty whenever
+	// the original needed no escaping, which is precisely the bare-'+' case.
 	token := url.Values{}
-	if fragment := parsed.Fragment; fragment != "" {
+	if fragment := parsed.EscapedFragment(); fragment != "" {
 		if values, err := url.ParseQuery(fragment); err == nil {
 			token = values
 		}
@@ -162,10 +180,14 @@ func ParsePairingURL(raw string) (string, error) {
 
 	base := url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
 
-	// Base64 standard encoding uses '+' and '/', but url.ParseQuery decodes '+'
-	// as a space. Undo that: spaces are never valid in base64, so replacing them
-	// back recovers any key that was not percent-encoded before concatenation.
-	desktopKey := strings.ReplaceAll(token.Get("key"), " ", "+")
+	// Spaces are never valid in base64, so a space can only be a '+' that a
+	// QR built by plain concatenation left unencoded and ParseQuery turned
+	// into a space. Recovering it costs nothing and keeps older desktops
+	// pairing. Applied to every base64 value the code carries, not just the
+	// key: the entitlement's signature is base64 too, and protecting one
+	// while leaving the other was how the double decode stayed hidden.
+	desktopKey := recoverBase64Plus(token.Get("key"))
+	entitlementToken := recoverBase64Plus(token.Get("entitlement"))
 
 	encoded, err := json.Marshal(PairingRequest{
 		BaseURL:      strings.TrimRight(base.String(), "/"),
@@ -176,7 +198,7 @@ func ParsePairingURL(raw string) (string, error) {
 		// Carried verbatim: it is opaque to the phone, which only presents it
 		// to the relay. Validating its shape here would couple the pairing
 		// parser to a token format the relay owns.
-		EntitlementToken: strings.TrimSpace(token.Get("entitlement")),
+		EntitlementToken: strings.TrimSpace(entitlementToken),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode pairing request: %w", err)
