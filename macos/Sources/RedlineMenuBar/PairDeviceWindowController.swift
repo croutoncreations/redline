@@ -145,17 +145,31 @@ final class PairDeviceModel: ObservableObject {
 
     /// Whether the poll should carry on, given the clock.
     ///
-    /// The code's expiry plus a minute covers a redeem in its last seconds
-    /// that the service still remembers. With no expiry from the service the
-    /// bound falls back to the token's known lifetime plus the same margin,
-    /// measured from when polling began.
-    static func shouldKeepPolling(now: Date, expiresAt: Date?, started: Date = .distantPast) -> Bool {
-        let margin: TimeInterval = 60
+    /// The code's expiry plus `redeemMemoryMargin` covers a redeem in its last
+    /// seconds that the service still remembers. With no expiry from the
+    /// service the bound falls back to the token's known lifetime plus the
+    /// same margin, measured from when polling began -- which is why `started`
+    /// has no default: a stale or distant value there silently ends the poll
+    /// before it begins.
+    static func shouldKeepPolling(now: Date, expiresAt: Date?, started: Date) -> Bool {
         if let expiresAt {
-            return now < expiresAt.addingTimeInterval(margin)
+            return now < expiresAt.addingTimeInterval(redeemMemoryMargin)
         }
-        return now < started.addingTimeInterval(10 * 60 + margin)
+        return now < started.addingTimeInterval(pairingTokenLifetime + redeemMemoryMargin)
     }
+
+    /// How long past a code's expiry the service still reports a redeem.
+    ///
+    /// Mirrors `redeemedMemory` in `internal/api/server.go`, and must not
+    /// exceed it: polling longer than the service remembers would read a real
+    /// redeem as expired. The two are the same number in two languages with
+    /// nothing but this comment and its twin holding them together, so change
+    /// them together.
+    static let redeemMemoryMargin: TimeInterval = 60
+
+    /// How long a pairing token lives, per `createPairingToken` in
+    /// `internal/api/server.go`. Used only when the service sent no expiry.
+    static let pairingTokenLifetime: TimeInterval = 10 * 60
 
     /// What a status means for the window, or nil to keep showing the code.
     ///

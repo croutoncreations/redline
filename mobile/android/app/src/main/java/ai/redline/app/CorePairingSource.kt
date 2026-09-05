@@ -91,9 +91,15 @@ class CorePairingSource : PairingSource {
     private companion object {
         const val TAG = "RedlineRelay"
 
-        /** The status from a full relay envelope, without parsing the rest of it. */
+        /**
+         * The status from a full relay envelope, without parsing the rest of
+         * it. Matches Go's json.Marshal output exactly -- no space after the
+         * colon -- which is the only producer.
+         */
+        private val STATUS = Regex("\"status\":(\\d{3})")
+
         fun statusOf(envelope: String): String =
-            Regex("\"status\":(\\d{3})").find(envelope)?.groupValues?.get(1) ?: "?"
+            STATUS.find(envelope)?.groupValues?.get(1) ?: "?"
     }
 }
 

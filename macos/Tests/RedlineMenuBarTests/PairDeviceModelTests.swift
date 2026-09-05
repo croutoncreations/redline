@@ -45,9 +45,23 @@ struct PairDeviceModelTests {
     @Test("Polling gives up a little after the code itself expires")
     func pollingHasADeadline() {
         let expires = Date(timeIntervalSince1970: 1_000)
-        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(-60), expiresAt: expires))
-        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(10), expiresAt: expires))
-        #expect(!PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(120), expiresAt: expires))
+        let started = expires.addingTimeInterval(-600)
+        let margin = PairDeviceModel.redeemMemoryMargin
+        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(-60), expiresAt: expires, started: started))
+        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(10), expiresAt: expires, started: started))
+        // The edge: still polling one second inside the margin, stopped on it.
+        #expect(PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(margin - 1), expiresAt: expires, started: started))
+        #expect(!PairDeviceModel.shouldKeepPolling(now: expires.addingTimeInterval(margin), expiresAt: expires, started: started))
+    }
+
+    /// The client must not out-wait the service. The service forgets a redeem
+    /// a minute after it happens; a client that polled past that would read a
+    /// real redeem as expired. The constant is checked against its documented
+    /// twin so a change to one without the other fails here.
+    @Test("The client margin does not exceed what the service remembers")
+    func marginMatchesTheService() {
+        // redeemedMemory in internal/api/server.go is one minute.
+        #expect(PairDeviceModel.redeemMemoryMargin <= 60)
     }
 
     /// A service that sent no expiry still gets a bounded poll.

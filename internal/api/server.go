@@ -102,7 +102,10 @@ type Server struct {
 // PairDeviceWindowController.show; the CLI runs once). Nothing asks about a
 // token it did not just mint, so nothing needs the answer later than this.
 // A surface that kept a token across opens would need a longer memory, and
-// this is the line to change.
+// this is the line to change -- together with
+// PairDeviceModel.redeemMemoryMargin in the macOS app, which must not exceed
+// it: a sheet that polls longer than the service remembers reads a real
+// redeem as expired.
 //
 // Kept in memory with the tokens themselves, so a service restart forgets a
 // redeem along with everything else: a sheet open across a restart reads
