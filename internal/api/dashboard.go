@@ -61,6 +61,25 @@ type dashboardProvider struct {
 	ActivePoolClaims         map[string]int          `json:"active_pool_claims,omitempty"`
 	LatestDecision           *dashboardDecision      `json:"latest_decision,omitempty"`
 	LatestDecisionAt         *time.Time              `json:"latest_decision_at,omitempty"`
+	// Scheduling is the effective policy's thresholds, in the shape a meter
+	// draws them: a floor on the 5-hour bar the scheduler never spends past,
+	// and the weekly floors it waits for as the reset nears. The decision
+	// alone said "waiting" and not where the line was.
+	Scheduling *dashboardScheduling `json:"scheduling,omitempty"`
+}
+
+type dashboardScheduling struct {
+	RollingReserve float64                  `json:"rolling_reserve"`
+	TriggerMargin  float64                  `json:"trigger_margin"`
+	PaceGapTrigger *float64                 `json:"pace_gap_trigger,omitempty"`
+	PaceThresholds []dashboardPaceThreshold `json:"pace_thresholds"`
+}
+
+// dashboardPaceThreshold carries the duration as seconds: a Go duration string
+// would need parsing on two platforms, and a number reads the same everywhere.
+type dashboardPaceThreshold struct {
+	TimeRemainingSeconds int64   `json:"time_remaining_seconds"`
+	MinWeeklyRemaining   float64 `json:"min_weekly_remaining"`
 }
 
 type dashboardDecision struct {
@@ -353,6 +372,21 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			return dashboardResponse{}, selectionErr
 		}
 		item.Policy, item.PolicySource = selection.Policy, selection.Source
+		if thresholds, thresholdsErr := selection.Definition.DecisionThresholds(); thresholdsErr == nil {
+			scheduling := &dashboardScheduling{
+				RollingReserve: selection.Definition.RollingReserve,
+				TriggerMargin:  selection.Definition.TriggerMargin,
+				PaceGapTrigger: selection.Definition.PaceGapTrigger,
+				PaceThresholds: make([]dashboardPaceThreshold, 0, len(thresholds)),
+			}
+			for _, threshold := range thresholds {
+				scheduling.PaceThresholds = append(scheduling.PaceThresholds, dashboardPaceThreshold{
+					TimeRemainingSeconds: int64(threshold.TimeRemaining / time.Second),
+					MinWeeklyRemaining:   threshold.MinWeeklyRemaining,
+				})
+			}
+			item.Scheduling = scheduling
+		}
 		item.DefaultPolicy = configured.Policy
 		if item.DefaultPolicy == "" {
 			item.DefaultPolicy = s.config.ActivePolicy

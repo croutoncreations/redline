@@ -403,6 +403,7 @@ private fun ProviderCard(
                 Meter(
                     "5-hour window", it.remainingPercent, it.resetsInSeconds,
                     it.resetInferred, it.resetsAt, it.elapsedPercent,
+                    zones = MeterZones(reservePercent = provider.scheduling?.reservePercent ?: 0),
                 )
             }
             // The window exists but the number could not be read. Showing
@@ -417,7 +418,26 @@ private fun ProviderCard(
                 Meter(
                     "Weekly allowance", it.remainingPercent, it.resetsInSeconds,
                     it.resetInferred, it.resetsAt, it.elapsedPercent,
+                    zones = MeterZones(floors = provider.scheduling?.weeklyFloors ?: emptyList()),
                 )
+            }
+            // What the scheduler is doing with this provider, under the bars
+            // that show where its lines are.
+            provider.scheduling?.let { scheduling ->
+                val line = schedulingLine(scheduling)
+                if (line.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(if (scheduling.decision == "ADMIT") Good else Accent),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(line, color = TextMuted, fontSize = 11.sp)
+                    }
+                }
             }
             // Worth showing beside an exhausted window, because spending one is
             // what gets work moving again. Labelled in full: a bare number here
@@ -526,6 +546,12 @@ private fun UnknownMeter(label: String) {
     }
 }
 
+/** The scheduler's lines on one meter. Empty draws nothing. */
+data class MeterZones(
+    val reservePercent: Int = 0,
+    val floors: List<WeeklyFloor> = emptyList(),
+)
+
 @Composable
 private fun Meter(
     label: String,
@@ -534,6 +560,7 @@ private fun Meter(
     resetInferred: Boolean,
     resetsAt: String = "",
     elapsedPercent: Int = 0,
+    zones: MeterZones = MeterZones(),
 ) {
     val resetSentence = resetLabel(resetsInSeconds, resetInferred)
     // Only computed for display; an unparseable or absent timestamp yields "".
@@ -585,6 +612,35 @@ private fun Meter(
                 color = toneFor(percent),
                 trackColor = Line,
             )
+            // Redline's own lines, drawn under the pace mark so the two read
+            // as different things: the mark is about the clock, these are
+            // about the scheduler.
+            //
+            // The reserve is a hatched band at the left end of the 5-hour bar:
+            // Redline never spends into it, so it is the person's. A weekly
+            // floor is a thin line; solid while armed (the scheduler is holding
+            // to it now), faint while not yet (it will matter as the reset
+            // nears). Faint rather than absent, because "what happens at 72h"
+            // is the question the bar is there to answer.
+            if (zones.reservePercent > 0) {
+                Box(
+                    Modifier
+                        .width(maxWidth * zones.reservePercent / 100f)
+                        .height(6.dp)
+                        .align(Alignment.CenterStart)
+                        .clip(RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp))
+                        .background(Accent.copy(alpha = 0.28f)),
+                )
+            }
+            zones.floors.forEach { floor ->
+                Box(
+                    Modifier
+                        .offset(x = maxWidth * floor.percent / 100f - 0.5.dp)
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(if (floor.armed) Accent else Accent.copy(alpha = 0.35f)),
+                )
+            }
             // Drawn only when the desktop sent an elapsed fraction: an older
             // one leaves the mark at the very end, where it says nothing.
             if (elapsedPercent > 0) {
@@ -637,6 +693,15 @@ private fun UsageScreenPreview() {
                         provider = "claude",
                         session = Window(remainingPercent = 100, resetsInSeconds = 18000, elapsedPercent = 15),
                         weekly = Window(remainingPercent = 93, resetsInSeconds = 259200, elapsedPercent = 57),
+                        scheduling = Scheduling(
+                            reservePercent = 25,
+                            weeklyFloors = listOf(
+                                WeeklyFloor(percent = 50, armsInSeconds = 0, armed = true),
+                                WeeklyFloor(percent = 20, armsInSeconds = 172800),
+                            ),
+                            decision = "WAIT",
+                            reason = "no pace threshold matched",
+                        ),
                         pools = listOf(
                             Pool(
                                 key = "model:fable:weekly",

@@ -61,6 +61,36 @@ data class ProviderUsage(
     @SerialName("banked_resets") val bankedResets: Int? = null,
     val weekly: Window? = null,
     val pools: List<Pool> = emptyList(),
+    /** Where Redline will act on the meters. Null from a desktop that sends no policy. */
+    val scheduling: Scheduling? = null,
+)
+
+/**
+ * The scheduler's lines on the bars, interpreted by the core so both platforms
+ * draw the same ones for the same policy.
+ */
+@Serializable
+data class Scheduling(
+    /** Below this much of the 5-hour window, Redline never dispatches. */
+    @SerialName("reserve_percent") val reservePercent: Int = 0,
+    /** Lines on the weekly bar, soonest to arm first. */
+    @SerialName("weekly_floors") val weeklyFloors: List<WeeklyFloor> = emptyList(),
+    val decision: String = "",
+    val reason: String = "",
+    @SerialName("projected_trigger_at") val projectedTriggerAt: String = "",
+) {
+    /** The floor that is live now, if any: the one the scheduler is actually holding to. */
+    val armedFloor: WeeklyFloor? get() = weeklyFloors.lastOrNull { it.armed }
+
+    /** The next floor to arm, for saying what is coming. */
+    val nextFloor: WeeklyFloor? get() = weeklyFloors.firstOrNull { !it.armed }
+}
+
+@Serializable
+data class WeeklyFloor(
+    val percent: Int = 0,
+    @SerialName("arms_in_seconds") val armsInSeconds: Long = 0,
+    val armed: Boolean = false,
 )
 
 @Serializable
@@ -197,6 +227,36 @@ fun formatResetAt(
         // Beyond that "Friday" could be any of several, so name the date.
         else -> target.format(java.time.format.DateTimeFormatter.ofPattern("MMM d,")) + " $time"
     }
+}
+
+/**
+ * The line under a provider's meters that says what Redline is doing with it.
+ *
+ * The zones on the bars show where the scheduler's lines are; this says which
+ * side of them the provider is on and, when waiting, what it is waiting for --
+ * in the order a person would ask: is it running? if not, when will it? if
+ * that is unknown, what is the next thing that changes? Assembled here so the
+ * words and the drawn lines cannot disagree.
+ *
+ * @param formatTime turns the projected RFC 3339 instant into a short local
+ *   time; injected so the sentence is testable without a clock or a zone.
+ */
+fun schedulingLine(
+    scheduling: Scheduling,
+    formatTime: (String) -> String = { formatResetAt(it) },
+): String {
+    if (scheduling.decision.isEmpty()) return ""
+    if (scheduling.decision == "ADMIT") return "Dispatching · ${scheduling.reason}"
+
+    if (scheduling.projectedTriggerAt.isNotEmpty()) {
+        val at = formatTime(scheduling.projectedTriggerAt)
+        if (at.isNotEmpty()) return "Waiting · jobs from $at if usage stays flat"
+    }
+    scheduling.armedFloor?.let { return "Waiting · runs while weekly stays above ${it.percent}%" }
+    scheduling.nextFloor?.let {
+        return "Waiting · ${it.percent}% floor arms in ${formatCountdown(it.armsInSeconds)}"
+    }
+    return "Waiting · ${scheduling.reason}"
 }
 
 /**

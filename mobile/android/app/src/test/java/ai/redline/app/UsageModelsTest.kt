@@ -348,3 +348,65 @@ class PaceTest {
         assertEquals(0, window.elapsedPercent)
     }
 }
+
+/**
+ * The line under a provider's meters that says what Redline is doing with it.
+ *
+ * The zones on the bars show WHERE the scheduler's lines are; this says which
+ * side of them the provider is on and, when it is waiting, what it is waiting
+ * for. Assembled in one tested place so the words and the drawn lines cannot
+ * disagree.
+ */
+class SchedulingLineTest {
+
+    private val floors = listOf(
+        WeeklyFloor(percent = 50, armsInSeconds = 86_400, armed = false),
+        WeeklyFloor(percent = 20, armsInSeconds = 259_200, armed = false),
+    )
+
+    @Test
+    fun `dispatching says so`() {
+        val s = Scheduling(reservePercent = 25, weeklyFloors = floors, decision = "ADMIT", reason = "weekly remaining exceeds prorated short-window throughput")
+        assertEquals("Dispatching · weekly remaining exceeds prorated short-window throughput", schedulingLine(s))
+    }
+
+    @Test
+    fun `waiting with a projected start names the time`() {
+        val s = Scheduling(decision = "WAIT", reason = "no actionable weekly overflow", projectedTriggerAt = "2026-09-06T20:00:00Z")
+        val line = schedulingLine(s, formatTime = { "Sun 8:03 PM" })
+        assertEquals("Waiting · jobs from Sun 8:03 PM if usage stays flat", line)
+    }
+
+    @Test
+    fun `waiting with no projection says when the next floor arms`() {
+        val s = Scheduling(weeklyFloors = floors, decision = "WAIT", reason = "no actionable weekly overflow")
+        assertEquals("Waiting · 50% floor arms in 1d", schedulingLine(s))
+    }
+
+    @Test
+    fun `waiting on an armed floor names the floor`() {
+        val armed = listOf(WeeklyFloor(percent = 50, armsInSeconds = 0, armed = true), floors[1])
+        val s = Scheduling(weeklyFloors = armed, decision = "WAIT", reason = "no pace threshold matched")
+        assertEquals("Waiting · runs while weekly stays above 50%", schedulingLine(s))
+    }
+
+    @Test
+    fun `waiting with nothing to wait for gives the reason`() {
+        val s = Scheduling(decision = "WAIT", reason = "current 5-hour reserve protected")
+        assertEquals("Waiting · current 5-hour reserve protected", schedulingLine(s))
+    }
+
+    @Test
+    fun `no decision yet is quiet`() {
+        assertEquals("", schedulingLine(Scheduling(reservePercent = 25)))
+    }
+
+    @Test
+    fun `the armed floor is the last armed one, the next is the first unarmed`() {
+        val s = Scheduling(weeklyFloors = listOf(
+            WeeklyFloor(50, 0, true), WeeklyFloor(20, 0, true), WeeklyFloor(10, 3600, false),
+        ))
+        assertEquals(20, s.armedFloor?.percent)
+        assertEquals(10, s.nextFloor?.percent)
+    }
+}

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,6 +76,38 @@ type ProviderUsage struct {
 	BankedResets *int    `json:"banked_resets,omitempty"`
 	Weekly       *Window `json:"weekly,omitempty"`
 	Pools        []Pool  `json:"pools,omitempty"`
+	// Scheduling is where Redline will act, drawn on the meters. Nil from a
+	// desktop that does not send its policy, in which case no zones are drawn
+	// rather than guessed.
+	Scheduling *SchedulingView `json:"scheduling,omitempty"`
+}
+
+// SchedulingView is the scheduler's policy for one provider, interpreted for
+// the meters. The bars show what is left; this says where Redline draws its
+// own lines on them, and what it last decided.
+type SchedulingView struct {
+	// ReservePercent is the floor on the 5-hour bar: below it Redline never
+	// dispatches. That much of every window is kept for the person.
+	ReservePercent int `json:"reserve_percent"`
+	// WeeklyFloors are lines on the weekly bar, each live only once the reset
+	// is within its time window. Ordered by when they arm, soonest first.
+	WeeklyFloors []WeeklyFloor `json:"weekly_floors,omitempty"`
+	// Decision and Reason are the scheduler's last verdict for this provider,
+	// so a screen showing the lines can also say which side of them it is on.
+	Decision string `json:"decision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	// ProjectedTriggerAt is when flat usage would first qualify to run, or
+	// zero when it never does before the reset.
+	ProjectedTriggerAt time.Time `json:"projected_trigger_at,omitempty"`
+}
+
+// WeeklyFloor is one pace threshold: once the reset is ArmsInSeconds away or
+// less, the scheduler dispatches while the weekly bar is at or above Percent.
+type WeeklyFloor struct {
+	Percent int `json:"percent"`
+	// ArmsInSeconds is how long until this floor is live, zero when it is.
+	ArmsInSeconds int64 `json:"arms_in_seconds"`
+	Armed         bool  `json:"armed"`
 }
 
 // UsageView is the whole capacity screen.
@@ -174,6 +207,18 @@ type dashboardPayload struct {
 		ActiveRuns        int                     `json:"active_runs"`
 		MaxConcurrentRuns int                     `json:"max_concurrent_runs"`
 		Snapshot          *decision.UsageSnapshot `json:"snapshot,omitempty"`
+		Scheduling        *struct {
+			RollingReserve float64 `json:"rolling_reserve"`
+			PaceThresholds []struct {
+				TimeRemainingSeconds int64   `json:"time_remaining_seconds"`
+				MinWeeklyRemaining   float64 `json:"min_weekly_remaining"`
+			} `json:"pace_thresholds"`
+		} `json:"scheduling,omitempty"`
+		LatestDecision *struct {
+			Decision           string    `json:"decision"`
+			Reason             string    `json:"reason"`
+			ProjectedTriggerAt time.Time `json:"projected_trigger_at"`
+		} `json:"latest_decision,omitempty"`
 	} `json:"providers"`
 }
 
@@ -221,6 +266,34 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 				item.ActiveRuns, item.MaxConcurrentRuns,
 				item.Snapshot.ObservedAt, now,
 			)
+		}
+		if item.Scheduling != nil {
+			scheduling := &SchedulingView{ReservePercent: percent(item.Scheduling.RollingReserve)}
+			if provider.Weekly != nil {
+				for _, threshold := range item.Scheduling.PaceThresholds {
+					// The floor arms when the time left in the week falls to
+					// the threshold's window. Time left is the countdown the
+					// meter already shows, so the two agree by construction.
+					armsIn := provider.Weekly.ResetsInSeconds - threshold.TimeRemainingSeconds
+					if armsIn < 0 {
+						armsIn = 0
+					}
+					scheduling.WeeklyFloors = append(scheduling.WeeklyFloors, WeeklyFloor{
+						Percent:       percent(threshold.MinWeeklyRemaining),
+						ArmsInSeconds: armsIn,
+						Armed:         armsIn == 0,
+					})
+				}
+				sort.Slice(scheduling.WeeklyFloors, func(i, j int) bool {
+					return scheduling.WeeklyFloors[i].ArmsInSeconds < scheduling.WeeklyFloors[j].ArmsInSeconds
+				})
+			}
+			if item.LatestDecision != nil {
+				scheduling.Decision = item.LatestDecision.Decision
+				scheduling.Reason = item.LatestDecision.Reason
+				scheduling.ProjectedTriggerAt = item.LatestDecision.ProjectedTriggerAt
+			}
+			provider.Scheduling = scheduling
 		}
 		view.Providers = append(view.Providers, provider)
 	}

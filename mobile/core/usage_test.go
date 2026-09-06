@@ -748,3 +748,119 @@ func TestElapsedClampsAtTheReset(t *testing.T) {
 		t.Errorf("elapsed past reset = %d%%, want 100", got)
 	}
 }
+
+// Where the scheduler will act, in the shape a meter draws it.
+//
+// The reserve is a floor on the 5-hour bar: below it, Redline never dispatches.
+// A pace threshold is a floor on the weekly bar that is armed only while the
+// reset is within its time window; with more time than that left, it is not
+// yet a line at all. Interpreted here so both platforms draw the same lines
+// for the same policy, and so the rule "armed only when the reset is near
+// enough" lives in one tested place rather than two screens.
+func TestSchedulingZonesComeFromTheEffectivePolicy(t *testing.T) {
+	// fixedNow is 2026-07-20T19:00Z. Weekly resets in 4 days: neither the
+	// 72h nor the 24h threshold is armed yet, but both are listed so the
+	// screen can say what is coming.
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "claude-main", "provider": "claude",
+			"snapshot": {
+				"short": {"remaining": 0.6, "resets_at": "2026-07-20T23:00:00Z"},
+				"weekly": {"remaining": 0.7, "resets_at": "2026-07-24T19:00:00Z"}
+			},
+			"scheduling": {
+				"rolling_reserve": 0.25, "trigger_margin": 0.02,
+				"pace_thresholds": [
+					{"time_remaining_seconds": 259200, "min_weekly_remaining": 0.5},
+					{"time_remaining_seconds": 86400,  "min_weekly_remaining": 0.2}
+				]
+			},
+			"latest_decision": {
+				"decision": "WAIT", "mode": "window_slots",
+				"reason": "no actionable weekly overflow", "overflow": -0.26
+			}
+		}]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := decodeUsage(t, raw).Providers[0]
+
+	if p.Scheduling == nil {
+		t.Fatal("no scheduling view")
+	}
+	if p.Scheduling.ReservePercent != 25 {
+		t.Errorf("reserve = %d%%, want 25", p.Scheduling.ReservePercent)
+	}
+	if len(p.Scheduling.WeeklyFloors) != 2 {
+		t.Fatalf("floors = %+v, want two", p.Scheduling.WeeklyFloors)
+	}
+	// Ordered by when they arm: the 72h one first.
+	if f := p.Scheduling.WeeklyFloors[0]; f.Percent != 50 || f.ArmsInSeconds != int64(24*time.Hour/time.Second) || f.Armed {
+		t.Errorf("first floor = %+v, want 50%% arming in 24h, not armed", f)
+	}
+	if f := p.Scheduling.WeeklyFloors[1]; f.Percent != 20 || f.ArmsInSeconds != int64(3*24*time.Hour/time.Second) || f.Armed {
+		t.Errorf("second floor = %+v, want 20%% arming in 72h, not armed", f)
+	}
+	if p.Scheduling.Decision != "WAIT" || p.Scheduling.Reason != "no actionable weekly overflow" {
+		t.Errorf("decision = %q %q", p.Scheduling.Decision, p.Scheduling.Reason)
+	}
+}
+
+// Once the reset is within a threshold's window, that floor is armed: the line
+// is live, and the bar being above it is what gets jobs running.
+func TestAWeeklyFloorArmsWhenTheResetIsNearEnough(t *testing.T) {
+	// Weekly resets in 48h: the 72h floor is armed, the 24h one is not.
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "claude-main", "provider": "claude",
+			"snapshot": {
+				"short": {"remaining": 0.6, "resets_at": "2026-07-20T23:00:00Z"},
+				"weekly": {"remaining": 0.7, "resets_at": "2026-07-22T19:00:00Z"}
+			},
+			"scheduling": {
+				"rolling_reserve": 0.25,
+				"pace_thresholds": [
+					{"time_remaining_seconds": 259200, "min_weekly_remaining": 0.5},
+					{"time_remaining_seconds": 86400,  "min_weekly_remaining": 0.2}
+				]
+			}
+		}]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	floors := decodeUsage(t, raw).Providers[0].Scheduling.WeeklyFloors
+	if !floors[0].Armed || floors[0].ArmsInSeconds != 0 {
+		t.Errorf("72h floor should be armed now: %+v", floors[0])
+	}
+	if floors[1].Armed || floors[1].ArmsInSeconds != int64(24*time.Hour/time.Second) {
+		t.Errorf("24h floor arms in a day: %+v", floors[1])
+	}
+}
+
+// A provider the desktop describes without a scheduling block -- an older
+// desktop -- has no zones to draw, and the screen must not invent any.
+func TestNoSchedulingBlockMeansNoZones(t *testing.T) {
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "claude-main", "provider": "claude",
+			"snapshot": {"weekly": {"remaining": 0.7, "resets_at": "2026-07-24T19:00:00Z"}}
+		}]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodeUsage(t, raw).Providers[0].Scheduling != nil {
+		t.Error("zones were invented for a desktop that sent none")
+	}
+}
