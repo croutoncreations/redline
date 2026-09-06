@@ -136,6 +136,10 @@ enum class Pace { AHEAD, ON_PACE, BEHIND }
 private const val PACE_TOLERANCE = 5
 
 fun paceOf(remainingPercent: Int, elapsedPercent: Int): Pace {
+    // A window that has run out has no pace left to be on or off. The numbers
+    // are the last sample before the reset, and "behind" against a mark at
+    // zero would call every snapshot taken in the final minutes a warning.
+    if (elapsedPercent >= 100) return Pace.ON_PACE
     val mark = paceMarkPercent(elapsedPercent)
     return when {
         remainingPercent > mark + PACE_TOLERANCE -> Pace.AHEAD

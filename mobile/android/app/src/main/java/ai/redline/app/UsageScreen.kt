@@ -46,6 +46,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.layout.BoxWithConstraintsScope
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -546,6 +548,22 @@ private fun UnknownMeter(label: String) {
     }
 }
 
+/**
+ * One of the scheduler's lines: bar-height, one pixel, kept inside the bar so
+ * a floor at 0% or 100% still shows rather than falling off the end.
+ */
+@Composable
+private fun BoxWithConstraintsScope.SchedulerLine(x: Dp, maxWidth: Dp, color: Color) {
+    Box(
+        Modifier
+            .offset(x = (x - 0.5.dp).coerceIn(0.dp, maxWidth - 1.dp))
+            .width(1.dp)
+            .height(6.dp)
+            .align(Alignment.CenterStart)
+            .background(color),
+    )
+}
+
 /** The scheduler's lines on one meter. Empty draws nothing. */
 data class MeterZones(
     val reservePercent: Int = 0,
@@ -612,42 +630,52 @@ private fun Meter(
                 color = toneFor(percent),
                 trackColor = Line,
             )
-            // Redline's own lines, drawn under the pace mark so the two read
-            // as different things: the mark is about the clock, these are
-            // about the scheduler.
+            // Redline's own lines. Every one is a line at a percent, drawn over
+            // the fill, because a line is visible whether the bar has reached
+            // it or not. The reserve was first drawn as a shaded band under
+            // the bar and, on a real phone, could not be seen in any state: the
+            // fill covered it when remaining was above the reserve, and tinted
+            // it into mud when below.
             //
-            // The reserve is a hatched band at the left end of the 5-hour bar:
-            // Redline never spends into it, so it is the person's. A weekly
-            // floor is a thin line; solid while armed (the scheduler is holding
-            // to it now), faint while not yet (it will matter as the reset
-            // nears). Faint rather than absent, because "what happens at 72h"
-            // is the question the bar is there to answer.
+            // The scheduler's lines are the bar's own height; the pace mark
+            // above is taller and lighter, so the two kinds tell apart by shape
+            // at a glance and not only by colour.
+            //
+            // The reserve is the floor on the 5-hour bar Redline never spends
+            // past: to its left is the person's. A weekly floor is solid while
+            // armed (the scheduler is holding to it now) and faint while not
+            // yet -- faint rather than absent, because "what happens at 72h"
+            // is the question the bar is there to answer. Below the reserve
+            // the fill itself is hatched, so a bar inside the protected zone
+            // looks protected.
             if (zones.reservePercent > 0) {
+                val reserveWidth = maxWidth * zones.reservePercent / 100f
                 Box(
                     Modifier
-                        .width(maxWidth * zones.reservePercent / 100f)
+                        .width(minOf(reserveWidth, maxWidth * percent / 100f))
                         .height(6.dp)
                         .align(Alignment.CenterStart)
                         .clip(RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp))
-                        .background(Accent.copy(alpha = 0.28f)),
+                        .background(Panel.copy(alpha = 0.45f)),
                 )
+                SchedulerLine(x = reserveWidth, maxWidth = maxWidth, color = Accent)
             }
             zones.floors.forEach { floor ->
-                Box(
-                    Modifier
-                        .offset(x = maxWidth * floor.percent / 100f - 0.5.dp)
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .background(if (floor.armed) Accent else Accent.copy(alpha = 0.35f)),
+                SchedulerLine(
+                    x = maxWidth * floor.percent / 100f,
+                    maxWidth = maxWidth,
+                    color = if (floor.armed) Accent else Accent.copy(alpha = 0.4f),
                 )
             }
             // Drawn only when the desktop sent an elapsed fraction: an older
             // one leaves the mark at the very end, where it says nothing.
+            // Taller than the bar and than the scheduler's lines: the one mark
+            // that is about the clock rather than the policy.
             if (elapsedPercent > 0) {
                 val mark = paceMarkPercent(elapsedPercent)
                 Box(
                     Modifier
-                        .offset(x = maxWidth * mark / 100f - 1.dp)
+                        .offset(x = (maxWidth * mark / 100f - 1.dp).coerceIn(0.dp, maxWidth - 2.dp))
                         .width(2.dp)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(1.dp))

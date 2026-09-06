@@ -410,3 +410,17 @@ class SchedulingLineTest {
         assertEquals(10, s.nextFloor?.percent)
     }
 }
+
+/**
+ * A window that has run out is not behind pace. Its numbers are the last
+ * sample before the reset, and judging them against a mark at zero would flag
+ * every snapshot from the final minutes -- seen on a real phone as an amber
+ * tick at the left edge of a bar reading "Resets now".
+ */
+class PaceAtTheResetTest {
+    @Test
+    fun `a spent window is on pace, whatever is left in it`() {
+        assertEquals(Pace.ON_PACE, paceOf(remainingPercent = 28, elapsedPercent = 100))
+        assertEquals(Pace.ON_PACE, paceOf(remainingPercent = 0, elapsedPercent = 100))
+    }
+}
