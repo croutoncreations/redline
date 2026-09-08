@@ -509,6 +509,37 @@ test('preserves advanced fields when revisiting a resumed profile', async ({ pag
   });
 });
 
+test('preserves a resumed harness-default model when revisiting workspace setup', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = { ...profileFixture()[0], model: '' };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await expect(page.locator('#onboarding-model')).toHaveValue('default');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body.model).toBe('default');
+});
+
+test('locks a persisted onboarding profile name when revisiting workspace setup', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('claude-worktree');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/claude-worktree')).toBe(true);
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(1);
+});
+
 test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();

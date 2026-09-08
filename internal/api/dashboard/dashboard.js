@@ -132,7 +132,7 @@ function useExistingOnboardingProfile(profile) {
   const harness = harnessCatalog.find(item => item.id === profile.harness_type);
   selectExistingOnboardingValue($('#onboarding-harness'),profile.harness_type,harness?.label);
   setOnboardingModels();
-  selectExistingOnboardingValue($('#onboarding-model'),profile.model,profile.model);
+  selectExistingOnboardingValue($('#onboarding-model'),profile.model || 'default',profile.model || 'Default model (harness decides)');
   $('#onboarding-profile-id').value = profile.id;
   selectExistingOnboardingValue($('#onboarding-workspace'),profile.workspace_provider,title(profile.workspace_provider));
   $('#onboarding-repository').value = profile.repository || '';
@@ -143,6 +143,9 @@ function useExistingOnboardingProfile(profile) {
 function showOnboardingStep(step) {
   onboardingStep = Math.max(1,Math.min(4,step));
   document.querySelectorAll('[data-onboarding-step]').forEach(section => { section.hidden = Number(section.dataset.onboardingStep) !== onboardingStep; });
+  const profileID = $('#onboarding-profile-id');
+  if (onboardingStep === 3 && onboardingProfileID) profileID.value = onboardingProfileID;
+  profileID.disabled = onboardingStep === 3 && Boolean(onboardingProfileID);
   $('#onboarding-progress').textContent = `${onboardingStep} of 4`;
   $('#onboarding-back').hidden = onboardingStep === 1;
   $('#onboarding-next').textContent = onboardingStep === 4 ? 'Create enabled job' : 'Continue';
