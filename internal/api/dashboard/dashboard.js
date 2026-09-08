@@ -89,6 +89,10 @@ function setOnboardingDefaults(preserveProvider=false) {
   const previous = preserveProvider ? providerSelect.value : '';
   providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
   if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
+  else {
+    const readyProvider = providerCatalog.find(item => installedHarnessesFor(item.provider).length > 0);
+    if (readyProvider) providerSelect.value = readyProvider.id;
+  }
   const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
   const choices = installedHarnessesFor(provider);
   $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
@@ -219,11 +223,12 @@ async function advanceOnboarding() {
 async function openOnboarding(step=1) {
   try {
     await Promise.all([loadProfiles(true),loadProfileOptions()]);
+    const resolvedStep = step === 'resume' ? (profiles.length ? 4 : 1) : step;
     renderOnboardingAccounts();
     onboardingProfileID = '';
     setOnboardingDefaults();
-    if (step === 4) useExistingOnboardingProfile(profiles[0]);
-    showOnboardingStep(step);
+    if (resolvedStep === 4) useExistingOnboardingProfile(profiles[0]);
+    showOnboardingStep(resolvedStep);
     $('#onboarding-error').hidden = true;
     if (!$('#onboarding-dialog').open) $('#onboarding-dialog').showModal();
   } catch (error) {
@@ -1166,7 +1171,7 @@ $('#new-task').addEventListener('click',async () => {
   }
 });
 $('#manage-profiles').addEventListener('click',openProfiles);
-$('#resume-onboarding').addEventListener('click',() => openOnboarding(profiles.length ? 4 : 1));
+$('#resume-onboarding').addEventListener('click',() => openOnboarding('resume'));
 $('#onboarding-skip').addEventListener('click',() => { onboardingStorage.set('dismissed','true'); $('#onboarding-dialog').close(); if (latestDashboard) renderGettingStarted(latestDashboard); });
 $('#onboarding-back').addEventListener('click',() => showOnboardingStep(onboardingStep - 1));
 $('#onboarding-next').addEventListener('click',advanceOnboarding);

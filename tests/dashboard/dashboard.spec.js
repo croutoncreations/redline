@@ -386,9 +386,39 @@ test('does not fall back to a harness for a different subscription provider', as
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
 
+  await page.locator('#onboarding-provider').selectOption('claude-main');
   await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
   await expect(page.locator('#onboarding-harness')).toHaveValue('');
   await expect(page.locator('#onboarding-harness')).not.toContainText('Codex CLI');
+});
+
+test('prefers the provider whose compatible harness is installed', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
+test('recomputes the resume step after refreshing profiles', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  const checklist = page.getByRole('region', { name: 'Getting started' });
+  await expect(checklist).toContainText('Execution profile created');
+  state.profiles = [];
+
+  await checklist.getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="1"]')).toBeVisible();
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeHidden();
 });
 
 test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
