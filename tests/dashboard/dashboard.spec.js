@@ -253,6 +253,27 @@ test('keeps an actionable setup checklist until profile and first job exist', as
   await expect(checklist.getByRole('button', { name: 'Resume setup' })).toBeVisible();
 });
 
+test('resumes first-job setup with the existing execution profile', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeVisible();
+  await expect(guide).toContainText('Codex · Codex CLI · GPT-5.5');
+  await expect(guide).toContainText('Devx · /repo/redline');
+
+  await page.locator('#onboarding-job-name').fill('Review one flaky test');
+  await page.locator('#onboarding-job-prompt').fill('Find one reproducible flaky test and report the evidence.');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({
+    execution_profile_id: 'codex-devx', enabled: true,
+  });
+});
+
 test('creates a capability-aware profile and an explicitly enabled first job', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];

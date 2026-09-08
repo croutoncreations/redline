@@ -108,6 +108,22 @@ function setOnboardingModels() {
     : '<option value="default">Default model (harness decides)</option>';
 }
 
+function useExistingOnboardingProfile(profile) {
+  if (!profile) return;
+  $('#onboarding-provider').value = profile.provider_account_id;
+  setOnboardingDefaults(true);
+  if ([...$('#onboarding-harness').options].some(option => option.value === profile.harness_type)) {
+    $('#onboarding-harness').value = profile.harness_type;
+    setOnboardingModels();
+  }
+  if ([...$('#onboarding-model').options].some(option => option.value === profile.model)) $('#onboarding-model').value = profile.model;
+  $('#onboarding-profile-id').value = profile.id;
+  $('#onboarding-workspace').value = profile.workspace_provider;
+  $('#onboarding-repository').value = profile.repository || '';
+  $('#onboarding-base-branch').value = profile.base_branch || '';
+  onboardingProfileID = profile.id;
+}
+
 function showOnboardingStep(step) {
   onboardingStep = Math.max(1,Math.min(4,step));
   document.querySelectorAll('[data-onboarding-step]').forEach(section => { section.hidden = Number(section.dataset.onboardingStep) !== onboardingStep; });
@@ -126,8 +142,10 @@ function renderOnboardingReview() {
   const schedulerOn = Boolean(latestDashboard?.scheduler?.enabled);
   const provider = providerCatalog.find(item => item.id === $('#onboarding-provider').value);
   const harness = harnessCatalog.find(item => item.id === $('#onboarding-harness').value);
+  const selectedModel = $('#onboarding-model').value || 'default';
+  const model = harness?.models?.[provider?.provider || '']?.find(item => item.id === selectedModel);
   $('#onboarding-review').innerHTML = `
-    <div><span>Route</span><strong>${escapeHTML(providerName(provider?.provider || ''))} · ${escapeHTML(harness?.label || $('#onboarding-harness').value)} · ${escapeHTML($('#onboarding-model').value || 'default')}</strong></div>
+    <div><span>Route</span><strong>${escapeHTML(providerName(provider?.provider || ''))} · ${escapeHTML(harness?.label || $('#onboarding-harness').value)} · ${escapeHTML(model ? modelLabel(model) : selectedModel)}</strong></div>
     <div><span>Workspace</span><strong>${escapeHTML(title($('#onboarding-workspace').value))} · ${escapeHTML($('#onboarding-repository').value)}</strong></div>
     <div><span>Activation</span><strong>Enabled · ${schedulerOn ? 'Scheduler is on; eligible work may run' : 'Scheduler is off; job will wait'}</strong></div>`;
 }
@@ -191,7 +209,9 @@ async function openOnboarding(step=1) {
   try {
     await Promise.all([loadProfiles(true),loadProfileOptions()]);
     renderOnboardingAccounts();
+    onboardingProfileID = '';
     setOnboardingDefaults();
+    if (step === 4) useExistingOnboardingProfile(profiles[0]);
     showOnboardingStep(step);
     $('#onboarding-error').hidden = true;
     if (!$('#onboarding-dialog').open) $('#onboarding-dialog').showModal();
