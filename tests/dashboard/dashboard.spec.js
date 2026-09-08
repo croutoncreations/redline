@@ -593,6 +593,18 @@ test('locks a persisted onboarding profile name when revisiting workspace setup'
   expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(1);
 });
 
+test('does not overwrite a profile created while new-job setup is opening', async ({ page }) => {
+  const state = await loadDashboard(page, { profiles: [] });
+  const collision = { ...profileFixture()[0], id: 'claude-worktree', provider_account_id: 'claude-main', harness_type: 'claude-code' };
+  state.profileResponses = [[], [collision]];
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-error')).toContainText('already exists');
+  expect(state.requests.filter(item => item.method === 'PATCH' && item.path === '/v1/profiles/claude-worktree')).toHaveLength(0);
+});
+
 test('keeps the persisted profile identity when changing providers during resume', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];

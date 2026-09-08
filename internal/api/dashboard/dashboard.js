@@ -193,7 +193,8 @@ async function saveOnboardingProfile() {
   if (!$('#onboarding-harness').value) throw new Error('Install a supported agent CLI before creating a profile.');
   if (!id) throw new Error('Choose a profile name.');
   if (!repository) throw new Error('Choose a repository path before continuing.');
-  const existing = profiles.find(item => item.id === (onboardingProfileID || id));
+  const existing = onboardingProfileID ? profiles.find(item => item.id === onboardingProfileID) : undefined;
+  if (!onboardingProfileID && profiles.some(item => item.id === id)) throw new Error(`A profile named ${id} already exists. Choose another name.`);
   const harnessType = $('#onboarding-harness').value;
   const preserveHarnessConfiguration = existing?.harness_type === harnessType;
   const leavingHermes = existing?.harness_type === 'hermes' && harnessType !== 'hermes';
