@@ -64,6 +64,7 @@ test "$(plutil -extract CFBundleVersion raw "${app_path}/Contents/Info.plist")" 
 test "$(plutil -extract CFBundleIconFile raw "${app_path}/Contents/Info.plist")" = "AppIcon"
 test "$(plutil -extract SUFeedURL raw "${app_path}/Contents/Info.plist")" = "https://updates.redline.example/appcast.xml"
 test "$(plutil -extract SUPublicEDKey raw "${app_path}/Contents/Info.plist")" = "${sparkle_public_key}"
+test "$(plutil -extract SUEnableAutomaticChecks raw "${app_path}/Contents/Info.plist")" = "false"
 test -s "${app_path}/Contents/Resources/AppIcon.icns"
 for executable in \
   "${app_path}/Contents/MacOS/RedlineMenuBar" \

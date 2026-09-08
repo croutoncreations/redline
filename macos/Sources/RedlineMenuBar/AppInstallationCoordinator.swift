@@ -72,11 +72,13 @@ final class AppInstallationCoordinator {
             (createdStarterConfig || legacyAgent != nil)
     }
 
-    func presentFirstRunIfNeeded() {
+    @discardableResult
+    func presentFirstRunIfNeeded() -> Bool {
         guard shouldPresentFirstRun,
-              !ProcessInfo.processInfo.arguments.contains("--suppress-first-run-ui") else { return }
+              !ProcessInfo.processInfo.arguments.contains("--suppress-first-run-ui") else { return false }
         defaults.set(true, forKey: Keys.presentedFirstRun)
         presentSetup()
+        return createdStarterConfig
     }
 
     func presentSetup() {
@@ -137,11 +139,6 @@ final class AppInstallationCoordinator {
             _ = try enableLaunchAtLogin()
             if service.status == .requiresApproval {
                 presentApprovalRequired()
-            } else {
-                presentMessage(
-                    title: "Launch at Login enabled",
-                    detail: "Redline will start automatically after you sign in."
-                )
             }
         } catch {
             presentMessage(title: "Could not enable Launch at Login", detail: error.localizedDescription)

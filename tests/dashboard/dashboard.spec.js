@@ -294,6 +294,54 @@ test('describes enabled jobs as waiting when the global scheduler is off', async
   await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
 });
 
+test('gives actionable install and sign-in guidance when account readiness is missing', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({
+    ...provider, snapshot: undefined, error: provider.provider === 'claude'
+      ? 'read Claude credentials: keychain item does not exist'
+      : 'read Codex credentials: file does not exist',
+  }));
+  const profileOptions = {
+    generated_at: dashboard.generated_at,
+    harnesses: [
+      { id: 'claude-code', label: 'Claude Code', installed: false },
+      { id: 'codex-cli', label: 'Codex CLI', installed: false },
+      { id: 'pi', label: 'Pi', installed: false },
+      { id: 'hermes', label: 'Hermes', installed: false },
+      { id: 'command', label: 'Custom command', installed: true },
+    ],
+  };
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toContainText('Install Claude Code');
+  await expect(guide).toContainText('claude auth login');
+  await expect(guide).toContainText('Install Codex CLI');
+  await expect(guide).toContainText('codex login');
+});
+
+test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+
+  await expect(page.locator('#profile-workspace')).toHaveValue('git-worktree');
+  await expect(page.locator('#profile-id')).toHaveAttribute('placeholder', 'claude-worktree');
+  await expect(page.locator('#profile-model-choice')).toHaveValue('claude-opus-4-8');
+  await page.locator('#profile-provider').selectOption('codex-main');
+  await expect(page.locator('#profile-id')).toHaveAttribute('placeholder', 'codex-worktree');
+  await expect(page.locator('#profile-model-choice')).toHaveValue('gpt-5.5');
+});
+
+test('uses in-product validation instead of native required-field bubbles', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.getByRole('button', { name: 'Save job' }).click();
+  await expect(page.locator('#task-form-error')).toContainText('Name the job');
+  await expect(page.locator('#task-name')).toBeFocused();
+});
+
 test('starts a job from an editable prompt template', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: '+ New job' }).click();

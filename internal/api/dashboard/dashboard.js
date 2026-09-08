@@ -38,6 +38,21 @@ function providerName(provider) {
   return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : title(provider);
 }
 
+function usageSourceName(source) {
+  return String(source).toLowerCase() === 'openusage' ? 'OpenUsage' : title(source);
+}
+
+function directHarnessFor(provider) {
+  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : '';
+  return harnessCatalog.find(item => item.id === id);
+}
+
+function providerSetupGuidance(provider) {
+  if (provider === 'claude') return {label:'Claude Code',login:'claude auth login',url:'https://docs.anthropic.com/en/docs/claude-code/getting-started'};
+  if (provider === 'codex') return {label:'Codex CLI',login:'codex login',url:'https://developers.openai.com/codex/cli/'};
+  return {label:providerName(provider),login:'',url:''};
+}
+
 function installedHarnessesFor(provider) {
   const preferred = provider === 'claude' ? ['claude-code','pi','hermes'] : provider === 'codex' ? ['codex-cli','pi','hermes'] : [];
   return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item => item?.installed);
@@ -46,15 +61,24 @@ function installedHarnessesFor(provider) {
 function renderOnboardingAccounts() {
   const providers = latestDashboard?.providers || [];
   $('#onboarding-accounts').innerHTML = providers.map(item => {
-    const harness = installedHarnessesFor(item.provider)[0];
+    const harness = directHarnessFor(item.provider);
+    const guidance = providerSetupGuidance(item.provider);
     const source = item.usage_source?.active || item.snapshot?.source || 'not available';
     const usageReady = Boolean(item.snapshot) && !item.snapshot_stale;
+    const authenticated = harness?.authentication === 'authenticated';
+    const installStatus = harness?.installed
+      ? `${escapeHTML(harness.label)} · Installed${harness.version ? ` · v${escapeHTML(harness.version)}` : ''}`
+      : `<a href="${escapeHTML(guidance.url)}" target="_blank" rel="noopener noreferrer">Install ${escapeHTML(guidance.label)} ↗</a>`;
+    const authStatus = authenticated
+      ? 'Agent sign-in verified'
+      : `Sign in from Terminal · <code>${escapeHTML(guidance.login)}</code>`;
     return `<article class="onboarding-account">
       <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
       <ul>
-        <li class="${harness ? 'ready' : 'needs-action'}">${harness ? `${escapeHTML(harness.label)} · Installed${harness.version ? ` · v${escapeHTML(harness.version)}` : ''}` : `Agent CLI not found · Install or choose another harness`}</li>
-        <li class="${usageReady ? 'ready' : 'needs-action'}">${usageReady ? 'Subscription usage verified' : `Sign-in or usage check needed${item.error ? ` · ${escapeHTML(item.error)}` : ''}`}</li>
-        <li>Usage source · ${escapeHTML(title(source))}${item.usage_source?.last_error ? ` · fallback active` : ''}</li>
+        <li class="${harness?.installed ? 'ready' : 'needs-action'}">${installStatus}</li>
+        <li class="${authenticated ? 'ready' : 'needs-action'}">${authStatus}</li>
+        <li class="${usageReady ? 'ready' : 'needs-action'}">${usageReady ? 'Subscription usage verified' : `Usage check needed${item.error ? ` · ${escapeHTML(item.error)}` : ''}`}</li>
+        <li>Usage source · Automatic → ${escapeHTML(usageSourceName(source))}${item.usage_source?.last_error ? ` · fallback active` : ''}</li>
       </ul>
     </article>`;
   }).join('') || '<p class="empty">No provider accounts are configured.</p>';
@@ -909,6 +933,8 @@ function applyTaskTemplate() {
 }
 async function saveTask(event) {
   event.preventDefault(); showTaskError('');
+  if (!$('#task-name').value.trim()) { showTaskError('Name the job before saving it.'); $('#task-name').focus(); return; }
+  if (!$('#task-profile').value) { showTaskError('Create or choose an execution profile before saving this job.'); $('#task-profile').focus(); return; }
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
@@ -977,6 +1003,12 @@ function preferredHarness() {
   const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
   return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'command';
 }
+function preferredModel(harness) {
+  return harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()]?.[0]?.id || 'default';
+}
+function updateProfileExample() {
+  if (!editingProfile) $('#profile-id').placeholder = `${providerKind() || 'agent'}-worktree`;
+}
 function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
@@ -986,8 +1018,8 @@ function updateHarnessFields(selectedModelValue) {
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
   $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
-  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = ''; $('#profile-context-concurrency').value = 1;
-  updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
+  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'git-worktree'; $('#profile-budget-group').value = ''; $('#profile-context-concurrency').value = 1;
+  updateHarnessFields(preferredModel($('#profile-harness').value)); updateProfileExample(); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
   try { await Promise.all([loadProfiles(true),loadProfileOptions(),loadRuntimeConfiguration()]); resetProfileForm(); $('#profiles-dialog').showModal(); }
@@ -1121,8 +1153,8 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
-$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : 'default'); });
-$('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
+$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : preferredModel($('#profile-harness').value)); updateProfileExample(); });
+$('#profile-harness').addEventListener('change',() => updateHarnessFields(preferredModel($('#profile-harness').value)));
 $('#profile-runtime-connection').addEventListener('change',() => { $('#edit-runtime-connection').disabled=!$('#profile-runtime-connection').value; discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)); });
 $('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });
 $('#import-hermes-desktop').addEventListener('click',() => importHermesDesktop().catch(error => showProfileError(`Hermes import failed: ${error.message}`)));

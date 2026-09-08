@@ -59,8 +59,8 @@ function profileOptionsFixture() {
   return {
     generated_at: '2026-07-20T19:00:00Z',
     harnesses: [
-      { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
-      { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
+      { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', authentication: 'authenticated', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
+      { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', authentication: 'authenticated', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
       { id: 'pi', label: 'Pi', installed: true, version: '0.80.10', models: {
         codex: [{ id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol', source: 'pi_config', context_window: '1M', max_output: '128K' }],
         claude: [{ id: 'anthropic-cli/claude-fable-5', label: 'Claude Fable 5', source: 'pi_config', context_window: '200K', max_output: '32K' }, { id: 'anthropic-cli/claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }],

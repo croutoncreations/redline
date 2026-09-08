@@ -38,7 +38,7 @@
     </section>
 
     <section id="scheduler-banner" class="scheduler-banner" aria-live="polite" hidden>
-      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until scheduling is enabled.</span>
+      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until <code>scheduler.enabled</code> is set to <code>true</code> in Redline’s configuration and the app is restarted.</span>
     </section>
 
     <section class="summary-rail" aria-label="Current capacity">
@@ -151,13 +151,13 @@
   </dialog>
 
   <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title">
-    <form id="task-form">
+    <form id="task-form" novalidate>
       <div class="dialog-head"><div><p class="eyebrow">JOB DEFINITION</p><h2 id="task-dialog-title">New scheduled job</h2></div><button id="close-task" type="button" aria-label="Close">×</button></div>
       <div class="form-body">
         <div id="task-form-error" class="form-error" hidden></div>
         <input id="task-id" type="hidden">
         <label id="task-template-field" class="field field-wide"><span>Start from</span><select id="task-template"><option value="">Blank job</option></select><small id="task-template-description" class="field-note">Choose an editable starter prompt or begin from scratch.</small></label>
-        <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
+        <label class="field field-wide"><span>Name <small>required</small></span><input id="task-name" required autocomplete="off" placeholder="e.g. Review stale authentication code"></label>
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
         <label id="task-runtime-job-field" class="field" hidden><span>Existing Hermes job <i class="help" tabindex="0" data-help="Choose an existing job discovered from the Hermes connection. Redline will trigger that job instead of sending this prompt to a new Hermes session.">?</i></span><select id="task-runtime-job"><option value="">New Hermes session from prompt</option></select><small id="task-runtime-job-status" class="field-note"></small></label>
         <label class="field"><span>Priority <i class="help" tabindex="0" data-help="When several jobs are eligible at the same time, the one with the highest priority is dispatched first.">?</i></span><input id="task-priority" type="number" min="0" max="100" value="50" required></label>
@@ -165,7 +165,7 @@
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
         <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"><small id="task-interval-note" class="field-note" hidden>Applies to recurring jobs only.</small></label>
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
-        <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="tasks/review-auth.md"></label>
+        <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="e.g. tasks/review-auth.md"></label>
         <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>
       </div>
       <div class="form-footer"><div><button id="delete-task" class="danger-button" type="button" hidden>Delete</button><button id="toggle-task" class="quiet-button" type="button" hidden>Disable</button></div><div><button id="cancel-task" class="quiet-button" type="button">Cancel</button><button id="save-task" class="primary-button" type="submit">Save job</button></div></div>
@@ -179,7 +179,7 @@
       <form id="profile-form" class="profile-form">
         <div id="profile-form-error" class="form-error" hidden></div>
         <div class="form-body">
-          <label class="field"><span>Profile ID</span><input id="profile-id" required autocomplete="off" placeholder="codex-devx"></label>
+          <label class="field"><span>Profile ID <small>required</small></span><input id="profile-id" required autocomplete="off" placeholder="claude-worktree"></label>
           <label class="field"><span>Provider account <i class="help" tabindex="0" data-help="The subscription allowance Redline should monitor for jobs using this profile.">?</i></span><select id="profile-provider" required></select></label>
           <label class="field"><span>Harness <i class="help" tabindex="0" data-help="Redline detects supported agent CLIs on this machine and displays their installed versions. Choose Custom command for another CLI or wrapper.">?</i></span><select id="profile-harness" required></select><small id="profile-discovery-status" class="field-note">Discovering local harnesses…</small><button id="refresh-profile-options" class="inline-button" type="button">Refresh discovery</button></label>
           <div id="profile-hermes-fields" class="advanced-grid field-wide" hidden>
@@ -193,7 +193,7 @@
           <label id="profile-model-field" class="field"><span>Model <i class="help" tabindex="0" data-help="Versioned models are discovered from the selected CLI's local catalog. Choose Other to enter any model identifier the harness accepts.">?</i></span><select id="profile-model-choice"></select><input id="profile-model-custom" class="nested-input" autocomplete="off" placeholder="Custom model identifier" hidden></label>
           <label id="profile-command-field" class="field" hidden><span>Custom command <i class="help" tabindex="0" data-help="Executed through the local shell. The task prompt is sent on standard input.">?</i></span><input id="profile-harness-command" autocomplete="off" placeholder="my-agent --non-interactive"></label>
           <label class="field"><span>Workspace provider <i class="help" tabindex="0" data-help="DevX and Git worktree isolate background changes. Existing directory uses the repository directly.">?</i></span><select id="profile-workspace" required><option value="devx">DevX session</option><option value="git-worktree">Git worktree</option><option value="existing-directory">Existing directory</option><option value="command">Custom setup command</option></select></label>
-          <div class="field field-wide"><span>Repository <i class="help" tabindex="0" data-help="Choose a repository already used by a profile, or type an absolute path directly. A native folder picker will fit naturally in the planned menu-bar app.">?</i></span><select id="profile-repository-recent"><option value="">Recently used repositories…</option></select><input id="profile-repository" class="nested-input" autocomplete="off" placeholder="/Users/me/projects/example"></div>
+          <div class="field field-wide"><span>Repository <i class="help" tabindex="0" data-help="Choose a repository already used by a profile, or type an absolute path directly.">?</i></span><select id="profile-repository-recent"><option value="">Recently used repositories…</option></select><input id="profile-repository" class="nested-input" autocomplete="off" placeholder="e.g. /Users/me/projects/example"></div>
           <label class="field"><span>Base branch</span><input id="profile-base-branch" autocomplete="off" placeholder="main"></label>
           <label class="field"><span>Cleanup policy</span><select id="profile-cleanup"><option value="">Default / preserve</option><option value="never">Never</option><option value="on_success">On success</option><option value="always">Always</option></select></label>
           <label class="check-field field-wide"><input id="profile-require-clean" type="checkbox"><span>Require a clean existing checkout</span></label>
