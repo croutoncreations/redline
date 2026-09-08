@@ -23,9 +23,109 @@ let currentRun = null, currentLogContent = '', currentLogView = 'formatted';
 let latestRuns = [], latestAttempts = [], taskNames = new Map();
 let showAllRuns = false, showAllAttempts = false;
 const ACTIVITY_PREVIEW = 8;
-let profiles = [], taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
+let profiles = [], profilesLoaded = false, taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
+let latestDashboard = null, onboardingStep = 1, onboardingEvaluated = false;
 const capacityCache = new Map();
+
+const onboardingStorage = {
+  get(key) { try { return localStorage.getItem(`redline.onboarding.${key}`); } catch (_) { return null; } },
+  set(key,value) { try { localStorage.setItem(`redline.onboarding.${key}`,value); } catch (_) {} },
+};
+
+function providerName(provider) {
+  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : title(provider);
+}
+
+function installedHarnessesFor(provider) {
+  const preferred = provider === 'claude' ? ['claude-code','pi','hermes'] : provider === 'codex' ? ['codex-cli','pi','hermes'] : [];
+  return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item => item?.installed);
+}
+
+function renderOnboardingAccounts() {
+  const providers = latestDashboard?.providers || [];
+  $('#onboarding-accounts').innerHTML = providers.map(item => {
+    const harness = installedHarnessesFor(item.provider)[0];
+    const source = item.usage_source?.active || item.snapshot?.source || 'not available';
+    const usageReady = Boolean(item.snapshot) && !item.snapshot_stale;
+    return `<article class="onboarding-account">
+      <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
+      <ul>
+        <li class="${harness ? 'ready' : 'needs-action'}">${harness ? `${escapeHTML(harness.label)} · Installed${harness.version ? ` · v${escapeHTML(harness.version)}` : ''}` : `Agent CLI not found · Install or choose another harness`}</li>
+        <li class="${usageReady ? 'ready' : 'needs-action'}">${usageReady ? 'Subscription usage verified' : `Sign-in or usage check needed${item.error ? ` · ${escapeHTML(item.error)}` : ''}`}</li>
+        <li>Usage source · ${escapeHTML(title(source))}${item.usage_source?.last_error ? ` · fallback active` : ''}</li>
+      </ul>
+    </article>`;
+  }).join('') || '<p class="empty">No provider accounts are configured.</p>';
+}
+
+function setOnboardingDefaults(preserveProvider=false) {
+  const providerSelect = $('#onboarding-provider');
+  const previous = preserveProvider ? providerSelect.value : '';
+  providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
+  if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
+  const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
+  const harnesses = installedHarnessesFor(provider);
+  const choices = harnesses.length ? harnesses : harnessCatalog.filter(item => item.installed && item.id !== 'command');
+  $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
+  if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
+  setOnboardingModels();
+  $('#onboarding-profile-id').value = `${provider || 'agent'}-worktree`;
+  $('#onboarding-workspace').value = 'git-worktree';
+}
+
+function setOnboardingModels() {
+  const provider = providerCatalog.find(item => item.id === $('#onboarding-provider').value)?.provider || '';
+  const harness = harnessCatalog.find(item => item.id === $('#onboarding-harness').value);
+  const models = harness?.models?.[provider] || [];
+  $('#onboarding-model').innerHTML = models.length
+    ? models.map(model => `<option value="${escapeHTML(model.id)}">${escapeHTML(modelLabel(model))}</option>`).join('') + '<option value="default">Default model (harness decides)</option>'
+    : '<option value="default">Default model (harness decides)</option>';
+}
+
+function showOnboardingStep(step) {
+  onboardingStep = Math.max(1,Math.min(4,step));
+  document.querySelectorAll('[data-onboarding-step]').forEach(section => { section.hidden = Number(section.dataset.onboardingStep) !== onboardingStep; });
+  $('#onboarding-progress').textContent = `${onboardingStep} of 4`;
+  $('#onboarding-back').hidden = onboardingStep === 1;
+  $('#onboarding-next').textContent = onboardingStep === 4 ? 'Create enabled job' : 'Continue';
+}
+
+async function openOnboarding(step=1) {
+  try {
+    await Promise.all([loadProfiles(true),loadProfileOptions()]);
+    renderOnboardingAccounts();
+    setOnboardingDefaults();
+    showOnboardingStep(step);
+    $('#onboarding-error').hidden = true;
+    if (!$('#onboarding-dialog').open) $('#onboarding-dialog').showModal();
+  } catch (error) {
+    $('#error-banner').hidden = false;
+    $('#error-banner').textContent = `Could not start setup: ${error.message}`;
+  }
+}
+
+function renderGettingStarted(data) {
+  const providerReady = data.providers.some(item => item.snapshot && !item.snapshot_stale);
+  const checks = [
+    {done:providerReady,label:providerReady ? 'Provider capacity detected' : 'Verify a provider subscription'},
+    {done:profiles.length > 0,label:profiles.length ? 'Execution profile created' : 'Create an execution profile'},
+    {done:data.tasks.length > 0,label:data.tasks.length ? 'First job created' : 'Create your first job'},
+  ];
+  const complete = checks.every(item => item.done);
+  $('#getting-started').hidden = complete;
+  $('#getting-started-steps').innerHTML = checks.map(item => `<li class="${item.done ? 'done' : ''}">${item.done ? '✓' : '○'} ${escapeHTML(item.label)}</li>`).join('');
+  $('#getting-started-summary').textContent = `${checks.filter(item => item.done).length} of ${checks.length} setup checks complete.`;
+}
+
+async function considerFirstRun(data) {
+  if (data.demo?.synthetic) return;
+  if (!profilesLoaded) await loadProfiles(true);
+  renderGettingStarted(data);
+  if (onboardingEvaluated) return;
+  onboardingEvaluated = true;
+  if (!data.tasks.length && !profiles.length && !onboardingStorage.get('dismissed') && !onboardingStorage.get('completed')) await openOnboarding(1);
+}
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -384,6 +484,7 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
+  latestDashboard = data;
   document.body.classList.toggle('demo-mode', Boolean(data.demo?.synthetic));
   const demoPill = $('#demo-pill');
   demoPill.hidden = !data.demo?.synthetic;
@@ -402,10 +503,12 @@ function render(data) {
   const policies = new Set(data.providers.map(provider => provider.policy).filter(Boolean));
   $('#policy').textContent = policies.size > 1 ? 'per provider' : ([...policies][0] || data.active_policy || '—');
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
+  $('#scheduler-banner').hidden = data.scheduler.enabled;
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
   renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs,data.unread_runs || 0); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
+  considerFirstRun(data).catch(() => {});
 }
 async function openLogs(runID) {
   const run = latestRuns.find(item => item.id === runID);
@@ -523,7 +626,10 @@ async function loadTaskTemplates() {
   return taskTemplates;
 }
 async function loadProfiles(force=false) {
-  if (force || !profiles.length) profiles = await apiRequest('/v1/profiles');
+  if (force || !profilesLoaded) {
+    profiles = await apiRequest('/v1/profiles');
+    profilesLoaded = true;
+  }
   $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
 }
 async function loadProfileOptions(force=false) {
@@ -899,8 +1005,25 @@ function connectLive() {
 }
 
 $('#refresh').addEventListener('click',refresh);
-$('#new-task').addEventListener('click',() => openTask());
+$('#new-task').addEventListener('click',async () => {
+  await loadProfiles(true);
+  if (!profiles.length) await openOnboarding(3);
+  else await openTask();
+});
 $('#manage-profiles').addEventListener('click',openProfiles);
+$('#resume-onboarding').addEventListener('click',() => openOnboarding(profiles.length ? 4 : 1));
+$('#onboarding-skip').addEventListener('click',() => { onboardingStorage.set('dismissed','true'); $('#onboarding-dialog').close(); if (latestDashboard) renderGettingStarted(latestDashboard); });
+$('#onboarding-back').addEventListener('click',() => showOnboardingStep(onboardingStep - 1));
+$('#onboarding-next').addEventListener('click',() => {
+  if (onboardingStep < 4) showOnboardingStep(onboardingStep + 1);
+});
+$('#onboarding-provider').addEventListener('change',() => setOnboardingDefaults(true));
+$('#onboarding-harness').addEventListener('change',setOnboardingModels);
+$('#onboarding-refresh-detection').addEventListener('click',async event => {
+  event.currentTarget.disabled = true;
+  try { await loadProfileOptions(true); renderOnboardingAccounts(); setOnboardingDefaults(true); }
+  finally { event.currentTarget.disabled = false; }
+});
 $('#mark-runs-read').addEventListener('click',async event => {
   const button = event.currentTarget; button.disabled = true;
   try { await apiRequest('/v1/runs/read-all',{method:'POST'}); await refresh(); }

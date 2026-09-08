@@ -189,6 +189,57 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true });
 });
 
+test('guides a first-time user with detected accounts and capability-aware defaults', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText('Redline starts with scheduling off');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(guide).toContainText('Claude Code');
+  await expect(guide).toContainText('Installed · v2.1.211');
+  await expect(guide).toContainText('Subscription usage verified');
+  await expect(guide).toContainText('Native');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await expect(page.locator('#onboarding-model')).toHaveValue('claude-opus-4-8');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('git-worktree');
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('claude-worktree');
+  expect(state.requests).toEqual([]);
+});
+
+test('routes New Job into setup when no execution profile exists', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Skip for now' }).click();
+
+  await page.getByRole('button', { name: '+ New job' }).click();
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText('Choose where jobs run');
+  await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
+});
+
+test('keeps an actionable setup checklist until profile and first job exist', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Skip for now' }).click();
+
+  const checklist = page.getByRole('region', { name: 'Getting started' });
+  await expect(checklist).toBeVisible();
+  await expect(checklist).toContainText('Provider capacity detected');
+  await expect(checklist).toContainText('Create an execution profile');
+  await expect(checklist).toContainText('Create your first job');
+  await expect(checklist.getByRole('button', { name: 'Resume setup' })).toBeVisible();
+});
+
 test('starts a job from an editable prompt template', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: '+ New job' }).click();

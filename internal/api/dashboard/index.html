@@ -31,6 +31,16 @@
     <div id="error-banner" class="error-banner" hidden></div>
     <section id="failure-alert" class="failure-alert" aria-live="polite" hidden></section>
 
+    <section id="getting-started" class="getting-started" aria-label="Getting started" hidden>
+      <div><p class="eyebrow">GETTING STARTED</p><h2>Finish setting up Redline</h2><p id="getting-started-summary">A few short checks keep your first run predictable.</p></div>
+      <ol id="getting-started-steps"></ol>
+      <button id="resume-onboarding" class="primary-button" type="button">Resume setup</button>
+    </section>
+
+    <section id="scheduler-banner" class="scheduler-banner" aria-live="polite" hidden>
+      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until scheduling is enabled.</span>
+    </section>
+
     <section class="summary-rail" aria-label="Current capacity">
       <div id="usage-strip" class="usage-strip">
         <div class="provider-compact skeleton-line"></div><div class="provider-compact skeleton-line"></div>
@@ -78,6 +88,60 @@
       </span>
     </footer>
   </main>
+
+  <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title">
+    <form id="onboarding-form">
+      <header class="onboarding-head">
+        <div><p class="eyebrow">FIRST-RUN GUIDE</p><h2 id="onboarding-title">Set up Redline</h2></div>
+        <span id="onboarding-progress" class="count">1 of 4</span>
+      </header>
+      <div id="onboarding-error" class="form-error onboarding-error" hidden></div>
+      <div class="onboarding-body">
+        <section class="onboarding-step" data-onboarding-step="1">
+          <span class="onboarding-kicker">Welcome</span>
+          <h3>Use spare subscription capacity—with clear guardrails.</h3>
+          <p>Redline monitors your existing agent subscriptions and schedules work when your configured capacity policy allows it.</p>
+          <div class="safety-grid">
+            <div><strong>Local by default</strong><span>The service and dashboard run on this Mac.</span></div>
+            <div><strong>You choose every job</strong><span>Redline will not invent work for you.</span></div>
+            <div><strong>Scheduler starts off</strong><span>Redline starts with scheduling off while you finish setup.</span></div>
+          </div>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="2" hidden>
+          <span class="onboarding-kicker">Accounts &amp; usage</span>
+          <h3>Confirm what Redline can use.</h3>
+          <p>Installation and subscription usage are checked separately. OpenUsage is used automatically when available, with native provider usage as fallback.</p>
+          <div id="onboarding-accounts" class="onboarding-accounts"></div>
+          <button id="onboarding-refresh-detection" class="quiet-button" type="button">Refresh detection</button>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="3" hidden>
+          <span class="onboarding-kicker">Workspace</span>
+          <h3>Choose where jobs run.</h3>
+          <p>Defaults are based on the selected account and locally detected harnesses. You can adjust everything later in Profiles.</p>
+          <div class="onboarding-fields">
+            <label class="field"><span>Subscription account</span><select id="onboarding-provider"></select></label>
+            <label class="field"><span>Agent harness</span><select id="onboarding-harness"></select></label>
+            <label class="field"><span>Model</span><select id="onboarding-model"></select></label>
+            <label class="field"><span>Workspace</span><select id="onboarding-workspace"><option value="git-worktree">Git worktree · recommended</option><option value="existing-directory">Existing directory</option><option value="command">Custom setup command</option><option value="devx">DevX session</option></select></label>
+            <label class="field"><span>Profile name <small>required</small></span><input id="onboarding-profile-id" required autocomplete="off"></label>
+            <label class="field"><span>Repository path <small>required</small></span><input id="onboarding-repository" required autocomplete="off" placeholder="/Users/you/projects/my-project"></label>
+            <label class="field"><span>Base branch</span><input id="onboarding-base-branch" autocomplete="off" value="main"></label>
+          </div>
+          <small class="field-note">Git worktrees isolate background changes from your current checkout. DevX is available from the advanced profile editor.</small>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="4" hidden>
+          <span class="onboarding-kicker">First job</span>
+          <h3>Define and review your first job.</h3>
+          <p>This is work you explicitly chose to create. It will be saved <strong>enabled</strong>; if the global scheduler is currently off, it cannot run until you enable scheduling.</p>
+          <div id="onboarding-review" class="onboarding-review"></div>
+        </section>
+      </div>
+      <footer class="onboarding-footer">
+        <button id="onboarding-skip" class="quiet-button" type="button">Skip for now</button>
+        <div><button id="onboarding-back" class="quiet-button" type="button" hidden>Back</button><button id="onboarding-next" class="primary-button" type="button">Continue</button></div>
+      </footer>
+    </form>
+  </dialog>
 
   <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title">
     <form id="task-form">
