@@ -228,8 +228,16 @@ async function advanceOnboarding() {
 
 async function openOnboarding(step=1) {
   try {
-    await Promise.all([loadProfiles(true),loadProfileOptions()]);
-    const resolvedStep = step === 'resume' ? (profiles.length ? 4 : 1) : step;
+    const [, , currentDashboard] = await Promise.all([
+      loadProfiles(true), loadProfileOptions(), step === 'resume' ? apiRequest('/v1/dashboard') : Promise.resolve(latestDashboard),
+    ]);
+    if (currentDashboard) {
+      latestDashboard = currentDashboard;
+      providerCatalog = currentDashboard.providers.map(provider => ({id:provider.id,provider:provider.provider}));
+      providerAccounts = providerCatalog.map(provider => provider.id);
+    }
+    const providerReady = currentDashboard?.providers?.some(item => item.snapshot && !item.snapshot_stale);
+    const resolvedStep = step === 'resume' ? (!providerReady ? 2 : (profiles.length ? 4 : 1)) : step;
     renderOnboardingAccounts();
     onboardingProfileID = '';
     setOnboardingDefaults();

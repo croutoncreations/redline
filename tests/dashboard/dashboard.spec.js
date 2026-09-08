@@ -476,6 +476,17 @@ test('recomputes the resume step after refreshing profiles', async ({ page }) =>
   await expect(page.locator('[data-onboarding-step="4"]')).toBeHidden();
 });
 
+test('resumes at account readiness when provider usage is unavailable', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot: undefined, error: 'usage unavailable' }));
+  await loadDashboard(page, { dashboard, waitForReady: false });
+
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+});
+
 test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];
@@ -484,6 +495,7 @@ test('keeps advanced workspace setup out of simple onboarding', async ({ page })
   await page.getByRole('button', { name: 'Continue' }).click();
 
   await expect(page.locator('#onboarding-workspace')).not.toContainText('Custom setup command');
+  await expect(page.locator('#onboarding-workspace')).not.toContainText('DevX');
 });
 
 test('preserves advanced fields when revisiting a resumed profile', async ({ page }) => {
