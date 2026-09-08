@@ -55,7 +55,9 @@ function providerSetupGuidance(provider) {
 
 function installedHarnessesFor(provider) {
   const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : [];
-  return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item => item?.installed);
+  return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item =>
+    item?.installed && (item.id !== 'pi' || (item.models?.[provider] || []).length > 0)
+  );
 }
 
 function renderOnboardingAccounts() {
@@ -1184,7 +1186,19 @@ for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboar
 $('#onboarding-job-type').addEventListener('change',syncOnboardingJobType);
 $('#onboarding-refresh-detection').addEventListener('click',async event => {
   event.currentTarget.disabled = true;
-  try { await loadProfileOptions(true); renderOnboardingAccounts(); setOnboardingDefaults(true); }
+  try {
+    showOnboardingError('');
+    const accountIDs = (latestDashboard?.providers || []).map(provider => provider.id);
+    const [,usageResults] = await Promise.all([
+      loadProfileOptions(true),
+      Promise.allSettled(accountIDs.map(id => apiRequest(`/v1/providers/${encodeURIComponent(id)}/refresh`,{method:'POST',body:'{}'}))),
+    ]);
+    await refresh();
+    renderOnboardingAccounts();
+    setOnboardingDefaults(true);
+    const failures = usageResults.filter(result => result.status === 'rejected');
+    if (failures.length) showOnboardingError(`Could not refresh usage for ${failures.length} account${failures.length === 1 ? '' : 's'}. Check the sign-in guidance above and try again.`);
+  } catch (error) { showOnboardingError(`Detection refresh failed: ${error.message}`); }
   finally { event.currentTarget.disabled = false; }
 });
 $('#mark-runs-read').addEventListener('click',async event => {

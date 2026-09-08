@@ -106,7 +106,8 @@ async function loadDashboard(page, options = {}) {
     taskTemplates: taskTemplatesFixture(),
     runtimeConnections: [], agentContexts: [],
     runtimeJobs: {},
-    requests: [], dashboardError: false, profileError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
+    requests: [], dashboardError: false, profileError: false, blockProfileDelete: false, taskCreateError: '',
+    providerRefreshSnapshots: {}, waitForReady: true, ...options,
   };
 	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
   state.tasks = {
@@ -212,6 +213,19 @@ async function loadDashboard(page, options = {}) {
       provider.policy = body.policy || provider.default_policy;
       provider.policy_source = body.policy ? 'override' : 'global';
       return json(200, { policy: provider.policy, source: provider.policy_source });
+    }
+    const providerRefreshMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/refresh$/);
+    if (providerRefreshMatch && method === 'POST') {
+      const id = decodeURIComponent(providerRefreshMatch[1]);
+      const provider = state.dashboard.providers.find(item => item.id === id);
+      state.requests.push({ method, path: url.pathname });
+      if (!provider) return json(404, { error: 'provider is not configured' });
+      if (state.providerRefreshSnapshots[id]) {
+        provider.snapshot = state.providerRefreshSnapshots[id];
+        provider.snapshot_stale = false;
+        provider.error = '';
+      }
+      return json(200, provider.snapshot || {});
     }
     if (url.pathname === '/v1/profiles' && method === 'GET') return state.profileError ? json(500, { error: 'profiles unavailable' }) : json(200, state.profiles);
     if (url.pathname === '/v1/profiles' && method === 'POST') {

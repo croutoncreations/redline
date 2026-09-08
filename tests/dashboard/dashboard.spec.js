@@ -392,6 +392,44 @@ test('does not fall back to a harness for a different subscription provider', as
   await expect(page.locator('#onboarding-harness')).not.toContainText('Codex CLI');
 });
 
+test('offers Pi only when it has a route for the selected subscription provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'pi'
+    ? { ...harness, models: { codex: harness.models.codex } }
+    : { ...harness, installed: harness.id === 'pi' || harness.id === 'command' });
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toContainText('Pi');
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Pi');
+});
+
+test('refresh detection rechecks subscription usage and reloads account readiness', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot: undefined, error: 'usage unavailable' }));
+  const refreshed = dashboardFixture().providers;
+  const state = await loadDashboard(page, {
+    dashboard, profiles: [], waitForReady: false,
+    providerRefreshSnapshots: Object.fromEntries(refreshed.map(provider => [provider.id, provider.snapshot])),
+  });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Subscription usage verified');
+  expect(state.requests.filter(item => item.method === 'POST' && /\/v1\/providers\/[^/]+\/refresh/.test(item.path)).map(item => item.path).sort()).toEqual([
+    '/v1/providers/claude-main/refresh', '/v1/providers/codex-main/refresh',
+  ]);
+});
+
 test('prefers the provider whose compatible harness is installed', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];
