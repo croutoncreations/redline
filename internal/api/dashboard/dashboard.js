@@ -190,10 +190,11 @@ async function saveOnboardingProfile() {
     harness_command:existing?.harness_command || '', harness_args:existing?.harness_args || [], workspace_args:existing?.workspace_args || [],
     prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
   };
-  const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(id)}` : '/v1/profiles',{
+  const persistedID = existing?.id || id;
+  const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(persistedID)}` : '/v1/profiles',{
     method:existing ? 'PATCH' : 'POST', body:JSON.stringify(existing ? {...payload,id:undefined} : payload),
   });
-  onboardingProfileID = saved.id || id;
+  onboardingProfileID = saved.id || persistedID;
   await loadProfiles(true);
 }
 

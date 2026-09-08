@@ -562,6 +562,7 @@ test('keeps the persisted profile identity when changing providers during resume
 
   await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
   await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await page.locator('#onboarding-profile-id').evaluate(input => { input.value = 'unexpected-renamed-profile'; });
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
   expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(0);
