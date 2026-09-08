@@ -508,6 +508,10 @@ test('resumes at account readiness when provider usage is unavailable', async ({
   await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
   await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await expect(page.locator('#onboarding-repository')).toHaveValue('/repo/redline');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
 });
 
 test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
@@ -585,6 +589,7 @@ test('keeps the persisted profile identity when changing providers during resume
 
   await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
   await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
   await page.locator('#onboarding-profile-id').evaluate(input => { input.value = 'unexpected-renamed-profile'; });
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);

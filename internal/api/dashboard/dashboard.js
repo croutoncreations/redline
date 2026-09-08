@@ -102,7 +102,7 @@ function setOnboardingDefaults(preserveProvider=false) {
   if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
   setOnboardingModels();
   $('#onboarding-profile-id').value = onboardingProfileID || `${provider || 'agent'}-worktree`;
-  $('#onboarding-workspace').value = 'git-worktree';
+  if (!onboardingProfileID) $('#onboarding-workspace').value = 'git-worktree';
 }
 
 function setOnboardingModels() {
@@ -242,7 +242,7 @@ async function openOnboarding(step=1) {
     renderOnboardingAccounts();
     onboardingProfileID = '';
     setOnboardingDefaults();
-    if (resolvedStep === 4) useExistingOnboardingProfile(profiles[0]);
+    if (step === 'resume' && profiles.length) useExistingOnboardingProfile(profiles[0]);
     showOnboardingStep(resolvedStep);
     $('#onboarding-error').hidden = true;
     if (!$('#onboarding-dialog').open) $('#onboarding-dialog').showModal();
