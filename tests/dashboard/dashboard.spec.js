@@ -430,6 +430,29 @@ test('refresh detection rechecks subscription usage and reloads account readines
   ]);
 });
 
+test('refresh detection recomputes defaults from newly available capabilities', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'claude-code' || harness.id === 'command',
+    authentication: harness.id === 'claude-code' ? 'signed_out' : harness.authentication,
+  }));
+  const state = await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  state.profileOptions = profileOptionsFixture();
+  state.profileOptions.harnesses = state.profileOptions.harnesses.map(harness => ({
+    ...harness, installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
 test('prefers the provider whose compatible harness is installed', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];

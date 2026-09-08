@@ -1208,7 +1208,7 @@ $('#onboarding-refresh-detection').addEventListener('click',async event => {
     ]);
     await refresh();
     renderOnboardingAccounts();
-    setOnboardingDefaults(true);
+    setOnboardingDefaults();
     const failures = usageResults.filter(result => result.status === 'rejected');
     if (failures.length) showOnboardingError(`Could not refresh usage for ${failures.length} account${failures.length === 1 ? '' : 's'}. Check the sign-in guidance above and try again.`);
   } catch (error) { showOnboardingError(`Detection refresh failed: ${error.message}`); }
