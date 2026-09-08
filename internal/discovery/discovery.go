@@ -24,14 +24,14 @@ type Model struct {
 }
 
 type Harness struct {
-	ID                  string             `json:"id"`
-	Label               string             `json:"label"`
-	Installed           bool               `json:"installed"`
-	Version             string             `json:"version,omitempty"`
-	Authentication      string             `json:"authentication,omitempty"`
-	Path                string             `json:"-"`
-	Error               string             `json:"error,omitempty"`
-	Models              map[string][]Model `json:"models,omitempty"`
+	ID             string             `json:"id"`
+	Label          string             `json:"label"`
+	Installed      bool               `json:"installed"`
+	Version        string             `json:"version,omitempty"`
+	Authentication string             `json:"authentication,omitempty"`
+	Path           string             `json:"-"`
+	Error          string             `json:"error,omitempty"`
+	Models         map[string][]Model `json:"models,omitempty"`
 }
 
 type Catalog struct {

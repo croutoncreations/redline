@@ -168,6 +168,7 @@ async function saveOnboardingJob() {
     name, execution_profile_id:onboardingProfileID || $('#onboarding-profile-id').value.trim(), runtime_job_id:'',
     priority:50, type:$('#onboarding-job-type').value, dispatch_tier:$('#onboarding-job-tier').value,
     min_interval:$('#onboarding-job-type').value === 'recurring' ? $('#onboarding-job-interval').value.trim() : '', prompt, prompt_file:'', require_repo_change:false,
+    enabled:true,
   })});
   onboardingStorage.set('completed','true');
   onboardingStorage.remove('dismissed');

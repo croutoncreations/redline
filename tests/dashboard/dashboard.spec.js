@@ -279,6 +279,7 @@ test('creates a capability-aware profile and an explicitly enabled first job', a
   await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({
     name: 'Review one flaky test', execution_profile_id: 'claude-worktree', type: 'one_off', dispatch_tier: 'behind',
+    enabled: true,
   });
   await expect(guide).toBeHidden();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('redline.onboarding.completed'))).toBe('true');
