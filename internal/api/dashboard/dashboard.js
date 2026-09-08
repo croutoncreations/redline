@@ -25,12 +25,13 @@ let showAllRuns = false, showAllAttempts = false;
 const ACTIVITY_PREVIEW = 8;
 let profiles = [], profilesLoaded = false, taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
-let latestDashboard = null, onboardingStep = 1, onboardingEvaluated = false;
+let latestDashboard = null, onboardingStep = 1, onboardingEvaluated = false, onboardingProfileID = '';
 const capacityCache = new Map();
 
 const onboardingStorage = {
   get(key) { try { return localStorage.getItem(`redline.onboarding.${key}`); } catch (_) { return null; } },
   set(key,value) { try { localStorage.setItem(`redline.onboarding.${key}`,value); } catch (_) {} },
+  remove(key) { try { localStorage.removeItem(`redline.onboarding.${key}`); } catch (_) {} },
 };
 
 function providerName(provider) {
@@ -89,6 +90,76 @@ function showOnboardingStep(step) {
   $('#onboarding-progress').textContent = `${onboardingStep} of 4`;
   $('#onboarding-back').hidden = onboardingStep === 1;
   $('#onboarding-next').textContent = onboardingStep === 4 ? 'Create enabled job' : 'Continue';
+  if (onboardingStep === 4) renderOnboardingReview();
+}
+
+function showOnboardingError(message) {
+  $('#onboarding-error').hidden = !message;
+  $('#onboarding-error').textContent = message || '';
+}
+
+function renderOnboardingReview() {
+  const schedulerOn = Boolean(latestDashboard?.scheduler?.enabled);
+  const provider = providerCatalog.find(item => item.id === $('#onboarding-provider').value);
+  const harness = harnessCatalog.find(item => item.id === $('#onboarding-harness').value);
+  $('#onboarding-review').innerHTML = `
+    <div><span>Route</span><strong>${escapeHTML(providerName(provider?.provider || ''))} · ${escapeHTML(harness?.label || $('#onboarding-harness').value)} · ${escapeHTML($('#onboarding-model').value || 'default')}</strong></div>
+    <div><span>Workspace</span><strong>${escapeHTML(title($('#onboarding-workspace').value))} · ${escapeHTML($('#onboarding-repository').value)}</strong></div>
+    <div><span>Activation</span><strong>Enabled · ${schedulerOn ? 'Scheduler is on; eligible work may run' : 'Scheduler is off; job will wait'}</strong></div>`;
+}
+
+function syncOnboardingJobType() {
+  const recurring = $('#onboarding-job-type').value === 'recurring';
+  $('#onboarding-job-interval-field').hidden = !recurring;
+  renderOnboardingReview();
+}
+
+async function saveOnboardingProfile() {
+  showOnboardingError('');
+  const id = $('#onboarding-profile-id').value.trim(), repository = $('#onboarding-repository').value.trim();
+  if (!$('#onboarding-harness').value) throw new Error('Install a supported agent CLI before creating a profile.');
+  if (!id) throw new Error('Choose a profile name.');
+  if (!repository) throw new Error('Choose a repository path before continuing.');
+  const payload = {
+    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:'',
+    harness_type:$('#onboarding-harness').value, model:$('#onboarding-model').value || 'default', budget_model_group:'',
+    workspace_provider:$('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
+    cleanup_policy:'', require_clean:false, harness_command:'', harness_args:[], workspace_args:[], prepare_command:'', finalize_command:'',
+  };
+  const existing = profiles.find(item => item.id === id);
+  const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(id)}` : '/v1/profiles',{
+    method:existing ? 'PATCH' : 'POST', body:JSON.stringify(existing ? {...payload,id:undefined} : payload),
+  });
+  onboardingProfileID = saved.id || id;
+  await loadProfiles(true);
+}
+
+async function saveOnboardingJob() {
+  showOnboardingError('');
+  const name = $('#onboarding-job-name').value.trim(), prompt = $('#onboarding-job-prompt').value.trim();
+  if (!name) throw new Error('Name the job before creating it.');
+  if (!prompt) throw new Error('Give the job a bounded prompt before creating it.');
+  if ($('#onboarding-job-type').value === 'recurring' && !$('#onboarding-job-interval').value.trim()) throw new Error('Choose a minimum interval for the recurring job.');
+  await apiRequest('/v1/tasks',{method:'POST',body:JSON.stringify({
+    name, execution_profile_id:onboardingProfileID || $('#onboarding-profile-id').value.trim(), runtime_job_id:'',
+    priority:50, type:$('#onboarding-job-type').value, dispatch_tier:$('#onboarding-job-tier').value,
+    min_interval:$('#onboarding-job-type').value === 'recurring' ? $('#onboarding-job-interval').value.trim() : '', prompt, prompt_file:'', require_repo_change:false,
+  })});
+  onboardingStorage.set('completed','true');
+  onboardingStorage.remove('dismissed');
+  $('#onboarding-dialog').close();
+  await refresh();
+}
+
+async function advanceOnboarding() {
+  const button = $('#onboarding-next');
+  button.disabled = true;
+  try {
+    if (onboardingStep === 3) { await saveOnboardingProfile(); showOnboardingStep(4); }
+    else if (onboardingStep === 4) await saveOnboardingJob();
+    else showOnboardingStep(onboardingStep + 1);
+  } catch (error) { showOnboardingError(error.message); }
+  finally { button.disabled = false; }
 }
 
 async function openOnboarding(step=1) {
@@ -364,7 +435,12 @@ function renderTasks(tasks) {
   if (disabled) summary.push(`${disabled} disabled`);
   $('#task-count').textContent = summary.join(' · ');
   $('#task-count').classList.toggle('count-attention', failed > 0);
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => {
+    const schedulerOff = !latestDashboard?.scheduler?.enabled && task.enabled && task.state === 'queued';
+    const recurrence = schedulerOff ? 'Waiting for global scheduling' : duration(task.min_interval);
+    const status = schedulerOff ? 'Ready · scheduler off' : task.state;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
     row.addEventListener('click',() => openTask(row.dataset.taskRow));
@@ -1014,11 +1090,14 @@ $('#manage-profiles').addEventListener('click',openProfiles);
 $('#resume-onboarding').addEventListener('click',() => openOnboarding(profiles.length ? 4 : 1));
 $('#onboarding-skip').addEventListener('click',() => { onboardingStorage.set('dismissed','true'); $('#onboarding-dialog').close(); if (latestDashboard) renderGettingStarted(latestDashboard); });
 $('#onboarding-back').addEventListener('click',() => showOnboardingStep(onboardingStep - 1));
-$('#onboarding-next').addEventListener('click',() => {
-  if (onboardingStep < 4) showOnboardingStep(onboardingStep + 1);
-});
+$('#onboarding-next').addEventListener('click',advanceOnboarding);
 $('#onboarding-provider').addEventListener('change',() => setOnboardingDefaults(true));
 $('#onboarding-harness').addEventListener('change',setOnboardingModels);
+for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboarding-job-tier']) {
+  $(selector).addEventListener('input',renderOnboardingReview);
+  $(selector).addEventListener('change',renderOnboardingReview);
+}
+$('#onboarding-job-type').addEventListener('change',syncOnboardingJobType);
 $('#onboarding-refresh-detection').addEventListener('click',async event => {
   event.currentTarget.disabled = true;
   try { await loadProfileOptions(true); renderOnboardingAccounts(); setOnboardingDefaults(true); }

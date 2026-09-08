@@ -240,6 +240,60 @@ test('keeps an actionable setup checklist until profile and first job exist', as
   await expect(checklist.getByRole('button', { name: 'Resume setup' })).toBeVisible();
 });
 
+test('creates a capability-aware profile and an explicitly enabled first job', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.scheduler = { enabled: false };
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/profiles')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({
+    id: 'claude-worktree', provider_account_id: 'claude-main', harness_type: 'claude-code',
+    model: 'claude-opus-4-8', workspace_provider: 'git-worktree', repository: '/repo/redline', base_branch: 'main',
+  });
+  await expect(guide).toContainText('will be saved enabled');
+  await expect(guide).toContainText('Scheduler is off');
+  await page.locator('#onboarding-job-name').fill('Review one flaky test');
+  await page.locator('#onboarding-job-prompt').fill('Find one reproducible flaky test and report the evidence.');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({
+    name: 'Review one flaky test', execution_profile_id: 'claude-worktree', type: 'one_off', dispatch_tier: 'behind',
+  });
+  await expect(guide).toBeHidden();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('redline.onboarding.completed'))).toBe('true');
+});
+
+test('keeps profile creation on the workspace step until required fields are valid', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Choose a repository path');
+  await expect(page.locator('[data-onboarding-step="3"]')).toBeVisible();
+  expect(state.requests.some(item => item.path === '/v1/profiles')).toBe(false);
+});
+
+test('describes enabled jobs as waiting when the global scheduler is off', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.scheduler = { enabled: false };
+  await loadDashboard(page, { dashboard });
+
+  await expect(page.locator('#scheduler-banner')).toContainText('nothing will run');
+  await expect(page.locator('#tasks-body')).toContainText('Ready · scheduler off');
+  await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
+});
+
 test('starts a job from an editable prompt template', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: '+ New job' }).click();

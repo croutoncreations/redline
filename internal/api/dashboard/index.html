@@ -132,7 +132,14 @@
         <section class="onboarding-step" data-onboarding-step="4" hidden>
           <span class="onboarding-kicker">First job</span>
           <h3>Define and review your first job.</h3>
-          <p>This is work you explicitly chose to create. It will be saved <strong>enabled</strong>; if the global scheduler is currently off, it cannot run until you enable scheduling.</p>
+          <p>This is work you explicitly chose to create. It will be saved enabled; if the global scheduler is currently off, it cannot run until you enable scheduling.</p>
+          <div class="onboarding-fields">
+            <label class="field field-wide"><span>Job name <small>required</small></span><input id="onboarding-job-name" required autocomplete="off" placeholder="e.g. Review one flaky test"></label>
+            <label class="field field-wide"><span>Prompt <small>required</small></span><textarea id="onboarding-job-prompt" required rows="4" placeholder="Give the agent one bounded, verifiable objective."></textarea></label>
+            <label class="field"><span>Run when</span><select id="onboarding-job-tier"><option value="behind">Standard surplus</option><option value="well_behind">High surplus</option><option value="expiring">Near expiry</option></select></label>
+            <label class="field"><span>Type</span><select id="onboarding-job-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
+            <label id="onboarding-job-interval-field" class="field field-wide" hidden><span>Minimum interval <small>required for recurring jobs</small></span><input id="onboarding-job-interval" autocomplete="off" placeholder="e.g. 7d or 12h"></label>
+          </div>
           <div id="onboarding-review" class="onboarding-review"></div>
         </section>
       </div>
