@@ -508,8 +508,12 @@ test('resumes at account readiness when provider usage is unavailable', async ({
   await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
   await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+  await expect(page.locator('#onboarding-model')).toHaveValue('gpt-5.5');
   await expect(page.locator('#onboarding-repository')).toHaveValue('/repo/redline');
   await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
 });
