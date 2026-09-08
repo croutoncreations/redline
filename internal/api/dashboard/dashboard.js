@@ -182,12 +182,15 @@ async function saveOnboardingProfile() {
   if (!id) throw new Error('Choose a profile name.');
   if (!repository) throw new Error('Choose a repository path before continuing.');
   const existing = profiles.find(item => item.id === (onboardingProfileID || id));
+  const harnessType = $('#onboarding-harness').value;
+  const preserveHarnessConfiguration = existing?.harness_type === harnessType;
   const payload = {
     id, provider_account_id:$('#onboarding-provider').value, agent_context_id:existing?.agent_context_id || '',
-    harness_type:$('#onboarding-harness').value, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',
+    harness_type:harnessType, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',
     workspace_provider:$('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
     cleanup_policy:existing?.cleanup_policy || '', require_clean:existing?.require_clean || false,
-    harness_command:existing?.harness_command || '', harness_args:existing?.harness_args || [], workspace_args:existing?.workspace_args || [],
+    harness_command:preserveHarnessConfiguration ? existing?.harness_command || '' : '',
+    harness_args:preserveHarnessConfiguration ? existing?.harness_args || [] : [], workspace_args:existing?.workspace_args || [],
     prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
   };
   const persistedID = existing?.id || id;

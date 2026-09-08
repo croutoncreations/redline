@@ -601,6 +601,28 @@ test('keeps the persisted profile identity when changing providers during resume
   expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body.provider_account_id).toBe('claude-main');
 });
 
+test('clears harness-specific configuration when changing harnesses during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = {
+    ...profileFixture()[0],
+    harness_type: 'codex-cli',
+    harness_command: 'codex',
+    harness_args: ['--search'],
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body).toMatchObject({
+    harness_type: 'claude-code', harness_command: '', harness_args: [],
+  });
+});
+
 test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();
