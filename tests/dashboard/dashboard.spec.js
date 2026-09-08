@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
-const { loadDashboard, dashboardFixture, profileFixture } = require('./harness');
+const { loadDashboard, dashboardFixture, profileFixture, profileOptionsFixture } = require('./harness');
 
 
 test('renders operational state and applies live dashboard events', async ({ page }) => {
@@ -357,6 +357,23 @@ test('gives actionable install and sign-in guidance when account readiness is mi
   await expect(guide).toContainText('codex login');
 });
 
+test('does not offer Hermes in simple onboarding without a runtime context', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'hermes' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).toContainText('No supported agent CLI found');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Hermes');
+});
+
 test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();
@@ -375,6 +392,21 @@ test('uses in-product validation instead of native required-field bubbles', asyn
   await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(page.locator('#task-form-error')).toContainText('Name the job');
   await expect(page.locator('#task-name')).toBeFocused();
+});
+
+test('validates job priority in-product before saving', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Invalid priority');
+  await page.locator('#task-priority').fill('101');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect(page.locator('#task-form-error')).toContainText('whole number between 0 and 100');
+  await expect(page.locator('#task-priority')).toBeFocused();
+  await page.locator('#task-priority').fill('');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect(page.locator('#task-form-error')).toContainText('whole number between 0 and 100');
+  expect(state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(false);
 });
 
 test('starts a job from an editable prompt template', async ({ page }) => {

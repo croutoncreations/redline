@@ -149,9 +149,7 @@ plutil -insert NSHumanReadableCopyright -string "Copyright © 2026 Redline" "${i
 if [[ -n "${sparkle_feed_url}" ]]; then
   plutil -insert SUFeedURL -string "${sparkle_feed_url}" "${info_plist}"
   plutil -insert SUPublicEDKey -string "${sparkle_public_key}" "${info_plist}"
-  # Keep the first launches focused on Redline setup. Users can opt into update
-  # checks later from the menu instead of receiving Sparkle's second-launch prompt.
-  plutil -insert SUEnableAutomaticChecks -bool false "${info_plist}"
+  plutil -insert SUEnableAutomaticChecks -bool true "${info_plist}"
 fi
 
 sign_options=(--force --options runtime --sign "${sign_identity}")

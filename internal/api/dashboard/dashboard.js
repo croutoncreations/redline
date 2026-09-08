@@ -54,7 +54,7 @@ function providerSetupGuidance(provider) {
 }
 
 function installedHarnessesFor(provider) {
-  const preferred = provider === 'claude' ? ['claude-code','pi','hermes'] : provider === 'codex' ? ['codex-cli','pi','hermes'] : [];
+  const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : [];
   return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item => item?.installed);
 }
 
@@ -91,7 +91,7 @@ function setOnboardingDefaults(preserveProvider=false) {
   if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
   const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
   const harnesses = installedHarnessesFor(provider);
-  const choices = harnesses.length ? harnesses : harnessCatalog.filter(item => item.installed && item.id !== 'command');
+  const choices = harnesses.length ? harnesses : harnessCatalog.filter(item => item.installed && !['command','hermes'].includes(item.id));
   $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
   if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
   setOnboardingModels();
@@ -963,10 +963,12 @@ async function saveTask(event) {
   event.preventDefault(); showTaskError('');
   if (!$('#task-name').value.trim()) { showTaskError('Name the job before saving it.'); $('#task-name').focus(); return; }
   if (!$('#task-profile').value) { showTaskError('Create or choose an execution profile before saving this job.'); $('#task-profile').focus(); return; }
+  const priorityInput = $('#task-priority').value.trim(), priority = Number(priorityInput);
+  if (!priorityInput || !Number.isInteger(priority) || priority < 0 || priority > 100) { showTaskError('Priority must be a whole number between 0 and 100.'); $('#task-priority').focus(); return; }
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
-    priority:Number($('#task-priority').value), type:$('#task-type').value,
+    priority, type:$('#task-type').value,
     dispatch_tier:$('#task-tier').value,
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
