@@ -374,6 +374,56 @@ test('does not offer Hermes in simple onboarding without a runtime context', asy
   await expect(page.locator('#onboarding-harness')).not.toContainText('Hermes');
 });
 
+test('does not fall back to a harness for a different subscription provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Codex CLI');
+});
+
+test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-workspace')).not.toContainText('Custom setup command');
+});
+
+test('preserves advanced fields when revisiting a resumed profile', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const advancedProfile = {
+    id: 'advanced-command', provider_account_id: 'codex-main', agent_context_id: 'context-1',
+    harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
+    workspace_provider: 'command', repository: '/repo/advanced', base_branch: 'develop',
+    harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [advancedProfile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/advanced-command')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/advanced-command').body).toMatchObject({
+    agent_context_id: 'context-1', harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
+    workspace_provider: 'command', harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+  });
+});
+
 test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();

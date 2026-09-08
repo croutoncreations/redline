@@ -90,8 +90,7 @@ function setOnboardingDefaults(preserveProvider=false) {
   providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
   if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
   const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
-  const harnesses = installedHarnessesFor(provider);
-  const choices = harnesses.length ? harnesses : harnessCatalog.filter(item => item.installed && !['command','hermes'].includes(item.id));
+  const choices = installedHarnessesFor(provider);
   $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
   if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
   setOnboardingModels();
@@ -108,17 +107,27 @@ function setOnboardingModels() {
     : '<option value="default">Default model (harness decides)</option>';
 }
 
+function selectExistingOnboardingValue(select, value, label) {
+  if (!value) return;
+  if (![...select.options].some(option => option.value === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label || title(value);
+    select.append(option);
+  }
+  select.value = value;
+}
+
 function useExistingOnboardingProfile(profile) {
   if (!profile) return;
   $('#onboarding-provider').value = profile.provider_account_id;
   setOnboardingDefaults(true);
-  if ([...$('#onboarding-harness').options].some(option => option.value === profile.harness_type)) {
-    $('#onboarding-harness').value = profile.harness_type;
-    setOnboardingModels();
-  }
-  if ([...$('#onboarding-model').options].some(option => option.value === profile.model)) $('#onboarding-model').value = profile.model;
+  const harness = harnessCatalog.find(item => item.id === profile.harness_type);
+  selectExistingOnboardingValue($('#onboarding-harness'),profile.harness_type,harness?.label);
+  setOnboardingModels();
+  selectExistingOnboardingValue($('#onboarding-model'),profile.model,profile.model);
   $('#onboarding-profile-id').value = profile.id;
-  $('#onboarding-workspace').value = profile.workspace_provider;
+  selectExistingOnboardingValue($('#onboarding-workspace'),profile.workspace_provider,title(profile.workspace_provider));
   $('#onboarding-repository').value = profile.repository || '';
   $('#onboarding-base-branch').value = profile.base_branch || '';
   onboardingProfileID = profile.id;
@@ -162,13 +171,15 @@ async function saveOnboardingProfile() {
   if (!$('#onboarding-harness').value) throw new Error('Install a supported agent CLI before creating a profile.');
   if (!id) throw new Error('Choose a profile name.');
   if (!repository) throw new Error('Choose a repository path before continuing.');
-  const payload = {
-    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:'',
-    harness_type:$('#onboarding-harness').value, model:$('#onboarding-model').value || 'default', budget_model_group:'',
-    workspace_provider:$('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
-    cleanup_policy:'', require_clean:false, harness_command:'', harness_args:[], workspace_args:[], prepare_command:'', finalize_command:'',
-  };
   const existing = profiles.find(item => item.id === id);
+  const payload = {
+    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:existing?.agent_context_id || '',
+    harness_type:$('#onboarding-harness').value, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',
+    workspace_provider:$('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
+    cleanup_policy:existing?.cleanup_policy || '', require_clean:existing?.require_clean || false,
+    harness_command:existing?.harness_command || '', harness_args:existing?.harness_args || [], workspace_args:existing?.workspace_args || [],
+    prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
+  };
   const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(id)}` : '/v1/profiles',{
     method:existing ? 'PATCH' : 'POST', body:JSON.stringify(existing ? {...payload,id:undefined} : payload),
   });
