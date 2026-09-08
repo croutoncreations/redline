@@ -289,7 +289,7 @@ test('creates a capability-aware profile and an explicitly enabled first job', a
   await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/profiles')).toBe(true);
   expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({
     id: 'claude-worktree', provider_account_id: 'claude-main', harness_type: 'claude-code',
-    model: 'claude-opus-4-8', workspace_provider: 'git-worktree', repository: '/repo/redline', base_branch: 'main',
+    model: 'claude-opus-4-8', workspace_provider: 'git-worktree', repository: '/repo/redline', base_branch: '',
   });
   await expect(guide).toContainText('will be saved enabled');
   await expect(guide).toContainText('Scheduler is off');
@@ -444,6 +444,23 @@ test('prefers the provider whose compatible harness is installed', async ({ page
 
   await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
   await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
+test('prefers an authenticated provider over an installed signed-out provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'claude-code'
+    ? { ...harness, authentication: 'signed_out' }
+    : harness);
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+  await expect(page.locator('#onboarding-base-branch')).toHaveValue('');
+  await expect(page.locator('#onboarding-base-branch')).toHaveAttribute('placeholder', 'Repository HEAD · recommended');
 });
 
 test('recomputes the resume step after refreshing profiles', async ({ page }) => {

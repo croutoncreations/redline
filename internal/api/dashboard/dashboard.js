@@ -92,7 +92,8 @@ function setOnboardingDefaults(preserveProvider=false) {
   providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
   if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
   else {
-    const readyProvider = providerCatalog.find(item => installedHarnessesFor(item.provider).length > 0);
+    const readyProvider = providerCatalog.find(item => installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+      || providerCatalog.find(item => installedHarnessesFor(item.provider).length > 0);
     if (readyProvider) providerSelect.value = readyProvider.id;
   }
   const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
