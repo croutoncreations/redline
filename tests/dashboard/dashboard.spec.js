@@ -172,6 +172,8 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await page.getByRole('button', { name: '+ New job' }).click();
   const dialog = page.getByRole('dialog', { name: 'New scheduled job' });
   await expect(dialog).toBeVisible();
+  await expect(page.locator('#task-enabled')).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Create enabled job' })).toBeVisible();
   await page.locator('#task-name').fill('Review cache invalidation');
   await page.locator('#task-profile').selectOption('codex-devx');
   await page.locator('#task-priority').fill('82');
@@ -183,10 +185,21 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await page.locator('#task-interval').fill('7d');
   await page.locator('#task-prompt').fill('Inspect one cache invalidation path and report findings.');
   await page.locator('#task-repo-change').check();
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(dialog).toBeHidden();
   await expect.poll(() => state.requests.filter(item => item.path === '/v1/tasks').length).toBe(1);
-  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true });
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true, enabled: true });
+});
+
+test('allows a user to turn a new job off before creating it', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Draft later');
+  await page.locator('#task-enabled').uncheck();
+  await expect(page.getByRole('button', { name: 'Create disabled job' })).toBeVisible();
+  await page.getByRole('button', { name: 'Create disabled job' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body.enabled).toBe(false);
 });
 
 test('guides a first-time user with detected accounts and capability-aware defaults', async ({ page }) => {
@@ -337,7 +350,7 @@ test('uses stock-Mac-safe defaults and provider-specific examples in the profile
 test('uses in-product validation instead of native required-field bubbles', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: '+ New job' }).click();
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(page.locator('#task-form-error')).toContainText('Name the job');
   await expect(page.locator('#task-name')).toBeFocused();
 });
@@ -352,7 +365,7 @@ test('starts a job from an editable prompt template', async ({ page }) => {
   await page.locator('#task-name').fill('Find one bug in parsing');
   await page.locator('#task-prompt').fill('Inspect parsing only. Reproduce one bug before fixing it.');
   await page.locator('#task-profile').selectOption('codex-devx');
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect.poll(() => state.requests.some(item =>
     item.path === '/v1/tasks' && item.body.name === 'Find one bug in parsing' &&
     item.body.prompt === 'Inspect parsing only. Reproduce one bug before fixing it.'
@@ -459,7 +472,7 @@ test('selects a discovered existing Hermes job for a scheduled task', async ({ p
   await expect(page.locator('#task-runtime-job-field')).toBeVisible();
   await expect(page.locator('#task-runtime-job')).toContainText('Weekly SEO content planner');
   await page.locator('#task-runtime-job').selectOption('job-seo-planner');
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
 
   await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
   expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body).toMatchObject({
@@ -513,7 +526,7 @@ test('loads both run log streams and controls an existing task', async ({ page }
   await page.getByRole('row').filter({ hasText: 'Audit authentication' }).click();
   await expect(page.getByRole('dialog', { name: 'Manage scheduled job' })).toBeVisible();
 	await page.locator('#task-priority').fill('75');
-	await page.getByRole('button', { name: 'Save job' }).click();
+	await page.getByRole('button', { name: 'Save changes' }).click();
 	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/tasks/audit-auth')).toBe(true);
 	await page.getByRole('button', { name: 'Manage' }).click();
 	page.once('dialog', confirmation => confirmation.accept());
@@ -575,7 +588,7 @@ test('shows loading state and task save errors without closing the form', async 
 	await page.locator('#task-name').fill('Invalid scheduled job');
 	await page.locator('#task-profile').selectOption('codex-devx');
 	await page.locator('#task-prompt').fill('Do a small thing.');
-	await page.getByRole('button', { name: 'Save job' }).click();
+	await page.getByRole('button', { name: 'Create enabled job' }).click();
 	await expect(page.locator('#task-form-error')).toContainText('minimum interval is invalid');
 	await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
 });

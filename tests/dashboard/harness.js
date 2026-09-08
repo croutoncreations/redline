@@ -235,7 +235,8 @@ async function loadDashboard(page, options = {}) {
     if (url.pathname === '/v1/tasks' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
 		if (state.taskCreateError) return json(400, { error: state.taskCreateError });
-      const task = { ...body, id: 'created-task', enabled: true, state: 'queued' }; state.tasks[task.id] = task; return json(201, task);
+      const enabled = body.enabled !== false;
+      const task = { ...body, id: 'created-task', enabled, state: enabled ? 'queued' : 'disabled' }; state.tasks[task.id] = task; return json(201, task);
     }
     const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(enable|disable|retry))?$/);
     if (taskMatch) {

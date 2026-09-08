@@ -1090,6 +1090,25 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 	}
 }
 
+func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	defaultOn := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "default-on", "name": "Default on", "execution_profile_id": "codex-devx", "type": "one_off",
+	})
+	if !defaultOn.Enabled || defaultOn.State != domain.Queued {
+		t.Fatalf("default task = %#v", defaultOn)
+	}
+	explicitlyOff := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "explicitly-off", "name": "Explicitly off", "execution_profile_id": "codex-devx", "type": "one_off", "enabled": false,
+	})
+	if explicitlyOff.Enabled || explicitlyOff.State != domain.Disabled {
+		t.Fatalf("explicitly disabled task = %#v", explicitlyOff)
+	}
+}
+
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{

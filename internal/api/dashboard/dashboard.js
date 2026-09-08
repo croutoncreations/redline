@@ -856,6 +856,11 @@ function syncIntervalField() {
   $('#task-interval').disabled = !recurring;
   $('#task-interval-note').hidden = recurring;
 }
+function syncNewTaskActivation() {
+  const creating = !$('#task-id').value;
+  $('#task-enabled-field').hidden = !creating;
+  $('#save-task').textContent = creating ? ($('#task-enabled').checked ? 'Create enabled job' : 'Create disabled job') : 'Save changes';
+}
 async function updateTaskRuntimeJobs(selected='') {
   const profile=profiles.find(item => item.id === $('#task-profile').value);
   const field=$('#task-runtime-job-field'), select=$('#task-runtime-job'), status=$('#task-runtime-job-status');
@@ -906,6 +911,8 @@ async function openTask(id='') {
     $('#task-prompt').value = task?.prompt || '';
     $('#task-prompt-file').value = task?.prompt_file || '';
     $('#task-repo-change').checked = !!task?.require_repo_change;
+    $('#task-enabled').checked = task?.enabled ?? true;
+    syncNewTaskActivation();
     $('#delete-task').hidden = !task || task.state === 'running';
     $('#toggle-task').hidden = !task || task.state === 'running';
     $('#toggle-task').textContent = task?.enabled ? 'Disable' : 'Enable';
@@ -943,6 +950,7 @@ async function saveTask(event) {
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
   };
+  if (!id) payload.enabled = $('#task-enabled').checked;
   const save = $('#save-task'); save.disabled = true;
   try {
     await apiRequest(id ? `/v1/tasks/${encodeURIComponent(id)}` : '/v1/tasks',{method:id ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
@@ -1144,6 +1152,7 @@ $('#task-form').addEventListener('submit',saveTask);
 $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#task-type').addEventListener('change',syncIntervalField);
+$('#task-enabled').addEventListener('change',syncNewTaskActivation);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);

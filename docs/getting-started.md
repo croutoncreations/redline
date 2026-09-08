@@ -71,8 +71,10 @@ account, harness, model, workspace, cadence, and activation state. Because this 
 explicitly chose to create, it is saved **enabled**. The global scheduler is still off on a stock
 installation, so the job waits until you deliberately enable scheduling.
 
-Later, choose **+ New job** to add another job from an editable prompt preset or from scratch. A
-good first job is bounded, reviewable, and safe to repeat, such as closing one high-risk test gap.
+Later, choose **+ New job** to add another job from an editable prompt preset or from scratch. New
+jobs default to **Enabled after creation**; clear that option when you intentionally want to save a
+disabled draft. A good first job is bounded, reviewable, and safe to repeat, such as closing one
+high-risk test gap.
 
 The **Run when** setting controls how much spare capacity must accumulate:
 

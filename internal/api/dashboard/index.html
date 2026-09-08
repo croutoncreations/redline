@@ -167,6 +167,7 @@
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
         <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="e.g. tasks/review-auth.md"></label>
         <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>
+        <label id="task-enabled-field" class="check-field field-wide"><input id="task-enabled" type="checkbox" checked><span>Enabled after creation</span></label>
       </div>
       <div class="form-footer"><div><button id="delete-task" class="danger-button" type="button" hidden>Delete</button><button id="toggle-task" class="quiet-button" type="button" hidden>Disable</button></div><div><button id="cancel-task" class="quiet-button" type="button">Cancel</button><button id="save-task" class="primary-button" type="submit">Save job</button></div></div>
     </form>
