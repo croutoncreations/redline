@@ -92,7 +92,13 @@ function setOnboardingDefaults(preserveProvider=false) {
   providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
   if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
   else {
-    const readyProvider = providerCatalog.find(item => installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+    const hasFreshUsage = item => {
+      const account = latestDashboard?.providers?.find(provider => provider.id === item.id);
+      return Boolean(account?.snapshot) && !account.snapshot_stale;
+    };
+    const readyProvider = providerCatalog.find(item => hasFreshUsage(item) && installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+      || providerCatalog.find(item => installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+      || providerCatalog.find(item => hasFreshUsage(item) && installedHarnessesFor(item.provider).length > 0)
       || providerCatalog.find(item => installedHarnessesFor(item.provider).length > 0);
     if (readyProvider) providerSelect.value = readyProvider.id;
   }
@@ -100,7 +106,7 @@ function setOnboardingDefaults(preserveProvider=false) {
   const choices = installedHarnessesFor(provider);
   $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
   if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
-  setOnboardingModels();
+  syncOnboardingHarness();
   $('#onboarding-profile-id').value = onboardingProfileID || `${provider || 'agent'}-worktree`;
   if (!onboardingProfileID) $('#onboarding-workspace').value = 'git-worktree';
 }
@@ -112,6 +118,12 @@ function setOnboardingModels() {
   $('#onboarding-model').innerHTML = models.length
     ? models.map(model => `<option value="${escapeHTML(model.id)}">${escapeHTML(modelLabel(model))}</option>`).join('') + '<option value="default">Default model (harness decides)</option>'
     : '<option value="default">Default model (harness decides)</option>';
+}
+
+function syncOnboardingHarness() {
+  setOnboardingModels();
+  const existing = onboardingProfileID && profiles.find(profile => profile.id === onboardingProfileID);
+  if (existing?.harness_type === 'hermes' && $('#onboarding-harness').value !== 'hermes') $('#onboarding-workspace').value = 'git-worktree';
 }
 
 function selectExistingOnboardingValue(select, value, label) {
@@ -184,13 +196,14 @@ async function saveOnboardingProfile() {
   const existing = profiles.find(item => item.id === (onboardingProfileID || id));
   const harnessType = $('#onboarding-harness').value;
   const preserveHarnessConfiguration = existing?.harness_type === harnessType;
+  const leavingHermes = existing?.harness_type === 'hermes' && harnessType !== 'hermes';
   const payload = {
-    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:existing?.agent_context_id || '',
+    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:leavingHermes ? '' : existing?.agent_context_id || '',
     harness_type:harnessType, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',
-    workspace_provider:$('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
+    workspace_provider:leavingHermes ? 'git-worktree' : $('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
     cleanup_policy:existing?.cleanup_policy || '', require_clean:existing?.require_clean || false,
     harness_command:preserveHarnessConfiguration ? existing?.harness_command || '' : '',
-    harness_args:preserveHarnessConfiguration ? existing?.harness_args || [] : [], workspace_args:existing?.workspace_args || [],
+    harness_args:preserveHarnessConfiguration ? existing?.harness_args || [] : [], workspace_args:leavingHermes ? [] : existing?.workspace_args || [],
     prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
   };
   const persistedID = existing?.id || id;
@@ -1194,7 +1207,7 @@ $('#onboarding-skip').addEventListener('click',() => { onboardingStorage.set('di
 $('#onboarding-back').addEventListener('click',() => showOnboardingStep(onboardingStep - 1));
 $('#onboarding-next').addEventListener('click',advanceOnboarding);
 $('#onboarding-provider').addEventListener('change',() => setOnboardingDefaults(true));
-$('#onboarding-harness').addEventListener('change',setOnboardingModels);
+$('#onboarding-harness').addEventListener('change',syncOnboardingHarness);
 for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboarding-job-tier']) {
   $(selector).addEventListener('input',renderOnboardingReview);
   $(selector).addEventListener('change',renderOnboardingReview);

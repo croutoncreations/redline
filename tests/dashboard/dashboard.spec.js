@@ -486,6 +486,16 @@ test('prefers an authenticated provider over an installed signed-out provider', 
   await expect(page.locator('#onboarding-base-branch')).toHaveAttribute('placeholder', 'Repository HEAD · recommended');
 });
 
+test('prefers fresh usage when multiple authenticated providers are available', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers[0] = { ...dashboard.providers[0], snapshot_stale: true };
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
 test('recomputes the resume step after refreshing profiles', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];
@@ -620,6 +630,30 @@ test('clears harness-specific configuration when changing harnesses during resum
   await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
   expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body).toMatchObject({
     harness_type: 'claude-code', harness_command: '', harness_args: [],
+  });
+});
+
+test('clears Hermes runtime state when changing to a local harness during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = {
+    ...profileFixture()[0],
+    harness_type: 'hermes',
+    agent_context_id: 'remote-context',
+    workspace_provider: 'runtime-owned',
+    workspace_args: ['--remote-workspace'],
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('git-worktree');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body).toMatchObject({
+    harness_type: 'claude-code', agent_context_id: '', workspace_provider: 'git-worktree', workspace_args: [],
   });
 });
 
