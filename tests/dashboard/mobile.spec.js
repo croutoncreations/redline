@@ -76,6 +76,18 @@ test('ring shows stale state when snapshot is stale', async ({ page }) => {
   await expect(svgs.last()).toHaveAttribute('aria-label', 'stale');
 });
 
+test('relative() rounds up to the next unit instead of overflowing the current one', async ({ page }) => {
+  await loadMobileDashboard(page);
+  const oneHourFromNow = await page.evaluate(() => relative(new Date(Date.now() + 3599 * 1000).toISOString()));
+  const oneDayFromNow = await page.evaluate(() => relative(new Date(Date.now() + 86399 * 1000).toISOString()));
+  const oneHourAgo = await page.evaluate(() => relative(new Date(Date.now() - 3599 * 1000).toISOString()));
+  const oneDayAgo = await page.evaluate(() => relative(new Date(Date.now() - 86399 * 1000).toISOString()));
+  expect(oneHourFromNow).toBe('in 1 hr');
+  expect(oneDayFromNow).toBe('in 1 day');
+  expect(oneHourAgo).toBe('1 hr ago');
+  expect(oneDayAgo).toBe('1 day ago');
+});
+
 test('shows error-state card when provider has no snapshot', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot = undefined;
