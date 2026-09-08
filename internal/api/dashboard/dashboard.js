@@ -55,9 +55,10 @@ function providerSetupGuidance(provider) {
 
 function installedHarnessesFor(provider) {
   const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : [];
-  return preferred.map(id => harnessCatalog.find(item => item.id === id)).filter(item =>
-    item?.installed && (item.id !== 'pi' || (item.models?.[provider] || []).length > 0)
-  );
+  const authenticationRank = harness => harness.authentication === 'authenticated' ? 0 : harness.authentication === 'signed_out' ? 2 : 1;
+  return preferred.map(id => harnessCatalog.find(item => item.id === id))
+    .filter(item => item?.installed && (item.id !== 'pi' || (item.models?.[provider] || []).length > 0))
+    .sort((left,right) => authenticationRank(left) - authenticationRank(right));
 }
 
 function renderOnboardingAccounts() {
@@ -1225,6 +1226,13 @@ $('#onboarding-refresh-detection').addEventListener('click',async event => {
     ]);
     await refresh();
     renderOnboardingAccounts();
+    const providerReady = latestDashboard?.providers?.some(item => item.snapshot && !item.snapshot_stale);
+    if (providerReady && profiles.length && latestDashboard?.tasks?.length) {
+      onboardingStorage.set('completed','true');
+      onboardingStorage.remove('dismissed');
+      $('#onboarding-dialog').close();
+      return;
+    }
     const existing = onboardingProfileID && profiles.find(profile => profile.id === onboardingProfileID);
     if (existing) useExistingOnboardingProfile(existing);
     else setOnboardingDefaults();

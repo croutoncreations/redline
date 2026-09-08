@@ -410,6 +410,20 @@ test('offers Pi only when it has a route for the selected subscription provider'
   await expect(page.locator('#onboarding-harness')).not.toContainText('Pi');
 });
 
+test('prefers Pi over a direct harness known to be signed out', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = [dashboard.providers[0]];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'claude-code'
+    ? { ...harness, authentication: 'signed_out' }
+    : harness);
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('pi');
+});
+
 test('refresh detection rechecks subscription usage and reloads account readiness', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];
@@ -526,6 +540,21 @@ test('resumes at account readiness when provider usage is unavailable', async ({
   await expect(page.locator('#onboarding-model')).toHaveValue('gpt-5.5');
   await expect(page.locator('#onboarding-repository')).toHaveValue('/repo/redline');
   await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
+});
+
+test('finishes resumed setup after usage recovers when a first job already exists', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot_stale: true }));
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
+
+  state.providerRefreshSnapshots['claude-main'] = dashboard.providers[0].snapshot;
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Getting started' })).toBeHidden();
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/tasks')).toHaveLength(0);
 });
 
 test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
