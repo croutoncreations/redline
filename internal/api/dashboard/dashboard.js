@@ -101,7 +101,7 @@ function setOnboardingDefaults(preserveProvider=false) {
   $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
   if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
   setOnboardingModels();
-  $('#onboarding-profile-id').value = `${provider || 'agent'}-worktree`;
+  $('#onboarding-profile-id').value = onboardingProfileID || `${provider || 'agent'}-worktree`;
   $('#onboarding-workspace').value = 'git-worktree';
 }
 
@@ -181,7 +181,7 @@ async function saveOnboardingProfile() {
   if (!$('#onboarding-harness').value) throw new Error('Install a supported agent CLI before creating a profile.');
   if (!id) throw new Error('Choose a profile name.');
   if (!repository) throw new Error('Choose a repository path before continuing.');
-  const existing = profiles.find(item => item.id === id);
+  const existing = profiles.find(item => item.id === (onboardingProfileID || id));
   const payload = {
     id, provider_account_id:$('#onboarding-provider').value, agent_context_id:existing?.agent_context_id || '',
     harness_type:$('#onboarding-harness').value, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',

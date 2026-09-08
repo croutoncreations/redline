@@ -540,6 +540,22 @@ test('locks a persisted onboarding profile name when revisiting workspace setup'
   expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(1);
 });
 
+test('keeps the persisted profile identity when changing providers during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+
+  await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(0);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body.provider_account_id).toBe('claude-main');
+});
+
 test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
   await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();
