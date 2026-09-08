@@ -10,7 +10,11 @@ const pct = (r) => Math.max(0, Math.min(100, Math.round((r || 0) * 100)));
 function relative(value) {
   if (!value) return '—';
   const secs = Math.round((new Date(value) - Date.now()) / 1000), abs = Math.abs(secs);
-  const [n, u] = abs < 60 ? [abs,'sec'] : abs < 3600 ? [Math.round(abs/60),'min'] : abs < 86400 ? [Math.round(abs/3600),'hr'] : [Math.round(abs/86400),'day'];
+  let n, u;
+  if (abs < 60) { n = abs; u = 'sec'; }
+  else if (abs < 3600) { n = Math.round(abs/60); u = 'min'; if (n >= 60) { n = 1; u = 'hr'; } }
+  else if (abs < 86400) { n = Math.round(abs/3600); u = 'hr'; if (n >= 24) { n = 1; u = 'day'; } }
+  else { n = Math.round(abs/86400); u = 'day'; }
   return secs >= 0 ? `in ${n} ${u}${n===1?'':'s'}` : `${n} ${u}${n===1?'':'s'} ago`;
 }
 function shortTime(value) {

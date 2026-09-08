@@ -3,7 +3,11 @@ const escapeHTML = (value = "") => String(value).replace(/[&<>'"]/g, c => ({'&':
 const relative = (value) => {
   if (!value) return "—";
   const seconds = Math.round((new Date(value) - Date.now()) / 1000), abs = Math.abs(seconds);
-  const [amount, unit] = abs < 60 ? [abs,"sec"] : abs < 3600 ? [Math.round(abs/60),"min"] : abs < 86400 ? [Math.round(abs/3600),"hr"] : [Math.round(abs/86400),"day"];
+  let amount, unit;
+  if (abs < 60) { amount = abs; unit = "sec"; }
+  else if (abs < 3600) { amount = Math.round(abs/60); unit = "min"; if (amount >= 60) { amount = 1; unit = "hr"; } }
+  else if (abs < 86400) { amount = Math.round(abs/3600); unit = "hr"; if (amount >= 24) { amount = 1; unit = "day"; } }
+  else { amount = Math.round(abs/86400); unit = "day"; }
   return seconds >= 0 ? `in ${amount} ${unit}${amount === 1 ? "" : "s"}` : `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
 };
 const shortTime = (value) => value ? new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)) : "—";
