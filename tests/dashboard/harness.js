@@ -106,7 +106,7 @@ async function loadDashboard(page, options = {}) {
     taskTemplates: taskTemplatesFixture(),
     runtimeConnections: [], agentContexts: [],
     runtimeJobs: {},
-    requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
+    requests: [], dashboardError: false, profileError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
   };
 	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
   state.tasks = {
@@ -213,7 +213,7 @@ async function loadDashboard(page, options = {}) {
       provider.policy_source = body.policy ? 'override' : 'global';
       return json(200, { policy: provider.policy, source: provider.policy_source });
     }
-    if (url.pathname === '/v1/profiles' && method === 'GET') return json(200, state.profiles);
+    if (url.pathname === '/v1/profiles' && method === 'GET') return state.profileError ? json(500, { error: 'profiles unavailable' }) : json(200, state.profiles);
     if (url.pathname === '/v1/profiles' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
       const profile = { ...body, created_at: '2026-07-20T19:00:00Z' }; state.profiles.push(profile); return json(201, profile);

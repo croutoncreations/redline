@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -131,12 +132,13 @@ func (s Service) inspect(ctx context.Context, id, label, binary string, args []s
 	}
 	if len(authArgs) > 0 {
 		authOutput, authErr := s.run()(ctx, path, authArgs...)
+		var exitErr *exec.ExitError
 		if authErr == nil {
 			harness.Authentication = "authenticated"
-		} else {
+		} else if errors.As(authErr, &exitErr) && exitErr.ExitCode() == 1 {
 			harness.Authentication = "signed_out"
-			_ = authOutput // Authentication output can contain account details; do not expose it through discovery.
 		}
+		_ = authOutput // Authentication output can contain account details; do not expose it through discovery.
 	}
 	return harness
 }

@@ -1145,9 +1145,14 @@ function connectLive() {
 
 $('#refresh').addEventListener('click',refresh);
 $('#new-task').addEventListener('click',async () => {
-  await loadProfiles(true);
-  if (!profiles.length) await openOnboarding(3);
-  else await openTask();
+  try {
+    await loadProfiles(true);
+    if (!profiles.length) await openOnboarding(3);
+    else await openTask();
+  } catch (error) {
+    $('#error-banner').hidden = false;
+    $('#error-banner').textContent = `Could not open job: ${error.message}`;
+  }
 });
 $('#manage-profiles').addEventListener('click',openProfiles);
 $('#resume-onboarding').addEventListener('click',() => openOnboarding(profiles.length ? 4 : 1));

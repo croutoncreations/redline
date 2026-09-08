@@ -646,3 +646,10 @@ test('shows loading state and task save errors without closing the form', async 
 	await expect(page.locator('#task-form-error')).toContainText('minimum interval is invalid');
 	await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
 });
+
+test('shows profile load failures when starting a new job', async ({ page }) => {
+  await loadDashboard(page, { profileError: true });
+  await page.getByRole('button', { name: '+ New job' }).click();
+
+  await expect(page.locator('#error-banner')).toContainText('Could not open job: profiles unavailable');
+});
