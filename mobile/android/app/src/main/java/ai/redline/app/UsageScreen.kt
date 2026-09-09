@@ -619,7 +619,7 @@ private fun Meter(
         // passing. Half left means nothing on its own -- it is comfortable
         // near the end of a window and a problem near the start -- and this
         // is the one glance that tells which.
-        BoxWithConstraints(Modifier.fillMaxWidth().height(10.dp)) {
+        BoxWithConstraints(Modifier.fillMaxWidth().height(14.dp)) {
             LinearProgressIndicator(
                 progress = { percent / 100f },
                 modifier = Modifier
@@ -670,7 +670,9 @@ private fun Meter(
             // Drawn only when the desktop sent an elapsed fraction: an older
             // one leaves the mark at the very end, where it says nothing.
             // Taller than the bar and than the scheduler's lines: the one mark
-            // that is about the clock rather than the policy.
+            // that is about the clock rather than the policy. Pace remains in
+            // the accessibility sentence; the visual mark is always white so
+            // every meter has the same easily scanned landmark.
             if (elapsedPercent > 0) {
                 val mark = paceMarkPercent(elapsedPercent)
                 Box(
@@ -679,12 +681,7 @@ private fun Meter(
                         .width(2.dp)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(1.dp))
-                        .background(
-                            when (pace) {
-                                Pace.BEHIND -> Warn
-                                else -> TextPrimary
-                            },
-                        ),
+                        .background(TextPrimary),
                 )
             }
         }
