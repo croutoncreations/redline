@@ -726,6 +726,39 @@ func TestPoolElapsedUsesTheAllowancePeriod(t *testing.T) {
 	}
 }
 
+// A model-scoped short pool consumes the same rolling reserve as an account
+// short window when a task routes through that model. Carry the role and the
+// effective reserve on the pool itself so the phone draws protection on Spark,
+// not incorrectly on every model allowance.
+func TestShortModelPoolCarriesItsReserve(t *testing.T) {
+	server := usagePayload(t, `{
+		"generated_at": "2026-07-20T19:00:00Z",
+		"providers": [{
+			"id": "codex-main", "provider": "codex",
+			"snapshot": {
+				"weekly": {"remaining": 0.5, "resets_at": "2026-07-24T19:00:00Z"},
+				"allowances": [
+					{"key":"model:spark:short", "source_label":"Spark", "scope":"model", "role":"short", "remaining":0.8, "resets_at":"2026-07-20T23:00:00Z"},
+					{"key":"model:spark:weekly", "source_label":"Spark Weekly", "scope":"model", "role":"weekly", "remaining":0.8, "resets_at":"2026-07-24T19:00:00Z"}
+				]
+			},
+			"scheduling": {"rolling_reserve":0.25, "pace_thresholds":[]}
+		}]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pools := decodeUsage(t, raw).Providers[0].Pools
+	if pools[0].Role != "short" || pools[0].ReservePercent != 25 {
+		t.Errorf("Spark short = %+v, want short role and 25%% reserve", pools[0])
+	}
+	if pools[1].Role != "weekly" || pools[1].ReservePercent != 0 {
+		t.Errorf("Spark weekly = %+v, want weekly role and no reserve", pools[1])
+	}
+}
+
 // Past the reset, the window is over; the tick sits at the end rather than
 // running off it.
 func TestElapsedClampsAtTheReset(t *testing.T) {

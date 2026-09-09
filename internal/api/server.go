@@ -1991,6 +1991,40 @@ func (s *Server) evaluateCandidateBudget(
 			"shared weekly allowance is exhausted"
 	}
 	if group != "" {
+		// Spark has a separate short window as well as a weekly one. It is not
+		// the account's short window, but a Spark task consumes it, so background
+		// work must leave the same rolling reserve for interactive Spark use.
+		// Other model groups (currently Fable) have only a weekly allowance and
+		// must not grow a made-up short-window requirement.
+		shortKey := "model:" + group + ":short"
+		short, hasShort := snapshot.Allowance(shortKey)
+		// Spark is known to have a short window. If the collector could not read
+		// it, fail closed rather than spending an unknown interactive budget.
+		// Other groups currently have only weekly allowances, but if a provider
+		// adds a short one later it gets reserve protection automatically.
+		if group == "spark" && !hasShort {
+			required = append(required, shortKey)
+			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+				shortKey + " allowance is missing"
+		}
+		if hasShort {
+			required = append(required, shortKey)
+			shortDecision := decision.Admit
+			shortReason := "model short reserve available"
+			if short.Remaining <= policy.RollingReserve {
+				shortDecision = decision.Wait
+				shortReason = "model short reserve is protected"
+			}
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: shortKey, Decision: shortDecision, Mode: decision.ModeSlots,
+				Reason: shortReason, Remaining: short.Remaining,
+			})
+			if shortDecision == decision.Wait {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					shortKey + " reserve is protected"
+			}
+		}
+
 		poolKey := "model:" + group + ":weekly"
 		required = append(required, poolKey)
 		allowance, found := snapshot.Allowance(poolKey)

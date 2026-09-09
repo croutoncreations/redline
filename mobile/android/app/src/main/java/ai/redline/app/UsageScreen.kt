@@ -462,6 +462,11 @@ private fun ProviderCard(
                 Meter(
                     pool.label, pool.remainingPercent, pool.resetsInSeconds,
                     pool.resetInferred, pool.resetsAt, pool.elapsedPercent,
+                    // Spark's short allowance is independent of Codex's main
+                    // weekly budget, but a Spark task consumes it. The core
+                    // attaches the reserve only when the scheduler protects
+                    // this pool, keeping the line and enforcement together.
+                    zones = MeterZones(reservePercent = pool.reservePercent),
                 )
             }
 

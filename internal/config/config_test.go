@@ -382,6 +382,20 @@ func TestClaudeModelRoutingDistinguishesFableFromAccountOnlyModels(t *testing.T)
 	}
 }
 
+// Spark has its own short and weekly allowances. A profile naming the Spark
+// model must route through that budget group without every user having to
+// repeat a model_groups stanza; otherwise Redline can see the allowance but
+// will never protect it.
+func TestCodexModelRoutingRecognisesSparkByDefault(t *testing.T) {
+	provider := config.Provider{Provider: "codex"}
+	for _, model := range []string{"spark", "gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"} {
+		group, routing, err := provider.ResolveModelGroup(model, "")
+		if err != nil || group != "spark" || routing != "alias" {
+			t.Fatalf("model %q group=%q routing=%q err=%v", model, group, routing, err)
+		}
+	}
+}
+
 func TestClaudeModelRoutingAcceptsProviderQualifiedPiModel(t *testing.T) {
 	provider := config.Provider{Provider: "claude"}
 	group, routing, err := provider.ResolveModelGroup("anthropic-cli/claude-fable-5", "")

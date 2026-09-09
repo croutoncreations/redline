@@ -40,6 +40,20 @@ class UsageModelsTest {
         assertTrue(provider.pools[0].resetInferred)
     }
 
+    @Test
+    fun `decodes the reserve attached to a Spark short pool`() {
+        val raw = """
+        {"providers":[{"id":"codex-main","provider":"codex","pools":[
+          {"key":"model:spark:short","label":"Spark","scope":"model","role":"short",
+           "reserve_percent":25,"remaining_percent":80,"resets_in_seconds":3600}
+        ]}]}
+        """.trimIndent()
+
+        val spark = redlineJson.decodeFromString(UsageView.serializer(), raw).providers[0].pools[0]
+        assertEquals("short", spark.role)
+        assertEquals(25, spark.reservePercent)
+    }
+
     /** A newer desktop must not break an older app. */
     @Test
     fun ignoresUnknownFields() {

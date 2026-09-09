@@ -48,6 +48,11 @@ type Pool struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
 	Scope string `json:"scope"`
+	// Role distinguishes a model short window such as Spark from its weekly
+	// allowance. ReservePercent is non-zero only on a short pool the scheduler
+	// protects, so the screen never has to infer policy from a label.
+	Role           string `json:"role"`
+	ReservePercent int    `json:"reserve_percent,omitempty"`
 	Window
 }
 
@@ -260,7 +265,11 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 				providesShortWindow(item.Snapshot)
 			provider.BankedResets = item.Snapshot.BankedResets
 			provider.Weekly = weeklyWindow(item.Snapshot, now)
-			provider.Pools = pools(item.Snapshot, now)
+			reservePercent := 0
+			if item.Scheduling != nil {
+				reservePercent = percent(item.Scheduling.RollingReserve)
+			}
+			provider.Pools = pools(item.Snapshot, now, reservePercent)
 			provider.SourceLabel = sourceLabel(
 				item.UsageSource.Active, item.Snapshot.Source,
 				item.ActiveRuns, item.MaxConcurrentRuns,
@@ -367,7 +376,7 @@ func allowanceWindow(snapshot *decision.UsageSnapshot, key string, now time.Time
 
 // pools returns every allowance that is not already shown as a dedicated
 // window.
-func pools(snapshot *decision.UsageSnapshot, now time.Time) []Pool {
+func pools(snapshot *decision.UsageSnapshot, now time.Time, reservePercent int) []Pool {
 	var result []Pool
 	for _, allowance := range snapshot.Allowances {
 		if isCanonicalPool(allowance) {
@@ -377,11 +386,17 @@ func pools(snapshot *decision.UsageSnapshot, now time.Time) []Pool {
 		if label == "" {
 			label = allowance.Key
 		}
+		poolReserve := 0
+		if allowance.Role == "short" {
+			poolReserve = reservePercent
+		}
 		result = append(result, Pool{
-			Key:    allowance.Key,
-			Label:  label,
-			Scope:  allowance.Scope,
-			Window: *newWindow(allowance.Remaining, allowance.ResetsAt, allowancePeriod(allowance), allowance.ResetInferred, now),
+			Key:            allowance.Key,
+			Label:          label,
+			Scope:          allowance.Scope,
+			Role:           allowance.Role,
+			ReservePercent: poolReserve,
+			Window:         *newWindow(allowance.Remaining, allowance.ResetsAt, allowancePeriod(allowance), allowance.ResetInferred, now),
 		})
 	}
 	return result

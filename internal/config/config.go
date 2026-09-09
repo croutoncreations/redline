@@ -158,6 +158,15 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 			groups["fable"] = ModelGroup{Aliases: []string{"fable", "claude-fable-5", "claude-fable-latest"}}
 		}
 	}
+	// Spark is a distinct Codex product with its own short and weekly
+	// allowances. Recognise the provider's model name without requiring every
+	// installation to duplicate this stable mapping in YAML; an explicit
+	// model_groups.spark still wins above, just as it does for Fable.
+	if strings.EqualFold(p.Provider, "codex") {
+		if _, ok := groups["spark"]; !ok {
+			groups["spark"] = ModelGroup{Aliases: []string{"spark", "gpt-5.3-codex-spark"}}
+		}
+	}
 	return groups
 }
 

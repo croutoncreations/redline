@@ -112,6 +112,10 @@ data class Pool(
     val key: String = "",
     val label: String = "",
     val scope: String = "",
+    /** short or weekly; explicit so the screen never guesses from the label. */
+    val role: String = "",
+    /** The protected floor for a model short pool such as Spark. */
+    @SerialName("reserve_percent") val reservePercent: Int = 0,
     @SerialName("remaining_percent") val remainingPercent: Int = 0,
     @SerialName("resets_in_seconds") val resetsInSeconds: Long = 0,
     @SerialName("resets_at") val resetsAt: String = "",

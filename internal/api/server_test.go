@@ -1487,6 +1487,68 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 	}
 }
 
+// A Spark task consumes Spark's own pair of allowances. Its short window is
+// not Codex's account short window, but the configured rolling reserve means
+// the same thing there: background work must leave that fraction for the
+// person using Spark interactively.
+func TestSparkTaskWaitsAtItsModelShortReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.25, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil {
+		t.Fatalf("selected Spark task inside reserve: %#v", result.SelectedTask)
+	}
+	if len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short reserve is protected") {
+		t.Fatalf("rejections = %#v", result.Result.CandidateRejections)
+	}
+}
+
+func TestSparkTaskFailsClosedWhenItsShortAllowanceIsMissing(t *testing.T) {
+	payload := fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
+	server, db := newAPIServer(t, payload)
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil || len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short allowance is missing") {
+		t.Fatalf("selected=%#v rejections=%#v", result.SelectedTask, result.Result.CandidateRejections)
+	}
+}
+
+func TestSparkTaskRequiresBothSparkAllowancesAboveReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.26, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || result.SelectedTask.ID != "spark-task" {
+		t.Fatalf("selected=%#v result=%#v", result.SelectedTask, result.Result)
+	}
+	if strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short,model:spark:weekly" {
+		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
 func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))
 	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 100)
@@ -3341,6 +3403,34 @@ func createClaudeCandidate(
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func createCodexCandidate(t *testing.T, db *store.DB, profileID, model, taskID string) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: profileID, ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		Model: model, WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: taskID, Name: taskID, Priority: 100, ExecutionProfileID: profileID, Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func codexSparkAllowancePayload(short, sparkWeekly, accountWeekly float64) string {
+	return fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark","used":%f,"limit":100,"periodDurationMs":18000000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), (1-accountWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		(1-short)*100, apiNow.Add(4*time.Hour).Format(time.RFC3339Nano),
+		(1-sparkWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
 }
 
 func claudeAllowancePayload(fableRemaining, sharedRemaining float64, untilReset time.Duration) string {
