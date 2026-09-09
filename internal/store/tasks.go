@@ -613,7 +613,14 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// formatTime uses a fixed-width fractional-second field so that lexicographic
+// ordering of the resulting TEXT column matches chronological ordering.
+// time.RFC3339Nano omits the fraction entirely when it is exactly zero, which
+// makes a whole-second timestamp sort after a later timestamp that happens to
+// have a non-zero fraction in the same second ('.' < 'Z' in ASCII).
+func formatTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 func parseStoredTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)

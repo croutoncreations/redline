@@ -41,6 +41,38 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// RFC3339Nano omits the fractional-second field entirely when it is exactly
+// zero, so a snapshot observed at a whole second sorts lexicographically
+// *after* a chronologically later snapshot with a non-zero fractional second
+// in the same wall-clock second ('.' < 'Z' in ASCII). Stored timestamps must
+// use a fixed-width fraction so SQLite's TEXT ordering matches real time.
+func TestSQLiteLatestSnapshotOrdersByActualTimeNotFormattedString(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	earlier := usageSnapshot(time.Date(2030, 1, 1, 0, 0, 5, 0, time.UTC), 0.9)
+	later := usageSnapshot(earlier.ObservedAt.Add(time.Nanosecond), 0.8)
+	if err := db.SaveSnapshot(ctx, earlier, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(ctx, later, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(later.ObservedAt) {
+		t.Fatalf("latest snapshot observed_at = %s, want %s (the chronologically later snapshot)",
+			got.ObservedAt, later.ObservedAt)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
