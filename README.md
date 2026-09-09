@@ -232,6 +232,10 @@ go run ./cmd/redline candidates --provider codex-main
 go run ./cmd/redline task dispatch add-tests
 ```
 
+A task needs either an inline `prompt` or a `prompt_file` naming a file the harness reads from the
+prepared workspace at run time. `prompt_file` must be a relative path; Redline rejects an absolute
+path or one that would resolve outside the workspace directory.
+
 Each task has a `dispatch_tier` that controls when it becomes eligible:
 
 ```yaml
