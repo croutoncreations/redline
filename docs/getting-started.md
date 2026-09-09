@@ -21,6 +21,10 @@ Redline requires macOS 13 or later and supports Apple Silicon and Intel Macs.
 4. Choose whether Redline should launch when you log in. You can change this later under
    **App Setup…** in the menu-bar app.
 
+On first launch, Redline opens the dashboard and a four-step setup guide. The guide is safe to
+skip: a **Getting started** checklist remains on the dashboard and resumes at the first incomplete
+step.
+
 Release builds are signed by Crouton Creations and notarized by Apple. Do not bypass Gatekeeper or
 remove quarantine attributes to install Redline.
 
@@ -29,8 +33,10 @@ into a trusted local coding agent.
 
 ## 2. Confirm usage monitoring
 
-Open the Redline menu-bar item. Codex and Claude should show a weekly percentage and reset time.
-When a five-hour limit exists, Redline shows that too.
+The setup guide checks each supported account in three distinct stages: CLI installation, agent
+sign-in, and subscription-usage access. If a CLI or login is missing, it provides the install link
+or terminal command needed to continue. Codex and Claude should then show a weekly percentage and
+reset time. When a five-hour limit exists, Redline shows that too.
 
 - Redline reuses a healthy local OpenUsage API when one is already running.
 - Otherwise it uses its built-in read-only collectors.
@@ -42,7 +48,12 @@ Usage monitoring does not enable automatic dispatch.
 
 ## 3. Create an execution profile
 
-Open **Redline**, choose **Profiles**, then create a profile:
+Continue to **Workspace** in the first-run guide. Redline preselects the account, directly
+compatible installed harness, and discovered model when possible. It also defaults to an isolated
+Git worktree. Choose a profile name, repository path, and base branch. You can edit the result
+later under **Profiles**.
+
+The fields mean:
 
 - **Provider account** selects the allowance to protect.
 - **Harness** selects Codex CLI, Claude Code, Pi, Hermes, or a custom command.
@@ -55,8 +66,15 @@ interactively before asking it to run unattended.
 
 ## 4. Add a small first job
 
-Choose **+ New job**. Start from an editable prompt preset or write your own. A good first job is
-bounded, reviewable, and safe to repeat, such as closing one high-risk test gap.
+The last guide step creates the first job. Give it a name and bounded prompt, then review its
+account, harness, model, workspace, cadence, and activation state. Because this is a job you
+explicitly chose to create, it is saved **enabled**. The global scheduler is still off on a stock
+installation, so the job waits until you deliberately enable scheduling.
+
+Later, choose **+ New job** to add another job from an editable prompt preset or from scratch. New
+jobs default to **Enabled after creation**; clear that option when you intentionally want to save a
+disabled draft. A good first job is bounded, reviewable, and safe to repeat, such as closing one
+high-risk test gap.
 
 The **Run when** setting controls how much spare capacity must accumulate:
 
@@ -69,9 +87,11 @@ optionally require the repository to change before another run.
 
 ## 5. Enable dispatch deliberately
 
-Review the queue and profiles, then enable scheduling for the providers you want Redline to manage.
-Start with the **Standard** policy. The provider card explains the latest `WAIT` or `RUN` decision
-and estimates when the next tier will become eligible if usage does not change.
+Review the queue and profiles, then set `scheduler.enabled` to `true` in Redline's configuration
+and restart the app. The dashboard's **Scheduler off** banner shows this instruction while global
+scheduling is disabled. Start with the **Standard** policy. The provider card explains the latest
+`WAIT` or `RUN` decision and estimates when the next tier will become eligible if usage does not
+change.
 
 Redline admits one job at a time by default. Once admitted, a task runs to completion; Redline does
 not kill it at an arbitrary runtime limit.

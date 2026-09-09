@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,13 +25,14 @@ type Model struct {
 }
 
 type Harness struct {
-	ID        string             `json:"id"`
-	Label     string             `json:"label"`
-	Installed bool               `json:"installed"`
-	Version   string             `json:"version,omitempty"`
-	Path      string             `json:"-"`
-	Error     string             `json:"error,omitempty"`
-	Models    map[string][]Model `json:"models,omitempty"`
+	ID             string             `json:"id"`
+	Label          string             `json:"label"`
+	Installed      bool               `json:"installed"`
+	Version        string             `json:"version,omitempty"`
+	Authentication string             `json:"authentication,omitempty"`
+	Path           string             `json:"-"`
+	Error          string             `json:"error,omitempty"`
+	Models         map[string][]Model `json:"models,omitempty"`
 }
 
 type Catalog struct {
@@ -121,6 +123,23 @@ func (s Service) inspect(ctx context.Context, id, label, binary string, args []s
 		return harness
 	}
 	harness.Version = cleanVersion(string(output))
+	var authArgs []string
+	switch id {
+	case "codex-cli":
+		authArgs = []string{"login", "status"}
+	case "claude-code":
+		authArgs = []string{"auth", "status"}
+	}
+	if len(authArgs) > 0 {
+		authOutput, authErr := s.run()(ctx, path, authArgs...)
+		var exitErr *exec.ExitError
+		if authErr == nil {
+			harness.Authentication = "authenticated"
+		} else if errors.As(authErr, &exitErr) && exitErr.ExitCode() == 1 {
+			harness.Authentication = "signed_out"
+		}
+		_ = authOutput // Authentication output can contain account details; do not expose it through discovery.
+	}
 	return harness
 }
 

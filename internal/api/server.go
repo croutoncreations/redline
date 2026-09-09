@@ -1145,6 +1145,7 @@ type taskRequest struct {
 	MinInterval        string              `json:"min_interval"`
 	RequireRepoChange  bool                `json:"require_repo_change"`
 	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
+	Enabled            *bool               `json:"enabled"`
 }
 
 type taskUpdateRequest struct {
@@ -1184,6 +1185,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
 		RuntimeJobID: request.RuntimeJobID,
 		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+	}
+	if request.Enabled != nil && !*request.Enabled {
+		task.State = domain.Disabled
 	}
 	if err := s.store.CreateTask(r.Context(), task, s.now()); err != nil {
 		writeError(w, err)

@@ -23,9 +23,274 @@ let currentRun = null, currentLogContent = '', currentLogView = 'formatted';
 let latestRuns = [], latestAttempts = [], taskNames = new Map();
 let showAllRuns = false, showAllAttempts = false;
 const ACTIVITY_PREVIEW = 8;
-let profiles = [], taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
+let profiles = [], profilesLoaded = false, taskTemplates = [], providerAccounts = [], providerCatalog = [], harnessCatalog = [], editingProfile = '', policyCatalog = {};
 let runtimeConnections = [], agentContexts = [], hermesDiscovery = null, editingRuntimeConnection = '';
+let latestDashboard = null, onboardingStep = 1, onboardingEvaluated = false, onboardingProfileID = '';
 const capacityCache = new Map();
+
+const onboardingStorage = {
+  get(key) { try { return localStorage.getItem(`redline.onboarding.${key}`); } catch (_) { return null; } },
+  set(key,value) { try { localStorage.setItem(`redline.onboarding.${key}`,value); } catch (_) {} },
+  remove(key) { try { localStorage.removeItem(`redline.onboarding.${key}`); } catch (_) {} },
+};
+
+function providerName(provider) {
+  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : title(provider);
+}
+
+function usageSourceName(source) {
+  return String(source).toLowerCase() === 'openusage' ? 'OpenUsage' : title(source);
+}
+
+function directHarnessFor(provider) {
+  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : '';
+  return harnessCatalog.find(item => item.id === id);
+}
+
+function providerSetupGuidance(provider) {
+  if (provider === 'claude') return {label:'Claude Code',login:'claude auth login',url:'https://docs.anthropic.com/en/docs/claude-code/getting-started'};
+  if (provider === 'codex') return {label:'Codex CLI',login:'codex login',url:'https://developers.openai.com/codex/cli/'};
+  return {label:providerName(provider),login:'',url:''};
+}
+
+function installedHarnessesFor(provider) {
+  const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : [];
+  const authenticationRank = harness => harness.authentication === 'authenticated' ? 0 : harness.authentication === 'signed_out' ? 2 : 1;
+  return preferred.map(id => harnessCatalog.find(item => item.id === id))
+    .filter(item => item?.installed && (item.id !== 'pi' || (item.models?.[provider] || []).length > 0))
+    .sort((left,right) => authenticationRank(left) - authenticationRank(right));
+}
+
+function renderOnboardingAccounts() {
+  const providers = latestDashboard?.providers || [];
+  $('#onboarding-accounts').innerHTML = providers.map(item => {
+    const harness = directHarnessFor(item.provider);
+    const guidance = providerSetupGuidance(item.provider);
+    const source = item.usage_source?.active || item.snapshot?.source || 'not available';
+    const usageReady = Boolean(item.snapshot) && !item.snapshot_stale;
+    const authenticated = harness?.authentication === 'authenticated';
+    const installStatus = harness?.installed
+      ? `${escapeHTML(harness.label)} · Installed${harness.version ? ` · v${escapeHTML(harness.version)}` : ''}`
+      : `<a href="${escapeHTML(guidance.url)}" target="_blank" rel="noopener noreferrer">Install ${escapeHTML(guidance.label)} ↗</a>`;
+    const authStatus = authenticated
+      ? 'Agent sign-in verified'
+      : `Sign in from Terminal · <code>${escapeHTML(guidance.login)}</code>`;
+    return `<article class="onboarding-account">
+      <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
+      <ul>
+        <li class="${harness?.installed ? 'ready' : 'needs-action'}">${installStatus}</li>
+        <li class="${authenticated ? 'ready' : 'needs-action'}">${authStatus}</li>
+        <li class="${usageReady ? 'ready' : 'needs-action'}">${usageReady ? 'Subscription usage verified' : `Usage check needed${item.error ? ` · ${escapeHTML(item.error)}` : ''}`}</li>
+        <li>Usage source · Automatic → ${escapeHTML(usageSourceName(source))}${item.usage_source?.last_error ? ` · fallback active` : ''}</li>
+      </ul>
+    </article>`;
+  }).join('') || '<p class="empty">No provider accounts are configured.</p>';
+}
+
+function setOnboardingDefaults(preserveProvider=false) {
+  const providerSelect = $('#onboarding-provider');
+  const previous = preserveProvider ? providerSelect.value : '';
+  providerSelect.innerHTML = providerCatalog.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(providerName(item.provider))} · ${escapeHTML(item.id)}</option>`).join('');
+  if (previous && providerCatalog.some(item => item.id === previous)) providerSelect.value = previous;
+  else {
+    const hasFreshUsage = item => {
+      const account = latestDashboard?.providers?.find(provider => provider.id === item.id);
+      return Boolean(account?.snapshot) && !account.snapshot_stale;
+    };
+    const readyProvider = providerCatalog.find(item => hasFreshUsage(item) && installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+      || providerCatalog.find(item => installedHarnessesFor(item.provider).some(harness => harness.authentication === 'authenticated'))
+      || providerCatalog.find(item => hasFreshUsage(item) && installedHarnessesFor(item.provider).length > 0)
+      || providerCatalog.find(item => installedHarnessesFor(item.provider).length > 0);
+    if (readyProvider) providerSelect.value = readyProvider.id;
+  }
+  const provider = providerCatalog.find(item => item.id === providerSelect.value)?.provider || '';
+  const choices = installedHarnessesFor(provider);
+  $('#onboarding-harness').innerHTML = choices.map(item => `<option value="${escapeHTML(item.id)}">${escapeHTML(item.label)}${item.version ? ` · v${escapeHTML(item.version)}` : ''}</option>`).join('');
+  if (!choices.length) $('#onboarding-harness').innerHTML = '<option value="">No supported agent CLI found</option>';
+  syncOnboardingHarness();
+  $('#onboarding-profile-id').value = onboardingProfileID || `${provider || 'agent'}-worktree`;
+  if (!onboardingProfileID) $('#onboarding-workspace').value = 'git-worktree';
+}
+
+function setOnboardingModels() {
+  const provider = providerCatalog.find(item => item.id === $('#onboarding-provider').value)?.provider || '';
+  const harness = harnessCatalog.find(item => item.id === $('#onboarding-harness').value);
+  const models = harness?.models?.[provider] || [];
+  $('#onboarding-model').innerHTML = models.length
+    ? models.map(model => `<option value="${escapeHTML(model.id)}">${escapeHTML(modelLabel(model))}</option>`).join('') + '<option value="default">Default model (harness decides)</option>'
+    : '<option value="default">Default model (harness decides)</option>';
+}
+
+function syncOnboardingHarness() {
+  setOnboardingModels();
+  const existing = onboardingProfileID && profiles.find(profile => profile.id === onboardingProfileID);
+  if (existing?.harness_type === 'hermes' && $('#onboarding-harness').value !== 'hermes') $('#onboarding-workspace').value = 'git-worktree';
+}
+
+function selectExistingOnboardingValue(select, value, label) {
+  if (!value) return;
+  if (![...select.options].some(option => option.value === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label || title(value);
+    select.append(option);
+  }
+  select.value = value;
+}
+
+function useExistingOnboardingProfile(profile) {
+  if (!profile) return;
+  $('#onboarding-provider').value = profile.provider_account_id;
+  setOnboardingDefaults(true);
+  const harness = harnessCatalog.find(item => item.id === profile.harness_type);
+  selectExistingOnboardingValue($('#onboarding-harness'),profile.harness_type,harness?.label);
+  setOnboardingModels();
+  selectExistingOnboardingValue($('#onboarding-model'),profile.model || 'default',profile.model || 'Default model (harness decides)');
+  $('#onboarding-profile-id').value = profile.id;
+  selectExistingOnboardingValue($('#onboarding-workspace'),profile.workspace_provider,title(profile.workspace_provider));
+  $('#onboarding-repository').value = profile.repository || '';
+  $('#onboarding-base-branch').value = profile.base_branch || '';
+  onboardingProfileID = profile.id;
+}
+
+function showOnboardingStep(step) {
+  onboardingStep = Math.max(1,Math.min(4,step));
+  document.querySelectorAll('[data-onboarding-step]').forEach(section => { section.hidden = Number(section.dataset.onboardingStep) !== onboardingStep; });
+  const profileID = $('#onboarding-profile-id');
+  if (onboardingStep === 3 && onboardingProfileID) profileID.value = onboardingProfileID;
+  profileID.disabled = onboardingStep === 3 && Boolean(onboardingProfileID);
+  $('#onboarding-progress').textContent = `${onboardingStep} of 4`;
+  $('#onboarding-back').hidden = onboardingStep === 1;
+  $('#onboarding-next').textContent = onboardingStep === 4 ? 'Create enabled job' : 'Continue';
+  if (onboardingStep === 4) renderOnboardingReview();
+}
+
+function showOnboardingError(message) {
+  $('#onboarding-error').hidden = !message;
+  $('#onboarding-error').textContent = message || '';
+}
+
+function renderOnboardingReview() {
+  const schedulerOn = Boolean(latestDashboard?.scheduler?.enabled);
+  const provider = providerCatalog.find(item => item.id === $('#onboarding-provider').value);
+  const harness = harnessCatalog.find(item => item.id === $('#onboarding-harness').value);
+  const selectedModel = $('#onboarding-model').value || 'default';
+  const model = harness?.models?.[provider?.provider || '']?.find(item => item.id === selectedModel);
+  $('#onboarding-review').innerHTML = `
+    <div><span>Route</span><strong>${escapeHTML(providerName(provider?.provider || ''))} · ${escapeHTML(harness?.label || $('#onboarding-harness').value)} · ${escapeHTML(model ? modelLabel(model) : selectedModel)}</strong></div>
+    <div><span>Workspace</span><strong>${escapeHTML(title($('#onboarding-workspace').value))} · ${escapeHTML($('#onboarding-repository').value)}</strong></div>
+    <div><span>Activation</span><strong>Enabled · ${schedulerOn ? 'Scheduler is on; eligible work may run' : 'Scheduler is off; job will wait'}</strong></div>`;
+}
+
+function syncOnboardingJobType() {
+  const recurring = $('#onboarding-job-type').value === 'recurring';
+  $('#onboarding-job-interval-field').hidden = !recurring;
+  renderOnboardingReview();
+}
+
+async function saveOnboardingProfile() {
+  showOnboardingError('');
+  const id = $('#onboarding-profile-id').value.trim(), repository = $('#onboarding-repository').value.trim();
+  if (!$('#onboarding-harness').value) throw new Error('Install a supported agent CLI before creating a profile.');
+  if (!id) throw new Error('Choose a profile name.');
+  if (!repository) throw new Error('Choose a repository path before continuing.');
+  const existing = onboardingProfileID ? profiles.find(item => item.id === onboardingProfileID) : undefined;
+  if (!onboardingProfileID && profiles.some(item => item.id === id)) throw new Error(`A profile named ${id} already exists. Choose another name.`);
+  const harnessType = $('#onboarding-harness').value;
+  const preserveHarnessConfiguration = existing?.harness_type === harnessType;
+  const leavingHermes = existing?.harness_type === 'hermes' && harnessType !== 'hermes';
+  const payload = {
+    id, provider_account_id:$('#onboarding-provider').value, agent_context_id:leavingHermes ? '' : existing?.agent_context_id || '',
+    harness_type:harnessType, model:$('#onboarding-model').value || 'default', budget_model_group:existing?.budget_model_group || '',
+    workspace_provider:leavingHermes ? 'git-worktree' : $('#onboarding-workspace').value, repository, base_branch:$('#onboarding-base-branch').value.trim(),
+    cleanup_policy:existing?.cleanup_policy || '', require_clean:existing?.require_clean || false,
+    harness_command:preserveHarnessConfiguration ? existing?.harness_command || '' : '',
+    harness_args:preserveHarnessConfiguration ? existing?.harness_args || [] : [], workspace_args:leavingHermes ? [] : existing?.workspace_args || [],
+    prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
+  };
+  const persistedID = existing?.id || id;
+  const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(persistedID)}` : '/v1/profiles',{
+    method:existing ? 'PATCH' : 'POST', body:JSON.stringify(existing ? {...payload,id:undefined} : payload),
+  });
+  onboardingProfileID = saved.id || persistedID;
+  await loadProfiles(true);
+}
+
+async function saveOnboardingJob() {
+  showOnboardingError('');
+  const name = $('#onboarding-job-name').value.trim(), prompt = $('#onboarding-job-prompt').value.trim();
+  if (!name) throw new Error('Name the job before creating it.');
+  if (!prompt) throw new Error('Give the job a bounded prompt before creating it.');
+  if ($('#onboarding-job-type').value === 'recurring' && !$('#onboarding-job-interval').value.trim()) throw new Error('Choose a minimum interval for the recurring job.');
+  await apiRequest('/v1/tasks',{method:'POST',body:JSON.stringify({
+    name, execution_profile_id:onboardingProfileID || $('#onboarding-profile-id').value.trim(), runtime_job_id:'',
+    priority:50, type:$('#onboarding-job-type').value, dispatch_tier:$('#onboarding-job-tier').value,
+    min_interval:$('#onboarding-job-type').value === 'recurring' ? $('#onboarding-job-interval').value.trim() : '', prompt, prompt_file:'', require_repo_change:false,
+    enabled:true,
+  })});
+  onboardingStorage.set('completed','true');
+  onboardingStorage.remove('dismissed');
+  $('#onboarding-dialog').close();
+  await refresh();
+}
+
+async function advanceOnboarding() {
+  const button = $('#onboarding-next');
+  button.disabled = true;
+  try {
+    if (onboardingStep === 3) { await saveOnboardingProfile(); showOnboardingStep(4); }
+    else if (onboardingStep === 4) await saveOnboardingJob();
+    else showOnboardingStep(onboardingStep + 1);
+  } catch (error) { showOnboardingError(error.message); }
+  finally { button.disabled = false; }
+}
+
+async function openOnboarding(step=1) {
+  try {
+    const [, , currentDashboard] = await Promise.all([
+      loadProfiles(true), loadProfileOptions(), step === 'resume' ? apiRequest('/v1/dashboard') : Promise.resolve(latestDashboard),
+    ]);
+    if (currentDashboard) {
+      latestDashboard = currentDashboard;
+      providerCatalog = currentDashboard.providers.map(provider => ({id:provider.id,provider:provider.provider}));
+      providerAccounts = providerCatalog.map(provider => provider.id);
+    }
+    const providerReady = currentDashboard?.providers?.some(item => item.snapshot && !item.snapshot_stale);
+    const resolvedStep = step === 'resume' ? (!providerReady ? 2 : (profiles.length ? 4 : 1)) : step;
+    renderOnboardingAccounts();
+    onboardingProfileID = '';
+    setOnboardingDefaults();
+    if (step === 'resume' && profiles.length) useExistingOnboardingProfile(profiles[0]);
+    showOnboardingStep(resolvedStep);
+    $('#onboarding-error').hidden = true;
+    if (!$('#onboarding-dialog').open) $('#onboarding-dialog').showModal();
+  } catch (error) {
+    $('#error-banner').hidden = false;
+    $('#error-banner').textContent = `Could not start setup: ${error.message}`;
+  }
+}
+
+function renderGettingStarted(data) {
+  const providerReady = data.providers.some(item => item.snapshot && !item.snapshot_stale);
+  const checks = [
+    {done:providerReady,label:providerReady ? 'Provider capacity detected' : 'Verify a provider subscription'},
+    {done:profiles.length > 0,label:profiles.length ? 'Execution profile created' : 'Create an execution profile'},
+    {done:data.tasks.length > 0,label:data.tasks.length ? 'First job created' : 'Create your first job'},
+  ];
+  const complete = checks.every(item => item.done);
+  $('#getting-started').hidden = complete;
+  $('#getting-started-steps').innerHTML = checks.map(item => `<li class="${item.done ? 'done' : ''}">${item.done ? '✓' : '○'} ${escapeHTML(item.label)}</li>`).join('');
+  $('#getting-started-summary').textContent = `${checks.filter(item => item.done).length} of ${checks.length} setup checks complete.`;
+}
+
+async function considerFirstRun(data) {
+  if (data.demo?.synthetic) return;
+  if (!profilesLoaded) await loadProfiles(true);
+  renderGettingStarted(data);
+  if (onboardingEvaluated) return;
+  onboardingEvaluated = true;
+  if (!data.tasks.length && !profiles.length && !onboardingStorage.get('dismissed') && !onboardingStorage.get('completed')) await openOnboarding(1);
+}
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
@@ -264,7 +529,12 @@ function renderTasks(tasks) {
   if (disabled) summary.push(`${disabled} disabled`);
   $('#task-count').textContent = summary.join(' · ');
   $('#task-count').classList.toggle('count-attention', failed > 0);
-  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(duration(task.min_interval))}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${escapeHTML(task.state)}">${escapeHTML(task.state)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
+  $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => {
+    const schedulerOff = !latestDashboard?.scheduler?.enabled && task.enabled && task.state === 'queued';
+    const recurrence = schedulerOff ? 'Waiting for global scheduling' : duration(task.min_interval);
+    const status = schedulerOff ? 'Ready · scheduler off' : task.state;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
     row.addEventListener('click',() => openTask(row.dataset.taskRow));
@@ -384,6 +654,7 @@ function renderHealth(health, attempts) {
 }
 function render(data) {
 	 document.body.dataset.updatedAt = data.generated_at;
+  latestDashboard = data;
   document.body.classList.toggle('demo-mode', Boolean(data.demo?.synthetic));
   const demoPill = $('#demo-pill');
   demoPill.hidden = !data.demo?.synthetic;
@@ -402,10 +673,12 @@ function render(data) {
   const policies = new Set(data.providers.map(provider => provider.policy).filter(Boolean));
   $('#policy').textContent = policies.size > 1 ? 'per provider' : ([...policies][0] || data.active_policy || '—');
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
+  $('#scheduler-banner').hidden = data.scheduler.enabled;
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
   renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs,data.unread_runs || 0); renderAttempts(data.attempts);
   $('#error-banner').hidden = true;
+  considerFirstRun(data).catch(() => {});
 }
 async function openLogs(runID) {
   const run = latestRuns.find(item => item.id === runID);
@@ -523,7 +796,10 @@ async function loadTaskTemplates() {
   return taskTemplates;
 }
 async function loadProfiles(force=false) {
-  if (force || !profiles.length) profiles = await apiRequest('/v1/profiles');
+  if (force || !profilesLoaded) {
+    profiles = await apiRequest('/v1/profiles');
+    profilesLoaded = true;
+  }
   $('#task-profile').innerHTML = profiles.map(profile => `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.id)} · ${escapeHTML(profile.provider_account_id)}${profile.model ? ` · ${escapeHTML(profile.model)}` : ''}</option>`).join('');
 }
 async function loadProfileOptions(force=false) {
@@ -650,6 +926,11 @@ function syncIntervalField() {
   $('#task-interval').disabled = !recurring;
   $('#task-interval-note').hidden = recurring;
 }
+function syncNewTaskActivation() {
+  const creating = !$('#task-id').value;
+  $('#task-enabled-field').hidden = !creating;
+  $('#save-task').textContent = creating ? ($('#task-enabled').checked ? 'Create enabled job' : 'Create disabled job') : 'Save changes';
+}
 async function updateTaskRuntimeJobs(selected='') {
   const profile=profiles.find(item => item.id === $('#task-profile').value);
   const field=$('#task-runtime-job-field'), select=$('#task-runtime-job'), status=$('#task-runtime-job-status');
@@ -700,6 +981,8 @@ async function openTask(id='') {
     $('#task-prompt').value = task?.prompt || '';
     $('#task-prompt-file').value = task?.prompt_file || '';
     $('#task-repo-change').checked = !!task?.require_repo_change;
+    $('#task-enabled').checked = task?.enabled ?? true;
+    syncNewTaskActivation();
     $('#delete-task').hidden = !task || task.state === 'running';
     $('#toggle-task').hidden = !task || task.state === 'running';
     $('#toggle-task').textContent = task?.enabled ? 'Disable' : 'Enable';
@@ -727,14 +1010,19 @@ function applyTaskTemplate() {
 }
 async function saveTask(event) {
   event.preventDefault(); showTaskError('');
+  if (!$('#task-name').value.trim()) { showTaskError('Name the job before saving it.'); $('#task-name').focus(); return; }
+  if (!$('#task-profile').value) { showTaskError('Create or choose an execution profile before saving this job.'); $('#task-profile').focus(); return; }
+  const priorityInput = $('#task-priority').value.trim(), priority = Number(priorityInput);
+  if (!priorityInput || !Number.isInteger(priority) || priority < 0 || priority > 100) { showTaskError('Priority must be a whole number between 0 and 100.'); $('#task-priority').focus(); return; }
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
-    priority:Number($('#task-priority').value), type:$('#task-type').value,
+    priority, type:$('#task-type').value,
     dispatch_tier:$('#task-tier').value,
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
   };
+  if (!id) payload.enabled = $('#task-enabled').checked;
   const save = $('#save-task'); save.disabled = true;
   try {
     await apiRequest(id ? `/v1/tasks/${encodeURIComponent(id)}` : '/v1/tasks',{method:id ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
@@ -795,6 +1083,12 @@ function preferredHarness() {
   const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
   return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'command';
 }
+function preferredModel(harness) {
+  return harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()]?.[0]?.id || 'default';
+}
+function updateProfileExample() {
+  if (!editingProfile) $('#profile-id').placeholder = `${providerKind() || 'agent'}-worktree`;
+}
 function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
@@ -804,8 +1098,8 @@ function updateHarnessFields(selectedModelValue) {
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
   $('#profile-provider').innerHTML = providerAccounts.map(id => `<option value="${escapeHTML(id)}">${escapeHTML(id)}</option>`).join('');
-  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'devx'; $('#profile-budget-group').value = ''; $('#profile-context-concurrency').value = 1;
-  updateHarnessFields('default'); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
+  setHarnessControl(preferredHarness()); $('#profile-workspace').value = 'git-worktree'; $('#profile-budget-group').value = ''; $('#profile-context-concurrency').value = 1;
+  updateHarnessFields(preferredModel($('#profile-harness').value)); updateProfileExample(); populateRepositoryChoices(); $('#delete-profile').hidden = true; showProfileError(''); renderProfiles();
 }
 async function openProfiles() {
   try { await Promise.all([loadProfiles(true),loadProfileOptions(),loadRuntimeConfiguration()]); resetProfileForm(); $('#profiles-dialog').showModal(); }
@@ -899,8 +1193,54 @@ function connectLive() {
 }
 
 $('#refresh').addEventListener('click',refresh);
-$('#new-task').addEventListener('click',() => openTask());
+$('#new-task').addEventListener('click',async () => {
+  try {
+    await loadProfiles(true);
+    if (!profiles.length) await openOnboarding(3);
+    else await openTask();
+  } catch (error) {
+    $('#error-banner').hidden = false;
+    $('#error-banner').textContent = `Could not open job: ${error.message}`;
+  }
+});
 $('#manage-profiles').addEventListener('click',openProfiles);
+$('#resume-onboarding').addEventListener('click',() => openOnboarding('resume'));
+$('#onboarding-skip').addEventListener('click',() => { onboardingStorage.set('dismissed','true'); $('#onboarding-dialog').close(); if (latestDashboard) renderGettingStarted(latestDashboard); });
+$('#onboarding-back').addEventListener('click',() => showOnboardingStep(onboardingStep - 1));
+$('#onboarding-next').addEventListener('click',advanceOnboarding);
+$('#onboarding-provider').addEventListener('change',() => setOnboardingDefaults(true));
+$('#onboarding-harness').addEventListener('change',syncOnboardingHarness);
+for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboarding-job-tier']) {
+  $(selector).addEventListener('input',renderOnboardingReview);
+  $(selector).addEventListener('change',renderOnboardingReview);
+}
+$('#onboarding-job-type').addEventListener('change',syncOnboardingJobType);
+$('#onboarding-refresh-detection').addEventListener('click',async event => {
+  event.currentTarget.disabled = true;
+  try {
+    showOnboardingError('');
+    const accountIDs = (latestDashboard?.providers || []).map(provider => provider.id);
+    const [,usageResults] = await Promise.all([
+      loadProfileOptions(true),
+      Promise.allSettled(accountIDs.map(id => apiRequest(`/v1/providers/${encodeURIComponent(id)}/refresh`,{method:'POST',body:'{}'}))),
+    ]);
+    await refresh();
+    renderOnboardingAccounts();
+    const providerReady = latestDashboard?.providers?.some(item => item.snapshot && !item.snapshot_stale);
+    if (providerReady && profiles.length && latestDashboard?.tasks?.length) {
+      onboardingStorage.set('completed','true');
+      onboardingStorage.remove('dismissed');
+      $('#onboarding-dialog').close();
+      return;
+    }
+    const existing = onboardingProfileID && profiles.find(profile => profile.id === onboardingProfileID);
+    if (existing) useExistingOnboardingProfile(existing);
+    else setOnboardingDefaults();
+    const failures = usageResults.filter(result => result.status === 'rejected');
+    if (failures.length) showOnboardingError(`Could not refresh usage for ${failures.length} account${failures.length === 1 ? '' : 's'}. Check the sign-in guidance above and try again.`);
+  } catch (error) { showOnboardingError(`Detection refresh failed: ${error.message}`); }
+  finally { event.currentTarget.disabled = false; }
+});
 $('#mark-runs-read').addEventListener('click',async event => {
   const button = event.currentTarget; button.disabled = true;
   try { await apiRequest('/v1/runs/read-all',{method:'POST'}); await refresh(); }
@@ -910,6 +1250,7 @@ $('#task-form').addEventListener('submit',saveTask);
 $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#task-type').addEventListener('change',syncIntervalField);
+$('#task-enabled').addEventListener('change',syncNewTaskActivation);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);
@@ -919,8 +1260,8 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
-$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : 'default'); });
-$('#profile-harness').addEventListener('change',() => updateHarnessFields('default'));
+$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : preferredModel($('#profile-harness').value)); updateProfileExample(); });
+$('#profile-harness').addEventListener('change',() => updateHarnessFields(preferredModel($('#profile-harness').value)));
 $('#profile-runtime-connection').addEventListener('change',() => { $('#edit-runtime-connection').disabled=!$('#profile-runtime-connection').value; discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)); });
 $('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });
 $('#import-hermes-desktop').addEventListener('click',() => importHermesDesktop().catch(error => showProfileError(`Hermes import failed: ${error.message}`)));

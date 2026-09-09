@@ -149,6 +149,7 @@ plutil -insert NSHumanReadableCopyright -string "Copyright © 2026 Redline" "${i
 if [[ -n "${sparkle_feed_url}" ]]; then
   plutil -insert SUFeedURL -string "${sparkle_feed_url}" "${info_plist}"
   plutil -insert SUPublicEDKey -string "${sparkle_public_key}" "${info_plist}"
+  plutil -insert SUEnableAutomaticChecks -bool true "${info_plist}"
 fi
 
 sign_options=(--force --options runtime --sign "${sign_identity}")
@@ -175,7 +176,7 @@ else
 fi
 plutil -lint "${info_plist}"
 codesign --verify --deep --strict "${app_path}"
-if ! otool -l "${app_path}/Contents/MacOS/RedlineMenuBar" | grep -q '@executable_path/../Frameworks'; then
+if ! otool -l "${app_path}/Contents/MacOS/RedlineMenuBar" | grep -F '@executable_path/../Frameworks' >/dev/null; then
   printf 'RedlineMenuBar is missing its bundled-framework runtime search path.\n' >&2
   exit 1
 fi

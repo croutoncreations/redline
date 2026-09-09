@@ -59,8 +59,8 @@ function profileOptionsFixture() {
   return {
     generated_at: '2026-07-20T19:00:00Z',
     harnesses: [
-      { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
-      { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
+      { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', authentication: 'authenticated', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
+      { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', authentication: 'authenticated', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
       { id: 'pi', label: 'Pi', installed: true, version: '0.80.10', models: {
         codex: [{ id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol', source: 'pi_config', context_window: '1M', max_output: '128K' }],
         claude: [{ id: 'anthropic-cli/claude-fable-5', label: 'Claude Fable 5', source: 'pi_config', context_window: '200K', max_output: '32K' }, { id: 'anthropic-cli/claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }],
@@ -106,7 +106,8 @@ async function loadDashboard(page, options = {}) {
     taskTemplates: taskTemplatesFixture(),
     runtimeConnections: [], agentContexts: [],
     runtimeJobs: {},
-    requests: [], dashboardError: false, blockProfileDelete: false, taskCreateError: '', waitForReady: true, ...options,
+    requests: [], dashboardError: false, profileError: false, blockProfileDelete: false, taskCreateError: '',
+    providerRefreshSnapshots: {}, profileResponses: null, waitForReady: true, ...options,
   };
 	if (state.pauseDashboard) state.dashboardGate = new Promise(resolve => { state.releaseDashboard = resolve; });
   state.tasks = {
@@ -213,7 +214,23 @@ async function loadDashboard(page, options = {}) {
       provider.policy_source = body.policy ? 'override' : 'global';
       return json(200, { policy: provider.policy, source: provider.policy_source });
     }
-    if (url.pathname === '/v1/profiles' && method === 'GET') return json(200, state.profiles);
+    const providerRefreshMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/refresh$/);
+    if (providerRefreshMatch && method === 'POST') {
+      const id = decodeURIComponent(providerRefreshMatch[1]);
+      const provider = state.dashboard.providers.find(item => item.id === id);
+      state.requests.push({ method, path: url.pathname });
+      if (!provider) return json(404, { error: 'provider is not configured' });
+      if (state.providerRefreshSnapshots[id]) {
+        provider.snapshot = state.providerRefreshSnapshots[id];
+        provider.snapshot_stale = false;
+        provider.error = '';
+      }
+      return json(200, provider.snapshot || {});
+    }
+    if (url.pathname === '/v1/profiles' && method === 'GET') {
+      const profiles = state.profileResponses?.length ? state.profileResponses.shift() : state.profiles;
+      return state.profileError ? json(500, { error: 'profiles unavailable' }) : json(200, profiles);
+    }
     if (url.pathname === '/v1/profiles' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
       const profile = { ...body, created_at: '2026-07-20T19:00:00Z' }; state.profiles.push(profile); return json(201, profile);
@@ -235,7 +252,8 @@ async function loadDashboard(page, options = {}) {
     if (url.pathname === '/v1/tasks' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
 		if (state.taskCreateError) return json(400, { error: state.taskCreateError });
-      const task = { ...body, id: 'created-task', enabled: true, state: 'queued' }; state.tasks[task.id] = task; return json(201, task);
+      const enabled = body.enabled !== false;
+      const task = { ...body, id: 'created-task', enabled, state: enabled ? 'queued' : 'disabled' }; state.tasks[task.id] = task; return json(201, task);
     }
     const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(enable|disable|retry))?$/);
     if (taskMatch) {

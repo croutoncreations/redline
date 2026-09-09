@@ -3,6 +3,7 @@ package discovery_test
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,8 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 				return []byte("0.80.10\n"), nil
 			case "/bin/hermes --version":
 				return []byte("Hermes Agent v0.18.2 (2026.7.7.2)\nInstall directory: /opt/hermes\nUpdate available\n"), nil
+			case "/bin/codex login status", "/bin/claude auth status":
+				return []byte("authenticated\n"), nil
 			case "/bin/pi --offline --list-models openai-codex":
 				return []byte(piCodexModels), nil
 			case "/bin/pi --offline --list-models anthropic-cli":
@@ -51,6 +54,59 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 	hermesHarness := findHarness(t, catalog, "hermes")
 	if !hermesHarness.Installed || hermesHarness.Version != "0.18.2" {
 		t.Fatalf("hermes = %#v", hermesHarness)
+	}
+	if findHarness(t, catalog, "codex-cli").Authentication != "authenticated" ||
+		findHarness(t, catalog, "claude-code").Authentication != "authenticated" {
+		t.Fatalf("direct harness authentication was not detected: %#v", catalog.Harnesses)
+	}
+}
+
+func TestCatalogReportsDirectHarnessAuthenticationFailureWithoutHidingInstallation(t *testing.T) {
+	signedOutErr := exec.Command("sh", "-c", "exit 1").Run()
+	service := discovery.Service{
+		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if len(args) == 1 && args[0] == "--version" {
+				return []byte("1.2.3"), nil
+			}
+			if name == "/bin/codex" && strings.Join(args, " ") == "login status" {
+				return []byte("Not logged in"), signedOutErr
+			}
+			if name == "/bin/claude" && strings.Join(args, " ") == "auth status" {
+				return []byte("authenticated"), nil
+			}
+			return nil, errors.New("not available")
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
+	catalog := service.Discover(t.Context())
+	codex := findHarness(t, catalog, "codex-cli")
+	if !codex.Installed || codex.Authentication != "signed_out" {
+		t.Fatalf("codex = %#v", codex)
+	}
+	claude := findHarness(t, catalog, "claude-code")
+	if claude.Authentication != "authenticated" {
+		t.Fatalf("claude = %#v", claude)
+	}
+}
+
+func TestCatalogLeavesAuthenticationUnknownAfterOperationalFailure(t *testing.T) {
+	service := discovery.Service{
+		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
+		Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if len(args) == 1 && args[0] == "--version" {
+				return []byte("1.2.3"), nil
+			}
+			return nil, context.DeadlineExceeded
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
+	catalog := service.Discover(t.Context())
+	if authentication := findHarness(t, catalog, "codex-cli").Authentication; authentication != "" {
+		t.Fatalf("codex authentication = %q, want unknown", authentication)
+	}
+	if authentication := findHarness(t, catalog, "claude-code").Authentication; authentication != "" {
+		t.Fatalf("claude authentication = %q, want unknown", authentication)
 	}
 }
 

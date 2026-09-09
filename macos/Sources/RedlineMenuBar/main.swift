@@ -52,7 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
         Task {
             try? await Task.sleep(for: .milliseconds(900))
-            if let installation { installation.presentFirstRunIfNeeded() }
+            if let installation {
+                if installation.presentFirstRunIfNeeded() {
+                    controller.showDashboard()
+                }
+            }
             else { presentInstallationFailure() }
         }
         if ProcessInfo.processInfo.arguments.contains("--show-dashboard") {

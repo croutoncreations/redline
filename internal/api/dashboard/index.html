@@ -31,6 +31,16 @@
     <div id="error-banner" class="error-banner" hidden></div>
     <section id="failure-alert" class="failure-alert" aria-live="polite" hidden></section>
 
+    <section id="getting-started" class="getting-started" aria-label="Getting started" hidden>
+      <div><p class="eyebrow">GETTING STARTED</p><h2>Finish setting up Redline</h2><p id="getting-started-summary">A few short checks keep your first run predictable.</p></div>
+      <ol id="getting-started-steps"></ol>
+      <button id="resume-onboarding" class="primary-button" type="button">Resume setup</button>
+    </section>
+
+    <section id="scheduler-banner" class="scheduler-banner" aria-live="polite" hidden>
+      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until <code>scheduler.enabled</code> is set to <code>true</code> in Redline’s configuration and the app is restarted.</span>
+    </section>
+
     <section class="summary-rail" aria-label="Current capacity">
       <div id="usage-strip" class="usage-strip">
         <div class="provider-compact skeleton-line"></div><div class="provider-compact skeleton-line"></div>
@@ -79,14 +89,75 @@
     </footer>
   </main>
 
+  <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title">
+    <form id="onboarding-form">
+      <header class="onboarding-head">
+        <div><p class="eyebrow">FIRST-RUN GUIDE</p><h2 id="onboarding-title">Set up Redline</h2></div>
+        <span id="onboarding-progress" class="count">1 of 4</span>
+      </header>
+      <div id="onboarding-error" class="form-error onboarding-error" hidden></div>
+      <div class="onboarding-body">
+        <section class="onboarding-step" data-onboarding-step="1">
+          <span class="onboarding-kicker">Welcome</span>
+          <h3>Use spare subscription capacity—with clear guardrails.</h3>
+          <p>Redline monitors your existing agent subscriptions and schedules work when your configured capacity policy allows it.</p>
+          <div class="safety-grid">
+            <div><strong>Local by default</strong><span>The service and dashboard run on this Mac.</span></div>
+            <div><strong>You choose every job</strong><span>Redline will not invent work for you.</span></div>
+            <div><strong>Scheduler starts off</strong><span>Redline starts with scheduling off while you finish setup.</span></div>
+          </div>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="2" hidden>
+          <span class="onboarding-kicker">Accounts &amp; usage</span>
+          <h3>Confirm what Redline can use.</h3>
+          <p>Installation and subscription usage are checked separately. OpenUsage is used automatically when available, with native provider usage as fallback.</p>
+          <div id="onboarding-accounts" class="onboarding-accounts"></div>
+          <button id="onboarding-refresh-detection" class="quiet-button" type="button">Refresh detection</button>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="3" hidden>
+          <span class="onboarding-kicker">Workspace</span>
+          <h3>Choose where jobs run.</h3>
+          <p>Defaults are based on the selected account and locally detected harnesses. You can adjust everything later in Profiles.</p>
+          <div class="onboarding-fields">
+            <label class="field"><span>Subscription account</span><select id="onboarding-provider"></select></label>
+            <label class="field"><span>Agent harness</span><select id="onboarding-harness"></select></label>
+            <label class="field"><span>Model</span><select id="onboarding-model"></select></label>
+            <label class="field"><span>Workspace</span><select id="onboarding-workspace"><option value="git-worktree">Git worktree · recommended</option><option value="existing-directory">Existing directory</option></select></label>
+            <label class="field"><span>Profile name <small>required</small></span><input id="onboarding-profile-id" required autocomplete="off"></label>
+            <label class="field"><span>Repository path <small>required</small></span><input id="onboarding-repository" required autocomplete="off" placeholder="/Users/you/projects/my-project"></label>
+            <label class="field"><span>Base branch</span><input id="onboarding-base-branch" autocomplete="off" placeholder="Repository HEAD · recommended"></label>
+          </div>
+          <small class="field-note">Git worktrees isolate background changes from your current checkout. DevX is available from the advanced profile editor.</small>
+        </section>
+        <section class="onboarding-step" data-onboarding-step="4" hidden>
+          <span class="onboarding-kicker">First job</span>
+          <h3>Define and review your first job.</h3>
+          <p>This is work you explicitly chose to create. It will be saved enabled; if the global scheduler is currently off, it cannot run until you enable scheduling.</p>
+          <div class="onboarding-fields">
+            <label class="field field-wide"><span>Job name <small>required</small></span><input id="onboarding-job-name" required autocomplete="off" placeholder="e.g. Review one flaky test"></label>
+            <label class="field field-wide"><span>Prompt <small>required</small></span><textarea id="onboarding-job-prompt" required rows="4" placeholder="Give the agent one bounded, verifiable objective."></textarea></label>
+            <label class="field"><span>Run when</span><select id="onboarding-job-tier"><option value="behind">Standard surplus</option><option value="well_behind">High surplus</option><option value="expiring">Near expiry</option></select></label>
+            <label class="field"><span>Type</span><select id="onboarding-job-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
+            <label id="onboarding-job-interval-field" class="field field-wide" hidden><span>Minimum interval <small>required for recurring jobs</small></span><input id="onboarding-job-interval" autocomplete="off" placeholder="e.g. 7d or 12h"></label>
+          </div>
+          <div id="onboarding-review" class="onboarding-review"></div>
+        </section>
+      </div>
+      <footer class="onboarding-footer">
+        <button id="onboarding-skip" class="quiet-button" type="button">Skip for now</button>
+        <div><button id="onboarding-back" class="quiet-button" type="button" hidden>Back</button><button id="onboarding-next" class="primary-button" type="button">Continue</button></div>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title">
-    <form id="task-form">
+    <form id="task-form" novalidate>
       <div class="dialog-head"><div><p class="eyebrow">JOB DEFINITION</p><h2 id="task-dialog-title">New scheduled job</h2></div><button id="close-task" type="button" aria-label="Close">×</button></div>
       <div class="form-body">
         <div id="task-form-error" class="form-error" hidden></div>
         <input id="task-id" type="hidden">
         <label id="task-template-field" class="field field-wide"><span>Start from</span><select id="task-template"><option value="">Blank job</option></select><small id="task-template-description" class="field-note">Choose an editable starter prompt or begin from scratch.</small></label>
-        <label class="field field-wide"><span>Name</span><input id="task-name" required autocomplete="off" placeholder="Review stale authentication code"></label>
+        <label class="field field-wide"><span>Name <small>required</small></span><input id="task-name" required autocomplete="off" placeholder="e.g. Review stale authentication code"></label>
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
         <label id="task-runtime-job-field" class="field" hidden><span>Existing Hermes job <i class="help" tabindex="0" data-help="Choose an existing job discovered from the Hermes connection. Redline will trigger that job instead of sending this prompt to a new Hermes session.">?</i></span><select id="task-runtime-job"><option value="">New Hermes session from prompt</option></select><small id="task-runtime-job-status" class="field-note"></small></label>
         <label class="field"><span>Priority <i class="help" tabindex="0" data-help="When several jobs are eligible at the same time, the one with the highest priority is dispatched first.">?</i></span><input id="task-priority" type="number" min="0" max="100" value="50" required></label>
@@ -94,8 +165,9 @@
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
         <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"><small id="task-interval-note" class="field-note" hidden>Applies to recurring jobs only.</small></label>
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
-        <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="tasks/review-auth.md"></label>
+        <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="e.g. tasks/review-auth.md"></label>
         <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>
+        <label id="task-enabled-field" class="check-field field-wide"><input id="task-enabled" type="checkbox" checked><span>Enabled after creation</span></label>
       </div>
       <div class="form-footer"><div><button id="delete-task" class="danger-button" type="button" hidden>Delete</button><button id="toggle-task" class="quiet-button" type="button" hidden>Disable</button></div><div><button id="cancel-task" class="quiet-button" type="button">Cancel</button><button id="save-task" class="primary-button" type="submit">Save job</button></div></div>
     </form>
@@ -108,7 +180,7 @@
       <form id="profile-form" class="profile-form">
         <div id="profile-form-error" class="form-error" hidden></div>
         <div class="form-body">
-          <label class="field"><span>Profile ID</span><input id="profile-id" required autocomplete="off" placeholder="codex-devx"></label>
+          <label class="field"><span>Profile ID <small>required</small></span><input id="profile-id" required autocomplete="off" placeholder="claude-worktree"></label>
           <label class="field"><span>Provider account <i class="help" tabindex="0" data-help="The subscription allowance Redline should monitor for jobs using this profile.">?</i></span><select id="profile-provider" required></select></label>
           <label class="field"><span>Harness <i class="help" tabindex="0" data-help="Redline detects supported agent CLIs on this machine and displays their installed versions. Choose Custom command for another CLI or wrapper.">?</i></span><select id="profile-harness" required></select><small id="profile-discovery-status" class="field-note">Discovering local harnesses…</small><button id="refresh-profile-options" class="inline-button" type="button">Refresh discovery</button></label>
           <div id="profile-hermes-fields" class="advanced-grid field-wide" hidden>
@@ -122,7 +194,7 @@
           <label id="profile-model-field" class="field"><span>Model <i class="help" tabindex="0" data-help="Versioned models are discovered from the selected CLI's local catalog. Choose Other to enter any model identifier the harness accepts.">?</i></span><select id="profile-model-choice"></select><input id="profile-model-custom" class="nested-input" autocomplete="off" placeholder="Custom model identifier" hidden></label>
           <label id="profile-command-field" class="field" hidden><span>Custom command <i class="help" tabindex="0" data-help="Executed through the local shell. The task prompt is sent on standard input.">?</i></span><input id="profile-harness-command" autocomplete="off" placeholder="my-agent --non-interactive"></label>
           <label class="field"><span>Workspace provider <i class="help" tabindex="0" data-help="DevX and Git worktree isolate background changes. Existing directory uses the repository directly.">?</i></span><select id="profile-workspace" required><option value="devx">DevX session</option><option value="git-worktree">Git worktree</option><option value="existing-directory">Existing directory</option><option value="command">Custom setup command</option></select></label>
-          <div class="field field-wide"><span>Repository <i class="help" tabindex="0" data-help="Choose a repository already used by a profile, or type an absolute path directly. A native folder picker will fit naturally in the planned menu-bar app.">?</i></span><select id="profile-repository-recent"><option value="">Recently used repositories…</option></select><input id="profile-repository" class="nested-input" autocomplete="off" placeholder="/Users/me/projects/example"></div>
+          <div class="field field-wide"><span>Repository <i class="help" tabindex="0" data-help="Choose a repository already used by a profile, or type an absolute path directly.">?</i></span><select id="profile-repository-recent"><option value="">Recently used repositories…</option></select><input id="profile-repository" class="nested-input" autocomplete="off" placeholder="e.g. /Users/me/projects/example"></div>
           <label class="field"><span>Base branch</span><input id="profile-base-branch" autocomplete="off" placeholder="main"></label>
           <label class="field"><span>Cleanup policy</span><select id="profile-cleanup"><option value="">Default / preserve</option><option value="never">Never</option><option value="on_success">On success</option><option value="always">Always</option></select></label>
           <label class="check-field field-wide"><input id="profile-require-clean" type="checkbox"><span>Require a clean existing checkout</span></label>

@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
-const { loadDashboard, dashboardFixture, profileFixture } = require('./harness');
+const { loadDashboard, dashboardFixture, profileFixture, profileOptionsFixture } = require('./harness');
 
 
 test('renders operational state and applies live dashboard events', async ({ page }) => {
@@ -172,6 +172,8 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await page.getByRole('button', { name: '+ New job' }).click();
   const dialog = page.getByRole('dialog', { name: 'New scheduled job' });
   await expect(dialog).toBeVisible();
+  await expect(page.locator('#task-enabled')).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Create enabled job' })).toBeVisible();
   await page.locator('#task-name').fill('Review cache invalidation');
   await page.locator('#task-profile').selectOption('codex-devx');
   await page.locator('#task-priority').fill('82');
@@ -183,10 +185,552 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await page.locator('#task-interval').fill('7d');
   await page.locator('#task-prompt').fill('Inspect one cache invalidation path and report findings.');
   await page.locator('#task-repo-change').check();
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(dialog).toBeHidden();
   await expect.poll(() => state.requests.filter(item => item.path === '/v1/tasks').length).toBe(1);
-  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true });
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true, enabled: true });
+});
+
+test('allows a user to turn a new job off before creating it', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Draft later');
+  await page.locator('#task-enabled').uncheck();
+  await expect(page.getByRole('button', { name: 'Create disabled job' })).toBeVisible();
+  await page.getByRole('button', { name: 'Create disabled job' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body.enabled).toBe(false);
+});
+
+test('guides a first-time user with detected accounts and capability-aware defaults', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText('Redline starts with scheduling off');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(guide).toContainText('Claude Code');
+  await expect(guide).toContainText('Installed · v2.1.211');
+  await expect(guide).toContainText('Subscription usage verified');
+  await expect(guide).toContainText('Native');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await expect(page.locator('#onboarding-model')).toHaveValue('claude-opus-4-8');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('git-worktree');
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('claude-worktree');
+  expect(state.requests).toEqual([]);
+});
+
+test('routes New Job into setup when no execution profile exists', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Skip for now' }).click();
+
+  await page.getByRole('button', { name: '+ New job' }).click();
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText('Choose where jobs run');
+  await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
+});
+
+test('keeps an actionable setup checklist until profile and first job exist', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Skip for now' }).click();
+
+  const checklist = page.getByRole('region', { name: 'Getting started' });
+  await expect(checklist).toBeVisible();
+  await expect(checklist).toContainText('Provider capacity detected');
+  await expect(checklist).toContainText('Create an execution profile');
+  await expect(checklist).toContainText('Create your first job');
+  await expect(checklist.getByRole('button', { name: 'Resume setup' })).toBeVisible();
+});
+
+test('resumes first-job setup with the existing execution profile', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeVisible();
+  await expect(guide).toContainText('Codex · Codex CLI · GPT-5.5');
+  await expect(guide).toContainText('Devx · /repo/redline');
+
+  await page.locator('#onboarding-job-name').fill('Review one flaky test');
+  await page.locator('#onboarding-job-prompt').fill('Find one reproducible flaky test and report the evidence.');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({
+    execution_profile_id: 'codex-devx', enabled: true,
+  });
+});
+
+test('creates a capability-aware profile and an explicitly enabled first job', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.scheduler = { enabled: false };
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/profiles')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({
+    id: 'claude-worktree', provider_account_id: 'claude-main', harness_type: 'claude-code',
+    model: 'claude-opus-4-8', workspace_provider: 'git-worktree', repository: '/repo/redline', base_branch: '',
+  });
+  await expect(guide).toContainText('will be saved enabled');
+  await expect(guide).toContainText('Scheduler is off');
+  await page.locator('#onboarding-job-name').fill('Review one flaky test');
+  await page.locator('#onboarding-job-prompt').fill('Find one reproducible flaky test and report the evidence.');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({
+    name: 'Review one flaky test', execution_profile_id: 'claude-worktree', type: 'one_off', dispatch_tier: 'behind',
+    enabled: true,
+  });
+  await expect(guide).toBeHidden();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('redline.onboarding.completed'))).toBe('true');
+});
+
+test('keeps profile creation on the workspace step until required fields are valid', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Choose a repository path');
+  await expect(page.locator('[data-onboarding-step="3"]')).toBeVisible();
+  expect(state.requests.some(item => item.path === '/v1/profiles')).toBe(false);
+});
+
+test('describes enabled jobs as waiting when the global scheduler is off', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.scheduler = { enabled: false };
+  await loadDashboard(page, { dashboard });
+
+  await expect(page.locator('#scheduler-banner')).toContainText('nothing will run');
+  await expect(page.locator('#tasks-body')).toContainText('Ready · scheduler off');
+  await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
+});
+
+test('gives actionable install and sign-in guidance when account readiness is missing', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({
+    ...provider, snapshot: undefined, error: provider.provider === 'claude'
+      ? 'read Claude credentials: keychain item does not exist'
+      : 'read Codex credentials: file does not exist',
+  }));
+  const profileOptions = {
+    generated_at: dashboard.generated_at,
+    harnesses: [
+      { id: 'claude-code', label: 'Claude Code', installed: false },
+      { id: 'codex-cli', label: 'Codex CLI', installed: false },
+      { id: 'pi', label: 'Pi', installed: false },
+      { id: 'hermes', label: 'Hermes', installed: false },
+      { id: 'command', label: 'Custom command', installed: true },
+    ],
+  };
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await expect(guide).toContainText('Install Claude Code');
+  await expect(guide).toContainText('claude auth login');
+  await expect(guide).toContainText('Install Codex CLI');
+  await expect(guide).toContainText('codex login');
+});
+
+test('does not offer Hermes in simple onboarding without a runtime context', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'hermes' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).toContainText('No supported agent CLI found');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Hermes');
+});
+
+test('does not fall back to a harness for a different subscription provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Codex CLI');
+});
+
+test('offers Pi only when it has a route for the selected subscription provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'pi'
+    ? { ...harness, models: { codex: harness.models.codex } }
+    : { ...harness, installed: harness.id === 'pi' || harness.id === 'command' });
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toContainText('Pi');
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('');
+  await expect(page.locator('#onboarding-harness')).not.toContainText('Pi');
+});
+
+test('prefers Pi over a direct harness known to be signed out', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = [dashboard.providers[0]];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'claude-code'
+    ? { ...harness, authentication: 'signed_out' }
+    : harness);
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('pi');
+});
+
+test('refresh detection rechecks subscription usage and reloads account readiness', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot: undefined, error: 'usage unavailable' }));
+  const refreshed = dashboardFixture().providers;
+  const state = await loadDashboard(page, {
+    dashboard, profiles: [], waitForReady: false,
+    providerRefreshSnapshots: Object.fromEntries(refreshed.map(provider => [provider.id, provider.snapshot])),
+  });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Subscription usage verified');
+  expect(state.requests.filter(item => item.method === 'POST' && /\/v1\/providers\/[^/]+\/refresh/.test(item.path)).map(item => item.path).sort()).toEqual([
+    '/v1/providers/claude-main/refresh', '/v1/providers/codex-main/refresh',
+  ]);
+});
+
+test('refresh detection recomputes defaults from newly available capabilities', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'claude-code' || harness.id === 'command',
+    authentication: harness.id === 'claude-code' ? 'signed_out' : harness.authentication,
+  }));
+  const state = await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  state.profileOptions = profileOptionsFixture();
+  state.profileOptions.harnesses = state.profileOptions.harnesses.map(harness => ({
+    ...harness, installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
+test('prefers the provider whose compatible harness is installed', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => ({
+    ...harness,
+    installed: harness.id === 'codex-cli' || harness.id === 'command',
+  }));
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
+test('prefers an authenticated provider over an installed signed-out provider', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profileOptions = profileOptionsFixture();
+  profileOptions.harnesses = profileOptions.harnesses.map(harness => harness.id === 'claude-code'
+    ? { ...harness, authentication: 'signed_out' }
+    : harness);
+  await loadDashboard(page, { dashboard, profiles: [], profileOptions, waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+  await expect(page.locator('#onboarding-base-branch')).toHaveValue('');
+  await expect(page.locator('#onboarding-base-branch')).toHaveAttribute('placeholder', 'Repository HEAD · recommended');
+});
+
+test('prefers fresh usage when multiple authenticated providers are available', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers[0] = { ...dashboard.providers[0], snapshot_stale: true };
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+});
+
+test('recomputes the resume step after refreshing profiles', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  const checklist = page.getByRole('region', { name: 'Getting started' });
+  await expect(checklist).toContainText('Execution profile created');
+  state.profiles = [];
+
+  await checklist.getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="1"]')).toBeVisible();
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeHidden();
+});
+
+test('resumes at account readiness when provider usage is unavailable', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot: undefined, error: 'usage unavailable' }));
+  await loadDashboard(page, { dashboard, waitForReady: false });
+
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toContainText('Usage check needed');
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await expect(page.locator('#onboarding-provider')).toHaveValue('codex-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
+  await expect(page.locator('#onboarding-model')).toHaveValue('gpt-5.5');
+  await expect(page.locator('#onboarding-repository')).toHaveValue('/repo/redline');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
+});
+
+test('finishes resumed setup after usage recovers when a first job already exists', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers = dashboard.providers.map(provider => ({ ...provider, snapshot_stale: true }));
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await expect(page.locator('[data-onboarding-step="2"]')).toBeVisible();
+
+  state.providerRefreshSnapshots['claude-main'] = dashboard.providers[0].snapshot;
+  await page.getByRole('button', { name: 'Refresh detection' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Set up Redline' })).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Getting started' })).toBeHidden();
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/tasks')).toHaveLength(0);
+});
+
+test('keeps advanced workspace setup out of simple onboarding', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-workspace')).not.toContainText('Custom setup command');
+  await expect(page.locator('#onboarding-workspace')).not.toContainText('DevX');
+});
+
+test('preserves advanced fields when revisiting a resumed profile', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const advancedProfile = {
+    id: 'advanced-command', provider_account_id: 'codex-main', agent_context_id: 'context-1',
+    harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
+    workspace_provider: 'command', repository: '/repo/advanced', base_branch: 'develop',
+    harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [advancedProfile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/advanced-command')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/advanced-command').body).toMatchObject({
+    agent_context_id: 'context-1', harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
+    workspace_provider: 'command', harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+  });
+});
+
+test('preserves a resumed harness-default model when revisiting workspace setup', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = { ...profileFixture()[0], model: '' };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await expect(page.locator('#onboarding-model')).toHaveValue('default');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body.model).toBe('default');
+});
+
+test('locks a persisted onboarding profile name when revisiting workspace setup', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('claude-worktree');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/claude-worktree')).toBe(true);
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(1);
+});
+
+test('does not overwrite a profile created while new-job setup is opening', async ({ page }) => {
+  const state = await loadDashboard(page, { profiles: [] });
+  const collision = { ...profileFixture()[0], id: 'claude-worktree', provider_account_id: 'claude-main', harness_type: 'claude-code' };
+  state.profileResponses = [[], [collision]];
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#onboarding-repository').fill('/repo/redline');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect(page.locator('#onboarding-error')).toContainText('already exists');
+  expect(state.requests.filter(item => item.method === 'PATCH' && item.path === '/v1/profiles/claude-worktree')).toHaveLength(0);
+});
+
+test('keeps the persisted profile identity when changing providers during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+
+  await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
+  await expect(page.locator('#onboarding-profile-id')).toHaveValue('codex-devx');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('devx');
+  await page.locator('#onboarding-profile-id').evaluate(input => { input.value = 'unexpected-renamed-profile'; });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.filter(item => item.method === 'POST' && item.path === '/v1/profiles')).toHaveLength(0);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body.provider_account_id).toBe('claude-main');
+});
+
+test('clears harness-specific configuration when changing harnesses during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = {
+    ...profileFixture()[0],
+    harness_type: 'codex-cli',
+    harness_command: 'codex',
+    harness_args: ['--search'],
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await page.getByRole('button', { name: 'Continue' }).click();
+
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body).toMatchObject({
+    harness_type: 'claude-code', harness_command: '', harness_args: [],
+  });
+});
+
+test('clears Hermes runtime state when changing to a local harness during resume', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const profile = {
+    ...profileFixture()[0],
+    harness_type: 'hermes',
+    agent_context_id: 'remote-context',
+    workspace_provider: 'runtime-owned',
+    workspace_args: ['--remote-workspace'],
+  };
+  const state = await loadDashboard(page, { dashboard, profiles: [profile], waitForReady: false });
+  await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.locator('#onboarding-provider').selectOption('claude-main');
+
+  await expect(page.locator('#onboarding-harness')).toHaveValue('claude-code');
+  await expect(page.locator('#onboarding-workspace')).toHaveValue('git-worktree');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/codex-devx')).toBe(true);
+  expect(state.requests.find(item => item.path === '/v1/profiles/codex-devx').body).toMatchObject({
+    harness_type: 'claude-code', agent_context_id: '', workspace_provider: 'git-worktree', workspace_args: [],
+  });
+});
+
+test('uses stock-Mac-safe defaults and provider-specific examples in the profile editor', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: 'Profiles' }).click();
+
+  await expect(page.locator('#profile-workspace')).toHaveValue('git-worktree');
+  await expect(page.locator('#profile-id')).toHaveAttribute('placeholder', 'claude-worktree');
+  await expect(page.locator('#profile-model-choice')).toHaveValue('claude-opus-4-8');
+  await page.locator('#profile-provider').selectOption('codex-main');
+  await expect(page.locator('#profile-id')).toHaveAttribute('placeholder', 'codex-worktree');
+  await expect(page.locator('#profile-model-choice')).toHaveValue('gpt-5.5');
+});
+
+test('uses in-product validation instead of native required-field bubbles', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect(page.locator('#task-form-error')).toContainText('Name the job');
+  await expect(page.locator('#task-name')).toBeFocused();
+});
+
+test('validates job priority in-product before saving', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Invalid priority');
+  await page.locator('#task-priority').fill('101');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+
+  await expect(page.locator('#task-form-error')).toContainText('whole number between 0 and 100');
+  await expect(page.locator('#task-priority')).toBeFocused();
+  await page.locator('#task-priority').fill('');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect(page.locator('#task-form-error')).toContainText('whole number between 0 and 100');
+  expect(state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(false);
 });
 
 test('starts a job from an editable prompt template', async ({ page }) => {
@@ -199,7 +743,7 @@ test('starts a job from an editable prompt template', async ({ page }) => {
   await page.locator('#task-name').fill('Find one bug in parsing');
   await page.locator('#task-prompt').fill('Inspect parsing only. Reproduce one bug before fixing it.');
   await page.locator('#task-profile').selectOption('codex-devx');
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect.poll(() => state.requests.some(item =>
     item.path === '/v1/tasks' && item.body.name === 'Find one bug in parsing' &&
     item.body.prompt === 'Inspect parsing only. Reproduce one bug before fixing it.'
@@ -306,7 +850,7 @@ test('selects a discovered existing Hermes job for a scheduled task', async ({ p
   await expect(page.locator('#task-runtime-job-field')).toBeVisible();
   await expect(page.locator('#task-runtime-job')).toContainText('Weekly SEO content planner');
   await page.locator('#task-runtime-job').selectOption('job-seo-planner');
-  await page.getByRole('button', { name: 'Save job' }).click();
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
 
   await expect.poll(() => state.requests.some(item => item.method === 'POST' && item.path === '/v1/tasks')).toBe(true);
   expect(state.requests.find(item => item.method === 'POST' && item.path === '/v1/tasks').body).toMatchObject({
@@ -360,7 +904,7 @@ test('loads both run log streams and controls an existing task', async ({ page }
   await page.getByRole('row').filter({ hasText: 'Audit authentication' }).click();
   await expect(page.getByRole('dialog', { name: 'Manage scheduled job' })).toBeVisible();
 	await page.locator('#task-priority').fill('75');
-	await page.getByRole('button', { name: 'Save job' }).click();
+	await page.getByRole('button', { name: 'Save changes' }).click();
 	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/tasks/audit-auth')).toBe(true);
 	await page.getByRole('button', { name: 'Manage' }).click();
 	page.once('dialog', confirmation => confirmation.accept());
@@ -422,7 +966,14 @@ test('shows loading state and task save errors without closing the form', async 
 	await page.locator('#task-name').fill('Invalid scheduled job');
 	await page.locator('#task-profile').selectOption('codex-devx');
 	await page.locator('#task-prompt').fill('Do a small thing.');
-	await page.getByRole('button', { name: 'Save job' }).click();
+	await page.getByRole('button', { name: 'Create enabled job' }).click();
 	await expect(page.locator('#task-form-error')).toContainText('minimum interval is invalid');
 	await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
+});
+
+test('shows profile load failures when starting a new job', async ({ page }) => {
+  await loadDashboard(page, { profileError: true });
+  await page.getByRole('button', { name: '+ New job' }).click();
+
+  await expect(page.locator('#error-banner')).toContainText('Could not open job: profiles unavailable');
 });
