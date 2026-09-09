@@ -180,9 +180,11 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 		if len(group.RequiredAllowanceRoles) == 0 {
 			group.RequiredAllowanceRoles = []string{"weekly"}
 		}
+		normalizedRoles := make([]string, len(group.RequiredAllowanceRoles))
 		for i, role := range group.RequiredAllowanceRoles {
-			group.RequiredAllowanceRoles[i] = strings.ToLower(strings.TrimSpace(role))
+			normalizedRoles[i] = strings.ToLower(strings.TrimSpace(role))
 		}
+		group.RequiredAllowanceRoles = normalizedRoles
 		groups[name] = group
 	}
 	return groups

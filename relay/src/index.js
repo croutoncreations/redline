@@ -60,13 +60,22 @@ export default {
     }
 
     const id = env.SESSIONS.idFromName(sessionId);
-    // Authorization ends here. The session object pairs opaque WebSockets and
-    // never needs the bearer credential, so do not widen its exposure.
-    const sessionHeaders = new Headers(request.headers);
-    sessionHeaders.delete("X-Redline-Entitlement");
-    return env.SESSIONS.get(id).fetch(new Request(request, { headers: sessionHeaders }));
+    return env.SESSIONS.get(id).fetch(requestWithoutEntitlement(request));
   },
 };
+
+/**
+ * Remove every accepted credential representation at the authorization
+ * boundary. The session object pairs opaque sockets and needs neither one.
+ */
+export function requestWithoutEntitlement(request) {
+  const cleanURL = new URL(request.url);
+  cleanURL.searchParams.delete("entitlement");
+  const cleanHeaders = new Headers(request.headers);
+  cleanHeaders.delete("X-Redline-Entitlement");
+  const moved = new Request(cleanURL.toString(), request);
+  return new Request(moved, { headers: cleanHeaders });
+}
 
 /**
  * Verify the caller may use the relay.

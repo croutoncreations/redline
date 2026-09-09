@@ -34,10 +34,8 @@ data class PairingConfiguration(
     val entitlementToken: String,
 )
 
-interface RedlineSettingsWriter {
-    fun update(baseUrl: String, token: String)
-
-    /** Stores credential and routes as one pairing transaction. */
+interface PairingStore {
+    /** Stores credential and every route as one transaction. */
     fun updatePairing(configuration: PairingConfiguration)
 
     /**
@@ -49,30 +47,9 @@ interface RedlineSettingsWriter {
      */
     fun clear()
 
-    /**
-     * Records how to reach this desktop when it is not directly reachable.
-     *
-     * Kept separate from update() because an older desktop supplies neither,
-     * and pairing must still work without them: no relay simply means direct
-     * only, which is what every existing paired phone already does.
-     */
-    fun updateRelay(
-        relayUrl: String,
-        desktopKey: String,
-        relaySession: String,
-        entitlementToken: String,
-    )
 }
 
-/**
- * Alias used by tests that only care about storing and clearing a pairing.
- *
- * Named for the role rather than the implementation, so a test reads as being
- * about the pairing store rather than about Android preferences.
- */
-typealias PairingStore = RedlineSettingsWriter
-
-class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
+class RedlineSettings(private val context: Context) : PairingStore {
 
     private val preferences: SharedPreferences = try {
         val key = MasterKey.Builder(context)
@@ -135,7 +112,7 @@ class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
     val relayConfigured: Boolean
         get() = relayConfigurationComplete(relayUrl, desktopKey, relaySession)
 
-    override fun updateRelay(
+    fun updateRelay(
         relayUrl: String,
         desktopKey: String,
         relaySession: String,
@@ -152,7 +129,7 @@ class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
     /** Whether this device has been paired with a Redline desktop. */
     val isPaired: Boolean get() = token.isNotBlank()
 
-    override fun update(baseUrl: String, token: String) {
+    fun update(baseUrl: String, token: String) {
         preferences.edit()
             .putString(KEY_BASE_URL, baseUrl)
             .putString(KEY_TOKEN, token)

@@ -18,12 +18,12 @@ class UnpairTest {
     /** Stands in for the Keystore-backed store, which needs a device. */
     private class FakeStore : PairingStore {
         val values = mutableMapOf<String, String>()
-        override fun update(baseUrl: String, token: String) {
+        fun update(baseUrl: String, token: String) {
             values["base_url"] = baseUrl
             values["token"] = token
         }
 
-        override fun updateRelay(
+        fun updateRelay(
             relayUrl: String,
             desktopKey: String,
             relaySession: String,

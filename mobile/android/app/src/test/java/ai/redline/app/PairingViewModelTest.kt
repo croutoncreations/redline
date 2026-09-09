@@ -24,7 +24,7 @@ class PairingViewModelTest {
     @After fun tearDown() = Dispatchers.resetMain()
 
     /** Records what was stored, standing in for the Keystore-backed settings. */
-    private class FakeSettings : RedlineSettingsWriter {
+    private class FakeSettings : PairingStore {
         var baseUrl: String? = null
         var token: String? = null
         var relayUrl: String? = null
@@ -32,12 +32,12 @@ class PairingViewModelTest {
         var relaySession: String? = null
         var entitlementToken: String? = null
         var pairingTransactions = 0
-        override fun update(baseUrl: String, token: String) {
+        fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
             this.token = token
         }
 
-        override fun updateRelay(
+        fun updateRelay(
             relayUrl: String,
             desktopKey: String,
             relaySession: String,

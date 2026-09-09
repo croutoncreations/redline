@@ -422,6 +422,9 @@ func TestEffectiveModelGroupsCanonicalizesRequiredAllowanceRoles(t *testing.T) {
 	if strings.Join(roles, ",") != "short,weekly" {
 		t.Fatalf("roles = %#v, want canonical roles", roles)
 	}
+	if got := provider.ModelGroups["spark"].RequiredAllowanceRoles[0]; got != " Short " {
+		t.Fatalf("read-like accessor mutated source configuration to %q", got)
+	}
 }
 
 func TestLoadRejectsUnknownRequiredAllowanceRole(t *testing.T) {

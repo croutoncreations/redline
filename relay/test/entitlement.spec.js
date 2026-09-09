@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { requestWithoutEntitlement } from "../src/index.js";
 
 // The issuer's signing key never exists in the relay; these tests hold it only
 // to mint tokens the way a real issuer would.
@@ -46,6 +47,17 @@ async function connectWithToken(sessionId, token) {
 }
 
 describe("entitlements", () => {
+  it("removes both entitlement transports before session forwarding", () => {
+    const request = new Request(
+      "https://relay.example.com/v1/session/test?role=client&entitlement=query-secret",
+      { headers: { "X-Redline-Entitlement": "header-secret", Upgrade: "websocket" } },
+    );
+    const clean = requestWithoutEntitlement(request);
+    expect(clean.headers.get("X-Redline-Entitlement")).toBeNull();
+    expect(new URL(clean.url).searchParams.get("entitlement")).toBeNull();
+    expect(new URL(clean.url).searchParams.get("role")).toBe("client");
+  });
+
   it("accepts a validly signed, unexpired token", async () => {
     const token = await mintToken({ exp: Math.floor(Date.now() / 1000) + 3600 });
     const res = await connectWithToken("ent-ok-relaytestpadding", token);

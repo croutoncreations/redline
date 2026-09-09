@@ -47,7 +47,7 @@ data class PairingUiState(
 
 class PairingViewModel(
     private val source: PairingSource,
-    private val settings: RedlineSettingsWriter,
+    private val settings: PairingStore,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
 
