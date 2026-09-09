@@ -381,11 +381,9 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 	}
 }
 
-// Entitlement tokens are standard base64, whose alphabet includes '+' -- which
-// a query string decodes as a space. Concatenating one unescaped would corrupt
-// roughly half of all real tokens, and the symptom would be a paying customer
-// told they had not paid.
-func TestEntitlementTokenSurvivesTheQueryString(t *testing.T) {
+// Entitlement tokens are bearer credentials. They travel in the WebSocket
+// handshake header and must never appear in the URL infrastructure logs retain.
+func TestEntitlementTokenUsesAHandshakeHeaderNotTheURL(t *testing.T) {
 	token := "eyJleHAiOjE3ODg1MTM4MDN9.Pb8j33+KIif5vCjENO2yby9Q38q4=="
 	dialer := NewDialer(DialerOptions{
 		RelayURL:         "https://relay.example.com",
@@ -397,8 +395,11 @@ func TestEntitlementTokenSurvivesTheQueryString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the dial URL does not parse: %v", err)
 	}
-	if got := parsed.Query().Get("entitlement"); got != token {
-		t.Fatalf("token was mangled in the URL:\n got %q\nwant %q", got, token)
+	if got := parsed.Query().Get("entitlement"); got != "" {
+		t.Fatalf("entitlement leaked into URL: %q", got)
+	}
+	if got := dialer.sessionHeaders().Get("X-Redline-Entitlement"); got != token {
+		t.Fatalf("entitlement header = %q, want %q", got, token)
 	}
 	if got := parsed.Query().Get("role"); got != "host" {
 		t.Fatalf("role: %q", got)

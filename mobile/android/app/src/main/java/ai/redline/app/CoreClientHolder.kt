@@ -122,7 +122,7 @@ class CoreClientHolder(private val settings: RedlineSettings) {
             runCatching { existing.close() }
             relay = null
         }
-        return runCatching {
+        return try {
             Core.dialRelay(
                 settings.relayUrl,
                 settings.relaySession,
@@ -133,13 +133,13 @@ class CoreClientHolder(private val settings: RedlineSettings) {
                 relay = it
                 Log.i(TAG, "relay session established via ${settings.relayUrl}")
             }
-        }.onFailure {
-            // The dial reason must reach the log. Swallowing it here left the
-            // phone reporting "cannot reach Redline" for a URL-scheme mismatch,
-            // a rejected entitlement, and a missing config alike -- three
-            // different faults with one message, and nothing to tell them apart.
-            Log.w(TAG, "relay dial to ${settings.relayUrl} failed: ${it.message}")
-        }.getOrNull()
+        } catch (error: Exception) {
+            // The dial reason must reach both the log and the caller. Swallowing
+            // it here made an expired entitlement indistinguishable from an
+            // unconfigured relay, so the renewal UI could never be reached.
+            Log.w(TAG, "relay dial to ${settings.relayUrl} failed: ${error.message}")
+            throw error
+        }
     }
 
     /**

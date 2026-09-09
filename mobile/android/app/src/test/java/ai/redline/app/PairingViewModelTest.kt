@@ -31,6 +31,7 @@ class PairingViewModelTest {
         var desktopKey: String? = null
         var relaySession: String? = null
         var entitlementToken: String? = null
+        var pairingTransactions = 0
         override fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
             this.token = token
@@ -46,6 +47,17 @@ class PairingViewModelTest {
             this.desktopKey = desktopKey
             this.relaySession = relaySession
             this.entitlementToken = entitlementToken
+        }
+
+        override fun updatePairing(configuration: PairingConfiguration) {
+            pairingTransactions += 1
+            update(configuration.baseUrl, configuration.token)
+            updateRelay(
+                configuration.relayUrl,
+                configuration.desktopKey,
+                configuration.relaySession,
+                configuration.entitlementToken,
+            )
         }
 
         override fun clear() {
@@ -156,6 +168,17 @@ class PairingViewModelTest {
      * tailnet a prerequisite for a product whose point is that it is optional.
      */
     @Test
+    fun `stored relay-only endpoint remains empty instead of becoming localhost`() {
+        assertEquals("", resolvedBaseUrl(hasStoredValue = true, storedValue = ""))
+        assertEquals("http://127.0.0.1:7436", resolvedBaseUrl(hasStoredValue = false, storedValue = null))
+    }
+
+    @Test
+    fun `open relay is configured without an entitlement`() {
+        assertTrue(relayConfigurationComplete("https://relay.example", "key", "session"))
+    }
+
+    @Test
     fun redeemsARelayOnlyCodeWithTheRelayDetailsItCarried() = runTest(dispatcher) {
         val settings = FakeSettings()
         var seen: PairingRequest? = null
@@ -185,6 +208,7 @@ class PairingViewModelTest {
         assertEquals("", settings.baseUrl)
         assertEquals("durable-api-token", settings.token)
         assertEquals("https://relay.example", settings.relayUrl)
+        assertEquals(1, settings.pairingTransactions)
         assertTrue(model.state.value.isPaired)
     }
 

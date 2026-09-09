@@ -14,11 +14,9 @@ import androidx.security.crypto.MasterKey
  * secure element, so the stored file is useless on its own — which matters
  * because a plain preferences file is readable on a rooted or backed-up device.
  *
- * Storage falls back to plain preferences only if the encrypted store cannot be
- * opened at all. That is rare, and being unable to run beats being unable to
- * run *securely* only when the alternative is losing the app entirely; the
- * fallback is recorded in [usingEncryptedStorage] so the UI can say so rather
- * than quietly downgrading.
+ * If encrypted storage cannot open, credential storage fails closed. A bearer
+ * token with full API access must never silently move to plaintext because of
+ * a transient Keystore fault.
  */
 /**
  * The part of settings that pairing needs.
@@ -27,8 +25,28 @@ import androidx.security.crypto.MasterKey
  * implementation needs a Context and the Android Keystore, neither of which
  * exists in a unit test.
  */
+data class PairingConfiguration(
+    val baseUrl: String,
+    val token: String,
+    val relayUrl: String,
+    val desktopKey: String,
+    val relaySession: String,
+    val entitlementToken: String,
+)
+
 interface RedlineSettingsWriter {
     fun update(baseUrl: String, token: String)
+
+    /** Stores credential and routes as one pairing transaction. */
+    fun updatePairing(configuration: PairingConfiguration) {
+        update(configuration.baseUrl, configuration.token)
+        updateRelay(
+            configuration.relayUrl,
+            configuration.desktopKey,
+            configuration.relaySession,
+            configuration.entitlementToken,
+        )
+    }
 
     /**
      * Forgets everything about the paired desktop.
@@ -62,9 +80,7 @@ interface RedlineSettingsWriter {
  */
 typealias PairingStore = RedlineSettingsWriter
 
-class RedlineSettings(context: Context) : RedlineSettingsWriter {
-
-    private var encrypted = true
+class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
 
     private val preferences: SharedPreferences = try {
         val key = MasterKey.Builder(context)
@@ -76,20 +92,24 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
             key,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
+        ).also {
+            // Versions before secure storage became fail-closed could leave a
+            // bearer token in this file after a transient Keystore failure.
+            context.deleteSharedPreferences(PLAIN_FILE)
+        }
     } catch (error: Exception) {
-        // A corrupt keystore entry or an unsupported device should not brick
-        // the app, but it must not pretend the credential is protected either.
-        encrypted = false
-        context.getSharedPreferences(PLAIN_FILE, Context.MODE_PRIVATE)
+        context.deleteSharedPreferences(PLAIN_FILE)
+        throw IllegalStateException("secure credential storage is unavailable", error)
     }
 
-    /** Whether the credential is actually held in Keystore-backed storage. */
-    val usingEncryptedStorage: Boolean get() = encrypted
+    /** Credential storage is always Keystore-backed or construction fails. */
+    val usingEncryptedStorage: Boolean get() = true
 
     val baseUrl: String
-        get() = preferences.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() }
-            ?: DEFAULT_BASE_URL
+        get() = resolvedBaseUrl(
+            hasStoredValue = preferences.contains(KEY_BASE_URL),
+            storedValue = preferences.getString(KEY_BASE_URL, null),
+        )
 
     val token: String
         get() = preferences.getString(KEY_TOKEN, null) ?: ""
@@ -121,8 +141,7 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
 
     /** Whether a relayed fallback is possible at all. */
     val relayConfigured: Boolean
-        get() = relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank() &&
-            entitlementToken.isNotBlank()
+        get() = relayConfigurationComplete(relayUrl, desktopKey, relaySession)
 
     override fun updateRelay(
         relayUrl: String,
@@ -148,6 +167,17 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
             .apply()
     }
 
+    override fun updatePairing(configuration: PairingConfiguration) {
+        preferences.edit()
+            .putString(KEY_BASE_URL, configuration.baseUrl)
+            .putString(KEY_TOKEN, configuration.token)
+            .putString(KEY_RELAY_URL, configuration.relayUrl)
+            .putString(KEY_ENTITLEMENT, configuration.entitlementToken)
+            .putString(KEY_DESKTOP_KEY, configuration.desktopKey)
+            .putString(KEY_RELAY_SESSION, configuration.relaySession)
+            .apply()
+    }
+
     /**
      * Forgets the credential.
      *
@@ -164,6 +194,8 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
             .remove(KEY_RELAY_SESSION)
             .remove(KEY_ENTITLEMENT)
             .apply()
+        // Also remove credentials written by pre-fail-closed versions.
+        context.deleteSharedPreferences(PLAIN_FILE)
     }
 
     private companion object {
@@ -176,9 +208,13 @@ class RedlineSettings(context: Context) : RedlineSettingsWriter {
 
         const val ENCRYPTED_FILE = "redline.secure"
         const val PLAIN_FILE = "redline"
-
-        // Pairing supplies the real address. This default only matters for a
-        // debug build reached through `adb reverse tcp:7436 tcp:7436`.
-        const val DEFAULT_BASE_URL = "http://127.0.0.1:7436"
     }
 }
+
+// Pairing supplies the real address. Localhost is only the unconfigured debug
+// default; an explicitly stored empty string means relay-only and stays empty.
+internal fun resolvedBaseUrl(hasStoredValue: Boolean, storedValue: String?): String =
+    if (hasStoredValue) storedValue.orEmpty() else "http://127.0.0.1:7436"
+
+internal fun relayConfigurationComplete(relayUrl: String, desktopKey: String, relaySession: String): Boolean =
+    relayUrl.isNotBlank() && desktopKey.isNotBlank() && relaySession.isNotBlank()

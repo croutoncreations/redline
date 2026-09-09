@@ -414,6 +414,17 @@ func TestExplicitBudgetModelGroupMustExist(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnknownRequiredAllowanceRole(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    model_groups:
+      spark:
+        aliases: [spark]
+        required_allowance_roles: [short, monthly]`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil || !strings.Contains(err.Error(), "monthly") {
+		t.Fatalf("expected unknown allowance role error, got %v", err)
+	}
+}
+
 func TestLoadRejectsAliasesSharedAcrossModelGroups(t *testing.T) {
 	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
     model_groups:

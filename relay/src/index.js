@@ -52,7 +52,7 @@ export default {
       return new Response("expected a websocket upgrade", { status: 426 });
     }
 
-    const entitlement = await checkEntitlement(env, url);
+    const entitlement = await checkEntitlement(env, request);
     if (!entitlement.ok) {
       // 402 rather than 401: nothing is wrong with the caller's identity, they
       // simply are not entitled to relay. The app distinguishes the two.
@@ -72,7 +72,7 @@ export default {
  * turning the paywall on cannot turn the relay into a way to track who is
  * talking to whom. Everything about who paid lives in the issuer.
  */
-async function checkEntitlement(env, url) {
+async function checkEntitlement(env, request) {
   // Configuration comes only from the environment. An earlier version let a
   // request header supply the verification key so one deployment could be
   // exercised both open and closed, which meant a caller could sign its own
@@ -91,7 +91,9 @@ async function checkEntitlement(env, url) {
     return { ok: false, reason: "relay is not configured to accept sessions" };
   }
 
-  const token = url.searchParams.get("entitlement");
+  // Credentials never belong in a URL: edge/proxy access logs commonly retain
+  // query strings outside this worker's control.
+  const token = request.headers.get("X-Redline-Entitlement");
   if (!token) {
     return { ok: false, reason: "this relay requires an entitlement" };
   }

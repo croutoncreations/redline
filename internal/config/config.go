@@ -146,6 +146,9 @@ func (p Provider) EffectiveUsageSource() string {
 
 type ModelGroup struct {
 	Aliases []string `yaml:"aliases"`
+	// RequiredAllowanceRoles declares which model-scoped budgets a task in
+	// this group consumes. Empty preserves the historical weekly-only shape.
+	RequiredAllowanceRoles []string `yaml:"required_allowance_roles,omitempty"`
 }
 
 func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
@@ -155,7 +158,10 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	}
 	if strings.EqualFold(p.Provider, "claude") {
 		if _, ok := groups["fable"]; !ok {
-			groups["fable"] = ModelGroup{Aliases: []string{"fable", "claude-fable-5", "claude-fable-latest"}}
+			groups["fable"] = ModelGroup{
+				Aliases:                []string{"fable", "claude-fable-5", "claude-fable-latest"},
+				RequiredAllowanceRoles: []string{"weekly"},
+			}
 		}
 	}
 	// Spark is a distinct Codex product with its own short and weekly
@@ -164,7 +170,16 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	// model_groups.spark still wins above, just as it does for Fable.
 	if strings.EqualFold(p.Provider, "codex") {
 		if _, ok := groups["spark"]; !ok {
-			groups["spark"] = ModelGroup{Aliases: []string{"spark", "gpt-5.3-codex-spark"}}
+			groups["spark"] = ModelGroup{
+				Aliases:                []string{"spark", "gpt-5.3-codex-spark"},
+				RequiredAllowanceRoles: []string{"short", "weekly"},
+			}
+		}
+	}
+	for name, group := range groups {
+		if len(group.RequiredAllowanceRoles) == 0 {
+			group.RequiredAllowanceRoles = []string{"weekly"}
+			groups[name] = group
 		}
 	}
 	return groups
@@ -347,6 +362,17 @@ func (cfg *Config) validate() error {
 		for groupName, group := range provider.EffectiveModelGroups() {
 			if groupName == "" {
 				return fmt.Errorf("provider %q: model_groups has an empty group name", name)
+			}
+			roles := make(map[string]bool, len(group.RequiredAllowanceRoles))
+			for _, role := range group.RequiredAllowanceRoles {
+				role = strings.ToLower(strings.TrimSpace(role))
+				if role != "short" && role != "weekly" {
+					return fmt.Errorf("provider %q model group %q: unknown required allowance role %q", name, groupName, role)
+				}
+				if roles[role] {
+					return fmt.Errorf("provider %q model group %q: duplicate required allowance role %q", name, groupName, role)
+				}
+				roles[role] = true
 			}
 			for _, alias := range group.Aliases {
 				normalized := strings.ToLower(strings.TrimSpace(alias))

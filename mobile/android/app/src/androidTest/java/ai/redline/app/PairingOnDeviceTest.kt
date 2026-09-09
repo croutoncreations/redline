@@ -1,5 +1,6 @@
 package ai.redline.app
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -94,6 +95,43 @@ class PairingOnDeviceTest {
      * since an encryption failure would otherwise surface as a mysterious
      * unauthorized error much later.
      */
+    @Test
+    fun openingSecureSettingsDeletesCredentialsFromTheLegacyPlaintextStore() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        context.getSharedPreferences("redline", Context.MODE_PRIVATE).edit()
+            .putString("token", "legacy-plaintext-token")
+            .commit()
+
+        RedlineSettings(context)
+
+        assertEquals(
+            null,
+            context.getSharedPreferences("redline", Context.MODE_PRIVATE).getString("token", null),
+        )
+    }
+
+    @Test
+    fun relayOnlyPairingKeepsTheDirectEndpointAbsentAcrossRestart() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val settings = RedlineSettings(context)
+        settings.clear()
+        settings.updatePairing(
+            PairingConfiguration(
+                baseUrl = "",
+                token = "relay-only-token",
+                relayUrl = "https://relay.example.com",
+                desktopKey = "desktop-key",
+                relaySession = "relay-session-01234567",
+                entitlementToken = "",
+            ),
+        )
+
+        val reopened = RedlineSettings(context)
+        assertEquals("", reopened.baseUrl)
+        assertTrue("open relay details should be usable", reopened.relayConfigured)
+        reopened.clear()
+    }
+
     @Test
     fun storesAndReadsTheCredentialFromEncryptedStorage() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

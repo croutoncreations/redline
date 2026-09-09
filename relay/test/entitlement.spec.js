@@ -40,10 +40,9 @@ beforeAll(async () => {
 
 // Entitlement checks run with ALLOW_UNENTITLED off, which is production shape.
 async function connectWithToken(sessionId, token) {
-  const query = token === undefined ? "" : `&entitlement=${encodeURIComponent(token)}`;
-  return SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client${query}`, {
-    headers: { Upgrade: "websocket" },
-  });
+  const headers = { Upgrade: "websocket" };
+  if (token !== undefined) headers["X-Redline-Entitlement"] = token;
+  return SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, { headers });
 }
 
 describe("entitlements", () => {
@@ -51,6 +50,15 @@ describe("entitlements", () => {
     const token = await mintToken({ exp: Math.floor(Date.now() / 1000) + 3600 });
     const res = await connectWithToken("ent-ok-relaytestpadding", token);
     expect(res.status).toBe(101);
+  });
+
+  it("does not accept entitlement credentials from a URL query", async () => {
+    const token = await mintToken({ exp: Math.floor(Date.now() / 1000) + 3600 });
+    const res = await SELF.fetch(
+      `https://relay.example.com/v1/session/ent-query-relaytest?role=client&entitlement=${encodeURIComponent(token)}`,
+      { headers: { Upgrade: "websocket" } },
+    );
+    expect(res.status).toBe(402);
   });
 
   it("refuses a session with no token when entitlements are required", async () => {
@@ -105,7 +113,7 @@ describe("entitlements", () => {
     );
 
     const res = await SELF.fetch(
-      `https://relay.example.com/v1/session/ent-selfsigned-relaytest?role=client&entitlement=${encodeURIComponent(token)}`,
+      `https://relay.example.com/v1/session/ent-selfsigned-relaytest?role=client`,
       {
         headers: {
           Upgrade: "websocket",
@@ -114,6 +122,7 @@ describe("entitlements", () => {
           "x-test-require-entitlement": "true",
           "x-entitlement-key": b64(impostorRaw),
           "entitlement-public-key": b64(impostorRaw),
+          "X-Redline-Entitlement": token,
         },
       },
     );

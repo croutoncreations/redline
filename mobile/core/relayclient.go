@@ -159,7 +159,15 @@ var ErrEntitlementRefused = errors.New("this relay requires a current subscripti
 //
 // A function rather than a bound sentinel because gomobile cannot express
 // errors.Is across the FFI boundary.
-func IsEntitlementRefused(err error) bool { return errors.Is(err, ErrEntitlementRefused) }
+func IsEntitlementRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	// gomobile may reconstruct an error from text after it crosses a Kotlin
+	// callback, losing the Go wrapping chain. The stable sentinel sentence is
+	// therefore part of this FFI classification contract.
+	return errors.Is(err, ErrEntitlementRefused) || strings.Contains(err.Error(), ErrEntitlementRefused.Error())
+}
 
 func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
 	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
@@ -171,9 +179,12 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 		return nil, fmt.Errorf("dial relay: %w", err)
 	}
 
-	target := buildSessionURL(relayURL, sessionID, entitlementToken)
-
-	conn, handshake, err := websocket.Dial(context.Background(), target, nil)
+	target := buildSessionURL(relayURL, sessionID)
+	headers := http.Header{}
+	if entitlementToken != "" {
+		headers.Set("X-Redline-Entitlement", entitlementToken)
+	}
+	conn, handshake, err := websocket.Dial(context.Background(), target, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		// A 402 is a billing answer, not a network one. Discarding the
 		// handshake response made an expired subscription read as "check that
@@ -194,8 +205,9 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 			// forged second line.
 			return nil, fmt.Errorf("%w (relay said: %q)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
 		}
-		// Deliberately not wrapped: the library puts the full URL in its error
-		// and the URL carries the entitlement token.
+		// Keep the library's response details out of the error. The entitlement
+		// travels in a handshake header, which a future library error must not
+		// accidentally echo across the FFI into logs.
 		return nil, fmt.Errorf("dial relay: connect failed")
 	}
 
@@ -524,12 +536,9 @@ func validateRelayURLForDial(raw string) error {
 	return nil
 }
 
-// buildSessionURL constructs the WebSocket URL for the phone's session.
-//
-// Built through net/url rather than concatenation. Entitlement tokens are
-// standard base64, whose alphabet includes '+'; concatenation would decode
-// that as a space on the Worker and corrupt the token.
-func buildSessionURL(relayURL, sessionID, entitlementToken string) string {
+// buildSessionURL constructs the non-secret WebSocket URL for the phone's
+// session. Entitlement credentials travel in the handshake header, never here.
+func buildSessionURL(relayURL, sessionID string) string {
 	base, err := url.Parse(relayURL)
 	if err != nil {
 		return relayURL
@@ -546,9 +555,6 @@ func buildSessionURL(relayURL, sessionID, entitlementToken string) string {
 	base.Path = path.Join(base.Path, "/v1/session", sessionID)
 	query := url.Values{}
 	query.Set("role", "client")
-	if entitlementToken != "" {
-		query.Set("entitlement", entitlementToken)
-	}
 	base.RawQuery = query.Encode()
 	return base.String()
 }

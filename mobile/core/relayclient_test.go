@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"encoding/base64"
+	"errors"
 	"github.com/coder/websocket"
 
 	"encoding/json"
@@ -343,6 +344,27 @@ func TestAFailedRequestDoesNotCorruptLaterOnes(t *testing.T) {
 //
 // This matters more the day the fee turns on, because it is the message every
 // lapsed subscriber sees.
+func TestEntitlementRefusalSurvivesAStringOnlyFFIBoundary(t *testing.T) {
+	// gomobile can reconstruct an error from its text without preserving the Go
+	// wrapping chain. Classification must survive that declared FFI contract.
+	err := errors.New("direct and relay routes failed: this relay requires a current subscription")
+	if !IsEntitlementRefused(err) {
+		t.Fatalf("string-only FFI error was not classified: %v", err)
+	}
+}
+
+func TestDirectFailurePreservesRelayEntitlementRefusal(t *testing.T) {
+	client := NewClient("http://127.0.0.1:1", "token")
+	client.SetRelayFallback(RelayFallbackRaw(func(_, _, _ string) (string, error) {
+		return "", ErrEntitlementRefused
+	}))
+
+	_, err := client.FetchUsage()
+	if err == nil || !IsEntitlementRefused(err) {
+		t.Fatalf("fallback entitlement refusal was erased: %v", err)
+	}
+}
+
 func TestDialRelayReportsAnEntitlementRefusalAsItsOwnThing(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this relay requires an entitlement", http.StatusPaymentRequired)
@@ -542,8 +564,8 @@ func TestDialRelayAcceptsTheURLTheDesktopPublishes(t *testing.T) {
 	}
 }
 
-// http:// stays refused for a public host: the entitlement rides in the query
-// string, and sending it in clear would hand it to anyone on the path.
+// http:// stays refused for a public host: the entitlement rides in a handshake
+// header, and sending it in clear would hand it to anyone on the path.
 func TestDialRelayStillRefusesCleartext(t *testing.T) {
 	_, err := DialRelay("http://relay.example.com", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)), "tok")

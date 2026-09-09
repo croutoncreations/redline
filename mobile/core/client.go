@@ -327,6 +327,10 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 			if relayed, relayErr := c.relayRequest(method, path, body); relayErr == nil {
 				markRelayed(ctx)
 				return relayed, nil
+			} else {
+				// Preserve both routes. In particular ErrEntitlementRefused must
+				// survive so the app asks for renewal rather than diagnosing wifi.
+				return nil, fmt.Errorf("direct and relay routes failed: %w", errors.Join(err, relayErr))
 			}
 		}
 		// Transport failures are reachability problems, never auth problems;

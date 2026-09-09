@@ -99,15 +99,18 @@ class PairingViewModel(
 
             result.fold(
                 onSuccess = { (baseUrl, token, request) ->
-                    settings.update(baseUrl, token)
-                    // Stored even when empty, so re-pairing with a desktop that
-                    // has dropped its relay clears the stale details rather
-                    // than leaving the phone aimed at a relay nobody answers.
-                    settings.updateRelay(
-                        request.relayUrl,
-                        request.desktopKey,
-                        request.relaySession,
-                        request.entitlementToken,
+                    // Credential and every route are one durable pairing. An
+                    // interruption must not combine a new token with an old
+                    // desktop's relay identity.
+                    settings.updatePairing(
+                        PairingConfiguration(
+                            baseUrl = baseUrl,
+                            token = token,
+                            relayUrl = request.relayUrl,
+                            desktopKey = request.desktopKey,
+                            relaySession = request.relaySession,
+                            entitlementToken = request.entitlementToken,
+                        ),
                     )
                     _state.value = PairingUiState(working = false, pairedTo = baseUrl)
                 },

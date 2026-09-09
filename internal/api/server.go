@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1996,18 +1997,19 @@ func (s *Server) evaluateCandidateBudget(
 		// work must leave the same rolling reserve for interactive Spark use.
 		// Other model groups (currently Fable) have only a weekly allowance and
 		// must not grow a made-up short-window requirement.
+		groupDefinition := configured.EffectiveModelGroups()[group]
+		requiresShort := slices.Contains(groupDefinition.RequiredAllowanceRoles, "short")
 		shortKey := "model:" + group + ":short"
 		short, hasShort := snapshot.Allowance(shortKey)
-		// Spark is known to have a short window. If the collector could not read
-		// it, fail closed rather than spending an unknown interactive budget.
-		// Other groups currently have only weekly allowances, but if a provider
-		// adds a short one later it gets reserve protection automatically.
-		if group == "spark" && !hasShort {
+		// A group that declares a short window fails closed when the collector
+		// cannot read it; the requirement is policy data, not a provider name
+		// embedded in the scheduler.
+		if requiresShort && !hasShort {
 			required = append(required, shortKey)
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 				shortKey + " allowance is missing"
 		}
-		if hasShort {
+		if requiresShort && hasShort {
 			required = append(required, shortKey)
 			shortDecision := decision.Admit
 			shortReason := "model short reserve available"

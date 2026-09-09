@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -43,7 +44,7 @@ type DialerOptions struct {
 	// working looked exactly like one refusing every connection: the only way
 	// to tell them apart was to open a second session and see whether the
 	// relay answered 409. Every line written here passes through redactToken
-	// first, because the session URL carries the entitlement.
+	// first as defense in depth against a library echoing handshake headers.
 	Logf func(format string, args ...any)
 }
 
@@ -138,7 +139,7 @@ func (d *Dialer) Run(ctx context.Context) {
 // returns that error. It returns nil if and only if ctx was cancelled.
 func (d *Dialer) connect(ctx context.Context) error {
 	target := d.sessionURL()
-	conn, _, err := websocket.Dial(ctx, target, nil)
+	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPHeader: d.sessionHeaders()})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -146,8 +147,9 @@ func (d *Dialer) connect(ctx context.Context) error {
 		// The library puts the full URL in its error, which carries the
 		// entitlement token. Nothing logs this today, and that is exactly why
 		// it is stripped here: the leak stays invisible until someone adds a
-		// log line, and then it is a credential in a file. Redacting at the
-		// source is one change; remembering in every future caller is not.
+		// log line, and then it is a credential in a file. The token now travels
+		// in a header, but redacting at the source is cheap defense in depth
+		// against a WebSocket library ever echoing handshake headers.
 		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), d.opts.EntitlementToken))
 	}
 	defer conn.CloseNow()
@@ -265,14 +267,18 @@ func redactToken(message, token string) string {
 
 // sessionURL builds the address this desktop dials.
 //
-// Built through net/url rather than concatenated. An entitlement token is
-// standard base64, whose alphabet includes '+', and a query string decodes
-// that as a space -- so concatenation would corrupt about half of all real
-// tokens and tell a paying customer they had not paid. Encoding the path
-// segment likewise stops a corrupted session id from adding its own query
-// parameters or climbing out of the path.
-//
-// The returned URL carries a credential and must not be logged.
+// Encoding the path segment stops a corrupted session id from adding its own
+// query parameters or climbing out of the path. The entitlement is deliberately
+// absent: it travels in a handshake header so infrastructure URL logs cannot
+// retain the bearer credential.
+func (d *Dialer) sessionHeaders() http.Header {
+	headers := http.Header{}
+	if d.opts.EntitlementToken != "" {
+		headers.Set("X-Redline-Entitlement", d.opts.EntitlementToken)
+	}
+	return headers
+}
+
 func (d *Dialer) sessionURL() string {
 	base, err := url.Parse(d.opts.RelayURL)
 	if err != nil {
@@ -283,9 +289,6 @@ func (d *Dialer) sessionURL() string {
 	base.Path = path.Join(base.Path, "/v1/session", d.opts.SessionID)
 	query := url.Values{}
 	query.Set("role", "host")
-	if d.opts.EntitlementToken != "" {
-		query.Set("entitlement", d.opts.EntitlementToken)
-	}
 	base.RawQuery = query.Encode()
 	return base.String()
 }
