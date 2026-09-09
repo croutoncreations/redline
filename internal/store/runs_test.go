@@ -196,3 +196,62 @@ func TestMarkRunActivityReadRequiresTerminalRun(t *testing.T) {
 		t.Fatalf("after single-run mark: unread count = %d, want 0", count)
 	}
 }
+
+// TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths guards against
+// a real ordering bug: run timestamps are persisted as TEXT via formatTime,
+// which formats with time.RFC3339Nano. That layout trims trailing zeros from
+// the fractional seconds, so two timestamps can serialize to strings of
+// different lengths (e.g. ".1Z" vs ".12Z"). SQLite's ORDER BY on a TEXT column
+// compares lexicographically, and "the shorter string is chronologically
+// earlier" does not hold once a shared prefix is followed by "Z" in one value
+// and a digit in the other ('Z' > any digit), so ListRuns can report a run
+// that started earlier as if it started later.
+func TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	// earlierStart's fractional seconds (.1) format to fewer digits than
+	// laterStart's (.12) despite occurring first in wall-clock time.
+	earlierStart := base.Add(100 * time.Millisecond)
+	laterStart := base.Add(120 * time.Millisecond)
+	if !earlierStart.Before(laterStart) {
+		t.Fatalf("test setup invariant violated: %v is not before %v", earlierStart, laterStart)
+	}
+
+	// Separate provider accounts so both runs can be admitted concurrently
+	// without tripping the per-provider concurrency limit.
+	admit := func(providerAccountID, taskID, runID string, startedAt time.Time) {
+		t.Helper()
+		profile := domain.ExecutionProfile{
+			ID: "p-" + taskID, ProviderAccountID: providerAccountID,
+			HarnessType: "codex-cli", WorkspaceProvider: "existing-directory",
+		}
+		if err := db.CreateProfile(ctx, profile, base); err != nil {
+			t.Fatal(err)
+		}
+		task := domain.Task{
+			ID: taskID, Name: taskID, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}
+		if err := db.CreateTask(ctx, task, base); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, runID, taskID, providerAccountID, "", startedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admit("codex-earlier", "task-earlier", "run-earlier", earlierStart)
+	admit("codex-later", "task-later", "run-later", laterStart)
+
+	runs, err := db.ListRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want 2", len(runs))
+	}
+	if runs[0].ID != "run-later" || runs[1].ID != "run-earlier" {
+		t.Fatalf("ListRuns order = [%s, %s], want [run-later, run-earlier] (most recently started first)",
+			runs[0].ID, runs[1].ID)
+	}
+}
