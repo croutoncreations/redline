@@ -414,6 +414,16 @@ func TestExplicitBudgetModelGroupMustExist(t *testing.T) {
 	}
 }
 
+func TestEffectiveModelGroupsCanonicalizesRequiredAllowanceRoles(t *testing.T) {
+	provider := config.Provider{Provider: "codex", ModelGroups: map[string]config.ModelGroup{
+		"spark": {Aliases: []string{"spark"}, RequiredAllowanceRoles: []string{" Short ", "WEEKLY"}},
+	}}
+	roles := provider.EffectiveModelGroups()["spark"].RequiredAllowanceRoles
+	if strings.Join(roles, ",") != "short,weekly" {
+		t.Fatalf("roles = %#v, want canonical roles", roles)
+	}
+}
+
 func TestLoadRejectsUnknownRequiredAllowanceRole(t *testing.T) {
 	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
     model_groups:

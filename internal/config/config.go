@@ -179,8 +179,11 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	for name, group := range groups {
 		if len(group.RequiredAllowanceRoles) == 0 {
 			group.RequiredAllowanceRoles = []string{"weekly"}
-			groups[name] = group
 		}
+		for i, role := range group.RequiredAllowanceRoles {
+			group.RequiredAllowanceRoles[i] = strings.ToLower(strings.TrimSpace(role))
+		}
+		groups[name] = group
 	}
 	return groups
 }

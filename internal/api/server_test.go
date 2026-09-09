@@ -1532,6 +1532,26 @@ func TestSparkTaskFailsClosedWhenItsShortAllowanceIsMissing(t *testing.T) {
 	}
 }
 
+func TestModelGroupWithOnlyShortRoleDoesNotInventAWeeklyRequirement(t *testing.T) {
+	server, db := newAPIServerConfigured(t, codexSparkAllowancePayload(.80, .80, .80), func(cfg *config.Config) {
+		provider := cfg.Providers["codex-main"]
+		provider.ModelGroups = map[string]config.ModelGroup{
+			"spark": {Aliases: []string{"spark"}, RequiredAllowanceRoles: []string{" Short "}},
+		}
+		cfg.Providers["codex-main"] = provider
+	})
+	createCodexCandidate(t, db, "spark-profile", "spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short" {
+		t.Fatalf("selected=%#v required=%#v", result.SelectedTask, result.Result.RequiredPools)
+	}
+}
+
 func TestSparkTaskRequiresBothSparkAllowancesAboveReserve(t *testing.T) {
 	server, db := newAPIServer(t, codexSparkAllowancePayload(.26, .80, .80))
 	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
@@ -3227,6 +3247,11 @@ func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
 
 func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	t.Helper()
+	return newAPIServerConfigured(t, payload, nil)
+}
+
+func newAPIServerConfigured(t *testing.T, payload string, configure func(*config.Config)) (*httptest.Server, *store.DB) {
+	t.Helper()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, payload)
 	}))
@@ -3237,6 +3262,9 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := testConfig(usage.URL)
+	if configure != nil {
+		configure(&cfg)
+	}
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)

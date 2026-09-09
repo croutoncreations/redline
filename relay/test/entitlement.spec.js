@@ -52,13 +52,13 @@ describe("entitlements", () => {
     expect(res.status).toBe(101);
   });
 
-  it("does not accept entitlement credentials from a URL query", async () => {
+  it("temporarily accepts query credentials from pre-header clients", async () => {
     const token = await mintToken({ exp: Math.floor(Date.now() / 1000) + 3600 });
     const res = await SELF.fetch(
       `https://relay.example.com/v1/session/ent-query-relaytest?role=client&entitlement=${encodeURIComponent(token)}`,
       { headers: { Upgrade: "websocket" } },
     );
-    expect(res.status).toBe(402);
+    expect(res.status).toBe(101);
   });
 
   it("refuses a session with no token when entitlements are required", async () => {

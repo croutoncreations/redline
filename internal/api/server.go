@@ -2027,47 +2027,49 @@ func (s *Server) evaluateCandidateBudget(
 			}
 		}
 
-		poolKey := "model:" + group + ":weekly"
-		required = append(required, poolKey)
-		allowance, found := snapshot.Allowance(poolKey)
-		if !found {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is missing"
-		}
-		if allowance.Remaining <= 0 {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is exhausted"
-		}
-		if !allowance.ResetsAt.After(s.now()) {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " reset is not in the future"
-		}
-		thresholds, thresholdErr := policy.DecisionThresholds()
-		maxAge, ageErr := s.config.SnapshotAge()
-		if thresholdErr != nil || ageErr != nil {
-			return base, false, "model-specific pace policy is invalid"
-		}
-		poolSnapshot := decision.UsageSnapshot{
-			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
-			Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
-			Source: snapshot.Source, Confidence: snapshot.Confidence,
-		}
-		poolDecision := decision.Evaluate(decision.Input{
-			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
-			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger,
-			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-		})
-		poolResults = append(poolResults, decision.PoolResult{
-			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
-			Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
-		})
-		if poolDecision.Decision == decision.Unknown {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " decision is unknown: " + poolDecision.Reason
-		}
-		if poolDecision.Decision == decision.Admit {
-			triggering = append(triggering, poolKey)
+		if slices.Contains(groupDefinition.RequiredAllowanceRoles, "weekly") {
+			poolKey := "model:" + group + ":weekly"
+			required = append(required, poolKey)
+			allowance, found := snapshot.Allowance(poolKey)
+			if !found {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is missing"
+			}
+			if allowance.Remaining <= 0 {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is exhausted"
+			}
+			if !allowance.ResetsAt.After(s.now()) {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " reset is not in the future"
+			}
+			thresholds, thresholdErr := policy.DecisionThresholds()
+			maxAge, ageErr := s.config.SnapshotAge()
+			if thresholdErr != nil || ageErr != nil {
+				return base, false, "model-specific pace policy is invalid"
+			}
+			poolSnapshot := decision.UsageSnapshot{
+				Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
+				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
+				Source: snapshot.Source, Confidence: snapshot.Confidence,
+			}
+			poolDecision := decision.Evaluate(decision.Input{
+				Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+				TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+				PaceGapTrigger: policy.PaceGapTrigger,
+				PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+			})
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
+				Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
+			})
+			if poolDecision.Decision == decision.Unknown {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " decision is unknown: " + poolDecision.Reason
+			}
+			if poolDecision.Decision == decision.Admit {
+				triggering = append(triggering, poolKey)
+			}
 		}
 	}
 	if len(triggering) == 0 {

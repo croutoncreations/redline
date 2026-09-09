@@ -38,15 +38,7 @@ interface RedlineSettingsWriter {
     fun update(baseUrl: String, token: String)
 
     /** Stores credential and routes as one pairing transaction. */
-    fun updatePairing(configuration: PairingConfiguration) {
-        update(configuration.baseUrl, configuration.token)
-        updateRelay(
-            configuration.relayUrl,
-            configuration.desktopKey,
-            configuration.relaySession,
-            configuration.entitlementToken,
-        )
-    }
+    fun updatePairing(configuration: PairingConfiguration)
 
     /**
      * Forgets everything about the paired desktop.
@@ -95,10 +87,10 @@ class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
         ).also {
             // Versions before secure storage became fail-closed could leave a
             // bearer token in this file after a transient Keystore failure.
-            context.deleteSharedPreferences(PLAIN_FILE)
+            clearLegacyPlaintext(context)
         }
     } catch (error: Exception) {
-        context.deleteSharedPreferences(PLAIN_FILE)
+        clearLegacyPlaintext(context)
         throw IllegalStateException("secure credential storage is unavailable", error)
     }
 
@@ -195,7 +187,7 @@ class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
             .remove(KEY_ENTITLEMENT)
             .apply()
         // Also remove credentials written by pre-fail-closed versions.
-        context.deleteSharedPreferences(PLAIN_FILE)
+        clearLegacyPlaintext(context)
     }
 
     private companion object {
@@ -208,6 +200,17 @@ class RedlineSettings(private val context: Context) : RedlineSettingsWriter {
 
         const val ENCRYPTED_FILE = "redline.secure"
         const val PLAIN_FILE = "redline"
+
+        fun clearLegacyPlaintext(context: Context) {
+            val legacy = context.getSharedPreferences(PLAIN_FILE, Context.MODE_PRIVATE)
+            // commit(), not apply(): construction must not continue while a
+            // full-access bearer token may still be queued for deletion.
+            if (!legacy.edit().clear().commit() || legacy.all.isNotEmpty()) {
+                throw IllegalStateException("legacy plaintext credentials could not be removed")
+            }
+            // An empty file is harmless; delete it when the platform can.
+            context.deleteSharedPreferences(PLAIN_FILE)
+        }
     }
 }
 

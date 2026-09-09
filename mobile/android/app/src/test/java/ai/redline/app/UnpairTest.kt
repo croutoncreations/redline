@@ -35,6 +35,16 @@ class UnpairTest {
             values["entitlement_token"] = entitlementToken
         }
 
+        override fun updatePairing(configuration: PairingConfiguration) {
+            update(configuration.baseUrl, configuration.token)
+            updateRelay(
+                configuration.relayUrl,
+                configuration.desktopKey,
+                configuration.relaySession,
+                configuration.entitlementToken,
+            )
+        }
+
         override fun clear() {
             values.clear()
         }

@@ -60,7 +60,11 @@ export default {
     }
 
     const id = env.SESSIONS.idFromName(sessionId);
-    return env.SESSIONS.get(id).fetch(request);
+    // Authorization ends here. The session object pairs opaque WebSockets and
+    // never needs the bearer credential, so do not widen its exposure.
+    const sessionHeaders = new Headers(request.headers);
+    sessionHeaders.delete("X-Redline-Entitlement");
+    return env.SESSIONS.get(id).fetch(new Request(request, { headers: sessionHeaders }));
   },
 };
 
@@ -93,7 +97,11 @@ async function checkEntitlement(env, request) {
 
   // Credentials never belong in a URL: edge/proxy access logs commonly retain
   // query strings outside this worker's control.
-  const token = request.headers.get("X-Redline-Entitlement");
+  // Query support is a staged migration path for pre-header clients. New
+  // clients never put the token in a URL; remove this fallback after their
+  // minimum supported version advances.
+  const token = request.headers.get("X-Redline-Entitlement") ||
+    new URL(request.url).searchParams.get("entitlement");
   if (!token) {
     return { ok: false, reason: "this relay requires an entitlement" };
   }
