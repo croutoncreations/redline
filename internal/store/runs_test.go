@@ -196,3 +196,66 @@ func TestMarkRunActivityReadRequiresTerminalRun(t *testing.T) {
 		t.Fatalf("after single-run mark: unread count = %d, want 0", count)
 	}
 }
+
+// TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths guards against
+// a formatTime bug: RFC3339Nano trims trailing zeros from the fractional
+// seconds, so two started_at values that serialize to different digit widths
+// (".1Z" vs ".12Z") no longer compare correctly as SQLite TEXT — 'Z' sorts
+// above any digit, so the objectively earlier timestamp's string can sort as
+// "greater" than the later one. ListRuns orders by started_at DESC, so this
+// would surface the older run before the newer one.
+func TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	setup := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	profile := domain.ExecutionProfile{
+		ID: "p-order", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "existing-directory",
+	}
+	if err := db.CreateProfile(ctx, profile, setup); err != nil {
+		t.Fatal(err)
+	}
+
+	// earlier chronologically, but formats to "...12:00:00.1Z" (short fraction)
+	earlier := time.Date(2026, 7, 24, 12, 0, 0, 100_000_000, time.UTC)
+	// later chronologically, but formats to "...12:00:00.12Z" (longer fraction)
+	later := time.Date(2026, 7, 24, 12, 0, 0, 120_000_000, time.UTC)
+	if !earlier.Before(later) {
+		t.Fatalf("test fixture invariant broken: earlier=%v later=%v", earlier, later)
+	}
+
+	for _, run := range []struct {
+		taskID, runID string
+		startedAt     time.Time
+	}{
+		{"task-earlier", "run-earlier", earlier},
+		{"task-later", "run-later", later},
+	} {
+		if err := db.CreateTask(ctx, domain.Task{
+			ID: run.taskID, Name: run.taskID, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}, setup); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, run.runID, run.taskID, "codex-main", "", run.startedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteRun(ctx, run.runID, domain.RunCompletion{
+			State: domain.RunCompleted, FinalizeState: "completed",
+		}, run.startedAt.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runs, err := db.ListRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs=%#v, want 2", runs)
+	}
+	if runs[0].ID != "run-later" || runs[1].ID != "run-earlier" {
+		t.Fatalf("ListRuns order = [%s, %s], want [run-later, run-earlier] (most recently started first)",
+			runs[0].ID, runs[1].ID)
+	}
+}
