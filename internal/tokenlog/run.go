@@ -73,12 +73,18 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			if input < 0 {
 				input = 0
 			}
-			result = []capacity.TokenObservation{{
-				Provider: "codex", Source: "redline-run", SourceID: runID,
-				ObservedAt: observedAt.UTC(), Model: configuredModel, InputTokens: input,
-				OutputTokens: record.Usage.OutputTokens, CacheReadTokens: record.Usage.CachedInputTokens,
-				Confidence: "high",
-			}}
+			// A codex-cli run emits one turn.completed record per agent turn,
+			// each reporting that turn's own usage rather than a running
+			// total, so multi-turn runs must accumulate across records.
+			if len(result) == 0 {
+				result = []capacity.TokenObservation{{
+					Provider: "codex", Source: "redline-run", SourceID: runID,
+					ObservedAt: observedAt.UTC(), Model: configuredModel, Confidence: "high",
+				}}
+			}
+			result[0].InputTokens += input
+			result[0].OutputTokens += record.Usage.OutputTokens
+			result[0].CacheReadTokens += record.Usage.CachedInputTokens
 		case "hermes":
 			if record.Type != "hermes.result" {
 				continue

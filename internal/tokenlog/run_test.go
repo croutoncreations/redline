@@ -76,6 +76,28 @@ func TestLoadRunArtifactReadsCodexTurnUsageAndSeparatesCachedInput(t *testing.T)
 	}
 }
 
+func TestLoadRunArtifactSumsCodexUsageAcrossMultipleTurns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "codex.jsonl")
+	data := `{"type":"thread.started","thread_id":"abc"}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":12}}
+{"type":"turn.completed","usage":{"input_tokens":150,"cached_input_tokens":90,"output_tokens":20}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "codex-cli", "run-2", "gpt-5.6-sol", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	item := got[0]
+	wantInput := int64(60 + 60) // (100-40) + (150-90)
+	wantOutput := int64(12 + 20)
+	wantCacheRead := int64(40 + 90)
+	if item.InputTokens != wantInput || item.OutputTokens != wantOutput || item.CacheReadTokens != wantCacheRead {
+		t.Fatalf("observation=%#v want input=%d output=%d cacheRead=%d", item, wantInput, wantOutput, wantCacheRead)
+	}
+}
+
 // TestNormalizeHermesProviderDirectAnthropicNames verifies that the literal
 // provider strings "anthropic" and "anthropic-cli" both map to "claude".
 // Bug class: if these cases fall through to the default branch, tokens would be
