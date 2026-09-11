@@ -41,6 +41,42 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// RFC3339Nano trims trailing zero fractional digits, so two timestamps within
+// the same wall-clock second can format to different-width fractions whose
+// lexicographic order (used by the SQL ORDER BY on the TEXT column) disagrees
+// with their chronological order. 120ms formats to ".12" and 123ms formats to
+// ".123"; ".12" > ".123" as a string even though 120ms is chronologically
+// earlier than 123ms.
+func TestSQLiteLatestSnapshotOrdersByActualTimeNotTextLexOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	base := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	older := usageSnapshot(base.Add(120*time.Millisecond), 0.47)
+	newer := usageSnapshot(base.Add(123*time.Millisecond), 0.46)
+	if err := db.SaveSnapshot(ctx, older, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(ctx, newer, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, raw, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(newer.ObservedAt) || got.Weekly.Remaining != 0.46 {
+		t.Fatalf("latest = %#v, want newer snapshot (123ms)", got)
+	}
+	if string(raw) != `{"sequence":2}` {
+		t.Fatalf("raw = %s", raw)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
