@@ -45,6 +45,36 @@ func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 	}
 }
 
+// formatTime uses time.RFC3339Nano, whose fractional-second component is
+// variable-width and omitted entirely when nanoseconds are exactly zero.
+// Two attempts completing within the same whole second, one exactly on the
+// second and one a fraction later, must still sort newest-first because
+// ListDispatchAttempts orders by completed_at DESC as TEXT in SQLite.
+func TestDispatchAttemptsOrderAcrossWholeSecondBoundary(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for _, attempt := range []domain.DispatchAttempt{
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start},
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start.Add(500 * time.Millisecond)},
+	} {
+		if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListDispatchAttempts(context.Background(), "codex-main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("attempts = %#v", got)
+	}
+	if !got[0].CompletedAt.After(got[1].CompletedAt) {
+		t.Fatalf("expected newest-first order, got %v then %v", got[0].CompletedAt, got[1].CompletedAt)
+	}
+}
+
 func TestDispatchAttemptValidation(t *testing.T) {
 	db := openTaskDB(t)
 	_, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{})
