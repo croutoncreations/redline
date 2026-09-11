@@ -612,7 +612,12 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// Fixed-width fractions preserve chronological order in SQLite TEXT keys;
+// RFC3339Nano omits the fraction entirely when it is zero, which breaks
+// lexicographic comparisons against timestamps that do have a fraction.
+func formatTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 func parseStoredTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
