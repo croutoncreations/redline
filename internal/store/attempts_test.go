@@ -73,3 +73,28 @@ func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
 		t.Fatalf("attempts = %#v", got)
 	}
 }
+
+// Timestamps are stored as RFC3339Nano text and compared lexicographically in
+// SQL. RFC3339Nano omits the fractional part entirely when it is zero, so a
+// timestamp with a sub-second fraction (e.g. "...00.5Z") sorts *before* a
+// whole-second timestamp (e.g. "...00Z") because '.' < 'Z'. An attempt that
+// completed a fraction of a second after the range start must still be
+// included in the range.
+func TestListDispatchAttemptsRangeHandlesSubSecondPrecision(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	attempt := domain.DispatchAttempt{
+		ProviderAccountID: "claude", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT",
+		StartedAt: start, CompletedAt: start.Add(500 * time.Millisecond),
+	}
+	if _, err := db.RecordDispatchAttempt(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ListDispatchAttemptsRange(context.Background(), "automatic", start, start.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("attempts = %#v, want the sub-second attempt included in the range", got)
+	}
+}
