@@ -127,8 +127,8 @@ func loadPiFile(ctx context.Context, sessionID, path, targetProvider string, aft
 		if !ok || !observedAt.After(after) {
 			continue
 		}
-		cacheRead := record.Message.Usage.CacheRead + record.Message.Usage.Cache.Read
-		cacheCreation := record.Message.Usage.CacheWrite + record.Message.Usage.CacheCreation + record.Message.Usage.Cache.Write
+		cacheRead := max(record.Message.Usage.CacheRead, record.Message.Usage.Cache.Read)
+		cacheCreation := max(record.Message.Usage.CacheWrite, record.Message.Usage.CacheCreation, record.Message.Usage.Cache.Write)
 		if record.Message.Usage.Input < 0 || record.Message.Usage.Output < 0 || cacheRead < 0 || cacheCreation < 0 {
 			continue
 		}
