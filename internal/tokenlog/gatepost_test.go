@@ -75,6 +75,43 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784332800000, 1784332810000);`, 
 	}
 }
 
+// TestLoadGatepostPiCacheTokensDoNotDoubleCountAcrossAliases verifies that
+// when a Pi message record carries both the flat cacheRead/cacheWrite fields
+// and the nested cache.read/cache.write fields for the same usage, the
+// parser does not add them together.
+// Bug class: Pi's JSONL schema represents cache tokens two ways (flat
+// cacheRead/cacheWrite and nested cache.read/cache.write). If a record
+// populates both aliases for the same underlying value, summing them
+// double-counts cache tokens, inflating usage estimates and causing the
+// scheduler to under-dispatch. This mirrors the alias-collision bug already
+// guarded against for Hermes records in run.go (see
+// TestLoadRunArtifactHermesCacheReadPrefersLargestFieldValue).
+func TestLoadGatepostPiCacheTokensDoNotDoubleCountAcrossAliases(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "viewer.db")
+	sessionPath := filepath.Join(directory, "pi.jsonl")
+	data := `{"type":"message","id":"a1","timestamp":"2026-07-18T00:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":30,"cacheWrite":4,"cache":{"read":30,"write":4}}}}
+`
+	if err := os.WriteFile(sessionPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := sql.Open("sqlite", databasePath)
+	_, err := db.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784332800000, 1784332810000);`, sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	claude, err := tokenlog.LoadGatepostPi(context.Background(), databasePath, "claude", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude) != 1 || claude[0].CacheReadTokens != 30 || claude[0].CacheCreationTokens != 4 {
+		t.Fatalf("observations = %#v, want CacheReadTokens=30 CacheCreationTokens=4 (largest of the aliased fields, not their sum)", claude)
+	}
+}
+
 func TestLoadGatepostPiAppliesTimestampCursor(t *testing.T) {
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "viewer.db")
