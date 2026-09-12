@@ -137,11 +137,11 @@ all clients remain attached and in-flight traffic is not interrupted. With no
 attached host it returns `423 {"code":"no_host"}`. The boundary strips the
 credential, query fallback, and forged internal headers before forwarding.
 
-## Future issuer HTTP API contract
+## Public issuer HTTP API contract
 
 The issuer is a separate service planned for the private `redline-issuer`
-repository; it is **not implemented here**. The relay never calls it and never
-looks anything up. The future issuer API base is
+repository; it is **not implemented here**. The desktop client for this contract
+is implemented, while the relay never calls it and never looks anything up. The issuer API base is
 `https://redline.croutoncreations.com/api`; paths below are relative to it.
 
 Entitlement creation puts the license key in JSON because this is also the
@@ -169,8 +169,10 @@ The remaining calls authenticate with exactly
   `200 {"url":"https://<short-lived-customer-portal-url>"}`. A portal URL is
   created for each request and must never be cached in an entitlement response.
 
-The issuer signs `{exp, sid, max_clients}` and currently sets `max_clients` to
-`5`.
+The issuer signs `{exp, sid, max_clients}`, sets `exp` to issuance time plus 14
+days, and currently sets `max_clients` to `5`. Desktop clients reject responses
+whose token claims disagree with the surrounding response, exceed the 14-day
+lifetime, or carry out-of-range seat/client counts.
 
 ### License recovery contract
 

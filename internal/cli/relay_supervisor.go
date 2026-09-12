@@ -27,9 +27,9 @@ type activeRelayDialer struct {
 }
 
 type relayConnection struct {
-	url       string
-	sessionID string
-	token     config.RelayEntitlementToken
+	url                 string
+	sessionID           string
+	reconnectGeneration uint64
 }
 
 // newRelaySupervisor captures the coordinator's initial snapshot from the same
@@ -77,9 +77,9 @@ func (s *relaySupervisor) apply(ctx context.Context, snapshot config.ResolvedRel
 		return nil
 	}
 	connection := relayConnection{
-		url:       snapshot.URL,
-		sessionID: snapshot.SessionID,
-		token:     snapshot.EntitlementToken,
+		url:                 snapshot.URL,
+		sessionID:           snapshot.SessionID,
+		reconnectGeneration: snapshot.ReconnectGeneration,
 	}
 	if s.active != nil && s.active.connection == connection {
 		return nil

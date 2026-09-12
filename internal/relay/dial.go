@@ -37,6 +37,10 @@ type DialerOptions struct {
 	// Left empty during development with ALLOW_UNENTITLED=true on the relay.
 	EntitlementToken string
 
+	// EntitlementSignal reports only typed relay entitlement events. It never
+	// receives an error string, header, or token.
+	EntitlementSignal func(EntitlementSignal)
+
 	// Logf reports connection state to the operator. Nil means silent, which
 	// is what every test that does not care about output gets.
 	//
@@ -55,6 +59,19 @@ type DialerOptions struct {
 // reconnects; when the context is cancelled it stops.
 type Dialer struct {
 	opts DialerOptions
+}
+
+type EntitlementSignal string
+
+const (
+	EntitlementHandshakeRequired EntitlementSignal = "handshake_402"
+	EntitlementExpired           EntitlementSignal = "close_1008_expired"
+)
+
+type EntitlementSignalError struct{ Signal EntitlementSignal }
+
+func (e *EntitlementSignalError) Error() string {
+	return "relay requires entitlement renewal: " + string(e.Signal)
 }
 
 // errIdle marks the ordinary end of a session, where no phone has sent
@@ -80,6 +97,12 @@ func NewDialer(opts DialerOptions) *Dialer {
 // Redaction happens here rather than at each call site so that adding a log
 // line later cannot leak the credential: the only way to write output from
 // this type is through a function that has already removed it.
+func (d *Dialer) signal(signal EntitlementSignal) {
+	if d.opts.EntitlementSignal != nil {
+		d.opts.EntitlementSignal(signal)
+	}
+}
+
 func (d *Dialer) logf(format string, args ...any) {
 	if d.opts.Logf == nil {
 		return
@@ -139,10 +162,17 @@ func (d *Dialer) Run(ctx context.Context) {
 // returns that error. It returns nil if and only if ctx was cancelled.
 func (d *Dialer) connect(ctx context.Context) error {
 	target := d.sessionURL()
-	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPHeader: d.sessionHeaders()})
+	conn, response, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPHeader: d.sessionHeaders()})
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		if ctx.Err() != nil {
 			return nil
+		}
+		if response != nil && response.StatusCode == http.StatusPaymentRequired {
+			d.signal(EntitlementHandshakeRequired)
+			return &EntitlementSignalError{Signal: EntitlementHandshakeRequired}
 		}
 		// Library errors may echo handshake request details. Nothing logs this
 		// today, and that is exactly why the token is stripped here: the leak
@@ -201,6 +231,10 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 		readExpired := readCtx.Err() != nil && ctx.Err() == nil
 		cancelRead()
 		if err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusPolicyViolation && strings.Contains(strings.ToLower(err.Error()), "entitlement expired") {
+				d.signal(EntitlementExpired)
+				return &EntitlementSignalError{Signal: EntitlementExpired}
+			}
 			if ctx.Err() != nil {
 				_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 				return nil
@@ -255,13 +289,17 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 //
 // Takes the token rather than pattern-matching a URL, so it cannot be fooled by
 // a different encoding of the same value.
-func redactToken(message, token string) string {
-	if token == "" {
-		return message
+func redactToken(message string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		message = strings.ReplaceAll(message, secret, "[redacted]")
+		// A library error may URL-escape a credential even though Redline never
+		// deliberately puts either the license or token in a URL.
+		message = strings.ReplaceAll(message, url.QueryEscape(secret), "[redacted]")
 	}
-	message = strings.ReplaceAll(message, token, "[redacted]")
-	// The URL in an error is escaped, so the escaped form has to go too.
-	return strings.ReplaceAll(message, url.QueryEscape(token), "[redacted]")
+	return message
 }
 
 // sessionURL builds the address this desktop dials.

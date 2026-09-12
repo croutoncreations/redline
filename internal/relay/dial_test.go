@@ -139,6 +139,58 @@ func TestDialerServesAPhoneThroughTheRelay(t *testing.T) {
 	}
 }
 
+func TestDialerSurfacesTypedEntitlementHandshakeAndExpirySignals(t *testing.T) {
+	t.Run("handshake 402", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusPaymentRequired)
+		}))
+		defer server.Close()
+		keypair, _ := core.NewDesktopKeypair()
+		signals := make(chan EntitlementSignal, 1)
+		dialer := NewDialer(DialerOptions{
+			RelayURL: strings.Replace(server.URL, "http://", "ws://", 1), SessionID: "test-session-id-0123456789",
+			Keypair: keypair, Forwarder: NewForwarder("http://127.0.0.1:1", http.DefaultClient), EntitlementSignal: func(signal EntitlementSignal) { signals <- signal },
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		go dialer.Run(ctx)
+		select {
+		case signal := <-signals:
+			cancel()
+			if signal != EntitlementHandshakeRequired {
+				t.Fatalf("signal=%s", signal)
+			}
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("missing handshake entitlement signal")
+		}
+	})
+
+	t.Run("close 1008 entitlement expired", func(t *testing.T) {
+		server := fakeRelay(t, func(conn *websocket.Conn) {
+			_ = conn.Close(websocket.StatusPolicyViolation, "entitlement expired")
+		})
+		defer server.Close()
+		keypair, _ := core.NewDesktopKeypair()
+		signals := make(chan EntitlementSignal, 1)
+		dialer := NewDialer(DialerOptions{
+			RelayURL: strings.Replace(server.URL, "http://", "ws://", 1), SessionID: "test-session-id-0123456789",
+			Keypair: keypair, Forwarder: NewForwarder("http://127.0.0.1:1", http.DefaultClient), EntitlementSignal: func(signal EntitlementSignal) { signals <- signal },
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		go dialer.Run(ctx)
+		select {
+		case signal := <-signals:
+			cancel()
+			if signal != EntitlementExpired {
+				t.Fatalf("signal=%s", signal)
+			}
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("missing expiry entitlement signal")
+		}
+	})
+}
+
 // A relay that is down must not spin the desktop into a tight retry loop, and
 // must not give up either.
 func TestDialerRetriesAnUnavailableRelay(t *testing.T) {

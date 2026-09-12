@@ -425,9 +425,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		return 1
 	}
 	defer listener.Close()
+	licenseStore := config.DefaultLicenseStore()
 	resolver := config.NewRelayResolver(
 		config.NewRelayStateStore(config.DefaultRelayStatePath(cfg.Relay.KeypairPath, cfg.Database)),
-		config.DefaultLicenseStore(),
+		licenseStore,
 	)
 	resolvedRelay, err := resolver.Resolve(context.Background(), cfg.Relay)
 	if err != nil {
@@ -442,8 +443,28 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	// snapshot. Bootstrap YAML remains bootstrap-only and cannot be mistaken for
 	// managed mode, readiness, or dialability.
 	relayRuntime := config.NewRelayCoordinator(resolvedRelay)
+	var entitlementController *config.EntitlementController
+	if resolvedRelay.Mode == config.RelayModeHosted {
+		issuer, issuerErr := relay.NewIssuerClient(resolvedRelay.IssuerURL, nil)
+		if issuerErr != nil {
+			fmt.Fprintln(stderr, "relay issuer:", issuerErr)
+			return 1
+		}
+		identityPath := relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database)
+		entitlementController = config.NewEntitlementController(config.EntitlementControllerOptions{
+			Coordinator: relayRuntime,
+			Initial:     resolvedRelay,
+			Licenses:    licenseStore,
+			Issuer:      issuer,
+			Cache:       relay.NewEntitlementCacheStore(relay.DefaultEntitlementCachePath(identityPath)),
+		})
+	}
 	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay) (relayDialerRun, error) {
-		dialer, err := newRelayDialer(cfg, snapshot, listener.Addr().String(), func(format string, args ...any) {
+		dialer, err := newRelayDialer(cfg, snapshot, listener.Addr().String(), func(relay.EntitlementSignal) {
+			if entitlementController != nil {
+				entitlementController.Trigger()
+			}
+		}, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		})
 		if err != nil {
@@ -496,6 +517,15 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	relayDone := make(chan error, 1)
 	go func() { relayDone <- relayManager.Run(ctx) }()
+	controllerDone := make(chan struct{})
+	if entitlementController != nil {
+		go func() {
+			entitlementController.Run(ctx)
+			close(controllerDone)
+		}()
+	} else {
+		close(controllerDone)
+	}
 
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(listener) }()
@@ -535,6 +565,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 			exitCode = 1
 		}
 	}
+	<-controllerDone
 	return exitCode
 }
 
@@ -543,7 +574,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 //
 // The session id has already been resolved from atomically managed state rather
 // than minted per start, so a phone remains paired across service restarts.
-func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
+func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr string, signal func(relay.EntitlementSignal), logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
@@ -555,11 +586,12 @@ func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr 
 		return nil, fmt.Errorf("resolved relay session_id is required when dial is enabled")
 	}
 	return relay.NewDialer(relay.DialerOptions{
-		RelayURL:         snapshot.URL,
-		SessionID:        sessionID,
-		Keypair:          keypair,
-		EntitlementToken: snapshot.EntitlementToken.Value(),
-		Logf:             logf,
+		RelayURL:          snapshot.URL,
+		SessionID:         sessionID,
+		Keypair:           keypair,
+		EntitlementToken:  snapshot.EntitlementToken.Value(),
+		EntitlementSignal: signal,
+		Logf:              logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.
 		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),

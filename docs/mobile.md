@@ -50,8 +50,8 @@ continues to reject cross-origin requests.
 
 ## 2. The relay (optional)
 
-The current desktop provides the hardened storage and resolution foundation; account
-activation, issuer calls, renewal, relay management endpoints, and the Pair a Device
+The desktop includes hosted entitlement acquisition, protected caching, automatic
+renewal, and live relay refresh. Relay management API/CLI commands and the Pair a Device
 configuration UI are later milestones and do not exist yet. YAML is only an optional
 bootstrap. Once `relay-state.json` exists, managed state wins and the service does not
 rewrite the YAML.
@@ -64,19 +64,24 @@ relay:
 ```
 
 With no `url`, bootstrap selects Redline's hosted relay and reports `needs_license` until
-a license is present in Keychain. This foundation deliberately does not contact the
-issuer or dial the hosted relay even after a license is present; the entitlement lifecycle
-is still pending. If Keychain is locked, denied, or unavailable, hosted relay reports
-`unavailable` while the local API, scheduler, and database continue running. A custom
-`url` selects self-hosted mode, which never reads a license or sends a token. `off` never
-dials.
+a license is present in Keychain. The service then exchanges it with the configured
+HTTPS issuer and dials only with a validated, unexpired session-bound entitlement. A
+valid cache is usable immediately while startup renewal runs. Issuer outages produce
+`renew_pending` until that cache expires and `unavailable` afterward; issuer 401, 402,
+and 409 responses publish `invalid_key`, `lapsed`, and `no_seat`. If Keychain is locked,
+denied, or unavailable, hosted relay reports `unavailable`. All of these failures leave
+the local API, scheduler, and database running. A custom `url` selects self-hosted mode,
+which never reads a license or sends a token. `off` never dials.
 
 The service creates `relay-state.json` beside `relay-identity.json` with mode `0600`, an
 inter-process transaction lock, descriptor-based no-follow checks, and durable atomic
 replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `label`, and
-`session_id`; it contains no license or entitlement. The session id is generated on first
-hosted or self-hosted use and persisted only there. YAML containing `session_id`,
-`entitlement_token`, or `license_key` is rejected.
+`session_id`; it contains no license or entitlement. The separate
+`relay-entitlement.json` cache uses the same owner-only, no-follow, process-lock, and
+atomic durability rules and contains exactly `token`, `exp`, `obtained_at`, `sid`, and
+`max_clients`. Entitlements have a maximum lifetime of 14 days. The session id is
+generated on first hosted or self-hosted use and persisted only in managed state. YAML
+containing `session_id`, `entitlement_token`, or `license_key` is rejected.
 
 Hosted licenses are generic-password items in macOS Keychain. The exact identifiers are
 service `ai.redline.mac.relay-license`, account `hosted`. Only the local service reads the

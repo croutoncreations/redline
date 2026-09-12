@@ -1,0 +1,236 @@
+package relay
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func testEntitlementToken(t *testing.T, exp int64, sid string, maxClients int) string {
+	t.Helper()
+	claims, err := json.Marshal(tokenClaims{Exp: exp, SID: sid, MaxClients: maxClients})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(claims) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64))
+}
+
+func TestIssuerEntitlementUsesBodyAndValidatesTokenCoherence(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	sid := SessionSID("session-issuer-contract-123")
+	exp := now.Add(EntitlementLifetime).Unix()
+	const license = "rl_live_must_never_leak"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.String(), license) || r.URL.Path != "/api/v1/entitlement" {
+			t.Fatalf("unsafe request URL %q", r.URL.String())
+		}
+		var body issuerEntitlementRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.LicenseKey != license || body.SID != sid || body.Label != "Studio Mac" {
+			t.Fatalf("request body = %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(Entitlement{
+			Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+			MaxClients: 5, Seats: 2, SeatsUsed: 1,
+		})
+	}))
+	defer server.Close()
+	client, err := NewIssuerClient(server.URL+"/api", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Entitlement(context.Background(), license, sid, "Studio Mac", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exp != exp || got.MaxClients != 5 || got.Seats != 2 || got.SeatsUsed != 1 {
+		t.Fatalf("entitlement = %#v", got)
+	}
+	for _, diagnostic := range []string{fmt.Sprint(got), fmt.Sprintf("%#v", got), fmt.Sprint(got.Token)} {
+		if strings.Contains(diagnostic, got.Token.Value()) {
+			t.Fatalf("token leaked through diagnostic: %s", diagnostic)
+		}
+	}
+}
+
+func TestIssuerRejectsAResponseWhoseTokenClaimsDisagree(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("session-coherence-123456")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		responseExp := now.Add(EntitlementLifetime).Unix()
+		_ = json.NewEncoder(w).Encode(Entitlement{
+			Token: NewSecret(testEntitlementToken(t, responseExp-1, sid, 5)), Exp: responseExp,
+			MaxClients: 5, Seats: 1, SeatsUsed: 1,
+		})
+	}))
+	defer server.Close()
+	client, _ := NewIssuerClient(server.URL, server.Client())
+	_, err := client.Entitlement(context.Background(), "license", sid, "", now)
+	var typed *IssuerError
+	if !errors.As(err, &typed) || typed.Kind != IssuerInvalidResponse {
+		t.Fatalf("error=%#v", err)
+	}
+}
+
+func TestRedactTokenRemovesLicenseAndEntitlementForms(t *testing.T) {
+	license, token := "rl_live_redact_me", "claims.signature"
+	message := "license=" + license + " token=" + token + " escaped=" + url.QueryEscape(token)
+	got := redactToken(message, license, token)
+	if strings.Contains(got, license) || strings.Contains(got, token) || strings.Contains(got, url.QueryEscape(token)) {
+		t.Fatalf("credential survived redaction: %q", got)
+	}
+}
+
+func TestIssuerTypedFailuresNeverIncludeCredentialsOrBodies(t *testing.T) {
+	const license = "rl_live_error_secret"
+	for status, kind := range map[int]IssuerErrorKind{
+		http.StatusUnauthorized:       IssuerInvalidKey,
+		http.StatusPaymentRequired:    IssuerLapsed,
+		http.StatusServiceUnavailable: IssuerUnavailable,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("response-secret " + license))
+			}))
+			defer server.Close()
+			client, _ := NewIssuerClient(server.URL, server.Client())
+			_, err := client.Entitlement(context.Background(), license, SessionSID("session-error-123456"), "", time.Now())
+			var typed *IssuerError
+			if !errors.As(err, &typed) || typed.Kind != kind {
+				t.Fatalf("error = %#v, want %s", err, kind)
+			}
+			if strings.Contains(err.Error(), license) || strings.Contains(err.Error(), "response-secret") {
+				t.Fatalf("credential/body leaked in %q", err)
+			}
+		})
+	}
+}
+
+func TestIssuerActivationAndPortalContractsUseBearerAuthentication(t *testing.T) {
+	const license = "rl_live_bearer_secret"
+	var requests []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+license {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		requests = append(requests, r.Method+" "+r.RequestURI)
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"activations":[{"id":"opaque","label":"Mac","first_seen":"2026-01-02T03:04:05Z","current":true}]}`))
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			_, _ = w.Write([]byte(`{"url":"https://billing.example.com/session/fresh"}`))
+		}
+	}))
+	defer server.Close()
+	client, _ := NewIssuerClient(server.URL, server.Client())
+	if _, err := client.Activations(context.Background(), license); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteActivation(context.Background(), license, "opaque/id?# space"); err != nil {
+		t.Fatal(err)
+	}
+	portal, err := client.Portal(context.Background(), license)
+	if err != nil || portal.Scheme != "https" {
+		t.Fatalf("portal = %v, err=%v", portal, err)
+	}
+	want := []string{"GET /v1/activations", "DELETE /v1/activations/opaque%2Fid%3F%23%20space", "POST /v1/portal"}
+	if fmt.Sprint(requests) != fmt.Sprint(want) {
+		t.Fatalf("requests=%v want=%v", requests, want)
+	}
+}
+
+func TestRelayEntitlementRefreshPreservesSocketAndClassifiesNoHost(t *testing.T) {
+	const tokenValue = "entitlement-refresh-secret"
+	statuses := []int{http.StatusNoContent, http.StatusLocked}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/session/session-refresh-123456/entitlement" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Redline-Entitlement") != tokenValue {
+			t.Fatal("refresh token was not sent in the header")
+		}
+		status := statuses[0]
+		statuses = statuses[1:]
+		w.WriteHeader(status)
+	}))
+	defer server.Close()
+	if err := RefreshRelayEntitlement(context.Background(), server.Client(), server.URL, "session-refresh-123456", NewSecret(tokenValue)); err != nil {
+		t.Fatalf("204 refresh: %v", err)
+	}
+	err := RefreshRelayEntitlement(context.Background(), server.Client(), server.URL, "session-refresh-123456", NewSecret(tokenValue))
+	var typed *RelayRefreshError
+	if !errors.As(err, &typed) || typed.Kind != RelayRefreshNoHost {
+		t.Fatalf("423 refresh error=%#v", err)
+	}
+	if strings.Contains(err.Error(), tokenValue) {
+		t.Fatal("refresh error leaked token")
+	}
+}
+
+func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-session-123456789")
+	exp := now.Add(EntitlementLifetime).Unix()
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	store := NewEntitlementCacheStore(path)
+	want := CachedEntitlement{
+		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+		ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("cache mode=%v err=%v", info.Mode().Perm(), err)
+	}
+	got, exists, err := store.Load(sid, now)
+	if err != nil || !exists || got.Token.Value() != want.Token.Value() {
+		t.Fatalf("load=%#v exists=%v err=%v", got, exists, err)
+	}
+	if _, _, err := store.Load(SessionSID("wrong-session-123456"), now); err == nil {
+		t.Fatal("cache bound to another sid was accepted")
+	}
+	if _, _, err := store.Load(sid, time.Unix(exp, 0)); err == nil {
+		t.Fatal("expired cache was accepted")
+	}
+	raw, _ := os.ReadFile(path)
+	var shape map[string]any
+	_ = json.Unmarshal(raw, &shape)
+	if len(shape) != 5 {
+		t.Fatalf("cache schema has extra fields: %v", shape)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(sid, now); err == nil {
+		t.Fatal("overpermissive cache was accepted")
+	}
+	_ = os.Remove(path)
+	target := filepath.Join(filepath.Dir(path), "target")
+	_ = os.WriteFile(target, raw, 0o600)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(sid, now); err == nil {
+		t.Fatal("symlink cache was accepted")
+	}
+	if err := store.Save(want); err == nil {
+		t.Fatal("renewal replaced a symlink cache")
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/jfox/redline/internal/relay"
@@ -211,8 +212,9 @@ func validateSafeEndpoint(raw string) error {
 	return nil
 }
 
-// RelayReadiness is the configuration-only state available in Phase 2.1.
-// Token acquisition and active/renewing states are introduced in Phase 2.2.
+// RelayReadiness is the service's published entitlement state. It is kept on
+// the same immutable snapshot as the dial inputs so API and supervisor readers
+// cannot observe a new token with an old state (or vice versa).
 type RelayReadiness string
 
 const (
@@ -220,12 +222,24 @@ const (
 	RelayReadinessSelfHosted       RelayReadiness = "self_hosted"
 	RelayReadinessNeedsLicense     RelayReadiness = "needs_license"
 	RelayReadinessHostedConfigured RelayReadiness = "hosted_configured"
+	RelayReadinessActive           RelayReadiness = "active"
+	RelayReadinessRenewPending     RelayReadiness = "renew_pending"
 	RelayReadinessUnavailable      RelayReadiness = "unavailable"
+	RelayReadinessLapsed           RelayReadiness = "lapsed"
+	RelayReadinessNoSeat           RelayReadiness = "no_seat"
+	RelayReadinessInvalidKey       RelayReadiness = "invalid_key"
 )
+
+// RelayActivationSummary is the non-secret subset returned with no_seat.
+type RelayActivationSummary struct {
+	Label     string    `json:"label"`
+	FirstSeen time.Time `json:"first_seen"`
+}
+
+const maxRelayActivationSummaries = 25
 
 // RelayEntitlementToken keeps the runtime-only host credential out of JSON and
 // diagnostic formatting while still allowing the dialer boundary to read it.
-// Token acquisition and renewal are introduced in later phases.
 type RelayEntitlementToken struct {
 	value string
 }
@@ -247,12 +261,35 @@ func (t RelayEntitlementToken) GoString() string { return t.String() }
 
 type ResolvedRelay struct {
 	RelayManagedState
-	Readiness RelayReadiness
-	// Dial is true only when Phase 2.1 has everything required to connect.
-	// Hosted mode remains false until Phase 2.2 can exchange its license for an
-	// entitlement token; the license itself is never passed to the relay.
-	Dial             bool
-	EntitlementToken RelayEntitlementToken `json:"-"`
+	Readiness RelayReadiness `json:"state"`
+	Dial      bool           `json:"-"`
+
+	EntitlementToken    RelayEntitlementToken `json:"-"`
+	RenewsAt            time.Time             `json:"renews_at,omitempty"`
+	ExpiresAt           time.Time             `json:"expires_at,omitempty"`
+	UnavailableSince    time.Time             `json:"since,omitempty"`
+	Seats               int                   `json:"seats,omitempty"`
+	SeatsUsed           int                   `json:"seats_used,omitempty"`
+	MaxClients          int                   `json:"max_clients,omitempty"`
+	ReconnectGeneration uint64                `json:"-"`
+
+	// A fixed-size value keeps snapshots comparable (the supervisor uses value
+	// equality) while the count preserves a normal list at API boundaries.
+	ActivationSummaries [maxRelayActivationSummaries]RelayActivationSummary `json:"-"`
+	ActivationCount     int                                                 `json:"-"`
+}
+
+func (r ResolvedRelay) Activations() []RelayActivationSummary {
+	count := r.ActivationCount
+	if count < 0 {
+		count = 0
+	}
+	if count > len(r.ActivationSummaries) {
+		count = len(r.ActivationSummaries)
+	}
+	out := make([]RelayActivationSummary, count)
+	copy(out, r.ActivationSummaries[:count])
+	return out
 }
 
 // CanDial is the one authority for whether this snapshot may advertise and
@@ -264,10 +301,12 @@ func (r ResolvedRelay) CanDial() bool {
 		return false
 	}
 	switch r.Readiness {
-	case RelayReadinessOff, RelayReadinessNeedsLicense, RelayReadinessUnavailable:
-		return false
-	default:
+	case RelayReadinessSelfHosted:
 		return true
+	case RelayReadinessActive, RelayReadinessRenewPending:
+		return r.EntitlementToken.Value() != ""
+	default:
+		return false
 	}
 }
 

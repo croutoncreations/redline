@@ -157,30 +157,37 @@ func TestRelaySupervisorStartsWhenRuntimeBecomesDialable(t *testing.T) {
 	}
 }
 
-func TestRelaySupervisorReplacesConnectionForURLSessionAndTokenChanges(t *testing.T) {
+func TestRelaySupervisorReplacesConnectionForRoutingChangesButNotLiveTokenRefresh(t *testing.T) {
 	initial := selfHostedSnapshot("https://relay-one.example.com", "session-abcdefghij0123")
 	runtime, factory, cancel, done := startSupervisorTest(t, initial)
 	if got := waitSnapshot(t, factory.started); got != initial {
 		t.Fatalf("initial dialer snapshot = %#v", got)
 	}
 
-	changes := []config.ResolvedRelay{initial, initial, initial}
-	changes[0].URL = "https://relay-two.example.com"
-	changes[1] = changes[0]
-	changes[1].SessionID = "session-zyxwvutsrqpo9876"
-	changes[2] = changes[1]
-	changes[2].EntitlementToken = config.NewRelayEntitlementToken("token-two")
-	previous := initial
-	for _, next := range changes {
-		runtime.send(next)
-		if stopped := waitSnapshot(t, factory.stopped); stopped != previous {
-			t.Fatalf("stopped snapshot = %#v, want %#v", stopped, previous)
-		}
-		if started := waitSnapshot(t, factory.started); started != next {
-			t.Fatalf("started snapshot = %#v, want %#v", started, next)
-		}
-		previous = next
+	urlChange := initial
+	urlChange.URL = "https://relay-two.example.com"
+	runtime.send(urlChange)
+	_ = waitSnapshot(t, factory.stopped)
+	_ = waitSnapshot(t, factory.started)
+
+	sessionChange := urlChange
+	sessionChange.SessionID = "session-zyxwvutsrqpo9876"
+	runtime.send(sessionChange)
+	_ = waitSnapshot(t, factory.stopped)
+	_ = waitSnapshot(t, factory.started)
+
+	refreshed := sessionChange
+	refreshed.EntitlementToken = config.NewRelayEntitlementToken("token-two")
+	runtime.send(refreshed)
+	runtime.send(refreshed)
+	if factory.count() != 3 {
+		t.Fatalf("successful live refresh restarted socket: starts=%d", factory.count())
 	}
+
+	refreshed.ReconnectGeneration++
+	runtime.send(refreshed)
+	_ = waitSnapshot(t, factory.stopped)
+	_ = waitSnapshot(t, factory.started)
 	stopSupervisorTest(t, runtime, cancel, done)
 	_ = waitSnapshot(t, factory.stopped)
 }
@@ -223,7 +230,8 @@ func TestRelaySupervisorDoesNotRestartForPresentationOnlyOrNoopUpdates(t *testin
 	presentation := initial
 	presentation.Label = "work mac"
 	runtime.send(presentation)
-	presentation.Readiness = config.RelayReadinessHostedConfigured
+	presentation.Readiness = config.RelayReadinessActive
+	presentation.EntitlementToken = config.NewRelayEntitlementToken("still-the-same-connection")
 	runtime.send(presentation)
 	// The second unbuffered send cannot complete until the first update has
 	// been reconciled, making this negative assertion deterministic.
