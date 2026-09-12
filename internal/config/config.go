@@ -5,10 +5,12 @@ import (
 	"math"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
+	core "github.com/jfox/redline/mobile/core"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +25,7 @@ type Config struct {
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
+	Relay           Relay               `yaml:"relay"`
 	APIToken        string              `yaml:"-"`
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
@@ -62,6 +65,26 @@ func (c Config) NotificationEvents() map[string]bool {
 
 type API struct {
 	TrustedHosts []string `yaml:"trusted_hosts"`
+}
+
+// Relay configures reaching this desktop from outside the tailnet, through an
+// untrusted forwarding service.
+//
+// It is off unless the user turns it on. Everything below only takes effect
+// while Enabled is true, so a user who never opts in is in exactly the position
+// they were before the relay existed.
+type Relay struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
+	// SessionID is persisted so a restart rejoins the same session rather than
+	// stranding a paired phone on an id nothing will ever answer.
+	SessionID string `yaml:"session_id"`
+	// KeypairPath holds the desktop's Noise static identity, which every paired
+	// phone trusts. Empty means a default beside the database.
+	KeypairPath string `yaml:"keypair_path"`
+	// EntitlementToken authorises use of the relay. It says nothing about who
+	// the user is; the relay checks only that it is signed and unexpired.
+	EntitlementToken string `yaml:"entitlement_token"`
 }
 
 type Scheduler struct {
@@ -123,6 +146,9 @@ func (p Provider) EffectiveUsageSource() string {
 
 type ModelGroup struct {
 	Aliases []string `yaml:"aliases"`
+	// RequiredAllowanceRoles declares which model-scoped budgets a task in
+	// this group consumes. Empty preserves the historical weekly-only shape.
+	RequiredAllowanceRoles []string `yaml:"required_allowance_roles,omitempty"`
 }
 
 func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
@@ -132,8 +158,34 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	}
 	if strings.EqualFold(p.Provider, "claude") {
 		if _, ok := groups["fable"]; !ok {
-			groups["fable"] = ModelGroup{Aliases: []string{"fable", "claude-fable-5", "claude-fable-latest"}}
+			groups["fable"] = ModelGroup{
+				Aliases:                []string{"fable", "claude-fable-5", "claude-fable-latest"},
+				RequiredAllowanceRoles: []string{"weekly"},
+			}
 		}
+	}
+	// Spark is a distinct Codex product with its own short and weekly
+	// allowances. Recognise the provider's model name without requiring every
+	// installation to duplicate this stable mapping in YAML; an explicit
+	// model_groups.spark still wins above, just as it does for Fable.
+	if strings.EqualFold(p.Provider, "codex") {
+		if _, ok := groups["spark"]; !ok {
+			groups["spark"] = ModelGroup{
+				Aliases:                []string{"spark", "gpt-5.3-codex-spark"},
+				RequiredAllowanceRoles: []string{"short", "weekly"},
+			}
+		}
+	}
+	for name, group := range groups {
+		if len(group.RequiredAllowanceRoles) == 0 {
+			group.RequiredAllowanceRoles = []string{"weekly"}
+		}
+		normalizedRoles := make([]string, len(group.RequiredAllowanceRoles))
+		for i, role := range group.RequiredAllowanceRoles {
+			normalizedRoles[i] = strings.ToLower(strings.TrimSpace(role))
+		}
+		group.RequiredAllowanceRoles = normalizedRoles
+		groups[name] = group
 	}
 	return groups
 }
@@ -172,11 +224,49 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining" json:"min_weekly_remaining"`
 }
 
-func validTrustedHost(host string) bool {
+// validTrustedHost reports whether host may be trusted by the API.
+//
+// The .ts.net requirement predates the relay, when Tailscale was the only way
+// in and a publicly resolvable trusted host would have been an opening. With
+// the relay enabled a non-Tailscale name is legitimate, so the suffix rule
+// relaxes -- but only then, and nothing else about the check relaxes with it: a
+// bare IP, a wildcard, a port, or a malformed label is still refused either
+// way, so turning the relay on cannot be used to smuggle in a host that was
+// never a valid name to begin with.
+func validTrustedHost(host string, relayEnabled bool) bool {
 	if host == "" || strings.TrimSpace(host) != host {
 		return false
 	}
-	if net.ParseIP(host) != nil || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+	// An entry may name the port a phone should use ("name.ts.net:8443"),
+	// which is how a Tailscale Serve front end off 443 is written down. The
+	// service composes the pairing code and has to know; the request-matching
+	// side already ignored a port here. Split before the host checks so a
+	// port cannot smuggle a bad host past them.
+	//
+	// net.SplitHostPort rather than a hand-rolled split on the last colon:
+	// the pairing package splits entries the same way, and the two must agree
+	// on what an entry means or the validator admits what the composer cannot
+	// read. It also handles a bracketed IPv6 literal, which then fails the IP
+	// check below for the right reason.
+	if strings.Contains(host, ":") {
+		bare, portText, err := net.SplitHostPort(host)
+		if err != nil {
+			return false
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+		host = bare
+	}
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	if !relayEnabled && !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return false
+	}
+	// A name with no dot is a bare label, not a fully qualified host.
+	if relayEnabled && !strings.Contains(host, ".") {
 		return false
 	}
 	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
@@ -227,10 +317,18 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("at least one provider is required")
 	}
 	for index, host := range cfg.API.TrustedHosts {
-		if !validTrustedHost(host) {
+		if !validTrustedHost(host, cfg.Relay.Enabled) {
+			if cfg.Relay.Enabled {
+				return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified domain name", index, host)
+			}
 			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
 		}
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
+	}
+	if cfg.Relay.Enabled {
+		if err := validRelayURL(cfg.Relay.URL); err != nil {
+			return fmt.Errorf("relay url: %w", err)
+		}
 	}
 	for name, provider := range cfg.Providers {
 		if provider.Provider == "" {
@@ -269,6 +367,17 @@ func (cfg *Config) validate() error {
 		for groupName, group := range provider.EffectiveModelGroups() {
 			if groupName == "" {
 				return fmt.Errorf("provider %q: model_groups has an empty group name", name)
+			}
+			roles := make(map[string]bool, len(group.RequiredAllowanceRoles))
+			for _, role := range group.RequiredAllowanceRoles {
+				role = strings.ToLower(strings.TrimSpace(role))
+				if role != "short" && role != "weekly" {
+					return fmt.Errorf("provider %q model group %q: unknown required allowance role %q", name, groupName, role)
+				}
+				if roles[role] {
+					return fmt.Errorf("provider %q model group %q: duplicate required allowance role %q", name, groupName, role)
+				}
+				roles[role] = true
 			}
 			for _, alias := range group.Aliases {
 				normalized := strings.ToLower(strings.TrimSpace(alias))
@@ -370,4 +479,12 @@ func fraction(name string, value float64) error {
 		return fmt.Errorf("%s must be between 0 and 1, got %v", name, value)
 	}
 	return nil
+}
+
+// validRelayURL checks the relay address the desktop will dial.
+//
+// The rule itself lives in mobile/core so the phone, the desktop, and the
+// relay dialer cannot drift apart on what counts as a safe relay.
+func validRelayURL(raw string) error {
+	return core.ValidateRelayURL(raw)
 }

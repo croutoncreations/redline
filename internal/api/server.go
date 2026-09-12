@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"github.com/jfox/redline/internal/nativeusage"
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
+	"github.com/jfox/redline/internal/pairing"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/tasktemplate"
@@ -84,7 +86,33 @@ type Server struct {
 	started      bool
 	pairingMu    sync.Mutex
 	pairing      map[string]time.Time
+	// redeemed remembers a spent token for a short while after the fact, so
+	// the surface that showed the code can learn the phone got in. Without
+	// this a redeem was a deletion and nothing more: the sheet kept showing
+	// a dead code and had no way to say "paired".
+	redeemed map[string]time.Time
 }
+
+// redeemedMemory is how long a spent token stays reportable as redeemed.
+// Longer than the sheet's poll interval by a wide margin, and long enough
+// that a redeem in the token's last second is not read as an expiry by the
+// next poll; short enough that the map cannot grow without bound.
+//
+// A minute is enough only because every surface that shows a code mints a
+// fresh token each time it opens (the menu-bar sheet does so in
+// PairDeviceWindowController.show; the CLI runs once). Nothing asks about a
+// token it did not just mint, so nothing needs the answer later than this.
+// A surface that kept a token across opens would need a longer memory, and
+// this is the line to change -- together with
+// PairDeviceModel.redeemMemoryMargin in the macOS app, which must not exceed
+// it: a sheet that polls longer than the service remembers reads a real
+// redeem as expired.
+//
+// Kept in memory with the tokens themselves, so a service restart forgets a
+// redeem along with everything else: a sheet open across a restart reads
+// "expired" for a code the phone actually spent. The phone is paired either
+// way; the sheet is merely wrong about it once.
+const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
@@ -188,6 +216,7 @@ func newServer(
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
 		pairing:   make(map[string]time.Time),
+		redeemed:  make(map[string]time.Time),
 		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
@@ -214,6 +243,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
@@ -335,7 +365,7 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
-func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
@@ -344,17 +374,41 @@ func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, expiry := range s.pairing {
-		if !expiry.After(s.now()) {
-			delete(s.pairing, existing)
-		}
-	}
+	s.sweepPairingLocked()
 	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
-	writeJSON(w, http.StatusCreated, struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}{Token: token, ExpiresAt: expiresAt})
+
+	// The service composes the code, so the CLI, the menu bar and any later
+	// surface all show the same one. Each used to build its own, and when the
+	// format grew relay fields one of them was not told.
+	//
+	// A desktop with no route still gets its token: the web /pair page on
+	// this machine redeems it from a browser. It just gets no URL, and the
+	// empty route list says why.
+	response := struct {
+		Token      string          `json:"pairing_token"`
+		ExpiresAt  time.Time       `json:"expires_at"`
+		PairingURL string          `json:"pairing_url,omitempty"`
+		Routes     []pairing.Route `json:"routes"`
+		Endpoint   string          `json:"endpoint,omitempty"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}}
+
+	code, err := pairing.Compose(s.config, token, pairing.Options{
+		RelayOnly: r.URL.Query().Get("relay_only") == "1",
+	})
+	switch {
+	case err == nil:
+		response.PairingURL = code.URL
+		response.Routes = code.Routes
+		response.Endpoint = code.Endpoint
+	case errors.Is(err, pairing.ErrNoRoute):
+		// Reported through the empty route list rather than a failure: the
+		// token is good, there is simply nowhere to point a phone.
+	default:
+		writeError(w, fmt.Errorf("compose pairing code: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) consumePairingToken(token string) bool {
@@ -364,7 +418,59 @@ func (s *Server) consumePairingToken(token string) bool {
 	if ok {
 		delete(s.pairing, token)
 	}
-	return ok && expiresAt.After(s.now())
+	live := ok && expiresAt.After(s.now())
+	if live {
+		s.redeemed[token] = s.now().Add(redeemedMemory)
+	}
+	return live
+}
+
+// sweepPairingLocked forgets tokens and redeem records that are past their
+// time. Called under pairingMu wherever the maps are written.
+func (s *Server) sweepPairingLocked() {
+	now := s.now()
+	for token, expiry := range s.pairing {
+		if !expiry.After(now) {
+			delete(s.pairing, token)
+		}
+	}
+	for token, until := range s.redeemed {
+		if !until.After(now) {
+			delete(s.redeemed, token)
+		}
+	}
+}
+
+// pairingStatus reports where a pairing token is in its life: pending,
+// redeemed, or expired (which also covers "never issued" -- the two are
+// indistinguishable and the remedy is the same, a new code).
+//
+// The token travels in a header. It is a full-access credential for ten
+// minutes, and a path or query string lands in access logs. The caller must
+// also hold the API token: knowing a pairing token is meant to let a phone
+// spend it, not to unlock questions on the desktop.
+func (s *Server) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.Header.Get("X-Redline-Pairing-Token"))
+	if token == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "X-Redline-Pairing-Token header is required"})
+		return
+	}
+	s.pairingMu.Lock()
+	s.sweepPairingLocked()
+	_, pending := s.pairing[token]
+	_, redeemed := s.redeemed[token]
+	s.pairingMu.Unlock()
+
+	status := "expired"
+	switch {
+	case redeemed:
+		status = "redeemed"
+	case pending:
+		status = "pending"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: status})
 }
 
 func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +627,14 @@ func allowedHost(hostPort string, trusted []string) bool {
 	}
 	host = strings.Trim(host, "[]")
 	for _, candidate := range trusted {
+		// An entry may carry the port a phone should pair on. That is advice
+		// for composing the pairing code, not a constraint on which port a
+		// request may arrive by: Tailscale Serve terminates TLS and forwards
+		// on loopback, so the port the request names is not the one it came
+		// in on anyway.
+		if parsed, _, err := net.SplitHostPort(candidate); err == nil {
+			candidate = parsed
+		}
 		if strings.EqualFold(host, candidate) {
 			return true
 		}
@@ -1351,6 +1465,11 @@ type candidateView struct {
 	Priority int    `json:"priority"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
+	// EligibleAt is when a cooldown lifts, so a client can render the wait in
+	// its own words and timezone. Reason states the same thing in prose;
+	// parsing a timestamp back out of that sentence would make the wording an
+	// accidental API.
+	EligibleAt *time.Time `json:"eligible_at,omitempty"`
 }
 
 type candidatesResponse struct {
@@ -1437,7 +1556,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
-			Eligible: verdict.Eligible, Reason: verdict.Reason}
+			Eligible: verdict.Eligible, Reason: verdict.Reason, EligibleAt: verdict.EligibleAt}
 		response.Candidates = append(response.Candidates, view)
 		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
 			response.SelectedTaskID = task.ID
@@ -1700,6 +1819,8 @@ type candidateVerdict struct {
 	Result   decision.Result
 	Eligible bool
 	Reason   string
+	// EligibleAt is set when the block is a cooldown with a known end.
+	EligibleAt *time.Time
 }
 
 func (s *Server) evaluateCandidate(
@@ -1711,6 +1832,8 @@ func (s *Server) evaluateCandidate(
 		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			stamp := eligibleAt.UTC()
+			verdict.EligibleAt = &stamp
 			return verdict, nil
 		}
 	}
@@ -1869,47 +1992,84 @@ func (s *Server) evaluateCandidateBudget(
 			"shared weekly allowance is exhausted"
 	}
 	if group != "" {
-		poolKey := "model:" + group + ":weekly"
-		required = append(required, poolKey)
-		allowance, found := snapshot.Allowance(poolKey)
-		if !found {
+		// Spark has a separate short window as well as a weekly one. It is not
+		// the account's short window, but a Spark task consumes it, so background
+		// work must leave the same rolling reserve for interactive Spark use.
+		// Other model groups (currently Fable) have only a weekly allowance and
+		// must not grow a made-up short-window requirement.
+		groupDefinition := configured.EffectiveModelGroups()[group]
+		requiresShort := slices.Contains(groupDefinition.RequiredAllowanceRoles, "short")
+		shortKey := "model:" + group + ":short"
+		short, hasShort := snapshot.Allowance(shortKey)
+		// A group that declares a short window fails closed when the collector
+		// cannot read it; the requirement is policy data, not a provider name
+		// embedded in the scheduler.
+		if requiresShort && !hasShort {
+			required = append(required, shortKey)
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is missing"
+				shortKey + " allowance is missing"
 		}
-		if allowance.Remaining <= 0 {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is exhausted"
+		if requiresShort && hasShort {
+			required = append(required, shortKey)
+			shortDecision := decision.Admit
+			shortReason := "model short reserve available"
+			if short.Remaining <= policy.RollingReserve {
+				shortDecision = decision.Wait
+				shortReason = "model short reserve is protected"
+			}
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: shortKey, Decision: shortDecision, Mode: decision.ModeSlots,
+				Reason: shortReason, Remaining: short.Remaining,
+			})
+			if shortDecision == decision.Wait {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					shortKey + " reserve is protected"
+			}
 		}
-		if !allowance.ResetsAt.After(s.now()) {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " reset is not in the future"
-		}
-		thresholds, thresholdErr := policy.DecisionThresholds()
-		maxAge, ageErr := s.config.SnapshotAge()
-		if thresholdErr != nil || ageErr != nil {
-			return base, false, "model-specific pace policy is invalid"
-		}
-		poolSnapshot := decision.UsageSnapshot{
-			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
-			Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
-			Source: snapshot.Source, Confidence: snapshot.Confidence,
-		}
-		poolDecision := decision.Evaluate(decision.Input{
-			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
-			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger,
-			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-		})
-		poolResults = append(poolResults, decision.PoolResult{
-			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
-			Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
-		})
-		if poolDecision.Decision == decision.Unknown {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " decision is unknown: " + poolDecision.Reason
-		}
-		if poolDecision.Decision == decision.Admit {
-			triggering = append(triggering, poolKey)
+
+		if slices.Contains(groupDefinition.RequiredAllowanceRoles, "weekly") {
+			poolKey := "model:" + group + ":weekly"
+			required = append(required, poolKey)
+			allowance, found := snapshot.Allowance(poolKey)
+			if !found {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is missing"
+			}
+			if allowance.Remaining <= 0 {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is exhausted"
+			}
+			if !allowance.ResetsAt.After(s.now()) {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " reset is not in the future"
+			}
+			thresholds, thresholdErr := policy.DecisionThresholds()
+			maxAge, ageErr := s.config.SnapshotAge()
+			if thresholdErr != nil || ageErr != nil {
+				return base, false, "model-specific pace policy is invalid"
+			}
+			poolSnapshot := decision.UsageSnapshot{
+				Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
+				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
+				Source: snapshot.Source, Confidence: snapshot.Confidence,
+			}
+			poolDecision := decision.Evaluate(decision.Input{
+				Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+				TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+				PaceGapTrigger: policy.PaceGapTrigger,
+				PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+			})
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
+				Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
+			})
+			if poolDecision.Decision == decision.Unknown {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " decision is unknown: " + poolDecision.Reason
+			}
+			if poolDecision.Decision == decision.Admit {
+				triggering = append(triggering, poolKey)
+			}
 		}
 	}
 	if len(triggering) == 0 {

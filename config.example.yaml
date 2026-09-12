@@ -49,6 +49,14 @@ providers:
     # Bootstrap fallback. Redline learns an observed ratio when a 5-hour
     # window is present and enough paired snapshot history is available.
     window_weekly_cost: 0.10
+    # Spark is a built-in model group (aliases: spark and
+    # gpt-5.3-codex-spark). Spark tasks require its model-specific short and
+    # weekly pools; rolling_reserve protects the short pool. Override
+    # model_groups.spark only to add or replace provider model identifiers:
+    # model_groups:
+    #   spark:
+    #     aliases: [spark, gpt-5.3-codex-spark]
+    #     required_allowance_roles: [short, weekly]
   claude-main:
     provider: claude
     usage_source: auto

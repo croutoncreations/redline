@@ -48,6 +48,20 @@ type UsageSnapshot struct {
 	Allowances []AllowanceWindow `json:"allowances,omitempty"`
 	Source     string            `json:"source"`
 	Confidence string            `json:"confidence,omitempty"`
+	// ShortWindowUnavailable marks a five hour window that the provider
+	// reported but that had to be dropped, which happens when it arrives with
+	// no reset time while upstream state is refreshing.
+	//
+	// Without this, a client cannot tell "this provider has no five hour
+	// limit" from "it has one and the number is missing right now", and those
+	// render very differently: the first is an absent row, the second is a row
+	// that says it does not know. Confidence cannot carry the distinction
+	// because it also drops to medium for an inferred model weekly reset.
+	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
+	// BankedResets counts quota resets the account can spend on demand to
+	// refill an exhausted window. Nil when the provider does not report them,
+	// which is different from zero: none banked versus not known.
+	BankedResets *int `json:"banked_resets,omitempty"`
 }
 
 func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {

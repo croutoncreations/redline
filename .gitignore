@@ -22,3 +22,19 @@ dist/
 # they are never portable between machines.
 .envrc
 .tmuxp.yaml
+
+# gomobile output. The AAR/XCFramework is ~19MB and is rebuilt from
+# mobile/core by scripts/build-mobile-core.sh.
+mobile/build/
+mobile/android/app/libs/*.aar
+
+# Android build output and machine-local SDK path.
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+.gstack/
+
+# The relay's dev dependencies include the ~135MB workerd runtime binary.
+relay/node_modules/
+relay/.wrangler/

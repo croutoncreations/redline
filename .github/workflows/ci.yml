@@ -24,6 +24,24 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+        working-directory: relay
+      # The relay is the untrusted part of the system. These tests assert that
+      # it forwards frames it cannot read and that its entitlement check cannot
+      # be talked out of by the caller, so a regression here is a security
+      # regression rather than a broken feature.
+      - run: npm test
+        working-directory: relay
+
   dashboard:
     runs-on: ubuntu-latest
     steps:
@@ -35,6 +53,41 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:dashboard
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      # The Go core is compiled into the app through gomobile, and this is the
+      # only place the two are built together. Four bugs on the mobile branch
+      # shipped with every Go test green because the fault lived in the
+      # binding: a file gomobile silently skipped, a type it proxied narrower
+      # than declared, a stale AAR beside newer Go. Two Gradle guards exist for
+      # exactly that -- checkCoreFreshness and checkNoTestOnlyDeclarations --
+      # and until this job they ran only on a developer's machine, only when
+      # that developer happened to build the APK.
+      - name: Install gomobile at the version go.mod pins
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build the Go core for Android
+        run: |
+          gomobile init
+          ./scripts/build-mobile-core.sh android
+          mkdir -p mobile/android/app/libs
+          cp mobile/build/redlinecore.aar mobile/android/app/libs/redlinecore.aar
+      - name: Guards, unit tests, and a debug build
+        working-directory: mobile/android
+        run: ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest assembleDebug
 
   macos:
     runs-on: macos-15

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark to match the desktop and web dashboards. -->
+    <style name="Theme.Redline" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#0D0F12</item>
+        <item name="android:navigationBarColor">#0D0F12</item>
+        <item name="android:windowBackground">#0D0F12</item>
+    </style>
+</resources>

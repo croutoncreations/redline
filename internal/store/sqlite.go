@@ -434,6 +434,57 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (23)`); err != nil {
 			return fmt.Errorf("record requested task dispatch target migration: %w", err)
 		}
+		version = 23
+	}
+	if version < 24 {
+		// Nullable on purpose: a provider that reports no resets and one that
+		// reports none available are different answers, and existing rows
+		// predate the field entirely rather than meaning zero.
+		//
+		// Skipped when the column is already there, which is the case for a
+		// database created fresh from the current schema rather than migrated
+		// up to it.
+		hasTable, err := tableExists(ctx, tx, "usage_snapshots")
+		if err != nil {
+			return err
+		}
+		hasColumn := false
+		if hasTable {
+			if hasColumn, err = columnExists(ctx, tx, "usage_snapshots", "banked_resets"); err != nil {
+				return err
+			}
+		}
+		if hasTable && !hasColumn {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_snapshots ADD COLUMN banked_resets INTEGER;`); err != nil {
+				return fmt.Errorf("add banked resets: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (24)`); err != nil {
+			return fmt.Errorf("record banked resets migration: %w", err)
+		}
+		version = 24
+	}
+	if version < 25 {
+		// Not nullable: a snapshot either reported the window as unavailable
+		// or it did not, and rows written before this column existed did not.
+		hasTable, err := tableExists(ctx, tx, "usage_snapshots")
+		if err != nil {
+			return err
+		}
+		hasColumn := false
+		if hasTable {
+			if hasColumn, err = columnExists(ctx, tx, "usage_snapshots", "short_window_unavailable"); err != nil {
+				return err
+			}
+		}
+		if hasTable && !hasColumn {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_snapshots ADD COLUMN short_window_unavailable INTEGER NOT NULL DEFAULT 0;`); err != nil {
+				return fmt.Errorf("add short window unavailable: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (25)`); err != nil {
+			return fmt.Errorf("record short window unavailable migration: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -521,6 +572,8 @@ CREATE TABLE usage_snapshots_v2 (
     weekly_resets_at TEXT NOT NULL,
     source TEXT NOT NULL,
     confidence TEXT NOT NULL DEFAULT '',
+    banked_resets INTEGER,
+    short_window_unavailable INTEGER NOT NULL DEFAULT 0,
     raw_payload BLOB,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`); err != nil {
@@ -581,8 +634,9 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	defer tx.Rollback()
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable, raw_payload
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -594,6 +648,8 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 		s.Weekly.ResetsAt.Format(time.RFC3339Nano),
 		s.Source,
 		s.Confidence,
+		bankedResetsValue(s.BankedResets),
+		s.ShortWindowUnavailable,
 		raw,
 	)
 	if err != nil {
@@ -645,7 +701,8 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable, raw_payload
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -659,6 +716,7 @@ FROM usage_snapshots WHERE provider = ?`
 	var shortRemaining sql.NullFloat64
 	var shortReset sql.NullString
 	var raw []byte
+	var bankedResets sql.NullInt64
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Provider,
@@ -669,6 +727,8 @@ FROM usage_snapshots WHERE provider = ?`
 		&weeklyReset,
 		&s.Source,
 		&s.Confidence,
+		&bankedResets,
+		&s.ShortWindowUnavailable,
 		&raw,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -692,6 +752,12 @@ FROM usage_snapshots WHERE provider = ?`
 			return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored short reset: %w", err)
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
+	}
+	if bankedResets.Valid {
+		// Zero and absent are different answers -- none banked versus not
+		// reported -- so the pointer is only set when a value was stored.
+		count := int(bankedResets.Int64)
+		s.BankedResets = &count
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
 	if err != nil {
@@ -726,4 +792,39 @@ FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotI
 		return nil, fmt.Errorf("list allowance windows: %w", err)
 	}
 	return allowances, nil
+}
+
+// bankedResetsValue converts an optional reset count for storage.
+//
+// nil becomes SQL NULL rather than zero, because a provider that reports no
+// resets and one that reports none available are different states, and
+// flattening them would make the screen claim knowledge it does not have.
+func bankedResetsValue(count *int) any {
+	if count == nil {
+		return nil
+	}
+	return *count
+}
+
+// columnExists reports whether a table already has a column.
+//
+// Needed because a fresh database gets its columns from the current schema
+// while an existing one gets them from migrations, so an ALTER that is correct
+// for the second is a duplicate-column error for the first.
+func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("scan %s column: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

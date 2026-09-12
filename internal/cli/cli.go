@@ -33,6 +33,8 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/mcpserver"
+	"github.com/jfox/redline/internal/pairing"
+	"github.com/jfox/redline/internal/relay"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"gopkg.in/yaml.v3"
@@ -451,6 +453,30 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
+
+	// Remote access is opt-in, so this loop exists only for a user who asked
+	// for it. It dials out to the relay rather than listening, which is what
+	// lets a phone reach a desktop behind a router nobody configured.
+	var relayDone chan struct{}
+	if cfg.Relay.Enabled {
+		// Relay progress goes to stderr, not stdout: it is diagnostic chatter
+		// that arrives at unpredictable times, and stdout here is the startup
+		// banner a caller may be parsing.
+		dialer, err := newRelayDialer(cfg, listener.Addr().String(), func(format string, args ...any) {
+			fmt.Fprintf(stderr, format+"\n", args...)
+		})
+		if err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Relay enabled via %s\n", cfg.Relay.URL)
+		relayDone = make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			dialer.Run(ctx)
+		}()
+	}
+
 	errors := make(chan error, 1)
 	go func() { errors <- server.Serve(listener) }()
 	select {
@@ -470,7 +496,44 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		}
 		apiServer.Wait()
 	}
+	// The dialer stops on the same cancelled context; waiting for it keeps a
+	// half-open relay session from outliving the process that owns it.
+	if relayDone != nil {
+		select {
+		case <-relayDone:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	return 0
+}
+
+// newRelayDialer builds the outbound relay leg for a service that has remote
+// access enabled.
+//
+// The session id is persisted in config rather than minted per start, because a
+// phone paired against one id would otherwise be stranded on an id nothing
+// answers after the next restart.
+func newRelayDialer(cfg config.Config, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
+	keypair, err := relay.LoadOrCreateKeypair(
+		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
+	)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := strings.TrimSpace(cfg.Relay.SessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("relay.session_id is required in the config when relay.enabled is true")
+	}
+	return relay.NewDialer(relay.DialerOptions{
+		RelayURL:         cfg.Relay.URL,
+		SessionID:        sessionID,
+		Keypair:          keypair,
+		EntitlementToken: cfg.Relay.EntitlementToken,
+		Logf:             logf,
+		// Requests are replayed against this service's own listener, so the
+		// phone reaches exactly the API a local browser would.
+		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),
+	}), nil
 }
 
 // resolveTokenConfigPath returns the config path whose API token the running
@@ -711,6 +774,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
 	host := flags.String("host", "", "Tailscale MagicDNS hostname")
 	port := flags.Int("port", 443, "Tailscale Serve HTTPS port")
+	relayOnly := flags.Bool("relay-only", false, "emit a relay-only code even when a tailnet host is available")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -727,63 +791,73 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	selectedHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))
-	if selectedHost == "" {
-		selectedHost, err = tailscaleDNSName()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
+
+	// Composed here from the local config rather than taken from the service's
+	// own pairing_url, because the CLI has flags the service does not: an
+	// explicit --host, a --port, and a tailnet name it can detect from this
+	// machine. Both go through the same package, so the two cannot drift.
+	//
+	// Composed before the token is minted, with a placeholder, so a bad --host
+	// is refused without spending a one-time credential on it.
+	options := pairing.Options{
+		Host:       *host,
+		Port:       *port,
+		RelayOnly:  *relayOnly,
+		DetectHost: tailscaleDNSName,
+	}
+	if _, err := pairing.Compose(cfg, "pending", options); err != nil {
+		if errors.Is(err, pairing.ErrNoRoute) {
+			fmt.Fprintln(stderr, "no Tailscale host is available and relay is not enabled; add a host to api.trusted_hosts or enable relay")
 			return 1
 		}
-	}
-	trusted := false
-	for _, configuredHost := range cfg.API.TrustedHosts {
-		if strings.EqualFold(configuredHost, selectedHost) {
-			trusted = true
-			break
-		}
-	}
-	if !trusted {
-		fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	var pairing struct {
+
+	var minted struct {
 		Token     string    `json:"pairing_token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &pairing); err != nil {
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &minted); err != nil {
 		fmt.Fprintln(stderr, "create pairing token:", err)
 		return 1
 	}
-	if pairing.Token == "" || !pairing.ExpiresAt.After(time.Now()) {
+	if minted.Token == "" || !minted.ExpiresAt.After(time.Now()) {
 		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
 		return 1
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token)
-	code, err := qrcode.New(pairingURL, qrcode.Medium)
+	code, err := pairing.Compose(cfg, minted.Token, options)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	qr, err := qrcode.New(code.URL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	endpoint := selectedHost
-	if *port != 443 {
-		endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+	if code.Notice != "" {
+		fmt.Fprintln(stderr, "note:", code.Notice)
 	}
-	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
-	renderTerminalQR(stdout, code.Bitmap())
+
+	// Says exactly which routes the code offers, because "from a device on
+	// your tailnet" was wrong for two of the three.
+	hasDirect, hasRelay := false, false
+	for _, route := range code.Routes {
+		hasDirect = hasDirect || route == pairing.RouteDirect
+		hasRelay = hasRelay || route == pairing.RouteRelay
+	}
+	switch {
+	case hasDirect && hasRelay:
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s) and falls back to the relay:\n", code.Endpoint)
+	case hasDirect:
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s):\n", code.Endpoint)
+	default:
+		fmt.Fprintln(stdout, "Scan this QR code to pair — pairs over the relay only:")
+	}
+	renderTerminalQR(stdout, qr.Bitmap())
 	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
 	return 0
-}
-
-func mobilePairingURL(host string, port int, token string) string {
-	endpoint := host
-	if port != 443 {
-		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
-	}
-	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
-	fragment := url.Values{}
-	fragment.Set("pairing_token", token)
-	pairingURL.Fragment = fragment.Encode()
-	return pairingURL.String()
 }
 
 func tailscaleDNSName() (string, error) {
