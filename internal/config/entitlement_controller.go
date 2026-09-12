@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,6 +27,10 @@ type entitlementIssuer interface {
 type entitlementCache interface {
 	Load(string, string, time.Time) (relay.CachedEntitlement, bool, error)
 	SaveContext(context.Context, relay.CachedEntitlement) error
+}
+
+type entitlementRevocationCandidateCache interface {
+	LoadRevocationCandidate(string) (relay.CachedEntitlement, bool, error)
 }
 
 type entitlementRevocations interface {
@@ -183,49 +188,15 @@ func (w *entitlementPersistenceWorker) discard() {
 	w.needsRetry = false
 }
 
-func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout time.Duration) *entitlementPersistenceResult {
-	// The barrier intentionally survives parent cancellation. Its deadline also
-	// bounds waiting for worker exit: SaveContext normally observes cancellation,
-	// but a filesystem sync already inside the kernel cannot be canceled. In that
-	// case the goroutine is unavoidably orphaned until the syscall returns or the
-	// process exits. Channels stay open so its eventual return cannot panic.
+func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout time.Duration) {
+	// Authority caching is best effort. Cancel it before the independent terminal
+	// marker barrier; only bound the wait for an uncancellable filesystem syscall.
 	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
 	defer cancel()
-	stopAndWait := func() {
-		w.cancel()
-		select {
-		case <-w.done:
-		case <-drainCtx.Done():
-		}
-	}
-
-	if !w.latest.cached.Revoked {
-		stopAndWait()
-		return nil
-	}
-	if w.needsRetry {
-		w.retry(w.latest.generation)
-	}
-	targetVersion := w.latest.version
-	if w.completedVersion >= targetVersion {
-		stopAndWait()
-		return nil
-	}
-
-	for {
-		select {
-		case result := <-w.results:
-			if result.request.version != targetVersion {
-				continue
-			}
-			stopAndWait()
-			return &result
-		case <-drainCtx.Done():
-			w.cancel()
-			return nil
-		case <-w.done:
-			return nil
-		}
+	w.cancel()
+	select {
+	case <-w.done:
+	case <-drainCtx.Done():
 	}
 }
 
@@ -369,15 +340,17 @@ type EntitlementController struct {
 	running   bool
 	runCtx    context.Context
 
-	credentialGeneration uint64
-	attemptCancel        context.CancelFunc
-	relayEventSequence   uint64
-	relayAttemptSequence uint64
-	relaySignalQueued    bool
-	relayFollowupQueued  bool
-	authorityEpoch       uint64
-	expiryCancel         context.CancelFunc
-	expiryWatchers       sync.WaitGroup
+	credentialGeneration  uint64
+	attemptCancel         context.CancelFunc
+	relayEventSequence    uint64
+	relayAttemptSequence  uint64
+	relaySignalQueued     bool
+	relayFollowupQueued   bool
+	authorityEpoch        uint64
+	expiryCancel          context.CancelFunc
+	expiryWatchers        sync.WaitGroup
+	knownAuthorityHashes  map[uint64]map[string]struct{}
+	generationFingerprint map[uint64]string
 }
 
 func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementController {
@@ -399,7 +372,10 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 	if opts.Refresh == nil {
 		opts.Refresh = relay.RefreshRelayEntitlement
 	}
-	return &EntitlementController{opts: opts, triggers: make(chan entitlementTrigger, 1)}
+	return &EntitlementController{
+		opts: opts, triggers: make(chan entitlementTrigger, 1),
+		knownAuthorityHashes: make(map[uint64]map[string]struct{}), generationFingerprint: make(map[uint64]string),
+	}
 }
 
 // TriggerLicenseChanged supersedes work and runtime authority for the previous
@@ -495,6 +471,34 @@ func (c *EntitlementController) finishAttempt(cancel context.CancelFunc) {
 	cancel()
 }
 
+func (c *EntitlementController) rememberAuthorityLocked(generation uint64, fingerprint string, token relay.Secret) {
+	if fingerprint == "" || token.Value() == "" {
+		return
+	}
+	if c.knownAuthorityHashes[generation] == nil {
+		c.knownAuthorityHashes[generation] = make(map[string]struct{})
+	}
+	c.knownAuthorityHashes[generation][relay.EntitlementTokenHash(token)] = struct{}{}
+	c.generationFingerprint[generation] = fingerprint
+}
+
+func (c *EntitlementController) markerForGenerationLocked(generation uint64) (relay.EntitlementRevocation, bool) {
+	hashes := c.knownAuthorityHashes[generation]
+	fingerprint := c.generationFingerprint[generation]
+	if fingerprint == "" || len(hashes) == 0 {
+		return relay.EntitlementRevocation{}, false
+	}
+	values := make([]string, 0, len(hashes))
+	for hash := range hashes {
+		values = append(values, hash)
+	}
+	sort.Strings(values)
+	return relay.EntitlementRevocation{
+		SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint,
+		RevokedTokenHashes: values,
+	}, true
+}
+
 func (c *EntitlementController) Run(ctx context.Context) {
 	c.mu.Lock()
 	if c.running {
@@ -549,13 +553,23 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	now = c.opts.Clock.Now()
 	if credentialFingerprint != "" && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
 		current, valid, _ = c.opts.Cache.Load(sid, credentialFingerprint, now)
-		// runServe admits only one service/controller process. Load the durable
-		// floor after potentially blocking cache I/O, immediately before startup
-		// publication, so a terminal marker written while Load was blocked wins.
-		// Store locks keep supported inter-process writes monotonic; there is no
-		// external post-startup mutation API that requires a watcher here.
+		// A revocation-only candidate is allowed to bypass wall-clock publication
+		// checks, but never the cache's schema, file-security, or credential binding.
+		// Remember it solely so a later terminal decision can revoke a durable
+		// future-dated authority even after normal Load rejected it.
+		candidate := current
+		if candidateStore, ok := c.opts.Cache.(entitlementRevocationCandidateCache); ok {
+			if loaded, exists, err := candidateStore.LoadRevocationCandidate(credentialFingerprint); err == nil && exists {
+				candidate = loaded
+			}
+		}
+		c.mu.Lock()
+		c.rememberAuthorityLocked(startupGeneration, credentialFingerprint, candidate.Token)
+		c.mu.Unlock()
+		// Load the independent marker after potentially blocking cache I/O, so a
+		// terminal marker written while Load was blocked wins before publication.
 		marker, markerExists, markerErr := c.opts.Revocations.Load()
-		if markerErr != nil || (markerExists && marker.CredentialFingerprint == credentialFingerprint && current.ObtainedAt <= marker.RevokedAt) {
+		if markerErr != nil || (markerExists && marker.CredentialFingerprint == credentialFingerprint && marker.Revokes(current.Token)) {
 			current = relay.CachedEntitlement{}
 			valid = false
 		}
@@ -590,15 +604,25 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		if remaining < 0 {
 			remaining = 0
 		}
-		_ = persistence.shutdown(ctx, remaining)
+		persistence.shutdown(ctx, remaining)
 	}()
 	for {
 		generation := c.generation()
 		if authorityGeneration != generation {
+			c.mu.Lock()
+			marker, revokeOldGeneration := c.markerForGenerationLocked(authorityGeneration)
+			c.mu.Unlock()
+			if revokeOldGeneration {
+				persistence.discard()
+				revocationPersistence.save(marker, authorityGeneration)
+			}
 			current = relay.CachedEntitlement{}
 			valid = false
 			base = c.opts.Coordinator.Current()
-			base.PersistenceDegraded = false
+			base.PersistenceDegraded = revokeOldGeneration
+			if revokeOldGeneration {
+				c.opts.Coordinator.Update(base)
+			}
 		}
 		persistence.retry(generation)
 		revocationPersistence.retry(generation)
@@ -703,7 +727,7 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 		return 0, false
 	}
 	if errors.Is(err, ErrLicenseNotFound) || (err == nil && license == "") {
-		if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, c.opts.Clock.Now(), RelayReadinessNeedsLicense, nil) {
+		if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, RelayReadinessNeedsLicense, nil) {
 			return terminalEntitlementRetry, true
 		}
 		return 0, false
@@ -757,7 +781,7 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 				state = RelayReadinessNoSeat
 			}
 			if state != "" {
-				if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, receivedAt, state, issuerErr.Activations) {
+				if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, state, issuerErr.Activations) {
 					return terminalEntitlementRetry, true
 				}
 				return 0, false
@@ -789,6 +813,11 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 		c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
 		return 0, false
 	}
+	// Relay acceptance creates token authority before runtime/cache commit. Keep
+	// its hash even if credential replacement wins the following commit race.
+	c.mu.Lock()
+	c.rememberAuthorityLocked(generation, next.CredentialFingerprint, next.Token)
+	c.mu.Unlock()
 	if c.opts.BeforeCommit != nil {
 		c.opts.BeforeCommit()
 	}
@@ -814,15 +843,15 @@ func (c *EntitlementController) publishFallbackForGeneration(generation uint64, 
 	return true
 }
 
-func (c *EntitlementController) publishTerminalForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker, revokedAt time.Time, state RelayReadiness, activations []relay.ActivationSummary) bool {
+func (c *EntitlementController) publishTerminalForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker, state RelayReadiness, activations []relay.ActivationSummary) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if generation != c.credentialGeneration {
 		return false
 	}
-	revocationVersion := revokedAt.UTC().Truncate(time.Second).Unix()
-	if current.ObtainedAt > revocationVersion {
-		revocationVersion = current.ObtainedAt
+	c.rememberAuthorityLocked(generation, *credentialFingerprint, current.Token)
+	if persistence.latest.generation == generation {
+		c.rememberAuthorityLocked(generation, persistence.latest.cached.CredentialFingerprint, persistence.latest.cached.Token)
 	}
 	*current = relay.CachedEntitlement{}
 	*authorityGeneration = generation
@@ -841,13 +870,11 @@ func (c *EntitlementController) publishTerminalForGeneration(generation uint64, 
 		// any cache request: an obsolete cache completion can remain visible, but
 		// the matching marker always wins at restart.
 		persistence.discard()
-		marker := relay.EntitlementRevocation{
-			SchemaVersion:         relay.EntitlementRevocationSchemaVersion,
-			CredentialFingerprint: *credentialFingerprint,
-			RevokedAt:             revocationVersion,
+		marker, hasAuthority := c.markerForGenerationLocked(generation)
+		if hasAuthority {
+			base.PersistenceDegraded = true
+			revocationPersistence.save(marker, generation)
 		}
-		base.PersistenceDegraded = true
-		revocationPersistence.save(marker, generation)
 	}
 	c.opts.Coordinator.Update(*base)
 	return true
@@ -870,6 +897,7 @@ func (c *EntitlementController) commitIssued(parent context.Context, generation,
 	}
 	*current = next
 	*authorityGeneration = generation
+	c.rememberAuthorityLocked(generation, next.CredentialFingerprint, next.Token)
 	*base = activeFromIssued(*base, next, issued, c.renewalTime(next.Exp, now))
 	// Pending durability is observable immediately, and SaveContext runs only in
 	// the worker. Neither flock nor fsync can stall this authority commit.
@@ -910,9 +938,8 @@ func (c *EntitlementController) applyPersistenceResult(generation uint64, base *
 	if !base.PersistenceDegraded {
 		return
 	}
-	// A relay-accepted authority newer than the durable marker supersedes that
-	// version floor at restart once this cache write succeeds. The marker itself
-	// is never cleared and may remain for the lifetime of the credential.
+	// A relay-accepted token with a distinct hash remains eligible even while an
+	// older exact-token revocation marker persists for this credential.
 	now := c.opts.Clock.Now()
 	if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) || current.CredentialFingerprint != result.request.cached.CredentialFingerprint {
 		return

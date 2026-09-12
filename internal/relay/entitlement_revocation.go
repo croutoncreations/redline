@@ -3,35 +3,80 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 )
 
-const EntitlementRevocationSchemaVersion = 1
+const EntitlementRevocationSchemaVersion = 2
 
-// EntitlementRevocation is a durable credential-bound authority version floor.
-// It deliberately contains neither a credential nor an entitlement token.
+// EntitlementRevocation is a durable credential-bound set of revoked token
+// authorities. It contains only one-way token hashes, never bearer plaintext.
 type EntitlementRevocation struct {
-	SchemaVersion         int    `json:"schema_version"`
-	CredentialFingerprint string `json:"credential_fingerprint"`
-	RevokedAt             int64  `json:"revoked_at"`
+	SchemaVersion         int      `json:"schema_version"`
+	CredentialFingerprint string   `json:"credential_fingerprint"`
+	RevokedTokenHashes    []string `json:"revoked_token_hashes"`
+}
+
+// EntitlementTokenHash identifies the exact bearer bytes without retaining the
+// bearer credential itself.
+func EntitlementTokenHash(token Secret) string {
+	digest := sha256.Sum256([]byte(token.Value()))
+	return hex.EncodeToString(digest[:])
+}
+
+func (marker EntitlementRevocation) Revokes(token Secret) bool {
+	hash := EntitlementTokenHash(token)
+	index := sort.SearchStrings(marker.RevokedTokenHashes, hash)
+	return index < len(marker.RevokedTokenHashes) && marker.RevokedTokenHashes[index] == hash
+}
+
+func validTokenHash(hash string) bool {
+	if len(hash) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(hash)
+	return err == nil && hex.EncodeToString(decoded) == hash
 }
 
 func validateEntitlementRevocation(marker EntitlementRevocation) error {
-	if marker.SchemaVersion != EntitlementRevocationSchemaVersion || marker.CredentialFingerprint == "" || marker.RevokedAt <= 0 {
+	if marker.SchemaVersion != EntitlementRevocationSchemaVersion || marker.CredentialFingerprint == "" || len(marker.RevokedTokenHashes) == 0 {
 		return errors.New("invalid entitlement revocation marker")
+	}
+	for index, hash := range marker.RevokedTokenHashes {
+		if !validTokenHash(hash) || (index > 0 && marker.RevokedTokenHashes[index-1] >= hash) {
+			return errors.New("invalid entitlement revocation token hashes")
+		}
 	}
 	return nil
 }
 
+func canonicalRevocation(marker EntitlementRevocation) EntitlementRevocation {
+	hashes := append([]string(nil), marker.RevokedTokenHashes...)
+	sort.Strings(hashes)
+	unique := hashes[:0]
+	for _, hash := range hashes {
+		if len(unique) == 0 || unique[len(unique)-1] != hash {
+			unique = append(unique, hash)
+		}
+	}
+	marker.RevokedTokenHashes = unique
+	return marker
+}
+
 func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return EntitlementRevocation{}, fmt.Errorf("decode entitlement revocation: %w", err)
+	}
 	var encoded struct {
-		SchemaVersion         *int    `json:"schema_version"`
-		CredentialFingerprint *string `json:"credential_fingerprint"`
-		RevokedAt             *int64  `json:"revoked_at"`
+		SchemaVersion         *int      `json:"schema_version"`
+		CredentialFingerprint *string   `json:"credential_fingerprint"`
+		RevokedTokenHashes    *[]string `json:"revoked_token_hashes"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -42,10 +87,14 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return EntitlementRevocation{}, errors.New("decode entitlement revocation: trailing data")
 	}
-	if encoded.SchemaVersion == nil || encoded.CredentialFingerprint == nil || encoded.RevokedAt == nil {
+	if encoded.SchemaVersion == nil || encoded.CredentialFingerprint == nil || encoded.RevokedTokenHashes == nil {
 		return EntitlementRevocation{}, errors.New("decode entitlement revocation: missing or null field")
 	}
-	marker := EntitlementRevocation{SchemaVersion: *encoded.SchemaVersion, CredentialFingerprint: *encoded.CredentialFingerprint, RevokedAt: *encoded.RevokedAt}
+	marker := EntitlementRevocation{
+		SchemaVersion:         *encoded.SchemaVersion,
+		CredentialFingerprint: *encoded.CredentialFingerprint,
+		RevokedTokenHashes:    *encoded.RevokedTokenHashes,
+	}
 	if err := validateEntitlementRevocation(marker); err != nil {
 		return EntitlementRevocation{}, err
 	}
@@ -53,8 +102,8 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 }
 
 // EntitlementRevocationStore has its own path and process/file locks, so cache
-// I/O cannot delay a terminal marker operation and writes can never lower the
-// stored time floor.
+// I/O cannot delay a terminal marker operation. Same-credential writes merge
+// under the inter-process lock and therefore cannot drop an existing hash.
 type EntitlementRevocationStore struct {
 	path string
 	lock entitlementCacheLock
@@ -98,6 +147,7 @@ func (s *EntitlementRevocationStore) Load() (EntitlementRevocation, bool, error)
 }
 
 func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker EntitlementRevocation) error {
+	marker = canonicalRevocation(marker)
 	if err := validateEntitlementRevocation(marker); err != nil {
 		return err
 	}
@@ -119,13 +169,12 @@ func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker Ent
 		if err != nil {
 			return err
 		}
-		if existing.CredentialFingerprint == marker.CredentialFingerprint && existing.RevokedAt >= marker.RevokedAt {
-			return op.syncDirectory()
-		}
-		// Credential replacement changes which floor is relevant, but must not
-		// let clock rollback lower the store's inter-process version watermark.
-		if existing.RevokedAt > marker.RevokedAt {
-			marker.RevokedAt = existing.RevokedAt
+		if existing.CredentialFingerprint == marker.CredentialFingerprint {
+			marker.RevokedTokenHashes = append(marker.RevokedTokenHashes, existing.RevokedTokenHashes...)
+			marker = canonicalRevocation(marker)
+			if len(marker.RevokedTokenHashes) == len(existing.RevokedTokenHashes) {
+				return op.syncDirectory()
+			}
 		}
 	}
 	raw, err := json.Marshal(marker)

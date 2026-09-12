@@ -137,51 +137,62 @@ extends the original five authority fields (`token`, `exp`, `obtained_at`,
 it binds authority to one credential replacement without storing a reversible
 key. This is an intentional deviation from the original five-field schema.
 Legacy/unversioned records, fingerprint mismatches, unknown fields, omitted
-required fields, explicit `null`, and fields from the wrong record variant all
-fail closed for authority. Under the cache lock, Save recognizes only an exact
-shape that the schema-v2 serializer could have produced as replaceable legacy.
-Member names are checked token-by-token before map or struct decoding, so a
-duplicate `token`, `revoked`, or other field cannot collapse into an apparently
-valid legacy record. Malformed schema-v2 and unknown future-schema records
-remain fail-closed and nonreplaceable. Existing schema-v3 cache tombstones are
-still read fail-closed for compatibility, but the controller no longer writes
-or queues tombstones.
+required fields, explicit `null`, and duplicate member names all fail closed for
+authority. Under the cache lock, Save recognizes only an exact authority shape
+that the schema-v2 serializer could have produced as replaceable legacy.
+Malformed schema-v2 and unknown future-schema records remain fail-closed and
+nonreplaceable. The cache has one authority-record variant; revocation records
+are not written into it.
 
 Terminal `invalid_key`, `lapsed`, and `no_seat` decisions instead write
-`relay-entitlement-revocation.json` beside the cache. Its closed schema is
-`{"schema_version":1,"credential_fingerprint":"…","revoked_at":<unix-seconds>}`;
-it contains neither a token nor a reversible credential. It has the same 0600,
-owner, no-follow, atomic replacement, inter-process locking, and parent-directory
-fsync guarantees as the cache, but uses its own path and lock. Runtime authority
-is revoked immediately and this independent high-priority writer is not queued
-behind cache I/O.
+`relay-entitlement-revocation.json` beside the cache. Its exact closed schema is
+`{"schema_version":2,"credential_fingerprint":"…","revoked_token_hashes":["<64 lowercase hex characters>"]}`.
+Each entry is SHA-256 over the exact entitlement-token bytes. Entries are
+sorted, unique, and contain neither token plaintext nor a reversible license
+credential. Unknown, omitted, duplicate, and explicit-null JSON members fail
+closed. The file has the same 0600, owner, no-follow, atomic replacement,
+inter-process locking, and parent-directory fsync guarantees as the cache, but
+uses its own path and lock. Same-fingerprint writes merge under that lock, so
+concurrent writers cannot drop hashes. Entries never delete. Growth is expected
+to stay small because normal authority renews around half of the maximum
+fourteen-day lifetime; the list is intentionally unbounded rather than risk
+dropping an unexpired revoked authority during unusually frequent accepted
+refreshes.
 
 Startup loads the Keychain credential, then the credential-bound cache, and
-finally the marker immediately before publication. A matching marker is a
-durable version floor: cached authority is trusted only when its `obtained_at`
-is strictly later than `revoked_at`, so the marker wins a tie. Loading the marker
-after potentially blocking cache I/O also catches a terminal marker written
-while the cache load was blocked. A marker for a replaced credential does not
-affect the new fingerprint. This separate marker and its precedence are
-intentional deviations from the original single five-field cache design.
+finally the marker immediately before publication. A matching marker rejects a
+cache if and only if SHA-256 of its exact token bytes is present. This is
+independent of `obtained_at`, so clock rollback and a future-dated cache cannot
+revive terminally denied authority. A revocation-only cache candidate read still
+requires the closed schema, fingerprint, owner, mode, and no-follow checks, but
+bypasses wall-clock publication checks; its token is never published and is
+used only to ensure terminal handling hashes durable authority. Loading the
+marker after potentially blocking cache I/O also catches a terminal write while
+the cache load was blocked. A marker for a replaced credential does not affect
+the new fingerprint.
 
-A marker is never cleared or deleted. Authority newly accepted by the relay may
-supersede a matching floor after its newer cache record is durable; the old
-marker may remain forever. A cache-save failure leaves safe in-memory authority
-active with `persistence_degraded`, while restart fails closed behind the marker
-because no newer durable cache authority exists. Terminal marker failures also
-keep `persistence_degraded` set. On shutdown, a bounded,
-parent-cancellation-independent marker barrier consumes and retries even a
-failure result buffered before the main loop observed it. Old cache I/O is
-canceled separately; a syscall that cannot observe cancellation may return
-after `Run`, but cannot lower the independently stored marker floor.
+Runtime authority is revoked immediately. Terminal handling records every known
+current, durable, pending, or in-flight token hash before the bounded,
+parent-cancellation-independent shutdown barrier completes. The marker writer
+has an independent path, lock, and worker, so an old cache Save may become
+visible later but its exact token remains denied at restart. A newly
+relay-accepted token with a distinct hash is immediately eligible and may be
+cached without clearing the marker.
+
+A cache Save can report parent-directory-fsync uncertainty after atomic rename.
+That is durability uncertainty, not authorization failure: if a later restart
+observes the file and it remains structurally valid, unexpired, fingerprint
+bound, and absent from the hash marker, it is safe to use because the relay had
+already accepted that exact token. `persistence_degraded` remains visible while
+the running process cannot confirm durability. Marker failures likewise retain
+that status. No cross-file commit receipt is required or implied.
 
 `redline serve` claims the listening socket before constructing the controller,
-so controller marker writes have one service-process owner. The store still
-uses process and file locks and compares records under those locks, preserving
-monotonic marker time for supported inter-process writes. There is no external
-marker-writer API, so hostile mutation after startup is outside this ownership
-model and does not require a watcher.
+so controller marker writes have one service-process owner. Store process and
+file locks still preserve monotonic same-credential hash-set merges across
+supported processes. There is no external marker-writer API, so hostile
+mutation after startup is outside this ownership model and does not require a
+watcher.
 
 ## Implemented relay refresh endpoint
 

@@ -86,16 +86,27 @@ replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `labe
 `relay-entitlement.json` cache uses the same owner-only, no-follow, process-lock, and
 atomic durability rules and contains schema version, credential fingerprint, `token`,
 `exp`, `obtained_at`, `sid`, and `max_clients`. The independently locked
-`relay-entitlement-revocation.json` contains exactly schema version, credential
-fingerprint, and revocation time—never a token. Startup loads the Keychain license, then
-the cache, then the marker immediately before publication. For a matching fingerprint the
-marker is a persistent version floor: it wins when cache `obtained_at` is older than or
-equal to marker `revoked_at`; only newer cache authority is trusted. A marker for a replaced
-credential is ignored and markers are never cleared or deleted. Relay-accepted recovery is
-usable in memory, but restart trusts it only after its newer cache record is durable; a
-cache-save failure remains restart-fail-closed with `persistence_degraded`. `redline serve`
-permits one service/controller owner, while store locks preserve monotonic marker writes
-across supported processes. Entitlements have a maximum lifetime of 14 days. The session id is
+`relay-entitlement-revocation.json` has the exact closed schema
+`{"schema_version":2,"credential_fingerprint":"…","revoked_token_hashes":["<SHA-256 lowercase hex>"]}`.
+It stores sorted, unique hashes of exact revoked entitlement-token bytes—never token
+plaintext or a reversible license. Startup loads the Keychain license, then the cache, then
+the marker immediately before publication. For a matching fingerprint, cached authority is
+rejected if and only if its exact token hash is listed; timestamps do not affect revocation,
+so clock rollback cannot revive it. A security- and schema-validated candidate read lets a
+terminal decision hash a durable future-dated cache without ever publishing that token.
+Terminal handling includes all known current, durable, pending, and in-flight authorities,
+and same-fingerprint marker writes merge under the inter-process lock. Hashes are never
+cleared or deleted; the intentionally unbounded list grows slowly at the normal roughly
+seven-day renewal cadence and avoids ever dropping an unexpired revoked token. A marker for
+a replaced credential is ignored. A distinct token newly accepted by the relay is eligible
+without a clock comparison or marker clearing.
+
+A cache Save may return parent-directory-fsync uncertainty after its rename is already
+visible. That status remains `persistence_degraded` in the running process, but it is not an
+authorization failure: a later restart may use the observed record when it is structurally
+valid, unexpired, fingerprint-bound, and its exact token hash is not revoked. No cross-file
+commit receipt is required. `redline serve` permits one service/controller owner, while
+store locks preserve monotonic hash-set merges across supported processes. Entitlements have a maximum lifetime of 14 days. The session id is
 generated on first hosted or self-hosted use and persisted only in managed state. YAML
 containing `session_id`, `entitlement_token`, or `license_key` is rejected.
 

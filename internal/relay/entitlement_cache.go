@@ -20,13 +20,11 @@ const EntitlementCacheSchemaVersion = 3
 type CachedEntitlement struct {
 	SchemaVersion         int    `json:"schema_version"`
 	CredentialFingerprint string `json:"credential_fingerprint"`
-	Revoked               bool   `json:"revoked,omitempty"`
-	RevokedAt             int64  `json:"revoked_at,omitempty"`
-	Token                 Secret `json:"token,omitempty"`
-	Exp                   int64  `json:"exp,omitempty"`
-	ObtainedAt            int64  `json:"obtained_at,omitempty"`
-	SID                   string `json:"sid,omitempty"`
-	MaxClients            int    `json:"max_clients,omitempty"`
+	Token                 Secret `json:"token"`
+	Exp                   int64  `json:"exp"`
+	ObtainedAt            int64  `json:"obtained_at"`
+	SID                   string `json:"sid"`
+	MaxClients            int    `json:"max_clients"`
 }
 
 // CredentialFingerprint binds cached authority to one high-entropy license
@@ -37,7 +35,7 @@ func CredentialFingerprint(credential string) string {
 }
 
 func (c CachedEntitlement) ValidAt(sid string, now time.Time) bool {
-	if c.SchemaVersion != EntitlementCacheSchemaVersion || c.Revoked || c.CredentialFingerprint == "" || c.SID != sid || c.ObtainedAt <= 0 || time.Unix(c.ObtainedAt, 0).After(now.Add(EntitlementClockSkew)) {
+	if c.SchemaVersion != EntitlementCacheSchemaVersion || c.CredentialFingerprint == "" || c.SID != sid || c.ObtainedAt <= 0 || time.Unix(c.ObtainedAt, 0).After(now.Add(EntitlementClockSkew)) {
 		return false
 	}
 	// Clock skew is accepted only while checking issuer lifetime coherence.
@@ -61,13 +59,11 @@ func validateCachedToken(c CachedEntitlement) error {
 type entitlementCacheJSON struct {
 	SchemaVersion         *int    `json:"schema_version"`
 	CredentialFingerprint *string `json:"credential_fingerprint"`
-	Revoked               *bool   `json:"revoked,omitempty"`
-	RevokedAt             *int64  `json:"revoked_at,omitempty"`
-	Token                 *string `json:"token,omitempty"`
-	Exp                   *int64  `json:"exp,omitempty"`
-	ObtainedAt            *int64  `json:"obtained_at,omitempty"`
-	SID                   *string `json:"sid,omitempty"`
-	MaxClients            *int    `json:"max_clients,omitempty"`
+	Token                 *string `json:"token"`
+	Exp                   *int64  `json:"exp"`
+	ObtainedAt            *int64  `json:"obtained_at"`
+	SID                   *string `json:"sid"`
+	MaxClients            *int    `json:"max_clients"`
 }
 
 func rejectDuplicateJSONKeys(raw []byte) error {
@@ -142,38 +138,13 @@ func decodeEntitlementCache(raw []byte) (CachedEntitlement, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return CachedEntitlement{}, errors.New("decode entitlement cache: trailing data")
 	}
-	if record.SchemaVersion == nil || record.CredentialFingerprint == nil {
-		return CachedEntitlement{}, errors.New("decode entitlement cache: missing version or credential fingerprint")
+	if record.SchemaVersion == nil || record.CredentialFingerprint == nil || record.Token == nil || record.Exp == nil || record.ObtainedAt == nil || record.SID == nil || record.MaxClients == nil {
+		return CachedEntitlement{}, errors.New("decode entitlement cache: missing or null field")
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return CachedEntitlement{}, fmt.Errorf("decode entitlement cache shape: %w", err)
-	}
-	_, hasRevoked := fields["revoked"]
-	_, hasRevokedAt := fields["revoked_at"]
-	_, hasToken := fields["token"]
-	_, hasExp := fields["exp"]
-	_, hasObtainedAt := fields["obtained_at"]
-	_, hasSID := fields["sid"]
-	_, hasMaxClients := fields["max_clients"]
 	cached := CachedEntitlement{
 		SchemaVersion: *record.SchemaVersion, CredentialFingerprint: *record.CredentialFingerprint,
-	}
-	if hasRevoked {
-		if record.Revoked == nil || !*record.Revoked || !hasRevokedAt || record.RevokedAt == nil || hasToken || hasExp || hasObtainedAt || hasSID || hasMaxClients {
-			return CachedEntitlement{}, errors.New("decode entitlement cache: malformed revocation tombstone")
-		}
-		cached.Revoked = true
-		cached.RevokedAt = *record.RevokedAt
-	} else {
-		if hasRevokedAt || !hasToken || record.Token == nil || !hasExp || record.Exp == nil || !hasObtainedAt || record.ObtainedAt == nil || !hasSID || record.SID == nil || !hasMaxClients || record.MaxClients == nil {
-			return CachedEntitlement{}, errors.New("decode entitlement cache: malformed authority record")
-		}
-		cached.Token = NewSecret(*record.Token)
-		cached.Exp = *record.Exp
-		cached.ObtainedAt = *record.ObtainedAt
-		cached.SID = *record.SID
-		cached.MaxClients = *record.MaxClients
+		Token: NewSecret(*record.Token), Exp: *record.Exp, ObtainedAt: *record.ObtainedAt,
+		SID: *record.SID, MaxClients: *record.MaxClients,
 	}
 	if err := validateEntitlementCacheRecord(cached); err != nil {
 		return CachedEntitlement{}, fmt.Errorf("decode entitlement cache: %w", err)
@@ -199,12 +170,11 @@ func decodeEntitlementCacheForReplacement(raw []byte) (CachedEntitlement, bool, 
 	var legacy struct {
 		SchemaVersion         *int    `json:"schema_version"`
 		CredentialFingerprint *string `json:"credential_fingerprint"`
-		Revoked               *bool   `json:"revoked,omitempty"`
-		Token                 *string `json:"token,omitempty"`
-		Exp                   *int64  `json:"exp,omitempty"`
-		ObtainedAt            *int64  `json:"obtained_at,omitempty"`
-		SID                   *string `json:"sid,omitempty"`
-		MaxClients            *int    `json:"max_clients,omitempty"`
+		Token                 *string `json:"token"`
+		Exp                   *int64  `json:"exp"`
+		ObtainedAt            *int64  `json:"obtained_at"`
+		SID                   *string `json:"sid"`
+		MaxClients            *int    `json:"max_clients"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -222,19 +192,7 @@ func decodeEntitlementCacheForReplacement(raw []byte) (CachedEntitlement, bool, 
 	if decodeErr := json.Unmarshal(raw, &fields); decodeErr != nil {
 		return CachedEntitlement{}, false, err
 	}
-	_, hasRevoked := fields["revoked"]
-	_, hasToken := fields["token"]
-	_, hasExp := fields["exp"]
-	_, hasObtainedAt := fields["obtained_at"]
-	_, hasSID := fields["sid"]
-	_, hasMaxClients := fields["max_clients"]
-	if hasRevoked {
-		if legacy.Revoked == nil || !*legacy.Revoked || len(fields) != 3 || hasToken || hasExp || hasObtainedAt || hasSID || hasMaxClients {
-			return CachedEntitlement{}, false, err
-		}
-		return CachedEntitlement{SchemaVersion: 2, CredentialFingerprint: *legacy.CredentialFingerprint, Revoked: true}, true, nil
-	}
-	if len(fields) != 7 || !hasToken || legacy.Token == nil || !hasExp || legacy.Exp == nil || !hasObtainedAt || legacy.ObtainedAt == nil || !hasSID || legacy.SID == nil || !hasMaxClients || legacy.MaxClients == nil {
+	if len(fields) != 7 || legacy.Token == nil || legacy.Exp == nil || legacy.ObtainedAt == nil || legacy.SID == nil || legacy.MaxClients == nil {
 		return CachedEntitlement{}, false, err
 	}
 	cached = CachedEntitlement{
@@ -252,27 +210,13 @@ func validateEntitlementCacheRecord(cached CachedEntitlement) error {
 	if cached.SchemaVersion != EntitlementCacheSchemaVersion || cached.CredentialFingerprint == "" {
 		return errors.New("unversioned or unbound entitlement cache")
 	}
-	if cached.Revoked {
-		if cached.RevokedAt <= 0 || cached.Token.Value() != "" || cached.Exp != 0 || cached.ObtainedAt != 0 || cached.SID != "" || cached.MaxClients != 0 {
-			return errors.New("revocation tombstone contains authority or lacks a revocation time")
-		}
-		return nil
-	}
-	if cached.RevokedAt != 0 || validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
+	if validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
 		return errors.New("invalid entitlement cache")
 	}
 	return nil
 }
 
 func encodeEntitlementCache(cached CachedEntitlement) ([]byte, error) {
-	if cached.Revoked {
-		return json.Marshal(struct {
-			SchemaVersion         int    `json:"schema_version"`
-			CredentialFingerprint string `json:"credential_fingerprint"`
-			Revoked               bool   `json:"revoked"`
-			RevokedAt             int64  `json:"revoked_at"`
-		}{cached.SchemaVersion, cached.CredentialFingerprint, true, cached.RevokedAt})
-	}
 	return json.Marshal(struct {
 		SchemaVersion         int    `json:"schema_version"`
 		CredentialFingerprint string `json:"credential_fingerprint"`
@@ -288,20 +232,7 @@ func entitlementCacheReplaces(existing, incoming CachedEntitlement) bool {
 	if existing.CredentialFingerprint != incoming.CredentialFingerprint {
 		return true
 	}
-	existingVersion := existing.ObtainedAt
-	if existing.Revoked {
-		existingVersion = existing.RevokedAt
-	}
-	incomingVersion := incoming.ObtainedAt
-	if incoming.Revoked {
-		incomingVersion = incoming.RevokedAt
-	}
-	if incomingVersion != existingVersion {
-		return incomingVersion > existingVersion
-	}
-	// At an equal issuer receipt second, terminal revocation wins over
-	// authority. Equal records and authority-to-authority races are no-ops.
-	return incoming.Revoked && !existing.Revoked
+	return incoming.ObtainedAt > existing.ObtainedAt
 }
 
 // EntitlementCacheStore uses the same descriptor-relative, no-follow,
@@ -365,6 +296,33 @@ func (s *EntitlementCacheStore) Load(sid, credentialFingerprint string, now time
 	}
 	if cached.CredentialFingerprint != credentialFingerprint || !cached.ValidAt(sid, now) {
 		return CachedEntitlement{}, false, errors.New("entitlement cache is revoked, expired, credential-mismatched, or malformed")
+	}
+	return cached, true, nil
+}
+
+// LoadRevocationCandidate reads a structurally valid, credential-bound cache
+// record without applying wall-clock or SID publication checks. It is an
+// internal revocation seam: callers must never publish the returned token.
+func (s *EntitlementCacheStore) LoadRevocationCandidate(credentialFingerprint string) (CachedEntitlement, bool, error) {
+	if err := s.lock.acquire(context.Background()); err != nil {
+		return CachedEntitlement{}, false, err
+	}
+	defer s.lock.release()
+	op, err := beginEntitlementCacheOperation(s.path)
+	if err != nil {
+		return CachedEntitlement{}, false, err
+	}
+	defer op.close()
+	raw, exists, err := op.read()
+	if err != nil || !exists {
+		return CachedEntitlement{}, exists, err
+	}
+	cached, err := decodeEntitlementCache(raw)
+	if err != nil {
+		return CachedEntitlement{}, false, err
+	}
+	if cached.CredentialFingerprint != credentialFingerprint {
+		return CachedEntitlement{}, false, errors.New("entitlement cache credential mismatch")
 	}
 	return cached, true, nil
 }
