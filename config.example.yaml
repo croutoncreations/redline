@@ -10,6 +10,17 @@ api:
   # trusted_hosts:
   #   - macbook-pro.example.ts.net
 
+# Optional bootstrap for relay-state.json. Once managed state exists, it wins
+# and this block is no longer consulted. An enabled relay with no URL selects
+# Redline's hosted relay; setting URL selects a token-free self-hosted relay.
+# The service never rewrites this YAML. session_id, license_key, and
+# entitlement_token are not configuration: session_id is generated into the
+# managed state file and the hosted license is stored only in macOS Keychain.
+relay:
+  enabled: false
+  # url: https://relay.example.com       # self-hosted only
+  # issuer_url: https://issuer.example.com/api  # hosted override only
+
 # Automatic dispatch is opt-in so installing or upgrading Redline cannot start
 # spending subscription capacity unexpectedly.
 scheduler:

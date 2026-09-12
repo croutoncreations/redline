@@ -50,32 +50,48 @@ continues to reject cross-origin requests.
 
 ## 2. The relay (optional)
 
-Phase 1 implements the relay protocol boundary; relay account setup and renewal UI are
-Phase 2/3 work and do not exist yet. For current development builds, configure the desktop
-in YAML. The URL must be `https://`; `session_id` is a long random value persisted across
-restarts.
+Phase 2.1 provides the storage and resolution foundation; account activation, issuer
+calls, renewal, service endpoints, CLI commands, and the Pair a Device configuration UI
+are later milestones and do not exist yet. YAML is only an optional bootstrap. Once
+`relay-state.json` exists, managed state wins and the service does not rewrite the YAML.
 
 ```yaml
 relay:
   enabled: true
-  url: https://relay.example.com
-  session_id: "<a long random string>"
-  # entitlement_token: "<host token>" # closed hosted relay only
+  # url: https://relay.example.com  # setting a URL selects self-hosted mode
+  # issuer_url: https://issuer.example.com/api  # hosted override only
 ```
 
-A closed relay verifies the token only on the desktop `host` connection. Phone `client`
-connections present no entitlement to the relay: they are admitted only while that
-entitled host owns the session and while its signed `max_clients` cap permits. Current
-pairing code still has a legacy entitlement field in its Phase 0 API; the Phase 1 relay
-ignores it for clients. Phase 2 removes it from emitted QR payloads, and Phase 4 removes
-it from phone storage. Until then, legacy phone builds may still carry and transmit the
-ignored entitlement. Do not read this as documentation for a finished purchase,
-activation, renewal, or Pair a Device configuration flow.
+With no `url`, bootstrap selects Redline's hosted relay and reports `needs_license` until
+a license is present in Keychain. Phase 2.1 deliberately does not contact the issuer or
+dial the hosted relay even after a license is present; Phase 2.2 supplies the entitlement
+needed to do that. A custom `url` selects self-hosted mode, which never reads a license or
+sends a token. `off` never dials.
+
+The service creates `relay-state.json` beside `relay-identity.json` with mode `0600` and
+atomic replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `label`,
+and `session_id`; it contains no license or entitlement. The session id is generated on
+first hosted or self-hosted use and persisted only there. The old YAML `session_id` and
+`entitlement_token` Go fields remain temporarily parseable solely so the existing pairing
+source and tests can survive until the coordinated Phase 2.4 cutover. Service resolution
+ignores them, and no `license_key` YAML field exists.
+
+Hosted licenses are generic-password items in macOS Keychain. The exact identifiers are
+service `ai.redline.mac.relay-license`, account `hosted`. Only the local service reads the
+item; future CLI and UI code must call authenticated service endpoints rather than access
+Keychain. Linux builds expose the same `LicenseStore` interface for fake-backed tests but
+do not provide plaintext file fallback.
+
+A closed relay verifies an entitlement only on the desktop `host` connection. Phone
+`client` connections present none: they are admitted only while the entitled host owns
+the session and while its signed `max_clients` cap permits. Current pairing code still
+has a legacy entitlement field; removing it is Phase 2.4/4 work, not part of this storage
+milestone.
 
 **Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
-then put its URL in the YAML block above and omit `entitlement_token`. The committed
-self-host profile uses `ALLOW_UNENTITLED=true`, while still requiring an attached desktop
-host and enforcing `MAX_CLIENTS_DEFAULT` (five unless validly configured otherwise).
+then put its URL in the YAML block above. The committed self-host profile uses
+`ALLOW_UNENTITLED=true`, while still requiring an attached desktop host and enforcing
+`MAX_CLIENTS_DEFAULT` (five unless validly configured otherwise).
 
 The desktop's relay identity (a Noise static keypair) is created on first use beside the
 database. Every paired phone pins it; rotating it unpairs them all.

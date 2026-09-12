@@ -74,16 +74,18 @@ type API struct {
 // while Enabled is true, so a user who never opts in is in exactly the position
 // they were before the relay existed.
 type Relay struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	// SessionID is persisted so a restart rejoins the same session rather than
-	// stranding a paired phone on an id nothing will ever answer.
-	SessionID string `yaml:"session_id"`
+	Enabled   bool   `yaml:"enabled"`
+	URL       string `yaml:"url"`
+	IssuerURL string `yaml:"issuer_url"`
 	// KeypairPath holds the desktop's Noise static identity, which every paired
 	// phone trusts. Empty means a default beside the database.
 	KeypairPath string `yaml:"keypair_path"`
-	// EntitlementToken authorises use of the relay. It says nothing about who
-	// the user is; the relay checks only that it is signed and unexpired.
+
+	// SessionID and EntitlementToken remain parseable only for the current
+	// pairing/source compatibility window. RelayResolver ignores both: session
+	// identity is generated into relay-state.json and secrets never override
+	// Keychain. They are removed at the coordinated pairing cutover.
+	SessionID        string `yaml:"session_id"`
 	EntitlementToken string `yaml:"entitlement_token"`
 }
 
@@ -326,8 +328,17 @@ func (cfg *Config) validate() error {
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
 	if cfg.Relay.Enabled {
-		if err := validRelayURL(cfg.Relay.URL); err != nil {
-			return fmt.Errorf("relay url: %w", err)
+		if strings.TrimSpace(cfg.Relay.URL) != "" {
+			if err := validRelayURL(cfg.Relay.URL); err != nil {
+				return fmt.Errorf("relay url: %w", err)
+			}
+			if strings.TrimSpace(cfg.Relay.IssuerURL) != "" {
+				return fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")
+			}
+		} else if strings.TrimSpace(cfg.Relay.IssuerURL) != "" {
+			if err := validateSafeEndpoint(cfg.Relay.IssuerURL); err != nil {
+				return fmt.Errorf("relay issuer_url: %w", err)
+			}
 		}
 	}
 	for name, provider := range cfg.Providers {

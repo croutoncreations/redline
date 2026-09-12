@@ -107,7 +107,6 @@ api:
 // the connection, must fail loudly at load rather than at first use.
 func TestRelayURLIsValidated(t *testing.T) {
 	for _, relayBlock := range []string{
-		"relay:\n  enabled: true",
 		"relay:\n  enabled: true\n  url: http://relay.example.com",
 		"relay:\n  enabled: true\n  url: ws://relay.example.com",
 		"relay:\n  enabled: true\n  url: https://192.0.2.1",

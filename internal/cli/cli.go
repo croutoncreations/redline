@@ -418,6 +418,26 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	resolver := config.NewRelayResolver(
+		config.NewRelayStateStore(config.DefaultRelayStatePath(cfg.Relay.KeypairPath, cfg.Database)),
+		config.DefaultLicenseStore(),
+	)
+	resolvedRelay, err := resolver.Resolve(context.Background(), cfg.Relay)
+	if err != nil {
+		fmt.Fprintln(stderr, "relay:", err)
+		return 1
+	}
+	// From this boundary onward every service component sees the same resolved
+	// values. Deprecated YAML session/token fields cannot bypass managed state
+	// or Keychain precedence.
+	cfg.Relay.Enabled = resolvedRelay.Dial
+	cfg.Relay.URL = resolvedRelay.URL
+	cfg.Relay.IssuerURL = resolvedRelay.IssuerURL
+	cfg.Relay.SessionID = resolvedRelay.SessionID
+	cfg.Relay.EntitlementToken = ""
+	if resolvedRelay.Readiness == config.RelayReadinessNeedsLicense {
+		fmt.Fprintln(stderr, "relay: needs_license")
+	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -510,9 +530,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 // newRelayDialer builds the outbound relay leg for a service that has remote
 // access enabled.
 //
-// The session id is persisted in config rather than minted per start, because a
-// phone paired against one id would otherwise be stranded on an id nothing
-// answers after the next restart.
+// The session id has already been resolved from atomically managed state rather
+// than minted per start, so a phone remains paired across service restarts.
 func newRelayDialer(cfg config.Config, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
