@@ -630,6 +630,29 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     expect((await new Promise((resolve) => host.addEventListener("message", (e) => resolve(new Uint8Array(e.data)), { once: true }))).slice(8)).toEqual(new Uint8Array([9]));
   });
 
+  it("a valid older refresh replaces claims and alarm like production", async () => {
+    const sessionId = "ent-refresh-older-relaytest";
+    const originalExp = Math.floor(Date.now() / 1000) + 7200;
+    await entitledSocket(sessionId, 7, originalExp);
+    const replacementExp = originalExp - 1800;
+    const token = await mintToken(
+      await validClaimsFor(sessionId, { exp: replacementExp, max_clients: 3 }),
+    );
+    const refresh = await SELF.fetch(
+      `https://relay.example.com/v1/session/${sessionId}/entitlement`,
+      { method: "POST", headers: { "X-Redline-Entitlement": token } },
+    );
+    expect(refresh.status).toBe(204);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    expect(await stub.debugStorageDump()).toMatchObject({
+      exp: replacementExp,
+      maxClients: 3,
+    });
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBe(replacementExp * 1000);
+    });
+  });
+
   it("a delayed old-host callback cannot clear a replacement alarm", async () => {
     const sessionId = "ent-generation-alarm-relaytest";
     const { socket: oldHost } = await entitledSocket(sessionId, 2);

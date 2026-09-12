@@ -181,6 +181,20 @@ func TestIssuerTypedFailuresNeverIncludeCredentialsOrBodies(t *testing.T) {
 	}
 }
 
+func TestIssuerNoSeatRequiresActivationsField(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	client, _ := NewIssuerClient(server.URL, server.Client())
+	_, err := client.Entitlement(context.Background(), "license", SessionSID("session-no-seat-123456"), "")
+	var typed *IssuerError
+	if !errors.As(err, &typed) || typed.Kind != IssuerInvalidResponse {
+		t.Fatalf("missing required activations field error=%#v", err)
+	}
+}
+
 func TestIssuerActivationAndPortalContractsUseBearerAuthentication(t *testing.T) {
 	const license = "rl_live_bearer_secret"
 	var requests []string
@@ -241,6 +255,25 @@ func TestRelayEntitlementRefreshPreservesSocketAndClassifiesNoHost(t *testing.T)
 	}
 	if strings.Contains(err.Error(), tokenValue) {
 		t.Fatal("refresh error leaked token")
+	}
+}
+
+func TestEntitlementCacheSaveContextStopsWhileProcessLockIsBlocked(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-context-session-123456")
+	exp := now.Add(EntitlementLifetime).Unix()
+	store := NewEntitlementCacheStore(filepath.Join(t.TempDir(), "relay-entitlement.json"))
+	if err := store.lock.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer store.lock.release()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := store.SaveContext(ctx, CachedEntitlement{
+		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp, ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked context-aware save error=%v", err)
 	}
 }
 

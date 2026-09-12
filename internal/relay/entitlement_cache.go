@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,8 +46,21 @@ func validateCachedToken(c CachedEntitlement) error {
 // process-lock and durable atomic replacement rules as managed relay state.
 type EntitlementCacheStore struct {
 	path string
-	mu   *sync.Mutex
+	lock entitlementCacheLock
 }
+
+type entitlementCacheLock chan struct{}
+
+func (l entitlementCacheLock) acquire(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l:
+		return nil
+	}
+}
+
+func (l entitlementCacheLock) release() { l <- struct{}{} }
 
 var entitlementCacheProcessLocks sync.Map
 
@@ -56,8 +70,10 @@ func NewEntitlementCacheStore(path string) *EntitlementCacheStore {
 		absolute = path
 	}
 	cleaned := filepath.Clean(absolute)
-	lock, _ := entitlementCacheProcessLocks.LoadOrStore(cleaned, &sync.Mutex{})
-	return &EntitlementCacheStore{path: cleaned, mu: lock.(*sync.Mutex)}
+	created := make(entitlementCacheLock, 1)
+	created <- struct{}{}
+	lock, _ := entitlementCacheProcessLocks.LoadOrStore(cleaned, created)
+	return &EntitlementCacheStore{path: cleaned, lock: lock.(entitlementCacheLock)}
 }
 
 func DefaultEntitlementCachePath(identityPath string) string {
@@ -65,8 +81,10 @@ func DefaultEntitlementCachePath(identityPath string) string {
 }
 
 func (s *EntitlementCacheStore) Load(sid string, now time.Time) (CachedEntitlement, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lock.acquire(context.Background()); err != nil {
+		return CachedEntitlement{}, false, err
+	}
+	defer s.lock.release()
 	op, err := beginEntitlementCacheOperation(s.path)
 	if err != nil {
 		return CachedEntitlement{}, false, err
@@ -93,6 +111,12 @@ func (s *EntitlementCacheStore) Load(sid string, now time.Time) (CachedEntitleme
 }
 
 func (s *EntitlementCacheStore) Save(cached CachedEntitlement) error {
+	return s.SaveContext(context.Background(), cached)
+}
+
+// SaveContext persists an entitlement while allowing a controller-owned
+// persistence worker to stop before entering blocked lock or I/O stages.
+func (s *EntitlementCacheStore) SaveContext(ctx context.Context, cached CachedEntitlement) error {
 	if validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
 		return errors.New("refuse invalid entitlement cache")
 	}
@@ -101,9 +125,11 @@ func (s *EntitlementCacheStore) Save(cached CachedEntitlement) error {
 		return fmt.Errorf("encode entitlement cache: %w", err)
 	}
 	raw = append(raw, '\n')
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	op, err := beginEntitlementCacheOperation(s.path)
+	if err := s.lock.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.lock.release()
+	op, err := beginEntitlementCacheOperationContext(ctx, s.path)
 	if err != nil {
 		return err
 	}

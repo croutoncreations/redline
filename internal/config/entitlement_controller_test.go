@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ type controllerCache struct {
 func (c *controllerCache) Load(string, time.Time) (relay.CachedEntitlement, bool, error) {
 	return c.value, c.exists, nil
 }
-func (c *controllerCache) Save(value relay.CachedEntitlement) error {
+func (c *controllerCache) SaveContext(_ context.Context, value relay.CachedEntitlement) error {
 	c.mu.Lock()
 	c.value, c.exists = value, true
 	var err error
@@ -56,6 +57,39 @@ func (c *controllerCache) Save(value relay.CachedEntitlement) error {
 	default:
 	}
 	return err
+}
+
+type blockingControllerCache struct {
+	started   chan relay.CachedEntitlement
+	release   chan struct{}
+	persisted chan relay.CachedEntitlement
+	mu        sync.Mutex
+	current   relay.CachedEntitlement
+	calls     int
+}
+
+func (c *blockingControllerCache) Load(string, time.Time) (relay.CachedEntitlement, bool, error) {
+	return relay.CachedEntitlement{}, false, nil
+}
+
+func (c *blockingControllerCache) SaveContext(ctx context.Context, value relay.CachedEntitlement) error {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	c.mu.Unlock()
+	c.started <- value
+	if call == 1 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.release:
+		}
+	}
+	c.mu.Lock()
+	c.current = value
+	c.mu.Unlock()
+	c.persisted <- value
+	return nil
 }
 
 type controllerIssuerFunc func(context.Context, string, string, string, time.Time) (relay.Entitlement, error)
@@ -679,6 +713,313 @@ func TestEntitlementControllerRetainsRelaySignalQueuedDuringAcceptance(t *testin
 	}
 	cancel()
 	<-done
+}
+
+func TestEntitlementControllerTerminalDenialRevokesFallbackForCredentialGeneration(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(time.Hour).Unix()
+	cached := relay.CachedEntitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: now.Add(-time.Hour).Unix(), SID: sid, MaxClients: 5}
+	calls := 0
+	issuer := controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		calls++
+		if calls == 1 {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerLapsed}
+		}
+		return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
+	})
+	coordinator := NewRelayCoordinator(base)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 2)}
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Issuer: issuer,
+		Cache: &controllerCache{value: cached, exists: true, saved: make(chan relay.CachedEntitlement, 1)}, Clock: clock,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	_ = waitRelayState(t, coordinator, RelayReadinessLapsed)
+	<-clock.delays
+	controller.TriggerRelayEntitlement(relay.EntitlementExpired)
+	got := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("terminally revoked fallback was republished: %#v", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerNewCredentialGenerationCanEstablishAuthorityAfterTerminalDenial(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	newExp := now.Add(relay.EntitlementLifetime).Unix()
+	newToken := controllerToken(t, newExp, sid, 5)
+	calls := 0
+	issuer := controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		calls++
+		if calls == 1 {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerInvalidKey}
+		}
+		return relay.ReceivedEntitlement{Entitlement: relay.Entitlement{Token: newToken, Exp: newExp, MaxClients: 5, Seats: 1, SeatsUsed: 1}, ReceivedAt: now}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 2)}
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "new-license"}, Issuer: issuer,
+		Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}, Clock: clock,
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	_ = waitRelayState(t, coordinator, RelayReadinessInvalidKey)
+	<-clock.delays
+	controller.TriggerLicenseChanged()
+	got := waitRelayState(t, coordinator, RelayReadinessActive)
+	if !got.CanDial() || got.EntitlementToken.Value() != newToken.Value() {
+		t.Fatalf("new credential generation did not establish authority: %#v", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerResamplesClockAfterKeychainWorkBeforeFallback(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(time.Hour).Unix()
+	cached := relay.CachedEntitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: now.Add(-time.Hour).Unix(), SID: sid, MaxClients: 5}
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 1)}
+	store := controllerLicenseStore{load: func() (string, error) {
+		clock.Advance(time.Hour)
+		return "", ErrLicenseStoreUnavailable
+	}}
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: store,
+		Cache: &controllerCache{value: cached, exists: true, saved: make(chan relay.CachedEntitlement, 1)}, Clock: clock,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			t.Fatal("issuer called after keychain failure")
+			return relay.ReceivedEntitlement{}, nil
+		}),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	got := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if got.CanDial() || !got.UnavailableSince.Equal(time.Unix(exp, 0)) {
+		t.Fatalf("expiration crossing during keychain work published stale fallback: %#v", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerExactExpirationBetweenValidationAndCommitIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(time.Minute).Unix()
+	cache := &controllerCache{saved: make(chan relay.CachedEntitlement, 1)}
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 1)}
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Cache: cache, Clock: clock,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+			return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		BeforeCommit: func() {
+			clock.Advance(time.Minute)
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	got := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" || !got.UnavailableSince.Equal(time.Unix(exp, 0)) {
+		t.Fatalf("exact expiration crossing published authority: %#v", got)
+	}
+	select {
+	case <-cache.saved:
+		t.Fatal("expired issuer result was enqueued for persistence")
+	default:
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerCredentialGenerationCommitIsAtomic(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	oldExp := now.Add(relay.EntitlementLifetime - time.Hour).Unix()
+	oldToken := controllerToken(t, oldExp, sid, 4)
+	newExp := now.Add(relay.EntitlementLifetime).Unix()
+	newToken := controllerToken(t, newExp, sid, 5)
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	calls := 0
+	issuer := controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		calls++
+		issued := relay.Entitlement{Token: oldToken, Exp: oldExp, MaxClients: 4, Seats: 1, SeatsUsed: 1}
+		if calls > 1 {
+			issued.Token, issued.Exp, issued.MaxClients = newToken, newExp, 5
+		}
+		return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 2)}
+	hookCalls := 0
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Issuer: issuer,
+		Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}, Clock: clock,
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		BeforeCommit: func() {
+			hookCalls++
+			if hookCalls == 1 {
+				close(beforeCommit)
+				<-releaseCommit
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	<-beforeCommit
+	controller.TriggerLicenseChanged()
+	close(releaseCommit)
+	got := waitRelayState(t, coordinator, RelayReadinessActive)
+	if got.EntitlementToken.Value() != newToken.Value() {
+		t.Fatalf("obsolete issuer attempt won generation race: %#v", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerBlockedPersistenceDoesNotBlockExpiryRenewalOrGeneration(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 5)}
+	cache := &blockingControllerCache{
+		started: make(chan relay.CachedEntitlement, 3), release: make(chan struct{}), persisted: make(chan relay.CachedEntitlement, 3),
+	}
+	issuerStarted := make(chan int, 3)
+	releaseSecond := make(chan struct{})
+	calls := 0
+	issuer := controllerReceivedIssuerFunc(func(ctx context.Context, _, _, _ string) (relay.ReceivedEntitlement, error) {
+		calls++
+		call := calls
+		issuerStarted <- call
+		if call == 2 {
+			select {
+			case <-ctx.Done():
+				return relay.ReceivedEntitlement{}, ctx.Err()
+			case <-releaseSecond:
+			}
+		}
+		receivedAt := clock.Now()
+		exp := receivedAt.Add(relay.EntitlementLifetime).Unix()
+		if call == 1 {
+			exp = receivedAt.Add(time.Hour).Unix()
+		}
+		// Make each otherwise-identical token distinguishable without changing
+		// its validated claims.
+		claims := strings.Split(controllerToken(t, exp, sid, 5).Value(), ".")[0]
+		signature := make([]byte, 64)
+		signature[0] = byte(call)
+		token := relay.NewSecret(claims + "." + base64.StdEncoding.EncodeToString(signature))
+		issued := relay.Entitlement{Token: token, Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+		return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: receivedAt}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Issuer: issuer, Cache: cache, Clock: clock,
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	if call := <-issuerStarted; call != 1 {
+		t.Fatalf("initial issuer call=%d", call)
+	}
+	first := waitRelayState(t, coordinator, RelayReadinessActive)
+	blocked := <-cache.started
+	if blocked.Token.Value() != first.EntitlementToken.Value() || !first.PersistenceDegraded {
+		t.Fatalf("blocked persistence was not observable: %#v", first)
+	}
+	clock.Advance(time.Hour)
+	controller.TriggerRelayEntitlement(relay.EntitlementExpired)
+	if call := <-issuerStarted; call != 2 {
+		t.Fatalf("expiry issuer call=%d", call)
+	}
+	expired := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if expired.CanDial() || !expired.PersistenceDegraded {
+		t.Fatalf("blocked Save retained expired dial authority: %#v", expired)
+	}
+	close(releaseSecond)
+	second := waitRelayState(t, coordinator, RelayReadinessActive)
+	if second.EntitlementToken.Value() == first.EntitlementToken.Value() {
+		t.Fatal("renewal did not advance in-memory authority while Save was blocked")
+	}
+	controller.TriggerLicenseChanged()
+	if call := <-issuerStarted; call != 3 {
+		t.Fatalf("replacement generation issuer call=%d", call)
+	}
+	third := waitRelayState(t, coordinator, RelayReadinessActive)
+	if third.EntitlementToken.Value() == second.EntitlementToken.Value() {
+		t.Fatal("new credential generation did not supersede blocked persistence")
+	}
+	close(cache.release)
+	if firstPersisted := <-cache.persisted; firstPersisted.Token.Value() != first.EntitlementToken.Value() {
+		t.Fatal("unexpected first in-flight persistence value")
+	}
+	latestPersisted := <-cache.persisted
+	if latestPersisted.Token.Value() != third.EntitlementToken.Value() {
+		t.Fatalf("obsolete completion suppressed latest persistence: got %q want newest", latestPersisted.Token)
+	}
+	select {
+	case extra := <-cache.persisted:
+		t.Fatalf("obsolete intermediate token was persisted: %q", extra.Token)
+	default:
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("controller did not shut down after persistence worker completed")
+	}
+}
+
+func TestEntitlementControllerCancellationStopsBlockedPersistenceWorker(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(relay.EntitlementLifetime).Unix()
+	cache := &blockingControllerCache{
+		started: make(chan relay.CachedEntitlement, 1), release: make(chan struct{}), persisted: make(chan relay.CachedEntitlement, 1),
+	}
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: NewRelayCoordinator(base), Initial: base, Licenses: controllerLicenseStore{value: "license"}, Cache: cache,
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+			return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	<-cache.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware blocked Save leaked the controller worker")
+	}
 }
 
 func TestEntitlementControllerRetriesDegradedPersistenceWithoutDiscardingToken(t *testing.T) {

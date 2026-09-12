@@ -124,7 +124,7 @@ type activationsResponse struct {
 }
 
 type noSeatResponse struct {
-	Activations []ActivationSummary `json:"activations"`
+	Activations *[]ActivationSummary `json:"activations"`
 }
 
 type portalResponse struct {
@@ -251,10 +251,10 @@ func (c *IssuerClient) Entitlement(ctx context.Context, licenseKey, sid, label s
 		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerLapsed, Status: resp.StatusCode}
 	case http.StatusConflict:
 		var result noSeatResponse
-		if err := decodeStrict(raw, &result); err != nil || !validActivationSummaries(result.Activations) {
+		if err := decodeStrict(raw, &result); err != nil || result.Activations == nil || !validActivationSummaries(*result.Activations) {
 			return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 		}
-		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerNoSeat, Status: resp.StatusCode, Activations: result.Activations}
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerNoSeat, Status: resp.StatusCode, Activations: *result.Activations}
 	default:
 		return ReceivedEntitlement{ReceivedAt: receivedAt}, classifyStatus(resp.StatusCode)
 	}

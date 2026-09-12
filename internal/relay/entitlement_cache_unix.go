@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,10 @@ type entitlementCacheOperation struct {
 }
 
 func beginEntitlementCacheOperation(filePath string) (*entitlementCacheOperation, error) {
+	return beginEntitlementCacheOperationContext(context.Background(), filePath)
+}
+
+func beginEntitlementCacheOperationContext(ctx context.Context, filePath string) (*entitlementCacheOperation, error) {
 	directoryPath := filepath.Dir(filePath)
 	if err := os.MkdirAll(directoryPath, 0o700); err != nil {
 		return nil, fmt.Errorf("create entitlement cache directory: %w", err)
@@ -51,9 +56,21 @@ func beginEntitlementCacheOperation(filePath string) (*entitlementCacheOperation
 		_ = lock.Close()
 		return fail(errors.New("entitlement cache lock must be an owner-only regular file"))
 	}
-	if err := unix.Flock(lfd, unix.LOCK_EX); err != nil {
-		_ = lock.Close()
-		return fail(fmt.Errorf("lock entitlement cache: %w", err))
+	for {
+		err := unix.Flock(lfd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			_ = lock.Close()
+			return fail(fmt.Errorf("lock entitlement cache: %w", err))
+		}
+		select {
+		case <-ctx.Done():
+			_ = lock.Close()
+			return fail(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	return &entitlementCacheOperation{directory: directory, lock: lock, base: base}, nil
 }

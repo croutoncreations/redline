@@ -39,10 +39,14 @@ func (c *fullchainCache) Load(sid string, now time.Time) (relay.CachedEntitlemen
 	defer c.mu.Unlock()
 	return c.current, c.current.ValidAt(sid, now), nil
 }
-func (c *fullchainCache) Save(value relay.CachedEntitlement) error {
+func (c *fullchainCache) SaveContext(ctx context.Context, value relay.CachedEntitlement) error {
 	if c.saveStarted != nil {
 		close(c.saveStarted)
-		<-c.releaseSave
+		select {
+		case <-c.releaseSave:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	c.mu.Lock()
 	c.current = value
@@ -99,31 +103,37 @@ func validateFullchainToken(public ed25519.PublicKey, token, sid string, now tim
 	return claims, nil
 }
 
-type fullchainRelayAuthority struct {
-	mu         sync.Mutex
-	claims     fullchainClaims
-	alarmUnix  int64
-	generation uint64
+type fullchainAuthorityInstall struct {
+	claims    fullchainClaims
+	token     string
+	reconnect bool
 }
 
-func (a *fullchainRelayAuthority) install(claims fullchainClaims, reconnect bool) error {
+type fullchainRelayAuthority struct {
+	mu            sync.Mutex
+	claims        fullchainClaims
+	alarmUnix     int64
+	generation    uint64
+	installations []fullchainAuthorityInstall
+}
+
+// install matches the production Worker: every valid signed refresh or host
+// reconnect replaces claims and the alarm, even when exp is older.
+func (a *fullchainRelayAuthority) install(claims fullchainClaims, token string, reconnect bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.alarmUnix != 0 && claims.Exp < a.alarmUnix {
-		return errors.New("authority regression")
-	}
 	a.claims = claims
 	a.alarmUnix = claims.Exp
+	a.installations = append(a.installations, fullchainAuthorityInstall{claims: claims, token: token, reconnect: reconnect})
 	if reconnect {
 		a.generation++
 	}
-	return nil
 }
 
-func (a *fullchainRelayAuthority) snapshot() (fullchainClaims, int64, uint64) {
+func (a *fullchainRelayAuthority) snapshot() (fullchainClaims, int64, uint64, []fullchainAuthorityInstall) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.claims, a.alarmUnix, a.generation
+	return a.claims, a.alarmUnix, a.generation, append([]fullchainAuthorityInstall(nil), a.installations...)
 }
 
 // TestEntitlementRefreshFullChain joins the controller, supervisor, real
@@ -159,20 +169,22 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	mux.HandleFunc("/v1/session/session-fullchain-1234/entitlement", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Redline-Entitlement")
 		claims, validationErr := validateFullchainToken(public, token, relay.SessionSID("session-fullchain-1234"), time.Now())
-		if validationErr != nil || authority.install(claims, false) != nil {
+		if validationErr != nil {
 			http.Error(w, "not entitled", http.StatusPaymentRequired)
 			return
 		}
+		authority.install(claims, token, false)
 		refreshTokens <- token
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/v1/session/session-fullchain-1234", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Redline-Entitlement")
 		claims, validationErr := validateFullchainToken(public, token, relay.SessionSID("session-fullchain-1234"), time.Now())
-		if validationErr != nil || authority.install(claims, true) != nil {
+		if validationErr != nil {
 			http.Error(w, "not entitled", http.StatusPaymentRequired)
 			return
 		}
+		authority.install(claims, token, true)
 		handshakeTokens <- token
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -287,7 +299,7 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	if validationErr != nil {
 		t.Fatalf("refreshed signed token was invalid: %v", validationErr)
 	}
-	installed, alarm, generation := authority.snapshot()
+	installed, alarm, generation, installations := authority.snapshot()
 	if installed != newClaims || alarm != newClaims.Exp || generation != 1 || alarm <= oldExp {
 		t.Fatalf("refresh did not advance installed claims/alarm: claims=%#v alarm=%d generation=%d", installed, alarm, generation)
 	}
@@ -295,7 +307,6 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 		"bad signature": newToken + "corrupt",
 		"wrong sid":     fullchainToken(private, newClaims.Exp, relay.SessionSID("different-session-123456"), 5).Value(),
 		"invalid max":   fullchainToken(private, newClaims.Exp, sid, 26).Value(),
-		"stale claims":  oldToken.Value(),
 	} {
 		req, requestErr := http.NewRequest(http.MethodGet, tlsRelay.URL+"/v1/session/"+sessionID, nil)
 		if requestErr != nil {
@@ -345,9 +356,19 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("forced internal reconnect did not reach relay")
 	}
-	installed, alarm, generation = authority.snapshot()
+	installed, alarm, generation, installations = authority.snapshot()
 	if installed != newClaims || alarm != newClaims.Exp || generation != 2 {
-		t.Fatalf("reconnect regressed installed authority: claims=%#v alarm=%d generation=%d", installed, alarm, generation)
+		t.Fatalf("reconnect installed unexpected authority: claims=%#v alarm=%d generation=%d", installed, alarm, generation)
+	}
+	if len(installations) != 3 {
+		t.Fatalf("relay installations=%d want initial, refresh, reconnect", len(installations))
+	}
+	wantTokens := []string{oldToken.Value(), newToken, newToken}
+	wantExps := []int64{oldExp, newClaims.Exp, newClaims.Exp}
+	for i, installation := range installations {
+		if installation.token != wantTokens[i] || installation.claims.Exp != wantExps[i] {
+			t.Fatalf("installation %d authority was stale: token match=%v exp=%d want=%d", i, installation.token == wantTokens[i], installation.claims.Exp, wantExps[i])
+		}
 	}
 	cancel()
 	<-controllerDone

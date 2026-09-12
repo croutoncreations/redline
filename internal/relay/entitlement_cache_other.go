@@ -2,11 +2,17 @@
 
 package relay
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 type entitlementCacheOperation struct{}
 
-func beginEntitlementCacheOperation(string) (*entitlementCacheOperation, error) {
+func beginEntitlementCacheOperation(path string) (*entitlementCacheOperation, error) {
+	return beginEntitlementCacheOperationContext(context.Background(), path)
+}
+func beginEntitlementCacheOperationContext(context.Context, string) (*entitlementCacheOperation, error) {
 	return nil, errors.New("secure entitlement cache is unavailable on this platform")
 }
 func (*entitlementCacheOperation) close() {}
