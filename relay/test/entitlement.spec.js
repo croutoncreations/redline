@@ -1,5 +1,6 @@
-import { env, SELF } from "cloudflare:test";
+import { env, SELF, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import entitlementContract from "../../docs/relay-entitlement.md?raw";
 import worker, {
   requestWithoutEntitlement,
   sidForSession,
@@ -22,10 +23,14 @@ function b64(bytes) {
   return btoa(String.fromCharCode(...new Uint8Array(bytes)));
 }
 
-async function mintToken(claims, signingKey = issuer.privateKey) {
-  const payload = new TextEncoder().encode(JSON.stringify(claims));
+async function mintRawToken(claimsJSON, signingKey = issuer.privateKey) {
+  const payload = new TextEncoder().encode(claimsJSON);
   const signature = await crypto.subtle.sign("Ed25519", signingKey, payload);
   return `${b64(payload)}.${b64(signature)}`;
+}
+
+async function mintToken(claims, signingKey = issuer.privateKey) {
+  return mintRawToken(JSON.stringify(claims), signingKey);
 }
 
 function bytesFromB64(value) {
@@ -84,7 +89,35 @@ describe("entitlements: signature and claim validation", () => {
     expect(await bodyCode(res)).toBe("not_entitled");
   });
 
-  it("refuses an expired token", async () => {
+  it("refuses a missing exp", async () => {
+    const sessionId = "ent-missing-exp-relaytest";
+    const claims = await validClaimsFor(sessionId);
+    delete claims.exp;
+    const res = await connectAsHost(sessionId, await mintToken(claims));
+    expect(res.status).toBe(402);
+    expect(await bodyCode(res)).toBe("not_entitled");
+  });
+
+  it("refuses an exp of the wrong type", async () => {
+    const sessionId = "ent-wrong-exp-relaytestpadding";
+    const token = await mintToken(await validClaimsFor(sessionId, { exp: "4102444800" }));
+    const res = await connectAsHost(sessionId, token);
+    expect(res.status).toBe(402);
+    expect(await bodyCode(res)).toBe("not_entitled");
+  });
+
+  it("refuses a numeric JSON exp that parses as non-finite", async () => {
+    const sessionId = "ent-nonfinite-exp-relaytest";
+    const claims = await validClaimsFor(sessionId);
+    const token = await mintRawToken(
+      `{"exp":1e400,"sid":${JSON.stringify(claims.sid)},"max_clients":5}`,
+    );
+    const res = await connectAsHost(sessionId, token);
+    expect(res.status).toBe(402);
+    expect(await bodyCode(res)).toBe("not_entitled");
+  });
+
+  it("refuses an expired exp", async () => {
     const sessionId = "ent-expired-relaytestpadding";
     const token = await mintToken(
       await validClaimsFor(sessionId, { exp: Math.floor(Date.now() / 1000) - 60 }),
@@ -92,6 +125,15 @@ describe("entitlements: signature and claim validation", () => {
     const res = await connectAsHost(sessionId, token);
     expect(res.status).toBe(402);
     expect(await bodyCode(res)).toBe("not_entitled");
+  });
+
+  it("refuses signed JSON that is null, an array, or a primitive", async () => {
+    for (const [index, claims] of [null, [], 7, "claims"].entries()) {
+      const token = await mintToken(claims);
+      const res = await connectAsHost(`ent-bad-shape-${index}-relaytest`, token);
+      expect(res.status).toBe(402);
+      expect(await bodyCode(res)).toBe("not_entitled");
+    }
   });
 
   it("refuses a token signed by someone else", async () => {
@@ -135,7 +177,10 @@ describe("entitlements: signature and claim validation", () => {
   it("verifies the signature before trusting the sid claim", async () => {
     const sessionId = "ent-sigorder-relaytestpadding";
     const impostor = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-    const token = await mintToken(await validClaimsFor(sessionId), impostor.privateKey);
+    const token = await mintToken(
+      await validClaimsFor("ent-sigorder-other-relaytest"),
+      impostor.privateKey,
+    );
     const res = await connectAsHost(sessionId, token);
     expect(res.status).toBe(402);
     expect(await bodyCode(res)).toBe("not_entitled");
@@ -257,10 +302,10 @@ describe("entitlements: only role=host presents an entitlement", () => {
       "https://relay.example.com/v1/session/ent-clientbypass-relaytest?role=client",
       { headers: { Upgrade: "websocket", "X-Redline-Entitlement": "not-a-real-token" } },
     );
-    // A client is admitted because an entitled host is already attached to
-    // the same session, not because of anything it presents itself; a role
-    // that never had a token to check must never be refused for lacking one.
-    expect(res.status).toBe(101);
+    // The entitlement layer was bypassed; host-gated admission then rejects
+    // this session because it has no attached host.
+    expect(res.status).toBe(423);
+    expect(await bodyCode(res)).toBe("no_host");
   });
 
   it("bypasses the entitlement check entirely for role=client with no token at all", async () => {
@@ -268,7 +313,8 @@ describe("entitlements: only role=host presents an entitlement", () => {
       "https://relay.example.com/v1/session/ent-clientnotoken-relaytest?role=client",
       { headers: { Upgrade: "websocket" } },
     );
-    expect(res.status).toBe(101);
+    expect(res.status).toBe(423);
+    expect(await bodyCode(res)).toBe("no_host");
   });
 });
 
@@ -345,6 +391,41 @@ describe("entitlements: credential and internal-claim boundary", () => {
     expect(captured.headers.get("X-Redline-Internal-Max-Clients")).toBe("7");
   });
 
+  it("strips credentials and replaces forged claims on entitlement refresh", async () => {
+    const sessionId = "ent-refresh-boundary-relaytest";
+    const claims = await validClaimsFor(sessionId, { max_clients: 8 });
+    const token = await mintToken(claims);
+    let captured;
+    const fakeEnv = {
+      ...env,
+      SESSIONS: {
+        idFromName: () => "fake-durable-object-id",
+        get: () => ({
+          fetch: async (request) => {
+            captured = request;
+            return new Response(null, { status: 204 });
+          },
+        }),
+      },
+    };
+    const request = new Request(
+      `https://relay.example.com/v1/session/${sessionId}/entitlement?entitlement=query-secret`,
+      {
+        method: "POST",
+        headers: {
+          "X-Redline-Entitlement": token,
+          "X-Redline-Internal-Exp": "1",
+          "X-Redline-Internal-Max-Clients": "25",
+        },
+      },
+    );
+    expect((await worker.fetch(request, fakeEnv)).status).toBe(204);
+    expect(captured.headers.get("X-Redline-Entitlement")).toBeNull();
+    expect(new URL(captured.url).searchParams.get("entitlement")).toBeNull();
+    expect(captured.headers.get("X-Redline-Internal-Exp")).toBe(String(claims.exp));
+    expect(captured.headers.get("X-Redline-Internal-Max-Clients")).toBe("8");
+  });
+
   it("injects no internal claims for a client request, which presented none to verify", async () => {
     let captured;
     const fakeEnv = {
@@ -400,5 +481,118 @@ describe("entitlements: documented test vector", () => {
 
   it("computes the vector's sid from the vector's session id", async () => {
     expect(await sidForSession(TEST_VECTOR_SESSION_ID)).toBe(TEST_VECTOR_CLAIMS.sid);
+  });
+
+  it("contains every fixture literal verbatim in the public contract", async () => {
+    const doc = entitlementContract;
+    const claimsJSON = JSON.stringify(TEST_VECTOR_CLAIMS);
+    for (const literal of [
+      TEST_ISSUER_PRIVATE_KEY_PKCS8_B64,
+      TEST_ISSUER_PUBLIC_KEY_B64,
+      TEST_VECTOR_SESSION_ID,
+      TEST_VECTOR_CLAIMS.sid,
+      String(TEST_VECTOR_CLAIMS.exp),
+      String(TEST_VECTOR_CLAIMS.max_clients),
+      claimsJSON,
+      TEST_VECTOR_TOKEN,
+    ]) {
+      expect(doc).toContain(literal);
+    }
+    expect(doc).toContain("PKCS#8 private key");
+  });
+});
+
+describe("entitlements: durable session lifecycle and refresh", () => {
+  async function entitledSocket(sessionId, maxClients = 5, exp = Math.floor(Date.now() / 1000) + 3600) {
+    const token = await mintToken(await validClaimsFor(sessionId, { exp, max_clients: maxClients }));
+    const res = await connectAsHost(sessionId, token);
+    expect(res.status).toBe(101);
+    res.webSocket.accept();
+    return { socket: res.webSocket, token, exp };
+  }
+
+  function closeEvent(ws) {
+    return new Promise((resolve) => ws.addEventListener("close", resolve, { once: true }));
+  }
+
+  it("persists exactly verified exp and maxClients and schedules the expiry alarm", async () => {
+    const sessionId = "ent-storage-alarm-relaytest";
+    const { exp } = await entitledSocket(sessionId, 3);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    expect(await stub.debugStorageDump()).toEqual({ exp, maxClients: 3 });
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBe(exp * 1000);
+    });
+  });
+
+  it("enforces max_clients from the verified host token", async () => {
+    const sessionId = "ent-client-cap-relaytestpadding";
+    await entitledSocket(sessionId, 1);
+    const first = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(first.status).toBe(101);
+    first.webSocket.accept();
+    const second = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({ code: "too_many_clients" });
+  });
+
+  it("alarm closes host and clients with policy violation and clears state", async () => {
+    const sessionId = "ent-expiry-alarm-relaytest";
+    const { socket: host } = await entitledSocket(sessionId);
+    const clientRes = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(clientRes.status).toBe(101);
+    const client = clientRes.webSocket;
+    client.accept();
+    const closes = [closeEvent(host), closeEvent(client)];
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const events = await Promise.all(closes);
+    expect(events.map((event) => [event.code, event.reason])).toEqual([
+      [1008, "entitlement expired"],
+      [1008, "entitlement expired"],
+    ]);
+    expect(await stub.debugStorageDump()).toEqual({});
+  });
+
+  it("refresh updates claims and alarm without replacing sockets", async () => {
+    const sessionId = "ent-refresh-live-relaytest";
+    const { socket: host } = await entitledSocket(sessionId, 2);
+    const clientRes = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    const client = clientRes.webSocket;
+    client.accept();
+    const newExp = Math.floor(Date.now() / 1000) + 7200;
+    const token = await mintToken(await validClaimsFor(sessionId, { exp: newExp, max_clients: 4 }));
+    const refresh = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}/entitlement`, {
+      method: "POST",
+      headers: {
+        "X-Redline-Entitlement": token,
+        "X-Redline-Internal-Exp": "1",
+        "X-Redline-Internal-Max-Clients": "25",
+      },
+    });
+    expect(refresh.status).toBe(204);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    expect(await stub.debugStorageDump()).toEqual({ exp: newExp, maxClients: 4 });
+    client.send(new Uint8Array([9]));
+    expect((await new Promise((resolve) => host.addEventListener("message", (e) => resolve(new Uint8Array(e.data)), { once: true }))).slice(8)).toEqual(new Uint8Array([9]));
+  });
+
+  it("refresh returns structured 423 with no attached host", async () => {
+    const sessionId = "ent-refresh-nohost-relaytest";
+    const token = await mintToken(await validClaimsFor(sessionId));
+    const res = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}/entitlement`, {
+      method: "POST",
+      headers: { "X-Redline-Entitlement": token },
+    });
+    expect(res.status).toBe(423);
+    expect(await res.json()).toEqual({ code: "no_host" });
   });
 });

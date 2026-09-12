@@ -1,5 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { TEST_ISSUER_PUBLIC_KEY_B64 } from "./test/fixtures/entitlement-vector.js";
 
 // Two projects, because the two suites need genuinely different deployments:
 // the transport tests run an open relay so they can focus on forwarding, and
@@ -31,11 +32,18 @@ export default defineConfig({
               bindings: {
                 ALLOW_UNENTITLED: "false",
                 // Public half of the throwaway issuer keypair in the spec.
-                ENTITLEMENT_PUBLIC_KEY: "4guLn8Qk+4hhJCYiLZeX+sb2bv4vLMqtG73sqlqxyrA=",
+                ENTITLEMENT_PUBLIC_KEY: TEST_ISSUER_PUBLIC_KEY_B64,
               },
             },
           }),
         ],
+      },
+      {
+        test: {
+          name: "configuration",
+          environment: "node",
+          include: ["test/config.spec.js"],
+        },
       },
     ],
   },

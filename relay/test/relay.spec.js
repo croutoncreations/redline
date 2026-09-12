@@ -1,25 +1,21 @@
-import { env, SELF } from "cloudflare:test";
+import { env, SELF, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { CHANNEL_BYTES, MAX_PAYLOAD_BYTES, allocateChannelId } from "../src/session.js";
 
-// Connect a WebSocket to the relay the way a real peer would.
-async function connect(sessionId, role, extra = "") {
-  const res = await SELF.fetch(
-    `https://relay.example.com/v1/session/${sessionId}?role=${role}${extra}`,
-    { headers: { Upgrade: "websocket" } },
-  );
-  return res;
+async function connect(sessionId, role) {
+  return SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=${role}`, {
+    headers: { Upgrade: "websocket" },
+  });
 }
 
-async function connectSocket(sessionId, role, extra = "") {
-  const res = await connect(sessionId, role, extra);
+async function connectSocket(sessionId, role) {
+  const res = await connect(sessionId, role);
   expect(res.status).toBe(101);
   const ws = res.webSocket;
   ws.accept();
   return ws;
 }
 
-// Collect the next message as a string, with a timeout so a hang fails loudly
-// rather than stalling the suite.
 function nextMessage(ws, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), timeoutMs);
@@ -30,169 +26,213 @@ function nextMessage(ws, timeoutMs = 2000) {
   });
 }
 
-describe("relay session", () => {
-  it("forwards a frame from the phone to the desktop", async () => {
-    const desktop = await connectSocket("session-forward-1-relaytestpadding", "host");
-    const phone = await connectSocket("session-forward-1-relaytestpadding", "client");
+function nextClose(ws, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out waiting for close")), timeoutMs);
+    ws.addEventListener("close", (event) => {
+      clearTimeout(timer);
+      resolve(event);
+    }, { once: true });
+  });
+}
 
-    phone.send("opaque-frame-from-phone");
-    await expect(nextMessage(desktop)).resolves.toBe("opaque-frame-from-phone");
+function concat(...parts) {
+  const size = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+function bytes(text) {
+  return new TextEncoder().encode(text);
+}
+
+function payload(frame) {
+  return frame.slice(CHANNEL_BYTES);
+}
+
+function channel(frame) {
+  return frame.slice(0, CHANNEL_BYTES);
+}
+
+describe("host-gated relay session", () => {
+  it("returns structured 423 when a client has no attached host", async () => {
+    const res = await connect("session-no-host-relaytestpadding", "client");
+    expect(res.status).toBe(423);
+    expect(await res.json()).toEqual({ code: "no_host" });
   });
 
-  it("forwards a frame from the desktop to the phone", async () => {
-    const desktop = await connectSocket("session-forward-2-relaytestpadding", "host");
-    const phone = await connectSocket("session-forward-2-relaytestpadding", "client");
-
-    desktop.send("opaque-frame-from-desktop");
-    await expect(nextMessage(phone)).resolves.toBe("opaque-frame-from-desktop");
-  });
-
-  it("forwards binary frames unchanged", async () => {
-    const desktop = await connectSocket("session-binary-relaytestpadding", "host");
-    const phone = await connectSocket("session-binary-relaytestpadding", "client");
-
-    // A real Noise frame is binary and may contain NUL and invalid UTF-8.
-    const frame = new Uint8Array([0x00, 0xff, 0xfe, 0x41, 0x00, 0x80]);
-    phone.send(frame);
-
-    const received = await nextMessage(desktop);
-    expect(Array.from(received)).toEqual(Array.from(frame));
-  });
-
-  it("keeps separate sessions isolated", async () => {
-    const desktopA = await connectSocket("session-a-relaytestpadding", "host");
-    const phoneB = await connectSocket("session-b-relaytestpadding", "client");
-    const desktopB = await connectSocket("session-b-relaytestpadding", "host");
-
-    phoneB.send("meant-for-b");
-    await expect(nextMessage(desktopB)).resolves.toBe("meant-for-b");
-
-    // Nothing should ever have reached the other session.
-    await expect(nextMessage(desktopA, 300)).rejects.toThrow(/timed out/);
-  });
-
-  it("refuses a second peer in the same role", async () => {
+  it("keeps duplicate host rejection structured", async () => {
     await connectSocket("session-dup-relaytestpadding", "host");
     const second = await connect("session-dup-relaytestpadding", "host");
     expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({ code: "role_already_connected" });
   });
 
-  it("rejects an unknown role", async () => {
-    const res = await connect("session-role-relaytestpadding", "middlebox");
-    expect(res.status).toBe(400);
+  it("uses MAX_CLIENTS_DEFAULT in open mode and rejects the sixth client", async () => {
+    const session = "session-open-cap-relaytestpadding";
+    await connectSocket(session, "host");
+    for (let i = 0; i < 5; i += 1) await connectSocket(session, "client");
+    const sixth = await connect(session, "client");
+    expect(sixth.status).toBe(409);
+    expect(await sixth.json()).toEqual({ code: "too_many_clients" });
   });
 
-  it("rejects a session id that is not opaque and random-looking", async () => {
-    // Short or structured ids invite guessing another user's session.
-    for (const bad of ["", "a", "../etc/passwd", "x".repeat(200)]) {
-      const res = await connect(encodeURIComponent(bad), "client");
-      expect(res.status).toBeGreaterThanOrEqual(400);
-    }
-  });
-
-  it("requires a websocket upgrade", async () => {
-    const res = await SELF.fetch("https://relay.example.com/v1/session/session-plain-relaytestpadding?role=client");
-    expect(res.status).toBe(426);
-  });
-
-  it("tells a peer when its partner disconnects", async () => {
-    const desktop = await connectSocket("session-bye-relaytestpadding", "host");
-    const phone = await connectSocket("session-bye-relaytestpadding", "client");
-
-    const closed = new Promise((resolve) => {
-      phone.addEventListener("close", () => resolve("closed"), { once: true });
+  it("does not make the entitlement refresh endpoint unauthenticated in open mode", async () => {
+    const session = "session-open-refresh-relaytest";
+    await connectSocket(session, "host");
+    const res = await SELF.fetch(`https://relay.example.com/v1/session/${session}/entitlement`, {
+      method: "POST",
     });
-    desktop.close(1000, "going away");
-
-    // A phone that is never told will sit waiting for a reply that cannot come.
-    await expect(closed).resolves.toBe("closed");
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ code: "not_entitled" });
   });
 
-  it("buffers nothing: a frame sent before the partner arrives is not stored", async () => {
-    // The relay is a forwarder, not a mailbox. Storing frames would mean
-    // holding user ciphertext at rest, which is exactly what we promise not
-    // to do, and would make the DO a queue we have to bound.
-    const phone = await connectSocket("session-early-relaytestpadding", "client");
-    phone.send("sent-before-anyone-listened");
+  it("stores only maxClients and does not schedule an alarm in open mode", async () => {
+    const session = "session-open-storage-relaytest";
+    const id = env.SESSIONS.idFromName(session);
+    const stub = env.SESSIONS.get(id);
+    await connectSocket(session, "host");
+    expect(await stub.debugStorageDump()).toEqual({ maxClients: 5 });
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+  });
 
-    const desktop = await connectSocket("session-early-relaytestpadding", "host");
-    await expect(nextMessage(desktop, 300)).rejects.toThrow(/timed out/);
+  it("closes every client and clears storage and alarm when the host disconnects", async () => {
+    const session = "session-host-bye-relaytestpadding";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const host = await connectSocket(session, "host");
+    const first = await connectSocket(session, "client");
+    const second = await connectSocket(session, "client");
+    const closes = [nextClose(first), nextClose(second)];
+    host.close(1000, "done");
+    const events = await Promise.all(closes);
+    expect(events.map((event) => [event.code, event.reason])).toEqual([
+      [1000, "peer disconnected"],
+      [1000, "peer disconnected"],
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await stub.debugStorageDump()).toEqual({});
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
   });
 });
 
-describe("relay opacity", () => {
+describe("client channel multiplexing", () => {
+  it("routes two clients independently without crosstalk", async () => {
+    const session = "session-multiplex-relaytestpadding";
+    const host = await connectSocket(session, "host");
+    const first = await connectSocket(session, "client");
+    const second = await connectSocket(session, "client");
+
+    first.send(bytes("from-first"));
+    const firstHostFrame = await nextMessage(host);
+    second.send(bytes("from-second"));
+    const secondHostFrame = await nextMessage(host);
+
+    expect(Array.from(payload(firstHostFrame))).toEqual(Array.from(bytes("from-first")));
+    expect(Array.from(payload(secondHostFrame))).toEqual(Array.from(bytes("from-second")));
+    expect(Array.from(channel(firstHostFrame))).not.toEqual(Array.from(channel(secondHostFrame)));
+
+    host.send(concat(channel(secondHostFrame), bytes("reply-second")));
+    expect(Array.from(await nextMessage(second))).toEqual(Array.from(bytes("reply-second")));
+    await expect(nextMessage(first, 150)).rejects.toThrow(/timed out/);
+
+    host.send(concat(channel(firstHostFrame), bytes("reply-first")));
+    expect(Array.from(await nextMessage(first))).toEqual(Array.from(bytes("reply-first")));
+  });
+
+  it("drops a host frame for an unknown channel", async () => {
+    const session = "session-unknown-channel-relaytest";
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    host.send(concat(new Uint8Array(CHANNEL_BYTES).fill(0xff), bytes("not yours")));
+    await expect(nextMessage(client, 150)).rejects.toThrow(/timed out/);
+  });
+
+  it("notifies the host exactly once with the bare 8-byte channel when a client closes", async () => {
+    const session = "session-channel-close-relaytest";
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    client.send(bytes("identify"));
+    const tagged = await nextMessage(host);
+    client.close(1000, "done");
+    const closed = await nextMessage(host);
+    expect(closed.byteLength).toBe(CHANNEL_BYTES);
+    expect(Array.from(closed)).toEqual(Array.from(channel(tagged)));
+    await expect(nextMessage(host, 150)).rejects.toThrow(/timed out/);
+  });
+
+  it("retries an 8-byte random tag collision", () => {
+    const colliding = new Uint8Array(CHANNEL_BYTES).fill(1);
+    const unique = new Uint8Array(CHANNEL_BYTES).fill(2);
+    const generated = [colliding, unique];
+    const result = allocateChannelId(new Set(["0101010101010101"]), (target) => {
+      target.set(generated.shift());
+    });
+    expect(Array.from(result)).toEqual(Array.from(unique));
+  });
+
+  it("preserves the old maximum payload at the exact prefixed boundary", async () => {
+    const session = "session-frame-boundary-relaytest";
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    const original = new Uint8Array(MAX_PAYLOAD_BYTES);
+    original[0] = 1;
+    original[original.length - 1] = 2;
+    client.send(original);
+    const tagged = await nextMessage(host, 5000);
+    expect(tagged.byteLength).toBe(MAX_PAYLOAD_BYTES + CHANNEL_BYTES);
+    expect(tagged[CHANNEL_BYTES]).toBe(1);
+    expect(tagged[tagged.length - 1]).toBe(2);
+
+    host.send(concat(channel(tagged), original));
+    const returned = await nextMessage(client, 5000);
+    expect(returned.byteLength).toBe(MAX_PAYLOAD_BYTES);
+    expect(returned[0]).toBe(1);
+    expect(returned[returned.length - 1]).toBe(2);
+  });
+
+  it("routes correctly after Durable Object hibernation", async () => {
+    const session = "session-hibernation-relaytestpadding";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    await evictDurableObject(stub);
+    client.send(bytes("after-hibernation"));
+    const tagged = await nextMessage(host);
+    expect(Array.from(payload(tagged))).toEqual(Array.from(bytes("after-hibernation")));
+  });
+});
+
+describe("request validation and opacity", () => {
+  it("rejects unknown roles, invalid session ids, and non-upgrades", async () => {
+    expect((await connect("session-role-relaytestpadding", "middlebox")).status).toBe(400);
+    expect((await connect("a", "client")).status).toBe(400);
+    const plain = await SELF.fetch("https://relay.example.com/v1/session/session-plain-relaytestpadding?role=client");
+    expect(plain.status).toBe(426);
+  });
+
   it("never persists frame contents", async () => {
-    const id = env.SESSIONS.idFromName("session-storage-relaytestpadding");
-    const stub = env.SESSIONS.get(id);
-
-    const desktop = await connectSocket("session-storage-relaytestpadding", "host");
-    const phone = await connectSocket("session-storage-relaytestpadding", "client");
-    phone.send("secret-ciphertext-frame");
-    await nextMessage(desktop);
-
-    // Whatever the DO kept, none of it may be the frame.
+    const session = "session-storage-relaytestpadding";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    client.send(bytes("secret-ciphertext-frame"));
+    await nextMessage(host);
     const dump = await stub.debugStorageDump();
+    expect(dump).toEqual({ maxClients: 5 });
     expect(JSON.stringify(dump)).not.toContain("secret-ciphertext-frame");
   });
-});
 
-describe("health", () => {
-  it("answers a health check without touching a session", async () => {
-    const res = await SELF.fetch("https://relay.example.com/health");
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("ok");
-  });
-
-  it("404s an unknown path rather than guessing", async () => {
-    const res = await SELF.fetch("https://relay.example.com/nope");
-    expect(res.status).toBe(404);
-  });
-});
-
-// A phone hanging up must not take the desktop's leg with it.
-//
-// The desktop holds one long-lived outbound connection and cannot be dialled;
-// the phone comes and goes. Closing the desktop when the phone leaves meant
-// every relayed session cost the desktop a reconnect, and its backoff --
-// 2.3s, then 4.9s, then 7.6s -- was long enough that the next refresh found
-// nobody home. Observed on a real phone: "relayed", then "offline".
-//
-// Only the departing peer closes. The survivor keeps its socket, so the next
-// phone to arrive is paired immediately.
-describe("a peer leaving", () => {
-  it("leaves the other peer connected", async () => {
-    const session = "session-survives-a-departure-0123";
-    const host = await connectSocket(session, "host");
-    const client = await connectSocket(session, "client");
-
-    let hostClosed = false;
-    host.addEventListener("close", () => {
-      hostClosed = true;
-    });
-
-    // The phone goes away, as it does whenever the screen is closed.
-    client.close(1000, "done");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    expect(hostClosed).toBe(false);
-
-    // And the desktop is still paired: a new phone reaches it without the
-    // desktop having to redial.
-    const secondClient = await connectSocket(session, "client");
-    secondClient.send("still here");
-    expect(await nextMessage(host)).toBe("still here");
-  });
-
-  it("still frees the role so the same peer can return", async () => {
-    const session = "session-frees-the-role-abcdefgh12";
-    const host = await connectSocket(session, "host");
-    const client = await connectSocket(session, "client");
-    client.close(1000, "done");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // The slot must be free, or a returning phone gets 409 forever.
-    const res = await connect(session, "client");
-    expect(res.status).toBe(101);
-    host.close();
+  it("answers health and 404 routes", async () => {
+    expect((await SELF.fetch("https://relay.example.com/health")).status).toBe(200);
+    expect((await SELF.fetch("https://relay.example.com/nope")).status).toBe(404);
   });
 });

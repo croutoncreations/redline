@@ -112,40 +112,65 @@ bodies:
 |--------|--------------------|--------------------------------------------------------------------------|
 | 402    | `not_entitled`     | Missing token, malformed token, bad signature, expired, or an out-of-range/missing claim. |
 | 402    | `different_session`| Validly signed token whose `sid` names a different session.           |
-| 409    | `too_many_clients` | (Phase 1.2/1.3) `role=client` when the session is already at `max_clients`. |
-| 423    | `no_host`          | (Phase 1.2/1.3) `role=client` when no host is attached to the session. |
+| 409    | `too_many_clients` | `role=client` when the session is already at `max_clients`. |
+| 423    | `no_host`          | `role=client` when no host is attached to the session. |
+
+A duplicate host receives `409 {"code":"role_already_connected"}`.
 
 Close code `1008` with reason `entitlement expired` is sent to the host and
-every attached client when a Durable Object alarm fires at the stored `exp`
-(Phase 1.2/1.3; not yet implemented as of this contract's introduction).
+every attached client when a Durable Object alarm fires at the stored `exp`.
+Host disconnect instead closes all clients with `1000 peer disconnected` and
+clears the stored claims and alarm.
 
 `402` rather than `401` for every entitlement failure: nothing is wrong with
 the caller's identity — there is no identity here to be wrong about — the
 caller simply is not entitled to relay this session.
 
-## Issuer HTTP API
+## Implemented relay refresh endpoint
 
-The issuer is a separate service (`redline-issuer`, a private repository;
-see `docs/handoff-relay-launch-prompt.md` Phase 5 for the full contract). The
-relay never calls the issuer and never looks anything up; it only verifies
-signatures against `env.ENTITLEMENT_PUBLIC_KEY`. The issuer's role, for
-context:
+`POST /v1/session/{session_id}/entitlement` is implemented by this relay. It
+requires `X-Redline-Entitlement: <token>`, applies the same signature, claim,
+and `sid` checks as host admission, and returns `204` after replacing the live
+session's stored `{exp, maxClients}` and rescheduling its alarm. The host and
+all clients remain attached and in-flight traffic is not interrupted. With no
+attached host it returns `423 {"code":"no_host"}`. The boundary strips the
+credential, query fallback, and forged internal headers before forwarding.
 
-- `POST /v1/entitlement { license_key, sid, label? }` → `200 { token, exp, max_clients, seats, seats_used }`,
-  `401` unknown key, `402` subscription lapsed, `409 { activations }` seats
-  exhausted.
-- `GET /v1/activations`, `DELETE /v1/activations/{id}` — license key in the
-  `Authorization` header.
-- `POST /v1/portal` — creates a fresh, short-lived Customer Portal URL;
-  never cached.
+## Future issuer HTTP API contract
 
-The relay's authenticated host control endpoint,
-`POST /v1/session/{session_id}/entitlement`, lets a renewed token update a
-live session's stored `{exp, maxClients}` and reschedule its alarm without
-disturbing the host socket or any attached clients. It uses the exact same
-verification and `sid`-binding rules as the initial `role=host` connection
-described above. (Phase 1.2/1.3; not yet implemented as of this contract's
-introduction.)
+The issuer is a separate service planned for the private `redline-issuer`
+repository; it is **not implemented here**. The relay never calls it and never
+looks anything up. The future issuer API base is
+`https://redline.croutoncreations.com/api`; paths below are relative to it.
+
+Entitlement creation puts the license key in JSON because this is also the
+Mac activation operation:
+
+```http
+POST /v1/entitlement
+Content-Type: application/json
+
+{"license_key":"rl_live_…","sid":"<base64url sha256>","label":"Studio Mac"}
+```
+
+`label` is optional. Success is
+`200 {"token":"<signed token>","exp":<unix seconds>,"max_clients":5,"seats":<integer>,"seats_used":<integer>}`.
+An unknown key returns `401`; a lapsed subscription returns `402`; exhausted
+seats return `409 {"activations":[{"label":"Studio Mac","first_seen":"<RFC3339 timestamp>"}]}`.
+
+The remaining calls authenticate with exactly
+`Authorization: Bearer <license_key>`:
+
+- `GET /v1/activations` returns
+  `200 {"activations":[{"id":"<opaque id>","label":"Studio Mac","first_seen":"<RFC3339 timestamp>","current":true}]}`.
+- `DELETE /v1/activations/{id}` removes that activation and returns `204`.
+- `POST /v1/portal` has no request body and returns
+  `200 {"url":"https://<short-lived-customer-portal-url>"}`. A portal URL is
+  created for each request and must never be cached in an entitlement response.
+
+The issuer signs `{exp, sid, max_clients}` and currently sets `max_clients` to
+`5`. Its complete future payment, activation, recovery, and key-rotation
+contract is in `docs/handoff-relay-launch-prompt.md` Phase 5.
 
 ## Test vector
 
@@ -159,7 +184,7 @@ document must change in the same commit.
 
 **Never reuse this keypair or token for anything real.**
 
-Ed25519 seed / PKCS8 private key (base64, never deployed anywhere):
+PKCS#8 private key (base64 DER containing the fixed Ed25519 seed; never deployed anywhere):
 
 ```
 MC4CAQAwBQYDK2VwBCIEIHvMpD0g16iN/YS6HjsejaiLRihmf/MVCJUTVHUwNhnC
