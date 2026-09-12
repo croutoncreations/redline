@@ -545,6 +545,10 @@ func TestEntitlementCacheRejectsMalformedOrFutureCacheReplacement(t *testing.T) 
 		raw  string
 	}{
 		{"malformed v2", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":"bad","exp":1,"obtained_at":1,"sid":%q}`, fingerprint, sid) + "\n"},
+		{"v2 explicit null token", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":null,"exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
+		{"v2 explicit null revoked", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked":null,"token":"bad","exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
+		{"v2 omitted token", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
+		{"v2 explicit false revoked", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked":false,"token":"bad","exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
 		{"future schema", fmt.Sprintf(`{"schema_version":4,"credential_fingerprint":%q,"revoked":true,"revoked_at":%d}`, fingerprint, now.Unix()) + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -561,6 +565,123 @@ func TestEntitlementCacheRejectsMalformedOrFutureCacheReplacement(t *testing.T) 
 				t.Fatalf("unsafe cache changed to %q, err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestEntitlementRevocationStorePersistsClosedMarkerBesideCache(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	directory := t.TempDir()
+	cachePath := filepath.Join(directory, "relay-entitlement.json")
+	markerPath := DefaultEntitlementRevocationPath(cachePath)
+	fingerprint := CredentialFingerprint("revoked-license")
+	store := NewEntitlementRevocationStore(markerPath)
+	marker := EntitlementRevocation{
+		SchemaVersion:         EntitlementRevocationSchemaVersion,
+		CredentialFingerprint: fingerprint,
+		RevokedAt:             now.Unix(),
+	}
+	if err := store.SaveContext(context.Background(), marker); err != nil {
+		t.Fatal(err)
+	}
+	got, exists, err := store.Load()
+	if err != nil || !exists || got != marker {
+		t.Fatalf("marker=%#v exists=%v err=%v", got, exists, err)
+	}
+	raw, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if len(shape) != 3 || shape["schema_version"] != float64(EntitlementRevocationSchemaVersion) || shape["credential_fingerprint"] != fingerprint || shape["revoked_at"] != float64(now.Unix()) {
+		t.Fatalf("marker schema=%v", shape)
+	}
+	if strings.Contains(string(raw), "token") || strings.Contains(string(raw), "revoked-license") {
+		t.Fatalf("marker retained authority or credential: %s", raw)
+	}
+	info, err := os.Stat(markerPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("marker mode=%v err=%v", info.Mode().Perm(), err)
+	}
+	if err := store.ClearContext(context.Background(), fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := store.Load(); err != nil || exists {
+		t.Fatalf("cleared marker exists=%v err=%v", exists, err)
+	}
+}
+
+func TestEntitlementRevocationStoreUsesIndependentLockFromCache(t *testing.T) {
+	directory := t.TempDir()
+	cache := NewEntitlementCacheStore(filepath.Join(directory, "relay-entitlement.json"))
+	markerStore := NewEntitlementRevocationStore(DefaultEntitlementRevocationPath(cache.path))
+	if err := cache.lock.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer cache.lock.release()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	marker := EntitlementRevocation{
+		SchemaVersion:         EntitlementRevocationSchemaVersion,
+		CredentialFingerprint: CredentialFingerprint("independent-lock-license"),
+		RevokedAt:             time.Now().Unix(),
+	}
+	if err := markerStore.SaveContext(ctx, marker); err != nil {
+		t.Fatalf("cache lock delayed independent marker: %v", err)
+	}
+}
+
+func TestEntitlementRevocationClearSyncFailureRestoresFailClosedMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
+	store := NewEntitlementRevocationStore(path)
+	marker := EntitlementRevocation{
+		SchemaVersion:         EntitlementRevocationSchemaVersion,
+		CredentialFingerprint: CredentialFingerprint("clear-sync-license"),
+		RevokedAt:             time.Now().Unix(),
+	}
+	if err := store.SaveContext(context.Background(), marker); err != nil {
+		t.Fatal(err)
+	}
+	originalSync := entitlementCacheDirectorySync
+	defer func() { entitlementCacheDirectorySync = originalSync }()
+	calls := 0
+	entitlementCacheDirectorySync = func(directory *os.File) error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected clear sync failure")
+		}
+		return originalSync(directory)
+	}
+	if err := store.ClearContext(context.Background(), marker.CredentialFingerprint); err == nil {
+		t.Fatal("clear unexpectedly reported durable")
+	}
+	got, exists, err := store.Load()
+	if err != nil || !exists || got != marker {
+		t.Fatalf("failed clear did not restore marker: %#v exists=%v err=%v", got, exists, err)
+	}
+	if err := store.ClearContext(context.Background(), marker.CredentialFingerprint); err != nil {
+		t.Fatalf("clear retry: %v", err)
+	}
+}
+
+func TestEntitlementRevocationStoreRejectsNonCanonicalShapes(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second).Unix()
+	fingerprint := CredentialFingerprint("strict-marker-license")
+	for _, raw := range []string{
+		fmt.Sprintf(`{"schema_version":1,"credential_fingerprint":%q,"revoked_at":null}`, fingerprint),
+		fmt.Sprintf(`{"schema_version":1,"credential_fingerprint":%q}`, fingerprint),
+		fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked_at":%d}`, fingerprint, now),
+		fmt.Sprintf(`{"schema_version":1,"credential_fingerprint":%q,"revoked_at":%d,"token":"x"}`, fingerprint, now),
+	} {
+		path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
+		if err := os.WriteFile(path, []byte(raw+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists, err := NewEntitlementRevocationStore(path).Load(); err == nil || exists {
+			t.Fatalf("unsafe marker accepted: %s", raw)
+		}
 	}
 }
 

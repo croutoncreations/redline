@@ -137,36 +137,39 @@ extends the original five authority fields (`token`, `exp`, `obtained_at`,
 it binds authority to one credential replacement without storing a reversible
 key. This is an intentional deviation from the original five-field schema.
 Legacy/unversioned records, fingerprint mismatches, unknown fields, omitted
-required fields, and fields from the wrong record variant all fail closed for
-authority. Under the cache lock, Save recognizes a structurally valid schema-v2
-record as replaceable legacy so newly issuer-accepted schema-v3 authority or a
-schema-v3 terminal tombstone can migrate it. Malformed schema-v2 and unknown
-future-schema records remain fail-closed and nonreplaceable.
+required fields, explicit `null`, and fields from the wrong record variant all
+fail closed for authority. Under the cache lock, Save recognizes only an exact
+shape that the schema-v2 serializer could have produced as replaceable legacy.
+Malformed schema-v2 and unknown future-schema records remain fail-closed and
+nonreplaceable. Existing schema-v3 cache tombstones are still read fail-closed
+for compatibility, but the controller no longer writes or queues tombstones.
 
-Terminal `invalid_key`, `lapsed`, and `no_seat` decisions replace authority with
-`{"schema_version":3,"credential_fingerprint":"…","revoked":true,"revoked_at":<unix-seconds>}`.
-A tombstone contains no authority fields, including no empty `token`. Under the
-cache file lock, `obtained_at` versions authority and `revoked_at` versions a
-tombstone for the same credential fingerprint. Authority obtained before or at
-the revocation second cannot replace that tombstone, even from another process;
-issuer-accepted authority obtained after revocation can replace it. A tombstone
-wins a tie with authority. Even when this monotonic comparison makes an equal or
-newer existing record a no-op, Save syncs the parent directory before reporting
-success. This lets a retry complete durability after a prior rename succeeded
-but its directory sync failed.
+Terminal `invalid_key`, `lapsed`, and `no_seat` decisions instead write
+`relay-entitlement-revocation.json` beside the cache. Its closed schema is
+`{"schema_version":1,"credential_fingerprint":"…","revoked_at":<unix-seconds>}`;
+it contains neither a token nor a reversible credential. It has the same 0600,
+owner, no-follow, atomic replacement, inter-process locking, and parent-directory
+fsync guarantees as the cache, but uses its own path and lock. Runtime authority
+is revoked immediately and this independent high-priority writer is not queued
+behind cache I/O.
 
-Cache saves and revocations share the controller's latest-value persistence
-stream, so a revocation follows an already in-flight save and obsolete
-completion cannot clear a newer persistence warning. Runtime authority is
-revoked immediately. On shutdown, a distinct bounded barrier survives parent
-cancellation long enough to drain an obsolete in-flight save and persist the
-latest terminal tombstone. `persistence_degraded` remains the sanitized signal
-until that barrier succeeds; timeout or I/O failure leaves it set. The drain
-deadline bounds `Run` even if `SaveContext` is stuck in an OS sync syscall that
-cannot be canceled. Such a worker goroutine may remain until that syscall
-returns (or process exit); its channels are intentionally left open so a late
-return cannot panic. The cache therefore remains a fallback rather than a source
-that can overrule a fresh issuer decision.
+Startup loads the Keychain credential, derives its fingerprint, and checks the
+marker before considering cache authority. A matching marker always wins,
+including when an obsolete cache rename becomes visible after the marker. A
+marker for a replaced credential does not affect the new fingerprint. This
+separate marker and its precedence are intentional deviations from the original
+single five-field cache design.
+
+Only authority newly accepted by the relay may supersede a matching marker. The
+controller first makes the accepted authority cache durable and only then clears
+the marker durably. A clear failure leaves safe in-memory authority active but
+keeps `persistence_degraded` visible and the marker restart-fail-closed. Terminal
+marker failures also keep `persistence_degraded` set. On shutdown, a bounded,
+parent-cancellation-independent marker barrier consumes and retries even a
+failure result buffered before the main loop observed it. Old cache I/O is
+canceled separately; a syscall that cannot observe cancellation may return
+after `Run`, but cannot overwrite the independent marker or become the final
+restart authority decision.
 
 ## Implemented relay refresh endpoint
 

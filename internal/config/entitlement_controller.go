@@ -28,6 +28,22 @@ type entitlementCache interface {
 	SaveContext(context.Context, relay.CachedEntitlement) error
 }
 
+type entitlementRevocations interface {
+	Load() (relay.EntitlementRevocation, bool, error)
+	SaveContext(context.Context, relay.EntitlementRevocation) error
+	ClearContext(context.Context, string) error
+}
+
+type noopEntitlementRevocations struct{}
+
+func (noopEntitlementRevocations) Load() (relay.EntitlementRevocation, bool, error) {
+	return relay.EntitlementRevocation{}, false, nil
+}
+func (noopEntitlementRevocations) SaveContext(context.Context, relay.EntitlementRevocation) error {
+	return nil
+}
+func (noopEntitlementRevocations) ClearContext(context.Context, string) error { return nil }
+
 type entitlementTimer interface {
 	C() <-chan time.Time
 	Stop() bool
@@ -57,12 +73,13 @@ type EntitlementControllerOptions struct {
 	Licenses    LicenseStore
 	Issuer      entitlementIssuer
 	Cache       entitlementCache
+	Revocations entitlementRevocations
 	RelayHTTP   *http.Client
 	Clock       entitlementClock
 	ExpiryClock entitlementClock
 	Jitter      func() float64
 	// PersistenceDrainTimeout bounds persistence-worker shutdown, including
-	// terminal tombstone durability. The barrier is independent of parent
+	// terminal revocation-marker durability. The barrier is independent of parent
 	// cancellation, but cannot cancel an OS syscall already in progress.
 	PersistenceDrainTimeout time.Duration
 	Refresh                 func(context.Context, *http.Client, string, string, relay.Secret) error
@@ -108,8 +125,8 @@ type entitlementPersistenceWorker struct {
 
 func newEntitlementPersistenceWorker(cache entitlementCache) *entitlementPersistenceWorker {
 	// Best-effort authority caching is canceled explicitly by shutdown. It is
-	// not parent-bound because a queued terminal tombstone must be able to drain
-	// after Run's parent has already been canceled.
+	// not parent-bound so cancellation ordering remains separate from the
+	// high-priority revocation marker barrier.
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := &entitlementPersistenceWorker{
 		ctx: ctx, cancel: cancel,
@@ -163,6 +180,11 @@ func (w *entitlementPersistenceWorker) retry(generation uint64) {
 	w.submit(w.latest.cached, generation)
 }
 
+func (w *entitlementPersistenceWorker) discard() {
+	w.latest = entitlementPersistenceRequest{version: w.latest.version + 1}
+	w.needsRetry = false
+}
+
 func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout time.Duration) *entitlementPersistenceResult {
 	// The barrier intentionally survives parent cancellation. Its deadline also
 	// bounds waiting for worker exit: SaveContext normally observes cancellation,
@@ -209,6 +231,148 @@ func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout 
 	}
 }
 
+type entitlementRevocationRequest struct {
+	marker     relay.EntitlementRevocation
+	clear      bool
+	generation uint64
+	version    uint64
+}
+
+type entitlementRevocationResult struct {
+	request entitlementRevocationRequest
+	err     error
+}
+
+type entitlementRevocationWorker struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	requests chan entitlementRevocationRequest
+	results  chan entitlementRevocationResult
+	done     chan struct{}
+
+	latest           entitlementRevocationRequest
+	completedVersion uint64
+	needsRetry       bool
+}
+
+func newEntitlementRevocationWorker(store entitlementRevocations) *entitlementRevocationWorker {
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := &entitlementRevocationWorker{
+		ctx: ctx, cancel: cancel,
+		requests: make(chan entitlementRevocationRequest, 1),
+		results:  make(chan entitlementRevocationResult, 1),
+		done:     make(chan struct{}),
+	}
+	go func() {
+		defer close(worker.done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case request := <-worker.requests:
+				var err error
+				if request.clear {
+					err = store.ClearContext(ctx, request.marker.CredentialFingerprint)
+				} else {
+					err = store.SaveContext(ctx, request.marker)
+				}
+				select {
+				case worker.results <- entitlementRevocationResult{request: request, err: err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return worker
+}
+
+func (w *entitlementRevocationWorker) submit(request entitlementRevocationRequest) {
+	request.version = w.latest.version + 1
+	w.latest = request
+	w.needsRetry = false
+	select {
+	case w.requests <- request:
+		return
+	default:
+	}
+	select {
+	case <-w.requests:
+	default:
+	}
+	select {
+	case w.requests <- request:
+	default:
+	}
+}
+
+func (w *entitlementRevocationWorker) save(marker relay.EntitlementRevocation, generation uint64) {
+	w.submit(entitlementRevocationRequest{marker: marker, generation: generation})
+}
+
+func (w *entitlementRevocationWorker) clear(fingerprint string, generation uint64) {
+	w.submit(entitlementRevocationRequest{
+		marker: relay.EntitlementRevocation{CredentialFingerprint: fingerprint},
+		clear:  true, generation: generation,
+	})
+}
+
+func (w *entitlementRevocationWorker) retry(generation uint64) {
+	if !w.needsRetry || w.latest.generation != generation {
+		return
+	}
+	request := w.latest
+	w.submit(request)
+}
+
+// shutdown is the terminal marker durability barrier. It consumes and retries
+// a failed result even when Run returned before observing that buffered result.
+func (w *entitlementRevocationWorker) shutdown(parent context.Context, timeout time.Duration) *entitlementRevocationResult {
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	defer cancel()
+	stopAndWait := func() {
+		w.cancel()
+		select {
+		case <-w.done:
+		case <-drainCtx.Done():
+		}
+	}
+	if w.latest.version == 0 {
+		stopAndWait()
+		return nil
+	}
+	targetVersion := w.latest.version
+	if w.completedVersion >= targetVersion && !w.needsRetry {
+		stopAndWait()
+		return nil
+	}
+	if w.needsRetry {
+		w.retry(w.latest.generation)
+		targetVersion = w.latest.version
+	}
+	for {
+		select {
+		case result := <-w.results:
+			if result.request.version != targetVersion {
+				continue
+			}
+			if result.err != nil {
+				w.needsRetry = true
+				w.retry(result.request.generation)
+				targetVersion = w.latest.version
+				continue
+			}
+			stopAndWait()
+			return &result
+		case <-drainCtx.Done():
+			w.cancel()
+			return nil
+		case <-w.done:
+			return nil
+		}
+	}
+}
+
 // EntitlementController is the sole writer of hosted runtime entitlement
 // state. Its public triggers are narrow lifecycle seams for the future local
 // management API; this phase intentionally does not expose that API or UI.
@@ -240,6 +404,9 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 	}
 	if opts.Jitter == nil {
 		opts.Jitter = rand.Float64
+	}
+	if opts.Revocations == nil {
+		opts.Revocations = noopEntitlementRevocations{}
 	}
 	if opts.PersistenceDrainTimeout <= 0 {
 		opts.PersistenceDrainTimeout = defaultPersistenceDrainTimeout
@@ -395,7 +562,9 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		credentialFingerprint = relay.CredentialFingerprint(license)
 	}
 	now = c.opts.Clock.Now()
-	if credentialFingerprint != "" && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
+	marker, markerExists, markerErr := c.opts.Revocations.Load()
+	markerBlocksCache := markerErr != nil || (markerExists && marker.CredentialFingerprint == credentialFingerprint)
+	if credentialFingerprint != "" && !markerBlocksCache && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
 		current, valid, _ = c.opts.Cache.Load(sid, credentialFingerprint, now)
 		if valid {
 			c.mu.Lock()
@@ -414,10 +583,21 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	retry := initialEntitlementRetry
 	authorityGeneration := startupGeneration
 	persistence := newEntitlementPersistenceWorker(c.opts.Cache)
+	revocationPersistence := newEntitlementRevocationWorker(c.opts.Revocations)
 	defer func() {
-		if result := persistence.shutdown(ctx, c.opts.PersistenceDrainTimeout); result != nil {
-			c.applyPersistenceResult(result.request.generation, &base, &current, authorityGeneration, persistence, *result)
+		// Cancel old authority I/O before entering the independent marker barrier.
+		// Both workers share one shutdown budget, but blocked cache I/O cannot
+		// consume time before the marker gets its durability opportunity.
+		persistence.cancel()
+		started := time.Now()
+		if result := revocationPersistence.shutdown(ctx, c.opts.PersistenceDrainTimeout); result != nil {
+			c.applyRevocationResult(result.request.generation, &base, &current, authorityGeneration, revocationPersistence, *result)
 		}
+		remaining := c.opts.PersistenceDrainTimeout - time.Since(started)
+		if remaining < 0 {
+			remaining = 0
+		}
+		_ = persistence.shutdown(ctx, remaining)
 	}()
 	for {
 		generation := c.generation()
@@ -428,11 +608,12 @@ func (c *EntitlementController) Run(ctx context.Context) {
 			base.PersistenceDegraded = false
 		}
 		persistence.retry(generation)
+		revocationPersistence.retry(generation)
 		attemptCtx, cancelAttempt := c.startAttempt(ctx, generation)
 		c.mu.Lock()
 		attemptRelaySequence := c.relayAttemptSequence
 		c.mu.Unlock()
-		delay, terminal := c.renew(attemptCtx, generation, attemptRelaySequence, &license, &licenseErr, &licenseLoaded, &base, &current, &credentialFingerprint, &authorityGeneration, persistence)
+		delay, terminal := c.renew(attemptCtx, generation, attemptRelaySequence, &license, &licenseErr, &licenseLoaded, &base, &current, &credentialFingerprint, &authorityGeneration, persistence, revocationPersistence)
 		c.finishAttempt(cancelAttempt)
 		c.mu.Lock()
 		if !c.relayFollowupQueued {
@@ -483,7 +664,9 @@ func (c *EntitlementController) Run(ctx context.Context) {
 				timer.Stop()
 				return
 			case result := <-persistence.results:
-				c.applyPersistenceResult(generation, &base, &current, authorityGeneration, persistence, result)
+				c.applyPersistenceResult(generation, &base, &current, authorityGeneration, persistence, revocationPersistence, result)
+			case result := <-revocationPersistence.results:
+				c.applyRevocationResult(generation, &base, &current, authorityGeneration, revocationPersistence, result)
 			case trigger := <-c.triggers:
 				timer.Stop()
 				c.mu.Lock()
@@ -505,7 +688,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 }
 
 // renew returns zero for an exponentially backed-off transient failure.
-func (c *EntitlementController) renew(ctx context.Context, generation, attemptRelaySequence uint64, licenseHint *string, licenseErrHint *error, licenseLoaded *bool, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker) (time.Duration, bool) {
+func (c *EntitlementController) renew(ctx context.Context, generation, attemptRelaySequence uint64, licenseHint *string, licenseErrHint *error, licenseLoaded *bool, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker) (time.Duration, bool) {
 	now := c.opts.Clock.Now()
 	sid := relay.SessionSID(base.SessionID)
 	hadValid := *authorityGeneration == generation && current.ValidAt(sid, now)
@@ -527,7 +710,7 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 		return 0, false
 	}
 	if errors.Is(err, ErrLicenseNotFound) || (err == nil && license == "") {
-		if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, c.opts.Clock.Now(), RelayReadinessNeedsLicense, nil) {
+		if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, c.opts.Clock.Now(), RelayReadinessNeedsLicense, nil) {
 			return terminalEntitlementRetry, true
 		}
 		return 0, false
@@ -581,7 +764,7 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 				state = RelayReadinessNoSeat
 			}
 			if state != "" {
-				if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, receivedAt, state, issuerErr.Activations) {
+				if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, receivedAt, state, issuerErr.Activations) {
 					return terminalEntitlementRetry, true
 				}
 				return 0, false
@@ -638,17 +821,12 @@ func (c *EntitlementController) publishFallbackForGeneration(generation uint64, 
 	return true
 }
 
-func (c *EntitlementController) publishTerminalForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revokedAt time.Time, state RelayReadiness, activations []relay.ActivationSummary) bool {
+func (c *EntitlementController) publishTerminalForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker, revokedAt time.Time, state RelayReadiness, activations []relay.ActivationSummary) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if generation != c.credentialGeneration {
 		return false
 	}
-	// A terminal issuer decision revokes fallback eligibility for the complete
-	// credential generation, not merely for this attempt. Its tombstone follows
-	// any already in-flight Save in the latest-value persistence stream. A local
-	// clock correction cannot version that tombstone before authority this
-	// controller already accepted.
 	revocationVersion := revokedAt.UTC().Truncate(time.Second).Unix()
 	if current.ObtainedAt > revocationVersion {
 		revocationVersion = current.ObtainedAt
@@ -666,16 +844,18 @@ func (c *EntitlementController) publishTerminalForGeneration(generation uint64, 
 		setTerminal(base, state)
 	}
 	if *credentialFingerprint != "" && (state == RelayReadinessInvalidKey || state == RelayReadinessLapsed || state == RelayReadinessNoSeat) {
-		tombstone := relay.CachedEntitlement{
-			SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: *credentialFingerprint,
-			Revoked: true, RevokedAt: revocationVersion,
+		// Revocation has a distinct path, lock, and worker. Discard ownership of
+		// any cache request: an obsolete cache completion can remain visible, but
+		// the matching marker always wins at restart.
+		persistence.discard()
+		marker := relay.EntitlementRevocation{
+			SchemaVersion:         relay.EntitlementRevocationSchemaVersion,
+			CredentialFingerprint: *credentialFingerprint,
+			RevokedAt:             revocationVersion,
 		}
 		base.PersistenceDegraded = true
-		persistence.submit(tombstone, generation)
+		revocationPersistence.save(marker, generation)
 	}
-	// The generation check, pending-durability marker, and terminal coordinator
-	// publication are one critical-section update. No observer can mistake the
-	// intermediate runtime revocation for a durably persisted tombstone.
 	c.opts.Coordinator.Update(*base)
 	return true
 }
@@ -717,7 +897,7 @@ func (c *EntitlementController) commitIssued(parent context.Context, generation,
 	return true
 }
 
-func (c *EntitlementController) applyPersistenceResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementPersistenceWorker, result entitlementPersistenceResult) {
+func (c *EntitlementController) applyPersistenceResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker, result entitlementPersistenceResult) {
 	// Version validation and publication share the same critical section as
 	// TriggerLicenseChanged, so an obsolete completion cannot clear a newer
 	// warning or republish superseded authority.
@@ -737,18 +917,44 @@ func (c *EntitlementController) applyPersistenceResult(generation uint64, base *
 	if !base.PersistenceDegraded {
 		return
 	}
-	base.PersistenceDegraded = false
-	if result.request.cached.Revoked {
-		c.opts.Coordinator.Update(*base)
-		return
-	}
-	// Clearing a persistence warning is still an active-state publication, so
-	// guard it with a fresh raw-expiration sample.
+	// A freshly accepted authority may supersede a matching terminal marker,
+	// but only after the authority cache itself is durable. Until marker clear
+	// succeeds, restart remains fail-closed while runtime authority stays active.
 	now := c.opts.Clock.Now()
-	if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) {
-		publishUnavailable(c.opts.Coordinator, base, now)
+	if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) || current.CredentialFingerprint != result.request.cached.CredentialFingerprint {
 		return
 	}
+	revocationPersistence.clear(current.CredentialFingerprint, generation)
+}
+
+func (c *EntitlementController) applyRevocationResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementRevocationWorker, result entitlementRevocationResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if result.request.version > persistence.completedVersion {
+		persistence.completedVersion = result.request.version
+	}
+	if result.request.version != persistence.latest.version || result.request.generation != generation || generation != c.credentialGeneration {
+		return
+	}
+	if result.err != nil {
+		persistence.needsRetry = true
+		return
+	}
+	persistence.needsRetry = false
+	if !base.PersistenceDegraded {
+		return
+	}
+	now := c.opts.Clock.Now()
+	if result.request.clear {
+		if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) || current.CredentialFingerprint != result.request.marker.CredentialFingerprint {
+			return
+		}
+	} else if authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now) {
+		// An accepted recovery may already be waiting on cache durability. The
+		// older marker-save completion must not clear that newer warning.
+		return
+	}
+	base.PersistenceDegraded = false
 	c.opts.Coordinator.Update(*base)
 }
 

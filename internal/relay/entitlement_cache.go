@@ -152,13 +152,23 @@ func decodeEntitlementCacheForReplacement(raw []byte) (CachedEntitlement, bool, 
 	if legacy.SchemaVersion == nil || *legacy.SchemaVersion != 2 || legacy.CredentialFingerprint == nil || *legacy.CredentialFingerprint == "" {
 		return CachedEntitlement{}, false, err
 	}
-	if legacy.Revoked != nil && *legacy.Revoked {
-		if legacy.Token != nil || legacy.Exp != nil || legacy.ObtainedAt != nil || legacy.SID != nil || legacy.MaxClients != nil {
+	var fields map[string]json.RawMessage
+	if decodeErr := json.Unmarshal(raw, &fields); decodeErr != nil {
+		return CachedEntitlement{}, false, err
+	}
+	_, hasRevoked := fields["revoked"]
+	_, hasToken := fields["token"]
+	_, hasExp := fields["exp"]
+	_, hasObtainedAt := fields["obtained_at"]
+	_, hasSID := fields["sid"]
+	_, hasMaxClients := fields["max_clients"]
+	if hasRevoked {
+		if legacy.Revoked == nil || !*legacy.Revoked || len(fields) != 3 || hasToken || hasExp || hasObtainedAt || hasSID || hasMaxClients {
 			return CachedEntitlement{}, false, err
 		}
 		return CachedEntitlement{SchemaVersion: 2, CredentialFingerprint: *legacy.CredentialFingerprint, Revoked: true}, true, nil
 	}
-	if legacy.Token == nil || legacy.Exp == nil || legacy.ObtainedAt == nil || legacy.SID == nil || legacy.MaxClients == nil {
+	if len(fields) != 7 || !hasToken || legacy.Token == nil || !hasExp || legacy.Exp == nil || !hasObtainedAt || legacy.ObtainedAt == nil || !hasSID || legacy.SID == nil || !hasMaxClients || legacy.MaxClients == nil {
 		return CachedEntitlement{}, false, err
 	}
 	cached = CachedEntitlement{

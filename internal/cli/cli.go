@@ -457,6 +457,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 			Licenses:    licenseStore,
 			Issuer:      issuer,
 			Cache:       relay.NewEntitlementCacheStore(relay.DefaultEntitlementCachePath(identityPath)),
+			Revocations: relay.NewEntitlementRevocationStore(relay.DefaultEntitlementRevocationPath(relay.DefaultEntitlementCachePath(identityPath))),
 		})
 	}
 	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {

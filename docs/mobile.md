@@ -84,8 +84,15 @@ inter-process transaction lock, descriptor-based no-follow checks, and durable a
 replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `label`, and
 `session_id`; it contains no license or entitlement. The separate
 `relay-entitlement.json` cache uses the same owner-only, no-follow, process-lock, and
-atomic durability rules and contains exactly `token`, `exp`, `obtained_at`, `sid`, and
-`max_clients`. Entitlements have a maximum lifetime of 14 days. The session id is
+atomic durability rules and contains schema version, credential fingerprint, `token`,
+`exp`, `obtained_at`, `sid`, and `max_clients`. The independently locked
+`relay-entitlement-revocation.json` contains exactly schema version, credential
+fingerprint, and revocation time—never a token. On startup, a marker matching the loaded
+Keychain license always overrides the cache, even if an older cache write completed later;
+a marker for a replaced credential is ignored. Relay-accepted recovery is usable in memory,
+but the marker is cleared only after the new cache is durable, and clear failure remains
+restart-fail-closed with `persistence_degraded`. Entitlements have a maximum lifetime of 14
+days. The session id is
 generated on first hosted or self-hosted use and persisted only in managed state. YAML
 containing `session_id`, `entitlement_token`, or `license_key` is rejected.
 
