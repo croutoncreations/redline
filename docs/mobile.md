@@ -66,10 +66,16 @@ relay:
 With no `url`, bootstrap selects Redline's hosted relay and reports `needs_license` until
 a license is present in Keychain. The service then exchanges it with the configured
 HTTPS issuer and dials only with a validated, unexpired session-bound entitlement. A
-valid cache is usable immediately while startup renewal runs. Issuer outages produce
-`renew_pending` until that cache expires and `unavailable` afterward; issuer 401, 402,
+valid cache is usable immediately while startup renewal runs. Issuer lifetime validation
+allows bounded clock skew, but desktop dial authority ends at the signed raw `exp`, matching
+the relay alarm. Issuer outages produce `renew_pending` only until that instant and
+`unavailable` afterward; retry timers retain nonzero exponential backoff. Issuer 401, 402,
 and 409 responses publish `invalid_key`, `lapsed`, and `no_seat`. If Keychain is locked,
-denied, or unavailable, hosted relay reports `unavailable`. All of these failures leave
+denied, or unavailable, hosted relay reports `unavailable`. Cache-write failures are exposed
+as sanitized `persistence_degraded` status but do not block expiry, issuer renewal, relay
+signals, or license replacement; newer accepted authority supersedes older pending writes.
+Every reconnect handshake reads the coordinator's current accepted token synchronously,
+while a successful live refresh preserves the existing socket. All of these failures leave
 the local API, scheduler, and database running. A custom `url` selects self-hosted mode,
 which never reads a license or sends a token. `off` never dials.
 

@@ -23,7 +23,10 @@ func (c CachedEntitlement) ValidAt(sid string, now time.Time) bool {
 	if c.SID != sid || c.ObtainedAt <= 0 || time.Unix(c.ObtainedAt, 0).After(now.Add(EntitlementClockSkew)) {
 		return false
 	}
-	if !time.Unix(c.Exp, 0).After(now.Add(-EntitlementClockSkew)) || c.Exp-c.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
+	// Clock skew is accepted only while checking issuer lifetime coherence.
+	// Runtime authority ends at the signed expiration because the relay closes
+	// the session at that exact instant.
+	if !time.Unix(c.Exp, 0).After(now) || c.Exp-c.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
 		return false
 	}
 	if c.MaxClients < 1 || c.MaxClients > 25 {

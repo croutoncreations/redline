@@ -78,6 +78,14 @@ type Entitlement struct {
 	SeatsUsed  int    `json:"seats_used"`
 }
 
+// ReceivedEntitlement binds an issuer response to the instant at which its
+// complete HTTP body was received. Renewal authority must use this instant,
+// not a caller sample taken before Keychain or network latency.
+type ReceivedEntitlement struct {
+	Entitlement
+	ReceivedAt time.Time
+}
+
 type IssuerErrorKind string
 
 const (
@@ -126,11 +134,24 @@ type portalResponse struct {
 // IssuerClient implements only the public issuer contract. Its HTTP client
 // must have a timeout; NewIssuerClient supplies one when the caller does not.
 type IssuerClient struct {
-	base *url.URL
-	http *http.Client
+	base  *url.URL
+	http  *http.Client
+	clock issuerClock
 }
 
+type issuerClock interface {
+	Now() time.Time
+}
+
+type realIssuerClock struct{}
+
+func (realIssuerClock) Now() time.Time { return time.Now() }
+
 func NewIssuerClient(rawBase string, client *http.Client) (*IssuerClient, error) {
+	return newIssuerClient(rawBase, client, realIssuerClock{})
+}
+
+func newIssuerClient(rawBase string, client *http.Client, clock issuerClock) (*IssuerClient, error) {
 	base, err := safeHTTPSURL(rawBase)
 	if err != nil {
 		return nil, fmt.Errorf("issuer URL: %w", err)
@@ -161,7 +182,10 @@ func NewIssuerClient(rawBase string, client *http.Client) (*IssuerClient, error)
 		}
 		return nil
 	}
-	return &IssuerClient{base: base, http: client}, nil
+	if clock == nil {
+		clock = realIssuerClock{}
+	}
+	return &IssuerClient{base: base, http: client, clock: clock}, nil
 }
 
 func safeHTTPSURL(raw string) (*url.URL, error) {
@@ -194,47 +218,45 @@ func (c *IssuerClient) activationEndpoint(id string) string {
 	return copy.String()
 }
 
-func (c *IssuerClient) Entitlement(ctx context.Context, licenseKey, sid, label string, now time.Time) (Entitlement, error) {
-	requestStarted := time.Now()
+func (c *IssuerClient) Entitlement(ctx context.Context, licenseKey, sid, label string) (ReceivedEntitlement, error) {
 	body, err := json.Marshal(issuerEntitlementRequest{LicenseKey: licenseKey, SID: sid, Label: label})
 	if err != nil {
-		return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, cause: err}
+		return ReceivedEntitlement{}, &IssuerError{Kind: IssuerInvalidResponse, cause: err}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("v1", "entitlement"), bytes.NewReader(body))
 	if err != nil {
-		return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, cause: err}
+		return ReceivedEntitlement{}, &IssuerError{Kind: IssuerInvalidResponse, cause: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, raw, err := c.do(req)
+	// The issuer client owns this sample. It is taken only after do has finished
+	// reading the response body (or the transport attempt has completed).
+	receivedAt := c.clock.Now()
 	if err != nil {
-		return Entitlement{}, err
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, err
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var result Entitlement
 		if err := decodeStrict(raw, &result); err != nil {
-			return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
+			return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
 		}
-		// Add measured request latency to the caller's clock sample. This keeps
-		// the public deterministic seam while ensuring validation uses response
-		// receipt, not request dispatch, in production.
-		receivedAt := now.Add(time.Since(requestStarted))
 		if err := ValidateEntitlementAt(result, sid, receivedAt); err != nil {
-			return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
+			return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
 		}
-		return result, nil
+		return ReceivedEntitlement{Entitlement: result, ReceivedAt: receivedAt}, nil
 	case http.StatusUnauthorized:
-		return Entitlement{}, &IssuerError{Kind: IssuerInvalidKey, Status: resp.StatusCode}
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerInvalidKey, Status: resp.StatusCode}
 	case http.StatusPaymentRequired:
-		return Entitlement{}, &IssuerError{Kind: IssuerLapsed, Status: resp.StatusCode}
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerLapsed, Status: resp.StatusCode}
 	case http.StatusConflict:
 		var result noSeatResponse
 		if err := decodeStrict(raw, &result); err != nil || !validActivationSummaries(result.Activations) {
-			return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
+			return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 		}
-		return Entitlement{}, &IssuerError{Kind: IssuerNoSeat, Status: resp.StatusCode, Activations: result.Activations}
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, &IssuerError{Kind: IssuerNoSeat, Status: resp.StatusCode, Activations: result.Activations}
 	default:
-		return Entitlement{}, classifyStatus(resp.StatusCode)
+		return ReceivedEntitlement{ReceivedAt: receivedAt}, classifyStatus(resp.StatusCode)
 	}
 }
 

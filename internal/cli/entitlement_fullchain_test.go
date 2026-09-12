@@ -2,8 +2,12 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,27 +52,88 @@ func (c *fullchainCache) Save(value relay.CachedEntitlement) error {
 
 type fullchainIssuer struct {
 	release <-chan struct{}
+	private ed25519.PrivateKey
 }
 
-func (i fullchainIssuer) Entitlement(ctx context.Context, _ string, sid string, _ string, now time.Time) (relay.Entitlement, error) {
+func (i fullchainIssuer) Entitlement(ctx context.Context, _ string, sid string, _ string) (relay.ReceivedEntitlement, error) {
 	select {
 	case <-ctx.Done():
-		return relay.Entitlement{}, ctx.Err()
+		return relay.ReceivedEntitlement{}, ctx.Err()
 	case <-i.release:
 	}
-	exp := now.Add(relay.EntitlementLifetime).Unix()
-	return relay.Entitlement{Token: fullchainToken(exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}, nil
+	receivedAt := time.Now().UTC().Truncate(time.Second)
+	exp := receivedAt.Add(relay.EntitlementLifetime).Unix()
+	issued := relay.Entitlement{Token: fullchainToken(i.private, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+	return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: receivedAt}, nil
 }
 
-func fullchainToken(exp int64, sid string, maxClients int) relay.Secret {
-	claims, _ := json.Marshal(map[string]any{"exp": exp, "sid": sid, "max_clients": maxClients})
-	return relay.NewSecret(base64.StdEncoding.EncodeToString(claims) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64)))
+type fullchainClaims struct {
+	Exp        int64  `json:"exp"`
+	SID        string `json:"sid"`
+	MaxClients int    `json:"max_clients"`
+}
+
+func fullchainToken(private ed25519.PrivateKey, exp int64, sid string, maxClients int) relay.Secret {
+	claims, _ := json.Marshal(fullchainClaims{Exp: exp, SID: sid, MaxClients: maxClients})
+	signature := ed25519.Sign(private, claims)
+	return relay.NewSecret(base64.StdEncoding.EncodeToString(claims) + "." + base64.StdEncoding.EncodeToString(signature))
+}
+
+func validateFullchainToken(public ed25519.PublicKey, token, sid string, now time.Time) (fullchainClaims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return fullchainClaims{}, errors.New("token format")
+	}
+	claimsRaw, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		return fullchainClaims{}, errors.New("claims encoding")
+	}
+	signature, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil || !ed25519.Verify(public, claimsRaw, signature) {
+		return fullchainClaims{}, errors.New("signature")
+	}
+	var claims fullchainClaims
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil || claims.SID != sid || claims.Exp <= now.Unix() || claims.MaxClients < 1 || claims.MaxClients > 25 {
+		return fullchainClaims{}, errors.New("claims")
+	}
+	return claims, nil
+}
+
+type fullchainRelayAuthority struct {
+	mu         sync.Mutex
+	claims     fullchainClaims
+	alarmUnix  int64
+	generation uint64
+}
+
+func (a *fullchainRelayAuthority) install(claims fullchainClaims, reconnect bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.alarmUnix != 0 && claims.Exp < a.alarmUnix {
+		return errors.New("authority regression")
+	}
+	a.claims = claims
+	a.alarmUnix = claims.Exp
+	if reconnect {
+		a.generation++
+	}
+	return nil
+}
+
+func (a *fullchainRelayAuthority) snapshot() (fullchainClaims, int64, uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.claims, a.alarmUnix, a.generation
 }
 
 // TestEntitlementRefreshFullChain joins the controller, supervisor, real
 // dialer's internal reconnect loop, TLS relay stand-in, and a blocked forwarded
 // request. It deliberately does not require a production Worker deployment.
 func TestEntitlementRefreshFullChain(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	keypair, err := core.NewDesktopKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -88,14 +153,27 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	refreshTokens := make(chan string, 1)
 	var connections int
 	var connectionMu sync.Mutex
+	authority := &fullchainRelayAuthority{}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/session/session-fullchain-1234/entitlement", func(w http.ResponseWriter, r *http.Request) {
-		refreshTokens <- r.Header.Get("X-Redline-Entitlement")
+		token := r.Header.Get("X-Redline-Entitlement")
+		claims, validationErr := validateFullchainToken(public, token, relay.SessionSID("session-fullchain-1234"), time.Now())
+		if validationErr != nil || authority.install(claims, false) != nil {
+			http.Error(w, "not entitled", http.StatusPaymentRequired)
+			return
+		}
+		refreshTokens <- token
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/v1/session/session-fullchain-1234", func(w http.ResponseWriter, r *http.Request) {
-		handshakeTokens <- r.Header.Get("X-Redline-Entitlement")
+		token := r.Header.Get("X-Redline-Entitlement")
+		claims, validationErr := validateFullchainToken(public, token, relay.SessionSID("session-fullchain-1234"), time.Now())
+		if validationErr != nil || authority.install(claims, true) != nil {
+			http.Error(w, "not entitled", http.StatusPaymentRequired)
+			return
+		}
+		handshakeTokens <- token
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -140,8 +218,10 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 			opened, openErr := phone.Open(response)
 			if openErr == nil {
 				decoded, decodeErr := relay.DecodeResponse(opened)
-				if decodeErr != nil || decoded.Status != http.StatusOK || !strings.Contains(string(decoded.Body), `"ok":true`) {
+				if decodeErr != nil {
 					err = decodeErr
+				} else if decoded.Status != http.StatusOK || !strings.Contains(string(decoded.Body), `"ok":true`) {
+					err = fmt.Errorf("unexpected forwarded response: status=%d body=%q", decoded.Status, decoded.Body)
 				}
 			} else {
 				err = openErr
@@ -158,7 +238,7 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	sessionID := "session-fullchain-1234"
 	sid := relay.SessionSID(sessionID)
 	oldExp := now.Add(2 * time.Hour).Unix()
-	oldToken := fullchainToken(oldExp, sid, 5)
+	oldToken := fullchainToken(private, oldExp, sid, 5)
 	initial := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: tlsRelay.URL, SessionID: sessionID},
 		Readiness:         config.RelayReadinessActive, Dial: true, EntitlementToken: config.NewRelayEntitlementToken(oldToken.Value()),
@@ -174,8 +254,11 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	supervisorDone := make(chan error, 1)
-	go func() { supervisorDone <- supervisor.Run(ctx) }()
+	// Start the initial dialer but deliberately pause subscription consumption.
+	// Internal reconnects must still read coordinator.Current synchronously.
+	if err := supervisor.apply(ctx, supervisor.Initial()); err != nil {
+		t.Fatal(err)
+	}
 	if got := <-handshakeTokens; got != oldToken.Value() {
 		t.Fatalf("initial handshake token mismatch")
 	}
@@ -189,7 +272,7 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 		saveStarted: saveStarted, releaseSave: releaseSave,
 	}
 	controller := config.NewEntitlementController(config.EntitlementControllerOptions{
-		Coordinator: coordinator, Initial: initial, Licenses: fullchainLicenseStore{}, Issuer: fullchainIssuer{release: releaseIssuer},
+		Coordinator: coordinator, Initial: initial, Licenses: fullchainLicenseStore{}, Issuer: fullchainIssuer{release: releaseIssuer, private: private},
 		Cache: cache, RelayHTTP: tlsRelay.Client(),
 	})
 	controllerDone := make(chan struct{})
@@ -199,6 +282,34 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	newToken := <-refreshTokens
 	if newToken == "" || newToken == oldToken.Value() {
 		t.Fatal("relay refresh did not receive a fresh token")
+	}
+	newClaims, validationErr := validateFullchainToken(public, newToken, sid, time.Now())
+	if validationErr != nil {
+		t.Fatalf("refreshed signed token was invalid: %v", validationErr)
+	}
+	installed, alarm, generation := authority.snapshot()
+	if installed != newClaims || alarm != newClaims.Exp || generation != 1 || alarm <= oldExp {
+		t.Fatalf("refresh did not advance installed claims/alarm: claims=%#v alarm=%d generation=%d", installed, alarm, generation)
+	}
+	for name, token := range map[string]string{
+		"bad signature": newToken + "corrupt",
+		"wrong sid":     fullchainToken(private, newClaims.Exp, relay.SessionSID("different-session-123456"), 5).Value(),
+		"invalid max":   fullchainToken(private, newClaims.Exp, sid, 26).Value(),
+		"stale claims":  oldToken.Value(),
+	} {
+		req, requestErr := http.NewRequest(http.MethodGet, tlsRelay.URL+"/v1/session/"+sessionID, nil)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("X-Redline-Entitlement", token)
+		resp, requestErr := tlsRelay.Client().Do(req)
+		if requestErr != nil {
+			t.Fatalf("%s request: %v", name, requestErr)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusPaymentRequired {
+			t.Fatalf("%s token status=%d, want 402", name, resp.StatusCode)
+		}
 	}
 	deadline := time.Now().Add(time.Second)
 	updated := coordinator.Current()
@@ -234,9 +345,12 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("forced internal reconnect did not reach relay")
 	}
+	installed, alarm, generation = authority.snapshot()
+	if installed != newClaims || alarm != newClaims.Exp || generation != 2 {
+		t.Fatalf("reconnect regressed installed authority: claims=%#v alarm=%d generation=%d", installed, alarm, generation)
+	}
 	cancel()
 	<-controllerDone
-	if err := <-supervisorDone; err != nil {
-		t.Fatal(err)
-	}
+	supervisor.stopActive()
+	supervisor.Close()
 }

@@ -12,9 +12,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type fixedIssuerClock struct{ now time.Time }
+
+func (c fixedIssuerClock) Now() time.Time { return c.now }
+
+type mutableIssuerClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *mutableIssuerClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *mutableIssuerClock) Advance(delay time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(delay)
+	c.mu.Unlock()
+}
 
 func testEntitlementToken(t *testing.T, exp int64, sid string, maxClients int) string {
 	t.Helper()
@@ -47,11 +69,11 @@ func TestIssuerEntitlementUsesBodyAndValidatesTokenCoherence(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, err := NewIssuerClient(server.URL+"/api", server.Client())
+	client, err := newIssuerClient(server.URL+"/api", server.Client(), fixedIssuerClock{now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := client.Entitlement(context.Background(), license, sid, "Studio Mac", now)
+	got, err := client.Entitlement(context.Background(), license, sid, "Studio Mac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +84,46 @@ func TestIssuerEntitlementUsesBodyAndValidatesTokenCoherence(t *testing.T) {
 		if strings.Contains(diagnostic, got.Token.Value()) {
 			t.Fatalf("token leaked through diagnostic: %s", diagnostic)
 		}
+	}
+}
+
+func TestIssuerEntitlementSamplesReceiptAfterBlockedResponse(t *testing.T) {
+	startedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	receivedAt := startedAt.Add(2 * EntitlementClockSkew)
+	clock := &mutableIssuerClock{now: startedAt}
+	sid := SessionSID("session-issuer-receipt-123456")
+	exp := receivedAt.Add(EntitlementLifetime).Unix()
+	responseStarted := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(responseStarted)
+		<-releaseResponse
+		_ = json.NewEncoder(w).Encode(Entitlement{
+			Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+			MaxClients: 5, Seats: 1, SeatsUsed: 1,
+		})
+	}))
+	defer server.Close()
+	client, err := newIssuerClient(server.URL, server.Client(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan ReceivedEntitlement, 1)
+	errs := make(chan error, 1)
+	go func() {
+		issued, issueErr := client.Entitlement(context.Background(), "license", sid, "")
+		result <- issued
+		errs <- issueErr
+	}()
+	<-responseStarted
+	clock.Advance(2 * EntitlementClockSkew)
+	close(releaseResponse)
+	issued := <-result
+	if err := <-errs; err != nil {
+		t.Fatalf("legitimate fourteen-day response rejected using request time: %v", err)
+	}
+	if !issued.ReceivedAt.Equal(receivedAt) || issued.Exp != exp {
+		t.Fatalf("received entitlement=%#v want receipt=%v", issued, receivedAt)
 	}
 }
 
@@ -76,8 +138,8 @@ func TestIssuerRejectsAResponseWhoseTokenClaimsDisagree(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client, _ := NewIssuerClient(server.URL, server.Client())
-	_, err := client.Entitlement(context.Background(), "license", sid, "", now)
+	client, _ := newIssuerClient(server.URL, server.Client(), fixedIssuerClock{now: now})
+	_, err := client.Entitlement(context.Background(), "license", sid, "")
 	var typed *IssuerError
 	if !errors.As(err, &typed) || typed.Kind != IssuerInvalidResponse {
 		t.Fatalf("error=%#v", err)
@@ -107,7 +169,7 @@ func TestIssuerTypedFailuresNeverIncludeCredentialsOrBodies(t *testing.T) {
 			}))
 			defer server.Close()
 			client, _ := NewIssuerClient(server.URL, server.Client())
-			_, err := client.Entitlement(context.Background(), license, SessionSID("session-error-123456"), "", time.Now())
+			_, err := client.Entitlement(context.Background(), license, SessionSID("session-error-123456"), "")
 			var typed *IssuerError
 			if !errors.As(err, &typed) || typed.Kind != kind {
 				t.Fatalf("error = %#v, want %s", err, kind)
@@ -265,6 +327,22 @@ func TestEntitlementValidationAllowsOnlyBoundedClockSkew(t *testing.T) {
 	cached.ObtainedAt++
 	if cached.ValidAt(sid, receivedAt) {
 		t.Fatal("obtained_at beyond skew allowance was accepted")
+	}
+}
+
+func TestCachedEntitlementAuthorityEndsAtSignedExpiration(t *testing.T) {
+	receivedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	sid := SessionSID("session-raw-expiration-123456")
+	exp := receivedAt.Add(time.Hour).Unix()
+	cached := CachedEntitlement{
+		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+		ObtainedAt: receivedAt.Unix(), SID: sid, MaxClients: 5,
+	}
+	if !cached.ValidAt(sid, time.Unix(exp, 0).Add(-time.Nanosecond)) {
+		t.Fatal("cache was not valid immediately before signed expiration")
+	}
+	if cached.ValidAt(sid, time.Unix(exp, 0)) {
+		t.Fatal("validation skew extended cache authority beyond signed expiration")
 	}
 }
 

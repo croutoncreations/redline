@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/jfox/redline/internal/config"
 )
@@ -14,6 +13,7 @@ type relayDialerRun func(context.Context)
 type relayDialerFactory func(config.ResolvedRelay, func() string) (relayDialerRun, error)
 
 type relaySupervisor struct {
+	runtime     config.RelayRuntime
 	initial     config.ResolvedRelay
 	updates     <-chan config.ResolvedRelay
 	unsubscribe func()
@@ -23,22 +23,8 @@ type relaySupervisor struct {
 
 type activeRelayDialer struct {
 	connection relayConnection
-	token      *relayTokenSource
 	cancel     context.CancelFunc
 	done       chan struct{}
-}
-
-type relayTokenSource struct{ value atomic.Value }
-
-func newRelayTokenSource(token string) *relayTokenSource {
-	source := &relayTokenSource{}
-	source.value.Store(token)
-	return source
-}
-
-func (s *relayTokenSource) Load() string { return s.value.Load().(string) }
-func (s *relayTokenSource) Store(token string) {
-	s.value.Store(token)
 }
 
 type relayConnection struct {
@@ -54,6 +40,7 @@ func newRelaySupervisor(runtime config.RelayRuntime, newDialer relayDialerFactor
 	updates, unsubscribe := runtime.Subscribe()
 	initial := <-updates
 	return &relaySupervisor{
+		runtime:     runtime,
 		initial:     initial,
 		updates:     updates,
 		unsubscribe: unsubscribe,
@@ -97,22 +84,21 @@ func (s *relaySupervisor) apply(ctx context.Context, snapshot config.ResolvedRel
 		reconnectGeneration: snapshot.ReconnectGeneration,
 	}
 	if s.active != nil && s.active.connection == connection {
-		// A 204 refresh deliberately preserves the live socket. Future
-		// reconnects inside that same dialer's Run loop must nevertheless read
-		// the newly accepted token.
-		s.active.token.Store(snapshot.EntitlementToken.Value())
+		// A 204 refresh deliberately preserves the live socket. Its reconnect
+		// handshakes read authority directly from RelayRuntime.Current, so they do
+		// not depend on this supervisor consuming an update first.
 		return nil
 	}
 	s.stopActive()
-	token := newRelayTokenSource(snapshot.EntitlementToken.Value())
-	run, err := s.newDialer(snapshot, token.Load)
+	run, err := s.newDialer(snapshot, func() string {
+		return s.runtime.Current().EntitlementToken.Value()
+	})
 	if err != nil {
 		return err
 	}
 	dialerCtx, cancel := context.WithCancel(ctx)
 	active := &activeRelayDialer{
 		connection: connection,
-		token:      token,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}

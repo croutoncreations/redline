@@ -22,7 +22,11 @@ func newSupervisorTestRuntime(initial config.ResolvedRelay) *supervisorTestRunti
 	return &supervisorTestRuntime{initial: initial, updates: make(chan config.ResolvedRelay)}
 }
 
-func (r *supervisorTestRuntime) Current() config.ResolvedRelay { return r.initial }
+func (r *supervisorTestRuntime) Current() config.ResolvedRelay {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.initial
+}
 
 func (r *supervisorTestRuntime) Subscribe() (<-chan config.ResolvedRelay, func()) {
 	r.mu.Lock()
@@ -40,6 +44,9 @@ func (r *supervisorTestRuntime) Subscribe() (<-chan config.ResolvedRelay, func()
 }
 
 func (r *supervisorTestRuntime) send(snapshot config.ResolvedRelay) {
+	r.mu.Lock()
+	r.initial = snapshot
+	r.mu.Unlock()
 	r.updates <- snapshot
 }
 
@@ -201,6 +208,47 @@ func TestRelaySupervisorReplacesConnectionForRoutingChangesButNotLiveTokenRefres
 	_ = waitSnapshot(t, factory.started)
 	stopSupervisorTest(t, runtime, cancel, done)
 	_ = waitSnapshot(t, factory.stopped)
+}
+
+func TestRelaySupervisorReconnectReadsAuthorityBeforeUpdateConsumption(t *testing.T) {
+	initial := selfHostedSnapshot("https://relay.example.com", "session-authority-123456")
+	initial.Readiness = config.RelayReadinessActive
+	initial.EntitlementToken = config.NewRelayEntitlementToken("token-old")
+	runtime := newSupervisorTestRuntime(initial)
+	factory := newRecordingDialerFactory()
+	supervisor := newRelaySupervisor(runtime, factory.new)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := supervisor.apply(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitSnapshot(t, factory.started)
+
+	fresh := initial
+	fresh.EntitlementToken = config.NewRelayEntitlementToken("token-fresh")
+	published := make(chan struct{})
+	go func() {
+		runtime.send(fresh) // blocks because supervisor event consumption is paused
+		close(published)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for runtime.Current().EntitlementToken.Value() != "token-fresh" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := factory.latestToken(); got != "token-fresh" {
+		t.Fatalf("reconnect token=%q, want synchronously published authority", got)
+	}
+	select {
+	case <-published:
+		t.Fatal("test did not pause supervisor event consumption")
+	default:
+	}
+
+	cancel()
+	supervisor.stopActive()
+	<-runtime.updates
+	<-published
+	supervisor.Close()
 }
 
 func TestRelaySupervisorStopsForNondialableReadiness(t *testing.T) {

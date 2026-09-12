@@ -19,7 +19,7 @@ const (
 )
 
 type entitlementIssuer interface {
-	Entitlement(context.Context, string, string, string, time.Time) (relay.Entitlement, error)
+	Entitlement(context.Context, string, string, string) (relay.ReceivedEntitlement, error)
 }
 
 type entitlementCache interface {
@@ -71,6 +71,11 @@ const (
 
 type entitlementTrigger struct {
 	reason     entitlementTriggerReason
+	generation uint64
+}
+
+type pendingEntitlementPersistence struct {
+	cached     relay.CachedEntitlement
 	generation uint64
 }
 
@@ -179,17 +184,11 @@ func (c *EntitlementController) accepted(generation uint64) bool {
 	if generation != c.credentialGeneration {
 		return false
 	}
-	// Drain signals that were queued before this acceptance while holding the
-	// trigger lock. A signal arriving after acceptance waits, then becomes a
-	// fresh event instead of being mistaken for stale work.
-	for {
-		select {
-		case <-c.triggers:
-		default:
-			c.relayTriggerPending = false
-			return true
-		}
-	}
+	// Do not drain the trigger channel here. A relay failure racing acceptance
+	// may describe the newly accepted handshake authority; one redundant
+	// renewal is safer than losing a fresh 402/1008 signal.
+	c.relayTriggerPending = false
+	return true
 }
 
 func (c *EntitlementController) Run(ctx context.Context) {
@@ -238,13 +237,22 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	}
 
 	retry := initialEntitlementRetry
-	var pendingPersistence *relay.CachedEntitlement
+	var pendingPersistence *pendingEntitlementPersistence
 	for {
 		generation := c.generation()
+		if pendingPersistence != nil && pendingPersistence.generation != generation {
+			// Credential replacement supersedes durability work for authority
+			// accepted under the previous license generation.
+			pendingPersistence = nil
+			if base.PersistenceDegraded {
+				base.PersistenceDegraded = false
+				c.opts.Coordinator.Update(base)
+			}
+		}
 		attemptCtx, cancelAttempt := c.startAttempt(ctx, generation)
 		delay, terminal := c.renew(attemptCtx, generation, &base, &current, valid, &pendingPersistence)
 		c.finishAttempt(cancelAttempt)
-		valid = current.ValidAt(sid, c.opts.Clock.Now()) && base.CanDial()
+		valid = current.ValidAt(sid, c.opts.Clock.Now())
 		if ctx.Err() != nil {
 			return
 		}
@@ -263,14 +271,16 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		if terminal {
 			retry = initialEntitlementRetry
 		}
-		if base.Readiness == RelayReadinessRenewPending {
-			untilExpiry := base.ExpiresAt.Sub(c.opts.Clock.Now())
+		if valid && base.CanDial() {
+			untilExpiry := time.Unix(current.Exp, 0).Sub(c.opts.Clock.Now())
 			if untilExpiry < delay {
 				delay = untilExpiry
 			}
-			if delay < 0 {
-				delay = 0
-			}
+		}
+		// No failure path may install a zero-duration timer. At raw expiration
+		// renew publishes unavailable, then retains ordinary retry backoff.
+		if delay <= 0 {
+			delay = initialEntitlementRetry
 		}
 		timer := c.opts.Clock.NewTimer(delay)
 		select {
@@ -288,22 +298,33 @@ func (c *EntitlementController) Run(ctx context.Context) {
 }
 
 // renew returns zero for an exponentially backed-off transient failure.
-func (c *EntitlementController) renew(ctx context.Context, generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, hadValid bool, pendingPersistence **relay.CachedEntitlement) (time.Duration, bool) {
+func (c *EntitlementController) renew(ctx context.Context, generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, hadValid bool, pendingPersistence **pendingEntitlementPersistence) (time.Duration, bool) {
 	now := c.opts.Clock.Now()
 	sid := relay.SessionSID(base.SessionID)
-	if *pendingPersistence != nil {
-		if err := c.opts.Cache.Save(**pendingPersistence); err != nil {
-			base.PersistenceDegraded = true
+	defer func() {
+		degraded := *pendingPersistence != nil
+		if base.PersistenceDegraded != degraded {
+			base.PersistenceDegraded = degraded
 			c.opts.Coordinator.Update(*base)
-			return 0, false
 		}
-		*pendingPersistence = nil
-		base.PersistenceDegraded = false
-		c.opts.Coordinator.Update(*base)
-		// Re-enter renewal on the normal transient backoff. An authoritative
-		// relay trigger may have arrived while persistence was degraded; waiting
-		// until the old half-life would incorrectly swallow that signal.
-		return 0, false
+	}()
+	if hadValid && !current.ValidAt(sid, now) {
+		// Validation skew never extends runtime authority. Publish the raw signed
+		// expiration boundary before attempting any persistence or renewal I/O.
+		publishUnavailable(c.opts.Coordinator, base, now)
+		hadValid = false
+	}
+	if *pendingPersistence != nil {
+		if err := c.opts.Cache.Save((*pendingPersistence).cached); err != nil {
+			if !base.PersistenceDegraded {
+				base.PersistenceDegraded = true
+				c.opts.Coordinator.Update(*base)
+			}
+		} else {
+			*pendingPersistence = nil
+			base.PersistenceDegraded = false
+			c.opts.Coordinator.Update(*base)
+		}
 	}
 
 	license, err := c.opts.Licenses.Load(ctx)
@@ -327,16 +348,21 @@ func (c *EntitlementController) renew(ctx context.Context, generation uint64, ba
 		return 0, false
 	}
 
-	issued, err := c.opts.Issuer.Entitlement(ctx, license, sid, base.Label, now)
-	// Tokens and the protected cache use Unix seconds. Canonicalize one receipt
-	// instant and use it for validation, obtained_at, and renewal scheduling so
-	// request latency or subsecond sampling cannot split those decisions.
-	receivedAt := c.opts.Clock.Now().UTC().Truncate(time.Second)
+	issued, err := c.opts.Issuer.Entitlement(ctx, license, sid, base.Label)
+	// Tokens and the protected cache use Unix seconds. Canonicalize the receipt
+	// sampled by IssuerClient after complete response/body handling, then use it
+	// for validation, obtained_at, and renewal scheduling.
+	receivedAt := issued.ReceivedAt.UTC().Truncate(time.Second)
+	if issued.ReceivedAt.IsZero() {
+		// Deterministic issuer fakes may omit the receipt, but production
+		// IssuerClient always supplies its post-response clock sample.
+		receivedAt = c.opts.Clock.Now().UTC().Truncate(time.Second)
+	}
 	if ctx.Err() != nil || generation != c.generation() {
 		return 0, false
 	}
 	if err == nil {
-		if validationErr := relay.ValidateEntitlementAt(issued, sid, receivedAt); validationErr != nil {
+		if validationErr := relay.ValidateEntitlementAt(issued.Entitlement, sid, receivedAt); validationErr != nil {
 			err = &relay.IssuerError{Kind: relay.IssuerInvalidResponse}
 		}
 	}
@@ -393,13 +419,15 @@ func (c *EntitlementController) renew(ctx context.Context, generation uint64, ba
 		return 0, false
 	}
 	*current = next
-	*base = activeFromIssued(*base, next, issued, c.renewalTime(next.Exp, receivedAt))
+	*base = activeFromIssued(*base, next, issued.Entitlement, c.renewalTime(next.Exp, receivedAt))
 	// Publish relay-accepted in-memory authority before potentially slow durable
 	// I/O. A reconnect racing a blocked fsync must already see the new token.
 	c.opts.Coordinator.Update(*base)
+	// A newly accepted credential supersedes any older pending cache write,
+	// including one from the same license generation.
+	*pendingPersistence = nil
 	if err := c.opts.Cache.Save(next); err != nil {
-		copy := next
-		*pendingPersistence = &copy
+		*pendingPersistence = &pendingEntitlementPersistence{cached: next, generation: generation}
 		base.PersistenceDegraded = true
 		c.opts.Coordinator.Update(*base)
 	}

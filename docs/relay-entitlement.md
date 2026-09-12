@@ -170,9 +170,13 @@ The remaining calls authenticate with exactly
   created for each request and must never be cached in an entitlement response.
 
 The issuer signs `{exp, sid, max_clients}`, sets `exp` to issuance time plus 14
-days, and currently sets `max_clients` to `5`. Desktop clients reject responses
-whose token claims disagree with the surrounding response, exceed the 14-day
-lifetime, or carry out-of-range seat/client counts.
+days, and currently sets `max_clients` to `5`. Desktop clients sample receipt time
+after the complete issuer response body has been handled (independently of caller
+or Keychain timing) and reject responses whose token claims disagree with the
+surrounding response, exceed the 14-day lifetime plus bounded validation skew, or
+carry out-of-range seat/client counts. That skew applies only to issuer-response
+coherence: cached and in-memory dial authority ends at signed `exp`, exactly when
+the relay alarm expires it.
 
 ### License recovery contract
 
