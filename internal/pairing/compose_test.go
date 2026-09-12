@@ -26,6 +26,16 @@ func composeForTest(cfg config.Config, token string, options Options) (Code, err
 	return prepared.Render(token), nil
 }
 
+func TestPlanPortErrorDocumentsZeroAsTheDefault(t *testing.T) {
+	_, err := PlanRoutes([]string{"mac.example.ts.net"}, config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+		Readiness:         config.RelayReadinessOff,
+	}, Options{Port: -1})
+	if err == nil || !strings.Contains(err.Error(), "zero or between 1 and 65535") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestPlanRefusesRelayOnlyWhenRuntimeIsUnavailable(t *testing.T) {
 	runtime := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "managed-session-abcdefghij"},

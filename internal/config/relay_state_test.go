@@ -176,6 +176,9 @@ func TestRelayBootstrapValidationAgreesWithServiceResolution(t *testing.T) {
 		{name: "custom issuer", relayYAML: "  enabled: true\n  issuer_url: https://issuer.example.com/api", wantMode: config.RelayModeHosted, wantURL: config.DefaultHostedRelayURL},
 		{name: "custom URL and issuer contradict", relayYAML: "  enabled: true\n  url: https://relay.example.com\n  issuer_url: https://issuer.example.com/api", wantError: "issuer_url"},
 		{name: "unsafe custom URL", relayYAML: "  enabled: true\n  url: http://relay.example.com", wantError: "relay url"},
+		{name: "custom URL query", relayYAML: "  enabled: true\n  url: https://relay.example.com?tenant=one", wantError: "query or fragment"},
+		{name: "custom URL fragment", relayYAML: "  enabled: true\n  url: https://relay.example.com/#section", wantError: "query or fragment"},
+		{name: "hosted URL cannot masquerade as custom", relayYAML: "  enabled: true\n  url: " + config.DefaultHostedRelayURL, wantError: "custom url"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -201,6 +204,46 @@ func TestRelayBootstrapValidationAgreesWithServiceResolution(t *testing.T) {
 			}
 			if resolved.Mode != tt.wantMode || resolved.URL != tt.wantURL {
 				t.Fatalf("resolved=%#v", resolved)
+			}
+		})
+	}
+}
+
+func TestResolveRelayBootstrapUsesManagedStatePersistencePredicate(t *testing.T) {
+	tests := []struct {
+		name      string
+		bootstrap config.RelayBootstrap
+		managed   config.RelayManagedState
+		wantError string
+	}{
+		{name: "off", bootstrap: config.RelayBootstrap{}, managed: config.RelayManagedState{Mode: config.RelayModeOff}},
+		{name: "hosted", bootstrap: config.RelayBootstrap{Enabled: true}, managed: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL}},
+		{name: "self hosted", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com"}},
+		{name: "self hosted query", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com?tenant=one"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com?tenant=one"}, wantError: "query or fragment"},
+		{name: "self hosted fragment", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com/#section"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com/#section"}, wantError: "query or fragment"},
+		{name: "hosted URL as self hosted", bootstrap: config.RelayBootstrap{Enabled: true, URL: config.DefaultHostedRelayURL}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: config.DefaultHostedRelayURL}, wantError: "custom url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, bootstrapErr := config.ResolveRelayBootstrap(tt.bootstrap)
+			persistenceErr := config.NewRelayStateStore(filepath.Join(t.TempDir(), "relay-state.json")).Save(tt.managed)
+			if (bootstrapErr == nil) != (persistenceErr == nil) {
+				t.Fatalf("bootstrap error=%v persistence error=%v", bootstrapErr, persistenceErr)
+			}
+			if tt.wantError != "" {
+				if bootstrapErr == nil {
+					t.Fatalf("bootstrap and persistence unexpectedly accepted invalid state %#v", tt.managed)
+				}
+				if !strings.Contains(bootstrapErr.Error(), tt.wantError) || !strings.Contains(persistenceErr.Error(), tt.wantError) {
+					t.Fatalf("bootstrap error=%v persistence error=%v; both must contain %q", bootstrapErr, persistenceErr, tt.wantError)
+				}
+				return
+			}
+			if bootstrapErr != nil {
+				t.Fatalf("bootstrap error=%v persistence error=%v", bootstrapErr, persistenceErr)
+			}
+			if state != tt.managed {
+				t.Fatalf("bootstrap state=%#v, want %#v", state, tt.managed)
 			}
 		})
 	}

@@ -104,7 +104,7 @@ type PreparedPlan struct {
 // the relay identity file.
 func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Options) (Plan, error) {
 	if options.Port < 0 || options.Port > 65535 {
-		return Plan{}, &CallerError{Err: errors.New("pairing port must be between 1 and 65535")}
+		return Plan{}, &CallerError{Err: errors.New("pairing port must be zero or between 1 and 65535")}
 	}
 	hasRelay := runtime.Dial
 	if hasRelay && (strings.TrimSpace(runtime.URL) == "" || strings.TrimSpace(runtime.SessionID) == "") {

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jfox/redline/internal/decision"
-	core "github.com/jfox/redline/mobile/core"
 	"gopkg.in/yaml.v3"
 )
 
@@ -500,12 +499,4 @@ func fraction(name string, value float64) error {
 		return fmt.Errorf("%s must be between 0 and 1, got %v", name, value)
 	}
 	return nil
-}
-
-// validRelayURL checks the relay address the desktop will dial.
-//
-// The rule itself lives in mobile/core so the phone, the desktop, and the
-// relay dialer cannot drift apart on what counts as a safe relay.
-func validRelayURL(raw string) error {
-	return core.ValidateRelayURL(raw)
 }

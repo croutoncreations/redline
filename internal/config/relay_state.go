@@ -223,13 +223,36 @@ const (
 	RelayReadinessUnavailable      RelayReadiness = "unavailable"
 )
 
+// RelayEntitlementToken keeps the runtime-only host credential out of JSON and
+// diagnostic formatting while still allowing the dialer boundary to read it.
+// Token acquisition and renewal are introduced in later phases.
+type RelayEntitlementToken struct {
+	value string
+}
+
+func NewRelayEntitlementToken(value string) RelayEntitlementToken {
+	return RelayEntitlementToken{value: value}
+}
+
+func (t RelayEntitlementToken) Value() string { return t.value }
+
+func (t RelayEntitlementToken) String() string {
+	if t.value == "" {
+		return ""
+	}
+	return "[REDACTED]"
+}
+
+func (t RelayEntitlementToken) GoString() string { return t.String() }
+
 type ResolvedRelay struct {
 	RelayManagedState
 	Readiness RelayReadiness
 	// Dial is true only when Phase 2.1 has everything required to connect.
 	// Hosted mode remains false until Phase 2.2 can exchange its license for an
 	// entitlement token; the license itself is never passed to the relay.
-	Dial bool
+	Dial             bool
+	EntitlementToken RelayEntitlementToken `json:"-"`
 }
 
 // RelayResolver is the single precedence boundary between managed state and
@@ -247,28 +270,26 @@ func NewRelayResolver(state *RelayStateStore, licenses LicenseStore) *RelayResol
 // YAML bootstrap input. Both the public loader and RelayResolver call this
 // function; managed state may ignore invalid losing bootstrap values.
 func ResolveRelayBootstrap(bootstrap RelayBootstrap) (RelayManagedState, error) {
-	if !bootstrap.Enabled {
-		return RelayManagedState{Mode: RelayModeOff}, nil
-	}
-	relayURL := strings.TrimSpace(bootstrap.URL)
-	issuerURL := strings.TrimSpace(bootstrap.IssuerURL)
-	if relayURL != "" {
-		if err := validRelayURL(relayURL); err != nil {
-			return RelayManagedState{}, fmt.Errorf("relay url: %w", err)
+	state := RelayManagedState{Mode: RelayModeOff}
+	if bootstrap.Enabled {
+		relayURL := strings.TrimSpace(bootstrap.URL)
+		issuerURL := strings.TrimSpace(bootstrap.IssuerURL)
+		if relayURL != "" {
+			if issuerURL != "" {
+				return RelayManagedState{}, fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")
+			}
+			state = RelayManagedState{Mode: RelayModeSelfHosted, URL: relayURL}
+		} else {
+			if issuerURL == "" {
+				issuerURL = DefaultIssuerURL
+			}
+			state = RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: issuerURL}
 		}
-		if issuerURL != "" {
-			return RelayManagedState{}, fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")
-		}
-		return RelayManagedState{Mode: RelayModeSelfHosted, URL: relayURL}, nil
 	}
-	if issuerURL != "" {
-		if err := validateSafeEndpoint(issuerURL); err != nil {
-			return RelayManagedState{}, fmt.Errorf("relay issuer_url: %w", err)
-		}
-	} else {
-		issuerURL = DefaultIssuerURL
+	if err := validateRelayManagedState(state); err != nil {
+		return RelayManagedState{}, err
 	}
-	return RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: issuerURL}, nil
+	return state, nil
 }
 
 func (r *RelayResolver) Resolve(ctx context.Context, bootstrap RelayBootstrap) (ResolvedRelay, error) {

@@ -1,11 +1,39 @@
 package config_test
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jfox/redline/internal/config"
 )
+
+func TestResolvedRelayEntitlementTokenStaysOutOfSerializationAndFormatting(t *testing.T) {
+	const token = "host-entitlement-secret"
+	resolved := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted},
+		EntitlementToken:  config.NewRelayEntitlementToken(token),
+	}
+	raw, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, output := range map[string]string{
+		"json":        string(raw),
+		"format":      fmt.Sprint(resolved),
+		"go format":   fmt.Sprintf("%#v", resolved),
+		"token print": fmt.Sprint(resolved.EntitlementToken),
+	} {
+		if strings.Contains(output, token) {
+			t.Fatalf("token crossed %s boundary: %s", name, output)
+		}
+	}
+	if resolved.EntitlementToken.Value() != token {
+		t.Fatal("dialer boundary cannot recover entitlement token")
+	}
+}
 
 func TestRelayCoordinatorPublishesOneImmutableSnapshot(t *testing.T) {
 	initial := config.ResolvedRelay{

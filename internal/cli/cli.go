@@ -442,11 +442,22 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	// snapshot. Bootstrap YAML remains bootstrap-only and cannot be mistaken for
 	// managed mode, readiness, or dialability.
 	relayRuntime := config.NewRelayCoordinator(resolvedRelay)
-	switch resolvedRelay.Readiness {
+	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay) (relayDialerRun, error) {
+		dialer, err := newRelayDialer(cfg, snapshot, listener.Addr().String(), func(format string, args ...any) {
+			fmt.Fprintf(stderr, format+"\n", args...)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return dialer.Run, nil
+	})
+	defer relayManager.Close()
+	initialRelay := relayManager.Initial()
+	switch initialRelay.Readiness {
 	case config.RelayReadinessNeedsLicense:
 		fmt.Fprintln(stderr, "relay: needs_license")
 	case config.RelayReadinessUnavailable:
-		fmt.Fprintln(stderr, "relay: unavailable (Keychain access unavailable)")
+		fmt.Fprintln(stderr, "relay: unavailable (secure store unavailable)")
 	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
@@ -478,57 +489,53 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
 
-	// Remote access is opt-in, so this loop exists only for a user who asked
-	// for it. It dials out to the relay rather than listening, which is what
-	// lets a phone reach a desktop behind a router nobody configured.
-	var relayDone chan struct{}
-	if relayRuntime.Current().Dial {
-		// Relay progress goes to stderr, not stdout: it is diagnostic chatter
-		// that arrives at unpredictable times, and stdout here is the startup
-		// banner a caller may be parsing.
-		dialer, err := newRelayDialer(cfg, relayRuntime, listener.Addr().String(), func(format string, args ...any) {
-			fmt.Fprintf(stderr, format+"\n", args...)
-		})
-		if err != nil {
-			fmt.Fprintln(stderr, "relay:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "Relay enabled via %s\n", relayRuntime.Current().URL)
-		relayDone = make(chan struct{})
-		go func() {
-			defer close(relayDone)
-			dialer.Run(ctx)
-		}()
+	// Remote access is opt-in. The supervisor dials out and follows the same
+	// coordinator observed by API pairing instead of retaining startup state.
+	if relaySnapshotDialable(initialRelay) {
+		fmt.Fprintf(stdout, "Relay enabled via %s\n", initialRelay.URL)
 	}
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relayManager.Run(ctx) }()
 
-	errors := make(chan error, 1)
-	go func() { errors <- server.Serve(listener) }()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve(listener) }()
+	relayFinished := false
+	serverFinished := false
+	exitCode := 0
 	select {
-	case err := <-errors:
+	case err := <-serverDone:
+		serverFinished = true
 		stop()
-		apiServer.Wait()
 		if err != nil && err != http.ErrServerClosed {
 			fmt.Fprintln(stderr, err)
-			return 1
+			exitCode = 1
+		}
+	case err := <-relayDone:
+		relayFinished = true
+		stop()
+		if err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			exitCode = 1
 		}
 	case <-ctx.Done():
+	}
+	if !serverFinished {
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
 			fmt.Fprintln(stderr, err)
-			return 1
+			exitCode = 1
 		}
-		apiServer.Wait()
+		cancel()
+		<-serverDone
 	}
-	// The dialer stops on the same cancelled context; waiting for it keeps a
-	// half-open relay session from outliving the process that owns it.
-	if relayDone != nil {
-		select {
-		case <-relayDone:
-		case <-time.After(5 * time.Second):
+	apiServer.Wait()
+	if !relayFinished {
+		if err := <-relayDone; err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			exitCode = 1
 		}
 	}
-	return 0
+	return exitCode
 }
 
 // newRelayDialer builds the outbound relay leg for a service that has remote
@@ -536,8 +543,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 //
 // The session id has already been resolved from atomically managed state rather
 // than minted per start, so a phone remains paired across service restarts.
-func newRelayDialer(cfg config.Config, runtime config.RelayRuntime, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
-	snapshot := runtime.Current()
+func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
@@ -552,7 +558,7 @@ func newRelayDialer(cfg config.Config, runtime config.RelayRuntime, localAddr st
 		RelayURL:         snapshot.URL,
 		SessionID:        sessionID,
 		Keypair:          keypair,
-		EntitlementToken: "",
+		EntitlementToken: snapshot.EntitlementToken.Value(),
 		Logf:             logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.
