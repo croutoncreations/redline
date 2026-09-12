@@ -72,7 +72,7 @@ func (s *relaySupervisor) Run(ctx context.Context) error {
 }
 
 func (s *relaySupervisor) apply(ctx context.Context, snapshot config.ResolvedRelay) error {
-	if !relaySnapshotDialable(snapshot) {
+	if !snapshot.CanDial() {
 		s.stopActive()
 		return nil
 	}
@@ -111,16 +111,4 @@ func (s *relaySupervisor) stopActive() {
 	s.active = nil
 	active.cancel()
 	<-active.done
-}
-
-func relaySnapshotDialable(snapshot config.ResolvedRelay) bool {
-	if !snapshot.Dial || snapshot.Mode == config.RelayModeOff {
-		return false
-	}
-	switch snapshot.Readiness {
-	case config.RelayReadinessOff, config.RelayReadinessNeedsLicense, config.RelayReadinessUnavailable:
-		return false
-	default:
-		return true
-	}
 }

@@ -255,6 +255,22 @@ type ResolvedRelay struct {
 	EntitlementToken RelayEntitlementToken `json:"-"`
 }
 
+// CanDial is the one authority for whether this snapshot may advertise and
+// operate a relay route. Dial records resource availability; mode/readiness
+// prevent malformed or stale externally supplied snapshots from contradicting
+// the state the user sees.
+func (r ResolvedRelay) CanDial() bool {
+	if !r.Dial || r.Mode == RelayModeOff {
+		return false
+	}
+	switch r.Readiness {
+	case RelayReadinessOff, RelayReadinessNeedsLicense, RelayReadinessUnavailable:
+		return false
+	default:
+		return true
+	}
+}
+
 // RelayResolver is the single precedence boundary between managed state and
 // bootstrap YAML. Once a managed file exists, YAML relay fields are ignored.
 type RelayResolver struct {

@@ -40,6 +40,9 @@ func TestPlanRefusesRelayOnlyWhenRuntimeIsUnavailable(t *testing.T) {
 	runtime := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "managed-session-abcdefghij"},
 		Readiness:         config.RelayReadinessUnavailable,
+		// A malformed external update must not make pairing advertise a route
+		// the supervisor refuses to dial.
+		Dial: true,
 	}
 	if _, err := PlanRoutes(nil, runtime, Options{RelayOnly: true}); err == nil || !strings.Contains(err.Error(), "ready relay") {
 		t.Fatalf("error = %v", err)

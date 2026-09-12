@@ -491,7 +491,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 
 	// Remote access is opt-in. The supervisor dials out and follows the same
 	// coordinator observed by API pairing instead of retaining startup state.
-	if relaySnapshotDialable(initialRelay) {
+	if initialRelay.CanDial() {
 		fmt.Fprintf(stdout, "Relay enabled via %s\n", initialRelay.URL)
 	}
 	relayDone := make(chan error, 1)

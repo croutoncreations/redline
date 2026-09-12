@@ -35,6 +35,26 @@ func TestResolvedRelayEntitlementTokenStaysOutOfSerializationAndFormatting(t *te
 	}
 }
 
+func TestResolvedRelayDialabilityCannotContradictReadiness(t *testing.T) {
+	for _, snapshot := range []config.ResolvedRelay{
+		{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff}, Readiness: config.RelayReadinessOff, Dial: true},
+		{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted}, Readiness: config.RelayReadinessNeedsLicense, Dial: true},
+		{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted}, Readiness: config.RelayReadinessUnavailable, Dial: true},
+	} {
+		if snapshot.CanDial() {
+			t.Fatalf("inconsistent snapshot reported dialable: %#v", snapshot)
+		}
+	}
+	ready := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-abcdefghij0123"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
+	}
+	if !ready.CanDial() {
+		t.Fatal("ready self-hosted snapshot should be dialable")
+	}
+}
+
 func TestRelayCoordinatorPublishesOneImmutableSnapshot(t *testing.T) {
 	initial := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "session-abcdefghij0123"},

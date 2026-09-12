@@ -106,7 +106,7 @@ func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Opt
 	if options.Port < 0 || options.Port > 65535 {
 		return Plan{}, &CallerError{Err: errors.New("pairing port must be zero or between 1 and 65535")}
 	}
-	hasRelay := runtime.Dial
+	hasRelay := runtime.CanDial()
 	if hasRelay && (strings.TrimSpace(runtime.URL) == "" || strings.TrimSpace(runtime.SessionID) == "") {
 		return Plan{}, errors.New("dialable relay runtime is missing its URL or session_id")
 	}
