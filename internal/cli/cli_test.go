@@ -127,11 +127,21 @@ func TestPairQRUsesServiceDefaultTrustedHost(t *testing.T) {
 
 func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
 	configPath, _ := writePairingConfig(t, []string{"trusted.example.ts.net"})
+	// The public CLI delegates route validation to the running service. Keep
+	// this test hermetic: an earlier version accidentally contacted the user's
+	// localhost service and passed locally only because its API token differed,
+	// then failed in clean CI with connection refused.
+	refusingService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"pairing host is not trusted"}`)
+	}))
+	defer refusingService.Close()
 	for name, test := range map[string]struct {
 		args []string
 		want string
 	}{
-		"untrusted":    {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "Redline API authentication"},
+		"untrusted":    {[]string{"--api", refusingService.URL, "--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "pairing host is not trusted"},
 		"missing qr":   {[]string{"--config", configPath, "pair"}, "--qr is required"},
 		"invalid port": {[]string{"--config", configPath, "pair", "--qr", "--host", "trusted.example.ts.net", "--port", "70000"}, "--port must be between"},
 	} {
