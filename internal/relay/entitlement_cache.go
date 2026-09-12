@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -119,6 +120,58 @@ func decodeEntitlementCache(raw []byte) (CachedEntitlement, error) {
 	return cached, nil
 }
 
+// decodeEntitlementCacheForReplacement accepts schema v3 records normally and
+// recognizes only records that schema v2 itself could have written. Schema v2
+// remains invalid for Load authority, but a valid issuer decision must be able
+// to migrate it while malformed and unknown-future records stay nonreplaceable.
+func decodeEntitlementCacheForReplacement(raw []byte) (CachedEntitlement, bool, error) {
+	cached, err := decodeEntitlementCache(raw)
+	if err == nil {
+		return cached, false, nil
+	}
+
+	var legacy struct {
+		SchemaVersion         *int    `json:"schema_version"`
+		CredentialFingerprint *string `json:"credential_fingerprint"`
+		Revoked               *bool   `json:"revoked,omitempty"`
+		Token                 *string `json:"token,omitempty"`
+		Exp                   *int64  `json:"exp,omitempty"`
+		ObtainedAt            *int64  `json:"obtained_at,omitempty"`
+		SID                   *string `json:"sid,omitempty"`
+		MaxClients            *int    `json:"max_clients,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decodeErr := decoder.Decode(&legacy); decodeErr != nil {
+		return CachedEntitlement{}, false, err
+	}
+	var trailing any
+	if decodeErr := decoder.Decode(&trailing); !errors.Is(decodeErr, io.EOF) {
+		return CachedEntitlement{}, false, err
+	}
+	if legacy.SchemaVersion == nil || *legacy.SchemaVersion != 2 || legacy.CredentialFingerprint == nil || *legacy.CredentialFingerprint == "" {
+		return CachedEntitlement{}, false, err
+	}
+	if legacy.Revoked != nil && *legacy.Revoked {
+		if legacy.Token != nil || legacy.Exp != nil || legacy.ObtainedAt != nil || legacy.SID != nil || legacy.MaxClients != nil {
+			return CachedEntitlement{}, false, err
+		}
+		return CachedEntitlement{SchemaVersion: 2, CredentialFingerprint: *legacy.CredentialFingerprint, Revoked: true}, true, nil
+	}
+	if legacy.Token == nil || legacy.Exp == nil || legacy.ObtainedAt == nil || legacy.SID == nil || legacy.MaxClients == nil {
+		return CachedEntitlement{}, false, err
+	}
+	cached = CachedEntitlement{
+		SchemaVersion: 2, CredentialFingerprint: *legacy.CredentialFingerprint,
+		Token: NewSecret(*legacy.Token), Exp: *legacy.Exp, ObtainedAt: *legacy.ObtainedAt,
+		SID: *legacy.SID, MaxClients: *legacy.MaxClients,
+	}
+	if validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
+		return CachedEntitlement{}, false, err
+	}
+	return cached, true, nil
+}
+
 func validateEntitlementCacheRecord(cached CachedEntitlement) error {
 	if cached.SchemaVersion != EntitlementCacheSchemaVersion || cached.CredentialFingerprint == "" {
 		return errors.New("unversioned or unbound entitlement cache")
@@ -195,7 +248,10 @@ func (l entitlementCacheLock) acquire(ctx context.Context) error {
 
 func (l entitlementCacheLock) release() { l <- struct{}{} }
 
-var entitlementCacheProcessLocks sync.Map
+var (
+	entitlementCacheProcessLocks  sync.Map
+	entitlementCacheDirectorySync = (*os.File).Sync
+)
 
 func NewEntitlementCacheStore(path string) *EntitlementCacheStore {
 	absolute, err := filepath.Abs(path)
@@ -269,12 +325,15 @@ func (s *EntitlementCacheStore) SaveContext(ctx context.Context, cached CachedEn
 		return err
 	}
 	if exists {
-		existing, err := decodeEntitlementCache(existingRaw)
+		existing, legacy, err := decodeEntitlementCacheForReplacement(existingRaw)
 		if err != nil {
 			return err
 		}
-		if !entitlementCacheReplaces(existing, cached) {
-			return nil
+		if !legacy && !entitlementCacheReplaces(existing, cached) {
+			// A prior rename may be visible even though its parent-directory sync
+			// failed. Re-sync the directory before acknowledging an equal/newer
+			// monotonic record as durable.
+			return op.syncDirectory()
 		}
 	}
 	return op.write(raw)

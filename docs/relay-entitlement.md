@@ -137,7 +137,11 @@ extends the original five authority fields (`token`, `exp`, `obtained_at`,
 it binds authority to one credential replacement without storing a reversible
 key. This is an intentional deviation from the original five-field schema.
 Legacy/unversioned records, fingerprint mismatches, unknown fields, omitted
-required fields, and fields from the wrong record variant all fail closed.
+required fields, and fields from the wrong record variant all fail closed for
+authority. Under the cache lock, Save recognizes a structurally valid schema-v2
+record as replaceable legacy so newly issuer-accepted schema-v3 authority or a
+schema-v3 terminal tombstone can migrate it. Malformed schema-v2 and unknown
+future-schema records remain fail-closed and nonreplaceable.
 
 Terminal `invalid_key`, `lapsed`, and `no_seat` decisions replace authority with
 `{"schema_version":3,"credential_fingerprint":"…","revoked":true,"revoked_at":<unix-seconds>}`.
@@ -146,7 +150,10 @@ cache file lock, `obtained_at` versions authority and `revoked_at` versions a
 tombstone for the same credential fingerprint. Authority obtained before or at
 the revocation second cannot replace that tombstone, even from another process;
 issuer-accepted authority obtained after revocation can replace it. A tombstone
-wins a tie with authority.
+wins a tie with authority. Even when this monotonic comparison makes an equal or
+newer existing record a no-op, Save syncs the parent directory before reporting
+success. This lets a retry complete durability after a prior rename succeeded
+but its directory sync failed.
 
 Cache saves and revocations share the controller's latest-value persistence
 stream, so a revocation follows an already in-flight save and obsolete
@@ -154,10 +161,12 @@ completion cannot clear a newer persistence warning. Runtime authority is
 revoked immediately. On shutdown, a distinct bounded barrier survives parent
 cancellation long enough to drain an obsolete in-flight save and persist the
 latest terminal tombstone. `persistence_degraded` remains the sanitized signal
-until that barrier succeeds; timeout or I/O failure leaves it set. Cancellation
-can still interrupt an operation during the narrow platform fsync boundary, so
-the cache remains a fallback rather than a source that can overrule a fresh
-issuer decision.
+until that barrier succeeds; timeout or I/O failure leaves it set. The drain
+deadline bounds `Run` even if `SaveContext` is stuck in an OS sync syscall that
+cannot be canceled. Such a worker goroutine may remain until that syscall
+returns (or process exit); its channels are intentionally left open so a late
+return cannot panic. The cache therefore remains a fallback rather than a source
+that can overrule a fresh issuer decision.
 
 ## Implemented relay refresh endpoint
 

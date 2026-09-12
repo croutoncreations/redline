@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,6 +95,23 @@ func (c *blockingControllerCache) SaveContext(ctx context.Context, value relay.C
 	c.current = value
 	c.mu.Unlock()
 	c.persisted <- value
+	return nil
+}
+
+type uncancellableControllerCache struct {
+	started  chan relay.CachedEntitlement
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func (c *uncancellableControllerCache) Load(string, string, time.Time) (relay.CachedEntitlement, bool, error) {
+	return relay.CachedEntitlement{}, false, nil
+}
+
+func (c *uncancellableControllerCache) SaveContext(_ context.Context, value relay.CachedEntitlement) error {
+	c.started <- value
+	<-c.release // Models an OS sync syscall that cannot observe context cancellation.
+	close(c.returned)
 	return nil
 }
 
@@ -1196,11 +1212,51 @@ func TestEntitlementControllerShutdownDrainsTerminalTombstoneAfterObsoleteSave(t
 	<-restartDone
 }
 
+func TestEntitlementPersistenceRetryClearsDegradationAfterEqualTombstoneSync(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	fingerprint := relay.CredentialFingerprint("equal-tombstone-sync-license")
+	cache := &controllerCache{
+		saved:    make(chan relay.CachedEntitlement, 2),
+		saveErrs: []error{errors.New("sync entitlement cache directory: injected failure"), nil},
+	}
+	persistence := newEntitlementPersistenceWorker(cache)
+	tombstone := relay.CachedEntitlement{
+		SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Revoked: true, RevokedAt: now.Unix(),
+	}
+	persistence.submit(tombstone, 0)
+	firstSaved := <-cache.saved
+	firstResult := <-persistence.results
+
+	base := hostedControllerBase()
+	base.Readiness = RelayReadinessLapsed
+	base.PersistenceDegraded = true
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{Coordinator: coordinator})
+	current := relay.CachedEntitlement{}
+	controller.applyPersistenceResult(0, &base, &current, 0, persistence, firstResult)
+	if !base.PersistenceDegraded || !persistence.needsRetry {
+		t.Fatalf("first directory sync failure cleared degradation: base=%#v retry=%v", base, persistence.needsRetry)
+	}
+
+	persistence.retry(0)
+	secondSaved := <-cache.saved
+	secondResult := <-persistence.results
+	if !firstSaved.Revoked || firstSaved.RevokedAt != secondSaved.RevokedAt {
+		t.Fatalf("retry was not the equal tombstone: first=%#v second=%#v", firstSaved, secondSaved)
+	}
+	controller.applyPersistenceResult(0, &base, &current, 0, persistence, secondResult)
+	if base.PersistenceDegraded || persistence.needsRetry {
+		t.Fatalf("successful second sync retained degradation: base=%#v retry=%v", base, persistence.needsRetry)
+	}
+	persistence.shutdown(context.Background(), time.Second)
+}
+
 func TestEntitlementControllerTerminalShutdownDrainIsBounded(t *testing.T) {
 	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
 	base := hostedControllerBase()
-	cache := &blockingControllerCache{
-		started: make(chan relay.CachedEntitlement, 1), release: make(chan struct{}), persisted: make(chan relay.CachedEntitlement, 1),
+	cache := &uncancellableControllerCache{
+		started: make(chan relay.CachedEntitlement, 1), release: make(chan struct{}), returned: make(chan struct{}),
 	}
 	coordinator := NewRelayCoordinator(base)
 	controller := NewEntitlementController(EntitlementControllerOptions{
@@ -1219,14 +1275,24 @@ func TestEntitlementControllerTerminalShutdownDrainIsBounded(t *testing.T) {
 		t.Fatal("pending terminal tombstone was reported as durable")
 	}
 	<-cache.started
+	startedShutdown := time.Now()
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("terminal durability barrier exceeded its bound")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("terminal durability barrier exceeded its bound on uncancellable sync")
+	}
+	if elapsed := time.Since(startedShutdown); elapsed > 200*time.Millisecond {
+		t.Fatalf("shutdown took %v for a 25ms persistence bound", elapsed)
 	}
 	if got := coordinator.Current(); got.CanDial() || !got.PersistenceDegraded {
 		t.Fatalf("bounded durability failure was not surfaced safely: %#v", got)
+	}
+	close(cache.release)
+	select {
+	case <-cache.returned:
+	case <-time.After(time.Second):
+		t.Fatal("orphan persistence call did not return after simulated syscall release")
 	}
 }
 
@@ -1346,18 +1412,11 @@ func TestEntitlementControllerTerminalTombstoneSurvivesRestart(t *testing.T) {
 	first, cancelFirst, doneFirst := run(&relay.IssuerError{Kind: relay.IssuerLapsed})
 	_ = waitRelayState(t, first, RelayReadinessLapsed)
 	deadline := time.Now().Add(time.Second)
-	durableTombstone := false
-	for time.Now().Before(deadline) {
-		raw, err := os.ReadFile(cachePath)
-		var shape map[string]any
-		if err == nil && json.Unmarshal(raw, &shape) == nil && shape["revoked"] == true && shape["revoked_at"] != nil {
-			durableTombstone = true
-			break
-		}
+	for first.Current().PersistenceDegraded && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if !durableTombstone {
-		t.Fatal("terminal denial did not publish a durable tombstone")
+	if first.Current().PersistenceDegraded {
+		t.Fatal("terminal denial did not report successful tombstone persistence")
 	}
 	cancelFirst()
 	<-doneFirst

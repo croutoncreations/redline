@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -428,6 +429,138 @@ func TestEntitlementCacheTombstoneWinsInterprocessOrdering(t *testing.T) {
 	got, valid, err := firstStore.Load(sid, fingerprint, revokedAt)
 	if err != nil || !valid || got.Token.Value() != newer.Token.Value() {
 		t.Fatalf("newer authority load=%#v valid=%v err=%v", got, valid, err)
+	}
+}
+
+func TestEntitlementCacheRetrySyncsEqualTombstoneAfterDirectorySyncFailure(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	fingerprint := CredentialFingerprint("directory-sync-license")
+	store := NewEntitlementCacheStore(path)
+	tombstone := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Revoked: true, RevokedAt: now.Unix(),
+	}
+
+	originalSync := entitlementCacheDirectorySync
+	defer func() { entitlementCacheDirectorySync = originalSync }()
+	syncCalls := 0
+	var crashDurable []byte
+	entitlementCacheDirectorySync = func(directory *os.File) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("injected directory sync failure")
+		}
+		var err error
+		crashDurable, err = os.ReadFile(path)
+		return err
+	}
+
+	if err := store.Save(tombstone); err == nil || !strings.Contains(err.Error(), "sync entitlement cache directory") {
+		t.Fatalf("first tombstone save error=%v", err)
+	}
+	visibleAfterFailedSync, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(crashDurable) != 0 {
+		t.Fatal("failed directory sync advanced crash-durable model")
+	}
+	if err := store.Save(tombstone); err != nil {
+		t.Fatalf("equal tombstone retry did not repair durability: %v", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("directory sync calls=%d, want 2", syncCalls)
+	}
+	if !bytes.Equal(crashDurable, visibleAfterFailedSync) {
+		t.Fatal("successful retry did not make the already-renamed tombstone crash-durable")
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(crashDurable, &shape); err != nil || shape["revoked"] != true {
+		t.Fatalf("crash-durable record=%s err=%v", crashDurable, err)
+	}
+}
+
+func TestEntitlementCacheSchemaV2AuthorityIsReplaceableLegacy(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-v2-upgrade-session-123456")
+	fingerprint := CredentialFingerprint("v2-upgrade-license")
+	legacyExp := now.Add(time.Hour).Unix()
+	legacy := fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":%q,"exp":%d,"obtained_at":%d,"sid":%q,"max_clients":5}`, fingerprint, testEntitlementToken(t, legacyExp, sid, 5), legacyExp, now.Unix(), sid) + "\n"
+
+	for _, tc := range []struct {
+		name     string
+		incoming CachedEntitlement
+	}{
+		{
+			name: "v3 authority",
+			incoming: CachedEntitlement{
+				SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+				Token: NewSecret(testEntitlementToken(t, now.Add(2*time.Hour).Unix(), sid, 5)),
+				Exp:   now.Add(2 * time.Hour).Unix(), ObtainedAt: now.Add(time.Minute).Unix(), SID: sid, MaxClients: 5,
+			},
+		},
+		{
+			name: "v3 tombstone",
+			incoming: CachedEntitlement{
+				SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+				Revoked: true, RevokedAt: now.Add(time.Minute).Unix(),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+			if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := NewEntitlementCacheStore(path)
+			if _, valid, err := store.Load(sid, fingerprint, now); err == nil || valid {
+				t.Fatal("schema-v2 cache was accepted as authority")
+			}
+			if err := store.SaveContext(context.Background(), tc.incoming); err != nil {
+				t.Fatalf("replace schema-v2 cache: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := decodeEntitlementCache(raw)
+			if err != nil || decoded.SchemaVersion != EntitlementCacheSchemaVersion || decoded.Revoked != tc.incoming.Revoked {
+				t.Fatalf("replacement=%#v err=%v", decoded, err)
+			}
+		})
+	}
+}
+
+func TestEntitlementCacheRejectsMalformedOrFutureCacheReplacement(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-replacement-reject-session")
+	fingerprint := CredentialFingerprint("replacement-reject-license")
+	incoming := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Revoked: true, RevokedAt: now.Add(time.Minute).Unix(),
+	}
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"malformed v2", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":"bad","exp":1,"obtained_at":1,"sid":%q}`, fingerprint, sid) + "\n"},
+		{"future schema", fmt.Sprintf(`{"schema_version":4,"credential_fingerprint":%q,"revoked":true,"revoked_at":%d}`, fingerprint, now.Unix()) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+			if err := os.WriteFile(path, []byte(tc.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := NewEntitlementCacheStore(path)
+			if err := store.SaveContext(context.Background(), incoming); err == nil {
+				t.Fatal("unsafe existing cache was replaced")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != tc.raw {
+				t.Fatalf("unsafe cache changed to %q, err=%v", got, err)
+			}
+		})
 	}
 }
 

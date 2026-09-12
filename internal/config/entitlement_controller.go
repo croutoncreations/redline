@@ -61,8 +61,9 @@ type EntitlementControllerOptions struct {
 	Clock       entitlementClock
 	ExpiryClock entitlementClock
 	Jitter      func() float64
-	// PersistenceDrainTimeout bounds terminal tombstone durability during
-	// shutdown. The barrier is deliberately independent of parent cancellation.
+	// PersistenceDrainTimeout bounds persistence-worker shutdown, including
+	// terminal tombstone durability. The barrier is independent of parent
+	// cancellation, but cannot cancel an OS syscall already in progress.
 	PersistenceDrainTimeout time.Duration
 	Refresh                 func(context.Context, *http.Client, string, string, relay.Secret) error
 	// BeforeCommit is a deterministic test seam immediately before an issuer
@@ -163,9 +164,23 @@ func (w *entitlementPersistenceWorker) retry(generation uint64) {
 }
 
 func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout time.Duration) *entitlementPersistenceResult {
-	if !w.latest.cached.Revoked {
+	// The barrier intentionally survives parent cancellation. Its deadline also
+	// bounds waiting for worker exit: SaveContext normally observes cancellation,
+	// but a filesystem sync already inside the kernel cannot be canceled. In that
+	// case the goroutine is unavoidably orphaned until the syscall returns or the
+	// process exits. Channels stay open so its eventual return cannot panic.
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	defer cancel()
+	stopAndWait := func() {
 		w.cancel()
-		<-w.done
+		select {
+		case <-w.done:
+		case <-drainCtx.Done():
+		}
+	}
+
+	if !w.latest.cached.Revoked {
+		stopAndWait()
 		return nil
 	}
 	if w.needsRetry {
@@ -173,30 +188,20 @@ func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout 
 	}
 	targetVersion := w.latest.version
 	if w.completedVersion >= targetVersion {
-		w.cancel()
-		<-w.done
+		stopAndWait()
 		return nil
 	}
 
-	// The terminal barrier intentionally survives parent cancellation, but an
-	// overall deadline still bounds an obsolete in-flight save plus the latest
-	// tombstone write. Expiry cancels the worker's active SaveContext.
-	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
-	defer cancel()
-	stopWorker := context.AfterFunc(drainCtx, w.cancel)
-	defer stopWorker()
 	for {
 		select {
 		case result := <-w.results:
 			if result.request.version != targetVersion {
 				continue
 			}
-			w.cancel()
-			<-w.done
+			stopAndWait()
 			return &result
 		case <-drainCtx.Done():
 			w.cancel()
-			<-w.done
 			return nil
 		case <-w.done:
 			return nil

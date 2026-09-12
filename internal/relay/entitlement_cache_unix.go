@@ -105,6 +105,13 @@ func (op *entitlementCacheOperation) read() ([]byte, bool, error) {
 	return raw, true, nil
 }
 
+func (op *entitlementCacheOperation) syncDirectory() error {
+	if err := entitlementCacheDirectorySync(op.directory); err != nil {
+		return fmt.Errorf("sync entitlement cache directory: %w", err)
+	}
+	return nil
+}
+
 func (op *entitlementCacheOperation) write(raw []byte) error {
 	name := ".relay-entitlement-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	fd, err := unix.Openat(int(op.directory.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
@@ -137,8 +144,5 @@ func (op *entitlementCacheOperation) write(raw []byte) error {
 		return fmt.Errorf("replace entitlement cache: %w", err)
 	}
 	published = true
-	if err := op.directory.Sync(); err != nil {
-		return fmt.Errorf("sync entitlement cache directory: %w", err)
-	}
-	return nil
+	return op.syncDirectory()
 }
