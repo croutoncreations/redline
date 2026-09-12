@@ -330,6 +330,19 @@ func (r ResolvedRelay) Activations() []RelayActivationSummary {
 // operate a relay route. Dial records resource availability; mode/readiness
 // prevent malformed or stale externally supplied snapshots from contradicting
 // the state the user sees.
+// EntitlementTokenAt is the dialer boundary for hosted bearer authority. It
+// independently enforces raw signed expiration even if controller renewal I/O
+// is blocked and the expiry watcher has not yet been scheduled by the runtime.
+func (r ResolvedRelay) EntitlementTokenAt(now time.Time) string {
+	if !r.CanDial() {
+		return ""
+	}
+	if r.Mode == RelayModeHosted && (r.ExpiresAt.IsZero() || !r.ExpiresAt.After(now)) {
+		return ""
+	}
+	return r.EntitlementToken.Value()
+}
+
 func (r ResolvedRelay) CanDial() bool {
 	if !r.Dial || r.Mode == RelayModeOff {
 		return false

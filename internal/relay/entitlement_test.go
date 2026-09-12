@@ -270,6 +270,7 @@ func TestEntitlementCacheSaveContextStopsWhileProcessLockIsBlocked(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := store.SaveContext(ctx, CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: CredentialFingerprint("test-license"),
 		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp, ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -283,7 +284,9 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	exp := now.Add(EntitlementLifetime).Unix()
 	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
 	store := NewEntitlementCacheStore(path)
+	fingerprint := CredentialFingerprint("test-license")
 	want := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
 		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
 		ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
 	}
@@ -294,26 +297,26 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("cache mode=%v err=%v", info.Mode().Perm(), err)
 	}
-	got, exists, err := store.Load(sid, now)
+	got, exists, err := store.Load(sid, fingerprint, now)
 	if err != nil || !exists || got.Token.Value() != want.Token.Value() {
 		t.Fatalf("load=%#v exists=%v err=%v", got, exists, err)
 	}
-	if _, _, err := store.Load(SessionSID("wrong-session-123456"), now); err == nil {
+	if _, _, err := store.Load(SessionSID("wrong-session-123456"), fingerprint, now); err == nil {
 		t.Fatal("cache bound to another sid was accepted")
 	}
-	if _, _, err := store.Load(sid, time.Unix(exp, 0).Add(EntitlementClockSkew)); err == nil {
+	if _, _, err := store.Load(sid, fingerprint, time.Unix(exp, 0).Add(EntitlementClockSkew)); err == nil {
 		t.Fatal("cache beyond the bounded expiry skew was accepted")
 	}
 	raw, _ := os.ReadFile(path)
 	var shape map[string]any
 	_ = json.Unmarshal(raw, &shape)
-	if len(shape) != 5 {
-		t.Fatalf("cache schema has extra fields: %v", shape)
+	if len(shape) != 7 || shape["schema_version"] != float64(EntitlementCacheSchemaVersion) || shape["credential_fingerprint"] != fingerprint {
+		t.Fatalf("cache schema is not versioned and credential-bound: %v", shape)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Load(sid, now); err == nil {
+	if _, _, err := store.Load(sid, fingerprint, now); err == nil {
 		t.Fatal("overpermissive cache was accepted")
 	}
 	_ = os.Remove(path)
@@ -322,11 +325,45 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Load(sid, now); err == nil {
+	if _, _, err := store.Load(sid, fingerprint, now); err == nil {
 		t.Fatal("symlink cache was accepted")
 	}
 	if err := store.Save(want); err == nil {
 		t.Fatal("renewal replaced a symlink cache")
+	}
+}
+
+func TestEntitlementCacheRejectsReplacementCredentialAndDurableTombstone(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-revocation-session-123456")
+	exp := now.Add(EntitlementLifetime).Unix()
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	store := NewEntitlementCacheStore(path)
+	oldFingerprint := CredentialFingerprint("old-high-entropy-license")
+	cached := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: oldFingerprint,
+		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+		ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
+	}
+	if err := store.Save(cached); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.Load(sid, CredentialFingerprint("replacement-license"), now); err == nil || valid {
+		t.Fatal("replacement credential trusted old cache authority")
+	}
+	tombstone := CachedEntitlement{SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: oldFingerprint, Revoked: true}
+	if err := store.Save(tombstone); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.Load(sid, oldFingerprint, now); err == nil || valid {
+		t.Fatal("durably revoked credential retained cache authority")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "old-high-entropy-license") || strings.Contains(string(raw), cached.Token.Value()) {
+		t.Fatal("tombstone retained reversible credential or authority token")
 	}
 }
 
@@ -353,7 +390,7 @@ func TestEntitlementValidationAllowsOnlyBoundedClockSkew(t *testing.T) {
 	}
 
 	futureReceipt := receivedAt.Add(EntitlementClockSkew)
-	cached := CachedEntitlement{Token: NewSecret(testEntitlementToken(t, futureReceipt.Add(time.Hour).Unix(), sid, 5)), Exp: futureReceipt.Add(time.Hour).Unix(), ObtainedAt: futureReceipt.Unix(), SID: sid, MaxClients: 5}
+	cached := CachedEntitlement{SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: CredentialFingerprint("test-license"), Token: NewSecret(testEntitlementToken(t, futureReceipt.Add(time.Hour).Unix(), sid, 5)), Exp: futureReceipt.Add(time.Hour).Unix(), ObtainedAt: futureReceipt.Unix(), SID: sid, MaxClients: 5}
 	if !cached.ValidAt(sid, receivedAt) {
 		t.Fatal("bounded positive obtained_at skew was rejected")
 	}
@@ -368,6 +405,7 @@ func TestCachedEntitlementAuthorityEndsAtSignedExpiration(t *testing.T) {
 	sid := SessionSID("session-raw-expiration-123456")
 	exp := receivedAt.Add(time.Hour).Unix()
 	cached := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: CredentialFingerprint("test-license"),
 		Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
 		ObtainedAt: receivedAt.Unix(), SID: sid, MaxClients: 5,
 	}

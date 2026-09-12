@@ -34,10 +34,15 @@ type fullchainCache struct {
 	releaseSave <-chan struct{}
 }
 
-func (c *fullchainCache) Load(sid string, now time.Time) (relay.CachedEntitlement, bool, error) {
+func (c *fullchainCache) Load(sid, fingerprint string, now time.Time) (relay.CachedEntitlement, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.current, c.current.ValidAt(sid, now), nil
+	current := c.current
+	if current.SchemaVersion == 0 {
+		current.SchemaVersion = relay.EntitlementCacheSchemaVersion
+		current.CredentialFingerprint = fingerprint
+	}
+	return current, current.ValidAt(sid, now), nil
 }
 func (c *fullchainCache) SaveContext(ctx context.Context, value relay.CachedEntitlement) error {
 	if c.saveStarted != nil {
@@ -254,7 +259,7 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 	initial := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: tlsRelay.URL, SessionID: sessionID},
 		Readiness:         config.RelayReadinessActive, Dial: true, EntitlementToken: config.NewRelayEntitlementToken(oldToken.Value()),
-		RenewsAt: now.Add(30 * time.Minute), MaxClients: 5,
+		RenewsAt: now.Add(30 * time.Minute), ExpiresAt: time.Unix(oldExp, 0), MaxClients: 5,
 	}
 	coordinator := config.NewRelayCoordinator(initial)
 	supervisor := newRelaySupervisor(coordinator, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {

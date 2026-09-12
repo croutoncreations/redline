@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -38,8 +39,13 @@ type controllerCache struct {
 	mu       sync.Mutex
 }
 
-func (c *controllerCache) Load(string, time.Time) (relay.CachedEntitlement, bool, error) {
-	return c.value, c.exists, nil
+func (c *controllerCache) Load(_ string, fingerprint string, _ time.Time) (relay.CachedEntitlement, bool, error) {
+	value := c.value
+	if value.SchemaVersion == 0 {
+		value.SchemaVersion = relay.EntitlementCacheSchemaVersion
+		value.CredentialFingerprint = fingerprint
+	}
+	return value, c.exists, nil
 }
 func (c *controllerCache) SaveContext(_ context.Context, value relay.CachedEntitlement) error {
 	c.mu.Lock()
@@ -68,7 +74,7 @@ type blockingControllerCache struct {
 	calls     int
 }
 
-func (c *blockingControllerCache) Load(string, time.Time) (relay.CachedEntitlement, bool, error) {
+func (c *blockingControllerCache) Load(string, string, time.Time) (relay.CachedEntitlement, bool, error) {
 	return relay.CachedEntitlement{}, false, nil
 }
 
@@ -118,6 +124,17 @@ type controllerClock struct {
 	now    time.Time
 	mu     sync.Mutex
 	delays chan time.Duration
+}
+
+type controllableExpiryClock struct {
+	timers chan *controllerTimer
+}
+
+func (c *controllableExpiryClock) Now() time.Time { return time.Time{} }
+func (c *controllableExpiryClock) NewTimer(time.Duration) entitlementTimer {
+	timer := &controllerTimer{ch: make(chan time.Time, 1)}
+	c.timers <- timer
+	return timer
 }
 
 func (c *controllerClock) Now() time.Time {
@@ -320,8 +337,8 @@ func TestEntitlementControllerPublishesTerminalNoSeatAndRetriesOnTrigger(t *test
 	if got.CanDial() || len(got.Activations()) != 1 || got.Activations()[0].Label != "First Mac" {
 		t.Fatalf("no-seat snapshot=%#v", got)
 	}
-	if got.Seats != 0 || got.SeatsUsed != 0 || got.MaxClients != 0 || !got.RenewsAt.IsZero() || !got.ExpiresAt.IsZero() || !got.UnavailableSince.IsZero() || got.PersistenceDegraded {
-		t.Fatalf("no-seat state retained stale fields: %#v", got)
+	if got.Seats != 0 || got.SeatsUsed != 0 || got.MaxClients != 0 || !got.RenewsAt.IsZero() || !got.ExpiresAt.IsZero() || !got.UnavailableSince.IsZero() {
+		t.Fatalf("no-seat state retained stale authority fields: %#v", got)
 	}
 	if delay := <-clock.delays; delay != terminalEntitlementRetry {
 		t.Fatalf("terminal retry=%v", delay)
@@ -765,9 +782,10 @@ func TestEntitlementControllerNewCredentialGenerationCanEstablishAuthorityAfterT
 	})
 	coordinator := NewRelayCoordinator(base)
 	clock := &controllerClock{now: now, delays: make(chan time.Duration, 2)}
+	cache := &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}
 	controller := NewEntitlementController(EntitlementControllerOptions{
 		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "new-license"}, Issuer: issuer,
-		Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}, Clock: clock,
+		Cache: cache, Clock: clock,
 		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -779,6 +797,17 @@ func TestEntitlementControllerNewCredentialGenerationCanEstablishAuthorityAfterT
 	got := waitRelayState(t, coordinator, RelayReadinessActive)
 	if !got.CanDial() || got.EntitlementToken.Value() != newToken.Value() {
 		t.Fatalf("new credential generation did not establish authority: %#v", got)
+	}
+	var cached relay.CachedEntitlement
+	for i := 0; i < 2; i++ {
+		candidate := <-cache.saved
+		if !candidate.Revoked {
+			cached = candidate
+			break
+		}
+	}
+	if cached.Token.Value() != newToken.Value() || cached.CredentialFingerprint != relay.CredentialFingerprint("new-license") {
+		t.Fatalf("new credential authority was not durably credential-bound: %#v", cached)
 	}
 	cancel()
 	<-done
@@ -829,7 +858,9 @@ func TestEntitlementControllerExactExpirationBetweenValidationAndCommitIsUnavail
 			issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
 			return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
 		}),
-		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error {
+			return &relay.RelayRefreshError{Kind: relay.RelayRefreshNoHost, Status: http.StatusLocked}
+		},
 		BeforeCommit: func() {
 			clock.Advance(time.Minute)
 		},
@@ -991,6 +1022,192 @@ func TestEntitlementControllerBlockedPersistenceDoesNotBlockExpiryRenewalOrGener
 	case <-time.After(time.Second):
 		t.Fatal("controller did not shut down after persistence worker completed")
 	}
+}
+
+func TestEntitlementControllerObsoleteSaveCannotUndoTerminalRevocation(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(relay.EntitlementLifetime).Unix()
+	cache := &blockingControllerCache{
+		started: make(chan relay.CachedEntitlement, 2), release: make(chan struct{}), persisted: make(chan relay.CachedEntitlement, 2),
+	}
+	calls := make(chan int, 2)
+	count := 0
+	issuer := controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		count++
+		calls <- count
+		if count == 2 {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerInvalidKey}
+		}
+		issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+		return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 3)}
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Issuer: issuer, Cache: cache, Clock: clock,
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	<-calls
+	_ = waitRelayState(t, coordinator, RelayReadinessActive)
+	oldSave := <-cache.started
+	controller.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
+	<-calls
+	terminal := waitRelayState(t, coordinator, RelayReadinessInvalidKey)
+	if terminal.CanDial() || !terminal.PersistenceDegraded {
+		t.Fatalf("terminal runtime revocation waited for persistence: %#v", terminal)
+	}
+	close(cache.release)
+	if persisted := <-cache.persisted; persisted.Token.Value() != oldSave.Token.Value() {
+		t.Fatal("test did not release the obsolete in-flight save")
+	}
+	if tombstone := <-cache.persisted; !tombstone.Revoked || tombstone.CredentialFingerprint != relay.CredentialFingerprint("license") {
+		t.Fatalf("obsolete save was not followed by bound tombstone: %#v", tombstone)
+	}
+	cache.mu.Lock()
+	current := cache.current
+	cache.mu.Unlock()
+	if !current.Revoked || current.Token.Value() != "" {
+		t.Fatalf("restart-visible record revived obsolete authority: %#v", current)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerExpiryWatcherRevokesWhileIssuerIsBlocked(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	exp := now.Add(time.Hour).Unix()
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 3)}
+	expiryClock := &controllableExpiryClock{timers: make(chan *controllerTimer, 2)}
+	issuerBlocked := make(chan struct{})
+	calls := 0
+	issuer := controllerReceivedIssuerFunc(func(ctx context.Context, _, _, _ string) (relay.ReceivedEntitlement, error) {
+		calls++
+		if calls > 1 {
+			close(issuerBlocked)
+			<-ctx.Done()
+			return relay.ReceivedEntitlement{}, ctx.Err()
+		}
+		issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+		return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"},
+		Issuer: issuer, Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}, Clock: clock, ExpiryClock: expiryClock,
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	_ = waitRelayState(t, coordinator, RelayReadinessActive)
+	expiryTimer := <-expiryClock.timers
+	<-clock.delays
+	controller.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
+	<-issuerBlocked
+	clock.Advance(time.Hour)
+	expiryTimer.ch <- clock.Now()
+	got := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("raw expiration watcher retained blocked authority: %#v", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("blocked renewal or expiry watcher leaked on shutdown")
+	}
+}
+
+func TestEntitlementControllerRelayEventAfterRefreshAcceptanceForcesFollowup(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	clock := &controllerClock{now: now, delays: make(chan time.Duration, 3)}
+	calls := make(chan int, 3)
+	count := 0
+	controllerRef := (*EntitlementController)(nil)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: NewRelayCoordinator(base), Initial: base, Licenses: controllerLicenseStore{value: "license"},
+		Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 3)}, Clock: clock,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			count++
+			calls <- count
+			exp := now.Add(relay.EntitlementLifetime).Unix()
+			issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+			return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		BeforeCommit: func() {
+			if count == 1 {
+				controllerRef.TriggerRelayEntitlement(relay.EntitlementExpired)
+			}
+		},
+	})
+	controllerRef = controller
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	if call := <-calls; call != 1 {
+		t.Fatalf("initial call=%d", call)
+	}
+	if call := <-calls; call != 2 {
+		t.Fatalf("post-acceptance relay event was lost: call=%d", call)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerTerminalTombstoneSurvivesRestart(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("durable-license")
+	exp := now.Add(time.Hour).Unix()
+	cache := relay.NewEntitlementCacheStore(filepath.Join(t.TempDir(), "relay-entitlement.json"))
+	if err := cache.Save(relay.CachedEntitlement{
+		SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(issuerErr *relay.IssuerError) (*RelayCoordinator, context.CancelFunc, <-chan struct{}) {
+		coordinator := NewRelayCoordinator(base)
+		controller := NewEntitlementController(EntitlementControllerOptions{
+			Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "durable-license"}, Cache: cache,
+			Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+				return relay.ReceivedEntitlement{ReceivedAt: time.Now().UTC().Truncate(time.Second)}, issuerErr
+			}),
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { controller.Run(ctx); close(done) }()
+		return coordinator, cancel, done
+	}
+	first, cancelFirst, doneFirst := run(&relay.IssuerError{Kind: relay.IssuerLapsed})
+	_ = waitRelayState(t, first, RelayReadinessLapsed)
+	deadline := time.Now().Add(time.Second)
+	for first.Current().PersistenceDegraded && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancelFirst()
+	<-doneFirst
+	if _, valid, err := cache.Load(sid, fingerprint, now); err == nil || valid {
+		t.Fatal("terminal denial did not durably replace cached authority")
+	}
+	second, cancelSecond, doneSecond := run(&relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true})
+	got := waitRelayState(t, second, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("restart revived terminally denied cache: %#v", got)
+	}
+	cancelSecond()
+	<-doneSecond
 }
 
 func TestEntitlementControllerCancellationStopsBlockedPersistenceWorker(t *testing.T) {

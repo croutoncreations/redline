@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"time"
 
 	"github.com/jfox/redline/internal/config"
 )
@@ -91,7 +92,7 @@ func (s *relaySupervisor) apply(ctx context.Context, snapshot config.ResolvedRel
 	}
 	s.stopActive()
 	run, err := s.newDialer(snapshot, func() string {
-		return s.runtime.Current().EntitlementToken.Value()
+		return s.runtime.Current().EntitlementTokenAt(time.Now())
 	})
 	if err != nil {
 		return err

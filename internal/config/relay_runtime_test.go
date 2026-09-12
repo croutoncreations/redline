@@ -35,6 +35,23 @@ func TestResolvedRelayEntitlementTokenStaysOutOfSerializationAndFormatting(t *te
 	}
 }
 
+func TestResolvedRelayEntitlementTokenAtRejectsRawExpiration(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	resolved := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted},
+		Readiness:         config.RelayReadinessActive, Dial: true,
+		EntitlementToken: config.NewRelayEntitlementToken("host-entitlement-secret"),
+		ExpiresAt:        now,
+	}
+	if got := resolved.EntitlementTokenAt(now); got != "" {
+		t.Fatalf("expired token supplier returned %q", got)
+	}
+	resolved.ExpiresAt = now.Add(time.Nanosecond)
+	if got := resolved.EntitlementTokenAt(now); got == "" {
+		t.Fatal("unexpired token supplier rejected authority")
+	}
+}
+
 func TestResolvedRelayDialabilityCannotContradictReadiness(t *testing.T) {
 	for _, snapshot := range []config.ResolvedRelay{
 		{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff}, Readiness: config.RelayReadinessOff, Dial: true},
