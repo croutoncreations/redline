@@ -1,10 +1,12 @@
 package api_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,12 +28,20 @@ import (
 
 func pairingHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
+	return pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+		Readiness:         config.RelayReadinessOff,
+	}))
+}
+
+func pairingHandlerWithRuntime(t *testing.T, cfg config.Config, runtime config.RelayRuntime) http.Handler {
+	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return api.NewServer(cfg, db, func() time.Time { return apiNow })
+	return api.NewServerWithRelayRuntime(cfg, db, func() time.Time { return apiNow }, runtime)
 }
 
 func createPairing(t *testing.T, handler http.Handler, cfg config.Config, query string) (int, map[string]any) {
@@ -98,13 +108,12 @@ func TestPairingResponseCarriesTheRelayWhenEnabled(t *testing.T) {
 	cfg.Database = filepath.Join(t.TempDir(), "redline.db")
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
-	cfg.Relay = config.Relay{
-		Enabled:          true,
-		URL:              "https://relay.example",
-		SessionID:        "session-0123456789abcdefghijklmnop",
-		EntitlementToken: "rl_fake_boundary_sentinel_never_emit",
+	resolved := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
 	}
-	handler := pairingHandler(t, cfg)
+	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
 	code, body := createPairing(t, handler, cfg, "")
 	if code != http.StatusCreated {
@@ -114,15 +123,11 @@ func TestPairingResponseCarriesTheRelayWhenEnabled(t *testing.T) {
 	if fragment.Get("relay") != "https://relay.example" {
 		t.Errorf("relay = %q", fragment.Get("relay"))
 	}
-	if fragment.Get("session") != cfg.Relay.SessionID {
+	if fragment.Get("session") != resolved.SessionID {
 		t.Errorf("session = %q", fragment.Get("session"))
 	}
 	if fragment.Has("entitlement") {
 		t.Errorf("host entitlement leaked into pairing URL: %q", fragment.Get("entitlement"))
-	}
-	encodedResponse, _ := json.Marshal(body)
-	if strings.Contains(string(encodedResponse), cfg.Relay.EntitlementToken) {
-		t.Fatalf("host entitlement leaked through service JSON: %s", encodedResponse)
 	}
 	if key := fragment.Get("key"); len(key) != 44 {
 		t.Errorf("key should be a base64 32-byte public key, got %q", key)
@@ -140,12 +145,12 @@ func TestPairingResponseIsRelayOnlyWithoutATrustedHost(t *testing.T) {
 	cfg.Database = filepath.Join(t.TempDir(), "redline.db")
 	cfg.API.TrustedHosts = nil
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
-	cfg.Relay = config.Relay{
-		Enabled:   true,
-		URL:       "https://relay.example",
-		SessionID: "session-0123456789abcdefghijklmnop",
+	resolved := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
 	}
-	handler := pairingHandler(t, cfg)
+	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
 	code, body := createPairing(t, handler, cfg, "")
 	if code != http.StatusCreated {
@@ -169,12 +174,111 @@ func TestPairingResponseHonoursRelayOnly(t *testing.T) {
 	cfg.Database = filepath.Join(t.TempDir(), "redline.db")
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
 	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
-	cfg.Relay = config.Relay{Enabled: true, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"}
-	handler := pairingHandler(t, cfg)
+	resolved := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
+	}
+	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
 	_, body := createPairing(t, handler, cfg, "?relay_only=1")
 	if !strings.HasPrefix(body["pairing_url"].(string), "https://relay/pair#") {
 		t.Errorf("relay_only was ignored: %q", body["pairing_url"])
+	}
+}
+
+func TestInvalidPairingOverridesDoNotCreateRelayIdentity(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		body       string
+		readyRelay bool
+	}{
+		{name: "host", body: `{"host":"attacker.example.com"}`, readyRelay: true},
+		{name: "port", body: `{"port":70000}`, readyRelay: true},
+		{name: "relay only without ready relay", query: "?relay_only=1"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := testConfig("http://unused")
+			cfg.Database = filepath.Join(root, "redline.db")
+			cfg.Relay.KeypairPath = filepath.Join(root, "relay-identity.json")
+			cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
+			cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+			runtime := config.ResolvedRelay{
+				RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+				Readiness:         config.RelayReadinessOff,
+			}
+			if tt.readyRelay {
+				runtime = config.ResolvedRelay{
+					RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+					Readiness:         config.RelayReadinessSelfHosted,
+					Dial:              true,
+				}
+			}
+			handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(runtime))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7436/v1/pairing"+tt.query, bytes.NewBufferString(tt.body))
+			request.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+			if tt.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if _, err := os.Stat(cfg.Relay.KeypairPath); !os.IsNotExist(err) {
+				t.Fatalf("identity file was created: %v", err)
+			}
+		})
+	}
+}
+
+func TestPairingIdentityFailuresAreInternalAndMintNothing(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig("http://unused")
+	cfg.Database = filepath.Join(root, "redline.db")
+	cfg.Relay.KeypairPath = filepath.Join(root, "relay-identity.json")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	if err := os.WriteFile(cfg.Relay.KeypairPath, []byte("not a keypair"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := config.NewRelayCoordinator(config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
+	})
+	handler := pairingHandlerWithRuntime(t, cfg, runtime)
+
+	code, body := createPairing(t, handler, cfg, "?relay_only=1")
+	if code != http.StatusInternalServerError || !strings.Contains(body["error"].(string), "pairing identity") {
+		t.Fatalf("status=%d body=%v", code, body)
+	}
+}
+
+func TestRelayRuntimeUpdateIsUsedConsistentlyByPairing(t *testing.T) {
+	cfg := testConfig("http://unused")
+	cfg.Database = filepath.Join(t.TempDir(), "redline.db")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	runtime := config.NewRelayCoordinator(config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessNeedsLicense,
+	})
+	handler := pairingHandlerWithRuntime(t, cfg, runtime)
+	runtime.Update(config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
+		Readiness:         config.RelayReadinessSelfHosted,
+		Dial:              true,
+	})
+
+	code, body := createPairing(t, handler, cfg, "?relay_only=1")
+	if code != http.StatusCreated || body["relay_status"] != string(config.RelayReadinessSelfHosted) {
+		t.Fatalf("status=%d body=%v", code, body)
+	}
+	fragment := fragmentOf(t, body["pairing_url"].(string))
+	if fragment.Get("relay") != "https://relay.example" || fragment.Get("session") != "session-0123456789abcdefghijklmnop" {
+		t.Fatalf("pairing fragment=%v", fragment)
 	}
 }
 

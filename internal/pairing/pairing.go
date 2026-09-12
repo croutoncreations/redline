@@ -11,7 +11,6 @@ package pairing
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -73,63 +72,97 @@ type Code struct {
 	Notice string
 }
 
-// Compose builds the pairing code for token against this configuration.
-//
-// The direct endpoint is chosen from Options.Host, else a detected name that
-// is trusted, else the first trusted host. The relay fields are added whenever
-// relay.enabled, from the same identity the desktop's relay leg presents:
-// loading the keypair here rather than generating one is what makes the key
-// in the QR the key the phone will later be answered by.
-func Compose(cfg config.Config, token string, options Options) (Code, error) {
-	relayURL, desktopKey, sessionID := "", "", ""
-	if cfg.Relay.Enabled {
-		switch cfg.Relay.Readiness {
-		case "", string(config.RelayReadinessSelfHosted), "active", "renew_pending":
-			// Empty is retained for direct package callers and tests; the running
-			// service always supplies an explicit resolved readiness.
-		default:
-			return Code{}, fmt.Errorf("relay pairing is unavailable: %s", cfg.Relay.Readiness)
-		}
-		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
-		if err != nil {
-			return Code{}, err
-		}
-		// Without the session id the phone knows where the relay is and has
-		// no idea which session on it belongs to this desktop.
-		sessionID = strings.TrimSpace(cfg.Relay.SessionID)
-		if sessionID == "" {
-			return Code{}, errors.New("relay.enabled is set but relay.session_id is empty; add one to the config")
-		}
-		relayURL = cfg.Relay.URL
-		desktopKey = core.DesktopPublicKey(keypair)
-	}
-	hasRelay := relayURL != "" && desktopKey != "" && sessionID != ""
+// CallerError marks an invalid caller-controlled pairing option. API handlers
+// map it to 400; identity and other internal failures remain 500 errors.
+type CallerError struct{ Err error }
 
-	host, port, notice, err := chooseDirect(cfg, options, hasRelay)
+func (e *CallerError) Error() string { return e.Err.Error() }
+func (e *CallerError) Unwrap() error { return e.Err }
+
+// Plan is the pure result of selecting pairing routes. It contains no desktop
+// key and planning performs no filesystem or identity I/O.
+type Plan struct {
+	Routes   []Route
+	Endpoint string
+	Notice   string
+
+	host      string
+	port      int
+	relayURL  string
+	sessionID string
+}
+
+// PreparedPlan has completed all fallible identity work. Rendering it with a
+// freshly minted token is deterministic and cannot fail.
+type PreparedPlan struct {
+	plan       Plan
+	desktopKey string
+}
+
+// PlanRoutes validates caller options and selects routes from one immutable
+// runtime snapshot. It is deliberately pure so invalid requests cannot create
+// the relay identity file.
+func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Options) (Plan, error) {
+	if options.Port < 0 || options.Port > 65535 {
+		return Plan{}, &CallerError{Err: errors.New("pairing port must be between 1 and 65535")}
+	}
+	hasRelay := runtime.Dial
+	if hasRelay && (strings.TrimSpace(runtime.URL) == "" || strings.TrimSpace(runtime.SessionID) == "") {
+		return Plan{}, errors.New("dialable relay runtime is missing its URL or session_id")
+	}
+	host, port, notice, err := chooseDirect(trustedHosts, options, hasRelay)
 	if err != nil {
-		return Code{}, err
+		return Plan{}, err
 	}
 	if host == "" && !hasRelay {
-		return Code{}, ErrNoRoute
+		if options.RelayOnly {
+			return Plan{}, &CallerError{Err: errors.New("relay-only pairing requires a ready relay")}
+		}
+		return Plan{}, ErrNoRoute
 	}
 
-	code := Code{Notice: notice}
-	qrHost := host
+	plan := Plan{Notice: notice, host: host, port: port}
 	if host != "" {
-		code.Routes = append(code.Routes, RouteDirect)
-		code.Endpoint = host
+		plan.Routes = append(plan.Routes, RouteDirect)
+		plan.Endpoint = host
 		if port != 443 {
-			code.Endpoint = net.JoinHostPort(host, strconv.Itoa(port))
+			plan.Endpoint = net.JoinHostPort(host, strconv.Itoa(port))
 		}
 	} else {
-		qrHost = RelayOnlyHost
-		port = 443
+		plan.host = RelayOnlyHost
+		plan.port = 443
 	}
 	if hasRelay {
-		code.Routes = append(code.Routes, RouteRelay)
+		plan.Routes = append(plan.Routes, RouteRelay)
+		plan.relayURL = runtime.URL
+		plan.sessionID = runtime.SessionID
 	}
-	code.URL = URL(qrHost, port, token, relayURL, desktopKey, sessionID)
-	return code, nil
+	return plan, nil
+}
+
+// PrepareIdentity performs the only filesystem operation in pairing
+// composition, after pure request validation has succeeded.
+func PrepareIdentity(plan Plan, keypairPath string) (PreparedPlan, error) {
+	prepared := PreparedPlan{plan: plan}
+	if plan.relayURL == "" {
+		return prepared, nil
+	}
+	keypair, err := relay.LoadOrCreateKeypair(keypairPath)
+	if err != nil {
+		return PreparedPlan{}, err
+	}
+	prepared.desktopKey = core.DesktopPublicKey(keypair)
+	return prepared, nil
+}
+
+// Render inserts the one-time token after all fallible work has completed.
+func (p PreparedPlan) Render(token string) Code {
+	return Code{
+		URL:      URL(p.plan.host, p.plan.port, token, p.plan.relayURL, p.desktopKey, p.plan.sessionID),
+		Routes:   append([]Route(nil), p.plan.Routes...),
+		Endpoint: p.plan.Endpoint,
+		Notice:   p.plan.Notice,
+	}
 }
 
 // chooseDirect picks the tailnet endpoint, or none, and says if anything
@@ -140,7 +173,7 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 // ("name.ts.net:8443"), which is how a Tailscale Serve front end off 443 is
 // written down; that port wins over the option, because the option is a
 // default and the config is a fact.
-func chooseDirect(cfg config.Config, options Options, hasRelay bool) (host string, port int, notice string, err error) {
+func chooseDirect(trustedHosts []string, options Options, hasRelay bool) (host string, port int, notice string, err error) {
 	if options.RelayOnly {
 		return "", 0, "", nil
 	}
@@ -150,19 +183,19 @@ func chooseDirect(cfg config.Config, options Options, hasRelay bool) (host strin
 	}
 	if options.Host != "" {
 		wanted := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(options.Host), "."))
-		trustedHost, trustedPort, ok := trusted(cfg, wanted)
+		trustedHost, trustedPort, ok := trusted(trustedHosts, wanted)
 		if !ok {
-			return "", 0, "", errors.New("host " + strconv.Quote(wanted) + " is not listed in api.trusted_hosts")
+			return "", 0, "", &CallerError{Err: errors.New("host " + strconv.Quote(wanted) + " is not listed in api.trusted_hosts")}
 		}
 		return trustedHost, portOr(trustedPort, port), "", nil
 	}
 	if options.DetectHost != nil {
 		detected, detectErr := options.DetectHost()
 		if detectErr == nil {
-			if trustedHost, trustedPort, ok := trusted(cfg, detected); ok {
+			if trustedHost, trustedPort, ok := trusted(trustedHosts, detected); ok {
 				return trustedHost, portOr(trustedPort, port), "", nil
 			}
-		} else if len(cfg.API.TrustedHosts) == 0 && !hasRelay {
+		} else if len(trustedHosts) == 0 && !hasRelay {
 			// Nothing to fall back to, so the detection failure is the answer.
 			return "", 0, "", detectErr
 		} else {
@@ -174,7 +207,7 @@ func chooseDirect(cfg config.Config, options Options, hasRelay bool) (host strin
 			notice = "could not detect the Tailscale name (" + detectErr.Error() + "); using the configured host"
 		}
 	}
-	for _, entry := range cfg.API.TrustedHosts {
+	for _, entry := range trustedHosts {
 		entryHost, entryPort := splitHostPort(entry)
 		if entryHost == "" {
 			continue
@@ -196,9 +229,9 @@ func portOr(fromEntry, fallback int) int {
 // trusted reports whether host is in api.trusted_hosts, and the port that
 // entry names if any. Entries may carry a port and the candidate may not, so
 // the comparison is on the host alone.
-func trusted(cfg config.Config, host string) (string, int, bool) {
+func trusted(trustedHosts []string, host string) (string, int, bool) {
 	candidate, _ := splitHostPort(host)
-	for _, entry := range cfg.API.TrustedHosts {
+	for _, entry := range trustedHosts {
 		entryHost, entryPort := splitHostPort(entry)
 		if strings.EqualFold(entryHost, candidate) {
 			return entryHost, entryPort, true

@@ -25,7 +25,7 @@ type Config struct {
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
-	Relay           Relay               `yaml:"relay"`
+	Relay           RelayBootstrap      `yaml:"relay"`
 	APIToken        string              `yaml:"-"`
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
@@ -67,27 +67,21 @@ type API struct {
 	TrustedHosts []string `yaml:"trusted_hosts"`
 }
 
-// Relay configures reaching this desktop from outside the tailnet, through an
-// untrusted forwarding service.
-//
-// It is off unless the user turns it on. Everything below only takes effect
-// while Enabled is true, so a user who never opts in is in exactly the position
-// they were before the relay existed.
-type Relay struct {
+// RelayBootstrap is the YAML-only input used when no managed relay state
+// exists. Runtime mode, readiness, session, and dialability live in
+// ResolvedRelay and must never be flattened back into this type.
+type RelayBootstrap struct {
 	Enabled   bool   `yaml:"enabled"`
 	URL       string `yaml:"url"`
 	IssuerURL string `yaml:"issuer_url"`
 	// KeypairPath holds the desktop's Noise static identity, which every paired
 	// phone trusts. Empty means a default beside the database.
 	KeypairPath string `yaml:"keypair_path"`
-
-	// Runtime-only values cannot be supplied by YAML. SessionID comes from
-	// relay-state.json; EntitlementToken remains only as a dialer handoff until
-	// Phase 2.2 owns token renewal and is never used by pairing.
-	SessionID        string `yaml:"-" json:"-"`
-	EntitlementToken string `yaml:"-" json:"-"`
-	Readiness        string `yaml:"-" json:"-"`
 }
+
+// Relay is a source-compatible name for the bootstrap-only configuration.
+// New runtime code must depend on ResolvedRelay through RelayRuntime instead.
+type Relay = RelayBootstrap
 
 type Scheduler struct {
 	Enabled      bool   `yaml:"enabled"`
@@ -346,26 +340,16 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 		return fmt.Errorf("at least one provider is required")
 	}
 	if validateBootstrapRelay {
-		if err := validateEffectiveTrustedHosts(cfg.API.TrustedHosts, cfg.Relay.Enabled); err != nil {
+		bootstrap, err := ResolveRelayBootstrap(cfg.Relay)
+		if err != nil {
+			return err
+		}
+		if err := validateEffectiveTrustedHosts(cfg.API.TrustedHosts, bootstrap.Mode != RelayModeOff); err != nil {
 			return err
 		}
 	}
 	for index, host := range cfg.API.TrustedHosts {
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
-	}
-	if validateBootstrapRelay && cfg.Relay.Enabled {
-		if strings.TrimSpace(cfg.Relay.URL) != "" {
-			if err := validRelayURL(cfg.Relay.URL); err != nil {
-				return fmt.Errorf("relay url: %w", err)
-			}
-			if strings.TrimSpace(cfg.Relay.IssuerURL) != "" {
-				return fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")
-			}
-		} else if strings.TrimSpace(cfg.Relay.IssuerURL) != "" {
-			if err := validateSafeEndpoint(cfg.Relay.IssuerURL); err != nil {
-				return fmt.Errorf("relay issuer_url: %w", err)
-			}
-		}
 	}
 	for name, provider := range cfg.Providers {
 		if provider.Provider == "" {

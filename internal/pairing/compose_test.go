@@ -11,10 +11,27 @@ import (
 // Detection failing is not a failure when there is a configured host to use
 // instead -- but it must not vanish either. The usual cause is Tailscale not
 // running, and a person about to scan a tailnet code would want to know.
-func TestComposeRefusesUnavailableRelayReadiness(t *testing.T) {
-	cfg := config.Config{}
-	cfg.Relay = config.Relay{Enabled: true, URL: "https://relay.example.com", SessionID: "managed-session-abcdefghij", Readiness: string(config.RelayReadinessUnavailable)}
-	if _, err := Compose(cfg, "tok", Options{RelayOnly: true}); err == nil || !strings.Contains(err.Error(), "unavailable") {
+func composeForTest(cfg config.Config, token string, options Options) (Code, error) {
+	plan, err := PlanRoutes(cfg.API.TrustedHosts, config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+		Readiness:         config.RelayReadinessOff,
+	}, options)
+	if err != nil {
+		return Code{}, err
+	}
+	prepared, err := PrepareIdentity(plan, "")
+	if err != nil {
+		return Code{}, err
+	}
+	return prepared.Render(token), nil
+}
+
+func TestPlanRefusesRelayOnlyWhenRuntimeIsUnavailable(t *testing.T) {
+	runtime := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "managed-session-abcdefghij"},
+		Readiness:         config.RelayReadinessUnavailable,
+	}
+	if _, err := PlanRoutes(nil, runtime, Options{RelayOnly: true}); err == nil || !strings.Contains(err.Error(), "ready relay") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -23,7 +40,7 @@ func TestComposeReportsAFailedDetectionItRecoveredFrom(t *testing.T) {
 	cfg := config.Config{}
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
 
-	code, err := Compose(cfg, "tok", Options{
+	code, err := composeForTest(cfg, "tok", Options{
 		DetectHost: func() (string, error) { return "", errors.New("tailscale is not running") },
 	})
 	if err != nil {
@@ -42,7 +59,7 @@ func TestComposeIsQuietWhenDetectionWorks(t *testing.T) {
 	cfg := config.Config{}
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net"}
 
-	code, err := Compose(cfg, "tok", Options{
+	code, err := composeForTest(cfg, "tok", Options{
 		DetectHost: func() (string, error) { return "macbook.example.ts.net", nil },
 	})
 	if err != nil {
@@ -56,7 +73,7 @@ func TestComposeIsQuietWhenDetectionWorks(t *testing.T) {
 // With nothing to fall back to, the detection error is the answer.
 func TestComposeReturnsTheDetectionErrorWhenItIsAllThereIs(t *testing.T) {
 	cfg := config.Config{}
-	_, err := Compose(cfg, "tok", Options{
+	_, err := composeForTest(cfg, "tok", Options{
 		DetectHost: func() (string, error) { return "", errors.New("tailscale is not running") },
 	})
 	if err == nil || !strings.Contains(err.Error(), "tailscale is not running") {
@@ -74,7 +91,7 @@ func TestComposeWithoutADetectorNeverHasANotice(t *testing.T) {
 	cfg := config.Config{}
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}
 
-	code, err := Compose(cfg, "tok", Options{})
+	code, err := composeForTest(cfg, "tok", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

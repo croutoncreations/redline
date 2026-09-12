@@ -243,7 +243,35 @@ func NewRelayResolver(state *RelayStateStore, licenses LicenseStore) *RelayResol
 	return &RelayResolver{state: state, licenses: licenses}
 }
 
-func (r *RelayResolver) Resolve(ctx context.Context, bootstrap Relay) (ResolvedRelay, error) {
+// ResolveRelayBootstrap is the canonical validation and conversion for active
+// YAML bootstrap input. Both the public loader and RelayResolver call this
+// function; managed state may ignore invalid losing bootstrap values.
+func ResolveRelayBootstrap(bootstrap RelayBootstrap) (RelayManagedState, error) {
+	if !bootstrap.Enabled {
+		return RelayManagedState{Mode: RelayModeOff}, nil
+	}
+	relayURL := strings.TrimSpace(bootstrap.URL)
+	issuerURL := strings.TrimSpace(bootstrap.IssuerURL)
+	if relayURL != "" {
+		if err := validRelayURL(relayURL); err != nil {
+			return RelayManagedState{}, fmt.Errorf("relay url: %w", err)
+		}
+		if issuerURL != "" {
+			return RelayManagedState{}, fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")
+		}
+		return RelayManagedState{Mode: RelayModeSelfHosted, URL: relayURL}, nil
+	}
+	if issuerURL != "" {
+		if err := validateSafeEndpoint(issuerURL); err != nil {
+			return RelayManagedState{}, fmt.Errorf("relay issuer_url: %w", err)
+		}
+	} else {
+		issuerURL = DefaultIssuerURL
+	}
+	return RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: issuerURL}, nil
+}
+
+func (r *RelayResolver) Resolve(ctx context.Context, bootstrap RelayBootstrap) (ResolvedRelay, error) {
 	state, managed, err := r.state.Load()
 	if err != nil {
 		return ResolvedRelay{}, fmt.Errorf("managed relay state: %w", err)
@@ -258,10 +286,11 @@ func (r *RelayResolver) Resolve(ctx context.Context, bootstrap Relay) (ResolvedR
 	state, err = r.state.Update(func(current RelayManagedState, exists bool) (RelayManagedState, error) {
 		if exists {
 			state = current
-		} else if strings.TrimSpace(bootstrap.URL) == "" {
-			state = RelayManagedState{Mode: RelayModeHosted, IssuerURL: strings.TrimSpace(bootstrap.IssuerURL)}
 		} else {
-			state = RelayManagedState{Mode: RelayModeSelfHosted, URL: strings.TrimSpace(bootstrap.URL)}
+			state, err = ResolveRelayBootstrap(bootstrap)
+			if err != nil {
+				return RelayManagedState{}, err
+			}
 		}
 		if state.Mode == RelayModeHosted {
 			if state.URL == "" {

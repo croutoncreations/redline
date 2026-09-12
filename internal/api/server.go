@@ -37,6 +37,7 @@ import (
 	"github.com/jfox/redline/internal/notification"
 	"github.com/jfox/redline/internal/openusage"
 	"github.com/jfox/redline/internal/pairing"
+	"github.com/jfox/redline/internal/relay"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"github.com/jfox/redline/internal/tasktemplate"
@@ -90,7 +91,9 @@ type Server struct {
 	// the surface that showed the code can learn the phone got in. Without
 	// this a redeem was a deletion and nothing more: the sheet kept showing
 	// a dead code and had no way to say "paired".
-	redeemed map[string]time.Time
+	redeemed         map[string]time.Time
+	relayRuntime     config.RelayRuntime
+	mintPairingToken func() (string, error)
 }
 
 // redeemedMemory is how long a spent token stays reportable as redeemed.
@@ -123,6 +126,17 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
+}
+
+// NewServerWithRelayRuntime injects the service-owned resolved relay boundary.
+// NewServer remains compatible for relay-off callers through an explicit off
+// adapter and never infers runtime state from bootstrap fields.
+func NewServerWithRelayRuntime(cfg config.Config, database *store.DB, now func() time.Time, runtime config.RelayRuntime) *Server {
+	server := NewServer(cfg, database, now)
+	if runtime != nil {
+		server.relayRuntime = runtime
+	}
+	return server
 }
 
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
@@ -215,11 +229,16 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
-		pairing:   make(map[string]time.Time),
-		redeemed:  make(map[string]time.Time),
-		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
-		discovery: discovery.Service{Now: now},
-		hermes:    hermes.Client{},
+		pairing:  make(map[string]time.Time),
+		redeemed: make(map[string]time.Time),
+		relayRuntime: config.NewRelayCoordinator(config.ResolvedRelay{
+			RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+			Readiness:         config.RelayReadinessOff,
+		}),
+		mintPairingToken: randomPairingToken,
+		artifacts:        artifacts.Reader{Root: cfg.ArtifactsDirectory()},
+		discovery:        discovery.Service{Now: now},
+		hermes:           hermes.Client{},
 	}
 	server.usageSources = usage.NewManager(
 		openusage.Source{},
@@ -365,6 +384,14 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
+func randomPairingToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
 func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Host      string `json:"host"`
@@ -379,23 +406,34 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if request.Port < 0 || request.Port > 65535 {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "pairing port must be between 1 and 65535"})
+	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
+	snapshot := s.relayRuntime.Current()
+	plan, planErr := pairing.PlanRoutes(s.config.API.TrustedHosts, snapshot, options)
+	noRoute := errors.Is(planErr, pairing.ErrNoRoute)
+	if planErr != nil && !noRoute {
+		var callerError *pairing.CallerError
+		if errors.As(planErr, &callerError) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: callerError.Error()})
+			return
+		}
+		writeError(w, fmt.Errorf("plan pairing code: %w", planErr))
 		return
 	}
-	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
-	// Validate caller-controlled overrides before minting a one-time token.
-	if _, err := pairing.Compose(s.config, "pending", options); err != nil && !errors.Is(err, pairing.ErrNoRoute) {
-		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
-		return
+	var prepared pairing.PreparedPlan
+	if !noRoute {
+		var err error
+		prepared, err = pairing.PrepareIdentity(plan, relay.DefaultKeypairPath(s.config.Relay.KeypairPath, s.config.Database))
+		if err != nil {
+			writeError(w, fmt.Errorf("prepare pairing identity: %w", err))
+			return
+		}
 	}
 
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
+	token, err := s.mintPairingToken()
+	if err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
 		return
 	}
-	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
 	s.sweepPairingLocked()
@@ -416,20 +454,13 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 		Routes      []pairing.Route `json:"routes"`
 		Endpoint    string          `json:"endpoint,omitempty"`
 		RelayStatus string          `json:"relay_status"`
-	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: s.config.Relay.Readiness}
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(snapshot.Readiness)}
 
-	code, err := pairing.Compose(s.config, token, options)
-	switch {
-	case err == nil:
+	if !noRoute {
+		code := prepared.Render(token)
 		response.PairingURL = code.URL
 		response.Routes = code.Routes
 		response.Endpoint = code.Endpoint
-	case errors.Is(err, pairing.ErrNoRoute):
-		// Reported through the empty route list rather than a failure: the
-		// token is good, there is simply nowhere to point a phone.
-	default:
-		writeError(w, fmt.Errorf("compose pairing code: %w", err))
-		return
 	}
 	writeJSON(w, http.StatusCreated, response)
 }

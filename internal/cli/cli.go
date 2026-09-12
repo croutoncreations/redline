@@ -438,15 +438,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	// From this boundary onward every service component sees the same resolved
-	// values. Rejected YAML session/token fields cannot bypass managed state or
-	// Keychain precedence.
-	cfg.Relay.Enabled = resolvedRelay.Dial
-	cfg.Relay.URL = resolvedRelay.URL
-	cfg.Relay.IssuerURL = resolvedRelay.IssuerURL
-	cfg.Relay.SessionID = resolvedRelay.SessionID
-	cfg.Relay.EntitlementToken = ""
-	cfg.Relay.Readiness = string(resolvedRelay.Readiness)
+	// From this boundary onward service components read one typed runtime
+	// snapshot. Bootstrap YAML remains bootstrap-only and cannot be mistaken for
+	// managed mode, readiness, or dialability.
+	relayRuntime := config.NewRelayCoordinator(resolvedRelay)
 	switch resolvedRelay.Readiness {
 	case config.RelayReadinessNeedsLicense:
 		fmt.Fprintln(stderr, "relay: needs_license")
@@ -472,7 +467,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	apiServer := api.NewServer(cfg, database, now)
+	apiServer := api.NewServerWithRelayRuntime(cfg, database, now, relayRuntime)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	apiServer.StartScheduler(ctx)
@@ -487,18 +482,18 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	// for it. It dials out to the relay rather than listening, which is what
 	// lets a phone reach a desktop behind a router nobody configured.
 	var relayDone chan struct{}
-	if cfg.Relay.Enabled {
+	if relayRuntime.Current().Dial {
 		// Relay progress goes to stderr, not stdout: it is diagnostic chatter
 		// that arrives at unpredictable times, and stdout here is the startup
 		// banner a caller may be parsing.
-		dialer, err := newRelayDialer(cfg, listener.Addr().String(), func(format string, args ...any) {
+		dialer, err := newRelayDialer(cfg, relayRuntime, listener.Addr().String(), func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		})
 		if err != nil {
 			fmt.Fprintln(stderr, "relay:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "Relay enabled via %s\n", cfg.Relay.URL)
+		fmt.Fprintf(stdout, "Relay enabled via %s\n", relayRuntime.Current().URL)
 		relayDone = make(chan struct{})
 		go func() {
 			defer close(relayDone)
@@ -541,22 +536,23 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 //
 // The session id has already been resolved from atomically managed state rather
 // than minted per start, so a phone remains paired across service restarts.
-func newRelayDialer(cfg config.Config, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
+func newRelayDialer(cfg config.Config, runtime config.RelayRuntime, localAddr string, logf func(string, ...any)) (*relay.Dialer, error) {
+	snapshot := runtime.Current()
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
 	if err != nil {
 		return nil, err
 	}
-	sessionID := strings.TrimSpace(cfg.Relay.SessionID)
+	sessionID := strings.TrimSpace(snapshot.SessionID)
 	if sessionID == "" {
-		return nil, fmt.Errorf("relay.session_id is required in the config when relay.enabled is true")
+		return nil, fmt.Errorf("resolved relay session_id is required when dial is enabled")
 	}
 	return relay.NewDialer(relay.DialerOptions{
-		RelayURL:         cfg.Relay.URL,
+		RelayURL:         snapshot.URL,
 		SessionID:        sessionID,
 		Keypair:          keypair,
-		EntitlementToken: cfg.Relay.EntitlementToken,
+		EntitlementToken: "",
 		Logf:             logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.

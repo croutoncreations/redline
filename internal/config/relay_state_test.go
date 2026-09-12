@@ -164,6 +164,48 @@ func TestRelayStateLoadFailsClosed(t *testing.T) {
 	})
 }
 
+func TestRelayBootstrapValidationAgreesWithServiceResolution(t *testing.T) {
+	tests := []struct {
+		name      string
+		relayYAML string
+		wantError string
+		wantMode  config.RelayMode
+		wantURL   string
+	}{
+		{name: "custom URL", relayYAML: "  enabled: true\n  url: https://relay.example.com", wantMode: config.RelayModeSelfHosted, wantURL: "https://relay.example.com"},
+		{name: "custom issuer", relayYAML: "  enabled: true\n  issuer_url: https://issuer.example.com/api", wantMode: config.RelayModeHosted, wantURL: config.DefaultHostedRelayURL},
+		{name: "custom URL and issuer contradict", relayYAML: "  enabled: true\n  url: https://relay.example.com\n  issuer_url: https://issuer.example.com/api", wantError: "issuer_url"},
+		{name: "unsafe custom URL", relayYAML: "  enabled: true\n  url: http://relay.example.com", wantError: "relay url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configured := strings.Replace(validConfig, "active_policy: standard", "active_policy: standard\nrelay:\n"+tt.relayYAML, 1)
+			path := writeConfig(t, configured)
+			_, publicErr := config.Load(path)
+			serviceConfig, serviceLoadErr := config.LoadForService(path)
+			if serviceLoadErr != nil {
+				t.Fatalf("service structural load: %v", serviceLoadErr)
+			}
+			resolved, resolveErr := config.NewRelayResolver(
+				config.NewRelayStateStore(filepath.Join(t.TempDir(), "relay-state.json")),
+				&fakeLicenseStore{},
+			).Resolve(context.Background(), serviceConfig.Relay)
+			if tt.wantError != "" {
+				if publicErr == nil || resolveErr == nil || !strings.Contains(publicErr.Error(), tt.wantError) || !strings.Contains(resolveErr.Error(), tt.wantError) {
+					t.Fatalf("public error=%v service error=%v; both must contain %q", publicErr, resolveErr, tt.wantError)
+				}
+				return
+			}
+			if publicErr != nil || resolveErr != nil {
+				t.Fatalf("public error=%v service error=%v", publicErr, resolveErr)
+			}
+			if resolved.Mode != tt.wantMode || resolved.URL != tt.wantURL {
+				t.Fatalf("resolved=%#v", resolved)
+			}
+		})
+	}
+}
+
 func TestRelayResolutionPrecedenceAndReadiness(t *testing.T) {
 	tests := []struct {
 		name       string
