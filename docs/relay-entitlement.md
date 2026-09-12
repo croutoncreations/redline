@@ -130,25 +130,34 @@ caller simply is not entitled to relay this session.
 ## Desktop cache and revocation schema
 
 The desktop cache is a versioned JSON record stored in `relay-entitlement.json`
-with owner-only permissions and durable atomic replacement. Schema version 2
+with owner-only permissions and durable atomic replacement. Schema version 3
 extends the original five authority fields (`token`, `exp`, `obtained_at`,
-`sid`, `max_clients`) with `schema_version`, `credential_fingerprint`, and the
-optional `revoked` tombstone marker. This is an intentional deviation from the
-original five-field schema: `credential_fingerprint` is SHA-256 over the
-high-entropy license credential and binds authority to one credential
-replacement without storing a reversible key. Legacy/unversioned records and
-fingerprint mismatches fail closed.
+`sid`, `max_clients`) with `schema_version` and `credential_fingerprint`.
+`credential_fingerprint` is SHA-256 over the high-entropy license credential;
+it binds authority to one credential replacement without storing a reversible
+key. This is an intentional deviation from the original five-field schema.
+Legacy/unversioned records, fingerprint mismatches, unknown fields, omitted
+required fields, and fields from the wrong record variant all fail closed.
 
 Terminal `invalid_key`, `lapsed`, and `no_seat` decisions replace authority with
-`{"schema_version":2,"credential_fingerprint":"…","revoked":true}`. A
-tombstone contains none of the five authority fields. Cache saves and
-revocations share the controller's latest-value persistence stream, so a
-revocation follows an already in-flight save and obsolete completion cannot
-clear a newer persistence warning. Runtime authority is revoked immediately;
-`persistence_degraded` reports a sanitized durability failure while retries
-continue. Cancellation can still interrupt an operation during the narrow
-platform fsync boundary, so the cache remains a fallback rather than a source
-that can overrule a fresh issuer decision.
+`{"schema_version":3,"credential_fingerprint":"…","revoked":true,"revoked_at":<unix-seconds>}`.
+A tombstone contains no authority fields, including no empty `token`. Under the
+cache file lock, `obtained_at` versions authority and `revoked_at` versions a
+tombstone for the same credential fingerprint. Authority obtained before or at
+the revocation second cannot replace that tombstone, even from another process;
+issuer-accepted authority obtained after revocation can replace it. A tombstone
+wins a tie with authority.
+
+Cache saves and revocations share the controller's latest-value persistence
+stream, so a revocation follows an already in-flight save and obsolete
+completion cannot clear a newer persistence warning. Runtime authority is
+revoked immediately. On shutdown, a distinct bounded barrier survives parent
+cancellation long enough to drain an obsolete in-flight save and persist the
+latest terminal tombstone. `persistence_degraded` remains the sanitized signal
+until that barrier succeeds; timeout or I/O failure leaves it set. Cancellation
+can still interrupt an operation during the narrow platform fsync boundary, so
+the cache remains a fallback rather than a source that can overrule a fresh
+issuer decision.
 
 ## Implemented relay refresh endpoint
 

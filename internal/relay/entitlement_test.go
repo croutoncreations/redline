@@ -351,7 +351,7 @@ func TestEntitlementCacheRejectsReplacementCredentialAndDurableTombstone(t *test
 	if _, valid, err := store.Load(sid, CredentialFingerprint("replacement-license"), now); err == nil || valid {
 		t.Fatal("replacement credential trusted old cache authority")
 	}
-	tombstone := CachedEntitlement{SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: oldFingerprint, Revoked: true}
+	tombstone := CachedEntitlement{SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: oldFingerprint, Revoked: true, RevokedAt: now.Add(time.Minute).Unix()}
 	if err := store.Save(tombstone); err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +364,84 @@ func TestEntitlementCacheRejectsReplacementCredentialAndDurableTombstone(t *test
 	}
 	if strings.Contains(string(raw), "old-high-entropy-license") || strings.Contains(string(raw), cached.Token.Value()) {
 		t.Fatal("tombstone retained reversible credential or authority token")
+	}
+}
+
+func TestEntitlementCacheTombstoneWinsInterprocessOrdering(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	sid := SessionSID("cache-monotonic-session-123456")
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	firstStore := NewEntitlementCacheStore(path)
+	secondStore := NewEntitlementCacheStore(path)
+	fingerprint := CredentialFingerprint("monotonic-high-entropy-license")
+	authority := func(obtainedAt time.Time) CachedEntitlement {
+		exp := obtainedAt.Add(time.Hour).Unix()
+		return CachedEntitlement{
+			SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+			Token: NewSecret(testEntitlementToken(t, exp, sid, 5)), Exp: exp,
+			ObtainedAt: obtainedAt.Unix(), SID: sid, MaxClients: 5,
+		}
+	}
+	obsolete := authority(now)
+	if err := firstStore.Save(obsolete); err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := now.Add(time.Minute)
+	tombstone := CachedEntitlement{
+		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Revoked: true, RevokedAt: revokedAt.Unix(),
+	}
+	if err := firstStore.Save(tombstone); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondStore.SaveContext(context.Background(), obsolete); err != nil {
+		t.Fatalf("obsolete authority save: %v", err)
+	}
+	if _, valid, err := firstStore.Load(sid, fingerprint, now); err == nil || valid {
+		t.Fatal("obsolete authority acquired after tombstone and revived cache")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if len(shape) != 4 || shape["revoked_at"] != float64(revokedAt.Unix()) {
+		t.Fatalf("tombstone schema=%v", shape)
+	}
+	if _, present := shape["token"]; present {
+		t.Fatal("tombstone JSON retained an empty token field")
+	}
+	if err := secondStore.Save(authority(revokedAt)); err != nil {
+		t.Fatalf("equal-time authority save: %v", err)
+	}
+	if _, valid, err := firstStore.Load(sid, fingerprint, now); err == nil || valid {
+		t.Fatal("authority obtained at revocation time revived cache")
+	}
+
+	newer := authority(revokedAt.Add(time.Second))
+	if err := secondStore.Save(newer); err != nil {
+		t.Fatalf("newer issuer-accepted authority: %v", err)
+	}
+	got, valid, err := firstStore.Load(sid, fingerprint, revokedAt)
+	if err != nil || !valid || got.Token.Value() != newer.Token.Value() {
+		t.Fatalf("newer authority load=%#v valid=%v err=%v", got, valid, err)
+	}
+}
+
+func TestEntitlementCacheRejectsNonCanonicalTombstoneSchema(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	fingerprint := CredentialFingerprint("strict-tombstone-license")
+	store := NewEntitlementCacheStore(path)
+	malformed := fmt.Sprintf(`{"schema_version":%d,"credential_fingerprint":%q,"revoked":true,"revoked_at":%d,"token":""}\n`, EntitlementCacheSchemaVersion, fingerprint, now.Unix())
+	if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.Load(SessionSID("strict-cache-session-123456"), fingerprint, now); err == nil || valid {
+		t.Fatal("tombstone with an authority field passed strict schema validation")
 	}
 }
 

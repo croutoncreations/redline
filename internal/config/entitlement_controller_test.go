@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,6 +97,31 @@ func (c *blockingControllerCache) SaveContext(ctx context.Context, value relay.C
 	c.mu.Unlock()
 	c.persisted <- value
 	return nil
+}
+
+type durableBlockingControllerCache struct {
+	store     *relay.EntitlementCacheStore
+	started   chan relay.CachedEntitlement
+	release   chan struct{}
+	blockOnce sync.Once
+}
+
+func (c *durableBlockingControllerCache) Load(sid, fingerprint string, now time.Time) (relay.CachedEntitlement, bool, error) {
+	return c.store.Load(sid, fingerprint, now)
+}
+
+func (c *durableBlockingControllerCache) SaveContext(ctx context.Context, value relay.CachedEntitlement) error {
+	blocked := false
+	c.blockOnce.Do(func() { blocked = true })
+	if blocked {
+		c.started <- value
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.release:
+		}
+	}
+	return c.store.SaveContext(ctx, value)
 }
 
 type controllerIssuerFunc func(context.Context, string, string, string, time.Time) (relay.Entitlement, error)
@@ -1078,6 +1104,132 @@ func TestEntitlementControllerObsoleteSaveCannotUndoTerminalRevocation(t *testin
 	<-done
 }
 
+func TestEntitlementControllerShutdownDrainsTerminalTombstoneAfterObsoleteSave(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("durable-license")
+	path := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	store := relay.NewEntitlementCacheStore(path)
+	initialExp := now.Add(time.Hour).Unix()
+	if err := store.Save(relay.CachedEntitlement{
+		SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+		Token: controllerToken(t, initialExp, sid, 5), Exp: initialExp,
+		ObtainedAt: now.Add(-time.Minute).Unix(), SID: sid, MaxClients: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cache := &durableBlockingControllerCache{
+		store: store, started: make(chan relay.CachedEntitlement, 1), release: make(chan struct{}),
+	}
+	calls := make(chan int, 2)
+	count := 0
+	issuer := controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		count++
+		calls <- count
+		if count == 2 {
+			return relay.ReceivedEntitlement{ReceivedAt: now.Add(time.Minute)}, &relay.IssuerError{Kind: relay.IssuerInvalidKey}
+		}
+		receivedAt := now
+		exp := receivedAt.Add(relay.EntitlementLifetime).Unix()
+		issued := relay.Entitlement{Token: controllerToken(t, exp, sid, 5), Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+		return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: receivedAt}, nil
+	})
+	coordinator := NewRelayCoordinator(base)
+	clock := &controllerClock{now: now.Add(time.Minute), delays: make(chan time.Duration, 3)}
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "durable-license"},
+		Issuer: issuer, Cache: cache, Clock: clock,
+		Refresh:                 func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		PersistenceDrainTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	if call := <-calls; call != 1 {
+		t.Fatalf("initial issuer call=%d", call)
+	}
+	_ = waitRelayState(t, coordinator, RelayReadinessActive)
+	<-cache.started
+	controller.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
+	if call := <-calls; call != 2 {
+		t.Fatalf("terminal issuer call=%d", call)
+	}
+	terminal := waitRelayState(t, coordinator, RelayReadinessInvalidKey)
+	if terminal.CanDial() || !terminal.PersistenceDegraded {
+		t.Fatalf("terminal state did not revoke immediately with pending durability: %#v", terminal)
+	}
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("controller claimed shutdown before draining terminal tombstone")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(cache.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("controller did not drain terminal tombstone after obsolete save")
+	}
+	if coordinator.Current().PersistenceDegraded {
+		t.Fatal("successful shutdown drain retained persistence degradation")
+	}
+	if _, valid, err := store.Load(sid, fingerprint, now); err == nil || valid {
+		t.Fatal("terminal tombstone was not restart-visible")
+	}
+
+	restartCoordinator := NewRelayCoordinator(base)
+	restart := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: restartCoordinator, Initial: base, Licenses: controllerLicenseStore{value: "durable-license"}, Cache: store,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{ReceivedAt: now.Add(2 * time.Minute)}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
+		}),
+	})
+	restartCtx, cancelRestart := context.WithCancel(context.Background())
+	restartDone := make(chan struct{})
+	go func() { restart.Run(restartCtx); close(restartDone) }()
+	got := waitRelayState(t, restartCoordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("restart revived terminally denied cache: %#v", got)
+	}
+	cancelRestart()
+	<-restartDone
+}
+
+func TestEntitlementControllerTerminalShutdownDrainIsBounded(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	cache := &blockingControllerCache{
+		started: make(chan relay.CachedEntitlement, 1), release: make(chan struct{}), persisted: make(chan relay.CachedEntitlement, 1),
+	}
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Cache: cache,
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerLapsed}
+		}),
+		PersistenceDrainTimeout: 25 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	terminal := waitRelayState(t, coordinator, RelayReadinessLapsed)
+	if !terminal.PersistenceDegraded {
+		t.Fatal("pending terminal tombstone was reported as durable")
+	}
+	<-cache.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal durability barrier exceeded its bound")
+	}
+	if got := coordinator.Current(); got.CanDial() || !got.PersistenceDegraded {
+		t.Fatalf("bounded durability failure was not surfaced safely: %#v", got)
+	}
+}
+
 func TestEntitlementControllerExpiryWatcherRevokesWhileIssuerIsBlocked(t *testing.T) {
 	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
 	base := hostedControllerBase()
@@ -1170,7 +1322,8 @@ func TestEntitlementControllerTerminalTombstoneSurvivesRestart(t *testing.T) {
 	sid := relay.SessionSID(base.SessionID)
 	fingerprint := relay.CredentialFingerprint("durable-license")
 	exp := now.Add(time.Hour).Unix()
-	cache := relay.NewEntitlementCacheStore(filepath.Join(t.TempDir(), "relay-entitlement.json"))
+	cachePath := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	cache := relay.NewEntitlementCacheStore(cachePath)
 	if err := cache.Save(relay.CachedEntitlement{
 		SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
 		Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: now.Unix(), SID: sid, MaxClients: 5,
@@ -1193,8 +1346,18 @@ func TestEntitlementControllerTerminalTombstoneSurvivesRestart(t *testing.T) {
 	first, cancelFirst, doneFirst := run(&relay.IssuerError{Kind: relay.IssuerLapsed})
 	_ = waitRelayState(t, first, RelayReadinessLapsed)
 	deadline := time.Now().Add(time.Second)
-	for first.Current().PersistenceDegraded && time.Now().Before(deadline) {
+	durableTombstone := false
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(cachePath)
+		var shape map[string]any
+		if err == nil && json.Unmarshal(raw, &shape) == nil && shape["revoked"] == true && shape["revoked_at"] != nil {
+			durableTombstone = true
+			break
+		}
 		time.Sleep(time.Millisecond)
+	}
+	if !durableTombstone {
+		t.Fatal("terminal denial did not publish a durable tombstone")
 	}
 	cancelFirst()
 	<-doneFirst
@@ -1269,6 +1432,9 @@ func TestEntitlementControllerRetriesDegradedPersistenceWithoutDiscardingToken(t
 			if !got.CanDial() || !got.PersistenceDegraded {
 				t.Fatalf("persistence failure discarded token or warning: %#v", got)
 			}
+			// Observe the failed SaveContext itself, not only the pending marker
+			// published before the worker starts, before requesting its retry.
+			<-cache.saved
 			<-clock.delays
 			controller.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
 			deadline = time.Now().Add(time.Second)
