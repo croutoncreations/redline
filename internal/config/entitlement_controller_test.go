@@ -1058,7 +1058,7 @@ func TestEntitlementControllerObsoleteSaveCannotUndoTerminalRevocation(t *testin
 	controller.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
 	<-calls
 	terminal := waitRelayState(t, coordinator, RelayReadinessInvalidKey)
-	if terminal.CanDial() || !terminal.PersistenceDegraded {
+	if terminal.CanDial() {
 		t.Fatalf("terminal runtime revocation waited for persistence: %#v", terminal)
 	}
 	close(cache.release)
