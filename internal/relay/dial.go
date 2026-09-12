@@ -144,26 +144,25 @@ func (d *Dialer) connect(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// The library puts the full URL in its error, which carries the
-		// entitlement token. Nothing logs this today, and that is exactly why
-		// it is stripped here: the leak stays invisible until someone adds a
-		// log line, and then it is a credential in a file. The token now travels
-		// in a header, but redacting at the source is cheap defense in depth
-		// against a WebSocket library ever echoing handshake headers.
+		// Library errors may echo handshake request details. Nothing logs this
+		// today, and that is exactly why the token is stripped here: the leak
+		// stays invisible until someone adds a log line, and then it is a
+		// credential in a file. Redacting at the source is cheap defense in
+		// depth even though the token travels only in a header.
 		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), d.opts.EntitlementToken))
 	}
 	defer conn.CloseNow()
 
-	// The session id, not the URL: the URL carries the entitlement, and while
-	// logf would redact it, naming the session is what an operator actually
-	// needs to correlate this desktop with a phone or a relay-side 409.
+	// The session id, not the URL: naming the session is what an operator
+	// actually needs to correlate this desktop with a phone or relay-side 409,
+	// and avoids logging incidental URL details.
 	d.logf("relay: connected, session %s", d.opts.SessionID)
 
 	// coder/websocket defaults to a 32 KB read limit, which a run's logs pass
-	// routinely. Exceeding it does not fail the request: it closes the socket,
-	// so the tunnel would drop mid-download and reconnect. Sized to the frame
-	// ceiling plus room for Noise and JSON overhead.
-	conn.SetReadLimit(maxTunnelFrame)
+	// routinely. The relay prefixes each host-bound payload with its eight-byte
+	// channel, so the host wire limit is deliberately larger than the unchanged
+	// 1 MiB tunnel payload limit. Phase 2 will consume that prefix.
+	conn.SetReadLimit(maxHostWireFrame)
 
 	// A fresh SessionHandler for every connection: a resumed connection must
 	// never reuse cipher states. A reconnect after a network blip creates a

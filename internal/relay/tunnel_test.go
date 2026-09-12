@@ -219,19 +219,25 @@ func TestTheLargestAllowedBodyFitsInAFrame(t *testing.T) {
 	// Plus the Noise AEAD tag that Seal adds.
 	const aeadTag = 16
 	sealed := len(encoded) + aeadTag
-	if sealed > maxTunnelFrame {
-		t.Fatalf("a maximum-size body does not fit in a frame: %d bytes sealed, limit %d (over by %d)",
-			sealed, maxTunnelFrame, sealed-maxTunnelFrame)
+	if sealed > maxTunnelPayload {
+		t.Fatalf("a maximum-size body does not fit in a payload: %d bytes sealed, limit %d (over by %d)",
+			sealed, maxTunnelPayload, sealed-maxTunnelPayload)
 	}
 }
 
-// The frame limit must also stay under the Durable Object's own message cap,
-// or the relay drops frames the desktop considered valid.
-func TestFrameLimitStaysUnderTheDurableObjectCap(t *testing.T) {
-	const durableObjectMessageCap = 1024 * 1024
-	if maxTunnelFrame > durableObjectMessageCap {
-		t.Fatalf("frame limit %d exceeds the relay's %d message cap",
-			maxTunnelFrame, durableObjectMessageCap)
+// Multiplexing adds an eight-byte channel to the existing payload ceiling.
+// The desktop is the host, so its WebSocket read limit must accept the whole
+// host wire frame without shrinking the payload that was valid in Phase 1.2.
+func TestHostWireLimitIncludesChannelWithoutShrinkingPayload(t *testing.T) {
+	if maxTunnelPayload != 1024*1024 {
+		t.Fatalf("payload limit = %d, want 1 MiB", maxTunnelPayload)
+	}
+	if relayChannelBytes != 8 {
+		t.Fatalf("channel prefix = %d, want 8", relayChannelBytes)
+	}
+	if maxHostWireFrame != maxTunnelPayload+relayChannelBytes {
+		t.Fatalf("host wire limit = %d, want payload %d + channel %d",
+			maxHostWireFrame, maxTunnelPayload, relayChannelBytes)
 	}
 }
 

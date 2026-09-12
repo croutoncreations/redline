@@ -1,6 +1,11 @@
 import { env, SELF, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { CHANNEL_BYTES, MAX_PAYLOAD_BYTES, allocateChannelId } from "../src/session.js";
+import {
+  CHANNEL_BYTES,
+  MAX_PAYLOAD_BYTES,
+  allocateChannelId,
+  selfHostedMaxClients,
+} from "../src/session.js";
 
 async function connect(sessionId, role) {
   return SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=${role}`, {
@@ -82,6 +87,13 @@ describe("host-gated relay session", () => {
     expect(await sixth.json()).toEqual({ code: "too_many_clients" });
   });
 
+  it("uses a documented cap of five when a self-host cap is invalid", () => {
+    for (const configured of [undefined, "", "nope", "0", "-1", "2.5"]) {
+      expect(selfHostedMaxClients(configured)).toBe(5);
+    }
+    expect(selfHostedMaxClients("7")).toBe(7);
+  });
+
   it("does not make the entitlement refresh endpoint unauthenticated in open mode", async () => {
     const session = "session-open-refresh-relaytest";
     await connectSocket(session, "host");
@@ -97,7 +109,10 @@ describe("host-gated relay session", () => {
     const id = env.SESSIONS.idFromName(session);
     const stub = env.SESSIONS.get(id);
     await connectSocket(session, "host");
-    expect(await stub.debugStorageDump()).toEqual({ maxClients: 5 });
+    expect(await stub.debugStorageDump()).toMatchObject({
+      maxClients: 5,
+      hostGeneration: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.getAlarm()).toBeNull();
     });
@@ -121,6 +136,65 @@ describe("host-gated relay session", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.getAlarm()).toBeNull();
     });
+  });
+
+  it("fails closed with a structured error when stored maxClients is missing or invalid", async () => {
+    for (const [suffix, value] of [["missing", undefined], ["invalid", 0]]) {
+      const session = `session-bad-cap-${suffix}-relaytest`;
+      const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+      await connectSocket(session, "host");
+      await runInDurableObject(stub, async (_instance, state) => {
+        if (value === undefined) await state.storage.delete("maxClients");
+        else await state.storage.put("maxClients", value);
+      });
+      const response = await connect(session, "client");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ code: "session_unavailable" });
+    }
+  });
+
+  it("ignores a delayed old-host close after a replacement owns the session", async () => {
+    const session = "session-host-generation-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const oldHost = await connectSocket(session, "host");
+    await connectSocket(session, "client");
+    let oldServer;
+    await runInDurableObject(stub, async (_instance, state) => {
+      [oldServer] = state.getWebSockets("host");
+    });
+
+    oldHost.close(1000, "replace");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const replacementHost = await connectSocket(session, "host");
+    const replacementClient = await connectSocket(session, "client");
+    const before = await stub.debugStorageDump();
+    const replacementClose = nextClose(replacementClient, 200);
+
+    await runInDurableObject(stub, async (instance) => instance.releaseSocket(oldServer));
+
+    expect(await stub.debugStorageDump()).toEqual(before);
+    await expect(replacementClose).rejects.toThrow(/timed out/);
+    replacementClient.send(bytes("still-owned"));
+    expect(Array.from(payload(await nextMessage(replacementHost)))).toEqual(Array.from(bytes("still-owned")));
+  });
+
+  it("does not notify a replacement host from a delayed old-client callback", async () => {
+    const session = "session-client-generation-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const oldHost = await connectSocket(session, "host");
+    await connectSocket(session, "client");
+    let oldClientServer;
+    await runInDurableObject(stub, async (_instance, state) => {
+      [oldClientServer] = state.getWebSockets("client");
+    });
+
+    oldHost.close(1000, "replace");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const replacementHost = await connectSocket(session, "host");
+    await connectSocket(session, "client");
+
+    await runInDurableObject(stub, async (instance) => instance.releaseSocket(oldClientServer));
+    await expect(nextMessage(replacementHost, 200)).rejects.toThrow(/timed out/);
   });
 });
 
@@ -169,6 +243,39 @@ describe("client channel multiplexing", () => {
     await expect(nextMessage(host, 150)).rejects.toThrow(/timed out/);
   });
 
+  it("notifies the host when a client WebSocket errors", async () => {
+    const session = "session-channel-error-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    const host = await connectSocket(session, "host");
+    const client = await connectSocket(session, "client");
+    client.send(bytes("identify-error"));
+    const tagged = await nextMessage(host);
+    const notified = nextMessage(host);
+    await runInDurableObject(stub, async (instance, state) => {
+      const [serverClient] = state.getWebSockets("client");
+      await instance.webSocketError(serverClient, new Error("test error"));
+    });
+    expect(Array.from(await notified)).toEqual(Array.from(channel(tagged)));
+  });
+
+  it("closes a host and its clients for undersized and oversized wire frames", async () => {
+    for (const [suffix, frame, expectedCode] of [
+      ["short", new Uint8Array(CHANNEL_BYTES - 1), 1002],
+      ["oversized", new Uint8Array(MAX_PAYLOAD_BYTES + CHANNEL_BYTES + 1), 1009],
+    ]) {
+      const session = `session-host-frame-${suffix}-relaytest`;
+      const host = await connectSocket(session, "host");
+      const client = await connectSocket(session, "client");
+      const hostClose = nextClose(host, 5000);
+      const clientClose = nextClose(client, 5000);
+      host.send(frame);
+      expect((await hostClose).code).toBe(expectedCode);
+      const clientEvent = await clientClose;
+      expect(clientEvent.code).toBe(1000);
+      expect(clientEvent.reason).toBe("peer disconnected");
+    }
+  });
+
   it("retries an 8-byte random tag collision", () => {
     const colliding = new Uint8Array(CHANNEL_BYTES).fill(1);
     const unique = new Uint8Array(CHANNEL_BYTES).fill(2);
@@ -199,6 +306,23 @@ describe("client channel multiplexing", () => {
     expect(returned[returned.length - 1]).toBe(2);
   });
 
+  it("tags each host and client with the same persisted generation", async () => {
+    const session = "session-generation-tags-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    await connectSocket(session, "host");
+    await connectSocket(session, "client");
+    const { hostGeneration } = await stub.debugStorageDump();
+    await runInDurableObject(stub, async (_instance, state) => {
+      const [host] = state.getWebSockets("host");
+      const [client] = state.getWebSockets("client");
+      expect(state.getTags(host)).toContain(`host:${hostGeneration}`);
+      expect(state.getTags(client)).toContain(`generation:${hostGeneration}`);
+      expect(state.getTags(client)).toContainEqual(
+        expect.stringMatching(new RegExp(`^client:${hostGeneration}:[0-9a-f]{16}$`)),
+      );
+    });
+  });
+
   it("routes correctly after Durable Object hibernation", async () => {
     const session = "session-hibernation-relaytestpadding";
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
@@ -227,7 +351,10 @@ describe("request validation and opacity", () => {
     client.send(bytes("secret-ciphertext-frame"));
     await nextMessage(host);
     const dump = await stub.debugStorageDump();
-    expect(dump).toEqual({ maxClients: 5 });
+    expect(dump).toMatchObject({
+      maxClients: 5,
+      hostGeneration: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
     expect(JSON.stringify(dump)).not.toContain("secret-ciphertext-frame");
   });
 

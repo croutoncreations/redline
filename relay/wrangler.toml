@@ -37,7 +37,8 @@ new_sqlite_classes = ["RelaySession"]
 
 [env.production.vars]
 ALLOW_UNENTITLED = "false"
-# TEMPORARY pre-cutover verifier value. Rotate this public key to the issuer's
-# new production key only during the coordinated issuer/desktop/relay cutover.
+# RETIRED pre-cutover verifier value. `npm run deploy` rejects this exact key;
+# Phase 5 must replace it with the future issuer Worker's new public key before
+# the coordinated production cutover. Its private half must not be recreated.
 ENTITLEMENT_PUBLIC_KEY = "GvAg4IZvAvBKgx3STrizOwtSLT62TYmMnny+xOq1FlI="
 MAX_CLIENTS_DEFAULT = "5"

@@ -1,5 +1,5 @@
-import { env, SELF, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { env, SELF, runInDurableObject } from "cloudflare:test";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import entitlementContract from "../../docs/relay-entitlement.md?raw";
 import worker, {
   requestWithoutEntitlement,
@@ -174,16 +174,21 @@ describe("entitlements: signature and claim validation", () => {
   // learn something about valid sids from a signature-invalid token; if the
   // implementation instead trusted the impostor's signature, this would come
   // back "different_session" instead of "not_entitled".
-  it("verifies the signature before trusting the sid claim", async () => {
-    const sessionId = "ent-sigorder-relaytestpadding";
+  it("verifies the signature before parsing or trusting any claim", async () => {
     const impostor = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-    const token = await mintToken(
-      await validClaimsFor("ent-sigorder-other-relaytest"),
-      impostor.privateKey,
-    );
-    const res = await connectAsHost(sessionId, token);
-    expect(res.status).toBe(402);
-    expect(await bodyCode(res)).toBe("not_entitled");
+    const token = await mintRawToken("not json at all", impostor.privateKey);
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const result = await verifyEntitlementToken(
+        token,
+        TEST_ISSUER_PUBLIC_KEY_B64,
+        "ent-sigorder-relaytestpadding",
+      );
+      expect(result).toEqual({ ok: false, status: 402, code: "not_entitled" });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   // A caller must never be able to choose the key its own token is checked
@@ -483,22 +488,18 @@ describe("entitlements: documented test vector", () => {
     expect(await sidForSession(TEST_VECTOR_SESSION_ID)).toBe(TEST_VECTOR_CLAIMS.sid);
   });
 
-  it("contains every fixture literal verbatim in the public contract", async () => {
-    const doc = entitlementContract;
-    const claimsJSON = JSON.stringify(TEST_VECTOR_CLAIMS);
-    for (const literal of [
+  it("parses the markdown vector and matches every fixture field exactly", () => {
+    const section = entitlementContract.split("## Test vector")[1];
+    const codeBlocks = [...section.matchAll(/```(?:json)?\n([^\n]+)\n```/g)].map((match) => match[1]);
+    expect(codeBlocks).toEqual([
       TEST_ISSUER_PRIVATE_KEY_PKCS8_B64,
       TEST_ISSUER_PUBLIC_KEY_B64,
       TEST_VECTOR_SESSION_ID,
       TEST_VECTOR_CLAIMS.sid,
-      String(TEST_VECTOR_CLAIMS.exp),
-      String(TEST_VECTOR_CLAIMS.max_clients),
-      claimsJSON,
+      JSON.stringify(TEST_VECTOR_CLAIMS),
       TEST_VECTOR_TOKEN,
-    ]) {
-      expect(doc).toContain(literal);
-    }
-    expect(doc).toContain("PKCS#8 private key");
+    ]);
+    expect(section).toContain("PKCS#8 private key");
   });
 });
 
@@ -519,7 +520,11 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     const sessionId = "ent-storage-alarm-relaytest";
     const { exp } = await entitledSocket(sessionId, 3);
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    expect(await stub.debugStorageDump()).toEqual({ exp, maxClients: 3 });
+    expect(await stub.debugStorageDump()).toMatchObject({
+      exp,
+      maxClients: 3,
+      hostGeneration: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.getAlarm()).toBe(exp * 1000);
     });
@@ -540,7 +545,7 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     expect(await second.json()).toEqual({ code: "too_many_clients" });
   });
 
-  it("alarm closes host and clients with policy violation and clears state", async () => {
+  it("alarm closes host and clients with policy violation only when stored expiry is due", async () => {
     const sessionId = "ent-expiry-alarm-relaytest";
     const { socket: host } = await entitledSocket(sessionId);
     const clientRes = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
@@ -551,13 +556,49 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     client.accept();
     const closes = [closeEvent(host), closeEvent(client)];
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("exp", Math.floor(Date.now() / 1000) - 1);
+      await state.storage.setAlarm(Date.now() - 1);
+    });
+    await runInDurableObject(stub, async (instance) => instance.alarm());
     const events = await Promise.all(closes);
     expect(events.map((event) => [event.code, event.reason])).toEqual([
       [1008, "entitlement expired"],
       [1008, "entitlement expired"],
     ]);
     expect(await stub.debugStorageDump()).toEqual({});
+  });
+
+  it("a stale old alarm after refresh reschedules and leaves replacement claims and sockets intact", async () => {
+    const sessionId = "ent-stale-alarm-relaytest";
+    const { socket: host } = await entitledSocket(sessionId, 2);
+    const clientRes = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    const client = clientRes.webSocket;
+    client.accept();
+    const newExp = Math.floor(Date.now() / 1000) + 7200;
+    const token = await mintToken(await validClaimsFor(sessionId, { exp: newExp, max_clients: 4 }));
+    const refresh = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}/entitlement`, {
+      method: "POST",
+      headers: { "X-Redline-Entitlement": token },
+    });
+    expect(refresh.status).toBe(204);
+    const close = closeEvent(client);
+
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.alarm();
+      expect(await state.storage.getAlarm()).toBe(newExp * 1000);
+    });
+
+    await expect(Promise.race([
+      close.then(() => "closed"),
+      new Promise((resolve) => setTimeout(() => resolve("open"), 200)),
+    ])).resolves.toBe("open");
+    client.send(new Uint8Array([7]));
+    const frame = await new Promise((resolve) => host.addEventListener("message", (event) => resolve(new Uint8Array(event.data)), { once: true }));
+    expect(frame.slice(8)).toEqual(new Uint8Array([7]));
   });
 
   it("refresh updates claims and alarm without replacing sockets", async () => {
@@ -580,9 +621,43 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     });
     expect(refresh.status).toBe(204);
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
-    expect(await stub.debugStorageDump()).toEqual({ exp: newExp, maxClients: 4 });
+    expect(await stub.debugStorageDump()).toMatchObject({
+      exp: newExp,
+      maxClients: 4,
+      hostGeneration: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
     client.send(new Uint8Array([9]));
     expect((await new Promise((resolve) => host.addEventListener("message", (e) => resolve(new Uint8Array(e.data)), { once: true }))).slice(8)).toEqual(new Uint8Array([9]));
+  });
+
+  it("a delayed old-host callback cannot clear a replacement alarm", async () => {
+    const sessionId = "ent-generation-alarm-relaytest";
+    const { socket: oldHost } = await entitledSocket(sessionId, 2);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    let oldServer;
+    await runInDurableObject(stub, async (_instance, state) => {
+      [oldServer] = state.getWebSockets("host");
+    });
+    oldHost.close(1000, "replace");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const newExp = Math.floor(Date.now() / 1000) + 7200;
+    await entitledSocket(sessionId, 4, newExp);
+    const replacementClient = await SELF.fetch(`https://relay.example.com/v1/session/${sessionId}?role=client`, {
+      headers: { Upgrade: "websocket" },
+    });
+    replacementClient.webSocket.accept();
+    const close = closeEvent(replacementClient.webSocket);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.releaseSocket(oldServer);
+      expect(await state.storage.getAlarm()).toBe(newExp * 1000);
+    });
+    expect(await stub.debugStorageDump()).toMatchObject({ exp: newExp, maxClients: 4 });
+    await expect(Promise.race([
+      close.then(() => "closed"),
+      new Promise((resolve) => setTimeout(() => resolve("open"), 200)),
+    ])).resolves.toBe("open");
   });
 
   it("refresh returns structured 423 with no attached host", async () => {

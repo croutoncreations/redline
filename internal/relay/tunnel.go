@@ -13,10 +13,14 @@ import (
 	"strings"
 )
 
-// maxTunnelFrame bounds a whole frame on the wire and is what the socket's
-// read limit is set to. The ceiling is the Durable Object's own 1 MB WebSocket
-// message cap: a larger frame is dropped by the relay, not by us.
-const maxTunnelFrame = 1024 * 1024
+// maxTunnelPayload is the pre-multiplexing encrypted-frame ceiling. Phase 1.3
+// adds an eight-byte relay channel to host wire frames; keeping the two limits
+// distinct preserves the full 1 MiB payload while the desktop accepts the
+// prefixed frame. Channel demultiplexing remains Phase 2 work.
+const maxTunnelPayload = 1024 * 1024
+
+const relayChannelBytes = 8
+const maxHostWireFrame = maxTunnelPayload + relayChannelBytes
 
 // tunnelEnvelopeSlack reserves room for everything wrapped around the body:
 // the JSON envelope, response headers, and the 16-byte AEAD tag Seal adds.
@@ -28,7 +32,7 @@ const tunnelEnvelopeSlack = 16 * 1024
 // There is no chunking: one request is one frame, one response is one frame.
 // The size is derived rather than chosen, because base64 in JSON expands the
 // body by 4/3 and a body picked to look round overshoots. A 768 KB body
-// encodes to exactly maxTunnelFrame with nothing left for the envelope, so
+// encodes to exactly maxTunnelPayload with nothing left for the envelope, so
 // the largest permitted response produced a frame the relay would drop -- and
 // since the sealing side's nonce has already advanced by then, that dropped
 // frame would leave the Noise session permanently out of step rather than
@@ -36,7 +40,7 @@ const tunnelEnvelopeSlack = 16 * 1024
 //
 // A response above this is refused rather than truncated: a silently short
 // log is worse than a visible failure.
-const maxTunnelBody = ((maxTunnelFrame - tunnelEnvelopeSlack) / 4) * 3
+const maxTunnelBody = ((maxTunnelPayload - tunnelEnvelopeSlack) / 4) * 3
 
 // TunnelRequest is an HTTP request encoded for transit through a Noise frame.
 //

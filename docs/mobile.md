@@ -50,26 +50,31 @@ continues to reject cross-origin requests.
 
 ## 2. The relay (optional)
 
-Add a `relay:` block. The URL is `https://`; `session_id` is required and should be a long
-random string -- it is how the relay tells your desktop's session from every other, and it
-is persisted so a restart rejoins the same session rather than stranding paired phones.
+Phase 1 implements the relay protocol boundary; relay account setup and renewal UI are
+Phase 2/3 work and do not exist yet. For current development builds, configure the desktop
+in YAML. The URL must be `https://`; `session_id` is a long random value persisted across
+restarts.
 
 ```yaml
 relay:
   enabled: true
-  url: https://redline-relay.croutoncreations.com
+  url: https://relay.example.com
   session_id: "<a long random string>"
-  entitlement_token: "<from your Redline account>"
+  # entitlement_token: "<host token>" # closed hosted relay only
 ```
 
-The `entitlement_token` says only that this desktop is entitled to use the relay; it
-carries no identity. Redline hands it to each phone at pairing, so the phone can open its
-own leg of the session.
+A closed relay verifies the token only on the desktop `host` connection. Phone `client`
+connections present no entitlement to the relay: they are admitted only while that
+entitled host owns the session and while its signed `max_clients` cap permits. Current
+pairing code still has a legacy entitlement field in its Phase 0 API; the Phase 1 relay
+ignores it for clients, and Phase 2 removes it from pairing and phone storage. Do not read
+this as documentation for a finished purchase, activation, renewal, or Pair a Device
+configuration flow.
 
-**Running your own relay.** The relay is open source, under `relay/`, and deploys to
-Cloudflare Workers with `wrangler`. Point `url` at your deployment. A relay started with
-`ALLOW_UNENTITLED=true` accepts sessions without an entitlement, and Redline omits the
-token from pairing codes when none is configured.
+**Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
+then put its URL in the YAML block above and omit `entitlement_token`. The committed
+self-host profile uses `ALLOW_UNENTITLED=true`, while still requiring an attached desktop
+host and enforcing `MAX_CLIENTS_DEFAULT` (five unless validly configured otherwise).
 
 The desktop's relay identity (a Noise static keypair) is created on first use beside the
 database. Every paired phone pins it; rotating it unpairs them all.

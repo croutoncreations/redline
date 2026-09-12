@@ -4,9 +4,9 @@ This describes the contract the closed hosted relay (`ALLOW_UNENTITLED=false`)
 enforces against a **host** connection at `wss://<relay>/v1/session/{session_id}?role=host`.
 A **client** (phone) connection at `role=client` never presents an entitlement
 and is not covered by any of this: it is admitted purely because an entitled
-host is already attached to the same session. The relay's zero-knowledge
-design means this document is also the relay's entire threat surface for
-paywall bypass; nothing described here is enforced anywhere else.
+host is already attached to the same session. This document covers the
+relay's entitlement boundary; transport metadata, traffic analysis, Worker
+configuration, and issuer/payment security remain separate threat surfaces.
 
 Self-hosted relays (`ALLOW_UNENTITLED=true`, the default in the committed
 `wrangler.toml`) skip all of this and take their client cap from
@@ -114,6 +114,7 @@ bodies:
 | 402    | `different_session`| Validly signed token whose `sid` names a different session.           |
 | 409    | `too_many_clients` | `role=client` when the session is already at `max_clients`. |
 | 423    | `no_host`          | `role=client` when no host is attached to the session. |
+| 503    | `session_unavailable` | `role=client` when persisted admission state is missing or invalid; admission fails closed. |
 
 A duplicate host receives `409 {"code":"role_already_connected"}`.
 
@@ -169,8 +170,41 @@ The remaining calls authenticate with exactly
   created for each request and must never be cached in an entitlement response.
 
 The issuer signs `{exp, sid, max_clients}` and currently sets `max_clients` to
-`5`. Its complete future payment, activation, recovery, and key-rotation
-contract is in `docs/handoff-relay-launch-prompt.md` Phase 5.
+`5`.
+
+### License recovery contract
+
+Recovery is rotation, never retrieval of stored plaintext:
+
+```http
+POST /v1/license/recover
+Content-Type: application/json
+
+{"email":"customer@example.com"}
+```
+
+The endpoint always returns `200` with the same response shape, whether or not
+the normalized email belongs to a license, so it cannot be used for account
+enumeration. It is rate-limited independently by source IP and normalized
+email, with a cooldown that prevents both brute force and email flooding.
+
+For an eligible account, the issuer revokes the lost license-key hash, creates
+a random replacement key, and delivers it through the same authenticated
+email path used for paid activation. The permanent license record stores only
+the replacement key's one-way hash. Plaintext exists only in a separate
+encrypted, one-time delivery record with a 24-hour TTL; successful display or
+email delivery consumes that record, and expiry deletes it. Recovery preserves
+the subscription and its seat count but invalidates the old key for every
+issuer API immediately. Concurrent retries must resolve idempotently to one
+active replacement, not mint several valid keys. Responses and logs never
+contain the old key, the new key, or whether the email matched.
+
+Managed Payments customer deletion is stronger than recovery: it revokes the
+license and deletes or anonymizes email and device labels, retaining only the
+minimal non-identifying accounting/security records required.
+
+The complete future payment, activation, webhook-ordering, recovery, and
+key-rotation contract is in `docs/handoff-relay-launch-prompt.md` Phase 5.
 
 ## Test vector
 

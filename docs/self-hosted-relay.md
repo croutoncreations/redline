@@ -23,19 +23,22 @@ npx wrangler deploy
 ```
 
 The last command prints a URL ending in `*.workers.dev`. Copy the complete
-`https://…workers.dev` URL into **Pair a Device → My own relay** on the Mac.
-Do not use `npm run deploy`: that script intentionally targets Redline's
-closed production environment.
+`https://…workers.dev` URL into the current desktop YAML `relay.url` setting
+(Phase 3 later moves this choice into Pair a Device). Do not use `npm run
+deploy`: that script targets Redline's closed production environment and is
+currently blocked until Phase 5 rotates the retired verifier key.
 
 `MAX_CLIENTS_DEFAULT = "5"` in `wrangler.toml` controls how many phones can be
-attached to one host. Keep `ALLOW_UNENTITLED = "true"` and
+attached to one host. A missing, non-integer, or non-positive value fails
+back to the explicit five-client self-host default; it never makes the
+cap unlimited. Keep `ALLOW_UNENTITLED = "true"` and
 `ENTITLEMENT_PUBLIC_KEY = ""` for an open self-hosted deployment.
 
 ## Optional custom domain
 
 A `workers.dev` address is enough. To use your own hostname, create the DNS
-name in the same Cloudflare account and add a top-level custom-domain route to
-`wrangler.toml`, before `[env.production]`:
+name in the same Cloudflare account and insert this top-level key **immediately
+after `compatibility_date` and before the first `[[durable_objects.bindings]]`**:
 
 ```toml
 routes = [
@@ -43,9 +46,11 @@ routes = [
 ]
 ```
 
-Run `npx wrangler deploy` again, then use `https://relay.example.com` in Pair
-a Device. Do not edit or deploy `[env.production]`; that environment describes
-Redline's hosted service rather than a self-host installation.
+Do not place it after `[vars]`: TOML would make it part of that table rather
+than a top-level Wrangler route. Run `npx wrangler deploy` again, then use
+`https://relay.example.com` in the current YAML relay configuration. Do not
+edit or deploy `[env.production]`; that environment describes Redline's hosted
+service rather than a self-host installation.
 
 ## Privacy and payload blindness
 

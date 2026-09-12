@@ -58,9 +58,9 @@ The relay never buffers, as today. Define the frame limit as a payload limit plu
 Restructure so the committed default is the self-host profile:
 
 - Top level: no `[[routes]]` (leave it commented with a note on adding a custom domain), `ALLOW_UNENTITLED = "true"`, `ENTITLEMENT_PUBLIC_KEY = ""`, `MAX_CLIENTS_DEFAULT = "5"`, the `SESSIONS` binding, and the migration.
-- `[env.production]`: the `redline-relay.croutoncreations.com` custom-domain route, `ALLOW_UNENTITLED = "false"`, the **new** production public key (see key rotation above), `MAX_CLIENTS_DEFAULT = "5"`, and the DO binding and migrations repeated (env sections do not inherit bindings).
-- `package.json`: `deploy` becomes `wrangler deploy --env production`; add `deploy:self-hosted` as `wrangler deploy`.
-- Add a vitest case that parses `wrangler.toml`, reads `env.production.vars`, and asserts `ALLOW_UNENTITLED` is `"false"` and `ENTITLEMENT_PUBLIC_KEY` is non-empty. This is the guard against the hosted relay ever shipping open.
+- `[env.production]`: the `redline-relay.croutoncreations.com` custom-domain route, `ALLOW_UNENTITLED = "false"`, `MAX_CLIENTS_DEFAULT = "5"`, and the DO binding and migrations repeated (env sections do not inherit bindings). Until Phase 5 creates the new issuer key, keep the old public key explicitly marked retired/temporary; do not generate its replacement in this repository.
+- `package.json`: `deploy` targets `wrangler deploy --env production` only after a tested preflight rejects the exact retired public key. Production deployment remains **BLOCKED** until Phase 5 supplies the new public key. `deploy:self-hosted` remains plain `wrangler deploy`; direct production `--dry-run` is allowed for structural validation.
+- Add vitest coverage that parses `wrangler.toml`, asserts production is closed, and proves the deploy preflight rejects the exact retired verifier key but accepts a different validly shaped public key. This guards both against shipping open and against accidentally deploying the retired verifier.
 - Rewrite the header comment: this file is the self-hoster's starting point; production lives in the env section; keep the note that the public key is public by construction.
 
 ### 1.5 Public contract documents

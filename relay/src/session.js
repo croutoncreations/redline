@@ -31,42 +31,52 @@ export class RelaySession extends DurableObject {
 
     const claims = this.claimsFromTrustedHeaders(request);
     if (!claims) return jsonError(402, "not_entitled");
-    await this.storeClaims(claims);
+    const previousGeneration = await this.ctx.storage.get("hostGeneration");
+    const generation = bytesToHex(allocateChannelId(new Set(previousGeneration ? [previousGeneration] : [])));
+    await this.storeClaims(claims, generation);
 
     const { 0: client, 1: server } = new WebSocketPair();
-    this.ctx.acceptWebSocket(server, ["host"]);
+    this.ctx.acceptWebSocket(server, ["host", `host:${generation}`]);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async connectClient() {
-    if (!this.host()) return jsonError(423, "no_host");
+    const generation = await this.ctx.storage.get("hostGeneration");
+    const host = generation ? this.hostForGeneration(generation) : null;
+    if (!host) return jsonError(423, "no_host");
+
     const maxClients = await this.ctx.storage.get("maxClients");
-    const clients = this.clients();
+    if (!Number.isInteger(maxClients) || maxClients < 1 || maxClients > 25) {
+      return jsonError(503, "session_unavailable");
+    }
+    const clients = this.clientsForGeneration(generation);
     if (clients.length >= maxClients) return jsonError(409, "too_many_clients");
 
     const existingChannels = new Set(clients.map((ws) => channelHexFromSocket(this.ctx, ws)));
     const channel = allocateChannelId(existingChannels);
     const channelHex = bytesToHex(channel);
     const { 0: client, 1: server } = new WebSocketPair();
-    server.serializeAttachment({ channelHex, closeNotified: false });
-    this.ctx.acceptWebSocket(server, ["client", `client:${channelHex}`]);
+    server.serializeAttachment({ generation, channelHex, closeNotified: false });
+    this.ctx.acceptWebSocket(server, [
+      "client",
+      `generation:${generation}`,
+      `client:${generation}:${channelHex}`,
+    ]);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async refreshEntitlement(request) {
-    if (!this.host()) return jsonError(423, "no_host");
+    const generation = await this.ctx.storage.get("hostGeneration");
+    if (!generation || !this.hostForGeneration(generation)) return jsonError(423, "no_host");
     const claims = this.claimsFromTrustedHeaders(request);
     if (!claims) return jsonError(402, "not_entitled");
-    await this.storeClaims(claims);
+    await this.storeClaims(claims, generation);
     return new Response(null, { status: 204 });
   }
 
   claimsFromTrustedHeaders(request) {
     if (String(this.env.ALLOW_UNENTITLED).toLowerCase() === "true") {
-      const configured = Number(this.env.MAX_CLIENTS_DEFAULT);
-      return {
-        maxClients: Number.isInteger(configured) && configured > 0 ? configured : 5,
-      };
+      return { maxClients: selfHostedMaxClients(this.env.MAX_CLIENTS_DEFAULT) };
     }
 
     const exp = Number(request.headers.get("X-Redline-Internal-Exp"));
@@ -77,41 +87,63 @@ export class RelaySession extends DurableObject {
     return { exp, maxClients };
   }
 
-  async storeClaims(claims) {
+  async storeClaims(claims, generation) {
     await this.ctx.storage.deleteAll();
-    await this.ctx.storage.put("maxClients", claims.maxClients);
+    await this.ctx.storage.put({
+      hostGeneration: generation,
+      maxClients: claims.maxClients,
+      ...(claims.exp === undefined ? {} : { exp: claims.exp }),
+    });
     if (claims.exp === undefined) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.put("exp", claims.exp);
     await this.ctx.storage.setAlarm(claims.exp * 1000);
   }
 
-  webSocketMessage(ws, message) {
-    const bytes = messageBytes(message);
+  async webSocketMessage(ws, message) {
+    const frame = messageBytes(message);
     const tags = this.ctx.getTags(ws);
     if (tags.includes("host")) {
-      if (bytes.byteLength < CHANNEL_BYTES || bytes.byteLength > MAX_HOST_FRAME_BYTES) return;
-      const channelHex = bytesToHex(bytes.subarray(0, CHANNEL_BYTES));
-      const client = this.ctx.getWebSockets(`client:${channelHex}`)[0];
-      if (client) client.send(bytes.slice(CHANNEL_BYTES));
+      if (frame.byteLength < CHANNEL_BYTES) {
+        await this.closeMalformedHost(ws, 1002, "host frame missing channel");
+        return;
+      }
+      if (frame.byteLength > MAX_HOST_FRAME_BYTES) {
+        await this.closeMalformedHost(ws, 1009, "frame too large");
+        return;
+      }
+      const generation = hostGenerationFromSocket(this.ctx, ws);
+      if (!generation) {
+        safeClose(ws, 1002, "host generation missing");
+        return;
+      }
+      const channelHex = bytesToHex(frame.subarray(0, CHANNEL_BYTES));
+      const client = this.ctx.getWebSockets(`client:${generation}:${channelHex}`)[0];
+      if (client) client.send(frame.slice(CHANNEL_BYTES));
       return;
     }
 
-    if (bytes.byteLength > MAX_PAYLOAD_BYTES) {
-      try {
-        ws.close(1009, "frame too large");
-      } catch {
-        // Already closing.
-      }
+    if (frame.byteLength > MAX_PAYLOAD_BYTES) {
+      safeClose(ws, 1009, "frame too large");
       return;
     }
-    const host = this.host();
+    const generation = clientGenerationFromSocket(this.ctx, ws);
+    const host = generation ? this.hostForGeneration(generation) : null;
     if (!host) return;
     const channelHex = channelHexFromSocket(this.ctx, ws);
     if (!channelHex) return;
-    host.send(concatBytes(hexToBytes(channelHex), bytes));
+    host.send(concatBytes(hexToBytes(channelHex), frame));
+  }
+
+  async closeMalformedHost(ws, code, reason) {
+    const generation = hostGenerationFromSocket(this.ctx, ws);
+    safeClose(ws, code, reason);
+    if (!generation || await this.ctx.storage.get("hostGeneration") !== generation) return;
+    for (const client of this.clientsForGeneration(generation)) {
+      safeClose(client, 1000, "peer disconnected");
+    }
+    await this.clearClaims(generation);
   }
 
   async webSocketClose(ws) {
@@ -125,12 +157,17 @@ export class RelaySession extends DurableObject {
   async releaseSocket(ws) {
     const tags = this.ctx.getTags(ws);
     if (tags.includes("host")) {
-      for (const client of this.clients()) safeClose(client, 1000, "peer disconnected");
-      await this.clearClaims();
+      const generation = hostGenerationFromSocket(this.ctx, ws);
+      if (!generation || await this.ctx.storage.get("hostGeneration") !== generation) return;
+      for (const client of this.clientsForGeneration(generation)) {
+        safeClose(client, 1000, "peer disconnected");
+      }
+      await this.clearClaims(generation);
       return;
     }
 
-    const host = this.host();
+    const generation = clientGenerationFromSocket(this.ctx, ws);
+    const host = generation ? this.hostForGeneration(generation) : null;
     const channelHex = channelHexFromSocket(this.ctx, ws);
     if (!host || !channelHex) return;
 
@@ -141,28 +178,49 @@ export class RelaySession extends DurableObject {
     try {
       host.send(hexToBytes(channelHex));
     } catch {
-      // The host is already closing.
+      // The owning host is already closing.
     }
   }
 
   async alarm() {
-    for (const socket of this.ctx.getWebSockets()) {
-      safeClose(socket, 1008, "entitlement expired");
+    const exp = await this.ctx.storage.get("exp");
+    if (!Number.isFinite(exp)) return;
+    if (exp * 1000 > Date.now()) {
+      await this.ctx.storage.setAlarm(exp * 1000);
+      return;
     }
-    await this.clearClaims();
+
+    const generation = await this.ctx.storage.get("hostGeneration");
+    if (!generation) return;
+    const host = this.hostForGeneration(generation);
+    if (host) safeClose(host, 1008, "entitlement expired");
+    for (const client of this.clientsForGeneration(generation)) {
+      safeClose(client, 1008, "entitlement expired");
+    }
+    await this.clearClaims(generation);
   }
 
-  async clearClaims() {
-    await this.ctx.storage.deleteAll();
+  async clearClaims(generation) {
+    if (await this.ctx.storage.get("hostGeneration") !== generation) return false;
+    await this.ctx.storage.delete(["exp", "maxClients", "hostGeneration"]);
     await this.ctx.storage.deleteAlarm();
+    return true;
   }
 
   host() {
     return this.ctx.getWebSockets("host")[0];
   }
 
+  hostForGeneration(generation) {
+    return this.ctx.getWebSockets(`host:${generation}`)[0];
+  }
+
   clients() {
     return this.ctx.getWebSockets("client");
+  }
+
+  clientsForGeneration(generation) {
+    return this.ctx.getWebSockets(`generation:${generation}`);
   }
 
   async debugStorageDump() {
@@ -170,7 +228,7 @@ export class RelaySession extends DurableObject {
   }
 }
 
-/** Generate a collision-free random channel. fillRandom is injectable for the collision test. */
+/** Generate a collision-free random identifier. fillRandom is injectable for collision tests. */
 export function allocateChannelId(existingChannels, fillRandom = crypto.getRandomValues.bind(crypto)) {
   for (;;) {
     const channel = new Uint8Array(CHANNEL_BYTES);
@@ -179,9 +237,25 @@ export function allocateChannelId(existingChannels, fillRandom = crypto.getRando
   }
 }
 
+/** Invalid self-host configuration keeps the historical five-client cap. */
+export function selfHostedMaxClients(value) {
+  const configured = Number(value);
+  return Number.isInteger(configured) && configured > 0 ? configured : 5;
+}
+
+function hostGenerationFromSocket(ctx, ws) {
+  const tag = ctx.getTags(ws).find((value) => value.startsWith("host:"));
+  return tag ? tag.slice("host:".length) : null;
+}
+
+function clientGenerationFromSocket(ctx, ws) {
+  const tag = ctx.getTags(ws).find((value) => value.startsWith("generation:"));
+  return tag ? tag.slice("generation:".length) : null;
+}
+
 function channelHexFromSocket(ctx, ws) {
   const tag = ctx.getTags(ws).find((value) => value.startsWith("client:"));
-  return tag ? tag.slice("client:".length) : null;
+  return tag ? tag.slice(tag.lastIndexOf(":") + 1) : null;
 }
 
 function messageBytes(message) {

@@ -1,27 +1,26 @@
 # Redline mobile + relay: distribution and licensing plan
 
-Review of the `jf-mobile-app` worktree (78 commits ahead of `main`, ~27k lines: Android app in Compose, Go core via gomobile, Cloudflare Worker relay, desktop relay dialer, pairing rework, macOS pairing window, CI for all of it) and a plan for shipping it.
+Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 is implemented; later-phase descriptions below remain design, not released UI.
 
-## 1. Where the branch stands
+## 1. Where the branch stands after Phase 1
 
-The architecture is in good shape and the security boundaries are the right ones:
+The relay boundary now provides:
 
-- The relay is blind. `relay/src/index.js` and `session.js` forward opaque frames between a `host` and a `client` socket in a hibernatable Durable Object, store nothing, and the entitlement check reads its key only from `env` (the earlier header-supplied-key hole is closed and tested). The token is stripped before the request reaches the DO.
-- The entitlement scheme is deliberately minimal: `<base64 claims>.<base64 Ed25519 sig>`, claims are `{exp}`, verified before parsed. `ALLOW_UNENTITLED=true` is the self-host switch. That is the "flag on the CF worker" and it is done.
-- Pairing is composed once in the service (`internal/pairing`), so CLI and menu bar emit identical codes; the QR fragment carries `relay`, `key`, `session`, and `entitlement`; the phone pins the desktop's Noise static key.
-- Tests are thorough (tamper/expiry/malformed tokens on the relay; full-chain relay integration tests in Go; gomobile-boundary guards in Gradle and CI).
+- Ed25519 tokens with required signed `{exp, sid, max_clients}` claims, signature-before-parse verification, session binding, header-only transport, and trusted claim forwarding into the Durable Object.
+- Host-only entitlement checks. Clients are admitted only behind the owning host generation, capped by stored `maxClients`, and multiplexed with random eight-byte channels. Stored expiry alarms terminate due sessions; refresh advances claims without replacing sockets.
+- An open self-host default and a closed production environment in `wrangler.toml`, plus public self-hosting and entitlement contracts. Production deployment is intentionally blocked while the retired verifier key remains configured; Phase 5 supplies the new public key while its private half exists only in the issuer Worker secret.
+- A desktop host-wire read boundary of 1 MiB payload plus the eight-byte channel. Desktop channel demultiplexing is deliberately not part of Phase 1.
 
-Gaps that matter for shipping, in priority order:
+Gaps that matter for shipping, in phase order:
 
-1. **There is no renewal path.** The comments say "short expiry plus renewal is how a lapsed subscription stops working", but nothing renews. `entitlement_token` is a static string in `config.yaml`, copied into the QR, and stored on the phone in SharedPreferences. When it expires, the desktop's dial gets a 402 that is only logged (`internal/relay/dial.go` has no 402 handling; the menu bar has no entitlement state), and the phone shows "renew" with nothing to tap. Worse, the phone's only route to a new token is the relay it can no longer enter. This is the core piece the issuer work has to close (section 3).
-2. **The phone should not need a token at all.** Since the DO knows whether an entitled `host` is attached, the relay can admit the `client` role whenever a host is present in that session (optionally storing the host's `exp` in `ctx.storage` on connect so a lapsed host that never reconnects is still cut off). Then the token never leaves the desktop, never appears in the QR, and the phone-renewal problem disappears. A phone without a desktop had nothing to talk to anyway. This also keeps all licensing on the Mac, which matters for Play Store policy (section 2).
-3. **Tokens are unbound bearer tokens.** Claims are `{exp}` only, so one paying user's token works for everyone. At $10/yr that is mostly a Cloudflare-bill risk, not a revenue risk, but it is cheap to fix: have the desktop send `sha256(session_id)` to the issuer and have the issuer put it in the claims as `sid`; the relay compares it to the session id it already sees. No new identity reaches either party.
-4. **Remove the query-string token fallback before launch.** No pre-header clients exist outside your own devices, so the "staged migration" comment can be retired now rather than after a public version pins it.
-5. **Android release plumbing is absent.** No `signingConfigs.release`, `versionCode = 1`, `targetSdk = 34`, `isMinifyEnabled = false`, no privacy policy, no store assets. Details in section 2.
-6. **`wrangler.toml` is not self-host friendly.** It hardcodes `redline-relay.croutoncreations.com` as a custom domain and your public key. A self-hoster has to edit both before `wrangler deploy` works.
-7. **Docs point at things that do not exist yet.** `docs/mobile.md` says the token comes "from your Redline account"; the README does not mention the phone app beyond one line.
+1. **Desktop entitlement lifecycle (Phase 2).** Managed relay state, Keychain license storage, issuer calls/cache/renewal, relay refresh handling, per-channel Noise handlers, structured relay state, local APIs, and CLI commands are not implemented.
+2. **Remove legacy phone token plumbing (Phase 2/4).** The relay no longer requires or trusts a client token, but the existing pairing/mobile APIs still carry the legacy field. Phase 2 removes it from pairing; Phase 4 deletes stored phone values and adds structured client errors.
+3. **Desktop setup and status UI (Phase 3).** Pair a Device does not yet configure hosted/self-hosted mode or activate a license, and the menu bar has no renewal/lapse state.
+4. **Android release (Phase 4).** Final application id, SDK 36 target, upload signing, Play-only AAB workflow, privacy verification, and listing work remain.
+5. **Issuer and key rotation (Phase 5).** Checkout, seat activation, token issuance, recovery, portal, webhook ordering, and the new production signing key live in the separate private issuer repository. No production relay deployment is usable until that key exists and the guarded retired public key is replaced.
+6. **Launch operations/docs (Phase 6).** Rate limits, paid capacity, monitoring, threat-model/privacy publication, README/CHANGELOG launch copy, and final coordinated cutover remain.
 
-Not reviewed here: the usage-meter/pace/reserve commits at the tip of the branch; they are UI work unrelated to distribution.
+Not reviewed here: usage-meter/pace/reserve work, which is unrelated to mobile distribution.
 
 ## 2. Sharing the app: open source and Play Store
 
@@ -131,20 +130,18 @@ What must stay in the public repo is the **contract**: a `docs/relay-entitlement
 - Issuer and local APIs list activations and deactivate any Mac by opaque activation id, including a lost device.
 - Customer Portal URLs are created fresh when requested, never cached with an entitlement.
 
-## Appendix B. `relay/wrangler.toml` changes (tracked for the handoff prompt)
+## Appendix B. `relay/wrangler.toml` Phase 1 result
 
-1. Make the committed default the **self-host profile**: no `[[routes]]` block (comment it out with a note), `ALLOW_UNENTITLED = "true"`, `ENTITLEMENT_PUBLIC_KEY = ""`.
-2. Move production under `[env.production]`: the `redline-relay.croutoncreations.com` custom-domain route, `ALLOW_UNENTITLED = "false"`, the real `ENTITLEMENT_PUBLIC_KEY`, and the `SESSIONS` DO binding plus migrations repeated (env sections do not inherit bindings). `npm run deploy` becomes `wrangler deploy --env production`; add `deploy:self-hosted` as plain `wrangler deploy`.
-3. Add `MAX_CLIENTS_DEFAULT` var for open self-hosted sessions, e.g. `"5"`; the closed hosted relay requires a signed `max_clients` claim.
-4. Add a vitest case that parses `wrangler.toml`, loads `[env.production]`, and asserts `ALLOW_UNENTITLED` is `"false"` and the key is non-empty, so the hosted relay can never ship open.
-5. Update the header comment: the file is the self-hoster's starting point; production lives in the env section; the public key is public by construction (keep that note).
-6. Document in `docs/self-hosted-relay.md`: `npm ci`, `npx wrangler login`, `npx wrangler deploy`, copy the `*.workers.dev` URL; optional custom domain; what Cloudflare logs.
-7. When the query-string token fallback is removed from `index.js`, drop the matching comment in the toml if any remains.
+1. The committed default is the open self-host profile with no route, an empty key, and `MAX_CLIENTS_DEFAULT = "5"`.
+2. `[env.production]` repeats the route, closed vars, Durable Object binding, and migration because environment sections do not inherit bindings.
+3. The configured production verifier is explicitly retired. `npm run deploy` runs a preflight that rejects that exact key and malformed/empty replacements before invoking `wrangler deploy --env production`. Phase 5 must install the new public key; private material stays in the issuer Worker secret.
+4. `npm run deploy:self-hosted` remains plain `wrangler deploy`. The self-host guide documents setup, unambiguous top-level custom-domain insertion, plan limits, and observable metadata.
+5. Tests assert the production profile is closed and prove the retired-key guard distinguishes a different validly shaped key. Direct Wrangler dry-runs remain available for structural validation.
 
-## Appendix C. Relay protocol changes (tracked)
+## Appendix C. Relay protocol Phase 1 result
 
 - Host-gated client admission; new status for "no host attached" (423) distinct from 402.
-- Persist host `exp` in DO storage on connect; close host at `exp` (alarm) so a lapsed subscription ends even a socket that never reconnects.
+- Persist host claims with a random ownership generation; a due `exp` alarm closes only that generation, so stale callbacks and refreshed alarms cannot tear down replacements.
 - Client multiplexing: relay assigns each `client` socket a random channel id; client→host frames are prefixed with it, host→client frames carry it and the relay strips it and routes. Phone wire format unchanged. Enforce `max_clients` per session by counting client sockets.
 - Required `sid` claim: the closed relay compares `base64url(sha256(session_id))` to the signed claim and rejects a missing or mismatched value.
 - Remove `entitlement` query-param fallback.

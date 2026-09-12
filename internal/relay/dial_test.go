@@ -265,8 +265,8 @@ func TestBackoffResetsAfterAConnectionThatWorked(t *testing.T) {
 }
 
 // A run's logs are routinely larger than a WebSocket library's default read
-// limit, and the tunnel advertises a 4 MB ceiling. Without raising the limit on
-// the connection the real ceiling was 32 KB, and exceeding it did not fail the
+// limit, and the tunnel permits a 1 MiB encrypted payload. Without raising the
+// limit on the connection the real ceiling was 32 KB, and exceeding it did not fail the
 // request -- it tore down the socket, which then fed the reconnect loop.
 func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 	// A response comfortably past the 32 KB default but inside the ceiling.

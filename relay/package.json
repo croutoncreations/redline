@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "vitest run",
-    "deploy": "wrangler deploy --env production",
+    "deploy": "node scripts/production-deploy-preflight.mjs && wrangler deploy --env production",
     "deploy:self-hosted": "wrangler deploy"
   },
   "devDependencies": {
