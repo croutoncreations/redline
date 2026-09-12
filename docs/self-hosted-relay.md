@@ -29,10 +29,10 @@ deploy`: that script targets Redline's closed production environment and is
 currently blocked until Phase 5 rotates the retired verifier key.
 
 `MAX_CLIENTS_DEFAULT = "5"` in `wrangler.toml` controls how many phones can be
-attached to one host. A missing, non-integer, or non-positive value fails
-back to the explicit five-client self-host default; it never makes the
-cap unlimited. Keep `ALLOW_UNENTITLED = "true"` and
-`ENTITLEMENT_PUBLIC_KEY = ""` for an open self-hosted deployment.
+attached to one host. Valid values are integers from 1 through 25 inclusive.
+A missing or invalid value falls back to the explicit five-client self-host
+default; it never makes the cap unlimited. Keep `ALLOW_UNENTITLED = "true"`
+and `ENTITLEMENT_PUBLIC_KEY = ""` for an open self-hosted deployment.
 
 ## Optional custom domain
 

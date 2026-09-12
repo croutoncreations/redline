@@ -67,9 +67,10 @@ A closed relay verifies the token only on the desktop `host` connection. Phone `
 connections present no entitlement to the relay: they are admitted only while that
 entitled host owns the session and while its signed `max_clients` cap permits. Current
 pairing code still has a legacy entitlement field in its Phase 0 API; the Phase 1 relay
-ignores it for clients, and Phase 2 removes it from pairing and phone storage. Do not read
-this as documentation for a finished purchase, activation, renewal, or Pair a Device
-configuration flow.
+ignores it for clients. Phase 2 removes it from emitted QR payloads, and Phase 4 removes
+it from phone storage. Until then, legacy phone builds may still carry and transmit the
+ignored entitlement. Do not read this as documentation for a finished purchase,
+activation, renewal, or Pair a Device configuration flow.
 
 **Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
 then put its URL in the YAML block above and omit `entitlement_token`. The committed

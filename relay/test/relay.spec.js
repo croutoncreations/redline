@@ -87,11 +87,12 @@ describe("host-gated relay session", () => {
     expect(await sixth.json()).toEqual({ code: "too_many_clients" });
   });
 
-  it("uses a documented cap of five when a self-host cap is invalid", () => {
-    for (const configured of [undefined, "", "nope", "0", "-1", "2.5"]) {
+  it("uses a documented cap of five when a self-host cap is outside 1 through 25", () => {
+    for (const configured of [undefined, "", "nope", "0", "-1", "2.5", "26", "1000"]) {
       expect(selfHostedMaxClients(configured)).toBe(5);
     }
-    expect(selfHostedMaxClients("7")).toBe(7);
+    expect(selfHostedMaxClients("1")).toBe(1);
+    expect(selfHostedMaxClients("25")).toBe(25);
   });
 
   it("does not make the entitlement refresh endpoint unauthenticated in open mode", async () => {
@@ -153,27 +154,57 @@ describe("host-gated relay session", () => {
     }
   });
 
-  it("ignores a delayed old-host close after a replacement owns the session", async () => {
+  it("a delayed old-host callback closes only old-generation clients", async () => {
     const session = "session-host-generation-relaytest";
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
     const oldHost = await connectSocket(session, "host");
-    await connectSocket(session, "client");
+    const oldClient = await connectSocket(session, "client");
+    let oldCallbackQueued = false;
     let oldServer;
-    await runInDurableObject(stub, async (_instance, state) => {
-      [oldServer] = state.getWebSockets("host");
+    let releaseSocket;
+
+    await runInDurableObject(stub, async (instance, state) => {
+      const oldGeneration = await state.storage.get("hostGeneration");
+      releaseSocket = instance.releaseSocket.bind(instance);
+      instance.releaseSocket = async (ws) => {
+        if (state.getTags(ws).includes(`host:${oldGeneration}`)) {
+          oldServer = ws;
+          oldCallbackQueued = true;
+          return;
+        }
+        return releaseSocket(ws);
+      };
     });
 
     oldHost.close(1000, "replace");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect.poll(() => oldCallbackQueued).toBe(true);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(state.getWebSockets(`generation:${await state.storage.get("hostGeneration")}`)).toHaveLength(1);
+    });
+
     const replacementHost = await connectSocket(session, "host");
     const replacementClient = await connectSocket(session, "client");
+    const { hostGeneration: replacementGeneration } = await stub.debugStorageDump();
+    const replacementExp = Math.floor(Date.now() / 1000) + 3600;
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("exp", replacementExp);
+      await state.storage.setAlarm(replacementExp * 1000);
+      expect(state.getWebSockets(`generation:${replacementGeneration}`)).toHaveLength(1);
+    });
     const before = await stub.debugStorageDump();
-    const replacementClose = nextClose(replacementClient, 200);
+    const oldClose = nextClose(oldClient);
+    const replacementStaysOpen = expect(nextClose(replacementClient, 200)).rejects.toThrow(/timed out/);
 
-    await runInDurableObject(stub, async (instance) => instance.releaseSocket(oldServer));
+    await runInDurableObject(stub, async () => releaseSocket(oldServer));
 
+    const oldEvent = await oldClose;
+    expect([oldEvent.code, oldEvent.reason]).toEqual([1000, "peer disconnected"]);
     expect(await stub.debugStorageDump()).toEqual(before);
-    await expect(replacementClose).rejects.toThrow(/timed out/);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBe(replacementExp * 1000);
+      expect(state.getWebSockets(`generation:${replacementGeneration}`)).toHaveLength(1);
+    });
+    await replacementStaysOpen;
     replacementClient.send(bytes("still-owned"));
     expect(Array.from(payload(await nextMessage(replacementHost)))).toEqual(Array.from(bytes("still-owned")));
   });

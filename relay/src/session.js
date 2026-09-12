@@ -139,7 +139,7 @@ export class RelaySession extends DurableObject {
   async closeMalformedHost(ws, code, reason) {
     const generation = hostGenerationFromSocket(this.ctx, ws);
     safeClose(ws, code, reason);
-    if (!generation || await this.ctx.storage.get("hostGeneration") !== generation) return;
+    if (!generation) return;
     for (const client of this.clientsForGeneration(generation)) {
       safeClose(client, 1000, "peer disconnected");
     }
@@ -158,7 +158,7 @@ export class RelaySession extends DurableObject {
     const tags = this.ctx.getTags(ws);
     if (tags.includes("host")) {
       const generation = hostGenerationFromSocket(this.ctx, ws);
-      if (!generation || await this.ctx.storage.get("hostGeneration") !== generation) return;
+      if (!generation) return;
       for (const client of this.clientsForGeneration(generation)) {
         safeClose(client, 1000, "peer disconnected");
       }
@@ -240,7 +240,7 @@ export function allocateChannelId(existingChannels, fillRandom = crypto.getRando
 /** Invalid self-host configuration keeps the historical five-client cap. */
 export function selfHostedMaxClients(value) {
   const configured = Number(value);
-  return Number.isInteger(configured) && configured > 0 ? configured : 5;
+  return Number.isInteger(configured) && configured >= 1 && configured <= 25 ? configured : 5;
 }
 
 function hostGenerationFromSocket(ctx, ws) {
