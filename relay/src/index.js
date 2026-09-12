@@ -21,6 +21,17 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 const VALID_ROLES = new Set(["host", "client"]);
 
+// Header used to carry the entitlement token from the caller.
+const ENTITLEMENT_HEADER = "X-Redline-Entitlement";
+
+// Internal-only claim headers. index.js sets these itself, after
+// independently verifying an entitlement token; nothing a caller sends may
+// reach the Durable Object under these names. If a caller could set them
+// directly, it could dictate its own expiry and client cap and the signature
+// check above would be theatre.
+const INTERNAL_EXP_HEADER = "X-Redline-Internal-Exp";
+const INTERNAL_MAX_CLIENTS_HEADER = "X-Redline-Internal-Max-Clients";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -52,40 +63,72 @@ export default {
       return new Response("expected a websocket upgrade", { status: 426 });
     }
 
-    const entitlement = await checkEntitlement(env, request);
-    if (!entitlement.ok) {
-      // 402 rather than 401: nothing is wrong with the caller's identity, they
-      // simply are not entitled to relay. The app distinguishes the two.
-      return new Response(entitlement.reason, { status: 402 });
+    // Only a host ever presents an entitlement. The phone never holds one --
+    // it is admitted because an entitled host is already attached to the
+    // same session, not because it can prove anything about itself -- so a
+    // client request skips the check entirely and is forwarded unexamined.
+    let claims = null;
+    if (role === "host") {
+      const result = await checkEntitlement(env, request, sessionId);
+      if (!result.ok) {
+        return jsonError(result.status, result.code);
+      }
+      claims = result.claims;
     }
 
     const id = env.SESSIONS.idFromName(sessionId);
-    return env.SESSIONS.get(id).fetch(requestWithoutEntitlement(request));
+    let forwarded = requestWithoutEntitlement(request);
+    if (claims) {
+      forwarded = withInternalHostClaims(forwarded, claims);
+    }
+    return env.SESSIONS.get(id).fetch(forwarded);
   },
 };
 
 /**
- * Remove every accepted credential representation at the authorization
- * boundary. The session object pairs opaque sockets and needs neither one.
+ * Remove every accepted credential representation, and any caller-supplied
+ * internal claim header, at the authorization boundary. The session object
+ * pairs opaque sockets and trusts only what index.js injects below it; it
+ * must never see a credential or a forged internal claim.
  */
 export function requestWithoutEntitlement(request) {
   const cleanURL = new URL(request.url);
   cleanURL.searchParams.delete("entitlement");
   const cleanHeaders = new Headers(request.headers);
-  cleanHeaders.delete("X-Redline-Entitlement");
+  cleanHeaders.delete(ENTITLEMENT_HEADER);
+  cleanHeaders.delete(INTERNAL_EXP_HEADER);
+  cleanHeaders.delete(INTERNAL_MAX_CLIENTS_HEADER);
   const moved = new Request(cleanURL.toString(), request);
   return new Request(moved, { headers: cleanHeaders });
 }
 
 /**
- * Verify the caller may use the relay.
- *
- * The check is deliberately shallow: a valid signature from the issuer over an
- * unexpired claim set. The relay performs no lookup and learns no identity, so
- * turning the paywall on cannot turn the relay into a way to track who is
- * talking to whom. Everything about who paid lives in the issuer.
+ * Inject the claims index.js just verified, under headers only index.js ever
+ * writes. Call only after requestWithoutEntitlement has removed whatever the
+ * caller sent under the same names, or this would merely be trusting the
+ * caller's forgery instead of overwriting it.
  */
-async function checkEntitlement(env, request) {
+export function withInternalHostClaims(request, claims) {
+  const headers = new Headers(request.headers);
+  headers.set(INTERNAL_EXP_HEADER, String(claims.exp));
+  headers.set(INTERNAL_MAX_CLIENTS_HEADER, String(claims.maxClients));
+  return new Request(request, { headers });
+}
+
+/**
+ * Verify the host may use the relay for this specific session.
+ *
+ * The check is deliberately shallow: a valid signature from the issuer over
+ * an unexpired, session-bound claim set. The relay performs no lookup and
+ * learns no identity beyond "this session", so turning the paywall on cannot
+ * turn the relay into a way to track who is talking to whom. Everything
+ * about who paid lives in the issuer.
+ *
+ * Only role=host ever calls this. A client is admitted because an entitled
+ * host is already attached to the same session, not because it can present
+ * anything of its own; the phone never holds an entitlement token.
+ */
+async function checkEntitlement(env, request, sessionId) {
   // Configuration comes only from the environment. An earlier version let a
   // request header supply the verification key so one deployment could be
   // exercised both open and closed, which meant a caller could sign its own
@@ -96,37 +139,39 @@ async function checkEntitlement(env, request) {
   const allowUnentitled = String(env.ALLOW_UNENTITLED).toLowerCase() === "true";
 
   if (allowUnentitled) {
-    return { ok: true };
+    // Open self-hosted mode has no token and takes its client cap from the
+    // deployment default; session.js reads that default directly, not from
+    // here, so there are no claims to hand back.
+    return { ok: true, claims: null };
   }
   if (!publicKeyB64) {
     // Refusing to run closed without a key is safer than silently running
     // open: a misconfigured deployment should not quietly become free.
-    return { ok: false, reason: "relay is not configured to accept sessions" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
 
-  // Credentials never belong in a URL: edge/proxy access logs commonly retain
-  // query strings outside this worker's control.
-  // Query support is a staged migration path for pre-header clients. New
-  // clients never put the token in a URL; remove this fallback after their
-  // minimum supported version advances.
-  const token = request.headers.get("X-Redline-Entitlement") ||
-    new URL(request.url).searchParams.get("entitlement");
+  // The header is the only accepted credential carrier. An earlier version
+  // also accepted `?entitlement=`, which put a bearer token in a URL that
+  // edge/proxy access logs commonly retain outside this worker's control;
+  // there are no clients left that need the fallback, so it is gone.
+  const token = request.headers.get(ENTITLEMENT_HEADER);
   if (!token) {
-    return { ok: false, reason: "this relay requires an entitlement" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
-  return verifyEntitlementToken(token, publicKeyB64);
+  return verifyEntitlementToken(token, publicKeyB64, sessionId);
 }
 
 /**
  * A token is "<base64 claims>.<base64 Ed25519 signature>".
  *
- * Claims are read only after the signature verifies, so edited claims are
- * rejected before anything trusts them.
+ * The signature is checked before the claims bytes are ever parsed, so an
+ * edited claim set is rejected before anything -- including the JSON parser
+ * -- trusts attacker-controlled bytes.
  */
-export async function verifyEntitlementToken(token, publicKeyB64) {
+export async function verifyEntitlementToken(token, publicKeyB64, sessionId) {
   const parts = String(token).split(".");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    return { ok: false, reason: "malformed entitlement" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
 
   let claimsBytes;
@@ -137,7 +182,7 @@ export async function verifyEntitlementToken(token, publicKeyB64) {
     signature = base64ToBytes(parts[1]);
     publicKeyBytes = base64ToBytes(publicKeyB64);
   } catch {
-    return { ok: false, reason: "malformed entitlement" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
 
   let verified = false;
@@ -152,26 +197,66 @@ export async function verifyEntitlementToken(token, publicKeyB64) {
     verified = await crypto.subtle.verify("Ed25519", key, signature, claimsBytes);
   } catch {
     // A bad key or signature length lands here. Treat every failure the same
-    // so the error message cannot be used to probe the verifier.
-    return { ok: false, reason: "entitlement is not valid" };
+    // so the error code cannot be used to probe the verifier.
+    return { ok: false, status: 402, code: "not_entitled" };
   }
   if (!verified) {
-    return { ok: false, reason: "entitlement is not valid" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
 
+  // Only now, after the signature has been checked against the bytes exactly
+  // as received, is it safe to parse and trust the claims.
   let claims;
   try {
     claims = JSON.parse(new TextDecoder().decode(claimsBytes));
   } catch {
-    return { ok: false, reason: "malformed entitlement" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
 
   if (typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now()) {
     // Short expiry plus renewal is how a lapsed subscription stops working,
     // which is why there is no revocation list to consult here.
-    return { ok: false, reason: "entitlement has expired" };
+    return { ok: false, status: 402, code: "not_entitled" };
   }
-  return { ok: true };
+
+  if (!Number.isInteger(claims.max_clients) || claims.max_clients < 1 || claims.max_clients > 25) {
+    return { ok: false, status: 402, code: "not_entitled" };
+  }
+
+  if (typeof claims.sid !== "string" || claims.sid.length === 0) {
+    return { ok: false, status: 402, code: "not_entitled" };
+  }
+
+  const expectedSid = await sidForSession(sessionId);
+  if (claims.sid !== expectedSid) {
+    // A structurally valid, validly signed token for a *different* session is
+    // not "not entitled" -- it is entitled to the wrong thing, which is worth
+    // a distinct code so a client can tell the two failure modes apart.
+    return { ok: false, status: 402, code: "different_session" };
+  }
+
+  return {
+    ok: true,
+    claims: { exp: claims.exp, maxClients: claims.max_clients },
+  };
+}
+
+/**
+ * `sid` binds a token to one session: base64url(sha256(sessionId)). Deriving
+ * it from the path rather than trusting a caller-supplied session identifier
+ * is what makes claims.sid meaningful to check at all.
+ */
+export async function sidForSession(sessionId) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sessionId));
+  return base64UrlFromBytes(new Uint8Array(digest));
+}
+
+function base64UrlFromBytes(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function base64ToBytes(value) {
@@ -181,4 +266,16 @@ function base64ToBytes(value) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+/**
+ * Every entitlement failure returns a machine-readable body so a phone or
+ * desktop client can branch on `code` instead of parsing prose. See
+ * docs/relay-entitlement.md for the fixed set of codes.
+ */
+function jsonError(status, code) {
+  return new Response(JSON.stringify({ code }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
