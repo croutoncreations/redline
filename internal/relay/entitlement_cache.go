@@ -20,10 +20,10 @@ type CachedEntitlement struct {
 }
 
 func (c CachedEntitlement) ValidAt(sid string, now time.Time) bool {
-	if c.SID != sid || c.ObtainedAt <= 0 || c.ObtainedAt > now.Unix() {
+	if c.SID != sid || c.ObtainedAt <= 0 || time.Unix(c.ObtainedAt, 0).After(now.Add(EntitlementClockSkew)) {
 		return false
 	}
-	if c.Exp <= now.Unix() || c.Exp-c.ObtainedAt > int64(EntitlementLifetime/time.Second) {
+	if !time.Unix(c.Exp, 0).After(now.Add(-EntitlementClockSkew)) || c.Exp-c.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
 		return false
 	}
 	if c.MaxClients < 1 || c.MaxClients > 25 {
@@ -33,7 +33,7 @@ func (c CachedEntitlement) ValidAt(sid string, now time.Time) bool {
 }
 
 func validateCachedToken(c CachedEntitlement) error {
-	return validateEntitlement(Entitlement{
+	return ValidateEntitlementAt(Entitlement{
 		Token: c.Token, Exp: c.Exp, MaxClients: c.MaxClients, Seats: 1, SeatsUsed: 1,
 	}, c.SID, time.Unix(c.ObtainedAt, 0))
 }
@@ -90,7 +90,7 @@ func (s *EntitlementCacheStore) Load(sid string, now time.Time) (CachedEntitleme
 }
 
 func (s *EntitlementCacheStore) Save(cached CachedEntitlement) error {
-	if validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64(EntitlementLifetime/time.Second) {
+	if validateCachedToken(cached) != nil || cached.Exp-cached.ObtainedAt > int64((EntitlementLifetime+EntitlementClockSkew)/time.Second) {
 		return errors.New("refuse invalid entitlement cache")
 	}
 	raw, err := json.Marshal(cached)

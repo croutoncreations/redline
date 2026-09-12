@@ -11,8 +11,8 @@ type RelayRuntime interface {
 }
 
 // RelayCoordinator owns the process's current resolved relay snapshot. It is
-// intentionally limited to atomic replacement and observation: license
-// exchange, renewal, and configuration mutation belong to later phases.
+// intentionally limited to atomic replacement and observation: configuration
+// mutation and the local management API/UI belong to later phases.
 type RelayCoordinator struct {
 	mu          sync.RWMutex
 	current     ResolvedRelay

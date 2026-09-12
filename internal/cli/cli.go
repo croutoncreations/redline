@@ -459,10 +459,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 			Cache:       relay.NewEntitlementCacheStore(relay.DefaultEntitlementCachePath(identityPath)),
 		})
 	}
-	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay) (relayDialerRun, error) {
-		dialer, err := newRelayDialer(cfg, snapshot, listener.Addr().String(), func(relay.EntitlementSignal) {
+	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
+		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), func(signal relay.EntitlementSignal) {
 			if entitlementController != nil {
-				entitlementController.Trigger()
+				entitlementController.TriggerRelayEntitlement(signal)
 			}
 		}, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
@@ -574,7 +574,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 //
 // The session id has already been resolved from atomically managed state rather
 // than minted per start, so a phone remains paired across service restarts.
-func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr string, signal func(relay.EntitlementSignal), logf func(string, ...any)) (*relay.Dialer, error) {
+func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, tokenSource func() string, localAddr string, signal func(relay.EntitlementSignal), logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
@@ -586,12 +586,12 @@ func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, localAddr 
 		return nil, fmt.Errorf("resolved relay session_id is required when dial is enabled")
 	}
 	return relay.NewDialer(relay.DialerOptions{
-		RelayURL:          snapshot.URL,
-		SessionID:         sessionID,
-		Keypair:           keypair,
-		EntitlementToken:  snapshot.EntitlementToken.Value(),
-		EntitlementSignal: signal,
-		Logf:              logf,
+		RelayURL:               snapshot.URL,
+		SessionID:              sessionID,
+		Keypair:                keypair,
+		EntitlementTokenSource: tokenSource,
+		EntitlementSignal:      signal,
+		Logf:                   logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.
 		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),

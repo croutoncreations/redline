@@ -1,6 +1,6 @@
 # Redline mobile + relay: distribution and licensing plan
 
-Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 and the hardened Phase 2.1 foundation are implemented; later-phase descriptions below remain design, not released UI.
+Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 and the hardened Phase 2.2 desktop entitlement lifecycle are implemented; Phase 2.5 local management API/UI and later-phase descriptions below remain design, not released UI.
 
 ## 1. Where the branch stands
 
@@ -9,11 +9,11 @@ The relay boundary now provides:
 - Ed25519 tokens with required signed `{exp, sid, max_clients}` claims, signature-before-parse verification, session binding, header-only transport, and trusted claim forwarding into the Durable Object.
 - Host-only entitlement checks. Clients are admitted only behind the owning host generation, capped by stored `maxClients`, and multiplexed with random eight-byte channels. Stored expiry alarms terminate due sessions; refresh advances claims without replacing sockets.
 - An open self-host default and a closed production environment in `wrangler.toml`, plus public self-hosting and entitlement contracts. Production deployment is intentionally blocked while the retired verifier key remains configured; Phase 5 supplies the new public key while its private half exists only in the issuer Worker secret.
-- A desktop host-wire read boundary of 1 MiB payload plus the eight-byte channel. Desktop channel demultiplexing is deliberately not part of Phase 1.
+- A desktop host-wire read boundary of 1 MiB payload plus the eight-byte channel, with reconnect-safe runtime entitlement renewal.
 
 Gaps that matter for shipping, in phase order:
 
-1. **Desktop entitlement lifecycle (Phase 2).** Managed relay state and Keychain license storage are implemented. Issuer calls/cache/renewal, relay refresh handling, per-channel Noise handlers, structured relay management APIs, and relay lifecycle CLI commands are not implemented.
+1. **Desktop relay management (Phase 2.5).** Managed state, Keychain storage, issuer calls, protected cache, renewal, and live relay refresh are implemented. The structured local management API/UI and relay lifecycle CLI commands are intentionally not implemented yet.
 2. **Finish phone cleanup and errors (Phase 4).** Pairing no longer emits a host entitlement and the Go mobile parser discards the legacy fragment. Phase 4 still deletes Android persisted legacy values and adds structured client errors.
 3. **Desktop setup and status UI (Phase 3).** Pair a Device does not yet configure hosted/self-hosted mode or activate a license, and the menu bar has no renewal/lapse state.
 4. **Android release (Phase 4).** Final application id, SDK 36 target, upload signing, Play-only AAB workflow, privacy verification, and listing work remain.

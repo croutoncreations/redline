@@ -62,13 +62,31 @@ type EntitlementControllerOptions struct {
 	Refresh     func(context.Context, *http.Client, string, string, relay.Secret) error
 }
 
+type entitlementTriggerReason string
+
+const (
+	triggerLicenseChanged entitlementTriggerReason = "license_changed"
+	triggerRelayRequired  entitlementTriggerReason = "relay_entitlement_required"
+)
+
+type entitlementTrigger struct {
+	reason     entitlementTriggerReason
+	generation uint64
+}
+
 // EntitlementController is the sole writer of hosted runtime entitlement
-// state. Trigger is non-blocking and coalesces concurrent relay/key events.
+// state. Its public triggers are narrow lifecycle seams for the future local
+// management API; this phase intentionally does not expose that API or UI.
 type EntitlementController struct {
 	opts     EntitlementControllerOptions
-	triggers chan struct{}
+	triggers chan entitlementTrigger
 	mu       sync.Mutex
 	running  bool
+
+	credentialGeneration uint64
+	attemptCancel        context.CancelFunc
+	relayTriggerPending  bool
+	relayTriggerGen      uint64
 }
 
 func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementController {
@@ -81,13 +99,96 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 	if opts.Refresh == nil {
 		opts.Refresh = relay.RefreshRelayEntitlement
 	}
-	return &EntitlementController{opts: opts, triggers: make(chan struct{}, 1)}
+	return &EntitlementController{opts: opts, triggers: make(chan entitlementTrigger, 1)}
 }
 
+// TriggerLicenseChanged supersedes work for the previous credential
+// generation. It is the only controller method a future license-change API
+// needs; persistence and input validation remain outside this phase.
+func (c *EntitlementController) TriggerLicenseChanged() {
+	c.mu.Lock()
+	c.credentialGeneration++
+	generation := c.credentialGeneration
+	cancel := c.attemptCancel
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.enqueue(entitlementTrigger{reason: triggerLicenseChanged, generation: generation})
+}
+
+// TriggerRelayEntitlement handles the dialer's authoritative 402/1008 typed
+// contract. Repeated signals for one credential generation coalesce, so a
+// hostile relay cannot turn the controller's scheduled backoff into a hot loop.
+func (c *EntitlementController) TriggerRelayEntitlement(_ relay.EntitlementSignal) {
+	c.mu.Lock()
+	generation := c.credentialGeneration
+	if c.relayTriggerPending && c.relayTriggerGen == generation {
+		c.mu.Unlock()
+		return
+	}
+	c.relayTriggerPending, c.relayTriggerGen = true, generation
+	cancel := c.attemptCancel
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.enqueue(entitlementTrigger{reason: triggerRelayRequired, generation: generation})
+}
+
+// Trigger remains a compatibility alias for an authoritative relay event.
 func (c *EntitlementController) Trigger() {
+	c.TriggerRelayEntitlement(relay.EntitlementHandshakeRequired)
+}
+
+func (c *EntitlementController) enqueue(trigger entitlementTrigger) {
 	select {
-	case c.triggers <- struct{}{}:
+	case c.triggers <- trigger:
 	default:
+	}
+}
+
+func (c *EntitlementController) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.credentialGeneration
+}
+
+func (c *EntitlementController) startAttempt(parent context.Context, generation uint64) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	c.mu.Lock()
+	if generation != c.credentialGeneration {
+		cancel()
+	} else {
+		c.attemptCancel = cancel
+	}
+	c.mu.Unlock()
+	return ctx, cancel
+}
+
+func (c *EntitlementController) finishAttempt(cancel context.CancelFunc) {
+	c.mu.Lock()
+	c.attemptCancel = nil
+	c.mu.Unlock()
+	cancel()
+}
+
+func (c *EntitlementController) accepted(generation uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if generation != c.credentialGeneration {
+		return false
+	}
+	// Drain signals that were queued before this acceptance while holding the
+	// trigger lock. A signal arriving after acceptance waits, then becomes a
+	// fresh event instead of being mistaken for stale work.
+	for {
+		select {
+		case <-c.triggers:
+		default:
+			c.relayTriggerPending = false
+			return true
+		}
 	}
 }
 
@@ -108,11 +209,13 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	base := c.opts.Initial
 	switch base.Mode {
 	case RelayModeOff:
-		base.Readiness, base.Dial = RelayReadinessOff, false
+		clearRelayStatus(&base)
+		base.Readiness = RelayReadinessOff
 		c.opts.Coordinator.Update(base)
 		<-ctx.Done()
 		return
 	case RelayModeSelfHosted:
+		clearRelayStatus(&base)
 		base.Readiness, base.Dial = RelayReadinessSelfHosted, true
 		c.opts.Coordinator.Update(base)
 		<-ctx.Done()
@@ -135,20 +238,29 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	}
 
 	retry := initialEntitlementRetry
+	var pendingPersistence *relay.CachedEntitlement
 	for {
-		delay, terminal := c.renew(ctx, &base, &current, valid)
-		valid = base.CanDial() && base.Readiness != RelayReadinessSelfHosted
+		generation := c.generation()
+		attemptCtx, cancelAttempt := c.startAttempt(ctx, generation)
+		delay, terminal := c.renew(attemptCtx, generation, &base, &current, valid, &pendingPersistence)
+		c.finishAttempt(cancelAttempt)
+		valid = current.ValidAt(sid, c.opts.Clock.Now()) && base.CanDial()
 		if ctx.Err() != nil {
 			return
+		}
+		if generation != c.generation() {
+			retry = initialEntitlementRetry
+			continue
 		}
 		if delay == 0 {
 			delay = retry
 			if retry < maximumEntitlementRetry {
 				retry = time.Duration(math.Min(float64(maximumEntitlementRetry), float64(retry*2)))
 			}
-		} else if terminal {
-			retry = initialEntitlementRetry
 		} else {
+			retry = initialEntitlementRetry
+		}
+		if terminal {
 			retry = initialEntitlementRetry
 		}
 		if base.Readiness == RelayReadinessRenewPending {
@@ -165,27 +277,49 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-c.triggers:
+		case trigger := <-c.triggers:
 			timer.Stop()
+			if trigger.generation == c.generation() && (trigger.reason == triggerLicenseChanged || trigger.reason == triggerRelayRequired) {
+				retry = initialEntitlementRetry
+			}
 		case <-timer.C():
 		}
 	}
 }
 
 // renew returns zero for an exponentially backed-off transient failure.
-func (c *EntitlementController) renew(ctx context.Context, base *ResolvedRelay, current *relay.CachedEntitlement, hadValid bool) (time.Duration, bool) {
+func (c *EntitlementController) renew(ctx context.Context, generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, hadValid bool, pendingPersistence **relay.CachedEntitlement) (time.Duration, bool) {
 	now := c.opts.Clock.Now()
+	sid := relay.SessionSID(base.SessionID)
+	if *pendingPersistence != nil {
+		if err := c.opts.Cache.Save(**pendingPersistence); err != nil {
+			base.PersistenceDegraded = true
+			c.opts.Coordinator.Update(*base)
+			return 0, false
+		}
+		*pendingPersistence = nil
+		base.PersistenceDegraded = false
+		c.opts.Coordinator.Update(*base)
+		// Re-enter renewal on the normal transient backoff. An authoritative
+		// relay trigger may have arrived while persistence was degraded; waiting
+		// until the old half-life would incorrectly swallow that signal.
+		return 0, false
+	}
+
 	license, err := c.opts.Licenses.Load(ctx)
+	if ctx.Err() != nil {
+		return 0, false
+	}
 	if errors.Is(err, ErrLicenseNotFound) || (err == nil && license == "") {
 		publishTerminal(c.opts.Coordinator, base, RelayReadinessNeedsLicense)
 		return terminalEntitlementRetry, true
 	}
-	if errors.Is(err, ErrLicenseStoreUnavailable) {
-		publishUnavailable(c.opts.Coordinator, base, now)
-		return 0, false
-	}
 	if err != nil {
-		if hadValid && current.ValidAt(relay.SessionSID(base.SessionID), now) {
+		// Once this controller has established trusted in-memory state, any
+		// transient Keychain failure is a renewal problem, not authority to
+		// discard that state. Startup still remains fail closed because hadValid
+		// is false until this run has loaded or accepted a valid token.
+		if hadValid && current.ValidAt(sid, now) {
 			publishPending(c.opts.Coordinator, base, *current)
 			return 0, false
 		}
@@ -193,7 +327,19 @@ func (c *EntitlementController) renew(ctx context.Context, base *ResolvedRelay, 
 		return 0, false
 	}
 
-	issued, err := c.opts.Issuer.Entitlement(ctx, license, relay.SessionSID(base.SessionID), base.Label, now)
+	issued, err := c.opts.Issuer.Entitlement(ctx, license, sid, base.Label, now)
+	// Tokens and the protected cache use Unix seconds. Canonicalize one receipt
+	// instant and use it for validation, obtained_at, and renewal scheduling so
+	// request latency or subsecond sampling cannot split those decisions.
+	receivedAt := c.opts.Clock.Now().UTC().Truncate(time.Second)
+	if ctx.Err() != nil || generation != c.generation() {
+		return 0, false
+	}
+	if err == nil {
+		if validationErr := relay.ValidateEntitlementAt(issued, sid, receivedAt); validationErr != nil {
+			err = &relay.IssuerError{Kind: relay.IssuerInvalidResponse}
+		}
+	}
 	if err != nil {
 		var issuerErr *relay.IssuerError
 		if errors.As(err, &issuerErr) {
@@ -209,44 +355,76 @@ func (c *EntitlementController) renew(ctx context.Context, base *ResolvedRelay, 
 				return terminalEntitlementRetry, true
 			}
 		}
-		if hadValid && current.ValidAt(relay.SessionSID(base.SessionID), now) {
+		if hadValid && current.ValidAt(sid, receivedAt) {
 			publishPending(c.opts.Coordinator, base, *current)
 			return 0, false
 		}
-		publishUnavailable(c.opts.Coordinator, base, now)
+		publishUnavailable(c.opts.Coordinator, base, receivedAt)
 		return 0, false
 	}
 
 	next := relay.CachedEntitlement{
-		Token: issued.Token, Exp: issued.Exp, ObtainedAt: now.Unix(),
-		SID: relay.SessionSID(base.SessionID), MaxClients: issued.MaxClients,
+		Token: issued.Token, Exp: issued.Exp, ObtainedAt: receivedAt.Unix(),
+		SID: sid, MaxClients: issued.MaxClients,
 	}
-	// A cache failure must not throw away a freshly validated in-memory token.
-	_ = c.opts.Cache.Save(next)
 	refreshErr := c.opts.Refresh(ctx, c.opts.RelayHTTP, base.URL, base.SessionID, issued.Token)
-	var refresh *relay.RelayRefreshError
-	if errors.As(refreshErr, &refresh) && refresh.Kind == relay.RelayRefreshNoHost {
-		base.ReconnectGeneration++
-		refreshErr = nil
-	}
-	*current = next
-	*base = activeFromIssued(*base, next, issued, c.renewalTime(next.Exp, now))
-	c.opts.Coordinator.Update(*base)
-	if refreshErr != nil {
-		// Keep the newly issued token usable, but retry promptly so the live
-		// relay alarm cannot remain pinned to the older token's expiry.
+	if ctx.Err() != nil || generation != c.generation() {
 		return 0, false
 	}
-	return base.RenewsAt.Sub(now), false
+	var refresh *relay.RelayRefreshError
+	acceptedByRelay := refreshErr == nil
+	if errors.As(refreshErr, &refresh) && refresh.Kind == relay.RelayRefreshNoHost {
+		// 423 is returned only after token verification when no host socket is
+		// present, so acceptance is authoritative and the supervisor reconnects.
+		base.ReconnectGeneration++
+		acceptedByRelay = true
+	}
+	if !acceptedByRelay {
+		// Auth/rejection and transport failures establish no new authority. Never
+		// cache or publish the rejected token; preserve the previous valid token.
+		if hadValid && current.ValidAt(sid, receivedAt) {
+			publishPending(c.opts.Coordinator, base, *current)
+		} else {
+			publishUnavailable(c.opts.Coordinator, base, receivedAt)
+		}
+		return 0, false
+	}
+	if !c.accepted(generation) {
+		return 0, false
+	}
+	*current = next
+	*base = activeFromIssued(*base, next, issued, c.renewalTime(next.Exp, receivedAt))
+	// Publish relay-accepted in-memory authority before potentially slow durable
+	// I/O. A reconnect racing a blocked fsync must already see the new token.
+	c.opts.Coordinator.Update(*base)
+	if err := c.opts.Cache.Save(next); err != nil {
+		copy := next
+		*pendingPersistence = &copy
+		base.PersistenceDegraded = true
+		c.opts.Coordinator.Update(*base)
+	}
+	if *pendingPersistence != nil {
+		return 0, false
+	}
+	return base.RenewsAt.Sub(receivedAt), false
+}
+
+func clearRelayStatus(base *ResolvedRelay) {
+	base.Dial = false
+	base.EntitlementToken = RelayEntitlementToken{}
+	base.RenewsAt, base.ExpiresAt, base.UnavailableSince = time.Time{}, time.Time{}, time.Time{}
+	base.Seats, base.SeatsUsed, base.MaxClients = 0, 0, 0
+	base.PersistenceDegraded = false
+	base.ActivationCount = 0
+	base.ActivationSummaries = [maxRelayActivationSummaries]RelayActivationSummary{}
 }
 
 func activeFromCache(base ResolvedRelay, cached relay.CachedEntitlement, renewsAt time.Time) ResolvedRelay {
+	clearRelayStatus(&base)
 	base.Readiness = RelayReadinessActive
 	base.Dial = true
 	base.EntitlementToken = NewRelayEntitlementToken(cached.Token.Value())
 	base.RenewsAt = renewsAt
-	base.ExpiresAt = time.Time{}
-	base.UnavailableSince = time.Time{}
 	base.MaxClients = cached.MaxClients
 	return base
 }
@@ -273,21 +451,19 @@ func (c *EntitlementController) renewalTime(exp int64, now time.Time) time.Time 
 }
 
 func publishTerminal(coordinator *RelayCoordinator, base *ResolvedRelay, state RelayReadiness) {
-	base.Readiness, base.Dial = state, false
-	base.EntitlementToken = RelayEntitlementToken{}
-	base.RenewsAt, base.ExpiresAt, base.UnavailableSince = time.Time{}, time.Time{}, time.Time{}
-	base.ActivationCount = 0
-	base.ActivationSummaries = [maxRelayActivationSummaries]RelayActivationSummary{}
+	clearRelayStatus(base)
+	base.Readiness = state
 	coordinator.Update(*base)
 }
 
 func publishUnavailable(coordinator *RelayCoordinator, base *ResolvedRelay, now time.Time) {
-	if base.Readiness != RelayReadinessUnavailable || base.UnavailableSince.IsZero() {
-		base.UnavailableSince = now
+	since := base.UnavailableSince
+	if base.Readiness != RelayReadinessUnavailable || since.IsZero() {
+		since = now
 	}
-	base.Readiness, base.Dial = RelayReadinessUnavailable, false
-	base.EntitlementToken = RelayEntitlementToken{}
-	base.RenewsAt, base.ExpiresAt = time.Time{}, time.Time{}
+	clearRelayStatus(base)
+	base.Readiness = RelayReadinessUnavailable
+	base.UnavailableSince = since
 	coordinator.Update(*base)
 }
 
@@ -299,10 +475,8 @@ func publishPending(coordinator *RelayCoordinator, base *ResolvedRelay, cached r
 }
 
 func publishNoSeat(coordinator *RelayCoordinator, base *ResolvedRelay, activations []relay.ActivationSummary) {
-	base.Readiness, base.Dial = RelayReadinessNoSeat, false
-	base.EntitlementToken = RelayEntitlementToken{}
-	base.RenewsAt, base.ExpiresAt, base.UnavailableSince = time.Time{}, time.Time{}, time.Time{}
-	base.ActivationSummaries = [maxRelayActivationSummaries]RelayActivationSummary{}
+	clearRelayStatus(base)
+	base.Readiness = RelayReadinessNoSeat
 	base.ActivationCount = len(activations)
 	if base.ActivationCount > len(base.ActivationSummaries) {
 		base.ActivationCount = len(base.ActivationSummaries)

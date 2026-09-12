@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jfox/redline/internal/config"
 )
@@ -292,6 +293,31 @@ func TestRelayResolutionPrecedenceAndReadiness(t *testing.T) {
 				t.Fatalf("license loads = %d, want %d", licenses.loadCount(), tt.wantLoads)
 			}
 		})
+	}
+}
+
+func TestResolvedRelayJSONOmitsZeroTimesAndSanitizesPersistenceWarning(t *testing.T) {
+	snapshot := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "session-json-shape-1234"},
+		Readiness:         config.RelayReadinessActive, PersistenceDegraded: true,
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"renews_at", "expires_at", "since", "seats", "seats_used", "max_clients", "activations"} {
+		if strings.Contains(string(raw), `"`+stale+`"`) {
+			t.Fatalf("zero/stale field %q serialized: %s", stale, raw)
+		}
+	}
+	if !strings.Contains(string(raw), `"persistence_degraded":true`) {
+		t.Fatalf("sanitized warning missing: %s", raw)
+	}
+
+	snapshot.RenewsAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	raw, _ = json.Marshal(snapshot)
+	if !strings.Contains(string(raw), `"renews_at":"2026-01-02T03:04:05Z"`) {
+		t.Fatalf("nonzero renewal omitted: %s", raw)
 	}
 }
 

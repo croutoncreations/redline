@@ -167,7 +167,7 @@ func TestDialerSurfacesTypedEntitlementHandshakeAndExpirySignals(t *testing.T) {
 
 	t.Run("close 1008 entitlement expired", func(t *testing.T) {
 		server := fakeRelay(t, func(conn *websocket.Conn) {
-			_ = conn.Close(websocket.StatusPolicyViolation, "entitlement expired")
+			_ = conn.Close(websocket.StatusPolicyViolation, "policy changed")
 		})
 		defer server.Close()
 		keypair, _ := core.NewDesktopKeypair()
@@ -438,9 +438,9 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 func TestEntitlementTokenUsesAHandshakeHeaderNotTheURL(t *testing.T) {
 	token := "eyJleHAiOjE3ODg1MTM4MDN9.Pb8j33+KIif5vCjENO2yby9Q38q4=="
 	dialer := NewDialer(DialerOptions{
-		RelayURL:         "https://relay.example.com",
-		SessionID:        "test-session-id-0123456789",
-		EntitlementToken: token,
+		RelayURL:               "https://relay.example.com",
+		SessionID:              "test-session-id-0123456789",
+		EntitlementTokenSource: func() string { return token },
 	})
 
 	parsed, err := url.Parse(dialer.sessionURL())
@@ -475,11 +475,11 @@ func TestDialErrorsDoNotCarryTheEntitlementToken(t *testing.T) {
 	const token = "eyJleHAiOjF9.c2lnbmF0dXJlLXZhbHVl"
 	dialer := NewDialer(DialerOptions{
 		// Port 1 is closed, so the dial fails immediately.
-		RelayURL:         "http://127.0.0.1:1",
-		SessionID:        "test-session-id-0123456789",
-		EntitlementToken: token,
-		Keypair:          keypair,
-		Forwarder:        NewForwarder("http://127.0.0.1:1", http.DefaultClient),
+		RelayURL:               "http://127.0.0.1:1",
+		SessionID:              "test-session-id-0123456789",
+		EntitlementTokenSource: func() string { return token },
+		Keypair:                keypair,
+		Forwarder:              NewForwarder("http://127.0.0.1:1", http.DefaultClient),
 	})
 
 	dialErr := dialer.connect(context.Background())
@@ -599,7 +599,7 @@ func TestDialerReportsWhenItConnects(t *testing.T) {
 
 	dialer := NewDialer(DialerOptions{
 		RelayURL:  relay.URL,
-		SessionID: "test-session",
+		SessionID: "test-session-1234",
 		Keypair:   mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
 		Logf:      rec.log,
@@ -629,7 +629,7 @@ func TestDialerReportsAFailureAndItsRetry(t *testing.T) {
 	// dropped session.
 	dialer := NewDialer(DialerOptions{
 		RelayURL:  "http://127.0.0.1:1",
-		SessionID: "test-session",
+		SessionID: "test-session-1234",
 		Keypair:   mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
 		Logf:      rec.log,
@@ -663,12 +663,12 @@ func TestDialerNeverLogsTheEntitlementToken(t *testing.T) {
 	defer cancel()
 
 	dialer := NewDialer(DialerOptions{
-		RelayURL:         "http://127.0.0.1:1",
-		SessionID:        "test-session",
-		Keypair:          mustTestKeypair(t),
-		Forwarder:        NewForwarder("http://127.0.0.1:1", nil),
-		EntitlementToken: secret,
-		Logf:             rec.log,
+		RelayURL:               "http://127.0.0.1:1",
+		SessionID:              "test-session-1234",
+		Keypair:                mustTestKeypair(t),
+		Forwarder:              NewForwarder("http://127.0.0.1:1", nil),
+		EntitlementTokenSource: func() string { return secret },
+		Logf:                   rec.log,
 	})
 	go dialer.Run(ctx)
 
@@ -702,7 +702,7 @@ func TestDialerWithNoLoggerDoesNotPanic(t *testing.T) {
 	// Logf left nil: every existing caller constructs DialerOptions without it.
 	dialer := NewDialer(DialerOptions{
 		RelayURL:  "http://127.0.0.1:1",
-		SessionID: "test-session",
+		SessionID: "test-session-1234",
 		Keypair:   mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
 	})
@@ -746,7 +746,7 @@ func TestDialerDoesNotBackOffAfterABadFrame(t *testing.T) {
 
 	dialer := NewDialer(DialerOptions{
 		RelayURL:  relay.URL,
-		SessionID: "test-session",
+		SessionID: "test-session-1234",
 		Keypair:   mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
 		Logf:      rec.log,
@@ -823,5 +823,84 @@ func TestDesktopServesASecondPhoneOnOneConnection(t *testing.T) {
 	}
 	if err := second.FinishHandshake(secondReply); err != nil {
 		t.Fatalf("second finish: %v", err)
+	}
+}
+
+func TestDialerReconnectReadsLatestTokenSource(t *testing.T) {
+	var token atomic.Value
+	token.Store("old-token")
+	handshakes := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes <- r.Header.Get("X-Redline-Entitlement")
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("force fresh noise session"))
+		time.Sleep(20 * time.Millisecond)
+		conn.CloseNow()
+	}))
+	defer server.Close()
+	dialer := NewDialer(DialerOptions{
+		RelayURL: server.URL, SessionID: "session-token-source-1234", Keypair: mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil), EntitlementTokenSource: func() string { return token.Load().(string) },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go dialer.Run(ctx)
+	if got := <-handshakes; got != "old-token" {
+		t.Fatalf("first handshake token=%q", got)
+	}
+	token.Store("new-token")
+	select {
+	case got := <-handshakes:
+		if got != "new-token" {
+			t.Fatalf("reconnect token=%q want newest token", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forced reconnect did not occur")
+	}
+}
+
+func TestDialerRejectsRedirectWithoutForwardingEntitlement(t *testing.T) {
+	const secret = "websocket-redirect-secret"
+	arrived := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		arrived <- r.Header.Get("X-Redline-Entitlement")
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	dialer := NewDialer(DialerOptions{
+		RelayURL: source.URL, SessionID: "session-no-redirect-1234", Keypair: mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil), EntitlementTokenSource: func() string { return secret },
+	})
+	if err := dialer.connect(context.Background()); err == nil {
+		t.Fatal("redirecting WebSocket handshake was accepted")
+	}
+	select {
+	case got := <-arrived:
+		t.Fatalf("redirect target received credential %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if dialer.handshakeClient().Timeout != 15*time.Second {
+		t.Fatalf("handshake timeout=%v", dialer.handshakeClient().Timeout)
+	}
+}
+
+func TestDialerRejectsHostileSessionBeforeNetwork(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	for _, sessionID := range []string{"../admin-session-1234", "slash/session-1234", "dot%2Fescape-session", ".", "short"} {
+		dialer := NewDialer(DialerOptions{RelayURL: server.URL, SessionID: sessionID})
+		if err := dialer.connect(context.Background()); err == nil {
+			t.Fatalf("session %q was accepted", sessionID)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid sessions reached network: %d", requests.Load())
 	}
 }

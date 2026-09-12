@@ -65,8 +65,9 @@ type recordingDialerFactory struct {
 	started chan config.ResolvedRelay
 	stopped chan config.ResolvedRelay
 
-	mu        sync.Mutex
-	snapshots []config.ResolvedRelay
+	mu           sync.Mutex
+	snapshots    []config.ResolvedRelay
+	tokenSources []func() string
 }
 
 func newRecordingDialerFactory() *recordingDialerFactory {
@@ -76,9 +77,10 @@ func newRecordingDialerFactory() *recordingDialerFactory {
 	}
 }
 
-func (f *recordingDialerFactory) new(snapshot config.ResolvedRelay) (relayDialerRun, error) {
+func (f *recordingDialerFactory) new(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
 	f.mu.Lock()
 	f.snapshots = append(f.snapshots, snapshot)
+	f.tokenSources = append(f.tokenSources, tokenSource)
 	f.mu.Unlock()
 	dialer := recordedDialer{snapshot: snapshot, started: f.started, stopped: f.stopped}
 	return dialer.run, nil
@@ -88,6 +90,12 @@ func (f *recordingDialerFactory) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.snapshots)
+}
+
+func (f *recordingDialerFactory) latestToken() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokenSources[len(f.tokenSources)-1]()
 }
 
 func selfHostedSnapshot(url, session string) config.ResolvedRelay {
@@ -182,6 +190,9 @@ func TestRelaySupervisorReplacesConnectionForRoutingChangesButNotLiveTokenRefres
 	runtime.send(refreshed)
 	if factory.count() != 3 {
 		t.Fatalf("successful live refresh restarted socket: starts=%d", factory.count())
+	}
+	if got := factory.latestToken(); got != "token-two" {
+		t.Fatalf("running dialer token source=%q want refreshed token", got)
 	}
 
 	refreshed.ReconnectGeneration++

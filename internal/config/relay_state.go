@@ -272,11 +272,45 @@ type ResolvedRelay struct {
 	SeatsUsed           int                   `json:"seats_used,omitempty"`
 	MaxClients          int                   `json:"max_clients,omitempty"`
 	ReconnectGeneration uint64                `json:"-"`
+	PersistenceDegraded bool                  `json:"persistence_degraded,omitempty"`
 
 	// A fixed-size value keeps snapshots comparable (the supervisor uses value
 	// equality) while the count preserves a normal list at API boundaries.
 	ActivationSummaries [maxRelayActivationSummaries]RelayActivationSummary `json:"-"`
 	ActivationCount     int                                                 `json:"-"`
+}
+
+// MarshalJSON uses pointers for optional timestamps because time.Time's own
+// marshaler prevents encoding/json's omitempty from suppressing its zero value.
+func (r ResolvedRelay) MarshalJSON() ([]byte, error) {
+	optionalTime := func(value time.Time) *time.Time {
+		if value.IsZero() {
+			return nil
+		}
+		copy := value
+		return &copy
+	}
+	return json.Marshal(struct {
+		Mode                RelayMode                `json:"mode"`
+		URL                 string                   `json:"url"`
+		IssuerURL           string                   `json:"issuer_url"`
+		Label               string                   `json:"label"`
+		SessionID           string                   `json:"session_id"`
+		Readiness           RelayReadiness           `json:"state"`
+		RenewsAt            *time.Time               `json:"renews_at,omitempty"`
+		ExpiresAt           *time.Time               `json:"expires_at,omitempty"`
+		UnavailableSince    *time.Time               `json:"since,omitempty"`
+		Seats               int                      `json:"seats,omitempty"`
+		SeatsUsed           int                      `json:"seats_used,omitempty"`
+		MaxClients          int                      `json:"max_clients,omitempty"`
+		PersistenceDegraded bool                     `json:"persistence_degraded,omitempty"`
+		Activations         []RelayActivationSummary `json:"activations,omitempty"`
+	}{
+		Mode: r.Mode, URL: r.URL, IssuerURL: r.IssuerURL, Label: r.Label, SessionID: r.SessionID,
+		Readiness: r.Readiness, RenewsAt: optionalTime(r.RenewsAt), ExpiresAt: optionalTime(r.ExpiresAt),
+		UnavailableSince: optionalTime(r.UnavailableSince), Seats: r.Seats, SeatsUsed: r.SeatsUsed,
+		MaxClients: r.MaxClients, PersistenceDegraded: r.PersistenceDegraded, Activations: r.Activations(),
+	})
 }
 
 func (r ResolvedRelay) Activations() []RelayActivationSummary {

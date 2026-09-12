@@ -206,8 +206,8 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	if _, _, err := store.Load(SessionSID("wrong-session-123456"), now); err == nil {
 		t.Fatal("cache bound to another sid was accepted")
 	}
-	if _, _, err := store.Load(sid, time.Unix(exp, 0)); err == nil {
-		t.Fatal("expired cache was accepted")
+	if _, _, err := store.Load(sid, time.Unix(exp, 0).Add(EntitlementClockSkew)); err == nil {
+		t.Fatal("cache beyond the bounded expiry skew was accepted")
 	}
 	raw, _ := os.ReadFile(path)
 	var shape map[string]any
@@ -232,5 +232,77 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	}
 	if err := store.Save(want); err == nil {
 		t.Fatal("renewal replaced a symlink cache")
+	}
+}
+
+func TestEntitlementValidationAllowsOnlyBoundedClockSkew(t *testing.T) {
+	receivedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	sid := SessionSID("session-clock-skew-123456")
+	for _, tc := range []struct {
+		name string
+		exp  time.Time
+		ok   bool
+	}{
+		{"positive skew", receivedAt.Add(EntitlementLifetime + EntitlementClockSkew), true},
+		{"positive skew exceeded", receivedAt.Add(EntitlementLifetime + EntitlementClockSkew + time.Second), false},
+		{"negative skew", receivedAt.Add(-EntitlementClockSkew + time.Second), true},
+		{"negative skew exceeded", receivedAt.Add(-EntitlementClockSkew), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entitlement := Entitlement{Token: NewSecret(testEntitlementToken(t, tc.exp.Unix(), sid, 5)), Exp: tc.exp.Unix(), MaxClients: 5, Seats: 1, SeatsUsed: 1}
+			err := ValidateEntitlementAt(entitlement, sid, receivedAt)
+			if (err == nil) != tc.ok {
+				t.Fatalf("validation error=%v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+
+	futureReceipt := receivedAt.Add(EntitlementClockSkew)
+	cached := CachedEntitlement{Token: NewSecret(testEntitlementToken(t, futureReceipt.Add(time.Hour).Unix(), sid, 5)), Exp: futureReceipt.Add(time.Hour).Unix(), ObtainedAt: futureReceipt.Unix(), SID: sid, MaxClients: 5}
+	if !cached.ValidAt(sid, receivedAt) {
+		t.Fatal("bounded positive obtained_at skew was rejected")
+	}
+	cached.ObtainedAt++
+	if cached.ValidAt(sid, receivedAt) {
+		t.Fatal("obtained_at beyond skew allowance was accepted")
+	}
+}
+
+func TestRelayEntitlementRefreshRejectsRedirectWithoutForwardingCredential(t *testing.T) {
+	const token = "redirect-secret-entitlement"
+	arrived := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		arrived <- "request arrived"
+	}))
+	defer target.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	err := RefreshRelayEntitlement(context.Background(), source.Client(), source.URL, "session-redirect-123456", NewSecret(token))
+	var typed *RelayRefreshError
+	if !errors.As(err, &typed) || typed.Kind != RelayRefreshRejected {
+		t.Fatalf("redirect error=%#v", err)
+	}
+	select {
+	case <-arrived:
+		t.Fatal("redirect target received the entitlement request")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRelayEntitlementRefreshRejectsHostileSessionIDsBeforeRequest(t *testing.T) {
+	var requests int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	for _, sessionID := range []string{"../admin-session-1234", "slash/session-1234", "dot%2Fescape-session", ".", "short"} {
+		err := RefreshRelayEntitlement(context.Background(), server.Client(), server.URL, sessionID, NewSecret("secret"))
+		var typed *RelayRefreshError
+		if !errors.As(err, &typed) || typed.Kind != RelayRefreshRejected {
+			t.Fatalf("session %q error=%#v", sessionID, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("hostile session ids reached network: %d requests", requests)
 	}
 }

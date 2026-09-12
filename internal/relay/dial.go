@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,10 +33,16 @@ type DialerOptions struct {
 	// Forwarder replays phone requests against the desktop's local API.
 	Forwarder *Forwarder
 
-	// EntitlementToken authorises this desktop to use the relay. The relay
-	// checks only that it is signed and unexpired, not who the holder is.
-	// Left empty during development with ALLOW_UNENTITLED=true on the relay.
-	EntitlementToken string
+	// EntitlementTokenSource returns the current runtime bearer credential for
+	// every handshake, including reconnects performed inside one Dialer.Run.
+	// Hosted callers must supply a live source rather than capturing a token.
+	EntitlementTokenSource func() string
+
+	// The relay verifies Ed25519 authenticity, expiry, and session-bound claims.
+
+	// HTTPClient bounds WebSocket handshakes. Redirects are always rejected by
+	// the dialer before an entitlement header can be forwarded.
+	HTTPClient *http.Client
 
 	// EntitlementSignal reports only typed relay entitlement events. It never
 	// receives an error string, header, or token.
@@ -103,11 +110,18 @@ func (d *Dialer) signal(signal EntitlementSignal) {
 	}
 }
 
+func (d *Dialer) currentToken() string {
+	if d.opts.EntitlementTokenSource == nil {
+		return ""
+	}
+	return d.opts.EntitlementTokenSource()
+}
+
 func (d *Dialer) logf(format string, args ...any) {
 	if d.opts.Logf == nil {
 		return
 	}
-	d.opts.Logf("%s", redactToken(fmt.Sprintf(format, args...), d.opts.EntitlementToken))
+	d.opts.Logf("%s", redactToken(fmt.Sprintf(format, args...), d.currentToken()))
 }
 
 // Run dials the relay and serves frames until ctx is cancelled.
@@ -161,8 +175,16 @@ func (d *Dialer) Run(ctx context.Context) {
 // connect dials the relay once, runs the frame loop until a fatal error, and
 // returns that error. It returns nil if and only if ctx was cancelled.
 func (d *Dialer) connect(ctx context.Context) error {
+	if err := ValidateSessionID(d.opts.SessionID); err != nil {
+		return fmt.Errorf("dial relay: %w", err)
+	}
 	target := d.sessionURL()
-	conn, response, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPHeader: d.sessionHeaders()})
+	client := d.handshakeClient()
+	// Snapshot once for this handshake. The next internal reconnect loads the
+	// source again, while errors from this attempt are redacted with the exact
+	// credential that was sent even if renewal races the dial.
+	token := d.currentToken()
+	conn, response, err := websocket.Dial(ctx, target, &websocket.DialOptions{HTTPClient: client, HTTPHeader: entitlementHeader(token)})
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
@@ -179,7 +201,7 @@ func (d *Dialer) connect(ctx context.Context) error {
 		// stays invisible until someone adds a log line, and then it is a
 		// credential in a file. Redacting at the source is cheap defense in
 		// depth even though the token travels only in a header.
-		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), d.opts.EntitlementToken))
+		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
 	}
 	defer conn.CloseNow()
 
@@ -231,7 +253,9 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 		readExpired := readCtx.Err() != nil && ctx.Err() == nil
 		cancelRead()
 		if err != nil {
-			if websocket.CloseStatus(err) == websocket.StatusPolicyViolation && strings.Contains(strings.ToLower(err.Error()), "entitlement expired") {
+			// Close 1008 is the relay's documented authoritative entitlement
+			// renewal contract. Do not couple the typed signal to human text.
+			if websocket.CloseStatus(err) == websocket.StatusPolicyViolation {
 				d.signal(EntitlementExpired)
 				return &EntitlementSignalError{Signal: EntitlementExpired}
 			}
@@ -308,12 +332,41 @@ func redactToken(message string, secrets ...string) string {
 // query parameters or climbing out of the path. The entitlement is deliberately
 // absent: it travels in a handshake header so infrastructure URL logs cannot
 // retain the bearer credential.
-func (d *Dialer) sessionHeaders() http.Header {
+func (d *Dialer) sessionHeaders() http.Header { return entitlementHeader(d.currentToken()) }
+
+func entitlementHeader(token string) http.Header {
 	headers := http.Header{}
-	if d.opts.EntitlementToken != "" {
-		headers.Set("X-Redline-Entitlement", d.opts.EntitlementToken)
+	if token != "" {
+		headers.Set("X-Redline-Entitlement", token)
 	}
 	return headers
+}
+
+func (d *Dialer) handshakeClient() *http.Client {
+	client := d.opts.HTTPClient
+	if client == nil {
+		client = &http.Client{}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	if client.Timeout <= 0 || client.Timeout > 15*time.Second {
+		client.Timeout = 15 * time.Second
+	}
+	// coder/websocket preserves the supplied CheckRedirect. Refusing every
+	// redirect guarantees the bearer header never crosses an origin boundary.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return client
+}
+
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+
+// ValidateSessionID applies the relay's public path-segment contract.
+func ValidateSessionID(sessionID string) error {
+	if !sessionIDPattern.MatchString(sessionID) {
+		return errors.New("relay session id must contain 16 to 128 base64url characters")
+	}
+	return nil
 }
 
 func (d *Dialer) sessionURL() string {
@@ -323,7 +376,15 @@ func (d *Dialer) sessionURL() string {
 		// deliberately broken URL simply fails to dial and backs off.
 		return d.opts.RelayURL
 	}
-	base.Path = path.Join(base.Path, "/v1/session", d.opts.SessionID)
+	prefix := path.Join(base.Path, "v1", "session")
+	sessionID := d.opts.SessionID
+	if ValidateSessionID(sessionID) != nil {
+		// sessionURL remains safe for diagnostics even though connect rejects the
+		// invalid public input before any request is sent.
+		sessionID = "invalid-session-id"
+	}
+	base.Path = prefix + "/" + sessionID
+	base.RawPath = (&url.URL{Path: prefix}).EscapedPath() + "/" + url.PathEscape(sessionID)
 	query := url.Values{}
 	query.Set("role", "host")
 	base.RawQuery = query.Encode()

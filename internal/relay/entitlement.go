@@ -19,9 +19,14 @@ import (
 
 const (
 	EntitlementLifetime = 14 * 24 * time.Hour
-	maxIssuerBody       = 64 << 10
-	maxEntitlementToken = 16 << 10
-	maxActivationCount  = 25
+	// EntitlementClockSkew is the maximum difference tolerated between the
+	// issuer, relay, and desktop clocks. It is deliberately small: it prevents
+	// a harmless clock offset from rejecting a fresh credential without
+	// extending the issuer's fourteen-day lifetime by more than five minutes.
+	EntitlementClockSkew = 5 * time.Minute
+	maxIssuerBody        = 64 << 10
+	maxEntitlementToken  = 16 << 10
+	maxActivationCount   = 25
 )
 
 // Secret is printable only as a redaction marker. JSON encoding is supported
@@ -190,6 +195,7 @@ func (c *IssuerClient) activationEndpoint(id string) string {
 }
 
 func (c *IssuerClient) Entitlement(ctx context.Context, licenseKey, sid, label string, now time.Time) (Entitlement, error) {
+	requestStarted := time.Now()
 	body, err := json.Marshal(issuerEntitlementRequest{LicenseKey: licenseKey, SID: sid, Label: label})
 	if err != nil {
 		return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, cause: err}
@@ -209,7 +215,11 @@ func (c *IssuerClient) Entitlement(ctx context.Context, licenseKey, sid, label s
 		if err := decodeStrict(raw, &result); err != nil {
 			return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
 		}
-		if err := validateEntitlement(result, sid, now); err != nil {
+		// Add measured request latency to the caller's clock sample. This keeps
+		// the public deterministic seam while ensuring validation uses response
+		// receipt, not request dispatch, in production.
+		receivedAt := now.Add(time.Since(requestStarted))
+		if err := ValidateEntitlementAt(result, sid, receivedAt); err != nil {
 			return Entitlement{}, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode, cause: err}
 		}
 		return result, nil
@@ -363,7 +373,10 @@ type tokenClaims struct {
 	MaxClients int    `json:"max_clients"`
 }
 
-func validateEntitlement(entitlement Entitlement, sid string, now time.Time) error {
+// ValidateEntitlementAt validates issuer response coherence at the instant the
+// complete response was received. Callers must not pass the request start time:
+// network latency is not part of the credential lifetime.
+func ValidateEntitlementAt(entitlement Entitlement, sid string, receivedAt time.Time) error {
 	decodedSID, sidErr := base64.RawURLEncoding.DecodeString(sid)
 	if sidErr != nil || len(decodedSID) != sha256.Size {
 		return errors.New("sid is malformed")
@@ -374,7 +387,8 @@ func validateEntitlement(entitlement Entitlement, sid string, now time.Time) err
 	if entitlement.MaxClients < 1 || entitlement.MaxClients > 25 || entitlement.Seats < 1 || entitlement.Seats > 10000 || entitlement.SeatsUsed < 1 || entitlement.SeatsUsed > entitlement.Seats {
 		return errors.New("entitlement values are out of range")
 	}
-	if entitlement.Exp <= now.Unix() || time.Unix(entitlement.Exp, 0).After(now.Add(EntitlementLifetime)) {
+	expiresAt := time.Unix(entitlement.Exp, 0)
+	if !expiresAt.After(receivedAt.Add(-EntitlementClockSkew)) || expiresAt.After(receivedAt.Add(EntitlementLifetime+EntitlementClockSkew)) {
 		return errors.New("entitlement expiration is out of range")
 	}
 	parts := strings.Split(entitlement.Token.Value(), ".")
@@ -424,6 +438,9 @@ func (e *RelayRefreshError) Error() string {
 }
 
 func RefreshRelayEntitlement(ctx context.Context, client *http.Client, relayURL, sessionID string, token Secret) error {
+	if err := ValidateSessionID(sessionID); err != nil {
+		return &RelayRefreshError{Kind: RelayRefreshRejected}
+	}
 	base, err := safeHTTPSURL(relayURL)
 	if err != nil || base.RawQuery != "" || base.Fragment != "" {
 		return &RelayRefreshError{Kind: RelayRefreshRejected}
@@ -437,22 +454,14 @@ func RefreshRelayEntitlement(ctx context.Context, client *http.Client, relayURL,
 			client.Timeout = 15 * time.Second
 		}
 	}
-	origin := originOf(base)
-	previousRedirect := client.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if req.URL.Scheme != "https" || originOf(req.URL) != origin {
-			return errors.New("relay redirect changed origin or scheme")
-		}
-		if previousRedirect != nil {
-			return previousRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("too many relay redirects")
-		}
-		return nil
-	}
+	// Never follow a refresh redirect. The entitlement is a bearer credential,
+	// and even same-origin redirects create unnecessary opportunities for it to
+	// reach an endpoint that did not request it.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	target := *base
-	target.Path = path.Join(target.Path, "v1", "session", sessionID, "entitlement")
+	prefix := path.Join(target.Path, "v1", "session")
+	target.Path = prefix + "/" + sessionID + "/entitlement"
+	target.RawPath = (&url.URL{Path: prefix}).EscapedPath() + "/" + url.PathEscape(sessionID) + "/entitlement"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), nil)
 	if err != nil {
 		return &RelayRefreshError{Kind: RelayRefreshRejected}

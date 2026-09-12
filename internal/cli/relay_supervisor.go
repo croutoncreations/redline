@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/jfox/redline/internal/config"
 )
@@ -10,7 +11,7 @@ import (
 // without network connections, credentials, or timing-dependent retries.
 type relayDialerRun func(context.Context)
 
-type relayDialerFactory func(config.ResolvedRelay) (relayDialerRun, error)
+type relayDialerFactory func(config.ResolvedRelay, func() string) (relayDialerRun, error)
 
 type relaySupervisor struct {
 	initial     config.ResolvedRelay
@@ -22,8 +23,22 @@ type relaySupervisor struct {
 
 type activeRelayDialer struct {
 	connection relayConnection
+	token      *relayTokenSource
 	cancel     context.CancelFunc
 	done       chan struct{}
+}
+
+type relayTokenSource struct{ value atomic.Value }
+
+func newRelayTokenSource(token string) *relayTokenSource {
+	source := &relayTokenSource{}
+	source.value.Store(token)
+	return source
+}
+
+func (s *relayTokenSource) Load() string { return s.value.Load().(string) }
+func (s *relayTokenSource) Store(token string) {
+	s.value.Store(token)
 }
 
 type relayConnection struct {
@@ -82,16 +97,22 @@ func (s *relaySupervisor) apply(ctx context.Context, snapshot config.ResolvedRel
 		reconnectGeneration: snapshot.ReconnectGeneration,
 	}
 	if s.active != nil && s.active.connection == connection {
+		// A 204 refresh deliberately preserves the live socket. Future
+		// reconnects inside that same dialer's Run loop must nevertheless read
+		// the newly accepted token.
+		s.active.token.Store(snapshot.EntitlementToken.Value())
 		return nil
 	}
 	s.stopActive()
-	run, err := s.newDialer(snapshot)
+	token := newRelayTokenSource(snapshot.EntitlementToken.Value())
+	run, err := s.newDialer(snapshot, token.Load)
 	if err != nil {
 		return err
 	}
 	dialerCtx, cancel := context.WithCancel(ctx)
 	active := &activeRelayDialer{
 		connection: connection,
+		token:      token,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
