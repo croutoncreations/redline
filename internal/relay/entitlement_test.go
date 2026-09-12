@@ -540,6 +540,8 @@ func TestEntitlementCacheRejectsMalformedOrFutureCacheReplacement(t *testing.T) 
 		SchemaVersion: EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
 		Revoked: true, RevokedAt: now.Add(time.Minute).Unix(),
 	}
+	legacyExp := now.Add(time.Hour).Unix()
+	legacyToken := testEntitlementToken(t, legacyExp, sid, 5)
 	for _, tc := range []struct {
 		name string
 		raw  string
@@ -549,6 +551,9 @@ func TestEntitlementCacheRejectsMalformedOrFutureCacheReplacement(t *testing.T) 
 		{"v2 explicit null revoked", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked":null,"token":"bad","exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
 		{"v2 omitted token", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
 		{"v2 explicit false revoked", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked":false,"token":"bad","exp":1,"obtained_at":1,"sid":%q,"max_clients":5}`, fingerprint, sid) + "\n"},
+		{"v2 duplicate token", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":"bad","token":%q,"exp":%d,"obtained_at":%d,"sid":%q,"max_clients":5}`, fingerprint, legacyToken, legacyExp, now.Unix(), sid) + "\n"},
+		{"v2 duplicate revoked", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked":false,"revoked":true}`, fingerprint) + "\n"},
+		{"v2 duplicate other field", fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"token":%q,"exp":%d,"obtained_at":%d,"sid":%q,"max_clients":4,"max_clients":5}`, fingerprint, legacyToken, legacyExp, now.Unix(), sid) + "\n"},
 		{"future schema", fmt.Sprintf(`{"schema_version":4,"credential_fingerprint":%q,"revoked":true,"revoked_at":%d}`, fingerprint, now.Unix()) + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -605,11 +610,35 @@ func TestEntitlementRevocationStorePersistsClosedMarkerBesideCache(t *testing.T)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("marker mode=%v err=%v", info.Mode().Perm(), err)
 	}
-	if err := store.ClearContext(context.Background(), fingerprint); err != nil {
+	older := marker
+	older.RevokedAt--
+	for _, nonAdvancing := range []EntitlementRevocation{older, marker} {
+		if err := store.SaveContext(context.Background(), nonAdvancing); err != nil {
+			t.Fatal(err)
+		}
+		if got, exists, err := store.Load(); err != nil || !exists || got != marker {
+			t.Fatalf("marker floor regressed: marker=%#v exists=%v err=%v", got, exists, err)
+		}
+	}
+	newer := marker
+	newer.RevokedAt++
+	if err := store.SaveContext(context.Background(), newer); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := store.Load(); err != nil || exists {
-		t.Fatalf("cleared marker exists=%v err=%v", exists, err)
+	if got, exists, err := store.Load(); err != nil || !exists || got != newer {
+		t.Fatalf("advanced marker=%#v exists=%v err=%v", got, exists, err)
+	}
+	replacement := EntitlementRevocation{
+		SchemaVersion:         EntitlementRevocationSchemaVersion,
+		CredentialFingerprint: CredentialFingerprint("replacement-revoked-license"),
+		RevokedAt:             older.RevokedAt,
+	}
+	if err := store.SaveContext(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacement.RevokedAt = newer.RevokedAt
+	if got, exists, err := store.Load(); err != nil || !exists || got != replacement {
+		t.Fatalf("replacement credential lowered marker time: marker=%#v exists=%v err=%v", got, exists, err)
 	}
 }
 
@@ -630,39 +659,6 @@ func TestEntitlementRevocationStoreUsesIndependentLockFromCache(t *testing.T) {
 	}
 	if err := markerStore.SaveContext(ctx, marker); err != nil {
 		t.Fatalf("cache lock delayed independent marker: %v", err)
-	}
-}
-
-func TestEntitlementRevocationClearSyncFailureRestoresFailClosedMarker(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
-	store := NewEntitlementRevocationStore(path)
-	marker := EntitlementRevocation{
-		SchemaVersion:         EntitlementRevocationSchemaVersion,
-		CredentialFingerprint: CredentialFingerprint("clear-sync-license"),
-		RevokedAt:             time.Now().Unix(),
-	}
-	if err := store.SaveContext(context.Background(), marker); err != nil {
-		t.Fatal(err)
-	}
-	originalSync := entitlementCacheDirectorySync
-	defer func() { entitlementCacheDirectorySync = originalSync }()
-	calls := 0
-	entitlementCacheDirectorySync = func(directory *os.File) error {
-		calls++
-		if calls == 1 {
-			return errors.New("injected clear sync failure")
-		}
-		return originalSync(directory)
-	}
-	if err := store.ClearContext(context.Background(), marker.CredentialFingerprint); err == nil {
-		t.Fatal("clear unexpectedly reported durable")
-	}
-	got, exists, err := store.Load()
-	if err != nil || !exists || got != marker {
-		t.Fatalf("failed clear did not restore marker: %#v exists=%v err=%v", got, exists, err)
-	}
-	if err := store.ClearContext(context.Background(), marker.CredentialFingerprint); err != nil {
-		t.Fatalf("clear retry: %v", err)
 	}
 }
 

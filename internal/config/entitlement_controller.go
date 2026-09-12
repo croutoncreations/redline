@@ -31,7 +31,6 @@ type entitlementCache interface {
 type entitlementRevocations interface {
 	Load() (relay.EntitlementRevocation, bool, error)
 	SaveContext(context.Context, relay.EntitlementRevocation) error
-	ClearContext(context.Context, string) error
 }
 
 type noopEntitlementRevocations struct{}
@@ -42,7 +41,6 @@ func (noopEntitlementRevocations) Load() (relay.EntitlementRevocation, bool, err
 func (noopEntitlementRevocations) SaveContext(context.Context, relay.EntitlementRevocation) error {
 	return nil
 }
-func (noopEntitlementRevocations) ClearContext(context.Context, string) error { return nil }
 
 type entitlementTimer interface {
 	C() <-chan time.Time
@@ -233,7 +231,6 @@ func (w *entitlementPersistenceWorker) shutdown(parent context.Context, timeout 
 
 type entitlementRevocationRequest struct {
 	marker     relay.EntitlementRevocation
-	clear      bool
 	generation uint64
 	version    uint64
 }
@@ -270,12 +267,7 @@ func newEntitlementRevocationWorker(store entitlementRevocations) *entitlementRe
 			case <-ctx.Done():
 				return
 			case request := <-worker.requests:
-				var err error
-				if request.clear {
-					err = store.ClearContext(ctx, request.marker.CredentialFingerprint)
-				} else {
-					err = store.SaveContext(ctx, request.marker)
-				}
+				err := store.SaveContext(ctx, request.marker)
 				select {
 				case worker.results <- entitlementRevocationResult{request: request, err: err}:
 				case <-ctx.Done():
@@ -308,13 +300,6 @@ func (w *entitlementRevocationWorker) submit(request entitlementRevocationReques
 
 func (w *entitlementRevocationWorker) save(marker relay.EntitlementRevocation, generation uint64) {
 	w.submit(entitlementRevocationRequest{marker: marker, generation: generation})
-}
-
-func (w *entitlementRevocationWorker) clear(fingerprint string, generation uint64) {
-	w.submit(entitlementRevocationRequest{
-		marker: relay.EntitlementRevocation{CredentialFingerprint: fingerprint},
-		clear:  true, generation: generation,
-	})
 }
 
 func (w *entitlementRevocationWorker) retry(generation uint64) {
@@ -562,10 +547,18 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		credentialFingerprint = relay.CredentialFingerprint(license)
 	}
 	now = c.opts.Clock.Now()
-	marker, markerExists, markerErr := c.opts.Revocations.Load()
-	markerBlocksCache := markerErr != nil || (markerExists && marker.CredentialFingerprint == credentialFingerprint)
-	if credentialFingerprint != "" && !markerBlocksCache && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
+	if credentialFingerprint != "" && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
 		current, valid, _ = c.opts.Cache.Load(sid, credentialFingerprint, now)
+		// runServe admits only one service/controller process. Load the durable
+		// floor after potentially blocking cache I/O, immediately before startup
+		// publication, so a terminal marker written while Load was blocked wins.
+		// Store locks keep supported inter-process writes monotonic; there is no
+		// external post-startup mutation API that requires a watcher here.
+		marker, markerExists, markerErr := c.opts.Revocations.Load()
+		if markerErr != nil || (markerExists && marker.CredentialFingerprint == credentialFingerprint && current.ObtainedAt <= marker.RevokedAt) {
+			current = relay.CachedEntitlement{}
+			valid = false
+		}
 		if valid {
 			c.mu.Lock()
 			now = c.opts.Clock.Now()
@@ -664,7 +657,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 				timer.Stop()
 				return
 			case result := <-persistence.results:
-				c.applyPersistenceResult(generation, &base, &current, authorityGeneration, persistence, revocationPersistence, result)
+				c.applyPersistenceResult(generation, &base, &current, authorityGeneration, persistence, result)
 			case result := <-revocationPersistence.results:
 				c.applyRevocationResult(generation, &base, &current, authorityGeneration, revocationPersistence, result)
 			case trigger := <-c.triggers:
@@ -897,7 +890,7 @@ func (c *EntitlementController) commitIssued(parent context.Context, generation,
 	return true
 }
 
-func (c *EntitlementController) applyPersistenceResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker, result entitlementPersistenceResult) {
+func (c *EntitlementController) applyPersistenceResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementPersistenceWorker, result entitlementPersistenceResult) {
 	// Version validation and publication share the same critical section as
 	// TriggerLicenseChanged, so an obsolete completion cannot clear a newer
 	// warning or republish superseded authority.
@@ -917,14 +910,15 @@ func (c *EntitlementController) applyPersistenceResult(generation uint64, base *
 	if !base.PersistenceDegraded {
 		return
 	}
-	// A freshly accepted authority may supersede a matching terminal marker,
-	// but only after the authority cache itself is durable. Until marker clear
-	// succeeds, restart remains fail-closed while runtime authority stays active.
+	// A relay-accepted authority newer than the durable marker supersedes that
+	// version floor at restart once this cache write succeeds. The marker itself
+	// is never cleared and may remain for the lifetime of the credential.
 	now := c.opts.Clock.Now()
 	if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) || current.CredentialFingerprint != result.request.cached.CredentialFingerprint {
 		return
 	}
-	revocationPersistence.clear(current.CredentialFingerprint, generation)
+	base.PersistenceDegraded = false
+	c.opts.Coordinator.Update(*base)
 }
 
 func (c *EntitlementController) applyRevocationResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementRevocationWorker, result entitlementRevocationResult) {
@@ -945,11 +939,7 @@ func (c *EntitlementController) applyRevocationResult(generation uint64, base *R
 		return
 	}
 	now := c.opts.Clock.Now()
-	if result.request.clear {
-		if authorityGeneration != generation || !current.ValidAt(relay.SessionSID(base.SessionID), now) || current.CredentialFingerprint != result.request.marker.CredentialFingerprint {
-			return
-		}
-	} else if authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now) {
+	if authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now) {
 		// An accepted recovery may already be waiting on cache durability. The
 		// older marker-save completion must not clear that newer warning.
 		return

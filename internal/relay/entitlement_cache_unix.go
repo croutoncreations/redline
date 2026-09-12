@@ -112,13 +112,6 @@ func (op *entitlementCacheOperation) syncDirectory() error {
 	return nil
 }
 
-func (op *entitlementCacheOperation) remove() error {
-	if err := unix.Unlinkat(int(op.directory.Fd()), op.base, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-		return fmt.Errorf("remove entitlement file: %w", err)
-	}
-	return op.syncDirectory()
-}
-
 func (op *entitlementCacheOperation) write(raw []byte) error {
 	name := ".relay-entitlement-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	fd, err := unix.Openat(int(op.directory.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)

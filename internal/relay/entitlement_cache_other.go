@@ -20,5 +20,4 @@ func (*entitlementCacheOperation) read() ([]byte, bool, error) {
 	return nil, false, errors.New("unavailable")
 }
 func (*entitlementCacheOperation) syncDirectory() error { return errors.New("unavailable") }
-func (*entitlementCacheOperation) remove() error        { return errors.New("unavailable") }
 func (*entitlementCacheOperation) write([]byte) error   { return errors.New("unavailable") }

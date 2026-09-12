@@ -70,7 +70,68 @@ type entitlementCacheJSON struct {
 	MaxClients            *int    `json:"max_clients,omitempty"`
 }
 
+func rejectDuplicateJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var consumeValue func() error
+	consumeValue = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("object key is not a string")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("duplicate object key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := consumeValue(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := consumeValue(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return errors.New("unexpected closing JSON delimiter")
+		}
+	}
+	if err := consumeValue(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON data")
+		}
+		return err
+	}
+	return nil
+}
+
 func decodeEntitlementCache(raw []byte) (CachedEntitlement, error) {
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return CachedEntitlement{}, fmt.Errorf("decode entitlement cache: %w", err)
+	}
 	var record entitlementCacheJSON
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -125,6 +186,11 @@ func decodeEntitlementCache(raw []byte) (CachedEntitlement, error) {
 // remains invalid for Load authority, but a valid issuer decision must be able
 // to migrate it while malformed and unknown-future records stay nonreplaceable.
 func decodeEntitlementCacheForReplacement(raw []byte) (CachedEntitlement, bool, error) {
+	// Inspect member-name tokens before either struct or map decoding. Both of
+	// those JSON interpretations silently collapse duplicate schema-v2 keys.
+	if duplicateErr := rejectDuplicateJSONKeys(raw); duplicateErr != nil {
+		return CachedEntitlement{}, false, fmt.Errorf("decode entitlement cache replacement: %w", duplicateErr)
+	}
 	cached, err := decodeEntitlementCache(raw)
 	if err == nil {
 		return cached, false, nil

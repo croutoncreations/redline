@@ -12,8 +12,8 @@ import (
 
 const EntitlementRevocationSchemaVersion = 1
 
-// EntitlementRevocation is a credential-bound terminal authority decision. It
-// deliberately contains neither a credential nor an entitlement token.
+// EntitlementRevocation is a durable credential-bound authority version floor.
+// It deliberately contains neither a credential nor an entitlement token.
 type EntitlementRevocation struct {
 	SchemaVersion         int    `json:"schema_version"`
 	CredentialFingerprint string `json:"credential_fingerprint"`
@@ -53,7 +53,8 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 }
 
 // EntitlementRevocationStore has its own path and process/file locks, so cache
-// I/O cannot delay a terminal marker operation.
+// I/O cannot delay a terminal marker operation and writes can never lower the
+// stored time floor.
 type EntitlementRevocationStore struct {
 	path string
 	lock entitlementCacheLock
@@ -100,11 +101,6 @@ func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker Ent
 	if err := validateEntitlementRevocation(marker); err != nil {
 		return err
 	}
-	raw, err := json.Marshal(marker)
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
 	if err := s.lock.acquire(ctx); err != nil {
 		return err
 	}
@@ -126,44 +122,15 @@ func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker Ent
 		if existing.CredentialFingerprint == marker.CredentialFingerprint && existing.RevokedAt >= marker.RevokedAt {
 			return op.syncDirectory()
 		}
-	}
-	return op.write(raw)
-}
-
-func (s *EntitlementRevocationStore) ClearContext(ctx context.Context, credentialFingerprint string) error {
-	if credentialFingerprint == "" {
-		return errors.New("empty entitlement credential fingerprint")
-	}
-	if err := s.lock.acquire(ctx); err != nil {
-		return err
-	}
-	defer s.lock.release()
-	op, err := beginEntitlementCacheOperationContext(ctx, s.path)
-	if err != nil {
-		return err
-	}
-	defer op.close()
-	raw, exists, err := op.read()
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return op.syncDirectory()
-	}
-	marker, err := decodeEntitlementRevocation(raw)
-	if err != nil {
-		return err
-	}
-	if marker.CredentialFingerprint != credentialFingerprint {
-		return nil
-	}
-	if err := op.remove(); err != nil {
-		// Keep an immediately restarted process fail-closed when deletion could
-		// not be acknowledged as crash durable.
-		if restoreErr := op.write(raw); restoreErr != nil {
-			return fmt.Errorf("clear entitlement revocation: %v; restore marker: %w", err, restoreErr)
+		// Credential replacement changes which floor is relevant, but must not
+		// let clock rollback lower the store's inter-process version watermark.
+		if existing.RevokedAt > marker.RevokedAt {
+			marker.RevokedAt = existing.RevokedAt
 		}
+	}
+	raw, err := json.Marshal(marker)
+	if err != nil {
 		return err
 	}
-	return nil
+	return op.write(append(raw, '\n'))
 }

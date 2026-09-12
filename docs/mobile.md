@@ -87,12 +87,15 @@ replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `labe
 atomic durability rules and contains schema version, credential fingerprint, `token`,
 `exp`, `obtained_at`, `sid`, and `max_clients`. The independently locked
 `relay-entitlement-revocation.json` contains exactly schema version, credential
-fingerprint, and revocation time—never a token. On startup, a marker matching the loaded
-Keychain license always overrides the cache, even if an older cache write completed later;
-a marker for a replaced credential is ignored. Relay-accepted recovery is usable in memory,
-but the marker is cleared only after the new cache is durable, and clear failure remains
-restart-fail-closed with `persistence_degraded`. Entitlements have a maximum lifetime of 14
-days. The session id is
+fingerprint, and revocation time—never a token. Startup loads the Keychain license, then
+the cache, then the marker immediately before publication. For a matching fingerprint the
+marker is a persistent version floor: it wins when cache `obtained_at` is older than or
+equal to marker `revoked_at`; only newer cache authority is trusted. A marker for a replaced
+credential is ignored and markers are never cleared or deleted. Relay-accepted recovery is
+usable in memory, but restart trusts it only after its newer cache record is durable; a
+cache-save failure remains restart-fail-closed with `persistence_degraded`. `redline serve`
+permits one service/controller owner, while store locks preserve monotonic marker writes
+across supported processes. Entitlements have a maximum lifetime of 14 days. The session id is
 generated on first hosted or self-hosted use and persisted only in managed state. YAML
 containing `session_id`, `entitlement_token`, or `license_key` is rejected.
 

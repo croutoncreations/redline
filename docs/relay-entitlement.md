@@ -140,9 +140,12 @@ Legacy/unversioned records, fingerprint mismatches, unknown fields, omitted
 required fields, explicit `null`, and fields from the wrong record variant all
 fail closed for authority. Under the cache lock, Save recognizes only an exact
 shape that the schema-v2 serializer could have produced as replaceable legacy.
-Malformed schema-v2 and unknown future-schema records remain fail-closed and
-nonreplaceable. Existing schema-v3 cache tombstones are still read fail-closed
-for compatibility, but the controller no longer writes or queues tombstones.
+Member names are checked token-by-token before map or struct decoding, so a
+duplicate `token`, `revoked`, or other field cannot collapse into an apparently
+valid legacy record. Malformed schema-v2 and unknown future-schema records
+remain fail-closed and nonreplaceable. Existing schema-v3 cache tombstones are
+still read fail-closed for compatibility, but the controller no longer writes
+or queues tombstones.
 
 Terminal `invalid_key`, `lapsed`, and `no_seat` decisions instead write
 `relay-entitlement-revocation.json` beside the cache. Its closed schema is
@@ -153,23 +156,32 @@ fsync guarantees as the cache, but uses its own path and lock. Runtime authority
 is revoked immediately and this independent high-priority writer is not queued
 behind cache I/O.
 
-Startup loads the Keychain credential, derives its fingerprint, and checks the
-marker before considering cache authority. A matching marker always wins,
-including when an obsolete cache rename becomes visible after the marker. A
-marker for a replaced credential does not affect the new fingerprint. This
-separate marker and its precedence are intentional deviations from the original
-single five-field cache design.
+Startup loads the Keychain credential, then the credential-bound cache, and
+finally the marker immediately before publication. A matching marker is a
+durable version floor: cached authority is trusted only when its `obtained_at`
+is strictly later than `revoked_at`, so the marker wins a tie. Loading the marker
+after potentially blocking cache I/O also catches a terminal marker written
+while the cache load was blocked. A marker for a replaced credential does not
+affect the new fingerprint. This separate marker and its precedence are
+intentional deviations from the original single five-field cache design.
 
-Only authority newly accepted by the relay may supersede a matching marker. The
-controller first makes the accepted authority cache durable and only then clears
-the marker durably. A clear failure leaves safe in-memory authority active but
-keeps `persistence_degraded` visible and the marker restart-fail-closed. Terminal
-marker failures also keep `persistence_degraded` set. On shutdown, a bounded,
+A marker is never cleared or deleted. Authority newly accepted by the relay may
+supersede a matching floor after its newer cache record is durable; the old
+marker may remain forever. A cache-save failure leaves safe in-memory authority
+active with `persistence_degraded`, while restart fails closed behind the marker
+because no newer durable cache authority exists. Terminal marker failures also
+keep `persistence_degraded` set. On shutdown, a bounded,
 parent-cancellation-independent marker barrier consumes and retries even a
 failure result buffered before the main loop observed it. Old cache I/O is
 canceled separately; a syscall that cannot observe cancellation may return
-after `Run`, but cannot overwrite the independent marker or become the final
-restart authority decision.
+after `Run`, but cannot lower the independently stored marker floor.
+
+`redline serve` claims the listening socket before constructing the controller,
+so controller marker writes have one service-process owner. The store still
+uses process and file locks and compares records under those locks, preserving
+monotonic marker time for supported inter-process writes. There is no external
+marker-writer API, so hostile mutation after startup is outside this ownership
+model and does not require a watcher.
 
 ## Implemented relay refresh endpoint
 

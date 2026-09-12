@@ -65,15 +65,44 @@ func (c *controllerCache) SaveContext(_ context.Context, value relay.CachedEntit
 	return err
 }
 
+type blockingLoadControllerCache struct {
+	value   relay.CachedEntitlement
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingLoadControllerCache) Load(string, string, time.Time) (relay.CachedEntitlement, bool, error) {
+	close(c.started)
+	<-c.release
+	return c.value, true, nil
+}
+
+func (*blockingLoadControllerCache) SaveContext(context.Context, relay.CachedEntitlement) error {
+	return nil
+}
+
+type rejectingControllerCache struct {
+	value  relay.CachedEntitlement
+	exists bool
+	saved  chan relay.CachedEntitlement
+	err    error
+}
+
+func (c *rejectingControllerCache) Load(string, string, time.Time) (relay.CachedEntitlement, bool, error) {
+	return c.value, c.exists, nil
+}
+
+func (c *rejectingControllerCache) SaveContext(_ context.Context, value relay.CachedEntitlement) error {
+	c.saved <- value
+	return c.err
+}
+
 type controllerRevocationStore struct {
-	mu        sync.Mutex
-	marker    relay.EntitlementRevocation
-	exists    bool
-	saved     chan relay.EntitlementRevocation
-	cleared   chan string
-	saveErrs  []error
-	clearErrs []error
-	clearErr  error
+	mu       sync.Mutex
+	marker   relay.EntitlementRevocation
+	exists   bool
+	saved    chan relay.EntitlementRevocation
+	saveErrs []error
 }
 
 func (s *controllerRevocationStore) Load() (relay.EntitlementRevocation, bool, error) {
@@ -98,22 +127,6 @@ func (s *controllerRevocationStore) SaveContext(_ context.Context, marker relay.
 	return err
 }
 
-func (s *controllerRevocationStore) ClearContext(_ context.Context, fingerprint string) error {
-	s.mu.Lock()
-	err := s.clearErr
-	if len(s.clearErrs) > 0 {
-		err, s.clearErrs = s.clearErrs[0], s.clearErrs[1:]
-	}
-	if err == nil && s.exists && s.marker.CredentialFingerprint == fingerprint {
-		s.marker, s.exists = relay.EntitlementRevocation{}, false
-	}
-	s.mu.Unlock()
-	if s.cleared != nil {
-		s.cleared <- fingerprint
-	}
-	return err
-}
-
 type uncancellableControllerRevocations struct {
 	started  chan relay.EntitlementRevocation
 	release  chan struct{}
@@ -129,7 +142,6 @@ func (s *uncancellableControllerRevocations) SaveContext(_ context.Context, mark
 	close(s.returned)
 	return nil
 }
-func (s *uncancellableControllerRevocations) ClearContext(context.Context, string) error { return nil }
 
 type blockingControllerCache struct {
 	started   chan relay.CachedEntitlement
@@ -324,6 +336,107 @@ func TestEntitlementControllerKeepsValidCacheUsableDuringStartupRenewal(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("controller leaked after cancellation")
 	}
+}
+
+func TestEntitlementControllerPersistentMarkerIsAuthorityVersionFloor(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("license")
+	markerTime := now.Add(-time.Hour)
+	for _, tc := range []struct {
+		name       string
+		obtainedAt time.Time
+		wantActive bool
+	}{
+		{name: "older authority", obtainedAt: markerTime.Add(-time.Second)},
+		{name: "equal authority", obtainedAt: markerTime},
+		{name: "newer authority", obtainedAt: markerTime.Add(time.Second), wantActive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exp := now.Add(time.Hour).Unix()
+			cached := relay.CachedEntitlement{
+				SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+				Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: tc.obtainedAt.Unix(), SID: sid, MaxClients: 5,
+			}
+			marker := relay.EntitlementRevocation{
+				SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint, RevokedAt: markerTime.Unix(),
+			}
+			revocations := relay.NewEntitlementRevocationStore(filepath.Join(t.TempDir(), "relay-entitlement-revocation.json"))
+			if err := revocations.SaveContext(context.Background(), marker); err != nil {
+				t.Fatal(err)
+			}
+			issuerStarted := make(chan struct{})
+			coordinator := NewRelayCoordinator(base)
+			controller := NewEntitlementController(EntitlementControllerOptions{
+				Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"},
+				Cache: &controllerCache{value: cached, exists: true, saved: make(chan relay.CachedEntitlement, 1)}, Revocations: revocations,
+				Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+				Issuer: controllerReceivedIssuerFunc(func(ctx context.Context, _, _, _ string) (relay.ReceivedEntitlement, error) {
+					close(issuerStarted)
+					<-ctx.Done()
+					return relay.ReceivedEntitlement{}, ctx.Err()
+				}),
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { controller.Run(ctx); close(done) }()
+			<-issuerStarted
+			got := coordinator.Current()
+			if got.CanDial() != tc.wantActive {
+				t.Fatalf("startup state=%#v, want active=%v", got, tc.wantActive)
+			}
+			cancel()
+			<-done
+			if got, exists, err := revocations.Load(); err != nil || !exists || got != marker {
+				t.Fatalf("persistent marker changed: %#v exists=%v err=%v", got, exists, err)
+			}
+		})
+	}
+}
+
+func TestEntitlementControllerChecksMarkerAfterBlockedStartupCacheLoad(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("license")
+	exp := now.Add(time.Hour).Unix()
+	cache := &blockingLoadControllerCache{
+		value: relay.CachedEntitlement{
+			SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+			Token: controllerToken(t, exp, sid, 5), Exp: exp, ObtainedAt: now.Add(-time.Minute).Unix(), SID: sid, MaxClients: 5,
+		},
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	revocations := &controllerRevocationStore{}
+	issuerStarted := make(chan struct{})
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "license"}, Cache: cache, Revocations: revocations,
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+		Issuer: controllerReceivedIssuerFunc(func(ctx context.Context, _, _, _ string) (relay.ReceivedEntitlement, error) {
+			close(issuerStarted)
+			<-ctx.Done()
+			return relay.ReceivedEntitlement{}, ctx.Err()
+		}),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	<-cache.started
+	revocations.mu.Lock()
+	revocations.marker = relay.EntitlementRevocation{
+		SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint, RevokedAt: now.Unix(),
+	}
+	revocations.exists = true
+	revocations.mu.Unlock()
+	close(cache.release)
+	<-issuerStarted
+	if got := coordinator.Current(); got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("startup published cache behind marker: %#v", got)
+	}
+	cancel()
+	<-done
 }
 
 func TestEntitlementControllerRenewsWithInjectedJitterWithoutSocketRestart(t *testing.T) {
@@ -1522,16 +1635,20 @@ func TestEntitlementControllerTerminalMarkerSurvivesRestart(t *testing.T) {
 	<-doneSecond
 }
 
-func TestEntitlementControllerAcceptedRecoveryClearFailureKeepsRuntimeAndRestartFailsClosed(t *testing.T) {
+func TestEntitlementControllerAcceptedRecoveryKeepsMarkerAndSurvivesRestart(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	base := hostedControllerBase()
 	sid := relay.SessionSID(base.SessionID)
 	fingerprint := relay.CredentialFingerprint("recovered-license")
 	exp := now.Add(time.Hour).Unix()
-	cache := &controllerCache{saved: make(chan relay.CachedEntitlement, 2)}
-	revocations := &controllerRevocationStore{
-		marker: relay.EntitlementRevocation{SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint, RevokedAt: now.Add(-time.Minute).Unix()},
-		exists: true, clearErr: errors.New("directory sync failed"), cleared: make(chan string, 1000),
+	cachePath := filepath.Join(t.TempDir(), "relay-entitlement.json")
+	cache := relay.NewEntitlementCacheStore(cachePath)
+	revocations := relay.NewEntitlementRevocationStore(relay.DefaultEntitlementRevocationPath(cachePath))
+	marker := relay.EntitlementRevocation{
+		SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint, RevokedAt: now.Add(-time.Minute).Unix(),
+	}
+	if err := revocations.SaveContext(context.Background(), marker); err != nil {
+		t.Fatal(err)
 	}
 	coordinator := NewRelayCoordinator(base)
 	controller := NewEntitlementController(EntitlementControllerOptions{
@@ -1550,22 +1667,20 @@ func TestEntitlementControllerAcceptedRecoveryClearFailureKeepsRuntimeAndRestart
 	if !active.CanDial() {
 		t.Fatal("accepted recovery was not usable at runtime")
 	}
-	select {
-	case <-revocations.cleared:
-	case <-time.After(time.Second):
-		t.Fatal("accepted authority did not attempt marker clear after cache persistence")
-	}
 	deadline := time.Now().Add(time.Second)
-	for !coordinator.Current().PersistenceDegraded && time.Now().Before(deadline) {
+	for coordinator.Current().PersistenceDegraded && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := coordinator.Current(); !got.CanDial() || !got.PersistenceDegraded {
-		t.Fatalf("clear durability failure changed safe runtime authority: %#v", got)
+	if got := coordinator.Current(); !got.CanDial() || got.PersistenceDegraded {
+		t.Fatalf("durable recovery did not retain active runtime authority: %#v", got)
+	}
+	if cached, valid, err := cache.Load(sid, fingerprint, now); err != nil || !valid || cached.ObtainedAt != now.Unix() {
+		t.Fatalf("accepted recovery cache=%#v valid=%v err=%v", cached, valid, err)
 	}
 	cancel()
 	<-done
-	if _, exists, err := revocations.Load(); err != nil || !exists {
-		t.Fatalf("failed clear did not preserve restart marker: exists=%v err=%v", exists, err)
+	if got, exists, err := revocations.Load(); err != nil || !exists || got != marker {
+		t.Fatalf("accepted recovery altered persistent marker: marker=%#v exists=%v err=%v", got, exists, err)
 	}
 
 	restartCoordinator := NewRelayCoordinator(base)
@@ -1579,9 +1694,73 @@ func TestEntitlementControllerAcceptedRecoveryClearFailureKeepsRuntimeAndRestart
 	restartCtx, restartCancel := context.WithCancel(context.Background())
 	restartDone := make(chan struct{})
 	go func() { restart.Run(restartCtx); close(restartDone) }()
+	got := waitRelayState(t, restartCoordinator, RelayReadinessRenewPending)
+	if !got.CanDial() || got.EntitlementToken.Value() == "" {
+		t.Fatalf("restart rejected authority newer than persistent marker: %#v", got)
+	}
+	restartCancel()
+	<-restartDone
+}
+
+func TestEntitlementControllerCacheSaveFailureKeepsMarkerAndRestartFailsClosed(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("recovered-license")
+	marker := relay.EntitlementRevocation{
+		SchemaVersion: relay.EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint, RevokedAt: now.Add(-time.Minute).Unix(),
+	}
+	oldExp := now.Add(time.Hour).Unix()
+	cache := &rejectingControllerCache{
+		value: relay.CachedEntitlement{
+			SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+			Token: controllerToken(t, oldExp, sid, 5), Exp: oldExp, ObtainedAt: marker.RevokedAt, SID: sid, MaxClients: 5,
+		},
+		exists: true, saved: make(chan relay.CachedEntitlement, 1), err: errors.New("disk full"),
+	}
+	revocations := &controllerRevocationStore{marker: marker, exists: true}
+	newExp := now.Add(2 * time.Hour).Unix()
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "recovered-license"}, Cache: cache, Revocations: revocations,
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 2)},
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			issued := relay.Entitlement{Token: controllerToken(t, newExp, sid, 5), Exp: newExp, MaxClients: 5, Seats: 1, SeatsUsed: 1}
+			return relay.ReceivedEntitlement{Entitlement: issued, ReceivedAt: now}, nil
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	active := waitRelayState(t, coordinator, RelayReadinessActive)
+	<-cache.saved
+	deadline := time.Now().Add(time.Second)
+	for !coordinator.Current().PersistenceDegraded && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !active.CanDial() || !coordinator.Current().PersistenceDegraded {
+		t.Fatalf("cache failure did not retain active degraded runtime: %#v", coordinator.Current())
+	}
+	cancel()
+	<-done
+	if got, exists, err := revocations.Load(); err != nil || !exists || got != marker {
+		t.Fatalf("cache failure altered marker: marker=%#v exists=%v err=%v", got, exists, err)
+	}
+
+	restartCoordinator := NewRelayCoordinator(base)
+	restart := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: restartCoordinator, Initial: base, Licenses: controllerLicenseStore{value: "recovered-license"}, Cache: cache, Revocations: revocations,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
+		}),
+	})
+	restartCtx, restartCancel := context.WithCancel(context.Background())
+	restartDone := make(chan struct{})
+	go func() { restart.Run(restartCtx); close(restartDone) }()
 	got := waitRelayState(t, restartCoordinator, RelayReadinessUnavailable)
-	if got.CanDial() {
-		t.Fatalf("restart trusted cache despite matching marker: %#v", got)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("restart trusted cache not persisted past marker: %#v", got)
 	}
 	restartCancel()
 	<-restartDone
