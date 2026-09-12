@@ -16,6 +16,8 @@ import (
 
 	"github.com/jfox/redline/internal/apiauth"
 	"github.com/jfox/redline/internal/cli"
+	"github.com/jfox/redline/internal/pairing"
+	"gopkg.in/yaml.v3"
 )
 
 func TestTaskDispatchConsumesServiceAPIWithoutBody(t *testing.T) {
@@ -72,7 +74,7 @@ func TestCandidatesRequiresProvider(t *testing.T) {
 func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	configPath, token := writePairingConfig(t, []string{"redline.example.ts.net"})
 	pairingToken := strings.Repeat("one-time-pairing-", 3)
-	server := pairingAPIServer(t, token, pairingToken)
+	server := pairingAPIServer(t, configPath, token, pairingToken)
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net", "--port", "8443"}, &stdout, &stderr, time.Now)
@@ -83,16 +85,39 @@ func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	}
 }
 
-func TestPairQRDiscoversTailscaleDNSName(t *testing.T) {
-	configPath, token := writePairingConfig(t, []string{"redline.tailnet.ts.net"})
-	server := pairingAPIServer(t, token, strings.Repeat("discovered-pairing-", 3))
-	defer server.Close()
-	bin := t.TempDir()
-	script := filepath.Join(bin, "tailscale")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"Self\":{\"DNSName\":\"redline.tailnet.ts.net.\"}}'\n"), 0o700); err != nil {
+func TestPairQRUsesServiceComposedManagedStateInsteadOfConflictingYAML(t *testing.T) {
+	configPath, token := writePairingConfig(t, []string{"yaml.example.ts.net"})
+	// The documented bootstrap shape has no session_id and intentionally
+	// conflicts with the authoritative managed route represented by the service.
+	file, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin)
+	if _, err := file.WriteString("relay:\n  enabled: true\n  url: https://yaml-relay.example.com\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	managedURL := pairing.URL(pairing.RelayOnlyHost, 443, "service-token", "https://managed-relay.example.com", "c3ludGhldGljLWtleQ==", "managed-session-abcdefghij")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Fatalf("missing authenticated service request")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"pairing_token": "service-token", "expires_at": time.Now().Add(time.Minute), "pairing_url": managedURL, "routes": []string{"relay"}, "relay_status": "self_hosted"})
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "relay only") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestPairQRUsesServiceDefaultTrustedHost(t *testing.T) {
+	configPath, token := writePairingConfig(t, []string{"redline.tailnet.ts.net"})
+	server := pairingAPIServer(t, configPath, token, strings.Repeat("discovered-pairing-", 3))
+	defer server.Close()
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr"}, &stdout, &stderr, time.Now)
 	if exit != 0 || !strings.Contains(stdout.String(), "redline.tailnet.ts.net") {
@@ -106,7 +131,7 @@ func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
 		args []string
 		want string
 	}{
-		"untrusted":    {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "api.trusted_hosts"},
+		"untrusted":    {[]string{"--config", configPath, "pair", "--qr", "--host", "evil.example.ts.net"}, "Redline API authentication"},
 		"missing qr":   {[]string{"--config", configPath, "pair"}, "--qr is required"},
 		"invalid port": {[]string{"--config", configPath, "pair", "--qr", "--host", "trusted.example.ts.net", "--port", "70000"}, "--port must be between"},
 	} {
@@ -120,15 +145,64 @@ func TestPairQRRejectsUntrustedHostAndBadUsage(t *testing.T) {
 	}
 }
 
-func pairingAPIServer(t *testing.T, apiToken, pairingToken string) *httptest.Server {
+func pairingAPIServer(t *testing.T, configPath, apiToken, pairingToken string) *httptest.Server {
 	t.Helper()
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serviceConfig struct {
+		API struct {
+			TrustedHosts []string `yaml:"trusted_hosts"`
+		} `yaml:"api"`
+		Relay struct {
+			Enabled   bool   `yaml:"enabled"`
+			URL       string `yaml:"url"`
+			SessionID string `yaml:"session_id"`
+		} `yaml:"relay"`
+	}
+	if err := yaml.Unmarshal(raw, &serviceConfig); err != nil {
+		t.Fatal(err)
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/pairing" || r.Header.Get("Authorization") != "Bearer "+apiToken {
 			t.Errorf("pairing request=%s %s authorization=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
 		}
+		var request struct {
+			Host      string `json:"host"`
+			Port      int    `json:"port"`
+			RelayOnly bool   `json:"relay_only"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		host := request.Host
+		if host == "" && len(serviceConfig.API.TrustedHosts) > 0 {
+			host = strings.Split(serviceConfig.API.TrustedHosts[0], ":")[0]
+		}
+		routes := []string{}
+		if host != "" && !request.RelayOnly {
+			routes = append(routes, "direct")
+		} else {
+			host = pairing.RelayOnlyHost
+		}
+		relayURL, key, session := "", "", ""
+		if serviceConfig.Relay.Enabled {
+			routes = append(routes, "relay")
+			session = serviceConfig.Relay.SessionID
+			if session == "" {
+				session = "managed-session-abcdefghij"
+			}
+			relayURL, key = serviceConfig.Relay.URL, "c3ludGhldGljLWRlc2t0b3Ata2V5"
+		}
+		pairingURL := pairing.URL(host, request.Port, pairingToken, relayURL, key, session)
+		endpoint := host
+		if host != pairing.RelayOnlyHost && request.Port != 443 {
+			endpoint = net.JoinHostPort(host, fmt.Sprint(request.Port))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(w, `{"pairing_token":%q,"expires_at":%q}`, pairingToken, time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339Nano))
+		_ = json.NewEncoder(w).Encode(map[string]any{"pairing_token": pairingToken, "expires_at": time.Now().Add(10 * time.Minute).UTC(), "pairing_url": pairingURL, "routes": routes, "endpoint": endpoint, "relay_status": "self_hosted"})
 	}))
 }
 
@@ -214,6 +288,9 @@ scheduler:
   enabled: false
 usage_monitor:
   enabled: false
+relay:
+  enabled: true
+  url: https://relay.example.com
 providers:
   codex-main:
     provider: codex
@@ -238,6 +315,9 @@ policies:
 	}
 	if _, err := os.Stat(database); !os.IsNotExist(err) {
 		t.Fatalf("database was touched before listener ownership was established: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "relay-state.json")); !os.IsNotExist(err) {
+		t.Fatalf("managed relay state was touched before listener ownership was established: %v", err)
 	}
 }
 
@@ -707,7 +787,6 @@ policies:
 relay:
   enabled: true
   url: https://redline-relay.example.com
-  session_id: "test-session-abcdef"
   keypair_path: %s
 `, filepath.Join(root, "identity.json"))
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
@@ -725,7 +804,7 @@ relay:
 func TestPairQRRelayOnlyWhenNoTailnet(t *testing.T) {
 	configPath, token := writeRelayOnlyConfig(t)
 	pairingToken := strings.Repeat("relay-only-pairing-", 3)
-	server := pairingAPIServer(t, token, pairingToken)
+	server := pairingAPIServer(t, configPath, token, pairingToken)
 	defer server.Close()
 
 	// Stub tailscale to fail — simulating no tailnet.
@@ -754,7 +833,7 @@ func TestPairQRRelayOnlyWhenNoTailnet(t *testing.T) {
 func TestPairQRRelayOnlyFlagForcesRelayEvenWithTailnet(t *testing.T) {
 	configPath, token := writeRelayOnlyConfig(t)
 	pairingToken := strings.Repeat("forced-relay-pairing-", 3)
-	server := pairingAPIServer(t, token, pairingToken)
+	server := pairingAPIServer(t, configPath, token, pairingToken)
 	defer server.Close()
 
 	// Tailscale is available.
@@ -803,7 +882,6 @@ policies:
 relay:
   enabled: true
   url: https://redline-relay.example.com
-  session_id: "test-session-xyz"
   keypair_path: %s
 `, filepath.Join(root, "identity.json"))
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
@@ -814,7 +892,7 @@ relay:
 	}
 
 	pairingToken := strings.Repeat("both-routes-pairing-", 3)
-	server := pairingAPIServer(t, token, pairingToken)
+	server := pairingAPIServer(t, configPath, token, pairingToken)
 	defer server.Close()
 
 	bin := t.TempDir()
@@ -842,7 +920,7 @@ relay:
 func TestPairQRMessageTailnetOnly(t *testing.T) {
 	configPath, token := writePairingConfig(t, []string{"mydesk.example.ts.net"})
 	pairingToken := strings.Repeat("tailnet-only-pairing-", 3)
-	server := pairingAPIServer(t, token, pairingToken)
+	server := pairingAPIServer(t, configPath, token, pairingToken)
 	defer server.Close()
 
 	bin := t.TempDir()

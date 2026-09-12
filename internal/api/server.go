@@ -366,6 +366,30 @@ func publicPairingRequest(r *http.Request) bool {
 }
 
 func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Host      string `json:"host"`
+		Port      int    `json:"port"`
+		RelayOnly bool   `json:"relay_only"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid pairing request: " + err.Error()})
+			return
+		}
+	}
+	if request.Port < 0 || request.Port > 65535 {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "pairing port must be between 1 and 65535"})
+		return
+	}
+	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
+	// Validate caller-controlled overrides before minting a one-time token.
+	if _, err := pairing.Compose(s.config, "pending", options); err != nil && !errors.Is(err, pairing.ErrNoRoute) {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
@@ -386,16 +410,15 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	// this machine redeems it from a browser. It just gets no URL, and the
 	// empty route list says why.
 	response := struct {
-		Token      string          `json:"pairing_token"`
-		ExpiresAt  time.Time       `json:"expires_at"`
-		PairingURL string          `json:"pairing_url,omitempty"`
-		Routes     []pairing.Route `json:"routes"`
-		Endpoint   string          `json:"endpoint,omitempty"`
-	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}}
+		Token       string          `json:"pairing_token"`
+		ExpiresAt   time.Time       `json:"expires_at"`
+		PairingURL  string          `json:"pairing_url,omitempty"`
+		Routes      []pairing.Route `json:"routes"`
+		Endpoint    string          `json:"endpoint,omitempty"`
+		RelayStatus string          `json:"relay_status"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: s.config.Relay.Readiness}
 
-	code, err := pairing.Compose(s.config, token, pairing.Options{
-		RelayOnly: r.URL.Query().Get("relay_only") == "1",
-	})
+	code, err := pairing.Compose(s.config, token, options)
 	switch {
 	case err == nil:
 		response.PairingURL = code.URL

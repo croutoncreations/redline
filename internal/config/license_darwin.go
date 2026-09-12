@@ -74,6 +74,11 @@ static OSStatus redline_license_replace(const char *service, const char *account
 	const void *values[] = { data };
 	CFDictionaryRef update = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,
 		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	if (update == NULL) {
+		CFRelease(query);
+		CFRelease(data);
+		return errSecAllocate;
+	}
 	OSStatus status = SecItemUpdate(query, update);
 	CFRelease(update);
 	if (status == errSecItemNotFound) {
@@ -84,6 +89,11 @@ static OSStatus redline_license_replace(const char *service, const char *account
 			const void *retryValues[] = { data };
 			CFDictionaryRef retry = CFDictionaryCreate(kCFAllocatorDefault, retryKeys, retryValues, 1,
 				&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+			if (retry == NULL) {
+				CFRelease(query);
+				CFRelease(data);
+				return errSecAllocate;
+			}
 			CFDictionaryRemoveValue(query, kSecValueData);
 			status = SecItemUpdate(query, retry);
 			CFRelease(retry);
@@ -106,7 +116,9 @@ import "C"
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"unsafe"
@@ -117,30 +129,74 @@ import (
 // also makes Replace/Clear atomic from concurrent callers' point of view.
 var relayLicenseKeychainMu sync.Mutex
 
-type keychainLicenseStore struct{}
+type keychainLicenseStore struct{ service, account string }
 
-func newPlatformLicenseStore() LicenseStore { return keychainLicenseStore{} }
+func newPlatformLicenseStore() LicenseStore {
+	return keychainLicenseStore{service: RelayLicenseKeychainService, account: RelayLicenseKeychainAccount}
+}
 
-func (keychainLicenseStore) Load(ctx context.Context) (string, error) {
+// newKeychainLicenseStore allows a test to use a unique synthetic item without
+// ever reading or mutating the production service/account pair.
+func newKeychainLicenseStore(service, account string) LicenseStore {
+	return keychainLicenseStore{service: service, account: account}
+}
+
+func keychainStatusError(operation string, status C.OSStatus) error {
+	if status == C.errSecItemNotFound {
+		return ErrLicenseNotFound
+	}
+	return fmt.Errorf("%s hosted relay license in Keychain: %w (OSStatus %d)", operation, ErrLicenseStoreUnavailable, int32(status))
+}
+
+func (s keychainLicenseStore) identifiers() (string, string) {
+	service, account := s.service, s.account
+	if service == "" {
+		service = RelayLicenseKeychainService
+	}
+	if account == "" {
+		account = RelayLicenseKeychainAccount
+	}
+	return service, account
+}
+
+func cIdentifiers(serviceName, accountName string) (*C.char, *C.char, error) {
+	service := C.CString(serviceName)
+	account := C.CString(accountName)
+	if service == nil || account == nil {
+		if service != nil {
+			C.free(unsafe.Pointer(service))
+		}
+		if account != nil {
+			C.free(unsafe.Pointer(account))
+		}
+		return nil, nil, errors.New("allocate Keychain item identifiers")
+	}
+	return service, account, nil
+}
+
+func (s keychainLicenseStore) Load(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	relayLicenseKeychainMu.Lock()
 	defer relayLicenseKeychainMu.Unlock()
-	service := C.CString(RelayLicenseKeychainService)
-	account := C.CString(RelayLicenseKeychainAccount)
+	serviceName, accountName := s.identifiers()
+	service, account, err := cIdentifiers(serviceName, accountName)
+	if err != nil {
+		return "", err
+	}
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
 	var output unsafe.Pointer
 	var length C.CFIndex
 	status := C.redline_license_load(service, account, &output, &length)
-	if status == C.errSecItemNotFound {
-		return "", ErrLicenseNotFound
-	}
 	if status != C.errSecSuccess {
-		return "", fmt.Errorf("read hosted relay license from Keychain: OSStatus %d", int32(status))
+		return "", keychainStatusError("read", status)
 	}
 	defer C.free(output)
+	if length < 0 || uint64(length) > uint64(math.MaxInt32) {
+		return "", fmt.Errorf("read hosted relay license from Keychain: invalid data length %d", int64(length))
+	}
 	value := C.GoBytes(output, C.int(length))
 	if len(value) == 0 {
 		return "", ErrLicenseNotFound
@@ -148,36 +204,50 @@ func (keychainLicenseStore) Load(ctx context.Context) (string, error) {
 	return string(value), nil
 }
 
-func (keychainLicenseStore) Replace(ctx context.Context, value string) error {
+func (s keychainLicenseStore) Replace(ctx context.Context, value string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(value) == "" {
 		return fmt.Errorf("replace hosted relay license: value is empty; use Clear to remove it")
 	}
+	if uint64(len(value)) > uint64(math.MaxInt64) {
+		return errors.New("replace hosted relay license: value is too large")
+	}
 	relayLicenseKeychainMu.Lock()
 	defer relayLicenseKeychainMu.Unlock()
-	service := C.CString(RelayLicenseKeychainService)
-	account := C.CString(RelayLicenseKeychainAccount)
+	serviceName, accountName := s.identifiers()
+	service, account, err := cIdentifiers(serviceName, accountName)
+	if err != nil {
+		return err
+	}
 	secret := C.CBytes([]byte(value))
+	if secret == nil {
+		C.free(unsafe.Pointer(service))
+		C.free(unsafe.Pointer(account))
+		return errors.New("allocate Keychain replacement value")
+	}
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
 	defer C.free(secret)
 	status := C.redline_license_replace(service, account, secret, C.CFIndex(len(value)))
 	if status != C.errSecSuccess {
-		return fmt.Errorf("replace hosted relay license in Keychain: OSStatus %d", int32(status))
+		return keychainStatusError("replace", status)
 	}
 	return nil
 }
 
-func (keychainLicenseStore) Clear(ctx context.Context) error {
+func (s keychainLicenseStore) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	relayLicenseKeychainMu.Lock()
 	defer relayLicenseKeychainMu.Unlock()
-	service := C.CString(RelayLicenseKeychainService)
-	account := C.CString(RelayLicenseKeychainAccount)
+	serviceName, accountName := s.identifiers()
+	service, account, err := cIdentifiers(serviceName, accountName)
+	if err != nil {
+		return err
+	}
 	defer C.free(unsafe.Pointer(service))
 	defer C.free(unsafe.Pointer(account))
 	status := C.redline_license_clear(service, account)
@@ -185,7 +255,7 @@ func (keychainLicenseStore) Clear(ctx context.Context) error {
 		return nil
 	}
 	if status != C.errSecSuccess {
-		return fmt.Errorf("clear hosted relay license from Keychain: OSStatus %d", int32(status))
+		return keychainStatusError("clear", status)
 	}
 	return nil
 }

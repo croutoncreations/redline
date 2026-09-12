@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,15 +16,19 @@ import (
 )
 
 type fakeLicenseStore struct {
-	mu    sync.Mutex
-	value string
-	loads int
+	mu      sync.Mutex
+	value   string
+	loadErr error
+	loads   int
 }
 
 func (s *fakeLicenseStore) Load(context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loads++
+	if s.loadErr != nil {
+		return "", s.loadErr
+	}
 	if s.value == "" {
 		return "", config.ErrLicenseNotFound
 	}
@@ -172,7 +178,7 @@ func TestRelayResolutionPrecedenceAndReadiness(t *testing.T) {
 	}{
 		{name: "yaml off", wantMode: config.RelayModeOff, wantStatus: config.RelayReadinessOff},
 		{name: "yaml hosted defaults", bootstrap: config.Relay{Enabled: true}, wantMode: config.RelayModeHosted, wantURL: config.DefaultHostedRelayURL, wantStatus: config.RelayReadinessNeedsLicense, wantLoads: 1},
-		{name: "yaml self hosted", bootstrap: config.Relay{Enabled: true, URL: "https://relay.example.com", EntitlementToken: "deprecated-secret-must-be-ignored"}, wantMode: config.RelayModeSelfHosted, wantURL: "https://relay.example.com", wantStatus: config.RelayReadinessSelfHosted, wantDial: true},
+		{name: "yaml self hosted never reads license", bootstrap: config.Relay{Enabled: true, URL: "https://relay.example.com"}, license: "rl_fake_boundary_sentinel_never_read", wantMode: config.RelayModeSelfHosted, wantURL: "https://relay.example.com", wantStatus: config.RelayReadinessSelfHosted, wantDial: true},
 		{name: "managed off wins over yaml", managed: &config.RelayManagedState{Mode: config.RelayModeOff}, bootstrap: config.Relay{Enabled: true, URL: "https://bootstrap.example.com"}, wantMode: config.RelayModeOff, wantStatus: config.RelayReadinessOff},
 		{name: "managed self hosted wins", managed: &config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://managed.example.com", SessionID: "session-abcdefghij0123"}, bootstrap: config.Relay{Enabled: true, URL: "https://bootstrap.example.com"}, wantMode: config.RelayModeSelfHosted, wantURL: "https://managed.example.com", wantStatus: config.RelayReadinessSelfHosted, wantDial: true},
 		{name: "hosted with key is configured but renewal is phase 2.2", managed: &config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL, SessionID: "session-abcdefghij0123"}, license: "rl_test_not_real", wantMode: config.RelayModeHosted, wantURL: config.DefaultHostedRelayURL, wantStatus: config.RelayReadinessHostedConfigured, wantLoads: 1},
@@ -204,14 +210,90 @@ func TestRelayResolutionPrecedenceAndReadiness(t *testing.T) {
 	}
 }
 
-func TestYAMLNeverAcceptsALicenseKey(t *testing.T) {
-	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
-relay:
-  enabled: true
-  license_key: rl_test_must_not_parse`, 1)
-	_, err := config.Load(writeConfig(t, configured))
-	if err == nil || !strings.Contains(err.Error(), "license_key") {
-		t.Fatalf("error = %v", err)
+func TestYAMLRejectsManagedSessionAndHostSecrets(t *testing.T) {
+	for _, field := range []string{"license_key", "entitlement_token", "session_id"} {
+		t.Run(field, func(t *testing.T) {
+			configured := strings.Replace(validConfig, "active_policy: standard", "active_policy: standard\nrelay:\n  enabled: true\n  "+field+": must_not_parse", 1)
+			path := writeConfig(t, configured)
+			for name, load := range map[string]func(string) (config.Config, error){"standard": config.Load, "service": config.LoadForService} {
+				_, err := load(path)
+				if err == nil || !strings.Contains(err.Error(), field) {
+					t.Fatalf("%s load error = %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEffectiveRelayValidationUsesManagedPrecedence(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", "active_policy: standard\napi:\n  trusted_hosts: [public.example.com]\nrelay:\n  enabled: true\n  url: http://stale.invalid", 1)
+	cfg, err := config.LoadForService(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("structural load rejected losing bootstrap: %v", err)
+	}
+
+	t.Run("managed off does not relax hosts", func(t *testing.T) {
+		resolved := config.ResolvedRelay{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff}}
+		if err := config.ValidateEffectiveRelay(cfg, resolved); err == nil || !strings.Contains(err.Error(), ".ts.net") {
+			t.Fatalf("effective validation error = %v", err)
+		}
+	})
+
+	t.Run("valid managed state ignores stale invalid YAML", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "relay-state.json")
+		store := config.NewRelayStateStore(path)
+		managed := config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://managed.example.com", SessionID: "managed-session-abcdefghij"}
+		if err := store.Save(managed); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := config.NewRelayResolver(store, &fakeLicenseStore{}).Resolve(context.Background(), cfg.Relay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved.URL != managed.URL {
+			t.Fatalf("resolved URL = %q", resolved.URL)
+		}
+		if err := config.ValidateEffectiveRelay(cfg, resolved); err != nil {
+			t.Fatalf("managed remote mode should permit valid public host: %v", err)
+		}
+	})
+}
+
+func TestLicenseSentinelNeverCrossesResolutionBoundary(t *testing.T) {
+	const sentinel = "rl_fake_boundary_sentinel_never_emit"
+	path := filepath.Join(t.TempDir(), "relay-state.json")
+	store := config.NewRelayStateStore(path)
+	resolved, err := config.NewRelayResolver(store, &fakeLicenseStore{value: sentinel}).Resolve(context.Background(), config.Relay{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonBytes, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"state": string(stateBytes), "resolved JSON": string(jsonBytes), "diagnostic/log formatting": fmt.Sprint(resolved), "argv": strings.Join(os.Args, "\x00"), "environment": strings.Join(os.Environ(), "\x00")} {
+		if strings.Contains(contents, sentinel) {
+			t.Fatalf("license sentinel crossed %s boundary", name)
+		}
+	}
+}
+
+func TestUnavailableLicenseStoreDisablesOnlyHostedRelay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-state.json")
+	store := config.NewRelayStateStore(path)
+	if err := store.Save(config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL, SessionID: "managed-session-abcdefghij"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := config.NewRelayResolver(store, &fakeLicenseStore{loadErr: config.ErrLicenseStoreUnavailable}).Resolve(context.Background(), config.Relay{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Readiness != config.RelayReadinessUnavailable || resolved.Dial {
+		t.Fatalf("resolved = %#v", resolved)
 	}
 }
 
@@ -268,6 +350,137 @@ func TestResolverGeneratesAndPersistsOneSessionConcurrently(t *testing.T) {
 	loaded, exists, err := store.Load()
 	if err != nil || !exists || loaded.SessionID != first {
 		t.Fatalf("persisted = %#v exists=%v err=%v", loaded, exists, err)
+	}
+}
+
+func TestRelayStateSubprocessHelper(t *testing.T) {
+	if os.Getenv("REDLINE_RELAY_STATE_HELPER") != "1" {
+		return
+	}
+	path, action, value := os.Getenv("REDLINE_RELAY_STATE_PATH"), os.Getenv("REDLINE_RELAY_STATE_ACTION"), os.Getenv("REDLINE_RELAY_STATE_VALUE")
+	store := config.NewRelayStateStore(path)
+	switch action {
+	case "resolve":
+		resolved, err := config.NewRelayResolver(store, &fakeLicenseStore{}).Resolve(context.Background(), config.Relay{Enabled: true, URL: "https://relay.example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Print(resolved.SessionID)
+	case "append":
+		_, err := store.Update(func(state config.RelayManagedState, exists bool) (config.RelayManagedState, error) {
+			if !exists {
+				return state, errors.New("missing state")
+			}
+			state.Label += value
+			return state, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown helper action %q", action)
+	}
+	os.Exit(0)
+}
+
+func runRelayStateHelpers(t *testing.T, path, action string, values []string) []string {
+	t.Helper()
+	outputs := make([]string, len(values))
+	errs := make(chan error, len(values))
+	var wg sync.WaitGroup
+	for index, value := range values {
+		wg.Add(1)
+		go func(index int, value string) {
+			defer wg.Done()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRelayStateSubprocessHelper$")
+			cmd.Env = append(os.Environ(), "REDLINE_RELAY_STATE_HELPER=1", "REDLINE_RELAY_STATE_PATH="+path, "REDLINE_RELAY_STATE_ACTION="+action, "REDLINE_RELAY_STATE_VALUE="+value)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				errs <- fmt.Errorf("helper %d: %w: %s", index, err, output)
+				return
+			}
+			outputs[index] = string(output)
+		}(index, value)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	return outputs
+}
+
+func TestResolverGeneratesOneSessionAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-state.json")
+	outputs := runRelayStateHelpers(t, path, "resolve", []string{"a", "b", "c", "d", "e", "f"})
+	for _, output := range outputs[1:] {
+		if output != outputs[0] {
+			t.Fatalf("session IDs differ across processes: %q and %q", outputs[0], output)
+		}
+	}
+	state, exists, err := config.NewRelayStateStore(path).Load()
+	if err != nil || !exists || state.SessionID != outputs[0] {
+		t.Fatalf("persisted state=%#v exists=%v err=%v outputs=%q", state, exists, err, outputs)
+	}
+}
+
+func TestRelayStateUpdateDoesNotLoseCrossProcessMutations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-state.json")
+	store := config.NewRelayStateStore(path)
+	if err := store.Save(config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com", SessionID: "session-abcdefghij0123"}); err != nil {
+		t.Fatal(err)
+	}
+	values := []string{"A", "B", "C", "D", "E", "F"}
+	runRelayStateHelpers(t, path, "append", values)
+	state, _, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if strings.Count(state.Label, value) != 1 {
+			t.Fatalf("lost update %q in label %q", value, state.Label)
+		}
+	}
+}
+
+func TestRelayStatePrePublicationFailurePreservesOldState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-state.json")
+	store := config.NewRelayStateStore(path)
+	original := config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com", SessionID: "session-abcdefghij0123"}
+	if err := store.Save(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "http://unsafe.example.com", SessionID: original.SessionID}); err == nil {
+		t.Fatal("invalid interrupted replacement unexpectedly succeeded")
+	}
+	loaded, exists, err := store.Load()
+	if err != nil || !exists || loaded != original {
+		t.Fatalf("old state not preserved: loaded=%#v exists=%v err=%v", loaded, exists, err)
+	}
+}
+
+func TestRelayStateRejectsSymlinkAndHostileParent(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "relay-state.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := config.NewRelayStateStore(link).Load(); err == nil {
+		t.Fatal("accepted symlink relay state")
+	}
+	hostile := filepath.Join(root, "hostile")
+	if err := os.Mkdir(hostile, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hostile, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.NewRelayStateStore(filepath.Join(hostile, "state.json")).Save(config.RelayManagedState{Mode: config.RelayModeOff}); err == nil || !strings.Contains(err.Error(), "directory permissions") {
+		t.Fatalf("hostile parent error = %v", err)
 	}
 }
 

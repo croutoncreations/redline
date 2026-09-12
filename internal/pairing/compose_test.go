@@ -11,6 +11,14 @@ import (
 // Detection failing is not a failure when there is a configured host to use
 // instead -- but it must not vanish either. The usual cause is Tailscale not
 // running, and a person about to scan a tailnet code would want to know.
+func TestComposeRefusesUnavailableRelayReadiness(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Relay = config.Relay{Enabled: true, URL: "https://relay.example.com", SessionID: "managed-session-abcdefghij", Readiness: string(config.RelayReadinessUnavailable)}
+	if _, err := Compose(cfg, "tok", Options{RelayOnly: true}); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestComposeReportsAFailedDetectionItRecoveredFrom(t *testing.T) {
 	cfg := config.Config{}
 	cfg.API.TrustedHosts = []string{"macbook.example.ts.net:8443"}

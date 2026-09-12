@@ -11,6 +11,7 @@ package pairing
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -80,8 +81,15 @@ type Code struct {
 // loading the keypair here rather than generating one is what makes the key
 // in the QR the key the phone will later be answered by.
 func Compose(cfg config.Config, token string, options Options) (Code, error) {
-	relayURL, desktopKey, sessionID, entitlement := "", "", "", ""
+	relayURL, desktopKey, sessionID := "", "", ""
 	if cfg.Relay.Enabled {
+		switch cfg.Relay.Readiness {
+		case "", string(config.RelayReadinessSelfHosted), "active", "renew_pending":
+			// Empty is retained for direct package callers and tests; the running
+			// service always supplies an explicit resolved readiness.
+		default:
+			return Code{}, fmt.Errorf("relay pairing is unavailable: %s", cfg.Relay.Readiness)
+		}
 		keypair, err := relay.LoadOrCreateKeypair(relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database))
 		if err != nil {
 			return Code{}, err
@@ -94,11 +102,6 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 		}
 		relayURL = cfg.Relay.URL
 		desktopKey = core.DesktopPublicKey(keypair)
-		// Presented by the phone to the relay as its own authorisation. It
-		// says nothing about who the user is, so handing it to a paired device
-		// grants relay access and nothing else. Empty for a self-hosted relay
-		// run with ALLOW_UNENTITLED=true.
-		entitlement = strings.TrimSpace(cfg.Relay.EntitlementToken)
 	}
 	hasRelay := relayURL != "" && desktopKey != "" && sessionID != ""
 
@@ -125,7 +128,7 @@ func Compose(cfg config.Config, token string, options Options) (Code, error) {
 	if hasRelay {
 		code.Routes = append(code.Routes, RouteRelay)
 	}
-	code.URL = URL(qrHost, port, token, relayURL, desktopKey, sessionID, entitlement)
+	code.URL = URL(qrHost, port, token, relayURL, desktopKey, sessionID)
 	return code, nil
 }
 
@@ -221,14 +224,13 @@ func splitHostPort(entry string) (string, int) {
 //
 // Relay, key and session travel together or not at all: without the key the
 // phone cannot verify who answers, and without the session it cannot find
-// this desktop on the relay. The entitlement is published when present but
-// not required for the other three -- a self-hosted relay run with
-// ALLOW_UNENTITLED=true has none, and an open relay does not ask.
+// this desktop on the relay. Host entitlement is deliberately never included:
+// phones are admitted only while an entitled host is attached.
 //
 // Omitting absent fields rather than sending them empty keeps a QR from a
 // relay-less desktop byte-identical to the one this has always produced, so
 // an older phone and a newer one read it the same way.
-func URL(host string, port int, token, relayURL, desktopKey, sessionID, entitlement string) string {
+func URL(host string, port int, token, relayURL, desktopKey, sessionID string) string {
 	endpoint := host
 	if port != 443 {
 		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
@@ -240,15 +242,12 @@ func URL(host string, port int, token, relayURL, desktopKey, sessionID, entitlem
 		fragment.Set("relay", relayURL)
 		fragment.Set("key", desktopKey)
 		fragment.Set("session", sessionID)
-		if entitlement != "" {
-			fragment.Set("entitlement", entitlement)
-		}
 	}
 	// Fragment holds the decoded form and RawFragment the encoded one; they
 	// have to agree or url.URL falls back to re-escaping Fragment, and an
 	// already-encoded string escaped twice turns %2B into %252B. Tokens are
-	// base64url and never contain those bytes; keys and entitlements are
-	// standard base64 and always might.
+	// base64url and never contain those bytes; keys are standard base64 and
+	// always might.
 	encoded := fragment.Encode()
 	decoded, err := url.PathUnescape(encoded)
 	if err != nil {

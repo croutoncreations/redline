@@ -81,12 +81,12 @@ type Relay struct {
 	// phone trusts. Empty means a default beside the database.
 	KeypairPath string `yaml:"keypair_path"`
 
-	// SessionID and EntitlementToken remain parseable only for the current
-	// pairing/source compatibility window. RelayResolver ignores both: session
-	// identity is generated into relay-state.json and secrets never override
-	// Keychain. They are removed at the coordinated pairing cutover.
-	SessionID        string `yaml:"session_id"`
-	EntitlementToken string `yaml:"entitlement_token"`
+	// Runtime-only values cannot be supplied by YAML. SessionID comes from
+	// relay-state.json; EntitlementToken remains only as a dialer handoff until
+	// Phase 2.2 owns token renewal and is never used by pairing.
+	SessionID        string `yaml:"-" json:"-"`
+	EntitlementToken string `yaml:"-" json:"-"`
+	Readiness        string `yaml:"-" json:"-"`
 }
 
 type Scheduler struct {
@@ -288,7 +288,15 @@ func validTrustedHost(host string, relayEnabled bool) bool {
 	return true
 }
 
-func Load(path string) (Config, error) {
+func Load(path string) (Config, error) { return load(path, true) }
+
+// LoadForService structurally decodes relay bootstrap fields but defers their
+// semantic effect until managed state has been resolved. This prevents stale,
+// losing YAML from either weakening trusted-host validation or stopping a
+// service whose authoritative managed state is valid.
+func LoadForService(path string) (Config, error) { return load(path, false) }
+
+func load(path string, validateBootstrapRelay bool) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
@@ -299,13 +307,32 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(validateBootstrapRelay); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func (cfg *Config) validate() error {
+// ValidateEffectiveRelay applies security decisions only to the authoritative
+// resolved mode. In particular, losing YAML cannot relax trusted hosts.
+func ValidateEffectiveRelay(cfg Config, resolved ResolvedRelay) error {
+	return validateEffectiveTrustedHosts(cfg.API.TrustedHosts, resolved.Mode != RelayModeOff)
+}
+
+func validateEffectiveTrustedHosts(hosts []string, remoteAccess bool) error {
+	for index, host := range hosts {
+		if validTrustedHost(host, remoteAccess) {
+			continue
+		}
+		if remoteAccess {
+			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified domain name", index, host)
+		}
+		return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
+	}
+	return nil
+}
+
+func (cfg *Config) validate(validateBootstrapRelay bool) error {
 	if cfg.Database == "" {
 		return fmt.Errorf("database is required")
 	}
@@ -318,16 +345,15 @@ func (cfg *Config) validate() error {
 	if len(cfg.Providers) == 0 {
 		return fmt.Errorf("at least one provider is required")
 	}
-	for index, host := range cfg.API.TrustedHosts {
-		if !validTrustedHost(host, cfg.Relay.Enabled) {
-			if cfg.Relay.Enabled {
-				return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified domain name", index, host)
-			}
-			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
+	if validateBootstrapRelay {
+		if err := validateEffectiveTrustedHosts(cfg.API.TrustedHosts, cfg.Relay.Enabled); err != nil {
+			return err
 		}
+	}
+	for index, host := range cfg.API.TrustedHosts {
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
-	if cfg.Relay.Enabled {
+	if validateBootstrapRelay && cfg.Relay.Enabled {
 		if strings.TrimSpace(cfg.Relay.URL) != "" {
 			if err := validRelayURL(cfg.Relay.URL); err != nil {
 				return fmt.Errorf("relay url: %w", err)

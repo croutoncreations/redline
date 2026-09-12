@@ -9,7 +9,7 @@ type unavailableLicenseStore struct{}
 func newPlatformLicenseStore() LicenseStore { return unavailableLicenseStore{} }
 
 func (unavailableLicenseStore) Load(context.Context) (string, error) {
-	return "", ErrLicenseNotFound
+	return "", ErrLicenseStoreUnavailable
 }
 
 func (unavailableLicenseStore) Replace(context.Context, string) error {

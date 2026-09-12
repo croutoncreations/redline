@@ -50,10 +50,11 @@ continues to reject cross-origin requests.
 
 ## 2. The relay (optional)
 
-Phase 2.1 provides the storage and resolution foundation; account activation, issuer
-calls, renewal, service endpoints, CLI commands, and the Pair a Device configuration UI
-are later milestones and do not exist yet. YAML is only an optional bootstrap. Once
-`relay-state.json` exists, managed state wins and the service does not rewrite the YAML.
+The current desktop provides the hardened storage and resolution foundation; account
+activation, issuer calls, renewal, relay management endpoints, and the Pair a Device
+configuration UI are later milestones and do not exist yet. YAML is only an optional
+bootstrap. Once `relay-state.json` exists, managed state wins and the service does not
+rewrite the YAML.
 
 ```yaml
 relay:
@@ -63,18 +64,19 @@ relay:
 ```
 
 With no `url`, bootstrap selects Redline's hosted relay and reports `needs_license` until
-a license is present in Keychain. Phase 2.1 deliberately does not contact the issuer or
-dial the hosted relay even after a license is present; Phase 2.2 supplies the entitlement
-needed to do that. A custom `url` selects self-hosted mode, which never reads a license or
-sends a token. `off` never dials.
+a license is present in Keychain. This foundation deliberately does not contact the
+issuer or dial the hosted relay even after a license is present; the entitlement lifecycle
+is still pending. If Keychain is locked, denied, or unavailable, hosted relay reports
+`unavailable` while the local API, scheduler, and database continue running. A custom
+`url` selects self-hosted mode, which never reads a license or sends a token. `off` never
+dials.
 
-The service creates `relay-state.json` beside `relay-identity.json` with mode `0600` and
-atomic replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `label`,
-and `session_id`; it contains no license or entitlement. The session id is generated on
-first hosted or self-hosted use and persisted only there. The old YAML `session_id` and
-`entitlement_token` Go fields remain temporarily parseable solely so the existing pairing
-source and tests can survive until the coordinated Phase 2.4 cutover. Service resolution
-ignores them, and no `license_key` YAML field exists.
+The service creates `relay-state.json` beside `relay-identity.json` with mode `0600`, an
+inter-process transaction lock, descriptor-based no-follow checks, and durable atomic
+replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `label`, and
+`session_id`; it contains no license or entitlement. The session id is generated on first
+hosted or self-hosted use and persisted only there. YAML containing `session_id`,
+`entitlement_token`, or `license_key` is rejected.
 
 Hosted licenses are generic-password items in macOS Keychain. The exact identifiers are
 service `ai.redline.mac.relay-license`, account `hosted`. Only the local service reads the
@@ -83,10 +85,10 @@ Keychain. Linux builds expose the same `LicenseStore` interface for fake-backed 
 do not provide plaintext file fallback.
 
 A closed relay verifies an entitlement only on the desktop `host` connection. Phone
-`client` connections present none: they are admitted only while the entitled host owns
-the session and while its signed `max_clients` cap permits. Current pairing code still
-has a legacy entitlement field; removing it is Phase 2.4/4 work, not part of this storage
-milestone.
+`client` connections present none: pairing URLs contain only `relay`, `key`, and `session`,
+and clients are admitted only while the entitled host owns the session and while its
+signed `max_clients` cap permits. Updated phones tolerate and discard the legacy fragment
+instead of retaining it.
 
 **Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
 then put its URL in the YAML block above. The committed self-host profile uses
@@ -110,9 +112,11 @@ code offers, and turns into a confirmation when the phone has paired.
 redline --config redline.yaml pair --qr
 ```
 
-The CLI picks the direct endpoint from `--host` if given, else a detected tailnet name that
-is trusted, else the first trusted host. With the relay enabled and no tailnet host, or
-with `--relay-only`, it emits a code that pairs over the relay alone.
+The CLI asks the authenticated running service to compose the complete pairing URL from
+resolved managed state; it never reconstructs relay fields from YAML. `--host` and
+`--port` are sent as authenticated overrides and validated against the service's trusted
+hosts. Otherwise the service uses the first trusted host. With the relay enabled and no
+tailnet host, or with `--relay-only`, it emits a code that pairs over the relay alone.
 
 Pairing itself goes over whichever route the phone can reach. A phone with no Tailscale
 pairs through the relay; nothing about pairing requires the tailnet.

@@ -11,7 +11,7 @@ import (
 func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 	got := URL(
 		"macbook.example.ts.net", 443, "one-time-token",
-		"https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123", "ent-token",
+		"https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123",
 	)
 
 	parsed, err := url.Parse(got)
@@ -41,7 +41,7 @@ func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {
 // With the relay off, the QR must look exactly as it always has, so a phone
 // paired against an older desktop and a newer one behave identically.
 func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
-	got := URL("macbook.example.ts.net", 443, "one-time-token", "", "", "", "")
+	got := URL("macbook.example.ts.net", 443, "one-time-token", "", "", "")
 	want := "https://macbook.example.ts.net/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
@@ -56,7 +56,7 @@ func TestMobilePairingURLOmitsRelayDetailsWhenUnset(t *testing.T) {
 // The expected value is also what the macOS app produces, so the two surfaces
 // cannot drift into emitting different codes for the same token.
 func TestMobilePairingURLEscapesTokensExactlyOnce(t *testing.T) {
-	got := URL("mac.example.ts.net", 443, "a+b/c=d&e", "", "", "", "")
+	got := URL("mac.example.ts.net", 443, "a+b/c=d&e", "", "", "")
 	want := "https://mac.example.ts.net/pair#pairing_token=a%2Bb%2Fc%3Dd%26e"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
@@ -78,20 +78,20 @@ func TestMobilePairingURLEscapesTokensExactlyOnce(t *testing.T) {
 }
 
 func TestMobilePairingURLIncludesNonDefaultHTTPSPort(t *testing.T) {
-	got := URL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "", "")
+	got := URL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token", "", "", "")
 	want := "https://macbook-pro.tail2e5d9.ts.net:8443/pair#pairing_token=one-time-token"
 	if got != want {
 		t.Fatalf("pairing URL = %q, want %q", got, want)
 	}
-	if defaultPort := URL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", "", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
+	if defaultPort := URL("macbook-pro.tail2e5d9.ts.net", 443, "token", "", "", ""); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
 		t.Fatalf("default pairing URL = %q", defaultPort)
 	}
 }
 
-func TestPairingURLCarriesTheEntitlement(t *testing.T) {
+func TestPairingURLNeverCarriesHostEntitlement(t *testing.T) {
 	got := URL(
 		"desk.example.ts.net", 443, "pair-token",
-		"https://relay.example.com", "desktop-key", "session-id", "entitlement-token",
+		"https://relay.example.com", "desktop-key", "session-id",
 	)
 
 	parsed, err := url.Parse(got)
@@ -102,21 +102,16 @@ func TestPairingURLCarriesTheEntitlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse fragment: %v", err)
 	}
-	if fields.Get("entitlement") != "entitlement-token" {
-		t.Errorf("entitlement = %q, want the token; a relayed session cannot start without it",
-			fields.Get("entitlement"))
+	if _, exists := fields["entitlement"]; exists {
+		t.Errorf("host entitlement leaked into phone QR: %q", fields.Get("entitlement"))
 	}
 }
 
-// Updated from the original "all four or none" rule: entitlement is now
-// optional so that self-hosted relays (ALLOW_UNENTITLED=true) can still
-// publish the three structural relay fields. The three structural fields
-// (relay, key, session) still travel together or not at all; an empty
-// entitlement is simply omitted rather than suppressing the whole group.
-func TestPairingURLPublishesRelayFieldsEvenWithEmptyEntitlement(t *testing.T) {
+// Relay, key, and session travel together without any host credential.
+func TestPairingURLPublishesStructuralRelayFields(t *testing.T) {
 	got := URL(
 		"desk.example.ts.net", 443, "pair-token",
-		"https://relay.example.com", "desktop-key", "session-id", "",
+		"https://relay.example.com", "desktop-key", "session-id",
 	)
 
 	parsed, _ := url.Parse(got)
@@ -140,7 +135,7 @@ func TestPairingURLPublishesRelayFieldsEvenWithEmptyEntitlement(t *testing.T) {
 func TestMobilePairingURLRelayOnlyUsesRelayHost(t *testing.T) {
 	got := URL(
 		"relay", 443, "one-time-token",
-		"https://redline-relay.example.com", "ZGVza3RvcC1rZXk=", "sess-abc", "",
+		"https://redline-relay.example.com", "ZGVza3RvcC1rZXk=", "sess-abc",
 	)
 	// The QR must carry a valid URL with host "relay".
 	parsed, err := url.Parse(got)
@@ -165,7 +160,7 @@ func TestMobilePairingURLRelayOnlyUsesRelayHost(t *testing.T) {
 func TestMobilePairingURLPublishesRelayWithoutEntitlement(t *testing.T) {
 	got := URL(
 		"desk.example.ts.net", 443, "pair-token",
-		"https://my-relay.example.com", "desktop-key", "session-id", "",
+		"https://my-relay.example.com", "desktop-key", "session-id",
 	)
 	parsed, err := url.Parse(got)
 	if err != nil {
@@ -196,17 +191,15 @@ func TestMobilePairingURLPublishesRelayWithoutEntitlement(t *testing.T) {
 // on the way across. This is the test that would have failed.
 func TestWhatTheDesktopComposesIsWhatThePhoneReads(t *testing.T) {
 	cases := map[string]struct {
-		host, relay, key, session, entitlement string
+		host, relay, key, session string
 	}{
 		"tailnet and relay": {
 			host: "macbook.example.ts.net", relay: "https://relay.example",
 			key: "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E=", session: "session-0123456789abcdefghijkl",
-			entitlement: "eyJleHAiOjF9.T1jh+dnP/igZ0kpVoQFJ2+/==",
 		},
 		"relay only": {
 			host: RelayOnlyHost, relay: "https://relay.example",
 			key: "ds+l3Fu+I5pTwmwTna7cMnK+P4LZulXpQz7f+9v5+E=", session: "session-0123456789abcdefghijkl",
-			entitlement: "eyJleHAiOjF9.T1jh+dnP/igZ0kpVoQFJ2+/==",
 		},
 		"relay only, self-hosted, no entitlement": {
 			host: RelayOnlyHost, relay: "https://relay.example",
@@ -216,7 +209,7 @@ func TestWhatTheDesktopComposesIsWhatThePhoneReads(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			composed := URL(c.host, 8443, "one-time-token", c.relay, c.key, c.session, c.entitlement)
+			composed := URL(c.host, 8443, "one-time-token", c.relay, c.key, c.session)
 
 			parsed, err := core.ParsePairingURL(composed)
 			if err != nil {
@@ -244,10 +237,9 @@ func TestWhatTheDesktopComposesIsWhatThePhoneReads(t *testing.T) {
 			if read.Token != "one-time-token" {
 				t.Errorf("token = %q", read.Token)
 			}
-			if read.Relay != c.relay || read.Key != c.key || read.Session != c.session || read.Entitlement != c.entitlement {
-				t.Errorf("relay fields did not survive the trip:\n got  %q %q %q %q\n want %q %q %q %q",
-					read.Relay, read.Key, read.Session, read.Entitlement,
-					c.relay, c.key, c.session, c.entitlement)
+			if read.Relay != c.relay || read.Key != c.key || read.Session != c.session || read.Entitlement != "" {
+				t.Errorf("relay fields mismatch or host entitlement reached phone:\n got %q %q %q %q",
+					read.Relay, read.Key, read.Session, read.Entitlement)
 			}
 		})
 	}

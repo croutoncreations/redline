@@ -142,8 +142,8 @@ func TestParsePairingURLCarriesTheEntitlement(t *testing.T) {
 	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.EntitlementToken != "ent.token" {
-		t.Errorf("entitlement_token = %q, want %q", got.EntitlementToken, "ent.token")
+	if got.EntitlementToken != "" {
+		t.Errorf("legacy entitlement was retained: %q", got.EntitlementToken)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestParsePairingURLPreservesPlusInTheEntitlement(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &req); err != nil {
 		t.Fatal(err)
 	}
-	if req.EntitlementToken != entitlement {
-		t.Errorf("entitlement arrived as %q, want %q", req.EntitlementToken, entitlement)
+	if req.EntitlementToken != "" {
+		t.Errorf("legacy entitlement was retained: %q", req.EntitlementToken)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestParsePairingURLRecoversPlusWhenTheQRDidNotEncodeIt(t *testing.T) {
 	if req.DesktopKey != key {
 		t.Errorf("key arrived as %q", req.DesktopKey)
 	}
-	if req.EntitlementToken != entitlement {
-		t.Errorf("entitlement arrived as %q, want %q", req.EntitlementToken, entitlement)
+	if req.EntitlementToken != "" {
+		t.Errorf("legacy entitlement was retained: %q", req.EntitlementToken)
 	}
 }

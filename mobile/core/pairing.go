@@ -31,11 +31,9 @@ type PairingRequest struct {
 	// RelaySession names this desktop's session on the relay. Without it the
 	// phone knows where the relay is but not which conversation is its own.
 	RelaySession string `json:"relay_session,omitempty"`
-	// EntitlementToken authorises the phone's own leg of a relayed session.
-	// The relay refuses an unentitled connection with 402, so without this a
-	// configured relay fails every time and looks like a broken relay rather
-	// than a missing credential.
-	EntitlementToken string `json:"entitlement_token,omitempty"`
+	// EntitlementToken is retained only for source compatibility. It is never
+	// populated or serialized; legacy QR fields are discarded.
+	EntitlementToken string `json:"-"`
 }
 
 // ParsePairingURL reads a scanned QR code and returns the pairing details as
@@ -213,13 +211,12 @@ func ParsePairingURL(raw string) (string, error) {
 	// key: the entitlement's signature is base64 too, and protecting one
 	// while leaving the other was how the double decode stayed hidden.
 	desktopKey := recoverBase64Plus(token.Get("key"))
-	entitlementToken := recoverBase64Plus(token.Get("entitlement"))
+	// Legacy entitlement fragments are intentionally ignored. A phone never
+	// receives or stores the host's credential.
 
 	// A relay-only code must carry the relay fields: without them the phone has
 	// no direct endpoint and no relay to fall back to, and would be permanently
-	// unreachable. A missing entitlement is tolerable only when the relay is
-	// open (ALLOW_UNENTITLED=true in the Worker); relay URL + key + session are
-	// all required.
+	// unreachable. Relay URL + key + session are all required.
 	relayURLVal := safeRelayURL(token.Get("relay"))
 	relaySessionVal := safeSessionID(token.Get("session"))
 	if isRelayOnly && (relayURLVal == "" || desktopKey == "" || relaySessionVal == "") {
@@ -232,10 +229,6 @@ func ParsePairingURL(raw string) (string, error) {
 		DesktopKey:   desktopKey,
 		RelayURL:     relayURLVal,
 		RelaySession: relaySessionVal,
-		// Carried verbatim: it is opaque to the phone, which only presents it
-		// to the relay. Validating its shape here would couple the pairing
-		// parser to a token format the relay owns.
-		EntitlementToken: strings.TrimSpace(entitlementToken),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode pairing request: %w", err)

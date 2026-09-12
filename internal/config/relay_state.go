@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -43,19 +42,26 @@ type RelayManagedState struct {
 	SessionID string    `json:"session_id"`
 }
 
-// RelayStateStore serializes access to the managed state and replaces the file
-// atomically. Stores for the same cleaned path share a process-local lock, so
-// independently constructed service components cannot lose updates.
+// RelayStateStore serializes access with an advisory file lock held across the
+// complete read/mutate/fsync/rename/fsync transaction. The normalized absolute
+// path gives aliases such as "a/../state" one lock identity across processes.
 type RelayStateStore struct {
 	path string
 	mu   *sync.Mutex
 }
 
-var relayStateLocks sync.Map
+var relayStateProcessLocks sync.Map
 
 func NewRelayStateStore(path string) *RelayStateStore {
-	cleaned := filepath.Clean(path)
-	lock, _ := relayStateLocks.LoadOrStore(cleaned, &sync.Mutex{})
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		absolute = path
+	}
+	cleaned := filepath.Clean(absolute)
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+		cleaned = filepath.Join(parent, filepath.Base(cleaned))
+	}
+	lock, _ := relayStateProcessLocks.LoadOrStore(cleaned, &sync.Mutex{})
 	return &RelayStateStore{path: cleaned, mu: lock.(*sync.Mutex)}
 }
 
@@ -67,29 +73,21 @@ func DefaultRelayStatePath(keypairPath, databasePath string) string {
 	return filepath.Join(filepath.Dir(relay.DefaultKeypairPath(keypairPath, databasePath)), "relay-state.json")
 }
 
-func (s *RelayStateStore) Load() (RelayManagedState, bool, error) {
+func (s *RelayStateStore) Load() (state RelayManagedState, exists bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.loadLocked()
+	op, err := beginRelayStateOperation(s.path)
+	if err != nil {
+		return RelayManagedState{}, false, err
+	}
+	defer func() { err = errors.Join(err, op.close()) }()
+	return loadRelayState(op)
 }
 
-func (s *RelayStateStore) loadLocked() (RelayManagedState, bool, error) {
-	info, err := os.Lstat(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return RelayManagedState{}, false, nil
-		}
-		return RelayManagedState{}, false, fmt.Errorf("inspect relay state: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return RelayManagedState{}, false, fmt.Errorf("relay state must be a regular file")
-	}
-	if info.Mode().Perm() != 0o600 {
-		return RelayManagedState{}, false, fmt.Errorf("relay state permissions %#o are invalid; want 0600", info.Mode().Perm())
-	}
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		return RelayManagedState{}, false, fmt.Errorf("read relay state: %w", err)
+func loadRelayState(op *relayStateOperation) (RelayManagedState, bool, error) {
+	raw, exists, err := op.read()
+	if err != nil || !exists {
+		return RelayManagedState{}, exists, err
 	}
 	var state RelayManagedState
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -110,32 +108,42 @@ func (s *RelayStateStore) loadLocked() (RelayManagedState, bool, error) {
 	return state, true, nil
 }
 
-func (s *RelayStateStore) Save(state RelayManagedState) error {
+func (s *RelayStateStore) Save(state RelayManagedState) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.saveLocked(state)
+	op, err := beginRelayStateOperation(s.path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, op.close()) }()
+	return saveRelayState(op, state)
 }
 
-// Update applies fn while holding the store lock, so read-modify-write callers
-// cannot create two session IDs or lose a concurrent managed choice.
-func (s *RelayStateStore) Update(fn func(RelayManagedState, bool) (RelayManagedState, error)) (RelayManagedState, error) {
+// Update holds the inter-process lock for the entire transaction, so separate
+// service processes cannot create two session IDs or lose concurrent updates.
+func (s *RelayStateStore) Update(fn func(RelayManagedState, bool) (RelayManagedState, error)) (next RelayManagedState, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, exists, err := s.loadLocked()
+	op, err := beginRelayStateOperation(s.path)
 	if err != nil {
 		return RelayManagedState{}, err
 	}
-	next, err := fn(current, exists)
+	defer func() { err = errors.Join(err, op.close()) }()
+	current, exists, err := loadRelayState(op)
 	if err != nil {
 		return RelayManagedState{}, err
 	}
-	if err := s.saveLocked(next); err != nil {
+	next, err = fn(current, exists)
+	if err != nil {
+		return RelayManagedState{}, err
+	}
+	if err := saveRelayState(op, next); err != nil {
 		return RelayManagedState{}, err
 	}
 	return next, nil
 }
 
-func (s *RelayStateStore) saveLocked(state RelayManagedState) error {
+func saveRelayState(op *relayStateOperation, state RelayManagedState) error {
 	if err := validateRelayManagedState(state); err != nil {
 		return err
 	}
@@ -144,49 +152,7 @@ func (s *RelayStateStore) saveLocked(state RelayManagedState) error {
 		return fmt.Errorf("encode relay state: %w", err)
 	}
 	raw = append(raw, '\n')
-	directory := filepath.Dir(s.path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create relay state directory: %w", err)
-	}
-	temporary, err := os.CreateTemp(directory, ".relay-state-*")
-	if err != nil {
-		return fmt.Errorf("create temporary relay state: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	fail := func(operation string, cause error) error {
-		_ = temporary.Close()
-		return fmt.Errorf("%s relay state: %w", operation, cause)
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		return fail("protect temporary", err)
-	}
-	if _, err := temporary.Write(raw); err != nil {
-		return fail("write temporary", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fail("sync temporary", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary relay state: %w", err)
-	}
-	if err := os.Rename(temporaryPath, s.path); err != nil {
-		return fmt.Errorf("replace relay state: %w", err)
-	}
-	// Rename preserves the temporary's 0600 mode. Chmod is defense in depth for
-	// platforms with unusual rename semantics and repairs no existing file in
-	// place (the replacement has already occurred).
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return fmt.Errorf("protect relay state: %w", err)
-	}
-	if directoryHandle, err := os.Open(directory); err == nil {
-		if syncErr := directoryHandle.Sync(); syncErr != nil {
-			_ = directoryHandle.Close()
-			return fmt.Errorf("sync relay state directory: %w", syncErr)
-		}
-		_ = directoryHandle.Close()
-	}
-	return nil
+	return op.write(raw)
 }
 
 var relaySessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
@@ -254,6 +220,7 @@ const (
 	RelayReadinessSelfHosted       RelayReadiness = "self_hosted"
 	RelayReadinessNeedsLicense     RelayReadiness = "needs_license"
 	RelayReadinessHostedConfigured RelayReadiness = "hosted_configured"
+	RelayReadinessUnavailable      RelayReadiness = "unavailable"
 )
 
 type ResolvedRelay struct {
@@ -327,6 +294,9 @@ func (r *RelayResolver) Resolve(ctx context.Context, bootstrap Relay) (ResolvedR
 		license, err := r.licenses.Load(ctx)
 		if errors.Is(err, ErrLicenseNotFound) {
 			return ResolvedRelay{RelayManagedState: state, Readiness: RelayReadinessNeedsLicense}, nil
+		}
+		if errors.Is(err, ErrLicenseStoreUnavailable) {
+			return ResolvedRelay{RelayManagedState: state, Readiness: RelayReadinessUnavailable}, nil
 		}
 		if err != nil {
 			return ResolvedRelay{}, fmt.Errorf("read hosted relay license: %w", err)

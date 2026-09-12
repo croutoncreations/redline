@@ -102,7 +102,7 @@ func TestPairingResponseCarriesTheRelayWhenEnabled(t *testing.T) {
 		Enabled:          true,
 		URL:              "https://relay.example",
 		SessionID:        "session-0123456789abcdefghijklmnop",
-		EntitlementToken: "eyJleHAiOjF9.sig+with/plus==",
+		EntitlementToken: "rl_fake_boundary_sentinel_never_emit",
 	}
 	handler := pairingHandler(t, cfg)
 
@@ -117,10 +117,12 @@ func TestPairingResponseCarriesTheRelayWhenEnabled(t *testing.T) {
 	if fragment.Get("session") != cfg.Relay.SessionID {
 		t.Errorf("session = %q", fragment.Get("session"))
 	}
-	// The '+' in the entitlement is the byte that was silently lost once; the
-	// URL the service hands out must round-trip it.
-	if fragment.Get("entitlement") != cfg.Relay.EntitlementToken {
-		t.Errorf("entitlement = %q, want %q", fragment.Get("entitlement"), cfg.Relay.EntitlementToken)
+	if fragment.Has("entitlement") {
+		t.Errorf("host entitlement leaked into pairing URL: %q", fragment.Get("entitlement"))
+	}
+	encodedResponse, _ := json.Marshal(body)
+	if strings.Contains(string(encodedResponse), cfg.Relay.EntitlementToken) {
+		t.Fatalf("host entitlement leaked through service JSON: %s", encodedResponse)
 	}
 	if key := fragment.Get("key"); len(key) != 44 {
 		t.Errorf("key should be a base64 32-byte public key, got %q", key)

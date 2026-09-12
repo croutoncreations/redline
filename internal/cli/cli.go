@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -413,11 +412,19 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadForService(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	// Claim the service boundary before RelayResolver can initialize or update
+	// managed state. A losing second service therefore cannot mutate state.
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer listener.Close()
 	resolver := config.NewRelayResolver(
 		config.NewRelayStateStore(config.DefaultRelayStatePath(cfg.Relay.KeypairPath, cfg.Database)),
 		config.DefaultLicenseStore(),
@@ -427,28 +434,30 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, "relay:", err)
 		return 1
 	}
+	if err := config.ValidateEffectiveRelay(cfg, resolvedRelay); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	// From this boundary onward every service component sees the same resolved
-	// values. Deprecated YAML session/token fields cannot bypass managed state
-	// or Keychain precedence.
+	// values. Rejected YAML session/token fields cannot bypass managed state or
+	// Keychain precedence.
 	cfg.Relay.Enabled = resolvedRelay.Dial
 	cfg.Relay.URL = resolvedRelay.URL
 	cfg.Relay.IssuerURL = resolvedRelay.IssuerURL
 	cfg.Relay.SessionID = resolvedRelay.SessionID
 	cfg.Relay.EntitlementToken = ""
-	if resolvedRelay.Readiness == config.RelayReadinessNeedsLicense {
+	cfg.Relay.Readiness = string(resolvedRelay.Readiness)
+	switch resolvedRelay.Readiness {
+	case config.RelayReadinessNeedsLicense:
 		fmt.Fprintln(stderr, "relay: needs_license")
+	case config.RelayReadinessUnavailable:
+		fmt.Fprintln(stderr, "relay: unavailable (Keychain access unavailable)")
 	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	listener, err := net.Listen("tcp", *listen)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	defer listener.Close()
 	database, err := store.Open(cfg.Database)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -781,12 +790,6 @@ func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Wri
 	return 0
 }
 
-type tailscaleStatus struct {
-	Self struct {
-		DNSName string `json:"DNSName"`
-	} `json:"Self"`
-}
-
 func runPair(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -805,59 +808,30 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "--port must be between 1 and 65535")
 		return 1
 	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	_ = configPath // Pairing state belongs to the authenticated running service.
+	var code struct {
+		Token       string          `json:"pairing_token"`
+		ExpiresAt   time.Time       `json:"expires_at"`
+		PairingURL  string          `json:"pairing_url"`
+		Routes      []pairing.Route `json:"routes"`
+		Endpoint    string          `json:"endpoint"`
+		RelayStatus string          `json:"relay_status"`
 	}
-
-	// Composed here from the local config rather than taken from the service's
-	// own pairing_url, because the CLI has flags the service does not: an
-	// explicit --host, a --port, and a tailnet name it can detect from this
-	// machine. Both go through the same package, so the two cannot drift.
-	//
-	// Composed before the token is minted, with a placeholder, so a bad --host
-	// is refused without spending a one-time credential on it.
-	options := pairing.Options{
-		Host:       *host,
-		Port:       *port,
-		RelayOnly:  *relayOnly,
-		DetectHost: tailscaleDNSName,
-	}
-	if _, err := pairing.Compose(cfg, "pending", options); err != nil {
-		if errors.Is(err, pairing.ErrNoRoute) {
-			fmt.Fprintln(stderr, "no Tailscale host is available and relay is not enabled; add a host to api.trusted_hosts or enable relay")
-			return 1
-		}
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-
-	var minted struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &minted); err != nil {
+	request := map[string]any{"host": *host, "port": *port, "relay_only": *relayOnly}
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", request, &code); err != nil {
 		fmt.Fprintln(stderr, "create pairing token:", err)
 		return 1
 	}
-	if minted.Token == "" || !minted.ExpiresAt.After(time.Now()) {
-		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
+	if code.Token == "" || code.PairingURL == "" || !code.ExpiresAt.After(time.Now()) {
+		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential or no usable route")
 		return 1
 	}
-	code, err := pairing.Compose(cfg, minted.Token, options)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	qr, err := qrcode.New(code.URL, qrcode.Medium)
+	qr, err := qrcode.New(code.PairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	if code.Notice != "" {
-		fmt.Fprintln(stderr, "note:", code.Notice)
-	}
+	fmt.Fprintf(stdout, "Relay: %s\n", strings.ReplaceAll(code.RelayStatus, "_", " "))
 
 	// Says exactly which routes the code offers, because "from a device on
 	// your tailnet" was wrong for two of the three.
@@ -877,31 +851,6 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	renderTerminalQR(stdout, qr.Bitmap())
 	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
 	return 0
-}
-
-func tailscaleDNSName() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "tailscale", "status", "--json").CombinedOutput()
-	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("read Tailscale status: command timed out")
-		}
-		detail := strings.TrimSpace(string(output))
-		if detail != "" {
-			return "", fmt.Errorf("read Tailscale status: %s", detail)
-		}
-		return "", fmt.Errorf("read Tailscale status: %w", err)
-	}
-	var status tailscaleStatus
-	if err := json.Unmarshal(output, &status); err != nil {
-		return "", fmt.Errorf("decode Tailscale status: %w", err)
-	}
-	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), "."))
-	if host == "" {
-		return "", fmt.Errorf("Tailscale status did not include this device's MagicDNS name")
-	}
-	return host, nil
 }
 
 func renderTerminalQR(output io.Writer, bitmap [][]bool) {

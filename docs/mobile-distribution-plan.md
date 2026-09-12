@@ -1,8 +1,8 @@
 # Redline mobile + relay: distribution and licensing plan
 
-Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 is implemented; later-phase descriptions below remain design, not released UI.
+Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 and the hardened Phase 2.1 foundation are implemented; later-phase descriptions below remain design, not released UI.
 
-## 1. Where the branch stands after Phase 1
+## 1. Where the branch stands
 
 The relay boundary now provides:
 
@@ -13,8 +13,8 @@ The relay boundary now provides:
 
 Gaps that matter for shipping, in phase order:
 
-1. **Desktop entitlement lifecycle (Phase 2).** Managed relay state, Keychain license storage, issuer calls/cache/renewal, relay refresh handling, per-channel Noise handlers, structured relay state, local APIs, and CLI commands are not implemented.
-2. **Remove legacy phone token plumbing (Phase 2/4).** The relay no longer requires or trusts a client token, but the existing pairing/mobile APIs still carry the legacy field. Phase 2 removes it from pairing; Phase 4 deletes stored phone values and adds structured client errors.
+1. **Desktop entitlement lifecycle (Phase 2).** Managed relay state and Keychain license storage are implemented. Issuer calls/cache/renewal, relay refresh handling, per-channel Noise handlers, structured relay management APIs, and relay lifecycle CLI commands are not implemented.
+2. **Finish phone cleanup and errors (Phase 4).** Pairing no longer emits a host entitlement and the Go mobile parser discards the legacy fragment. Phase 4 still deletes Android persisted legacy values and adds structured client errors.
 3. **Desktop setup and status UI (Phase 3).** Pair a Device does not yet configure hosted/self-hosted mode or activate a license, and the menu bar has no renewal/lapse state.
 4. **Android release (Phase 4).** Final application id, SDK 36 target, upload signing, Play-only AAB workflow, privacy verification, and listing work remain.
 5. **Issuer and key rotation (Phase 5).** Checkout, seat activation, token issuance, recovery, portal, webhook ordering, and the new production signing key live in the separate private issuer repository. No production relay deployment is usable until that key exists and the guarded retired public key is replaced.
