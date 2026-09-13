@@ -210,8 +210,9 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 			requestCompleted <- err
 			return
 		}
+		channel := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 		first, _ := phone.StartHandshake()
-		if err := conn.Write(r.Context(), websocket.MessageBinary, first); err != nil {
+		if err := conn.Write(r.Context(), websocket.MessageBinary, append(channel[:], first...)); err != nil {
 			requestCompleted <- err
 			return
 		}
@@ -220,19 +221,27 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 			requestCompleted <- err
 			return
 		}
-		if err := phone.FinishHandshake(reply); err != nil {
+		if len(reply) < len(channel) || string(reply[:len(channel)]) != string(channel[:]) {
+			requestCompleted <- errors.New("handshake reply used wrong relay channel")
+			return
+		}
+		if err := phone.FinishHandshake(reply[len(channel):]); err != nil {
 			requestCompleted <- err
 			return
 		}
 		request, _ := relay.EncodeRequestParts(http.MethodGet, "/v1/dashboard", nil, nil)
 		sealed, _ := phone.Seal(request)
-		if err := conn.Write(r.Context(), websocket.MessageBinary, sealed); err != nil {
+		if err := conn.Write(r.Context(), websocket.MessageBinary, append(channel[:], sealed...)); err != nil {
 			requestCompleted <- err
 			return
 		}
 		_, response, err := conn.Read(r.Context())
 		if err == nil {
-			opened, openErr := phone.Open(response)
+			if len(response) < len(channel) || string(response[:len(channel)]) != string(channel[:]) {
+				requestCompleted <- errors.New("response used wrong relay channel")
+				return
+			}
+			opened, openErr := phone.Open(response[len(channel):])
 			if openErr == nil {
 				decoded, decodeErr := relay.DecodeResponse(opened)
 				if decodeErr != nil {
@@ -245,8 +254,9 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 			}
 		}
 		requestCompleted <- err
-		// Force the dialer's prompt bad-frame reconnect after the live refresh.
-		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("force reconnect"))
+		// A malformed envelope with no complete channel forces a fresh host
+		// connection after the live refresh.
+		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("bad"))
 	})
 	tlsRelay := httptest.NewTLSServer(mux)
 	defer tlsRelay.Close()

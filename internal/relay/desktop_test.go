@@ -227,22 +227,10 @@ func TestRequestsBeforeTheHandshakeAreRefused(t *testing.T) {
 	}
 }
 
-// A second phone may take over an established session, but only with the
-// pairing credential.
-//
-// This replaces a test that refused any second handshake. That was right while
-// the desktop's connection died with each phone: a second handshake could only
-// be a bug or a state-reset attempt. It stopped being right once the relay
-// kept the desktop attached across phones, because then a returning phone's
-// opening message arrives on a live session and refusing it made one
-// connection serve exactly one phone, forever.
-//
-// The credential is what still gates entry. A handshake must be a valid Noise
-// IK message encrypted to the desktop's static key, so an attacker without it
-// cannot produce one. Someone who HAS it could already pair as the client
-// directly, since the relay allows one client at a time and the previous one
-// has gone -- so allowing the restart grants no capability they lacked.
-func TestASecondPhoneMayTakeOverWithTheCredential(t *testing.T) {
+// A second handshake on one channel must not reset its authenticated cipher
+// state. Returning phones receive a fresh relay channel; accepting a reset in
+// place would let an invalid frame rewrite established per-channel state.
+func TestSessionHandlerRefusesASecondHandshake(t *testing.T) {
 	keypair, _ := core.NewDesktopKeypair()
 	handler := NewSessionHandler(keypair, NewForwarder("http://127.0.0.1:1", http.DefaultClient))
 
@@ -254,12 +242,8 @@ func TestASecondPhoneMayTakeOverWithTheCredential(t *testing.T) {
 
 	other, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
 	second, _ := other.StartHandshake()
-	reply, err := handler.HandleFrame(context.Background(), second)
-	if err != nil {
-		t.Fatalf("a returning phone must be able to start a new session: %v", err)
-	}
-	if err := other.FinishHandshake(reply); err != nil {
-		t.Fatalf("the new session must be usable: %v", err)
+	if _, err := handler.HandleFrame(context.Background(), second); err == nil {
+		t.Fatal("a second handshake reset an established channel")
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -65,7 +64,8 @@ func TestDialerServesAPhoneThroughTheRelay(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := conn.Write(ctx, websocket.MessageBinary, first); err != nil {
+				channel := [relayChannelBytes]byte{1, 2, 3, 4, 5, 6, 7, 8}
+				if err := conn.Write(ctx, websocket.MessageBinary, append(channel[:], first...)); err != nil {
 					done <- err
 					return
 				}
@@ -74,7 +74,11 @@ func TestDialerServesAPhoneThroughTheRelay(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := phone.FinishHandshake(reply); err != nil {
+				if len(reply) < relayChannelBytes || string(reply[:relayChannelBytes]) != string(channel[:]) {
+					done <- errors.New("handshake reply used the wrong relay channel")
+					return
+				}
+				if err := phone.FinishHandshake(reply[relayChannelBytes:]); err != nil {
 					done <- err
 					return
 				}
@@ -89,7 +93,7 @@ func TestDialerServesAPhoneThroughTheRelay(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := conn.Write(ctx, websocket.MessageBinary, sealed); err != nil {
+				if err := conn.Write(ctx, websocket.MessageBinary, append(channel[:], sealed...)); err != nil {
 					done <- err
 					return
 				}
@@ -98,7 +102,11 @@ func TestDialerServesAPhoneThroughTheRelay(t *testing.T) {
 					done <- err
 					return
 				}
-				opened, err := phone.Open(frame)
+				if len(frame) < relayChannelBytes || string(frame[:relayChannelBytes]) != string(channel[:]) {
+					done <- errors.New("response used the wrong relay channel")
+					return
+				}
+				opened, err := phone.Open(frame[relayChannelBytes:])
 				if err != nil {
 					done <- err
 					return
@@ -273,29 +281,6 @@ func TestDialerBacksOffWhenTheRelayDropsAnAcceptedConnection(t *testing.T) {
 	}
 }
 
-// An idle timeout is how a session normally ends: the phone went away. It must
-// not be treated as a failure, because the accrued backoff would then make the
-// desktop slow to answer the next time someone opened the app -- punishing the
-// user for having put their phone down.
-//
-// The distinction has to be drawn from the real read deadline rather than from
-// "any error after connecting", or every dropped socket becomes an instant
-// retry.
-func TestOnlyARealDeadlineCountsAsIdle(t *testing.T) {
-	if !errors.Is(fmt.Errorf("%w after %v", errIdle, 5*time.Minute), errIdle) {
-		t.Fatal("an idle timeout must be recognisable as such by the caller")
-	}
-	for _, notIdle := range []error{
-		errors.New("connection refused"),
-		io.EOF,
-		context.Canceled,
-	} {
-		if errors.Is(notIdle, errIdle) {
-			t.Fatalf("%v must not look like an idle timeout", notIdle)
-		}
-	}
-}
-
 // A connection that worked for an hour and then dropped should retry promptly.
 // Reusing the backoff from a previous outage would leave a healthy desktop
 // unreachable for half a minute for no reason.
@@ -352,7 +337,8 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := conn.Write(ctx, websocket.MessageBinary, first); err != nil {
+				channel := [relayChannelBytes]byte{8, 7, 6, 5, 4, 3, 2, 1}
+				if err := conn.Write(ctx, websocket.MessageBinary, append(channel[:], first...)); err != nil {
 					done <- err
 					return
 				}
@@ -361,7 +347,11 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := phone.FinishHandshake(reply); err != nil {
+				if len(reply) < relayChannelBytes || string(reply[:relayChannelBytes]) != string(channel[:]) {
+					done <- errors.New("large-frame handshake reply used the wrong channel")
+					return
+				}
+				if err := phone.FinishHandshake(reply[relayChannelBytes:]); err != nil {
 					done <- err
 					return
 				}
@@ -379,7 +369,7 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 					done <- err
 					return
 				}
-				if err := conn.Write(ctx, websocket.MessageBinary, sealed); err != nil {
+				if err := conn.Write(ctx, websocket.MessageBinary, append(channel[:], sealed...)); err != nil {
 					done <- err
 					return
 				}
@@ -388,7 +378,11 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 					done <- err
 					return
 				}
-				opened, err := phone.Open(frame)
+				if len(frame) < relayChannelBytes || string(frame[:relayChannelBytes]) != string(channel[:]) {
+					done <- errors.New("large-frame response used the wrong channel")
+					return
+				}
+				opened, err := phone.Open(frame[relayChannelBytes:])
 				if err != nil {
 					done <- err
 					return
@@ -430,6 +424,69 @@ func TestLargeFramesSurviveTheDialLoop(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out carrying a large frame")
+	}
+}
+
+func TestExactHostWireBoundaryPreservesAnotherChannel(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	done := make(chan error, 1)
+	var once sync.Once
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		once.Do(func() {
+			go func() {
+				ctx := context.Background()
+				// This is exactly a 1 MiB encrypted payload plus its eight-byte
+				// host channel. It is deliberately invalid Noise for channel zero;
+				// accepting and isolating it is proved by the valid channel below.
+				boundary := make([]byte, maxHostWireFrame)
+				if err := conn.Write(ctx, websocket.MessageBinary, boundary); err != nil {
+					done <- err
+					return
+				}
+
+				channel := relayChannel{9, 8, 7, 6, 5, 4, 3, 2}
+				phone, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+				if err != nil {
+					done <- err
+					return
+				}
+				opening, err := phone.StartHandshake()
+				if err != nil {
+					done <- err
+					return
+				}
+				if err := conn.Write(ctx, websocket.MessageBinary, append(channel[:], opening...)); err != nil {
+					done <- err
+					return
+				}
+				_, reply, err := conn.Read(ctx)
+				if err != nil {
+					done <- fmt.Errorf("boundary closed host socket: %w", err)
+					return
+				}
+				if len(reply) < relayChannelBytes || string(reply[:relayChannelBytes]) != string(channel[:]) {
+					done <- fmt.Errorf("reply crossed channel: %x", reply)
+					return
+				}
+				done <- phone.FinishHandshake(reply[relayChannelBytes:])
+			}()
+		})
+	})
+	defer relay.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go NewDialer(DialerOptions{
+		RelayURL: relay.URL, SessionID: "boundary-session-0123456789", Keypair: keypair,
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+	}).Run(ctx)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out after exact host-wire boundary")
 	}
 }
 
@@ -719,23 +776,13 @@ func mustTestKeypair(t *testing.T) noise.DHKey {
 	return kp
 }
 
-// A bad frame from a phone must not make the desktop unreachable.
-//
-// A decrypt failure ends the Noise session, so the desktop reconnects -- but it
-// treated that like a relay outage and backed off, reaching 22 seconds. The
-// cause is a phone that dialled with a stale session; the phone is about to
-// retry with a fresh handshake, and it finds nobody listening.
-//
-// Backing off protects the relay from a hot loop. A frame error is not that:
-// the socket was healthy enough to deliver it, and reconnecting is cheap and
-// immediately useful.
-func TestDialerDoesNotBackOffAfterABadFrame(t *testing.T) {
-	rec := &recordingLog{}
+// A malformed host envelope has no trustworthy channel id, so it reconnects
+// the host promptly rather than guessing which phone state to discard.
+func TestDialerReconnectsPromptlyAfterAMalformedHostFrame(t *testing.T) {
 	var dials int32
 	relay := fakeRelay(t, func(conn *websocket.Conn) {
 		atomic.AddInt32(&dials, 1)
-		// Garbage that cannot decrypt, as a stale session's frame would be.
-		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("not a noise frame"))
+		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("short"))
 		time.Sleep(50 * time.Millisecond)
 		conn.CloseNow()
 	})
@@ -743,86 +790,62 @@ func TestDialerDoesNotBackOffAfterABadFrame(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	dialer := NewDialer(DialerOptions{
-		RelayURL:  relay.URL,
-		SessionID: "test-session-1234",
-		Keypair:   mustTestKeypair(t),
+		RelayURL: relay.URL, SessionID: "test-session-1234", Keypair: mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
-		Logf:      rec.log,
 	})
 	go dialer.Run(ctx)
 
-	// Three dials inside two seconds is only possible without a growing
-	// backoff: the old behaviour reached 2.3s after the first failure alone.
 	deadline := time.After(2 * time.Second)
 	for atomic.LoadInt32(&dials) < 3 {
 		select {
 		case <-deadline:
-			cancel()
-			t.Fatalf("only %d dials in two seconds; a frame error is still backing off.\nlog:\n%s",
-				atomic.LoadInt32(&dials), rec.all())
+			t.Fatalf("only %d dials in two seconds; malformed host frames are backing off", atomic.LoadInt32(&dials))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	cancel()
 }
 
-// One connection must be able to serve a second phone.
-//
-// The relay no longer closes the desktop when a phone leaves, which is what
-// stopped every disconnect costing a reconnect. But the desktop built one
-// Noise session per CONNECTION, and an established session refuses a second
-// handshake as a replay -- correctly, in isolation. Together those two facts
-// meant the surviving connection could serve exactly one phone, and the next
-// one got "message authentication failed" on every attempt.
-//
-// A handshake on an established session is the phone starting over, not an
-// attack: the relay only ever pairs one client at a time, and a client that
-// has gone cannot send anything. So the desktop starts a fresh session rather
-// than refusing.
-func TestDesktopServesASecondPhoneOnOneConnection(t *testing.T) {
+func TestChannelCloseAllowsFreshNoiseOnTheSameHostConnection(t *testing.T) {
 	keypair := mustTestKeypair(t)
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer local.Close()
+	responses := make(chan []byte, 2)
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder("http://127.0.0.1:1", nil), func(_ context.Context, frame []byte) error {
+		responses <- append([]byte(nil), frame...)
+		return nil
+	})
+	defer mux.Close()
+	channel := relayChannel{1, 2, 3, 4, 5, 6, 7, 8}
 
-	handler := NewSessionHandler(keypair, NewForwarder(local.URL, local.Client()))
-
-	// The first phone completes a handshake.
-	first, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
-	if err != nil {
+	first, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	firstMsg, _ := first.StartHandshake()
+	if err := mux.Dispatch(append(channel[:], firstMsg...)); err != nil {
 		t.Fatal(err)
 	}
-	firstMsg, err := first.StartHandshake()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err := handler.HandleFrame(context.Background(), firstMsg)
-	if err != nil {
-		t.Fatalf("first handshake: %v", err)
-	}
-	if err := first.FinishHandshake(reply); err != nil {
+	firstReply := <-responses
+	if err := first.FinishHandshake(firstReply[relayChannelBytes:]); err != nil {
 		t.Fatalf("first finish: %v", err)
 	}
 
-	// That phone goes away. A second one arrives on the same connection,
-	// because the relay no longer tears the desktop down in between.
-	second, err := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
-	if err != nil {
+	// The relay's exact eight-byte notification deletes only this channel.
+	if err := mux.Dispatch(channel[:]); err != nil {
 		t.Fatal(err)
 	}
-	secondMsg, err := second.StartHandshake()
-	if err != nil {
+	if mux.count() != 0 {
+		t.Fatalf("closed channel remains in map: %d", mux.count())
+	}
+	// Unknown close is idempotent.
+	if err := mux.Dispatch(channel[:]); err != nil {
+		t.Fatalf("duplicate close: %v", err)
+	}
+
+	second, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	secondMsg, _ := second.StartHandshake()
+	if err := mux.Dispatch(append(channel[:], secondMsg...)); err != nil {
 		t.Fatal(err)
 	}
-	secondReply, err := handler.HandleFrame(context.Background(), secondMsg)
-	if err != nil {
-		t.Fatalf("a second phone must be able to handshake on the same connection: %v", err)
-	}
-	if err := second.FinishHandshake(secondReply); err != nil {
-		t.Fatalf("second finish: %v", err)
+	secondReply := <-responses
+	if err := second.FinishHandshake(secondReply[relayChannelBytes:]); err != nil {
+		t.Fatalf("fresh session after close: %v", err)
 	}
 }
 
@@ -836,7 +859,7 @@ func TestDialerReconnectReadsLatestTokenSource(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("force fresh noise session"))
+		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("bad"))
 		time.Sleep(20 * time.Millisecond)
 		conn.CloseNow()
 	}))
@@ -902,5 +925,438 @@ func TestDialerRejectsHostileSessionBeforeNetwork(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("invalid sessions reached network: %d", requests.Load())
+	}
+}
+
+func TestMultiplexerIdleEvictionIsPerChannelAndGenerationSafe(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	responses := make(chan []byte, 2)
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder("http://127.0.0.1:1", nil), func(_ context.Context, frame []byte) error {
+		responses <- frame
+		return nil
+	})
+	defer mux.Close()
+	base := time.Unix(1_700_000_000, 0)
+	current := base
+	mux.now = func() time.Time { return current }
+
+	channels := []relayChannel{{1}, {2}}
+	for _, channel := range channels {
+		phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+		opening, _ := phone.StartHandshake()
+		if err := mux.Dispatch(append(channel[:], opening...)); err != nil {
+			t.Fatal(err)
+		}
+		<-responses
+	}
+
+	mux.mu.Lock()
+	first := mux.sessions[channels[0]]
+	second := mux.sessions[channels[1]]
+	first.lastSeen = base
+	second.lastSeen = base.Add(idleTimeout - time.Second)
+	mux.mu.Unlock()
+	current = base.Add(idleTimeout)
+	mux.evictIfIdle(channels[0], first)
+	mux.evictIfIdle(channels[1], second)
+	if mux.count() != 1 || !mux.active(channels[1], second) {
+		t.Fatalf("idle eviction affected the active channel; count=%d", mux.count())
+	}
+
+	// Reuse the evicted bytes, then simulate the old timer firing late. The
+	// pointer identity check must preserve the replacement generation.
+	phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	opening, _ := phone.StartHandshake()
+	if err := mux.Dispatch(append(channels[0][:], opening...)); err != nil {
+		t.Fatal(err)
+	}
+	<-responses
+	mux.evictIfIdle(channels[0], first)
+	mux.mu.Lock()
+	replacement := mux.sessions[channels[0]]
+	mux.mu.Unlock()
+	if replacement == nil || replacement == first {
+		t.Fatal("late idle callback deleted the replacement generation")
+	}
+}
+
+func TestMultiplexerBoundsChannelsAndHostFrames(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	responses := make(chan []byte, maxRelayChannels)
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder("http://127.0.0.1:1", nil), func(_ context.Context, frame []byte) error {
+		responses <- frame
+		return nil
+	})
+	defer mux.Close()
+
+	for i := 0; i < maxRelayChannels; i++ {
+		channel := relayChannel{byte(i + 1)}
+		phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+		opening, _ := phone.StartHandshake()
+		if err := mux.Dispatch(append(channel[:], opening...)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mux.count() != maxRelayChannels {
+		t.Fatalf("channel count=%d want %d", mux.count(), maxRelayChannels)
+	}
+	extra := relayChannel{0xff}
+	if err := mux.Dispatch(append(extra[:], byte(1))); err != nil {
+		t.Fatalf("excess channel should be dropped safely: %v", err)
+	}
+	if mux.count() != maxRelayChannels {
+		t.Fatalf("relay cap violation grew map to %d", mux.count())
+	}
+
+	boundary := make([]byte, maxHostWireFrame)
+	copy(boundary, extra[:])
+	if err := mux.Dispatch(boundary); err != nil {
+		t.Fatalf("exact payload+channel boundary was refused: %v", err)
+	}
+	if err := mux.Dispatch(make([]byte, relayChannelBytes-1)); err == nil {
+		t.Fatal("short host frame was accepted")
+	}
+	if err := mux.Dispatch(make([]byte, maxHostWireFrame+1)); err == nil {
+		t.Fatal("oversize host frame was accepted")
+	}
+}
+
+func TestInvalidChannelDoesNotDesynchronizeAnotherChannel(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("still-working"))
+	}))
+	defer local.Close()
+	responses := make(chan []byte, 4)
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder(local.URL, local.Client()), func(_ context.Context, frame []byte) error {
+		responses <- frame
+		return nil
+	})
+	defer mux.Close()
+	badChannel := relayChannel{1}
+	goodChannel := relayChannel{2}
+
+	if err := mux.Dispatch(append(badChannel[:], []byte("not noise")...)); err != nil {
+		t.Fatal(err)
+	}
+	good, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	opening, _ := good.StartHandshake()
+	if err := mux.Dispatch(append(goodChannel[:], opening...)); err != nil {
+		t.Fatal(err)
+	}
+	handshake := <-responses
+	if string(handshake[:relayChannelBytes]) != string(goodChannel[:]) {
+		t.Fatalf("bad channel produced or stole the good response: %x", handshake[:relayChannelBytes])
+	}
+	if err := good.FinishHandshake(handshake[relayChannelBytes:]); err != nil {
+		t.Fatal(err)
+	}
+	request, _ := EncodeRequestParts(http.MethodGet, "/v1/dashboard", nil, nil)
+	sealed, _ := good.Seal(request)
+	if err := mux.Dispatch(append(goodChannel[:], sealed...)); err != nil {
+		t.Fatal(err)
+	}
+	answer := <-responses
+	opened, err := good.Open(answer[relayChannelBytes:])
+	if err != nil {
+		t.Fatalf("good channel nonce state was corrupted: %v", err)
+	}
+	resp, err := DecodeResponse(opened)
+	if err != nil || string(resp.Body) != "still-working" {
+		t.Fatalf("good channel response=%q err=%v", resp.Body, err)
+	}
+}
+
+type multiplexRelayClient struct {
+	conn       *websocket.Conn
+	channel    relayChannel
+	generation uint64
+	writeMu    sync.Mutex
+}
+
+type multiplexRelayHost struct {
+	conn       *websocket.Conn
+	generation uint64
+}
+
+// multiplexRelayDouble implements the Phase 1 channel wire contract without
+// interpreting payloads. It gives integration tests two real mobile/core
+// clients and the real desktop Dialer while keeping Cloudflare out of the test.
+type multiplexRelayDouble struct {
+	server     *httptest.Server
+	mu         sync.Mutex
+	host       *multiplexRelayHost
+	clients    map[relayChannel]*multiplexRelayClient
+	next       uint64
+	generation uint64
+	hostWrite  sync.Mutex
+	hostEvents chan uint64
+}
+
+func newMultiplexRelayDouble() *multiplexRelayDouble {
+	r := &multiplexRelayDouble{clients: make(map[relayChannel]*multiplexRelayClient), hostEvents: make(chan uint64, 8)}
+	r.server = httptest.NewServer(http.HandlerFunc(r.serveHTTP))
+	return r
+}
+
+func (r *multiplexRelayDouble) close() { r.server.Close() }
+
+func (r *multiplexRelayDouble) serveHTTP(w http.ResponseWriter, req *http.Request) {
+	switch req.URL.Query().Get("role") {
+	case "host":
+		r.serveHost(w, req)
+	case "client":
+		r.serveClient(w, req)
+	default:
+		http.Error(w, "role", http.StatusBadRequest)
+	}
+}
+
+func (r *multiplexRelayDouble) serveHost(w http.ResponseWriter, req *http.Request) {
+	conn, err := websocket.Accept(w, req, nil)
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(maxHostWireFrame)
+	r.mu.Lock()
+	r.generation++
+	host := &multiplexRelayHost{conn: conn, generation: r.generation}
+	r.host = host
+	r.mu.Unlock()
+	r.hostEvents <- host.generation
+	defer func() {
+		r.mu.Lock()
+		if r.host == host {
+			r.host = nil
+		}
+		var clients []*multiplexRelayClient
+		for channel, client := range r.clients {
+			if client.generation == host.generation {
+				delete(r.clients, channel)
+				clients = append(clients, client)
+			}
+		}
+		r.mu.Unlock()
+		for _, client := range clients {
+			_ = client.conn.Close(websocket.StatusNormalClosure, "peer disconnected")
+		}
+		conn.CloseNow()
+	}()
+
+	for {
+		_, frame, err := conn.Read(context.Background())
+		if err != nil {
+			return
+		}
+		if len(frame) < relayChannelBytes {
+			return
+		}
+		var channel relayChannel
+		copy(channel[:], frame)
+		r.mu.Lock()
+		client := r.clients[channel]
+		r.mu.Unlock()
+		if client == nil || client.generation != host.generation {
+			continue
+		}
+		client.writeMu.Lock()
+		err = client.conn.Write(context.Background(), websocket.MessageBinary, frame[relayChannelBytes:])
+		client.writeMu.Unlock()
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (r *multiplexRelayDouble) serveClient(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	host := r.host
+	if host == nil {
+		r.mu.Unlock()
+		http.Error(w, "no host", http.StatusLocked)
+		return
+	}
+	r.next++
+	channel := relayChannel{byte(r.next), byte(r.next >> 8), byte(r.next >> 16), byte(r.next >> 24)}
+	generation := host.generation
+	r.mu.Unlock()
+
+	conn, err := websocket.Accept(w, req, nil)
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(maxTunnelPayload)
+	client := &multiplexRelayClient{conn: conn, channel: channel, generation: generation}
+	r.mu.Lock()
+	r.clients[channel] = client
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		if r.clients[channel] == client {
+			delete(r.clients, channel)
+		}
+		current := r.host
+		r.mu.Unlock()
+		if current != nil && current.generation == generation {
+			r.hostWrite.Lock()
+			_ = current.conn.Write(context.Background(), websocket.MessageBinary, channel[:])
+			r.hostWrite.Unlock()
+		}
+		conn.CloseNow()
+	}()
+
+	for {
+		_, payload, err := conn.Read(context.Background())
+		if err != nil {
+			return
+		}
+		wire := make([]byte, relayChannelBytes+len(payload))
+		copy(wire, channel[:])
+		copy(wire[relayChannelBytes:], payload)
+		r.mu.Lock()
+		current := r.host
+		r.mu.Unlock()
+		if current == nil || current.generation != generation {
+			return
+		}
+		r.hostWrite.Lock()
+		err = current.conn.Write(context.Background(), websocket.MessageBinary, wire)
+		r.hostWrite.Unlock()
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (r *multiplexRelayDouble) closeHost() {
+	r.mu.Lock()
+	host := r.host
+	r.mu.Unlock()
+	if host != nil {
+		host.conn.CloseNow()
+	}
+}
+
+func waitRelayHost(t *testing.T, events <-chan uint64) uint64 {
+	t.Helper()
+	select {
+	case generation := <-events:
+		return generation
+	case <-time.After(5 * time.Second):
+		t.Fatal("desktop did not attach to relay")
+		return 0
+	}
+}
+
+func dialTestPhone(t *testing.T, relayURL, sessionID string, keypair noise.DHKey) *core.RelayClient {
+	t.Helper()
+	phone, err := core.DialRelay(relayURL, sessionID, core.DesktopPublicKey(keypair), "")
+	if err != nil {
+		t.Fatalf("dial phone: %v", err)
+	}
+	return phone
+}
+
+func TestTwoMobileClientsMultiplexThroughOneDesktop(t *testing.T) {
+	slowStarted := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/slow" {
+			close(slowStarted)
+			<-releaseSlow
+		}
+		w.Header().Set("X-Relay-Test", req.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(req.URL.Path))
+	}))
+	defer local.Close()
+
+	relay := newMultiplexRelayDouble()
+	defer relay.close()
+	keypair := mustTestKeypair(t)
+	const sessionID = "multiplex-session-0123456789"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dialer := NewDialer(DialerOptions{
+		RelayURL: relay.server.URL, SessionID: sessionID, Keypair: keypair,
+		Forwarder: NewForwarder(local.URL, local.Client()),
+	})
+	go dialer.Run(ctx)
+	firstGeneration := waitRelayHost(t, relay.hostEvents)
+
+	type phoneResult struct {
+		phone *core.RelayClient
+		err   error
+	}
+	phones := make(chan phoneResult, 2)
+	for range 2 {
+		go func() {
+			phone, err := core.DialRelay(relay.server.URL, sessionID, core.DesktopPublicKey(keypair), "")
+			phones <- phoneResult{phone: phone, err: err}
+		}()
+	}
+	firstResult := <-phones
+	secondResult := <-phones
+	if firstResult.err != nil || secondResult.err != nil {
+		t.Fatalf("concurrent phone pairing: first=%v second=%v", firstResult.err, secondResult.err)
+	}
+	first := firstResult.phone
+	second := secondResult.phone
+	defer first.Close()
+	defer second.Close()
+
+	slowResult := make(chan error, 1)
+	go func() {
+		answer, err := first.AnswerFull(http.MethodGet, "/slow", "")
+		if err == nil && (!strings.Contains(answer, `"status":202`) || !strings.Contains(answer, `"X-Relay-Test"`) || !strings.Contains(answer, "L3Nsb3c=")) {
+			err = fmt.Errorf("slow response lost status/header/body: %s", answer)
+		}
+		slowResult <- err
+	}()
+	<-slowStarted
+
+	fastDone := make(chan error, 1)
+	go func() {
+		answer, err := second.Request(http.MethodGet, "/fast", "")
+		if err == nil && answer != "/fast" {
+			err = fmt.Errorf("fast response crossed channels: %q", answer)
+		}
+		fastDone <- err
+	}()
+	select {
+	case err := <-fastDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow channel blocked an independent phone")
+	}
+	close(releaseSlow)
+	if err := <-slowResult; err != nil {
+		t.Fatal(err)
+	}
+
+	first.Close()
+	time.Sleep(50 * time.Millisecond)
+	if answer, err := second.Request(http.MethodGet, "/after-close", ""); err != nil || answer != "/after-close" {
+		t.Fatalf("surviving phone after peer close: answer=%q err=%v", answer, err)
+	}
+	third := dialTestPhone(t, relay.server.URL, sessionID, keypair)
+	if answer, err := third.Request(http.MethodGet, "/fresh-phone", ""); err != nil || answer != "/fresh-phone" {
+		t.Fatalf("fresh phone on existing host: answer=%q err=%v", answer, err)
+	}
+	third.Close()
+	second.Close()
+
+	// A host transport reconnect discards every old channel. The same desktop
+	// identity then authenticates a completely fresh phone/Noise state.
+	relay.closeHost()
+	if generation := waitRelayHost(t, relay.hostEvents); generation == firstGeneration {
+		t.Fatal("relay host generation did not advance")
+	}
+	fresh := dialTestPhone(t, relay.server.URL, sessionID, keypair)
+	defer fresh.Close()
+	if answer, err := fresh.Request(http.MethodGet, "/after-reconnect", ""); err != nil || answer != "/after-reconnect" {
+		t.Fatalf("fresh Noise after host reconnect: answer=%q err=%v", answer, err)
 	}
 }

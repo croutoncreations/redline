@@ -14,14 +14,12 @@ import (
 // recovers is still picked up within half a minute.
 const maxBackoff = 30 * time.Second
 
-// idleTimeout is how long a relay session may be open with no traffic before
-// the desktop closes it.
+// idleTimeout is how long one phone channel may remain without traffic before
+// the desktop discards that channel's Noise state. The shared host socket and
+// other active channels remain connected.
 //
-// Relayed minutes meter against a Cloudflare bill and a phone's battery. An
-// always-open session with no activity is ~83% of the Durable Object free
-// tier's daily CPU allowance consumed for nothing. Five minutes is long
-// enough that a briefly backgrounded phone can come back, but short enough
-// that a forgotten open session is not the expensive case.
+// Five minutes is long enough that a briefly backgrounded phone can come back,
+// but short enough that stale cryptographic state is not retained indefinitely.
 const idleTimeout = 5 * time.Minute
 
 // backoff tracks how long to wait before the next reconnect attempt.

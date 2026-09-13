@@ -17,7 +17,9 @@ import (
 )
 
 // relayClientFrameLimit is the maximum size of a single WebSocket frame on the
-// wire. Must match internal/relay's maxTunnelFrame (1 MB). Keeping a local
+// wire. Must match internal/relay's maxTunnelPayload (1 MB); the relay's
+// eight-byte channel exists only on the host leg and is stripped before a
+// phone receives a frame. Keeping a local
 // constant is necessary because mobile/core cannot import internal/relay
 // (internal package visibility). If the relay package changes this value, this
 // constant must be updated to match, or the transport will silently clip large

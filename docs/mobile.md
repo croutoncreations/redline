@@ -122,7 +122,10 @@ A closed relay verifies an entitlement only on the desktop `host` connection. Ph
 `client` connections present none: pairing URLs contain only `relay`, `key`, and `session`,
 and clients are admitted only while the entitled host owns the session and while its
 signed `max_clients` cap permits. Updated phones tolerate and discard the legacy fragment
-instead of retaining it.
+instead of retaining it. The relay assigns each connected phone an opaque eight-byte
+channel on the single desktop socket. The desktop keeps a separate serialized Noise state
+and idle timeout per channel, so concurrent phones cannot share nonces or block one
+another; closing or invalidating one channel leaves the others connected.
 
 **Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
 then put its URL in the YAML block above. The committed self-host profile uses

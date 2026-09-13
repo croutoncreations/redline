@@ -27,11 +27,6 @@ type SessionHandler struct {
 	mu        sync.Mutex
 	session   *core.NoiseSession
 	forwarder *Forwarder
-	// keypair is retained so a second phone arriving on the same connection can
-	// be given a fresh session. The desktop's connection now outlives any one
-	// phone, so one handler must be able to serve several in turn.
-	keypair noise.DHKey
-
 	// lastSeen is the time of the most recent frame (handshake or application).
 	// It is zero until the first frame arrives; callers use IdleSince to
 	// convert "zero" into a meaningful fallback.
@@ -53,27 +48,7 @@ func NewSessionHandler(keypair noise.DHKey, forwarder *Forwarder) *SessionHandle
 	return &SessionHandler{
 		session:   session,
 		forwarder: forwarder,
-		keypair:   keypair,
 	}
-}
-
-// restartHandshake treats an undecryptable frame as a new phone's opening
-// message, replacing the session if it turns out to be one.
-//
-// Returns false when the frame is not a valid handshake, leaving the original
-// decrypt failure to be reported. The caller holds h.mu.
-func (h *SessionHandler) restartHandshake(frame []byte, at time.Time) ([]byte, bool) {
-	fresh, err := core.NewResponderSession(h.keypair)
-	if err != nil {
-		return nil, false
-	}
-	reply, err := fresh.ReadHandshake(frame)
-	if err != nil {
-		return nil, false
-	}
-	h.session = fresh
-	h.updateLastSeen(at)
-	return reply, true
 }
 
 // HandleFrame drives the session state machine with a single frame, using the
@@ -112,21 +87,9 @@ func (h *SessionHandler) HandleFrameAt(ctx context.Context, frame []byte, at tim
 	// right answer in both cases.
 	plaintext, err := h.session.Open(frame)
 	if err != nil {
-		// A frame that will not decrypt on an established session is, in
-		// practice, the next phone starting over: the relay pairs one client at
-		// a time and the previous one has gone, so nothing else can be sending.
-		// Since the desktop's connection now survives a phone leaving, refusing
-		// here meant one connection could serve exactly one phone and every
-		// later arrival failed with an authentication error.
-		//
-		// Retried as a handshake rather than trusted: a forged or corrupt frame
-		// still fails, one step further on, and the phone is authenticated by
-		// the same static key as before.
-		if reply, restarted := h.restartHandshake(frame, at); restarted {
-			return reply, nil
-		}
-		// Not a handshake either: the session is spent, the nonce advanced, and
-		// every later frame would be wrong. Closing beats continuing.
+		// This channel's cipher state is spent. The multiplexer drops only this
+		// handler; a later frame can then begin a fresh authenticated handshake
+		// without disturbing any other phone.
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 
@@ -189,6 +152,265 @@ func (h *SessionHandler) IdleSince(fallback time.Time) time.Time {
 		return fallback
 	}
 	return h.lastSeen
+}
+
+// relayChannel identifies one phone on the relay's host WebSocket. An array is
+// deliberately used as the map key so all eight bytes, including zeroes, are
+// significant and no text encoding can merge distinct channels.
+type relayChannel [relayChannelBytes]byte
+
+const maxRelayChannels = 25
+
+// channelTimer is the narrow timer seam used by the per-channel idle reaper.
+// time.Timer satisfies it; tests can inject a deterministic clock and invoke
+// eviction without sleeping.
+type channelTimer interface {
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+type multiplexedSession struct {
+	handler    *SessionHandler
+	frames     chan []byte
+	ctx        context.Context
+	cancel     context.CancelFunc
+	lastSeen   time.Time
+	processing bool
+	timer      channelTimer
+}
+
+// sessionMultiplexer owns all phone Noise states for one host WebSocket.
+// Entries never survive a host reconnect. Each entry has one worker, which
+// preserves frame order for that channel while allowing unrelated channels to
+// wait on the local API independently.
+type sessionMultiplexer struct {
+	mu        sync.Mutex
+	sessions  map[relayChannel]*multiplexedSession
+	ctx       context.Context
+	cancel    context.CancelFunc
+	keypair   noise.DHKey
+	forwarder *Forwarder
+	write     func(context.Context, []byte) error
+	now       func() time.Time
+	idleAfter time.Duration
+	afterFunc func(time.Duration, func()) channelTimer
+	closed    bool
+}
+
+func newSessionMultiplexer(ctx context.Context, keypair noise.DHKey, forwarder *Forwarder, write func(context.Context, []byte) error) *sessionMultiplexer {
+	muxCtx, cancel := context.WithCancel(ctx)
+	return &sessionMultiplexer{
+		sessions:  make(map[relayChannel]*multiplexedSession),
+		ctx:       muxCtx,
+		cancel:    cancel,
+		keypair:   keypair,
+		forwarder: forwarder,
+		write:     write,
+		now:       time.Now,
+		idleAfter: idleTimeout,
+		afterFunc: func(after time.Duration, fn func()) channelTimer { return time.AfterFunc(after, fn) },
+	}
+}
+
+// Dispatch accepts one complete relay host frame. Frames shorter than the
+// channel prefix or larger than the host-wire ceiling are connection-level
+// protocol failures. An exactly eight-byte frame is an idempotent close for
+// that channel. All other frames are copied before asynchronous processing.
+func (m *sessionMultiplexer) Dispatch(frame []byte) error {
+	if len(frame) < relayChannelBytes {
+		return fmt.Errorf("host frame is %d bytes; channel requires %d", len(frame), relayChannelBytes)
+	}
+	if len(frame) > maxHostWireFrame {
+		return fmt.Errorf("host frame is %d bytes; limit is %d", len(frame), maxHostWireFrame)
+	}
+
+	var channel relayChannel
+	copy(channel[:], frame[:relayChannelBytes])
+	if len(frame) == relayChannelBytes {
+		m.drop(channel, nil)
+		return nil
+	}
+	payload := append([]byte(nil), frame[relayChannelBytes:]...)
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return context.Canceled
+	}
+	entry := m.sessions[channel]
+	if entry == nil {
+		// The relay contract admits at most 25 clients. Preserve existing,
+		// authenticated sessions if a faulty relay violates that cap: the
+		// excess channel is ignored rather than consuming unbounded state or
+		// forcing every legitimate phone to reconnect.
+		if len(m.sessions) >= maxRelayChannels {
+			m.mu.Unlock()
+			return nil
+		}
+		entryCtx, cancel := context.WithCancel(m.ctx)
+		entry = &multiplexedSession{
+			handler:  NewSessionHandler(m.keypair, m.forwarder),
+			frames:   make(chan []byte, 2),
+			ctx:      entryCtx,
+			cancel:   cancel,
+			lastSeen: m.now(),
+		}
+		m.sessions[channel] = entry
+		entry.timer = m.afterFunc(m.idleAfter, func() { m.evictIfIdle(channel, entry) })
+		go m.serve(channel, entry)
+	} else {
+		entry.lastSeen = m.now()
+		entry.timer.Reset(m.idleAfter)
+	}
+
+	select {
+	case entry.frames <- payload:
+		m.mu.Unlock()
+		return nil
+	default:
+		// A conforming phone has at most one request awaiting a response. A
+		// full queue therefore means this channel is flooding or out of order.
+		// Drop only its state; blocking the host reader here would let one phone
+		// starve all others.
+		delete(m.sessions, channel)
+		entry.timer.Stop()
+		m.mu.Unlock()
+		entry.cancel()
+		return nil
+	}
+}
+
+func (m *sessionMultiplexer) serve(channel relayChannel, entry *multiplexedSession) {
+	for {
+		select {
+		case <-entry.ctx.Done():
+			return
+		case frame := <-entry.frames:
+			if !m.startProcessing(channel, entry) {
+				return
+			}
+			reply, err := entry.handler.HandleFrame(entry.ctx, frame)
+			if err != nil {
+				// Authentication, handshake, or decryption failure spends only
+				// this channel. No response is wire-safe because there may be no
+				// authenticated cipher with which to seal it.
+				m.drop(channel, entry)
+				return
+			}
+			if !m.active(channel, entry) {
+				return
+			}
+			wire := make([]byte, relayChannelBytes+len(reply))
+			copy(wire, channel[:])
+			copy(wire[relayChannelBytes:], reply)
+			if err := m.write(entry.ctx, wire); err != nil {
+				entry.cancel()
+				return
+			}
+			m.finishProcessing(channel, entry)
+		}
+	}
+}
+
+func (m *sessionMultiplexer) active(channel relayChannel, entry *multiplexedSession) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.closed && m.sessions[channel] == entry
+}
+
+func (m *sessionMultiplexer) startProcessing(channel relayChannel, entry *multiplexedSession) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.sessions[channel] != entry {
+		return false
+	}
+	entry.processing = true
+	return true
+}
+
+func (m *sessionMultiplexer) finishProcessing(channel relayChannel, entry *multiplexedSession) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.sessions[channel] != entry {
+		return
+	}
+	entry.processing = false
+	entry.lastSeen = m.now()
+	entry.timer.Reset(m.idleAfter)
+}
+
+// drop removes expected only when it is still the current generation for the
+// channel. That identity check prevents a late worker or idle callback from
+// deleting a fresh session created after a close/reopen race. A nil expected
+// means an authoritative channel-close frame and removes whichever generation
+// is current.
+func (m *sessionMultiplexer) drop(channel relayChannel, expected *multiplexedSession) {
+	m.mu.Lock()
+	entry := m.sessions[channel]
+	if entry == nil || (expected != nil && entry != expected) {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, channel)
+	entry.timer.Stop()
+	m.mu.Unlock()
+	entry.cancel()
+}
+
+func (m *sessionMultiplexer) evictIfIdle(channel relayChannel, expected *multiplexedSession) {
+	m.mu.Lock()
+	entry := m.sessions[channel]
+	if entry == nil || entry != expected {
+		m.mu.Unlock()
+		return
+	}
+	if entry.processing {
+		// A request waiting on the local API is active, not idle. This preserves
+		// the old single-session rule that a slow forward cannot trip the idle
+		// timeout while still letting other channels progress.
+		entry.timer.Reset(m.idleAfter)
+		m.mu.Unlock()
+		return
+	}
+	remaining := m.idleAfter - m.now().Sub(entry.lastSeen)
+	if remaining > 0 {
+		// A Reset racing the old callback may let that callback run. Recheck
+		// lastSeen and arm only the remaining duration rather than deleting a
+		// channel that has just received traffic.
+		entry.timer.Reset(remaining)
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, channel)
+	m.mu.Unlock()
+	entry.cancel()
+}
+
+func (m *sessionMultiplexer) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions)
+}
+
+// Close discards every channel and Noise state for this host connection.
+func (m *sessionMultiplexer) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	entries := make([]*multiplexedSession, 0, len(m.sessions))
+	for channel, entry := range m.sessions {
+		delete(m.sessions, channel)
+		entry.timer.Stop()
+		entries = append(entries, entry)
+	}
+	m.mu.Unlock()
+	m.cancel()
+	for _, entry := range entries {
+		entry.cancel()
+	}
 }
 
 // EncodeRequestParts encodes an HTTP request's parts into a tunnel frame.

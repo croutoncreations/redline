@@ -15,8 +15,8 @@ import (
 
 // maxTunnelPayload is the pre-multiplexing encrypted-frame ceiling. Phase 1.3
 // adds an eight-byte relay channel to host wire frames; keeping the two limits
-// distinct preserves the full 1 MiB payload while the desktop accepts the
-// prefixed frame. Channel demultiplexing remains Phase 2 work.
+// distinct preserves the full 1 MiB payload while the desktop demultiplexes the
+// prefixed frame into independent per-phone Noise sessions.
 const maxTunnelPayload = 1024 * 1024
 
 const relayChannelBytes = 8

@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -81,12 +82,6 @@ func (e *EntitlementSignalError) Error() string {
 	return "relay requires entitlement renewal: " + string(e.Signal)
 }
 
-// errIdle marks the ordinary end of a session, where no phone has sent
-// anything for the idle timeout. It is separated from real failures because
-// the two deserve opposite responses: reconnect promptly after a quiet spell,
-// back off after an outage.
-var errIdle = errors.New("idle timeout")
-
 // errBadFrame marks a frame this desktop could not read, which ends the Noise
 // session but says nothing about the relay's health.
 //
@@ -140,14 +135,9 @@ func (d *Dialer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			// An idle timeout is the ordinary end of a session: the phone put
-			// itself away. Treating it as a failure would grow the backoff, so
-			// a desktop that had merely been quiet would then be slow to answer
-			// the next time someone opened the app.
-			if errors.Is(err, errIdle) || errors.Is(err, errBadFrame) {
-				// Neither is a relay problem. An idle timeout is a phone that
-				// went away; a bad frame is a phone whose session was stale.
-				// Both want this desktop listening again immediately.
+			if errors.Is(err, errBadFrame) {
+				// A malformed host envelope is a protocol reset rather than a
+				// relay outage, so reconnect promptly with an empty channel map.
 				bo.reset()
 				d.logf("relay: %v; reconnecting", err)
 				continue
@@ -213,17 +203,14 @@ func (d *Dialer) connect(ctx context.Context) error {
 	// coder/websocket defaults to a 32 KB read limit, which a run's logs pass
 	// routinely. The relay prefixes each host-bound payload with its eight-byte
 	// channel, so the host wire limit is deliberately larger than the unchanged
-	// 1 MiB tunnel payload limit. Phase 2 will consume that prefix.
+	// 1 MiB tunnel payload limit. readLoop consumes that prefix before
+	// dispatching the payload to its per-channel Noise handler.
 	conn.SetReadLimit(maxHostWireFrame)
 
-	// A fresh SessionHandler for every connection: a resumed connection must
-	// never reuse cipher states. A reconnect after a network blip creates a
-	// new Noise session with the same static keypair, not a continuation of
-	// the broken one. Using a stale HandshakeState or cipher object would
-	// either fail to decrypt or, worse, silently produce wrong output.
-	handler := NewSessionHandler(d.opts.Keypair, d.opts.Forwarder)
-
-	if err := d.readLoop(ctx, conn, handler); err != nil {
+	// readLoop creates a fresh channel map for this connection. No Noise state
+	// survives a reconnect, even when the relay assigns a phone the same
+	// channel bytes again.
+	if err := d.readLoop(ctx, conn); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -232,26 +219,33 @@ func (d *Dialer) connect(ctx context.Context) error {
 	return nil
 }
 
-// readLoop reads frames from conn, hands each to handler, and writes the
-// reply. It returns when ctx is cancelled, when the idle timeout fires, or
-// when a fatal frame error occurs.
-func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *SessionHandler) error {
-	connectedAt := time.Now()
+// readLoop demultiplexes frames from one host socket. Each channel owns a
+// serial worker and independent Noise responder; writes share one mutex because
+// coder/websocket permits only one active writer. Channel-level protocol or
+// authentication failures delete that channel, while malformed host envelopes
+// reconnect the whole host because their channel cannot be identified safely.
+func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
+	var writeMu sync.Mutex
+	mux := newSessionMultiplexer(ctx, d.opts.Keypair, d.opts.Forwarder, func(writeCtx context.Context, frame []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if err := conn.Write(writeCtx, websocket.MessageBinary, frame); err != nil {
+			// Unblock the sole reader so connect can discard every channel and
+			// enter the normal reconnect path.
+			_ = conn.CloseNow()
+			return err
+		}
+		return nil
+	})
+	defer mux.Close()
+
 	for {
 		if ctx.Err() != nil {
 			_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 			return nil
 		}
 
-		// Enforce the idle timeout with a per-read context deadline. A socket
-		// that goes quiet for idleTimeout must not block the loop forever: the
-		// phone may be gone and the relay may be silently holding the
-		// connection open. Wrapping only the read (not HandleFrame or Write)
-		// means a slow local API call does not trigger an idle disconnect.
-		readCtx, cancelRead := context.WithTimeout(ctx, idleTimeout)
-		_, frame, err := conn.Read(readCtx)
-		readExpired := readCtx.Err() != nil && ctx.Err() == nil
-		cancelRead()
+		_, frame, err := conn.Read(ctx)
 		if err != nil {
 			// Close 1008 is the relay's documented authoritative entitlement
 			// renewal contract. Do not couple the typed signal to human text.
@@ -263,47 +257,25 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, handler *Se
 				_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 				return nil
 			}
-			if !readExpired {
-				// The socket failed rather than went quiet: the relay dropped
-				// us, the network reset, or the object was evicted. This must
-				// back off. Calling it idle and retrying immediately produced
-				// twenty thousand dials in three seconds against a relay that
-				// accepts and hangs up.
-				_ = conn.CloseNow()
-				return fmt.Errorf("read frame: %w", err)
+			if websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
+				return fmt.Errorf("%w: host frame exceeds %d bytes", errBadFrame, maxHostWireFrame)
 			}
-			// Only a genuine read deadline means the idle timeout
-			// fired. Close normally and let Run reconnect (or wait for a phone
-			// to come back).
-			_ = conn.Close(websocket.StatusNormalClosure, "idle timeout")
-			// IdleSince returns an instant, so report the elapsed time rather
-			// than a wall clock timestamp, which read as if it were a duration.
-			idleFor := time.Since(handler.IdleSince(connectedAt)).Round(time.Second)
-			return fmt.Errorf("%w after %v", errIdle, idleFor)
+			// The socket failed rather than one phone's channel. Back off so a
+			// relay that accepts and immediately drops hosts cannot cause a hot
+			// reconnect loop.
+			_ = conn.CloseNow()
+			return fmt.Errorf("read frame: %w", err)
 		}
 
-		reply, err := handler.HandleFrame(ctx, frame)
-		if err != nil {
-			// A decrypt failure terminates the Noise session: the cipher
-			// states are out of sync and every subsequent frame would be
-			// wrong. Close and reconnect so the phone can start a fresh
-			// handshake.
-			//
-			// Wrapped as errBadFrame so the loop reconnects promptly. Backing
-			// off exists to protect the relay from a hot dial loop, and this is
-			// not that: the socket was healthy enough to deliver a frame, the
-			// fault is one phone's stale session, and that phone is about to
-			// retry with a fresh handshake. Treating it as an outage grew the
-			// delay to twenty seconds and the phone found nobody listening.
-			_ = conn.Close(websocket.StatusProtocolError, "frame error")
+		if err := mux.Dispatch(frame); err != nil {
+			status := websocket.StatusProtocolError
+			reason := "host frame missing channel"
+			if len(frame) > maxHostWireFrame {
+				status = websocket.StatusMessageTooBig
+				reason = "host frame too large"
+			}
+			_ = conn.Close(status, reason)
 			return fmt.Errorf("%w: %w", errBadFrame, err)
-		}
-
-		if err := conn.Write(ctx, websocket.MessageBinary, reply); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("write reply: %w", err)
 		}
 	}
 }
