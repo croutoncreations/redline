@@ -129,7 +129,16 @@ public struct RedlineAPIClient: Sendable {
         let answer: RelayPortalAnswer = try await request(
             baseURL.appending(path: "v1/relay/portal"), method: "POST", as: RelayPortalAnswer.self
         )
-        guard let url = URL(string: answer.url) else { throw Error.invalidResponse }
+        guard let url = URL(string: answer.url), url.scheme?.lowercased() == "https" else {
+            // The service's own issuer client already enforces an absolute,
+            // fragment-free https URL before this ever reaches the local API
+            // (internal/relay/entitlement.go's safeHTTPSURL). This is an
+            // independent client-side check on the same invariant: the caller
+            // hands this URL straight to NSWorkspace.shared.open, and nothing
+            // three layers away should be the only thing stopping a `file://`
+            // path or a third-party custom URL scheme from being launched.
+            throw Error.invalidResponse
+        }
         return url
     }
 
@@ -472,7 +481,13 @@ public struct RelayConfigureRequest: Encodable, Sendable {
     public init(mode: RelayMode, url: String? = nil, licenseKey: String? = nil, label: String? = nil) {
         self.mode = mode
         self.url = url?.isEmpty == true ? nil : url
-        self.licenseKey = licenseKey?.isEmpty == true ? nil : licenseKey
+        // The server rejects (400 invalid_request) a license_key that is not
+        // already trimmed -- unlike url/label, which it trims itself. A key
+        // pasted from an email or password manager frequently carries a
+        // trailing newline or space; trim here so that common case succeeds
+        // instead of failing with a generic, unexplained HTTP status.
+        let trimmedLicenseKey = licenseKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.licenseKey = trimmedLicenseKey?.isEmpty == true ? nil : trimmedLicenseKey
         self.label = label?.isEmpty == true ? nil : label
     }
 

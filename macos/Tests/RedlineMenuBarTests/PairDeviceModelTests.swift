@@ -225,4 +225,127 @@ struct PairDeviceModelTests {
             }
         }
     }
+
+    // MARK: - start() and the local "already asked" record
+
+    /// A deliberate "tailnet only" choice persists `RelayManagedState{Mode:
+    /// off}`, which resolves to the exact same wire status
+    /// (`{state: off, mode: off}`) as a Mac that was never configured at all
+    /// -- the server genuinely cannot tell these apart (see
+    /// `needsConnectionChoice`'s doc comment). `start()` closes this gap with
+    /// a local record: once `chooseTailnetOnly()` succeeds, the connection
+    /// question must never be asked again on this Mac, regardless of what a
+    /// later `relayStatus()` call reports.
+    @Test("Choosing tailnet-only records a local flag so start() never re-asks, even though the server-side status looks identical to unconfigured")
+    func tailnetOnlyChoicePersistsLocallyDespiteIdenticalServerStatus() async throws {
+        let suiteName = "ai.redline.mac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StartFlowStub.self]
+        let client = RedlineAPIClient(
+            baseURL: URL(string: "http://127.0.0.1:7436")!,
+            token: "local-token",
+            session: URLSession(configuration: configuration)
+        )
+
+        // First open: nothing configured yet, nothing recorded locally --
+        // step one must appear.
+        let firstModel = PairDeviceModel(client: client, defaults: defaults)
+        await firstModel.start()
+        #expect(firstModel.step == .chooseConnection)
+
+        // Choosing tailnet-only succeeds; the server now reports the exact
+        // same {state: off, mode: off} it would have reported if nothing had
+        // ever been configured.
+        await firstModel.chooseTailnetOnly()
+        #expect(defaults.bool(forKey: PairDeviceModel.connectionChoiceMadeKey))
+
+        // A brand-new model (a fresh window open) must go straight to the
+        // code step this time, because the local record -- not the
+        // ambiguous server status -- is checked first.
+        let secondModel = PairDeviceModel(client: client, defaults: defaults)
+        await secondModel.start()
+        #expect(secondModel.step == .code)
+    }
+
+    /// A Mac with a real prior choice already on the server (e.g. hosted or
+    /// self-hosted, configured before this local record existed, or from a
+    /// different client) must not be re-asked just because no local flag
+    /// exists yet -- `start()` back-fills the flag from a genuine non-default
+    /// status instead.
+    @Test("A genuinely non-default server status back-fills the local flag without asking again")
+    func nonDefaultServerStatusBackfillsTheLocalFlag() async throws {
+        let suiteName = "ai.redline.mac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        #expect(!defaults.bool(forKey: PairDeviceModel.connectionChoiceMadeKey))
+
+        // A dedicated stub type, not `StartFlowStub`: `URLProtocol` routing
+        // is process-global class state, and Swift Testing runs tests
+        // concurrently by default, so two tests sharing one stub's mutable
+        // `statusBody` would race.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NonDefaultStatusStub.self]
+        let client = RedlineAPIClient(
+            baseURL: URL(string: "http://127.0.0.1:7436")!,
+            token: "local-token",
+            session: URLSession(configuration: configuration)
+        )
+
+        let model = PairDeviceModel(client: client, defaults: defaults)
+        await model.start()
+        #expect(model.step == .code)
+        #expect(defaults.bool(forKey: PairDeviceModel.connectionChoiceMadeKey))
+    }
+}
+
+/// Reports a genuine, already-made "self-hosted" choice from every request --
+/// a separate, immutable stub from `StartFlowStub` so the two `start()`
+/// integration tests cannot race on shared class state.
+private final class NonDefaultStatusStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let body = Data(#"{"state":"self_hosted","mode":"self_hosted","connection":"connected"}"#.utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+/// Routes `relayStatus`, `configureRelay`, and `createPairingToken` for the
+/// `start()`/`chooseTailnetOnly()` integration test above. Every response
+/// is fixed, not mutable static state: Swift Testing runs tests
+/// concurrently by default, and a shared mutable stub would race across
+/// tests even though each test builds its own `URLSession`.
+private final class StartFlowStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let body: Data
+        switch (request.httpMethod, path) {
+        case ("GET", "/v1/relay/status"):
+            // The resolver's true unconfigured default.
+            body = Data(#"{"state":"off","mode":"off","connection":"disconnected"}"#.utf8)
+        case ("POST", "/v1/relay/configure"):
+            // chooseTailnetOnly() always configures mode: off, which resolves
+            // to the same wire shape as the unconfigured default.
+            body = Data(#"{"state":"off","mode":"off","connection":"disconnected"}"#.utf8)
+        case ("POST", "/v1/pairing"):
+            body = Data(#"{"pairing_token":"tok","expires_at":"2026-01-01T00:10:00Z","pairing_url":"https://mac.example.ts.net/pair?t=tok","routes":["direct"],"endpoint":"mac.example.ts.net:443"}"#.utf8)
+        default:
+            body = Data("{}".utf8)
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

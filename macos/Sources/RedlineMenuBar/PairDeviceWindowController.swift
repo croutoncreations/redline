@@ -12,9 +12,11 @@ import SwiftUI
 final class PairDeviceWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let client: RedlineAPIClient
+    private let defaults: UserDefaults
 
-    init(client: RedlineAPIClient) {
+    init(client: RedlineAPIClient, defaults: UserDefaults = .standard) {
         self.client = client
+        self.defaults = defaults
     }
 
     func show() {
@@ -24,7 +26,7 @@ final class PairDeviceWindowController: NSObject, NSWindowDelegate {
             return
         }
 
-        let model = PairDeviceModel(client: client)
+        let model = PairDeviceModel(client: client, defaults: defaults)
         let hosting = NSHostingController(rootView: PairDeviceView(model: model))
         let window = NSWindow(contentViewController: hosting)
         window.title = "Pair a device"
@@ -56,14 +58,24 @@ final class PairDeviceWindowController: NSObject, NSWindowDelegate {
 final class PairDeviceModel: ObservableObject {
     /// Which half of the two-step flow is on screen.
     ///
-    /// Step one only appears the first time: once any choice is made
-    /// (including "tailnet only"), `configureRelay` records managed state and
-    /// the resolver's `!managed && !bootstrap.Enabled` default no longer
-    /// applies, so every later open of this window goes straight to step two.
-    enum Step {
+    /// Step one only appears the first time: `RelayStatus{state: off, mode:
+    /// off}` is bit-for-bit identical whether nothing has ever been
+    /// configured or a user deliberately chose "tailnet only" (that choice
+    /// records `RelayManagedState{Mode: off}`, which resolves to exactly the
+    /// same wire status as the resolver's true zero value). The server alone
+    /// cannot disambiguate these, so this Mac's own choice is additionally
+    /// recorded locally in `UserDefaults` the moment any step-one choice
+    /// completes (`connectionChoiceMadeKey`), and checked first.
+    enum Step: Equatable {
         case chooseConnection
         case code
     }
+
+    /// `UserDefaults` key recording that this Mac's user has already been
+    /// asked "how should your phone reach this Mac?" and answered, so the
+    /// question is never asked again purely because the server-side status
+    /// happens to read back as the same off/off shape as "never configured".
+    static let connectionChoiceMadeKey = "ai.redline.mac.relayConnectionChoiceMade"
 
     enum State {
         case loading
@@ -100,10 +112,12 @@ final class PairDeviceModel: ObservableObject {
     @Published private(set) var tailnetOnlyErrorMessage: String?
 
     private let client: RedlineAPIClient
+    private let defaults: UserDefaults
     private var watch: Task<Void, Never>?
 
-    init(client: RedlineAPIClient) {
+    init(client: RedlineAPIClient, defaults: UserDefaults = .standard) {
         self.client = client
+        self.defaults = defaults
     }
 
     deinit {
@@ -113,23 +127,33 @@ final class PairDeviceModel: ObservableObject {
     /// Entry point for opening the window: decides which step to show, then
     /// shows it.
     ///
-    /// A relay status of exactly `.off` state and `.off` mode is the
-    /// resolver's true zero value (`internal/config/relay_state.go`'s
-    /// `RelayResolver.Resolve`, the `!managed && !bootstrap.Enabled` branch)
-    /// -- nothing has ever been configured, managed or bootstrapped. Any
-    /// other status means a choice already exists (including an explicit,
-    /// managed "off", which the resolver cannot tell apart from the zero
-    /// value by state/mode alone, but which this window never re-asks about
-    /// once made -- see the note on `Step`). If the probe itself fails, this
-    /// falls back to today's existing behaviour (show the code) rather than
-    /// gating pairing on a second endpoint's availability.
+    /// This Mac's own local record of having already answered the connection
+    /// question is checked first and takes precedence: it is the only signal
+    /// that can distinguish a deliberate "tailnet only" choice from a truly
+    /// unconfigured Mac, since both resolve to the identical `{state: off,
+    /// mode: off}` wire status (see `Step`). Only when no local record exists
+    /// does this fall back to asking the service, so a fresh install (or a
+    /// different machine sharing the same account) still gets step one. If
+    /// the relayStatus() probe itself fails, this falls back to today's
+    /// pre-Phase-3 behaviour (show the code) rather than gating pairing on a
+    /// second endpoint's availability.
     func start() async {
+        if defaults.bool(forKey: PairDeviceModel.connectionChoiceMadeKey) {
+            step = .code
+            await load()
+            return
+        }
         do {
             let status = try await client.relayStatus()
             if PairDeviceModel.needsConnectionChoice(status) {
                 await enterChooseConnection()
                 return
             }
+            // The service already reports a real, non-default choice (e.g. an
+            // existing hosted/self-hosted setup from before this local record
+            // existed): back-fill the local flag so future opens are fast and
+            // do not depend on relayStatus() succeeding.
+            defaults.set(true, forKey: PairDeviceModel.connectionChoiceMadeKey)
         } catch {
             // Relay status is a new, additional signal; a service without it
             // (or momentarily unreachable) must not block pairing, which
@@ -139,10 +163,16 @@ final class PairDeviceModel: ObservableObject {
         await load()
     }
 
-    /// Whether the window should show step one.
+    /// Whether the window should show step one, from the service's status
+    /// alone (before the local `connectionChoiceMadeKey` override in
+    /// `start()` is applied).
     ///
     /// A pure function of the status alone, so the resolver-default check is
-    /// testable without a window, a client, or a clock.
+    /// testable without a window, a client, or a clock. Known limitation:
+    /// `{state: off, mode: off}` is bit-for-bit identical whether nothing has
+    /// ever been configured or a user deliberately chose "tailnet only" --
+    /// `start()` is what actually resolves this ambiguity using the local
+    /// flag; this function alone cannot.
     static func needsConnectionChoice(_ status: RelayStatus) -> Bool {
         status.state == .off && status.mode == .off
     }
@@ -217,6 +247,7 @@ final class PairDeviceModel: ObservableObject {
         defer { isConfiguringTailnetOnly = false }
         do {
             _ = try await client.configureRelay(RelayConfigureRequest(mode: .off))
+            defaults.set(true, forKey: PairDeviceModel.connectionChoiceMadeKey)
             step = .code
             await load()
         } catch {
@@ -236,6 +267,7 @@ final class PairDeviceModel: ObservableObject {
             )
             hostedResultMessage = PairDeviceModel.relayConfigureResultDescription(status)
             if PairDeviceModel.shouldProceedToCode(after: status) {
+                defaults.set(true, forKey: PairDeviceModel.connectionChoiceMadeKey)
                 step = .code
                 await load()
             }
@@ -258,6 +290,7 @@ final class PairDeviceModel: ObservableObject {
             )
             selfHostedResultMessage = PairDeviceModel.relayConfigureResultDescription(status)
             if PairDeviceModel.shouldProceedToCode(after: status) {
+                defaults.set(true, forKey: PairDeviceModel.connectionChoiceMadeKey)
                 step = .code
                 await load()
             }
@@ -323,6 +356,13 @@ final class PairDeviceModel: ObservableObject {
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
             guard let status = try? await client.pairingStatus(of: token) else { continue }
+            // Cancellation is cooperative: `load()` cancels the previous watch
+            // task before starting a new one, but that in-flight network call
+            // above may already have been awaiting when cancellation fired,
+            // and can still complete afterward. Without this check, a stale
+            // verdict for an already-discarded token could overwrite state a
+            // newer `load()` call has since set for a brand-new token.
+            if Task.isCancelled { return }
             if let next = PairDeviceModel.stateAfter(status: status, routes: routes) {
                 state = next
                 return

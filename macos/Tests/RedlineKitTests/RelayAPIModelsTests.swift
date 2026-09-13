@@ -171,6 +171,23 @@ struct RelayConfigureRequestEncodingTests {
         #expect(object["url"] as? String == "https://relay.example.com")
         #expect(object["license_key"] == nil)
     }
+
+    @Test("a license key with leading/trailing whitespace is trimmed before encoding")
+    func trimsLicenseKeyWhitespace() throws {
+        // The server rejects an untrimmed license_key with a generic 400,
+        // unlike url/label which it trims itself. A key pasted from an email
+        // or password manager commonly carries a trailing newline or space.
+        let request = RelayConfigureRequest(mode: .hosted, licenseKey: "  rl_test_not_real \n")
+        let data = try JSONEncoder().encode(request)
+        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["license_key"] as? String == "rl_test_not_real")
+    }
+
+    @Test("a license key that is entirely whitespace is omitted, not sent as a non-empty value")
+    func whitespaceOnlyLicenseKeyIsOmitted() throws {
+        let request = RelayConfigureRequest(mode: .hosted, licenseKey: "   ")
+        #expect(try encodedKeys(request) == ["mode"])
+    }
 }
 
 // MARK: - Client method tests
@@ -372,6 +389,36 @@ func apiClientFetchesRelayPortalURL() async throws {
     #expect(RelayPortalStub.sawMethod == "POST")
     #expect(RelayPortalStub.sawPath == "/v1/relay/portal")
     #expect(url.absoluteString == "https://portal.example.com/session/abc")
+}
+
+/// A `relayPortalURL()` response with a non-https scheme must be rejected,
+/// not handed straight to a caller that will pass it to
+/// `NSWorkspace.shared.open`.
+private final class RelayPortalNonHTTPSStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let body = Data(#"{"url":"file:///etc/passwd"}"#.utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+@Test("relayPortalURL() rejects a non-https scheme instead of returning it")
+func apiClientRejectsNonHTTPSPortalURL() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [RelayPortalNonHTTPSStub.self]
+    let client = RedlineAPIClient(
+        baseURL: URL(string: "http://127.0.0.1:7436")!,
+        token: "local-token",
+        session: URLSession(configuration: configuration)
+    )
+    await #expect(throws: RedlineAPIClient.Error.self) {
+        _ = try await client.relayPortalURL()
+    }
 }
 
 private final class RelayDeactivateStub: URLProtocol {
