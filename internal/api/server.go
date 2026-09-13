@@ -58,6 +58,15 @@ type HarnessDiscoverer interface {
 	Discover(context.Context) discovery.Catalog
 }
 
+type relayManagement interface {
+	Status() config.RelayStatus
+	Configure(context.Context, config.RelayConfigureRequest) (config.RelayStatus, error)
+	Devices(context.Context) ([]relay.Activation, error)
+	DeactivateDevice(context.Context, string) error
+	Portal(context.Context) (*url.URL, error)
+	Deactivate(context.Context) (config.RelayStatus, error)
+}
+
 type HermesDiscoverer interface {
 	Discover(context.Context, domain.RuntimeConnection) (hermes.Discovery, error)
 	ListJobs(context.Context, domain.RuntimeConnection) ([]hermes.Job, error)
@@ -93,6 +102,7 @@ type Server struct {
 	// a dead code and had no way to say "paired".
 	redeemed         map[string]time.Time
 	relayRuntime     config.RelayRuntime
+	relayManager     relayManagement
 	mintPairingToken func() (string, error)
 }
 
@@ -136,6 +146,14 @@ func NewServerWithRelayRuntime(cfg config.Config, database *store.DB, now func()
 	if runtime != nil {
 		server.relayRuntime = runtime
 	}
+	return server
+}
+
+// NewServerWithRelayManager installs the service-owned management boundary.
+// Handlers receive no Keychain or issuer dependency of their own.
+func NewServerWithRelayManager(cfg config.Config, database *store.DB, now func() time.Time, manager *config.RelayManager) *Server {
+	server := NewServerWithRelayRuntime(cfg, database, now, manager)
+	server.relayManager = manager
 	return server
 }
 
@@ -264,6 +282,12 @@ func newServer(
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
+	mux.HandleFunc("GET /v1/relay/status", server.relayStatus)
+	mux.HandleFunc("POST /v1/relay/configure", server.configureRelay)
+	mux.HandleFunc("GET /v1/relay/devices", server.relayDevices)
+	mux.HandleFunc("DELETE /v1/relay/devices/{id}", server.deactivateRelayDevice)
+	mux.HandleFunc("POST /v1/relay/portal", server.relayPortal)
+	mux.HandleFunc("POST /v1/relay/deactivate", server.deactivateRelay)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
@@ -392,6 +416,106 @@ func randomPairingToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+func (s *Server) relayStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.relayManager.Status())
+}
+
+func (s *Server) configureRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	var request config.RelayConfigureRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: err.Error()})
+		return
+	}
+	status, err := s.relayManager.Configure(r.Context(), request)
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) relayDevices(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	devices, err := s.relayManager.Devices(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Devices []relay.Activation `json:"devices"`
+	}{Devices: devices})
+}
+
+func (s *Server) deactivateRelayDevice(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	if err := s.relayManager.DeactivateDevice(r.Context(), r.PathValue("id")); err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) relayPortal(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	portal, err := s.relayManager.Portal(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		URL string `json:"url"`
+	}{URL: portal.String()})
+}
+
+func (s *Server) deactivateRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	status, err := s.relayManager.Deactivate(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func writeRelayManagementError(w http.ResponseWriter, err error) {
+	code, status := "internal_error", http.StatusInternalServerError
+	var management *config.RelayManagementError
+	if errors.As(err, &management) {
+		code = management.Code
+		switch code {
+		case "invalid_request":
+			status = http.StatusBadRequest
+		case "invalid_key":
+			status = http.StatusUnprocessableEntity
+		case "needs_license", "lapsed", "no_seat":
+			status = http.StatusConflict
+		case "issuer_unavailable", "unavailable", "secure_store_unavailable", "state_unavailable", "controller_unavailable", "compensation_failed":
+			status = http.StatusServiceUnavailable
+		}
+	}
+	writeJSON(w, status, problem{Code: code, Error: err.Error()})
+}
+
 func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Host      string `json:"host"`
@@ -413,7 +537,12 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	if planErr != nil && !noRoute {
 		var callerError *pairing.CallerError
 		if errors.As(planErr, &callerError) {
-			writeJSON(w, http.StatusBadRequest, problem{Error: callerError.Error()})
+			var unavailable *pairing.RelayUnavailableError
+			if errors.As(callerError, &unavailable) {
+				writeJSON(w, http.StatusBadRequest, problem{Code: string(unavailable.Reason), Error: callerError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: callerError.Error()})
 			return
 		}
 		writeError(w, fmt.Errorf("plan pairing code: %w", planErr))
@@ -448,13 +577,14 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	// this machine redeems it from a browser. It just gets no URL, and the
 	// empty route list says why.
 	response := struct {
-		Token       string          `json:"pairing_token"`
-		ExpiresAt   time.Time       `json:"expires_at"`
-		PairingURL  string          `json:"pairing_url,omitempty"`
-		Routes      []pairing.Route `json:"routes"`
-		Endpoint    string          `json:"endpoint,omitempty"`
-		RelayStatus string          `json:"relay_status"`
-	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(snapshot.Readiness)}
+		Token        string                     `json:"pairing_token"`
+		ExpiresAt    time.Time                  `json:"expires_at"`
+		PairingURL   string                     `json:"pairing_url,omitempty"`
+		Routes       []pairing.Route            `json:"routes"`
+		Endpoint     string                     `json:"endpoint,omitempty"`
+		RelayStatus  string                     `json:"relay_status"`
+		RelayRefusal pairing.RelayRefusalReason `json:"relay_refusal,omitempty"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(snapshot.Readiness), RelayRefusal: plan.RelayRefusal}
 
 	if !noRoute {
 		code := prepared.Render(token)
@@ -2559,6 +2689,7 @@ func (s *Server) fetchAndStore(
 }
 
 type problem struct {
+	Code  string `json:"code,omitempty"`
 	Error string `json:"error"`
 }
 

@@ -51,10 +51,10 @@ continues to reject cross-origin requests.
 ## 2. The relay (optional)
 
 The desktop includes hosted entitlement acquisition, protected caching, automatic
-renewal, and live relay refresh. Relay management API/CLI commands and the Pair a Device
-configuration UI are later milestones and do not exist yet. YAML is only an optional
-bootstrap. Once `relay-state.json` exists, managed state wins and the service does not
-rewrite the YAML.
+renewal, live relay refresh, and an authenticated local management API and CLI. The
+Pair a Device configuration UI is a later milestone and does not exist yet. YAML is only
+an optional bootstrap. Once `relay-state.json` exists, managed state wins and the service
+does not rewrite the YAML.
 
 ```yaml
 relay:
@@ -114,8 +114,8 @@ containing `session_id`, `entitlement_token`, or `license_key` is rejected.
 
 Hosted licenses are generic-password items in macOS Keychain. The exact identifiers are
 service `ai.redline.mac.relay-license`, account `hosted`. Only the local service reads the
-item; future CLI and UI code must call authenticated service endpoints rather than access
-Keychain. Linux builds expose the same `LicenseStore` interface for fake-backed tests but
+item; the CLI calls authenticated service endpoints rather than accessing Keychain, and
+future UI code must do the same. Linux builds expose the same `LicenseStore` interface for fake-backed tests but
 do not provide plaintext file fallback.
 
 A closed relay verifies an entitlement only on the desktop `host` connection. Phone
@@ -128,7 +128,8 @@ and idle timeout per channel, so concurrent phones cannot share nonces or block 
 another; closing or invalidating one channel leaves the others connected.
 
 **Running your own relay.** Follow [Self-host the Redline relay](self-hosted-relay.md),
-then put its URL in the YAML block above. The committed self-host profile uses
+then run `redline relay setup --url https://your-relay.example` against the running
+service (or use the YAML bootstrap before managed state exists). The committed self-host profile uses
 `ALLOW_UNENTITLED=true`, while still requiring an attached desktop host and enforcing
 `MAX_CLIENTS_DEFAULT` (five unless validly configured otherwise).
 
@@ -152,8 +153,27 @@ redline --config redline.yaml pair --qr
 The CLI asks the authenticated running service to compose the complete pairing URL from
 resolved managed state; it never reconstructs relay fields from YAML. `--host` and
 `--port` are sent as authenticated overrides and validated against the service's trusted
-hosts. Otherwise the service uses the first trusted host. With the relay enabled and no
-tailnet host, or with `--relay-only`, it emits a code that pairs over the relay alone.
+hosts. Otherwise the service uses the first trusted host. A relay route is included only
+for `active`, `renew_pending`, or `self_hosted` entitlement state while the host socket is
+actually connected. If it is connecting or unavailable, the response carries a structured
+reason and a direct route remains usable; `--relay-only` fails clearly instead of emitting
+a code that cannot work.
+
+Relay lifecycle commands all use the same authenticated local API:
+
+```sh
+redline relay status
+redline relay activate <license-key> --label "work mac"
+redline relay devices
+redline relay device deactivate <opaque-id>
+redline relay setup --url https://your-relay.example
+redline relay off
+redline relay deactivate
+```
+
+`relay deactivate` removes the issuer activation marked as the current Mac and then turns
+relay mode off. `relay off` only disables local relay use. CLI and API responses never
+include the license key, entitlement token, issuer URL, or relay session id.
 
 Pairing itself goes over whichever route the phone can reach. A phone with no Tailscale
 pairs through the relay; nothing about pairing requires the tailnet.

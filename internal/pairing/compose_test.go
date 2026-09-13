@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jfox/redline/internal/config"
 )
@@ -44,8 +45,53 @@ func TestPlanRefusesRelayOnlyWhenRuntimeIsUnavailable(t *testing.T) {
 		// the supervisor refuses to dial.
 		Dial: true,
 	}
-	if _, err := PlanRoutes(nil, runtime, Options{RelayOnly: true}); err == nil || !strings.Contains(err.Error(), "ready relay") {
+	_, err := PlanRoutes(nil, runtime, Options{RelayOnly: true})
+	var unavailable *RelayUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != RelayRefusalUnavailable {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPlanKeepsDirectRouteAndExplainsRelayRefusal(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		readiness  config.RelayReadiness
+		dial       bool
+		connected  bool
+		wantReason RelayRefusalReason
+	}{
+		{name: "connecting", readiness: config.RelayReadinessActive, dial: true, wantReason: RelayRefusalConnecting},
+		{name: "lapsed", readiness: config.RelayReadinessLapsed, wantReason: RelayRefusalLapsed},
+		{name: "no seat", readiness: config.RelayReadinessNoSeat, wantReason: RelayRefusalNoSeat},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := config.ResolvedRelay{
+				RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "managed-session-abcdefghij"},
+				Readiness:         test.readiness, Dial: test.dial, Connected: test.connected,
+				EntitlementToken: config.NewRelayEntitlementToken("runtime-only-secret"), ExpiresAt: time.Now().Add(time.Hour),
+			}
+			plan, err := PlanRoutes([]string{"mac.example.ts.net"}, runtime, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.Routes) != 1 || plan.Routes[0] != RouteDirect || plan.RelayRefusal != test.wantReason {
+				t.Fatalf("plan = %#v", plan)
+			}
+		})
+	}
+}
+
+func TestPlanAdvertisesRelayOnlyAfterHostConnectionIsProven(t *testing.T) {
+	runtime := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "managed-session-abcdefghij"},
+		Readiness:         config.RelayReadinessSelfHosted, Dial: true, Connected: true,
+	}
+	plan, err := PlanRoutes(nil, runtime, Options{RelayOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Routes) != 1 || plan.Routes[0] != RouteRelay || plan.RelayRefusal != "" {
+		t.Fatalf("plan = %#v", plan)
 	}
 }
 

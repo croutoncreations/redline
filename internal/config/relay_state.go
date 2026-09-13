@@ -272,6 +272,7 @@ type ResolvedRelay struct {
 	SeatsUsed           int                   `json:"seats_used,omitempty"`
 	MaxClients          int                   `json:"max_clients,omitempty"`
 	ReconnectGeneration uint64                `json:"-"`
+	Connected           bool                  `json:"-"`
 	PersistenceDegraded bool                  `json:"persistence_degraded,omitempty"`
 
 	// A fixed-size value keeps snapshots comparable (the supervisor uses value
@@ -342,6 +343,11 @@ func (r ResolvedRelay) EntitlementTokenAt(now time.Time) string {
 	}
 	return r.EntitlementToken.Value()
 }
+
+// CanAdvertise reports whether pairing may publish the relay route. A
+// configured or dialable route is not enough: the host WebSocket must have
+// completed its handshake so a phone will not receive a misleading route.
+func (r ResolvedRelay) CanAdvertise() bool { return r.CanDial() && r.Connected }
 
 func (r ResolvedRelay) CanDial() bool {
 	if !r.Dial || r.Mode == RelayModeOff {

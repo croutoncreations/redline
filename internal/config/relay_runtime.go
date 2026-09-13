@@ -11,8 +11,8 @@ type RelayRuntime interface {
 }
 
 // RelayCoordinator owns the process's current resolved relay snapshot. It is
-// intentionally limited to atomic replacement and observation: configuration
-// mutation and the local management API/UI belong to later phases.
+// intentionally limited to atomic replacement and observation; RelayManager
+// owns configuration and lifecycle mutation.
 type RelayCoordinator struct {
 	mu          sync.RWMutex
 	current     ResolvedRelay
@@ -30,6 +30,21 @@ func (r *RelayCoordinator) Current() ResolvedRelay {
 	return r.current
 }
 
+// Modify atomically derives and publishes a snapshot. It is the safe boundary
+// for independent runtime facts (such as socket connectivity) that would
+// otherwise lose a concurrent entitlement update in a Current/Update race.
+func (r *RelayCoordinator) Modify(fn func(ResolvedRelay) ResolvedRelay) ResolvedRelay {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := fn(r.current)
+	if next == r.current {
+		return next
+	}
+	r.current = next
+	r.publishLocked(next)
+	return next
+}
+
 // Update atomically replaces the current value and offers that same value to
 // every subscriber. A slow subscriber retains the newest snapshot rather than
 // blocking relay renewal or configuration changes.
@@ -37,6 +52,10 @@ func (r *RelayCoordinator) Update(next ResolvedRelay) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.current = next
+	r.publishLocked(next)
+}
+
+func (r *RelayCoordinator) publishLocked(next ResolvedRelay) {
 	for _, updates := range r.subscribers {
 		select {
 		case updates <- next:

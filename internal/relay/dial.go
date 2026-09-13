@@ -48,6 +48,11 @@ type DialerOptions struct {
 	// receives an error string, header, or token.
 	EntitlementSignal func(EntitlementSignal)
 
+	// ConnectionState reports the proven host WebSocket state. It is called
+	// with true only after a successful handshake and false when that socket is
+	// no longer usable. Configuration alone never produces a connected state.
+	ConnectionState func(bool)
+
 	// Logf reports connection state to the operator. Nil means silent, which
 	// is what every test that does not care about output gets.
 	//
@@ -185,6 +190,10 @@ func (d *Dialer) connect(ctx context.Context) error {
 		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
 	}
 	defer conn.CloseNow()
+	if d.opts.ConnectionState != nil {
+		d.opts.ConnectionState(true)
+		defer d.opts.ConnectionState(false)
+	}
 
 	// The session id, not the URL: naming the session is what an operator
 	// actually needs to correlate this desktop with a phone or relay-side 409,

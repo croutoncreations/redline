@@ -34,6 +34,27 @@ const (
 	RouteRelay  Route = "relay"
 )
 
+// RelayRefusalReason is a stable explanation for omitting the relay route.
+// Direct pairing can still proceed with this attached to the composed result.
+type RelayRefusalReason string
+
+const (
+	RelayRefusalOff          RelayRefusalReason = "off"
+	RelayRefusalConnecting   RelayRefusalReason = "connecting"
+	RelayRefusalNeedsLicense RelayRefusalReason = "needs_license"
+	RelayRefusalUnavailable  RelayRefusalReason = "unavailable"
+	RelayRefusalLapsed       RelayRefusalReason = "lapsed"
+	RelayRefusalNoSeat       RelayRefusalReason = "no_seat"
+	RelayRefusalInvalidKey   RelayRefusalReason = "invalid_key"
+)
+
+// RelayUnavailableError gives relay-only callers a machine-readable refusal.
+type RelayUnavailableError struct{ Reason RelayRefusalReason }
+
+func (e *RelayUnavailableError) Error() string {
+	return "relay-only pairing is unavailable: " + string(e.Reason)
+}
+
 // ErrNoRoute means the desktop has neither a trusted host nor a relay, so
 // there is nowhere to send a phone. The pairing token is still valid for the
 // web /pair page on this machine, which is why callers get a typed error they
@@ -60,8 +81,9 @@ type Options struct {
 // Code is what a phone scans, plus what it offers, for the surface showing it
 // to explain.
 type Code struct {
-	URL    string
-	Routes []Route
+	URL          string
+	Routes       []Route
+	RelayRefusal RelayRefusalReason
 	// Endpoint is the direct host:port the code names, or empty for a
 	// relay-only code.
 	Endpoint string
@@ -82,9 +104,10 @@ func (e *CallerError) Unwrap() error { return e.Err }
 // Plan is the pure result of selecting pairing routes. It contains no desktop
 // key and planning performs no filesystem or identity I/O.
 type Plan struct {
-	Routes   []Route
-	Endpoint string
-	Notice   string
+	Routes       []Route
+	Endpoint     string
+	Notice       string
+	RelayRefusal RelayRefusalReason
 
 	host      string
 	port      int
@@ -106,7 +129,8 @@ func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Opt
 	if options.Port < 0 || options.Port > 65535 {
 		return Plan{}, &CallerError{Err: errors.New("pairing port must be zero or between 1 and 65535")}
 	}
-	hasRelay := runtime.CanDial()
+	hasRelay := runtime.CanAdvertise()
+	refusal := relayRefusal(runtime)
 	if hasRelay && (strings.TrimSpace(runtime.URL) == "" || strings.TrimSpace(runtime.SessionID) == "") {
 		return Plan{}, errors.New("dialable relay runtime is missing its URL or session_id")
 	}
@@ -116,12 +140,12 @@ func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Opt
 	}
 	if host == "" && !hasRelay {
 		if options.RelayOnly {
-			return Plan{}, &CallerError{Err: errors.New("relay-only pairing requires a ready relay")}
+			return Plan{}, &CallerError{Err: &RelayUnavailableError{Reason: refusal}}
 		}
-		return Plan{}, ErrNoRoute
+		return Plan{RelayRefusal: refusal}, ErrNoRoute
 	}
 
-	plan := Plan{Notice: notice, host: host, port: port}
+	plan := Plan{Notice: notice, RelayRefusal: refusal, host: host, port: port}
 	if host != "" {
 		plan.Routes = append(plan.Routes, RouteDirect)
 		plan.Endpoint = host
@@ -138,6 +162,31 @@ func PlanRoutes(trustedHosts []string, runtime config.ResolvedRelay, options Opt
 		plan.sessionID = runtime.SessionID
 	}
 	return plan, nil
+}
+
+func relayRefusal(runtime config.ResolvedRelay) RelayRefusalReason {
+	if runtime.CanAdvertise() {
+		return ""
+	}
+	if runtime.CanDial() {
+		return RelayRefusalConnecting
+	}
+	switch runtime.Readiness {
+	case config.RelayReadinessNeedsLicense:
+		return RelayRefusalNeedsLicense
+	case config.RelayReadinessHostedConfigured:
+		return RelayRefusalConnecting
+	case config.RelayReadinessUnavailable:
+		return RelayRefusalUnavailable
+	case config.RelayReadinessLapsed:
+		return RelayRefusalLapsed
+	case config.RelayReadinessNoSeat:
+		return RelayRefusalNoSeat
+	case config.RelayReadinessInvalidKey:
+		return RelayRefusalInvalidKey
+	default:
+		return RelayRefusalOff
+	}
 }
 
 // PrepareIdentity performs the only filesystem operation in pairing
@@ -158,10 +207,11 @@ func PrepareIdentity(plan Plan, keypairPath string) (PreparedPlan, error) {
 // Render inserts the one-time token after all fallible work has completed.
 func (p PreparedPlan) Render(token string) Code {
 	return Code{
-		URL:      URL(p.plan.host, p.plan.port, token, p.plan.relayURL, p.desktopKey, p.plan.sessionID),
-		Routes:   append([]Route(nil), p.plan.Routes...),
-		Endpoint: p.plan.Endpoint,
-		Notice:   p.plan.Notice,
+		URL:          URL(p.plan.host, p.plan.port, token, p.plan.relayURL, p.desktopKey, p.plan.sessionID),
+		Routes:       append([]Route(nil), p.plan.Routes...),
+		Endpoint:     p.plan.Endpoint,
+		Notice:       p.plan.Notice,
+		RelayRefusal: p.plan.RelayRefusal,
 	}
 }
 

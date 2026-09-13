@@ -65,7 +65,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|relay>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -108,6 +108,8 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	case "pair":
 		return runPair(client, remaining[1:], *configPath, stdout, stderr)
+	case "relay":
+		return runRelay(client, remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -120,7 +122,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair")
+	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair, relay")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
@@ -425,47 +427,15 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		return 1
 	}
 	defer listener.Close()
-	licenseStore := config.DefaultLicenseStore()
-	resolver := config.NewRelayResolver(
-		config.NewRelayStateStore(config.DefaultRelayStatePath(cfg.Relay.KeypairPath, cfg.Database)),
-		licenseStore,
-	)
-	resolvedRelay, err := resolver.Resolve(context.Background(), cfg.Relay)
+	// From this boundary onward service components receive one deep owner, not
+	// separate state, Keychain, issuer, controller, or coordinator capabilities.
+	management, err := config.NewServiceRelayManager(context.Background(), cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "relay:", err)
 		return 1
 	}
-	if err := config.ValidateEffectiveRelay(cfg, resolvedRelay); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	// From this boundary onward service components read one typed runtime
-	// snapshot. Bootstrap YAML remains bootstrap-only and cannot be mistaken for
-	// managed mode, readiness, or dialability.
-	relayRuntime := config.NewRelayCoordinator(resolvedRelay)
-	var entitlementController *config.EntitlementController
-	if resolvedRelay.Mode == config.RelayModeHosted {
-		issuer, issuerErr := relay.NewIssuerClient(resolvedRelay.IssuerURL, nil)
-		if issuerErr != nil {
-			fmt.Fprintln(stderr, "relay issuer:", issuerErr)
-			return 1
-		}
-		identityPath := relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database)
-		entitlementController = config.NewEntitlementController(config.EntitlementControllerOptions{
-			Coordinator: relayRuntime,
-			Initial:     resolvedRelay,
-			Licenses:    licenseStore,
-			Issuer:      issuer,
-			Cache:       relay.NewEntitlementCacheStore(relay.DefaultEntitlementCachePath(identityPath)),
-			Revocations: relay.NewEntitlementRevocationStore(relay.DefaultEntitlementRevocationPath(relay.DefaultEntitlementCachePath(identityPath))),
-		})
-	}
-	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
-		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), func(signal relay.EntitlementSignal) {
-			if entitlementController != nil {
-				entitlementController.TriggerRelayEntitlement(signal)
-			}
-		}, func(format string, args ...any) {
+	relayManager := newRelaySupervisor(management, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
+		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), management.TriggerRelayEntitlement, management.SetConnected, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		})
 		if err != nil {
@@ -500,7 +470,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	apiServer := api.NewServerWithRelayRuntime(cfg, database, now, relayRuntime)
+	apiServer := api.NewServerWithRelayManager(cfg, database, now, management)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	apiServer.StartScheduler(ctx)
@@ -519,14 +489,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	relayDone := make(chan error, 1)
 	go func() { relayDone <- relayManager.Run(ctx) }()
 	controllerDone := make(chan struct{})
-	if entitlementController != nil {
-		go func() {
-			entitlementController.Run(ctx)
-			close(controllerDone)
-		}()
-	} else {
+	go func() {
+		management.Run(ctx)
 		close(controllerDone)
-	}
+	}()
 
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(listener) }()
@@ -575,7 +541,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 //
 // The session id has already been resolved from atomically managed state rather
 // than minted per start, so a phone remains paired across service restarts.
-func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, tokenSource func() string, localAddr string, signal func(relay.EntitlementSignal), logf func(string, ...any)) (*relay.Dialer, error) {
+func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, tokenSource func() string, localAddr string, signal func(relay.EntitlementSignal), connectionState func(bool), logf func(string, ...any)) (*relay.Dialer, error) {
 	keypair, err := relay.LoadOrCreateKeypair(
 		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
 	)
@@ -592,6 +558,7 @@ func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, tokenSourc
 		Keypair:                keypair,
 		EntitlementTokenSource: tokenSource,
 		EntitlementSignal:      signal,
+		ConnectionState:        connectionState,
 		Logf:                   logf,
 		// Requests are replayed against this service's own listener, so the
 		// phone reaches exactly the API a local browser would.
@@ -823,6 +790,96 @@ func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Wri
 	}
 	writeJSON(stdout, response)
 	return 0
+}
+
+func runRelay(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: redline relay <status|activate|devices|device deactivate|setup|off|deactivate>")
+		return 1
+	}
+	requestStatus := func(method, path string, body any) int {
+		var status config.RelayStatus
+		if err := client.Do(context.Background(), method, path, body, &status); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, status)
+		return 0
+	}
+	switch args[0] {
+	case "status":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: redline relay status")
+			return 1
+		}
+		return requestStatus(http.MethodGet, "/v1/relay/status", nil)
+	case "activate":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: redline relay activate <key> [--label LABEL]")
+			return 1
+		}
+		flags := flag.NewFlagSet("relay activate", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		label := flags.String("label", "", "optional device label")
+		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
+			return 1
+		}
+		return requestStatus(http.MethodPost, "/v1/relay/configure", config.RelayConfigureRequest{
+			Mode: config.RelayModeHosted, LicenseKey: args[1], Label: *label,
+		})
+	case "devices":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: redline relay devices")
+			return 1
+		}
+		var response struct {
+			Devices []relay.Activation `json:"devices"`
+		}
+		if err := client.Do(context.Background(), http.MethodGet, "/v1/relay/devices", nil, &response); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		writeJSON(stdout, response.Devices)
+		return 0
+	case "device":
+		if len(args) != 3 || args[1] != "deactivate" || args[2] == "" {
+			fmt.Fprintln(stderr, "usage: redline relay device deactivate <id>")
+			return 1
+		}
+		path := "/v1/relay/devices/" + url.PathEscape(args[2])
+		if err := client.Do(context.Background(), http.MethodDelete, path, nil, nil); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "relay device deactivated")
+		return 0
+	case "setup":
+		flags := flag.NewFlagSet("relay setup", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		relayURL := flags.String("url", "", "self-hosted relay URL")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *relayURL == "" {
+			if *relayURL == "" {
+				fmt.Fprintln(stderr, "--url is required")
+			}
+			return 1
+		}
+		return requestStatus(http.MethodPost, "/v1/relay/configure", config.RelayConfigureRequest{Mode: config.RelayModeSelfHosted, URL: *relayURL})
+	case "off":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: redline relay off")
+			return 1
+		}
+		return requestStatus(http.MethodPost, "/v1/relay/configure", config.RelayConfigureRequest{Mode: config.RelayModeOff})
+	case "deactivate":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: redline relay deactivate")
+			return 1
+		}
+		return requestStatus(http.MethodPost, "/v1/relay/deactivate", map[string]any{})
+	default:
+		fmt.Fprintf(stderr, "unknown relay command %q\n", args[0])
+		return 1
+	}
 }
 
 func runPair(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {

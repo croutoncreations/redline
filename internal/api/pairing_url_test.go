@@ -112,6 +112,7 @@ func TestPairingResponseCarriesTheRelayWhenEnabled(t *testing.T) {
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 		Readiness:         config.RelayReadinessSelfHosted,
 		Dial:              true,
+		Connected:         true,
 	}
 	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
@@ -149,6 +150,7 @@ func TestPairingResponseIsRelayOnlyWithoutATrustedHost(t *testing.T) {
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 		Readiness:         config.RelayReadinessSelfHosted,
 		Dial:              true,
+		Connected:         true,
 	}
 	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
@@ -178,6 +180,7 @@ func TestPairingResponseHonoursRelayOnly(t *testing.T) {
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 		Readiness:         config.RelayReadinessSelfHosted,
 		Dial:              true,
+		Connected:         true,
 	}
 	handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(resolved))
 
@@ -215,6 +218,7 @@ func TestInvalidPairingOverridesDoNotCreateRelayIdentity(t *testing.T) {
 					RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 					Readiness:         config.RelayReadinessSelfHosted,
 					Dial:              true,
+					Connected:         true,
 				}
 			}
 			handler := pairingHandlerWithRuntime(t, cfg, config.NewRelayCoordinator(runtime))
@@ -248,6 +252,7 @@ func TestPairingIdentityFailuresAreInternalAndMintNothing(t *testing.T) {
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 		Readiness:         config.RelayReadinessSelfHosted,
 		Dial:              true,
+		Connected:         true,
 	})
 	handler := pairingHandlerWithRuntime(t, cfg, runtime)
 
@@ -270,6 +275,7 @@ func TestRelayRuntimeUpdateIsUsedConsistentlyByPairing(t *testing.T) {
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example", SessionID: "session-0123456789abcdefghijklmnop"},
 		Readiness:         config.RelayReadinessSelfHosted,
 		Dial:              true,
+		Connected:         true,
 	})
 
 	code, body := createPairing(t, handler, cfg, "?relay_only=1")

@@ -380,8 +380,7 @@ func (w *entitlementRevocationWorker) shutdown(parent context.Context, timeout t
 }
 
 // EntitlementController is the sole writer of hosted runtime entitlement
-// state. Its public triggers are narrow lifecycle seams for the future local
-// management API; this phase intentionally does not expose that API or UI.
+// state. RelayManager owns its lifecycle and invokes its narrow typed triggers.
 type EntitlementController struct {
 	opts      EntitlementControllerOptions
 	triggers  chan entitlementTrigger
@@ -432,8 +431,8 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 
 // TriggerLicenseChanged supersedes work and runtime authority for the previous
 // credential generation. It returns false without mutation after shutdown has
-// established its closing boundary. Credential replacement and its validation
-// remain the responsibility of the later management API, not this controller.
+// established its closing boundary. Credential replacement and validation
+// remain RelayManager responsibilities, not this controller's.
 func (c *EntitlementController) TriggerLicenseChanged() bool {
 	c.mu.Lock()
 	if c.closing {
@@ -584,20 +583,18 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		c.expiryWatchers.Wait()
 	}()
 
-	base := c.opts.Initial
-	switch base.Mode {
-	case RelayModeOff:
+	// Configuration may be committed before the controller goroutine is
+	// scheduled. Start from the coordinator's current generation so startup
+	// cannot overwrite that newer managed state with constructor-time input.
+	base := c.opts.Coordinator.Current()
+	if base.Mode == RelayModeOff {
 		clearRelayStatus(&base)
 		base.Readiness = RelayReadinessOff
 		c.opts.Coordinator.Update(base)
-		<-ctx.Done()
-		return
-	case RelayModeSelfHosted:
+	} else if base.Mode == RelayModeSelfHosted {
 		clearRelayStatus(&base)
 		base.Readiness, base.Dial = RelayReadinessSelfHosted, true
 		c.opts.Coordinator.Update(base)
-		<-ctx.Done()
-		return
 	}
 
 	now := c.opts.Clock.Now()
@@ -609,10 +606,15 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	// Keychain must be loaded before cache authority is considered. The cache is
 	// cryptographically bound to that exact credential generation, so replacement
 	// cannot briefly publish authority issued for an old key.
-	license, licenseErr := c.opts.Licenses.Load(ctx)
-	licenseLoaded := true
-	if licenseErr == nil && license != "" {
-		credentialFingerprint = relay.CredentialFingerprint(license)
+	var license string
+	var licenseErr error
+	licenseLoaded := false
+	if base.Mode == RelayModeHosted {
+		license, licenseErr = c.opts.Licenses.Load(ctx)
+		licenseLoaded = true
+		if licenseErr == nil && license != "" {
+			credentialFingerprint = relay.CredentialFingerprint(license)
+		}
 	}
 	now = c.opts.Clock.Now()
 	if credentialFingerprint != "" && (base.Readiness == RelayReadinessHostedConfigured || base.Readiness == RelayReadinessActive || base.Readiness == RelayReadinessRenewPending) {
@@ -702,6 +704,12 @@ func (c *EntitlementController) Run(ctx context.Context) {
 				c.opts.Coordinator.Update(base)
 			}
 		}
+		// Presentation-only managed changes do not advance the credential
+		// generation or restart a healthy socket, but the next renewal must still
+		// use the latest label and route configuration.
+		published := c.opts.Coordinator.Current()
+		base.RelayManagedState = published.RelayManagedState
+		base.Connected = published.Connected
 		persistence.retry(generation)
 		revocationPersistence.retry()
 		attemptCtx, cancelAttempt := c.startAttempt(ctx, generation)
@@ -716,7 +724,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		}
 		c.mu.Unlock()
 		now = c.opts.Clock.Now()
-		valid = authorityGeneration == generation && current.ValidAt(sid, now)
+		valid = authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now)
 		if ctx.Err() != nil {
 			return
 		}
@@ -738,7 +746,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		// Re-sample immediately before sleeping. Issuer, refresh, and result
 		// handling may all have crossed the raw signed expiration boundary.
 		now = c.opts.Clock.Now()
-		valid = authorityGeneration == generation && current.ValidAt(sid, now)
+		valid = authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now)
 		if base.CanDial() && !valid {
 			publishUnavailable(c.opts.Coordinator, &base, now)
 		}
@@ -784,6 +792,17 @@ func (c *EntitlementController) Run(ctx context.Context) {
 
 // renew returns zero for an exponentially backed-off transient failure.
 func (c *EntitlementController) renew(ctx context.Context, generation, attemptRelaySequence uint64, licenseHint *string, licenseErrHint *error, licenseLoaded *bool, base *ResolvedRelay, current *relay.CachedEntitlement, credentialFingerprint *string, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, revocationPersistence *entitlementRevocationWorker) (time.Duration, bool) {
+	if base.Mode != RelayModeHosted {
+		clearRelayStatus(base)
+		if base.Mode == RelayModeSelfHosted {
+			base.Readiness, base.Dial = RelayReadinessSelfHosted, true
+		} else {
+			base.Connected = false
+			base.Readiness = RelayReadinessOff
+		}
+		c.opts.Coordinator.Update(*base)
+		return terminalEntitlementRetry, true
+	}
 	now := c.opts.Clock.Now()
 	sid := relay.SessionSID(base.SessionID)
 	hadValid := *authorityGeneration == generation && current.ValidAt(sid, now)
