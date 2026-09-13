@@ -20,6 +20,30 @@ interface QueueSource {
     fun fetchQueueJson(providerAccountId: String): String
     fun controlProvider(providerAccountId: String, control2: String)
     fun isUnauthorized(error: Throwable): Boolean
+
+    /**
+     * Reports whether the relay declined for lack of a current subscription.
+     *
+     * Default false so existing sources and tests are unaffected; only the
+     * core-backed source can actually tell (matches [UsageSource]).
+     */
+    fun isEntitlementRefused(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because no entitled host (this
+     * desktop) is currently attached to the session.
+     *
+     * Default false, matching [isEntitlementRefused].
+     */
+    fun isHostOffline(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because the session was already at
+     * its signed client cap.
+     *
+     * Default false, matching [isEntitlementRefused].
+     */
+    fun isTooManyPhones(error: Throwable): Boolean = false
 }
 
 data class QueueUiState(
@@ -144,10 +168,12 @@ class QueueViewModel(
 
     private fun applyFailure(error: Throwable) {
         if (error is CancellationException) throw error
-        val failure = if (source.isUnauthorized(error)) {
-            UsageUiState.Failure.UNAUTHORIZED
-        } else {
-            UsageUiState.Failure.UNREACHABLE
+        val failure = when {
+            source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
+            source.isEntitlementRefused(error) -> UsageUiState.Failure.ENTITLEMENT_REFUSED
+            source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
+            source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
+            else -> UsageUiState.Failure.UNREACHABLE
         }
         // The provider list survives: losing the picker would strand the user
         // on a screen with no way to try a different provider.

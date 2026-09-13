@@ -6,9 +6,9 @@ name: Android release
 # (docs/mobile-distribution-plan.md, docs/handoff-relay-launch-prompt.md).
 #
 # Triggered by pushing a tag of the form mobile-v<version>, e.g. mobile-v0.2.0.
-# The tag's version becomes both the AAB's versionName and (via the run
-# number appended to a fixed offset) a monotonically increasing versionCode,
-# matching how the macOS release derives its build number.
+# The tag's version becomes the AAB's versionName; versionCode is derived
+# separately (see the version-derivation step below) so it stays monotonic
+# and within Play's numeric ceiling regardless of how versionName is chosen.
 on:
   push:
     tags:
@@ -23,6 +23,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     environment: android-release
+    # Bounds how long the runner -- and the release-signing secrets loaded
+    # into its environment (keystore password, key password, Play
+    # service-account JSON) -- can remain live if a step hangs, rather than
+    # relying on GitHub's 360-minute default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -44,14 +49,31 @@ jobs:
             printf 'tag %q does not match mobile-v<version>\n' "${tag}" >&2
             exit 1
           fi
+          # A malformed version (a stray typo, an accidental extra "v", a
+          # trailing space) would otherwise silently become a real Play
+          # upload's versionName. Requiring strict semver here fails the
+          # workflow with a clear diagnostic instead.
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'tag version %q is not a valid semantic version (expected mobile-vMAJOR.MINOR.PATCH[-prerelease])\n' "${version}" >&2
+            exit 1
+          fi
           printf 'name=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
-          # The Play internal track requires a strictly increasing
-          # versionCode across every upload ever made for this application
-          # id, including from a different branch or a rerun of the same
-          # tag. The workflow run id is unique and monotonically assigned by
-          # GitHub across the whole repository, which is the property this
-          # actually needs; a per-tag counter would collide on a rerun.
-          printf 'code=%s\n' "${GITHUB_RUN_ID}" >> "${GITHUB_OUTPUT}"
+          # The Play internal track requires a strictly increasing versionCode
+          # across every upload ever made for this application id. Minutes
+          # since the Unix epoch is monotonic (a later release always gets a
+          # larger value, independent of branch, rerun, or repo history) and
+          # stays within Android's Int32 versionCode type and Play's
+          # documented 2,100,000,000 ceiling until the year 5962. GITHUB_RUN_ID
+          # was tried first, but it is a global, unbounded counter shared
+          # across every workflow run in the repository's whole history, with
+          # no relationship to Play's numeric ceiling: it can exceed both
+          # Int32 and that ceiling long before this app has had many releases.
+          version_code=$(( $(date -u +%s) / 60 ))
+          if (( version_code < 1 || version_code > 2100000000 )); then
+            printf 'derived versionCode %s is outside the valid range (1-2100000000)\n' "${version_code}" >&2
+            exit 1
+          fi
+          printf 'code=%s\n' "${version_code}" >> "${GITHUB_OUTPUT}"
 
       # The same silent-skip and stale-AAR failure modes the ci.yml android
       # job guards against apply here too: this is a separate workflow with
@@ -78,6 +100,23 @@ jobs:
           REDLINE_VERSION: ${{ steps.version.outputs.name }}
         run: |
           ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest bundleRelease
+
+      # A missing or misnamed secret makes build.gradle.kts silently skip
+      # signingConfigs.release entirely (deliberate, so a local/PR build
+      # without credentials still assembles unsigned) rather than failing
+      # the Gradle build. In this one context -- CI, about to upload to Play
+      # -- an unsigned AAB must never reach the upload step, so verify
+      # signing actually happened before it can.
+      - name: Verify the App Bundle was actually signed
+        run: |
+          aab="mobile/android/app/build/outputs/bundle/release/app-release.aab"
+          # jarsigner -verify always exits 0, signed or not (verified live: an
+          # unsigned jar prints "jar is unsigned" and still exits 0) -- its
+          # stdout text is the only signal, so that is what is checked.
+          if ! jarsigner -verify "${aab}" | grep -q "^jar verified\.$"; then
+            printf 'release App Bundle at %s is not signed -- refusing to upload an unsigned build. Check the REDLINE_ANDROID_KEYSTORE_* secrets are all set in the android-release environment.\n' "${aab}" >&2
+            exit 1
+          fi
 
       # r0adkll/upload-google-play, pinned to the v1.1.5 tag's exact commit.
       - name: Upload to the Play internal track

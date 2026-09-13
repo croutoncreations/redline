@@ -82,10 +82,15 @@ This triggers `.github/workflows/android-release.yml`, which:
 1. Builds the Go core for Android with the pinned `gomobile` toolchain (the same build every
    `ci.yml` PR already exercises, run fresh here rather than reused, since this is a separate
    workflow).
-2. Derives `versionName` from the tag (`0.2.0`) and `versionCode` from the GitHub Actions run
-   id, which is unique and monotonically assigned across the whole repository — the property
-   the Play internal track actually requires, and one a per-tag counter would not have across
-   a rerun of the same tag.
+2. Derives `versionName` from the tag (`0.2.0`) and `versionCode` from minutes since the Unix
+   epoch, which is monotonic (a later release always gets a larger value, regardless of branch,
+   rerun, or repo history) and stays within Android's Int32 versionCode type and Play's
+   documented 2,100,000,000 ceiling until the year 5962 — the property the Play internal track
+   actually requires, and one a per-tag counter would not have across a rerun of the same tag.
+   The workflow rejects an out-of-range value before it ever reaches `bundleRelease`. (An
+   earlier draft used the GitHub Actions run id instead; that counter is global and unbounded
+   across the whole repository's workflow history, with no relationship to Play's ceiling, so a
+   sufficiently long-lived repository would eventually produce a versionCode Play rejects.)
 3. Runs the same guards and unit tests `ci.yml`'s `android` job runs
    (`checkNoTestOnlyDeclarations`, `checkCoreFreshness`, `testDebugUnitTest`) before
    assembling anything, so a broken build never reaches signing.

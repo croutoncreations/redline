@@ -35,11 +35,15 @@ class QueueViewModelTest {
     private fun source(
         queue: (String) -> String = { queueJson },
         control: (String, String) -> Unit = { _, _ -> },
+        hostOffline: (Throwable) -> Boolean = { false },
+        tooManyPhones: (Throwable) -> Boolean = { false },
     ) = object : QueueSource {
         override fun fetchQueueJson(providerAccountId: String): String = queue(providerAccountId)
         override fun controlProvider(providerAccountId: String, control2: String) =
             control(providerAccountId, control2)
         override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun isHostOffline(error: Throwable): Boolean = hostOffline(error)
+        override fun isTooManyPhones(error: Throwable): Boolean = tooManyPhones(error)
     }
 
     @Test
@@ -110,6 +114,48 @@ class QueueViewModelTest {
         assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
         // Losing the picker would strand the user on a broken screen.
         assertEquals(2, model.state.value.providers.size)
+    }
+
+    /**
+     * A host-offline (423) refusal must reach the queue screen as its own
+     * case, the same as the usage screen: the desktop, relay, and
+     * subscription can all be fine, and the remedy is to check the Mac.
+     */
+    @Test
+    fun reportsHostOfflineDistinctlyFromUnreachable() = runTest(dispatcher) {
+        val model = QueueViewModel(
+            source(
+                queue = { throw RuntimeException("dial relay: no_host") },
+                hostOffline = { true },
+            ),
+            dispatcher,
+        )
+
+        model.setProviders(listOf("claude-main"))
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(UsageUiState.Failure.HOST_OFFLINE, model.state.value.failure)
+    }
+
+    /**
+     * A too-many-phones (409) refusal must reach the queue screen as its own
+     * case: the desktop is online and current, and the remedy is to close
+     * another phone's session.
+     */
+    @Test
+    fun reportsTooManyPhonesDistinctlyFromUnreachable() = runTest(dispatcher) {
+        val model = QueueViewModel(
+            source(
+                queue = { throw RuntimeException("dial relay: too_many_clients") },
+                tooManyPhones = { true },
+            ),
+            dispatcher,
+        )
+
+        model.setProviders(listOf("claude-main"))
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(UsageUiState.Failure.TOO_MANY_PHONES, model.state.value.failure)
     }
 
     /** A good load clears a stale failure. */

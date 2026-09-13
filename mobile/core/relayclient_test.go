@@ -608,6 +608,64 @@ func TestRelayClientReportsEntitlementExpiredMidSession(t *testing.T) {
 	}
 }
 
+// A 1008 close for any other reason must not be misreported as an
+// entitlement lapse. The relay is untrusted input: matching on the status
+// code alone would let it steer a phone onto "your subscription just
+// expired" for a reason that has nothing to do with entitlement.
+func TestRelayClientDoesNotMisclassifyAnUnrelatedPolicyViolationClose(t *testing.T) {
+	desktopKey, err := NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		conn.SetReadLimit(relayClientFrameLimit)
+
+		responder, err := NewResponderSession(desktopKey)
+		if err != nil {
+			return
+		}
+		_, handshakeMsg, err := conn.Read(context.Background())
+		if err != nil {
+			return
+		}
+		reply, err := responder.ReadHandshake(handshakeMsg)
+		if err != nil {
+			return
+		}
+		if err := conn.Write(context.Background(), websocket.MessageBinary, reply); err != nil {
+			return
+		}
+		// Same status code as an entitlement-lapse close, but a different
+		// reason -- exactly what a relay enforcing some unrelated future
+		// policy would send.
+		conn.Close(websocket.StatusPolicyViolation, "policy changed")
+	}))
+	defer relay.Close()
+
+	client, err := DialRelay(
+		strings.Replace(relay.URL, "http://", "ws://", 1),
+		"phone-session-0123456789abc",
+		DesktopPublicKey(desktopKey),
+	)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer client.Close()
+
+	_, requestErr := client.Request("GET", "/v1/dashboard", "")
+	if requestErr == nil {
+		t.Fatal("expected the request to fail once the relay closed the session")
+	}
+	if IsEntitlementExpiredMidSession(requestErr) {
+		t.Errorf("a 1008 close with an unrelated reason must not be reported as an entitlement lapse, got: %v", requestErr)
+	}
+}
+
 // The phone must not lose a race with the desktop's reconnect.
 //
 // Closing a relayed session ends the desktop's leg too, and it redials within

@@ -360,14 +360,7 @@ class UsageViewModel(
                 onSuccess = { refresh() },
                 onFailure = { error ->
                     if (error is CancellationException) throw error
-                    val failure = when {
-                        source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
-                        source.isEntitlementRefused(error) ->
-                            UsageUiState.Failure.ENTITLEMENT_REFUSED
-                        source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
-                        source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
-                        else -> UsageUiState.Failure.UNREACHABLE
-                    }
+                    val failure = classifyFailure(error)
                     _state.update { it.fail(failure) }
                     // Keep trying. A screen that cannot reach the desktop is
                     // exactly the screen that must retry on its own: the usual
@@ -387,6 +380,22 @@ class UsageViewModel(
                 },
             )
         }
+    }
+
+    /**
+     * Classifies a request failure into the specific [UsageUiState.Failure]
+     * case the user should see, most-specific check first.
+     *
+     * Shared by [controlProvider] and [refresh] rather than duplicated: both
+     * hit the same core client through the same [source] and must never
+     * drift out of sync on precedence or on which cases exist.
+     */
+    private fun classifyFailure(error: Throwable): UsageUiState.Failure = when {
+        source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
+        source.isEntitlementRefused(error) -> UsageUiState.Failure.ENTITLEMENT_REFUSED
+        source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
+        source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
+        else -> UsageUiState.Failure.UNREACHABLE
     }
 
     fun refresh() = refresh(armRecovery = true)
@@ -446,14 +455,7 @@ class UsageViewModel(
                 onFailure = { error ->
                     // Cancellation is control flow, not a transport failure.
                     if (error is CancellationException) throw error
-                    val failure = when {
-                        source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
-                        source.isEntitlementRefused(error) ->
-                            UsageUiState.Failure.ENTITLEMENT_REFUSED
-                        source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
-                        source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
-                        else -> UsageUiState.Failure.UNREACHABLE
-                    }
+                    val failure = classifyFailure(error)
                     _state.update { it.fail(failure) }
                     // Keep trying. A screen that cannot reach the desktop is
                     // exactly the screen that must retry on its own: the usual
@@ -474,6 +476,7 @@ class UsageViewModel(
             )
         }
     }
+
     private companion object {
         /**
          * How often to poll while only the relay is reachable.

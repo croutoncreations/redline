@@ -235,6 +235,28 @@ func IsEntitlementExpiredMidSession(err error) bool {
 	return errors.Is(err, ErrEntitlementExpiredMidSession) || strings.Contains(err.Error(), ErrEntitlementExpiredMidSession.Error())
 }
 
+// entitlementExpiredCloseReason is the exact reason string the relay sends
+// alongside a 1008 close for entitlement expiry (relay/src/session.js,
+// docs/relay-entitlement.md). Matching on it, not just the status code, keeps
+// an unrelated future 1008 close (a generic "policy violation" the relay
+// could send for any reason) from being reported as an entitlement lapse.
+const entitlementExpiredCloseReason = "entitlement expired"
+
+// isEntitlementExpiredClose reports whether err is a WebSocket close that
+// matches both the status code and the documented reason text the relay uses
+// exclusively for a Durable Object alarm firing at the stored exp. The relay
+// is untrusted input (docs/relay-entitlement.md), so both are required before
+// this specific, actionable-sounding classification is reported to the user;
+// checking the code alone would let any other 1008 close read as a lapsed
+// subscription.
+func isEntitlementExpiredClose(err error) bool {
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+	return closeErr.Code == websocket.StatusPolicyViolation && closeErr.Reason == entitlementExpiredCloseReason
+}
+
 func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, error) {
 	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
 		return nil, err
@@ -511,7 +533,16 @@ func (c *RelayClient) exchange(method, reqPath, body string) (tunnelResponse, er
 		// stored exp mid-session (docs/relay-entitlement.md). Distinct from
 		// the connect-time 402 refusal: a session that was already working
 		// just stopped, so the caller needs a different message.
-		if websocket.CloseStatus(err) == websocket.StatusPolicyViolation {
+		//
+		// The close reason is also checked, matching the caution already
+		// applied to the 423/409 body checks above: 1008 ("policy violation")
+		// is a generic WebSocket code the relay could send for an unrelated
+		// reason (e.g. a future policy the relay enforces that has nothing to
+		// do with entitlement), and the relay is untrusted input. Requiring
+		// the documented reason text before reporting "your subscription just
+		// lapsed" keeps a relay operator from steering that specific,
+		// actionable-sounding message onto a phone for any other 1008 close.
+		if isEntitlementExpiredClose(err) {
 			return tunnelResponse{}, fmt.Errorf("read response: %w", ErrEntitlementExpiredMidSession)
 		}
 		return tunnelResponse{}, fmt.Errorf("read response: %w", err)

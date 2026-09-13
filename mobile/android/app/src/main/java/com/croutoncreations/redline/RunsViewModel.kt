@@ -36,6 +36,30 @@ interface RunsSource {
 
     /** Clears every unread run marker. */
     fun markAllRunsRead() = Unit
+
+    /**
+     * Reports whether the relay declined for lack of a current subscription.
+     *
+     * Default false so existing sources and tests are unaffected; only the
+     * core-backed source can actually tell (matches [UsageSource]).
+     */
+    fun isEntitlementRefused(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because no entitled host (this
+     * desktop) is currently attached to the session.
+     *
+     * Default false, matching [isEntitlementRefused].
+     */
+    fun isHostOffline(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because the session was already at
+     * its signed client cap.
+     *
+     * Default false, matching [isEntitlementRefused].
+     */
+    fun isTooManyPhones(error: Throwable): Boolean = false
 }
 
 data class RunsUiState(
@@ -266,10 +290,12 @@ class RunsViewModel(
     private fun applyFailure(error: Throwable) {
         // Cancellation is control flow, not a transport failure.
         if (error is CancellationException) throw error
-        val failure = if (source.isUnauthorized(error)) {
-            UsageUiState.Failure.UNAUTHORIZED
-        } else {
-            UsageUiState.Failure.UNREACHABLE
+        val failure = when {
+            source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
+            source.isEntitlementRefused(error) -> UsageUiState.Failure.ENTITLEMENT_REFUSED
+            source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
+            source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
+            else -> UsageUiState.Failure.UNREACHABLE
         }
         _state.update { it.fail(failure) }
     }

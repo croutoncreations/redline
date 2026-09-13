@@ -259,6 +259,50 @@ class EntitlementFailureTest {
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
     }
+
+    /**
+     * A host-offline (423) refusal has to reach the UI as its own case.
+     *
+     * Distinct from ENTITLEMENT_REFUSED and TOO_MANY_PHONES: the phone, relay,
+     * and subscription can all be fine here -- the desktop just is not dialled
+     * into the relay right now, which is a different remedy from either.
+     */
+    private class HostOfflineSource(private val hostOffline: Boolean) : UsageSource {
+        override fun fetchUsageJson(): String = throw RuntimeException("dial relay: no_host")
+        override fun controlProvider(providerAccountId: String, control: String) = Unit
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun isHostOffline(error: Throwable): Boolean = hostOffline
+    }
+
+    @Test
+    fun `a host-offline refusal is its own failure, not unreachable`() = runTest(dispatcher) {
+        val model = UsageViewModel(HostOfflineSource(hostOffline = true), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.HOST_OFFLINE, model.state.value.failure)
+    }
+
+    /**
+     * A too-many-phones (409) refusal has to reach the UI as its own case.
+     *
+     * Distinct from the others: the desktop is online and current here, and
+     * the remedy is to close another phone's session, not to renew or wait
+     * for the tailnet.
+     */
+    private class TooManyPhonesSource(private val tooMany: Boolean) : UsageSource {
+        override fun fetchUsageJson(): String = throw RuntimeException("dial relay: too_many_clients")
+        override fun controlProvider(providerAccountId: String, control: String) = Unit
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun isTooManyPhones(error: Throwable): Boolean = tooMany
+    }
+
+    @Test
+    fun `a too-many-phones refusal is its own failure, not unreachable`() = runTest(dispatcher) {
+        val model = UsageViewModel(TooManyPhonesSource(tooMany = true), ioDispatcher = dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.TOO_MANY_PHONES, model.state.value.failure)
+    }
 }
 
 /**

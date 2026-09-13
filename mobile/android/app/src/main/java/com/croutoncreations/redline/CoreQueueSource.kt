@@ -11,4 +11,11 @@ class CoreQueueSource(private val client: CoreClientHolder) : QueueSource {
     }
 
     override fun isUnauthorized(error: Throwable): Boolean = client.isUnauthorized(error)
+
+    override fun isEntitlementRefused(error: Throwable): Boolean =
+        client.isEntitlementRefused(error)
+
+    override fun isHostOffline(error: Throwable): Boolean = client.isHostOffline(error)
+
+    override fun isTooManyPhones(error: Throwable): Boolean = client.isTooManyPhones(error)
 }

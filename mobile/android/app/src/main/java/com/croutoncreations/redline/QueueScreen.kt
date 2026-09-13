@@ -258,10 +258,6 @@ private fun QueueFailure(failure: UsageUiState.Failure, onRetry: () -> Unit) {
                     UsageUiState.Failure.UNREACHABLE -> "Cannot reach Redline"
                     UsageUiState.Failure.ENTITLEMENT_REFUSED ->
                         "Remote access needs a current subscription"
-                    // QueueViewModel never classifies a failure into either of
-                    // these two -- only UsageViewModel's core-backed source
-                    // can tell them apart from a plain UNREACHABLE -- but the
-                    // `when` above must stay exhaustive over the shared enum.
                     UsageUiState.Failure.HOST_OFFLINE -> "Your Mac is not connected to the relay"
                     UsageUiState.Failure.TOO_MANY_PHONES -> "Too many phones are connected"
                 },

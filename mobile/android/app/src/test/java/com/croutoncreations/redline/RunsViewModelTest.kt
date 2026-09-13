@@ -52,12 +52,16 @@ class RunsViewModelTest {
         logs: (String, String) -> String = { _, _ -> "log line\n" },
         dispatch: (String) -> String = { """{"started":true,"run_id":"new-run","reason":"capacity available"}""" },
         unauthorized: (Throwable) -> Boolean = { false },
+        hostOffline: (Throwable) -> Boolean = { false },
+        tooManyPhones: (Throwable) -> Boolean = { false },
     ) = object : RunsSource {
         override fun fetchRunsJson(): String = runs()
         override fun fetchTasksJson(): String = tasks()
         override fun fetchRunLogs(runId: String, stream: String): String = logs(runId, stream)
         override fun dispatchTask(taskId: String): String = dispatch(taskId)
         override fun isUnauthorized(error: Throwable): Boolean = unauthorized(error)
+        override fun isHostOffline(error: Throwable): Boolean = hostOffline(error)
+        override fun isTooManyPhones(error: Throwable): Boolean = tooManyPhones(error)
     }
 
     @Test
@@ -100,6 +104,46 @@ class RunsViewModelTest {
         dispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(UsageUiState.Failure.UNAUTHORIZED, model.state.value.failure)
+    }
+
+    /**
+     * A host-offline (423) refusal must reach the runs screen as its own
+     * case, the same as the usage screen: the desktop, relay, and
+     * subscription can all be fine, and the remedy is to check the Mac.
+     */
+    @Test
+    fun reportsHostOfflineDistinctlyFromUnreachable() = runTest(dispatcher) {
+        val model = RunsViewModel(
+            source(
+                runs = { throw RuntimeException("dial relay: no_host") },
+                hostOffline = { true },
+            ),
+            dispatcher,
+        )
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(UsageUiState.Failure.HOST_OFFLINE, model.state.value.failure)
+    }
+
+    /**
+     * A too-many-phones (409) refusal must reach the runs screen as its own
+     * case: the desktop is online and current, and the remedy is to close
+     * another phone's session.
+     */
+    @Test
+    fun reportsTooManyPhonesDistinctlyFromUnreachable() = runTest(dispatcher) {
+        val model = RunsViewModel(
+            source(
+                runs = { throw RuntimeException("dial relay: too_many_clients") },
+                tooManyPhones = { true },
+            ),
+            dispatcher,
+        )
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(UsageUiState.Failure.TOO_MANY_PHONES, model.state.value.failure)
     }
 
     /**
@@ -229,4 +273,3 @@ class RunsViewModelTest {
         )
     }
 }
-
