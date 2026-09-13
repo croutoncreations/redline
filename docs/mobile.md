@@ -171,9 +171,24 @@ redline relay off
 redline relay deactivate
 ```
 
-`relay deactivate` removes the issuer activation marked as the current Mac and then turns
-relay mode off. `relay off` only disables local relay use. CLI and API responses never
-include the license key, entitlement token, issuer URL, or relay session id.
+`relay deactivate` first makes the local relay non-dialable, durably records a non-secret
+retry intent, requires exactly one issuer activation marked as the current Mac, and then
+deletes that activation. If issuer deletion fails, relay access stays off while the intent
+and Keychain credential remain available for a retry (including after service restart).
+After remote deletion succeeds, Redline clears the Keychain credential and the intent and
+commits `off`. Reconfiguration is refused while an intent is pending. Deleting the current
+id with `relay device deactivate` uses this same transaction; deleting another id does not
+turn off this Mac. Activation ids contain only ASCII letters, digits, `_`, and `-`.
+
+`relay off` only disables local relay use and does not delete a seat. Hosted activation
+waits for the correlated first issuer attempt. If that bounded wait expires, the API
+returns `503` with code `pending`; `redline relay status` shows the eventual result. Public
+status values are the closed union `off`, `self_hosted`, `needs_license`, `active`
+(with `renews_at`), `renew_pending` (with `expires_at`), `unavailable` (with `since`),
+`lapsed`, `no_seat` (with `activations`), and `invalid_key`. Connection is independently
+reported as `disconnected`, `connecting`, or `connected`. CLI and API responses never
+include the license key, entitlement token, issuer URL, or relay session id, and activation
+errors redact the exact key supplied on the command line.
 
 Pairing itself goes over whichever route the phone can reach. A phone with no Tailscale
 pairs through the relay; nothing about pairing requires the tailnet.

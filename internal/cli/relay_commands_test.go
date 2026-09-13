@@ -13,6 +13,29 @@ import (
 	"github.com/jfox/redline/internal/cli"
 )
 
+func TestRelayCLIActivateRedactsHostileServiceOutput(t *testing.T) {
+	const license = "rl_test_hostile_reflection"
+	t.Setenv("REDLINE_API_TOKEN", "local-api-token-that-is-long-enough")
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = fmt.Fprintf(w, `{"state":"self_hosted","mode":"self_hosted","url":"https://%s.example","connection":"connecting"}`, license)
+				} else {
+					_, _ = fmt.Fprintf(w, `{"error":"issuer reflected %s repeatedly %s"}`, license, license)
+				}
+			}))
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			_ = cli.Run([]string{"--api", server.URL + "/" + license, "relay", "activate", license}, &stdout, &stderr, time.Now)
+			if strings.Contains(stdout.String(), license) || strings.Contains(stderr.String(), license) {
+				t.Fatalf("license leaked: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestRelayCLIUsesAuthenticatedManagementAPIAndNeverPrintsLicense(t *testing.T) {
 	const apiToken = "local-api-token-that-is-long-enough"
 	const license = "rl_test_cli_never_print"
@@ -56,7 +79,7 @@ func TestRelayCLIUsesAuthenticatedManagementAPIAndNeverPrintsLicense(t *testing.
 			}
 		}},
 		{args: []string{"relay", "devices"}, method: http.MethodGet, path: "/v1/relay/devices"},
-		{args: []string{"relay", "device", "deactivate", "device/opaque"}, method: http.MethodDelete, path: "/v1/relay/devices/device%2Fopaque"},
+		{args: []string{"relay", "device", "deactivate", "device_opaque"}, method: http.MethodDelete, path: "/v1/relay/devices/device_opaque"},
 		{args: []string{"relay", "setup", "--url", "https://relay.example"}, method: http.MethodPost, path: "/v1/relay/configure", assertBody: func(t *testing.T, body map[string]any) {
 			if body["mode"] != "self_hosted" || body["url"] != "https://relay.example" {
 				t.Fatalf("setup body = %v", body)

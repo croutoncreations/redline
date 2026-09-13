@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -364,6 +365,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	if r.URL.Path == "/v1/relay/portal" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if loopbackHost(r.Host) && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) != "" {
 		writeJSON(w, http.StatusForbidden, problem{Error: "reverse proxies must preserve a configured trusted host"})
 		return
@@ -398,7 +402,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w = &noStoreWriter{ResponseWriter: w}
 		}
 	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.EscapedPath(), "/v1/relay/devices/") && !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+func validRelayActivationRequestPath(r *http.Request) bool {
+	if r.URL.RawQuery != "" || r.URL.Fragment != "" {
+		return false
+	}
+	const prefix = "/v1/relay/devices/"
+	escaped := r.URL.EscapedPath()
+	if strings.Contains(strings.ToLower(escaped), "%") {
+		return false
+	}
+	id := strings.TrimPrefix(escaped, prefix)
+	if id == "" || len(id) > 512 {
+		return false
+	}
+	for _, character := range id {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 const apiSessionCookie = "redline_api_session"
@@ -458,6 +488,10 @@ func (s *Server) relayDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deactivateRelayDevice(w http.ResponseWriter, r *http.Request) {
+	if !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
 	if s.relayManager == nil {
 		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
 		return
@@ -470,6 +504,7 @@ func (s *Server) deactivateRelayDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) relayPortal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if s.relayManager == nil {
 		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
 		return
@@ -507,9 +542,17 @@ func writeRelayManagementError(w http.ResponseWriter, err error) {
 			status = http.StatusBadRequest
 		case "invalid_key":
 			status = http.StatusUnprocessableEntity
-		case "needs_license", "lapsed", "no_seat":
+		case "needs_license", "lapsed", "no_seat", "not_hosted", "deactivation_pending":
 			status = http.StatusConflict
-		case "issuer_unavailable", "unavailable", "secure_store_unavailable", "state_unavailable", "controller_unavailable", "compensation_failed":
+		case "activation_not_found", "not_found":
+			status = http.StatusNotFound
+		case "activation_conflict", "conflict":
+			status = http.StatusConflict
+		case "rate_limited":
+			status = http.StatusTooManyRequests
+		case "invalid_response":
+			status = http.StatusBadGateway
+		case "issuer_unavailable", "unavailable", "secure_store_unavailable", "state_unavailable", "controller_unavailable", "compensation_failed", "management_closing", "pending":
 			status = http.StatusServiceUnavailable
 		}
 	}
@@ -523,15 +566,22 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 		RelayOnly bool   `json:"relay_only"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil {
+		if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
 			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid pairing request: " + err.Error()})
 			return
 		}
 	}
 	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
 	snapshot := s.relayRuntime.Current()
+	publicRelayState := snapshot.Readiness
+	if s.relayManager != nil {
+		publicRelayState = s.relayManager.Status().State
+	}
+	if publicRelayState != snapshot.Readiness {
+		snapshot.Readiness = publicRelayState
+		snapshot.Dial = false
+		snapshot.Connected = false
+	}
 	plan, planErr := pairing.PlanRoutes(s.config.API.TrustedHosts, snapshot, options)
 	noRoute := errors.Is(planErr, pairing.ErrNoRoute)
 	if planErr != nil && !noRoute {
@@ -584,7 +634,7 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 		Endpoint     string                     `json:"endpoint,omitempty"`
 		RelayStatus  string                     `json:"relay_status"`
 		RelayRefusal pairing.RelayRefusalReason `json:"relay_refusal,omitempty"`
-	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(snapshot.Readiness), RelayRefusal: plan.RelayRefusal}
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(publicRelayState), RelayRefusal: plan.RelayRefusal}
 
 	if !noRoute {
 		code := prepared.Render(token)
@@ -665,7 +715,7 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Token string `json:"pairing_token"`
 	}
-	if err := decodeJSON(r, &request); err != nil {
+	if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -2691,6 +2741,25 @@ func (s *Server) fetchAndStore(
 type problem struct {
 	Code  string `json:"code,omitempty"`
 	Error string `json:"error"`
+}
+
+func decodeBoundedJSON(r *http.Request, target any, limit int64) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("invalid JSON: could not read request")
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("invalid JSON: request is too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("invalid JSON: request must contain one object")
+	}
+	return nil
 }
 
 func decodeJSON(r *http.Request, target any) error {

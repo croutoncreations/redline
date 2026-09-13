@@ -217,16 +217,31 @@ func TestIssuerActivationAndPortalContractsUseBearerAuthentication(t *testing.T)
 	if _, err := client.Activations(context.Background(), license); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.DeleteActivation(context.Background(), license, "opaque/id?# space"); err != nil {
+	if err := client.DeleteActivation(context.Background(), license, "opaque_id-123"); err != nil {
 		t.Fatal(err)
 	}
 	portal, err := client.Portal(context.Background(), license)
 	if err != nil || portal.Scheme != "https" {
 		t.Fatalf("portal = %v, err=%v", portal, err)
 	}
-	want := []string{"GET /v1/activations", "DELETE /v1/activations/opaque%2Fid%3F%23%20space", "POST /v1/portal"}
+	want := []string{"GET /v1/activations", "DELETE /v1/activations/opaque_id-123", "POST /v1/portal"}
 	if fmt.Sprint(requests) != fmt.Sprint(want) {
 		t.Fatalf("requests=%v want=%v", requests, want)
+	}
+}
+
+func TestIssuerRejectsHostileActivationIDsBeforeRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+	defer server.Close()
+	client, _ := NewIssuerClient(server.URL, server.Client())
+	for _, id := range []string{".", "..", "slash/id", "percent%2Fid", "query?id", "fragment#id", "space id"} {
+		if err := client.DeleteActivation(context.Background(), "license", id); err == nil {
+			t.Errorf("hostile activation id %q was accepted", id)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("hostile ids reached issuer: calls=%d", calls)
 	}
 }
 

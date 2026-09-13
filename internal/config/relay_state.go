@@ -36,11 +36,23 @@ const (
 // in Phase 3, the Pair a Device flow. Its JSON shape is intentionally closed:
 // licenses and entitlement tokens belong in dedicated secret stores.
 type RelayManagedState struct {
-	Mode      RelayMode `json:"mode"`
-	URL       string    `json:"url"`
-	IssuerURL string    `json:"issuer_url"`
-	Label     string    `json:"label"`
-	SessionID string    `json:"session_id"`
+	Mode         RelayMode                `json:"mode"`
+	URL          string                   `json:"url"`
+	IssuerURL    string                   `json:"issuer_url"`
+	Label        string                   `json:"label"`
+	SessionID    string                   `json:"session_id"`
+	Generation   uint64                   `json:"generation,omitempty"`
+	Deactivation *RelayDeactivationIntent `json:"deactivation,omitempty"`
+}
+
+// RelayDeactivationIntent is the durable, non-secret record of an issuer
+// deletion that must be retried before this installation may register again.
+// It deliberately contains neither a license key nor an entitlement token.
+type RelayDeactivationIntent struct {
+	ActivationID    string `json:"activation_id,omitempty"`
+	StateGeneration uint64 `json:"state_generation"`
+	DiscoverCurrent bool   `json:"discover_current,omitempty"`
+	RemoteDeleted   bool   `json:"remote_deleted,omitempty"`
 }
 
 // RelayStateStore serializes access with an advisory file lock held across the
@@ -156,7 +168,12 @@ func saveRelayState(op *relayStateOperation, state RelayManagedState) error {
 	return op.write(raw)
 }
 
-var relaySessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+var (
+	relaySessionPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+	relayActivationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,512}$`)
+)
+
+func validRelayActivationID(id string) bool { return relayActivationPattern.MatchString(id) }
 
 func validateRelayManagedState(state RelayManagedState) error {
 	if len(state.Label) > 200 || strings.IndexFunc(state.Label, unicode.IsControl) >= 0 {
@@ -164,6 +181,16 @@ func validateRelayManagedState(state RelayManagedState) error {
 	}
 	if state.SessionID != "" && !relaySessionPattern.MatchString(state.SessionID) {
 		return fmt.Errorf("relay session_id must contain 16 to 128 base64url characters")
+	}
+	if state.Deactivation != nil {
+		validTarget := validRelayActivationID(state.Deactivation.ActivationID) && !state.Deactivation.DiscoverCurrent
+		validDiscovery := state.Deactivation.ActivationID == "" && state.Deactivation.DiscoverCurrent && !state.Deactivation.RemoteDeleted
+		if (!validTarget && !validDiscovery) || state.Deactivation.StateGeneration == 0 || state.Deactivation.StateGeneration != state.Generation {
+			return fmt.Errorf("relay deactivation intent is malformed")
+		}
+		if state.Mode != RelayModeHosted && !(state.Mode == RelayModeOff && state.Deactivation.RemoteDeleted) {
+			return fmt.Errorf("relay deactivation intent requires hosted mode or a remotely deleted off checkpoint")
+		}
 	}
 	switch state.Mode {
 	case RelayModeOff:
@@ -264,16 +291,18 @@ type ResolvedRelay struct {
 	Readiness RelayReadiness `json:"state"`
 	Dial      bool           `json:"-"`
 
-	EntitlementToken    RelayEntitlementToken `json:"-"`
-	RenewsAt            time.Time             `json:"renews_at,omitempty"`
-	ExpiresAt           time.Time             `json:"expires_at,omitempty"`
-	UnavailableSince    time.Time             `json:"since,omitempty"`
-	Seats               int                   `json:"seats,omitempty"`
-	SeatsUsed           int                   `json:"seats_used,omitempty"`
-	MaxClients          int                   `json:"max_clients,omitempty"`
-	ReconnectGeneration uint64                `json:"-"`
-	Connected           bool                  `json:"-"`
-	PersistenceDegraded bool                  `json:"persistence_degraded,omitempty"`
+	EntitlementToken             RelayEntitlementToken `json:"-"`
+	RenewsAt                     time.Time             `json:"renews_at,omitempty"`
+	ExpiresAt                    time.Time             `json:"expires_at,omitempty"`
+	UnavailableSince             time.Time             `json:"since,omitempty"`
+	Seats                        int                   `json:"seats,omitempty"`
+	SeatsUsed                    int                   `json:"seats_used,omitempty"`
+	MaxClients                   int                   `json:"max_clients,omitempty"`
+	ReconnectGeneration          uint64                `json:"-"`
+	ControllerAttemptID          uint64                `json:"-"`
+	ControllerCompletedAttemptID uint64                `json:"-"`
+	Connected                    bool                  `json:"-"`
+	PersistenceDegraded          bool                  `json:"persistence_degraded,omitempty"`
 
 	// A fixed-size value keeps snapshots comparable (the supervisor uses value
 	// equality) while the count preserves a normal list at API boundaries.
@@ -297,6 +326,8 @@ func (r ResolvedRelay) MarshalJSON() ([]byte, error) {
 		IssuerURL           string                   `json:"issuer_url"`
 		Label               string                   `json:"label"`
 		SessionID           string                   `json:"session_id"`
+		Generation          uint64                   `json:"generation,omitempty"`
+		Deactivation        *RelayDeactivationIntent `json:"deactivation,omitempty"`
 		Readiness           RelayReadiness           `json:"state"`
 		RenewsAt            *time.Time               `json:"renews_at,omitempty"`
 		ExpiresAt           *time.Time               `json:"expires_at,omitempty"`
@@ -308,6 +339,7 @@ func (r ResolvedRelay) MarshalJSON() ([]byte, error) {
 		Activations         []RelayActivationSummary `json:"activations,omitempty"`
 	}{
 		Mode: r.Mode, URL: r.URL, IssuerURL: r.IssuerURL, Label: r.Label, SessionID: r.SessionID,
+		Generation: r.Generation, Deactivation: r.Deactivation,
 		Readiness: r.Readiness, RenewsAt: optionalTime(r.RenewsAt), ExpiresAt: optionalTime(r.ExpiresAt),
 		UnavailableSince: optionalTime(r.UnavailableSince), Seats: r.Seats, SeatsUsed: r.SeatsUsed,
 		MaxClients: r.MaxClients, PersistenceDegraded: r.PersistenceDegraded, Activations: r.Activations(),
@@ -461,6 +493,9 @@ func (r *RelayResolver) Resolve(ctx context.Context, bootstrap RelayBootstrap) (
 		}
 		if strings.TrimSpace(license) == "" {
 			return ResolvedRelay{RelayManagedState: state, Readiness: RelayReadinessNeedsLicense}, nil
+		}
+		if state.Deactivation != nil {
+			return ResolvedRelay{RelayManagedState: state, Readiness: RelayReadinessUnavailable}, nil
 		}
 		return ResolvedRelay{RelayManagedState: state, Readiness: RelayReadinessHostedConfigured}, nil
 	default:

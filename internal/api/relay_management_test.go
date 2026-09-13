@@ -24,6 +24,37 @@ type apiRelayLicenses struct {
 	value string
 }
 
+func TestRelayManagementAPIRejectsHostileActivationIDsAndOversizedPairingJSON(t *testing.T) {
+	initial := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL, SessionID: "managed-session-abcdefghij"},
+		Readiness:         config.RelayReadinessHostedConfigured,
+	}
+	issuer := &apiRelayIssuer{}
+	handler := relayManagementHandler(t, initial, &apiRelayLicenses{value: "test-key"}, issuer)
+	token := "test-token-that-is-at-least-thirty-two-characters"
+	for _, path := range []string{
+		"/v1/relay/devices/.",
+		"/v1/relay/devices/..",
+		"/v1/relay/devices/slash/id",
+		"/v1/relay/devices/dot%2Eid",
+		"/v1/relay/devices/slash%2Fid",
+		"/v1/relay/devices/valid-id?query=1",
+	} {
+		response := relayRequest(t, handler, http.MethodDelete, path, token, "")
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("hostile path %q status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	oversized := `{"host":"` + strings.Repeat("a", (16<<10)+1) + `"}`
+	response := relayRequest(t, handler, http.MethodPost, "/v1/pairing", token, oversized)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("oversized pairing status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(issuer.deleted) != 0 {
+		t.Fatalf("hostile ids reached issuer: %v", issuer.deleted)
+	}
+}
+
 func (s *apiRelayLicenses) Load(context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +86,10 @@ func (*apiRelayIssuer) Entitlement(context.Context, string, string, string) (rel
 	return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
 }
 func (*apiRelayIssuer) Activations(context.Context, string) ([]relay.Activation, error) {
-	return []relay.Activation{{ID: "opaque-device-id", Label: "desk", FirstSeen: time.Unix(10, 0).UTC(), Current: true}}, nil
+	return []relay.Activation{
+		{ID: "opaque-device-id", Label: "other", FirstSeen: time.Unix(9, 0).UTC()},
+		{ID: "current-device-id", Label: "desk", FirstSeen: time.Unix(10, 0).UTC(), Current: true},
+	}, nil
 }
 func (i *apiRelayIssuer) DeleteActivation(_ context.Context, _ string, id string) error {
 	i.mu.Lock()
@@ -80,8 +114,12 @@ func relayManagementHandler(t *testing.T, initial config.ResolvedRelay, licenses
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	state := config.NewRelayStateStore(filepath.Join(t.TempDir(), "relay-state.json"))
+	if err := state.Save(initial.RelayManagedState); err != nil {
+		t.Fatal(err)
+	}
 	manager := config.NewRelayManager(config.RelayManagerOptions{
-		State:    config.NewRelayStateStore(filepath.Join(t.TempDir(), "relay-state.json")),
+		State:    state,
 		Licenses: licenses, Issuer: issuer, Coordinator: config.NewRelayCoordinator(initial),
 	})
 	return api.NewServerWithRelayManager(cfg, db, time.Now, manager)
@@ -106,11 +144,14 @@ func TestRelayManagementAPIIsAuthenticatedAndStatusIsStrictlyNonSecret(t *testin
 	initial := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL, Label: "private label", SessionID: "private-session-123456"},
 		Readiness:         config.RelayReadinessActive, Dial: true, Connected: true,
-		EntitlementToken: config.NewRelayEntitlementToken("private-entitlement"), Seats: 2, SeatsUsed: 1, MaxClients: 5,
+		EntitlementToken: config.NewRelayEntitlementToken("private-entitlement"), RenewsAt: time.Now().Add(30 * time.Minute), Seats: 2, SeatsUsed: 1, MaxClients: 5,
 	}
 	handler := relayManagementHandler(t, initial, &apiRelayLicenses{value: secret}, &apiRelayIssuer{})
 	if got := relayRequest(t, handler, http.MethodGet, "/v1/relay/status", "", ""); got.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d", got.Code)
+	}
+	if got := relayRequest(t, handler, http.MethodPost, "/v1/relay/portal", "", `{}`); got.Code != http.StatusUnauthorized || got.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unauthenticated portal status=%d cache=%q", got.Code, got.Header().Get("Cache-Control"))
 	}
 	got := relayRequest(t, handler, http.MethodGet, "/v1/relay/status", "test-token-that-is-at-least-thirty-two-characters", "")
 	if got.Code != http.StatusOK {
@@ -142,7 +183,14 @@ func TestRelayManagementAPIConfigureAndIssuerOperationsNeverEchoSecrets(t *testi
 	if configured.Code != http.StatusOK || strings.Contains(configured.Body.String(), secret) {
 		t.Fatalf("configure status=%d body=%s", configured.Code, configured.Body.String())
 	}
-	// Self-hosted setup does not read or discard a previously stored hosted key.
+	// Self-hosted setup does not read or discard a previously stored hosted key,
+	// and issuer operations are refused until a hosted generation is durable.
+	if refused := relayRequest(t, handler, http.MethodGet, "/v1/relay/devices", token, ""); refused.Code != http.StatusConflict {
+		t.Fatalf("self-hosted devices status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	if hosted := relayRequest(t, handler, http.MethodPost, "/v1/relay/configure", token, `{"mode":"hosted"}`); hosted.Code != http.StatusOK {
+		t.Fatalf("hosted configure status=%d body=%s", hosted.Code, hosted.Body.String())
+	}
 	devices := relayRequest(t, handler, http.MethodGet, "/v1/relay/devices", token, "")
 	if devices.Code != http.StatusOK || strings.Contains(devices.Body.String(), secret) || !strings.Contains(devices.Body.String(), "opaque-device-id") {
 		t.Fatalf("devices status=%d body=%s", devices.Code, devices.Body.String())
@@ -156,11 +204,14 @@ func TestRelayManagementAPIConfigureAndIssuerOperationsNeverEchoSecrets(t *testi
 	if first.Code != http.StatusOK || second.Code != http.StatusOK || bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
 		t.Fatalf("portal responses were not fresh: %s %s", first.Body.String(), second.Body.String())
 	}
+	if first.Header().Get("Cache-Control") != "no-store" || second.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("portal cache headers = %q %q", first.Header().Get("Cache-Control"), second.Header().Get("Cache-Control"))
+	}
 	deactivated := relayRequest(t, handler, http.MethodPost, "/v1/relay/deactivate", token, `{}`)
 	if deactivated.Code != http.StatusOK || !strings.Contains(deactivated.Body.String(), `"state":"off"`) {
 		t.Fatalf("deactivate status=%d body=%s", deactivated.Code, deactivated.Body.String())
 	}
-	if len(issuer.deleted) != 2 || issuer.deleted[0] != "opaque-device-id" || issuer.deleted[1] != "opaque-device-id" {
+	if len(issuer.deleted) != 2 || issuer.deleted[0] != "opaque-device-id" || issuer.deleted[1] != "current-device-id" {
 		t.Fatalf("deleted = %v", issuer.deleted)
 	}
 	if _, err := licenses.Load(context.Background()); err != config.ErrLicenseNotFound {

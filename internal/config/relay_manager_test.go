@@ -2,7 +2,11 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
 	"testing"
@@ -12,11 +16,12 @@ import (
 )
 
 type managerLicenseStore struct {
-	mu           sync.Mutex
-	value        string
-	loads        int
-	replacements []string
-	clears       int
+	mu            sync.Mutex
+	value         string
+	loads         int
+	replacements  []string
+	clears        int
+	beforeReplace func()
 }
 
 func (s *managerLicenseStore) Load(context.Context) (string, error) {
@@ -29,6 +34,9 @@ func (s *managerLicenseStore) Load(context.Context) (string, error) {
 	return s.value, nil
 }
 func (s *managerLicenseStore) Replace(_ context.Context, value string) error {
+	if s.beforeReplace != nil {
+		s.beforeReplace()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.value = value
@@ -44,20 +52,22 @@ func (s *managerLicenseStore) Clear(context.Context) error {
 }
 
 type managerIssuer struct {
-	entitlement func(context.Context, string, string, string) (relay.ReceivedEntitlement, error)
-	devices     []relay.Activation
-	deleted     []string
+	entitlement    func(context.Context, string, string, string) (relay.ReceivedEntitlement, error)
+	devices        []relay.Activation
+	activationsErr error
+	deleteErr      error
+	deleted        []string
 }
 
 func (i *managerIssuer) Entitlement(ctx context.Context, key, sid, label string) (relay.ReceivedEntitlement, error) {
 	return i.entitlement(ctx, key, sid, label)
 }
 func (i *managerIssuer) Activations(context.Context, string) ([]relay.Activation, error) {
-	return append([]relay.Activation(nil), i.devices...), nil
+	return append([]relay.Activation(nil), i.devices...), i.activationsErr
 }
 func (i *managerIssuer) DeleteActivation(_ context.Context, _ string, id string) error {
 	i.deleted = append(i.deleted, id)
-	return nil
+	return i.deleteErr
 }
 func (*managerIssuer) Portal(context.Context, string) (*url.URL, error) {
 	return url.Parse("https://billing.example/short-lived")
@@ -66,6 +76,9 @@ func (*managerIssuer) Portal(context.Context, string) (*url.URL, error) {
 func newTestRelayManager(t *testing.T, initial ResolvedRelay, licenses *managerLicenseStore, issuer RelayManagementIssuer, controller bool) (*RelayManager, context.CancelFunc) {
 	t.Helper()
 	state := NewRelayStateStore(t.TempDir() + "/relay-state.json")
+	if err := state.Save(initial.RelayManagedState); err != nil {
+		t.Fatal(err)
+	}
 	coordinator := NewRelayCoordinator(initial)
 	var entitlement *EntitlementController
 	if controller {
@@ -145,6 +158,65 @@ func TestRelayManagerPresentationOnlyChangePreservesLiveConnection(t *testing.T)
 	}
 }
 
+func TestRelayManagerConnectionCallbacksRequireMatchingNewestGeneration(t *testing.T) {
+	licenses := &managerLicenseStore{}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeSelfHosted, URL: "https://relay.example", SessionID: "managed-session-abcdefghij", Generation: 2},
+		Readiness:         RelayReadinessSelfHosted, Dial: true,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, nil, false)
+	defer cancel()
+	first := RelayConnectionIdentity{URL: initial.URL, SessionID: initial.SessionID, ConnectionGeneration: 10}
+	second := first
+	second.ConnectionGeneration = 11
+	manager.SetConnection(first, true)
+	manager.SetConnection(second, false) // registers the replacement before it connects
+	manager.SetConnection(first, true)   // delayed old connect
+	if manager.Current().Connected {
+		t.Fatal("delayed old connect changed the replacement connection")
+	}
+	manager.SetConnection(second, true)
+	manager.SetConnection(first, false) // delayed old disconnect
+	if !manager.Current().Connected {
+		t.Fatal("delayed old disconnect cleared the replacement connection")
+	}
+	wrongRoute := second
+	wrongRoute.ConnectionGeneration++
+	wrongRoute.URL = "https://old.example"
+	manager.SetConnection(wrongRoute, false)
+	if !manager.Current().Connected {
+		t.Fatal("wrong-route callback changed connection truth")
+	}
+}
+
+func TestRelayCoordinatorControllerPublicationPreservesConcurrentConnection(t *testing.T) {
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 8},
+		Readiness:         RelayReadinessHostedConfigured,
+	}
+	coordinator := NewRelayCoordinator(initial)
+	staleController := initial
+	staleController.Readiness = RelayReadinessActive
+	staleController.Dial = true
+	staleController.EntitlementToken = NewRelayEntitlementToken("authority")
+	staleController.RenewsAt = time.Now().Add(time.Minute)
+	staleController.ExpiresAt = time.Now().Add(time.Hour)
+	coordinator.Modify(func(current ResolvedRelay) ResolvedRelay {
+		current.Connected = true
+		return current
+	})
+	coordinator.UpdateController(staleController)
+	if current := coordinator.Current(); !current.Connected || current.Readiness != RelayReadinessActive {
+		t.Fatalf("merged publication = %#v", current)
+	}
+	configurationChange := staleController
+	configurationChange.Generation++
+	coordinator.UpdateController(configurationChange)
+	if coordinator.Current().Connected {
+		t.Fatal("configuration generation carried connection truth forward")
+	}
+}
+
 func TestRelayManagerHostedConfigureWaitsForFirstControllerAttempt(t *testing.T) {
 	licenses := &managerLicenseStore{}
 	issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
@@ -190,6 +262,123 @@ func TestRelayManagerDeactivateDeletesCurrentThenClearsLocalAuthority(t *testing
 	}
 }
 
+func TestRelayManagerDeactivationFailurePersistsRetryableIntentAndStaysFailClosed(t *testing.T) {
+	licenses := &managerLicenseStore{value: "hosted-secret"}
+	issuer := &managerIssuer{
+		entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerUnavailable}
+		},
+		devices:   []relay.Activation{{ID: "current-device", Current: true, FirstSeen: time.Unix(1, 0)}},
+		deleteErr: &relay.IssuerError{Kind: relay.IssuerUnavailable, Status: http.StatusServiceUnavailable, Retryable: true},
+	}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 4},
+		Readiness:         RelayReadinessActive, Dial: true, Connected: true,
+		EntitlementToken: NewRelayEntitlementToken("runtime-authority"), RenewsAt: time.Now().Add(time.Minute), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+	defer cancel()
+	if _, err := manager.Deactivate(context.Background()); err == nil {
+		t.Fatal("deactivate succeeded despite issuer failure")
+	}
+	current := manager.Current()
+	if current.CanDial() || current.Connected || current.Readiness != RelayReadinessUnavailable {
+		t.Fatalf("failed deactivation left runtime authority: %#v", current)
+	}
+	state, exists, err := manager.state.Load()
+	if err != nil || !exists || state.Deactivation == nil || state.Deactivation.ActivationID != "current-device" || state.Deactivation.RemoteDeleted {
+		t.Fatalf("durable intent = %#v exists=%v err=%v", state.Deactivation, exists, err)
+	}
+	if licenses.value != "hosted-secret" {
+		t.Fatalf("retry credential was cleared: %q", licenses.value)
+	}
+	issuer.deleteErr = nil
+	status, err := manager.Deactivate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RelayReadinessOff || licenses.value != "" {
+		t.Fatalf("retry status=%#v key=%q", status, licenses.value)
+	}
+	state, _, err = manager.state.Load()
+	if err != nil || state.Mode != RelayModeOff || state.Deactivation != nil {
+		t.Fatalf("completed state = %#v err=%v", state, err)
+	}
+}
+
+func TestRelayManagerDeactivationRequiresExactlyOneCurrentActivation(t *testing.T) {
+	for _, devices := range [][]relay.Activation{
+		{{ID: "other-device", FirstSeen: time.Unix(1, 0)}},
+		{{ID: "one-current", Current: true, FirstSeen: time.Unix(1, 0)}, {ID: "two-current", Current: true, FirstSeen: time.Unix(2, 0)}},
+	} {
+		licenses := &managerLicenseStore{value: "hosted-secret"}
+		issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{}, nil
+		}, devices: devices}
+		initial := ResolvedRelay{
+			RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
+			Readiness:         RelayReadinessActive, Dial: true, Connected: true,
+		}
+		manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+		_, err := manager.Deactivate(context.Background())
+		cancel()
+		if err == nil || manager.Current().CanDial() || len(issuer.deleted) != 0 || licenses.value == "" {
+			t.Fatalf("devices=%#v err=%v current=%#v deleted=%v key=%q", devices, err, manager.Current(), issuer.deleted, licenses.value)
+		}
+	}
+}
+
+func TestRelayManagerCompletesRemoteDeletedIntentWithoutCredential(t *testing.T) {
+	licenses := &managerLicenseStore{}
+	intent := &RelayDeactivationIntent{ActivationID: "current-device", StateGeneration: 5, RemoteDeleted: true}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 5, Deactivation: intent},
+		Readiness:         RelayReadinessUnavailable,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, nil, false)
+	defer cancel()
+	status, err := manager.Deactivate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RelayReadinessOff || status.Mode != RelayModeOff {
+		t.Fatalf("status = %#v", status)
+	}
+	state, _, err := manager.state.Load()
+	if err != nil || state.Mode != RelayModeOff || state.Deactivation != nil {
+		t.Fatalf("state = %#v err=%v", state, err)
+	}
+}
+
+func TestRelayManagerDeactivationDiscoveryFailureBlocksReregistration(t *testing.T) {
+	licenses := &managerLicenseStore{value: "hosted-secret"}
+	issuer := &managerIssuer{
+		entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{}, nil
+		},
+		activationsErr: &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true},
+	}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 2},
+		Readiness:         RelayReadinessActive, Dial: true, Connected: true,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+	defer cancel()
+	if _, err := manager.Deactivate(context.Background()); err == nil {
+		t.Fatal("deactivation discovery unexpectedly succeeded")
+	}
+	state, _, err := manager.state.Load()
+	if err != nil || state.Deactivation == nil || !state.Deactivation.DiscoverCurrent || state.Deactivation.ActivationID != "" {
+		t.Fatalf("discovery intent = %#v err=%v", state.Deactivation, err)
+	}
+	if _, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "replacement-key"}); err == nil {
+		t.Fatal("pending deactivation allowed re-registration")
+	}
+	if licenses.value != "hosted-secret" || manager.Current().CanDial() {
+		t.Fatalf("pending state key=%q runtime=%#v", licenses.value, manager.Current())
+	}
+}
+
 func TestRelayManagerCompensatesSecureStoreWhenStateCommitFails(t *testing.T) {
 	licenses := &managerLicenseStore{value: "old-secret"}
 	manager, cancel := newTestRelayManager(t, ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, licenses, nil, false)
@@ -203,6 +392,260 @@ func TestRelayManagerCompensatesSecureStoreWhenStateCommitFails(t *testing.T) {
 	}
 	if licenses.value != "old-secret" {
 		t.Fatalf("secure store was not compensated: %q", licenses.value)
+	}
+}
+
+func TestRelayManagerReloadsDurableStateAfterCommitUncertainty(t *testing.T) {
+	licenses := &managerLicenseStore{value: "old-secret"}
+	manager, cancel := newTestRelayManager(t, ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, licenses, nil, false)
+	defer cancel()
+	previousHook := relayStateAfterRename
+	relayStateAfterRename = func() error { return errors.New("injected directory sync uncertainty") }
+	t.Cleanup(func() { relayStateAfterRename = previousHook })
+	status, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "new-secret"})
+	if err != nil {
+		t.Fatalf("observed durable commit returned failure: %v", err)
+	}
+	state, exists, loadErr := manager.state.Load()
+	if loadErr != nil || !exists || state.Mode != RelayModeHosted || licenses.value != "new-secret" || status.Mode != RelayModeHosted {
+		t.Fatalf("state=%#v exists=%v loadErr=%v key=%q status=%#v", state, exists, loadErr, licenses.value, status)
+	}
+}
+
+func TestRelayManagerDrainsOldAttemptBeforeReplacingCredential(t *testing.T) {
+	started := make(chan struct{})
+	drained := make(chan struct{})
+	var once sync.Once
+	issuer := &managerIssuer{entitlement: func(ctx context.Context, key, _, _ string) (relay.ReceivedEntitlement, error) {
+		if key == "old-key" {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			close(drained)
+			return relay.ReceivedEntitlement{}, ctx.Err()
+		}
+		return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerInvalidKey, Status: http.StatusUnauthorized}
+	}}
+	licenses := &managerLicenseStore{value: "old-key"}
+	licenses.beforeReplace = func() {
+		select {
+		case <-drained:
+		default:
+			t.Fatal("credential was replaced before the old controller attempt drained")
+		}
+	}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
+		Readiness:         RelayReadinessHostedConfigured,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, true)
+	defer cancel()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("old controller attempt did not start")
+	}
+	status, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "new-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RelayReadinessInvalidKey {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestRelayManagerIssuerSelectionFollowsCommittedRuntimeGeneration(t *testing.T) {
+	type issuerRequest struct {
+		LicenseKey string `json:"license_key"`
+		SID        string `json:"sid"`
+		Label      string `json:"label"`
+	}
+	oldRequests := make(chan issuerRequest, 4)
+	newRequests := make(chan issuerRequest, 4)
+	serve := func(requests chan<- issuerRequest) *httptest.Server {
+		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request issuerRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode issuer request: %v", err)
+			}
+			requests <- request
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+	}
+	oldServer := serve(oldRequests)
+	defer oldServer.Close()
+	newServer := serve(newRequests)
+	defer newServer.Close()
+	issuerHTTP := func(server *httptest.Server) *http.Client {
+		client := server.Client()
+		transport := client.Transport.(*http.Transport).Clone()
+		transport.TLSClientConfig.InsecureSkipVerify = true // test-only TLS issuers
+		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+		client.Transport = transport
+		return client
+	}
+	oldIssuerURL := "https://old-issuer.example"
+	oldIssuer, err := relay.NewIssuerClient(oldIssuerURL, issuerHTTP(oldServer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newIssuer, err := relay.NewIssuerClient(DefaultIssuerURL, issuerHTTP(newServer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := RelayIssuerFactory(func(issuerURL string) (RelayManagementIssuer, error) {
+		if issuerURL == oldIssuerURL {
+			return oldIssuer, nil
+		}
+		if issuerURL == DefaultIssuerURL {
+			return newIssuer, nil
+		}
+		return nil, errors.New("unexpected issuer generation")
+	})
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: oldIssuerURL, Label: "old-label", SessionID: "managed-session-abcdefghij", Generation: 3},
+		Readiness:         RelayReadinessHostedConfigured,
+	}
+	licenses := &managerLicenseStore{value: "old-key"}
+	state := NewRelayStateStore(t.TempDir() + "/relay-state.json")
+	if err := state.Save(initial.RelayManagedState); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewRelayCoordinator(initial)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: initial, Licenses: licenses, IssuerFactory: factory,
+		Cache: relay.NewEntitlementCacheStore(t.TempDir() + "/relay-entitlement.json"),
+	})
+	manager := NewRelayManager(RelayManagerOptions{
+		State: state, Licenses: licenses, IssuerFactory: factory, Controller: controller,
+		Coordinator: coordinator, AttemptTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go manager.Run(ctx)
+	select {
+	case request := <-oldRequests:
+		if request.LicenseKey != "old-key" || request.Label != "old-label" {
+			t.Fatalf("old issuer request = %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old issuer was not attempted")
+	}
+	status, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "sentinel-new-key", Label: "new-label"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case request := <-newRequests:
+		if request.LicenseKey != "sentinel-new-key" || request.Label != "new-label" || request.SID == "" {
+			t.Fatalf("new issuer request = %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("new issuer was not attempted; status=%#v current=%#v", status, manager.Current())
+	}
+	if status.State != RelayReadinessInvalidKey {
+		t.Fatalf("status = %#v current=%#v", status, manager.Current())
+	}
+	select {
+	case request := <-oldRequests:
+		if request.LicenseKey == "sentinel-new-key" || request.Label == "new-label" {
+			t.Fatalf("new generation reached old issuer: %#v", request)
+		}
+	default:
+	}
+}
+
+func TestRelayManagerHostedTimeoutReturnsPendingAndCompletionRemainsObservable(t *testing.T) {
+	release := make(chan struct{})
+	issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		<-release
+		return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerInvalidKey, Status: http.StatusUnauthorized}
+	}}
+	licenses := &managerLicenseStore{}
+	manager, cancel := newTestRelayManager(t, ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, licenses, issuer, true)
+	defer cancel()
+	manager.timeout = 20 * time.Millisecond
+	_, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "pending-key"})
+	var management *RelayManagementError
+	if !errors.As(err, &management) || management.Code != "pending" {
+		t.Fatalf("error = %v", err)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for manager.Status().State != RelayReadinessInvalidKey && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := manager.Status(); got.State != RelayReadinessInvalidKey {
+		t.Fatalf("later status = %#v", got)
+	}
+}
+
+func TestRelayManagerCloseAdmissionDrainsAdmittedMutation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	licenses := &managerLicenseStore{}
+	licenses.beforeReplace = func() { close(entered); <-release }
+	manager, cancel := newTestRelayManager(t, ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, licenses, nil, false)
+	defer cancel()
+	configured := make(chan error, 1)
+	go func() {
+		_, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "admitted-key"})
+		configured <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not reach secure-store boundary")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- manager.CloseAdmission(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.lifecycleMu.Lock()
+		closing := manager.lifecycle != relayManagerOpen
+		manager.lifecycleMu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing gate was not established")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeOff})
+	var management *RelayManagementError
+	if !errors.As(err, &management) || management.Code != "management_closing" {
+		t.Fatalf("closing gate did not reject new mutation: %v", err)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned before admitted mutation drained: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-configured; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRelayManagerClosingRejectsMutationBeforePersistence(t *testing.T) {
+	licenses := &managerLicenseStore{}
+	manager, cancel := newTestRelayManager(t, ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, licenses, nil, false)
+	defer cancel()
+	if err := manager.CloseAdmission(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted, LicenseKey: "must-not-persist"})
+	var management *RelayManagementError
+	if !errors.As(err, &management) || management.Code != "management_closing" {
+		t.Fatalf("error = %v", err)
+	}
+	if len(licenses.replacements) != 0 {
+		t.Fatalf("closing mutation reached Keychain: %#v", licenses.replacements)
 	}
 }
 

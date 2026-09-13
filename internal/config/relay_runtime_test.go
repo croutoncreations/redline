@@ -72,6 +72,28 @@ func TestResolvedRelayDialabilityCannotContradictReadiness(t *testing.T) {
 	}
 }
 
+func TestRelayCoordinatorDeepCopiesDeactivationIntent(t *testing.T) {
+	intent := &config.RelayDeactivationIntent{ActivationID: "current-device", StateGeneration: 4}
+	initial := config.ResolvedRelay{RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, Generation: 4, Deactivation: intent}}
+	coordinator := config.NewRelayCoordinator(initial)
+	intent.ActivationID = "mutated-input"
+	first := coordinator.Current()
+	if first.Deactivation.ActivationID != "current-device" {
+		t.Fatalf("constructor retained mutable intent: %#v", first.Deactivation)
+	}
+	first.Deactivation.ActivationID = "mutated-reader"
+	if current := coordinator.Current(); current.Deactivation.ActivationID != "current-device" {
+		t.Fatalf("reader mutated coordinator intent: %#v", current.Deactivation)
+	}
+	updates, cancel := coordinator.Subscribe()
+	defer cancel()
+	published := <-updates
+	published.Deactivation.ActivationID = "mutated-subscriber"
+	if current := coordinator.Current(); current.Deactivation.ActivationID != "current-device" {
+		t.Fatalf("subscriber mutated coordinator intent: %#v", current.Deactivation)
+	}
+}
+
 func TestRelayCoordinatorPublishesOneImmutableSnapshot(t *testing.T) {
 	initial := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "session-abcdefghij0123"},

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -434,8 +435,17 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, "relay:", err)
 		return 1
 	}
+	var connectionGeneration uint64
 	relayManager := newRelaySupervisor(management, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
-		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), management.TriggerRelayEntitlement, management.SetConnected, func(format string, args ...any) {
+		connectionGeneration++
+		identity := config.RelayConnectionIdentity{
+			URL: snapshot.URL, SessionID: snapshot.SessionID, ReconnectGeneration: snapshot.ReconnectGeneration,
+			ConnectionGeneration: connectionGeneration,
+		}
+		management.SetConnection(identity, false)
+		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), management.TriggerRelayEntitlement, func(connected bool) {
+			management.SetConnection(identity, connected)
+		}, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		})
 		if err != nil {
@@ -473,6 +483,11 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	apiServer := api.NewServerWithRelayManager(cfg, database, now, management)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// HTTP admission and handler draining precede controller/dialer cancellation.
+	// Keeping relay authority services alive during the drain lets every admitted
+	// management transaction finish its prepare/commit/abort protocol.
+	runtimeCtx, stopRuntime := context.WithCancel(context.Background())
+	defer stopRuntime()
 	apiServer.StartScheduler(ctx)
 	server := &http.Server{
 		Addr:              *listen,
@@ -487,10 +502,10 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintf(stdout, "Relay enabled via %s\n", initialRelay.URL)
 	}
 	relayDone := make(chan error, 1)
-	go func() { relayDone <- relayManager.Run(ctx) }()
+	go func() { relayDone <- relayManager.Run(runtimeCtx) }()
 	controllerDone := make(chan struct{})
 	go func() {
-		management.Run(ctx)
+		management.Run(runtimeCtx)
 		close(controllerDone)
 	}()
 
@@ -516,16 +531,21 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		}
 	case <-ctx.Done():
 	}
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := management.CloseAdmission(shutdown); err != nil {
+		fmt.Fprintln(stderr, "relay management shutdown:", err)
+		exitCode = 1
+	}
 	if !serverFinished {
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := server.Shutdown(shutdown); err != nil {
 			fmt.Fprintln(stderr, err)
 			exitCode = 1
 		}
-		cancel()
 		<-serverDone
 	}
 	apiServer.Wait()
+	cancel()
+	stopRuntime()
 	if !relayFinished {
 		if err := <-relayDone; err != nil {
 			fmt.Fprintln(stderr, "relay:", err)
@@ -814,7 +834,7 @@ func runRelay(client apiclient.Client, args []string, stdout, stderr io.Writer) 
 		}
 		return requestStatus(http.MethodGet, "/v1/relay/status", nil)
 	case "activate":
-		if len(args) < 2 {
+		if len(args) < 2 || args[1] == "" {
 			fmt.Fprintln(stderr, "usage: redline relay activate <key> [--label LABEL]")
 			return 1
 		}
@@ -824,9 +844,18 @@ func runRelay(client apiclient.Client, args []string, stdout, stderr io.Writer) 
 		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
 			return 1
 		}
-		return requestStatus(http.MethodPost, "/v1/relay/configure", config.RelayConfigureRequest{
-			Mode: config.RelayModeHosted, LicenseKey: args[1], Label: *label,
-		})
+		licenseKey := args[1]
+		var status config.RelayStatus
+		if err := client.Do(context.Background(), http.MethodPost, "/v1/relay/configure", config.RelayConfigureRequest{
+			Mode: config.RelayModeHosted, LicenseKey: licenseKey, Label: *label,
+		}, &status); err != nil {
+			fmt.Fprintln(stderr, strings.ReplaceAll(err.Error(), licenseKey, "[REDACTED]"))
+			return 1
+		}
+		var redacted bytes.Buffer
+		writeJSON(&redacted, status)
+		_, _ = fmt.Fprint(stdout, strings.ReplaceAll(redacted.String(), licenseKey, "[REDACTED]"))
+		return 0
 	case "devices":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "usage: redline relay devices")
@@ -842,7 +871,7 @@ func runRelay(client apiclient.Client, args []string, stdout, stderr io.Writer) 
 		writeJSON(stdout, response.Devices)
 		return 0
 	case "device":
-		if len(args) != 3 || args[1] != "deactivate" || args[2] == "" {
+		if len(args) != 3 || args[1] != "deactivate" || !validCLIActivationID(args[2]) {
 			fmt.Fprintln(stderr, "usage: redline relay device deactivate <id>")
 			return 1
 		}
@@ -882,6 +911,19 @@ func runRelay(client apiclient.Client, args []string, stdout, stderr io.Writer) 
 	}
 }
 
+func validCLIActivationID(id string) bool {
+	if id == "" || len(id) > 512 {
+		return false
+	}
+	for _, character := range id {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func runPair(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -902,17 +944,22 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	}
 	_ = configPath // Pairing state belongs to the authenticated running service.
 	var code struct {
-		Token       string          `json:"pairing_token"`
-		ExpiresAt   time.Time       `json:"expires_at"`
-		PairingURL  string          `json:"pairing_url"`
-		Routes      []pairing.Route `json:"routes"`
-		Endpoint    string          `json:"endpoint"`
-		RelayStatus string          `json:"relay_status"`
+		Token        string                     `json:"pairing_token"`
+		ExpiresAt    time.Time                  `json:"expires_at"`
+		PairingURL   string                     `json:"pairing_url"`
+		Routes       []pairing.Route            `json:"routes"`
+		Endpoint     string                     `json:"endpoint"`
+		RelayStatus  string                     `json:"relay_status"`
+		RelayRefusal pairing.RelayRefusalReason `json:"relay_refusal"`
 	}
 	request := map[string]any{"host": *host, "port": *port, "relay_only": *relayOnly}
 	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", request, &code); err != nil {
 		fmt.Fprintln(stderr, "create pairing token:", err)
 		return 1
+	}
+	fmt.Fprintf(stdout, "Relay: %s\n", strings.ReplaceAll(code.RelayStatus, "_", " "))
+	if code.RelayRefusal != "" {
+		fmt.Fprintf(stdout, "Relay route unavailable: %s\n", strings.ReplaceAll(string(code.RelayRefusal), "_", " "))
 	}
 	if code.Token == "" || code.PairingURL == "" || !code.ExpiresAt.After(time.Now()) {
 		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential or no usable route")
@@ -923,8 +970,6 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Relay: %s\n", strings.ReplaceAll(code.RelayStatus, "_", " "))
-
 	// Says exactly which routes the code offers, because "from a device on
 	// your tailnet" was wrong for two of the three.
 	hasDirect, hasRelay := false, false

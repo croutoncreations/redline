@@ -24,6 +24,10 @@ type entitlementIssuer interface {
 	Entitlement(context.Context, string, string, string) (relay.ReceivedEntitlement, error)
 }
 
+// RelayIssuerFactory binds issuer selection to an immutable managed runtime
+// generation. Callers must never reuse a client selected for another URL.
+type RelayIssuerFactory func(string) (RelayManagementIssuer, error)
+
 type entitlementCache interface {
 	Load(string, string, time.Time) (relay.CachedEntitlement, bool, error)
 	SaveContext(context.Context, relay.CachedEntitlement) error
@@ -75,16 +79,17 @@ func (t realEntitlementTimer) C() <-chan time.Time { return t.Timer.C }
 // EntitlementControllerOptions exposes deterministic seams used by tests. A
 // nil seam selects the production implementation.
 type EntitlementControllerOptions struct {
-	Coordinator *RelayCoordinator
-	Initial     ResolvedRelay
-	Licenses    LicenseStore
-	Issuer      entitlementIssuer
-	Cache       entitlementCache
-	Revocations entitlementRevocations
-	RelayHTTP   *http.Client
-	Clock       entitlementClock
-	ExpiryClock entitlementClock
-	Jitter      func() float64
+	Coordinator   *RelayCoordinator
+	Initial       ResolvedRelay
+	Licenses      LicenseStore
+	Issuer        entitlementIssuer
+	IssuerFactory RelayIssuerFactory
+	Cache         entitlementCache
+	Revocations   entitlementRevocations
+	RelayHTTP     *http.Client
+	Clock         entitlementClock
+	ExpiryClock   entitlementClock
+	Jitter        func() float64
 	// PersistenceDrainTimeout bounds persistence-worker shutdown, including
 	// terminal revocation-marker durability. The barrier is independent of parent
 	// cancellation, but cannot cancel an OS syscall already in progress.
@@ -391,7 +396,10 @@ type EntitlementController struct {
 	runCtx    context.Context
 
 	credentialGeneration  uint64
+	committedGeneration   uint64
+	attemptSequence       uint64
 	attemptCancel         context.CancelFunc
+	attemptDone           chan struct{}
 	relayEventSequence    uint64
 	relayAttemptSequence  uint64
 	relaySignalQueued     bool
@@ -433,29 +441,93 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 // credential generation. It returns false without mutation after shutdown has
 // established its closing boundary. Credential replacement and validation
 // remain RelayManager responsibilities, not this controller's.
+// RelayControllerPreparation is a single-use barrier token. The manager must
+// commit or abort it before the controller may perform another issuer call.
+type RelayControllerPreparation struct {
+	generation uint64
+	attemptID  uint64
+}
+
+// PrepareGeneration revokes runtime authority, cancels and drains the old
+// attempt, and gates renewals before the manager exposes a replacement key.
+func (c *EntitlementController) PrepareGeneration(ctx context.Context) (RelayControllerPreparation, bool) {
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return RelayControllerPreparation{}, false
+	}
+	oldGeneration := c.credentialGeneration
+	if marker, ok := c.markerForGenerationLocked(oldGeneration); ok && c.revocationPersistence != nil {
+		c.revocationPersistence.save(marker)
+	}
+	c.credentialGeneration++
+	c.attemptSequence++
+	prepared := RelayControllerPreparation{generation: c.credentialGeneration, attemptID: c.attemptSequence}
+	c.relayAttemptSequence = c.relayEventSequence
+	c.relaySignalQueued = false
+	c.relayFollowupQueued = false
+	cancel, done := c.attemptCancel, c.attemptDone
+	c.revokeAuthorityLocked(c.opts.Clock.Now())
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return RelayControllerPreparation{}, false
+		}
+	}
+	return prepared, true
+}
+
+// CommitGeneration opens the prepared generation and correlates every
+// resulting publication with its attempt id.
+func (c *EntitlementController) CommitGeneration(prepared RelayControllerPreparation) bool {
+	c.mu.Lock()
+	if c.closing || prepared.generation != c.credentialGeneration {
+		c.mu.Unlock()
+		return false
+	}
+	c.committedGeneration = prepared.generation
+	c.mu.Unlock()
+	c.enqueue(entitlementTrigger{reason: triggerLicenseChanged, generation: prepared.generation})
+	return true
+}
+
+// AbortGeneration permanently supersedes provisional work and leaves runtime
+// fail-closed. Rollback never reopens the old credential generation.
+func (c *EntitlementController) AbortGeneration(prepared RelayControllerPreparation) {
+	c.mu.Lock()
+	if prepared.generation == c.credentialGeneration {
+		c.credentialGeneration++
+		c.attemptSequence++
+		c.revokeAuthorityLocked(c.opts.Clock.Now())
+	}
+	c.mu.Unlock()
+}
+
 func (c *EntitlementController) TriggerLicenseChanged() bool {
+	// Compatibility trigger for non-management callers: cancellation is
+	// synchronous but draining is owned by RelayManager's prepare/commit path.
 	c.mu.Lock()
 	if c.closing {
 		c.mu.Unlock()
 		return false
 	}
 	oldGeneration := c.credentialGeneration
-	// Collect and enqueue every old-generation authority before advancing the
-	// generation or permitting attempt cancellation to return. Ledger requests
-	// are credential-independent merges, so shutdown cannot discard this work as
-	// obsolete merely because the replacement generation is current.
 	if marker, ok := c.markerForGenerationLocked(oldGeneration); ok && c.revocationPersistence != nil {
 		c.revocationPersistence.save(marker)
 	}
 	c.credentialGeneration++
+	c.attemptSequence++
 	generation := c.credentialGeneration
+	c.committedGeneration = generation
 	c.relayAttemptSequence = c.relayEventSequence
 	c.relaySignalQueued = false
 	c.relayFollowupQueued = false
 	cancel := c.attemptCancel
-	// Replacing a credential synchronously revokes authority established by the
-	// prior generation. The event loop may be inside issuer or refresh work, so
-	// waiting for it to observe a trigger would leave an obsolete token dialable.
 	c.revokeAuthorityLocked(c.opts.Clock.Now())
 	c.mu.Unlock()
 	if cancel != nil {
@@ -517,21 +589,28 @@ func (c *EntitlementController) generation() uint64 {
 	return c.credentialGeneration
 }
 
-func (c *EntitlementController) startAttempt(parent context.Context, generation uint64) (context.Context, context.CancelFunc) {
+func (c *EntitlementController) startAttempt(parent context.Context, generation uint64) (context.Context, context.CancelFunc, chan struct{}) {
 	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
 	c.mu.Lock()
-	if c.closing || generation != c.credentialGeneration {
+	if c.closing || generation != c.credentialGeneration || generation != c.committedGeneration {
 		cancel()
+		close(done)
 	} else {
 		c.attemptCancel = cancel
+		c.attemptDone = done
 	}
 	c.mu.Unlock()
-	return ctx, cancel
+	return ctx, cancel, done
 }
 
-func (c *EntitlementController) finishAttempt(cancel context.CancelFunc) {
+func (c *EntitlementController) finishAttempt(cancel context.CancelFunc, done chan struct{}) {
 	c.mu.Lock()
-	c.attemptCancel = nil
+	if c.attemptDone == done {
+		c.attemptCancel = nil
+		c.attemptDone = nil
+		close(done)
+	}
 	c.mu.Unlock()
 	cancel()
 }
@@ -590,11 +669,11 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	if base.Mode == RelayModeOff {
 		clearRelayStatus(&base)
 		base.Readiness = RelayReadinessOff
-		c.opts.Coordinator.Update(base)
+		c.opts.Coordinator.UpdateController(base)
 	} else if base.Mode == RelayModeSelfHosted {
 		clearRelayStatus(&base)
 		base.Readiness, base.Dial = RelayReadinessSelfHosted, true
-		c.opts.Coordinator.Update(base)
+		c.opts.Coordinator.UpdateController(base)
 	}
 
 	now := c.opts.Clock.Now()
@@ -647,7 +726,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 				base = activeFromCache(base, current, c.renewalTime(current.Exp, now))
 				c.authorityEpoch++
 				c.installExpiryWatcherLocked(ctx, startupGeneration, c.authorityEpoch, current.Exp)
-				c.opts.Coordinator.Update(base)
+				c.opts.Coordinator.UpdateController(base)
 			}
 			c.mu.Unlock()
 		}
@@ -688,6 +767,21 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	}()
 	for {
 		generation := c.generation()
+		c.mu.Lock()
+		committed := generation == c.committedGeneration
+		attemptID := c.attemptSequence
+		c.mu.Unlock()
+		if !committed {
+			select {
+			case <-ctx.Done():
+				return
+			case trigger := <-c.triggers:
+				if trigger.generation == c.generation() {
+					continue
+				}
+			}
+			continue
+		}
 		if authorityGeneration != generation {
 			c.mu.Lock()
 			marker, revokeOldGeneration := c.markerForGenerationLocked(authorityGeneration)
@@ -701,7 +795,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 			base = c.opts.Coordinator.Current()
 			base.PersistenceDegraded = revokeOldGeneration
 			if revokeOldGeneration {
-				c.opts.Coordinator.Update(base)
+				c.opts.Coordinator.UpdateController(base)
 			}
 		}
 		// Presentation-only managed changes do not advance the credential
@@ -712,12 +806,13 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		base.Connected = published.Connected
 		persistence.retry(generation)
 		revocationPersistence.retry()
-		attemptCtx, cancelAttempt := c.startAttempt(ctx, generation)
+		base.ControllerAttemptID = attemptID
+		attemptCtx, cancelAttempt, attemptDone := c.startAttempt(ctx, generation)
 		c.mu.Lock()
 		attemptRelaySequence := c.relayAttemptSequence
 		c.mu.Unlock()
 		delay, terminal := c.renew(attemptCtx, generation, attemptRelaySequence, &license, &licenseErr, &licenseLoaded, &base, &current, &credentialFingerprint, &authorityGeneration, persistence, revocationPersistence)
-		c.finishAttempt(cancelAttempt)
+		c.finishAttempt(cancelAttempt, attemptDone)
 		c.mu.Lock()
 		if !c.relayFollowupQueued {
 			c.relaySignalQueued = false
@@ -800,7 +895,7 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 			base.Connected = false
 			base.Readiness = RelayReadinessOff
 		}
-		c.opts.Coordinator.Update(*base)
+		c.opts.Coordinator.UpdateController(*base)
 		return terminalEntitlementRetry, true
 	}
 	now := c.opts.Clock.Now()
@@ -824,12 +919,14 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 		return 0, false
 	}
 	if errors.Is(err, ErrLicenseNotFound) || (err == nil && license == "") {
+		base.ControllerCompletedAttemptID = base.ControllerAttemptID
 		if c.publishTerminalForGeneration(generation, base, current, credentialFingerprint, authorityGeneration, persistence, revocationPersistence, RelayReadinessNeedsLicense, nil) {
 			return terminalEntitlementRetry, true
 		}
 		return 0, false
 	}
 	if err != nil {
+		base.ControllerCompletedAttemptID = base.ControllerAttemptID
 		// Re-sample after Keychain work; a token valid at entry may have expired
 		// while the credential store was blocked.
 		c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
@@ -847,7 +944,23 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 	}
 	*credentialFingerprint = loadedFingerprint
 
-	issued, err := c.opts.Issuer.Entitlement(ctx, license, sid, base.Label)
+	issuer := c.opts.Issuer
+	if c.opts.IssuerFactory != nil {
+		selected, selectErr := c.opts.IssuerFactory(base.IssuerURL)
+		if selectErr != nil {
+			base.ControllerCompletedAttemptID = base.ControllerAttemptID
+			c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
+			return 0, false
+		}
+		issuer = selected
+	}
+	if issuer == nil {
+		base.ControllerCompletedAttemptID = base.ControllerAttemptID
+		c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
+		return 0, false
+	}
+	issued, err := issuer.Entitlement(ctx, license, sid, base.Label)
+	base.ControllerCompletedAttemptID = base.ControllerAttemptID
 	// Tokens and the protected cache use Unix seconds. Canonicalize the receipt
 	// sampled by IssuerClient after complete response/body handling, then use it
 	// for validation, obtained_at, and renewal scheduling.
@@ -1020,7 +1133,7 @@ func (c *EntitlementController) publishTerminalForGeneration(generation uint64, 
 			revocationPersistence.save(marker)
 		}
 	}
-	c.opts.Coordinator.Update(*base)
+	c.opts.Coordinator.UpdateController(*base)
 	return true
 }
 
@@ -1049,7 +1162,7 @@ func (c *EntitlementController) commitIssued(parent context.Context, generation,
 	persistence.submit(next, generation)
 	c.authorityEpoch++
 	c.installExpiryWatcherLocked(parent, generation, c.authorityEpoch, next.Exp)
-	c.opts.Coordinator.Update(*base)
+	c.opts.Coordinator.UpdateController(*base)
 	// Only events already selected to cause this attempt are consumed. A relay
 	// denial arriving after refresh acceptance remains queued for follow-up.
 	if c.relayEventSequence > attemptRelaySequence {
@@ -1089,7 +1202,7 @@ func (c *EntitlementController) applyPersistenceResult(generation uint64, base *
 		return
 	}
 	base.PersistenceDegraded = false
-	c.opts.Coordinator.Update(*base)
+	c.opts.Coordinator.UpdateController(*base)
 }
 
 func (c *EntitlementController) applyRevocationResult(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64, persistence *entitlementRevocationWorker, result entitlementRevocationResult) {
@@ -1118,7 +1231,7 @@ func (c *EntitlementController) applyRevocationResult(generation uint64, base *R
 		return
 	}
 	base.PersistenceDegraded = false
-	c.opts.Coordinator.Update(*base)
+	c.opts.Coordinator.UpdateController(*base)
 }
 
 func (c *EntitlementController) revokeAuthorityLocked(now time.Time) {
@@ -1224,14 +1337,14 @@ func publishUnavailable(coordinator *RelayCoordinator, base *ResolvedRelay, now 
 	base.Readiness = RelayReadinessUnavailable
 	base.UnavailableSince = since
 	base.PersistenceDegraded = degraded
-	coordinator.Update(*base)
+	coordinator.UpdateController(*base)
 }
 
 func publishPending(coordinator *RelayCoordinator, base *ResolvedRelay, cached relay.CachedEntitlement) {
 	*base = activeFromCache(*base, cached, time.Time{})
 	base.Readiness = RelayReadinessRenewPending
 	base.ExpiresAt = time.Unix(cached.Exp, 0)
-	coordinator.Update(*base)
+	coordinator.UpdateController(*base)
 }
 
 func setNoSeat(base *ResolvedRelay, activations []relay.ActivationSummary) {

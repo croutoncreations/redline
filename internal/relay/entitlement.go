@@ -93,6 +93,9 @@ const (
 	IssuerLapsed          IssuerErrorKind = "lapsed"
 	IssuerNoSeat          IssuerErrorKind = "no_seat"
 	IssuerUnavailable     IssuerErrorKind = "unavailable"
+	IssuerRateLimited     IssuerErrorKind = "rate_limited"
+	IssuerNotFound        IssuerErrorKind = "not_found"
+	IssuerConflict        IssuerErrorKind = "conflict"
 	IssuerInvalidResponse IssuerErrorKind = "invalid_response"
 )
 
@@ -277,7 +280,7 @@ func (c *IssuerClient) Activations(ctx context.Context, licenseKey string) ([]Ac
 		return nil, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 	}
 	for _, activation := range result.Activations {
-		if activation.ID == "" || len(activation.ID) > 512 || activation.FirstSeen.IsZero() || !validLabel(activation.Label) {
+		if !validActivationID(activation.ID) || activation.FirstSeen.IsZero() || !validLabel(activation.Label) {
 			return nil, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 		}
 	}
@@ -285,7 +288,7 @@ func (c *IssuerClient) Activations(ctx context.Context, licenseKey string) ([]Ac
 }
 
 func (c *IssuerClient) DeleteActivation(ctx context.Context, licenseKey, id string) error {
-	if id == "" || len(id) > 512 || strings.IndexFunc(id, unicode.IsControl) >= 0 {
+	if !validActivationID(id) {
 		return &IssuerError{Kind: IssuerInvalidResponse}
 	}
 	req, err := c.authorizedRequest(ctx, http.MethodDelete, c.activationEndpoint(id), licenseKey)
@@ -347,6 +350,19 @@ func (c *IssuerClient) do(req *http.Request) (*http.Response, []byte, error) {
 	return resp, raw, nil
 }
 
+func validActivationID(id string) bool {
+	if id == "" || len(id) > 512 {
+		return false
+	}
+	for _, character := range id {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validLabel(label string) bool {
 	return len(label) <= 200 && strings.IndexFunc(label, unicode.IsControl) < 0
 }
@@ -369,6 +385,12 @@ func classifyStatus(status int) error {
 		return &IssuerError{Kind: IssuerInvalidKey, Status: status}
 	case http.StatusPaymentRequired:
 		return &IssuerError{Kind: IssuerLapsed, Status: status}
+	case http.StatusTooManyRequests:
+		return &IssuerError{Kind: IssuerRateLimited, Status: status, Retryable: true}
+	case http.StatusNotFound:
+		return &IssuerError{Kind: IssuerNotFound, Status: status}
+	case http.StatusConflict:
+		return &IssuerError{Kind: IssuerConflict, Status: status}
 	}
 	if status >= 500 {
 		return &IssuerError{Kind: IssuerUnavailable, Status: status, Retryable: true}
