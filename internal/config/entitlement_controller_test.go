@@ -65,6 +65,52 @@ func (c *controllerCache) SaveContext(_ context.Context, value relay.CachedEntit
 	return err
 }
 
+// blockingLicenseStore blocks Load until release is closed, letting a test
+// hold the controller's startup credential read open while a concurrent
+// generation change (PrepareGeneration/CommitGeneration) commits underneath
+// it.
+type blockingLicenseStore struct {
+	value   string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingLicenseStore) Load(context.Context) (string, error) {
+	close(s.started)
+	<-s.release
+	return s.value, nil
+}
+func (*blockingLicenseStore) Replace(context.Context, string) error { return nil }
+func (*blockingLicenseStore) Clear(context.Context) error           { return nil }
+
+// generationRaceLicenseStore blocks its first Load (simulating the startup
+// read) until release is closed, and always returns "before" from that first
+// call regardless of how much later it unblocks. Every subsequent Load
+// returns "after", modeling the credential a fresh generation would read.
+type generationRaceLicenseStore struct {
+	mu      sync.Mutex
+	calls   int
+	before  string
+	after   string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *generationRaceLicenseStore) Load(context.Context) (string, error) {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	s.mu.Unlock()
+	if first {
+		close(s.started)
+		<-s.release
+		return s.before, nil
+	}
+	return s.after, nil
+}
+func (*generationRaceLicenseStore) Replace(context.Context, string) error { return nil }
+func (*generationRaceLicenseStore) Clear(context.Context) error           { return nil }
+
 type blockingLoadControllerCache struct {
 	value   relay.CachedEntitlement
 	started chan struct{}
@@ -651,6 +697,59 @@ func TestEntitlementControllerChecksMarkerAfterBlockedStartupCacheLoad(t *testin
 	<-issuerStarted
 	if got := coordinator.Current(); got.CanDial() || got.EntitlementToken.Value() != "" {
 		t.Fatalf("startup published cache behind marker: %#v", got)
+	}
+	cancel()
+	<-done
+}
+
+// TestEntitlementControllerStartupCredentialLoadDiscardedAfterConcurrentGeneration
+// proves the fix for a race the review process found in Run(): the startup
+// Keychain/license read happens before PrepareGeneration's cancel/drain
+// barrier is registered (attemptCancel/attemptDone are only set once the main
+// loop calls startAttempt). Without discarding a stale in-flight startup read
+// once the credential generation has moved on, the loop would otherwise reuse
+// the value fetched for the OLD generation as if it belonged to the new one,
+// sending a stale credential to the issuer for the newly configured
+// generation. This test blocks the startup Load, advances the credential
+// generation underneath it (mirroring a concurrent Configure/PrepareGeneration
+// + CommitGeneration), then releases the blocked read and asserts the issuer
+// only ever observes the fresh, post-generation credential.
+func TestEntitlementControllerStartupCredentialLoadDiscardedAfterConcurrentGeneration(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	store := &generationRaceLicenseStore{started: make(chan struct{}), release: make(chan struct{}), before: "stale-license", after: "fresh-license"}
+	issuerCalls := make(chan string, 4)
+	issuer := controllerReceivedIssuerFunc(func(_ context.Context, key, _, _ string) (relay.ReceivedEntitlement, error) {
+		issuerCalls <- key
+		return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerInvalidKey, Status: 401}
+	})
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: store, Issuer: issuer,
+		Cache: &controllerCache{saved: make(chan relay.CachedEntitlement, 1)},
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 2)},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+
+	<-store.started // blocked inside the first (startup) Load call
+	prepared, ok := controller.PrepareGeneration(ctx)
+	if !ok {
+		t.Fatal("PrepareGeneration failed during blocked startup load")
+	}
+	if !controller.CommitGeneration(prepared) {
+		t.Fatal("CommitGeneration failed during blocked startup load")
+	}
+	close(store.release) // unblocks Load, which still returns the pre-race "stale-license"
+
+	select {
+	case key := <-issuerCalls:
+		if key != "fresh-license" {
+			t.Fatalf("issuer received stale startup credential across a generation change: %q", key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("issuer was never attempted for the new generation")
 	}
 	cancel()
 	<-done

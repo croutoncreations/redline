@@ -226,6 +226,13 @@ func (m *RelayManager) Run(ctx context.Context) {
 	// itself fail on I/O; it only revokes authority and bumps the generation,
 	// so the controller stays gated (uncommitted) even if Deactivate's own
 	// internal retry never reaches its matching commit.
+	// This call and Deactivate's own internal prepareController call are two
+	// independent PrepareGeneration invocations by design, not a bug: this one
+	// exists solely to gate the controller synchronously before any fallible
+	// work runs, so it must not be skipped even if Deactivate's own call is
+	// never reached (e.g. it fails before calling prepareController itself).
+	// The token returned here is deliberately not committed or aborted; its
+	// only purpose was already served the instant it revoked authority.
 	if m.coordinator.Current().Deactivation != nil {
 		if m.controller != nil {
 			m.controller.PrepareGeneration(ctx)
