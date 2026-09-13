@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"context"
 	"encoding/base64"
 	"errors"
 	"github.com/coder/websocket"
@@ -78,7 +79,6 @@ func TestRelayClientCarriesARequest(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
@@ -142,7 +142,6 @@ func TestRelayClientSendsTheCredential(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -175,7 +174,6 @@ func TestRelayClientRefusesUseAfterClose(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -206,7 +204,6 @@ func TestRelayClientTimesOutASilentDesktop(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -238,7 +235,6 @@ func TestRelayClientRejectsAnImpostorDesktop(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(realKey),
-		"",
 	)
 	if err == nil {
 		t.Fatal("the phone accepted a session with a desktop holding the wrong key")
@@ -265,7 +261,7 @@ func TestDialRelayValidatesItsInputs(t *testing.T) {
 		{"junk key", "wss://relay.example.com", "phone-session-0123456789abc", "not-a-key"},
 	}
 	for _, tc := range cases {
-		if _, err := DialRelay(tc.url, tc.session, tc.key, ""); err == nil {
+		if _, err := DialRelay(tc.url, tc.session, tc.key); err == nil {
 			t.Errorf("%s: DialRelay accepted it", tc.name)
 		}
 	}
@@ -314,7 +310,6 @@ func TestAFailedRequestDoesNotCorruptLaterOnes(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -375,7 +370,6 @@ func TestDialRelayReportsAnEntitlementRefusalAsItsOwnThing(t *testing.T) {
 		"ws"+strings.TrimPrefix(relay.URL, "http"),
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		"expired.token",
 	)
 	if err == nil {
 		t.Fatal("expected the dial to fail")
@@ -408,7 +402,6 @@ func TestDialRelayBoundsAndQuotesTheRefusalReason(t *testing.T) {
 		"ws"+strings.TrimPrefix(relay.URL, "http"),
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		"tok",
 	)
 	if err == nil {
 		t.Fatal("expected the dial to fail")
@@ -437,7 +430,6 @@ func TestDialRelayKeepsOtherFailuresAsConnectionFailures(t *testing.T) {
 		"ws"+strings.TrimPrefix(relay.URL, "http"),
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		"some.token",
 	)
 	if err == nil {
 		t.Fatal("expected the dial to fail")
@@ -470,7 +462,6 @@ func TestRelayClientReportsWhenItIsSpent(t *testing.T) {
 		"ws"+strings.TrimPrefix(relay.URL, "http"),
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		"token",
 	)
 	if err != nil {
 		// A handshake that cannot complete is its own failure; nothing to test.
@@ -489,6 +480,131 @@ func TestRelayClientReportsWhenItIsSpent(t *testing.T) {
 
 	if !client.IsSpent() {
 		t.Error("a client whose session failed must report itself spent so the caller redials")
+	}
+}
+
+// The relay refuses role=client with 423 when no entitled host is attached to
+// the session (docs/relay-entitlement.md). This must read as "your Mac is not
+// connected to the relay", not as a generic connection failure: the fix is to
+// check the desktop, not to check the phone's own network.
+func TestDialRelayReportsHostOfflineAs423(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"code":"no_host"}`, http.StatusLocked)
+	}))
+	defer relay.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if !IsHostOffline(err) {
+		t.Errorf("a 423 must be recognisable as the host being offline, got: %v", err)
+	}
+	if IsEntitlementRefused(err) {
+		t.Errorf("423 no_host is not an entitlement refusal: %v", err)
+	}
+	if IsTooManyPhones(err) {
+		t.Errorf("423 no_host is not too-many-phones: %v", err)
+	}
+}
+
+// The relay refuses role=client with 409 when the session is already at
+// max_clients (docs/relay-entitlement.md). Distinct from every other relay
+// refusal: the desktop and the subscription are both fine, and the remedy is
+// to close another phone's session, not to renew or check connectivity.
+func TestDialRelayReportsTooManyClientsAs409(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"code":"too_many_clients"}`, http.StatusConflict)
+	}))
+	defer relay.Close()
+
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		base64.StdEncoding.EncodeToString(make([]byte, 32)),
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if !IsTooManyPhones(err) {
+		t.Errorf("a 409 must be recognisable as too many phones, got: %v", err)
+	}
+	if IsHostOffline(err) || IsEntitlementRefused(err) {
+		t.Errorf("409 too_many_clients must not read as any other refusal: %v", err)
+	}
+}
+
+// A plain 409 with no relay body at all -- the shape DialRelay already
+// retries on while a desktop's reconnect races the phone's dial (see
+// TestDialRelayRetriesWhileTheDesktopReconnects) -- must not be
+// misclassified as too-many-phones just because the status code matches.
+// Only role=client's specific too_many_clients body means that.
+func TestDialRelayDoesNotMisclassifyAPlain409(t *testing.T) {
+	err := errors.New("dial relay: connect failed")
+	if IsTooManyPhones(err) {
+		t.Errorf("a plain connect failure must not be misclassified as too-many-phones: %v", err)
+	}
+}
+
+// The relay closes the WebSocket with 1008 "entitlement expired" mid-session
+// when a Durable Object alarm fires at the stored exp (docs/relay-entitlement.md).
+// This must be distinguishable from the connect-time 402 refusal by callers:
+// it happens after a session was already working, so the app can say the
+// subscription just lapsed rather than repeat the pre-connection wording.
+func TestRelayClientReportsEntitlementExpiredMidSession(t *testing.T) {
+	desktopKey, err := NewDesktopKeypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		conn.SetReadLimit(relayClientFrameLimit)
+
+		responder, err := NewResponderSession(desktopKey)
+		if err != nil {
+			return
+		}
+		_, handshakeMsg, err := conn.Read(context.Background())
+		if err != nil {
+			return
+		}
+		reply, err := responder.ReadHandshake(handshakeMsg)
+		if err != nil {
+			return
+		}
+		if err := conn.Write(context.Background(), websocket.MessageBinary, reply); err != nil {
+			return
+		}
+		// A live, authenticated session, then the relay closes it exactly as
+		// its alarm handler does at the stored exp.
+		conn.Close(websocket.StatusPolicyViolation, "entitlement expired")
+	}))
+	defer relay.Close()
+
+	client, err := DialRelay(
+		strings.Replace(relay.URL, "http://", "ws://", 1),
+		"phone-session-0123456789abc",
+		DesktopPublicKey(desktopKey),
+	)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer client.Close()
+
+	_, requestErr := client.Request("GET", "/v1/dashboard", "")
+	if requestErr == nil {
+		t.Fatal("expected the request to fail once the relay closed the session")
+	}
+	if !IsEntitlementExpiredMidSession(requestErr) {
+		t.Errorf("a 1008 policy-violation close must be recognisable as a mid-session entitlement expiry, got: %v", requestErr)
 	}
 }
 
@@ -524,7 +640,6 @@ func TestDialRelayRetriesWhileTheDesktopReconnects(t *testing.T) {
 		"ws"+strings.TrimPrefix(server.URL, "http"),
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		"token",
 	)
 	// The handshake cannot complete against a stub, but the dial must have been
 	// retried rather than given up after one refusal.
@@ -554,7 +669,7 @@ func TestDialRelayAcceptsTheURLTheDesktopPublishes(t *testing.T) {
 	} {
 		t.Run(raw, func(t *testing.T) {
 			_, err := DialRelay(raw, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				base64.StdEncoding.EncodeToString(make([]byte, 32)), "tok")
+				base64.StdEncoding.EncodeToString(make([]byte, 32)))
 			// The dial fails -- nothing is listening -- but it must fail on
 			// reaching the host, never on the shape of the URL.
 			if err != nil && strings.Contains(err.Error(), "must use wss") {
@@ -564,11 +679,14 @@ func TestDialRelayAcceptsTheURLTheDesktopPublishes(t *testing.T) {
 	}
 }
 
-// http:// stays refused for a public host: the entitlement rides in a handshake
-// header, and sending it in clear would hand it to anyone on the path.
+// http:// stays refused for a public host: every frame is Noise-sealed before
+// it reaches the wire, including the bearer token carried inside each sealed
+// request, but the handshake itself is still plaintext WebSocket framing, and
+// sending that in the clear would expose the session to tampering by anyone
+// on the path.
 func TestDialRelayStillRefusesCleartext(t *testing.T) {
 	_, err := DialRelay("http://relay.example.com", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		base64.StdEncoding.EncodeToString(make([]byte, 32)), "tok")
+		base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err == nil || !strings.Contains(err.Error(), "wss") {
 		t.Errorf("cleartext to a public host must be refused, got: %v", err)
 	}
@@ -620,7 +738,6 @@ func TestRelayClientAnswerFullKeepsTheDesktopHeaders(t *testing.T) {
 		strings.Replace(server.URL, "http://", "ws://", 1),
 		"phone-session-0123456789abc",
 		DesktopPublicKey(desktopKey),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
@@ -675,7 +792,7 @@ func TestRelayClientAnswerFullCarriesARefusal(t *testing.T) {
 
 	client, err := DialRelay(
 		strings.Replace(server.URL, "http://", "ws://", 1),
-		"phone-session-0123456789abc", DesktopPublicKey(desktopKey), "",
+		"phone-session-0123456789abc", DesktopPublicKey(desktopKey),
 	)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)

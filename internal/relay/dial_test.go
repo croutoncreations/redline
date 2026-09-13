@@ -1398,7 +1398,7 @@ func waitRelayHost(t *testing.T, events <-chan uint64) uint64 {
 
 func dialTestPhone(t *testing.T, relayURL, sessionID string, keypair noise.DHKey) *core.RelayClient {
 	t.Helper()
-	phone, err := core.DialRelay(relayURL, sessionID, core.DesktopPublicKey(keypair), "")
+	phone, err := core.DialRelay(relayURL, sessionID, core.DesktopPublicKey(keypair))
 	if err != nil {
 		t.Fatalf("dial phone: %v", err)
 	}
@@ -1439,7 +1439,7 @@ func TestTwoMobileClientsMultiplexThroughOneDesktop(t *testing.T) {
 	phones := make(chan phoneResult, 2)
 	for range 2 {
 		go func() {
-			phone, err := core.DialRelay(relay.server.URL, sessionID, core.DesktopPublicKey(keypair), "")
+			phone, err := core.DialRelay(relay.server.URL, sessionID, core.DesktopPublicKey(keypair))
 			phones <- phoneResult{phone: phone, err: err}
 		}()
 	}

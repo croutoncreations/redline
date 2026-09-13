@@ -67,7 +67,6 @@ func TestFullLoopPhoneToDesktop(t *testing.T) {
 		"ws://127.0.0.1:8788",
 		sessionID,
 		core.DesktopPublicKey(keypair),
-		"",
 	)
 	if err != nil {
 		t.Fatalf("phone could not reach the desktop through the relay: %v", err)

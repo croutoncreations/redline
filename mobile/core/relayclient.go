@@ -97,12 +97,15 @@ type RelayClient struct {
 // relayURL must be wss://, or ws:// only for loopback addresses (tests).
 // sessionID must be 16–128 characters of [A-Za-z0-9_-].
 // desktopPublicKey must be a valid base64-encoded 32-byte Curve25519 key.
-// entitlementToken may be empty during development.
 //
 // The function fails if the handshake does not complete, which means the far
 // end did not hold the expected desktop private key: an impostor relay or a
 // misconfigured desktop is caught here rather than silently passing requests to
 // the wrong party.
+//
+// The phone never holds an entitlement token: the relay admits role=client
+// purely because an entitled host is already attached to the session
+// (docs/relay-entitlement.md). There is nothing for this call to present.
 // DialRelay opens a relayed session, retrying briefly while the desktop is
 // still reconnecting.
 //
@@ -113,17 +116,17 @@ type RelayClient struct {
 // not arrived yet. Retrying the whole handshake is what covers it -- retrying
 // only the dial does not, because the dial was never the part that failed.
 //
-// An entitlement refusal is an answer rather than a race, so it returns at
-// once instead of being repeated three times.
-func DialRelay(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
+// A host-offline or too-many-phones refusal is an answer rather than a race,
+// so it returns at once instead of being repeated three times.
+func DialRelay(relayURL, sessionID, desktopPublicKey string) (*RelayClient, error) {
 	var err error
 	for attempt := 0; attempt < dialAttempts; attempt++ {
 		var client *RelayClient
-		client, err = dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken)
+		client, err = dialRelayOnce(relayURL, sessionID, desktopPublicKey)
 		if err == nil {
 			return client, nil
 		}
-		if errors.Is(err, ErrEntitlementRefused) {
+		if errors.Is(err, ErrHostOffline) || errors.Is(err, ErrTooManyPhones) || errors.Is(err, ErrEntitlementRefused) {
 			return nil, err
 		}
 		if attempt < dialAttempts-1 {
@@ -171,7 +174,68 @@ func IsEntitlementRefused(err error) bool {
 	return errors.Is(err, ErrEntitlementRefused) || strings.Contains(err.Error(), ErrEntitlementRefused.Error())
 }
 
-func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken string) (*RelayClient, error) {
+// ErrHostOffline means the relay refused a phone's role=client connection
+// with 423 because no entitled host is currently attached to the session
+// (docs/relay-entitlement.md's `no_host` code).
+//
+// Distinct from every other relay refusal: the phone, the relay, and the
+// subscription may all be fine. The desktop simply is not dialled in right
+// now -- asleep, offline, or between reconnect attempts -- and the remedy is
+// to check the Mac, not the phone's own network or its subscription.
+var ErrHostOffline = errors.New("your Mac is not connected to the relay")
+
+// IsHostOffline reports whether the relay refused the connection because no
+// entitled host is attached to this session.
+//
+// A function rather than a bound sentinel for the same FFI reason as
+// IsEntitlementRefused: gomobile may reconstruct the error from its text
+// alone after crossing a Kotlin callback.
+func IsHostOffline(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrHostOffline) || strings.Contains(err.Error(), ErrHostOffline.Error())
+}
+
+// ErrTooManyPhones means the relay refused a phone's role=client connection
+// with 409 because the session is already at its signed max_clients cap
+// (docs/relay-entitlement.md's `too_many_clients` code).
+//
+// Distinct from every other relay refusal: the desktop is online and the
+// subscription is current. The remedy is to close another phone's connection
+// to this same Mac, not to renew or reconnect.
+var ErrTooManyPhones = errors.New("too many phones are already connected to this Mac")
+
+// IsTooManyPhones reports whether the relay refused the connection because
+// the session was already at its client cap.
+func IsTooManyPhones(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrTooManyPhones) || strings.Contains(err.Error(), ErrTooManyPhones.Error())
+}
+
+// ErrEntitlementExpiredMidSession means a previously working relay session
+// was closed with WebSocket close code 1008 (docs/relay-entitlement.md),
+// which the relay sends only when a Durable Object alarm fires because the
+// desktop's entitlement reached its stored expiry.
+//
+// Distinct from ErrEntitlementRefused, which is a connect-time refusal before
+// any session existed: this happens after requests were already succeeding,
+// so the right message is "the subscription just lapsed", not a repeat of the
+// pre-connection wording.
+var ErrEntitlementExpiredMidSession = errors.New("the relay subscription expired during this session")
+
+// IsEntitlementExpiredMidSession reports whether a request failed because the
+// relay closed an established session at 1008 for entitlement expiry.
+func IsEntitlementExpiredMidSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrEntitlementExpiredMidSession) || strings.Contains(err.Error(), ErrEntitlementExpiredMidSession.Error())
+}
+
+func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, error) {
 	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
 		return nil, err
 	}
@@ -182,11 +246,9 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 	}
 
 	target := buildSessionURL(relayURL, sessionID)
-	headers := http.Header{}
-	if entitlementToken != "" {
-		headers.Set("X-Redline-Entitlement", entitlementToken)
-	}
-	conn, handshake, err := websocket.Dial(context.Background(), target, &websocket.DialOptions{HTTPHeader: headers})
+	// role=client never presents a credential (docs/relay-entitlement.md):
+	// admission is host-gated, not token-gated, so no header is sent here.
+	conn, handshake, err := websocket.Dial(context.Background(), target, &websocket.DialOptions{})
 	if err != nil {
 		// A 402 is a billing answer, not a network one. Discarding the
 		// handshake response made an expired subscription read as "check that
@@ -206,6 +268,21 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey, entitlementToken strin
 			// %q turns an embedded newline into two characters rather than a
 			// forged second line.
 			return nil, fmt.Errorf("%w (relay said: %q)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
+		}
+		// 423 no_host and 409 too_many_clients are role=client's own refusal
+		// codes (docs/relay-entitlement.md), distinguished from every other
+		// non-2xx status -- including the plain 409 a desktop reconnect race
+		// produces (see dialAttempts/dialRetryDelay above) -- only by this
+		// specific machine-readable body, never by status code alone.
+		if handshake != nil && (handshake.StatusCode == http.StatusLocked || handshake.StatusCode == http.StatusConflict) {
+			reason, _ := io.ReadAll(io.LimitReader(handshake.Body, 256))
+			handshake.Body.Close()
+			switch relayErrorCode(reason) {
+			case "no_host":
+				return nil, fmt.Errorf("%w", ErrHostOffline)
+			case "too_many_clients":
+				return nil, fmt.Errorf("%w", ErrTooManyPhones)
+			}
 		}
 		// Keep the library's response details out of the error. The entitlement
 		// travels in a handshake header, which a future library error must not
@@ -429,6 +506,14 @@ func (c *RelayClient) exchange(method, reqPath, body string) (tunnelResponse, er
 	_, rawFrame, err := c.conn.Read(ctx)
 	if err != nil {
 		c.closeConn()
+		// 1008 is the relay's documented authoritative signal that a Durable
+		// Object alarm fired because the desktop's entitlement reached its
+		// stored exp mid-session (docs/relay-entitlement.md). Distinct from
+		// the connect-time 402 refusal: a session that was already working
+		// just stopped, so the caller needs a different message.
+		if websocket.CloseStatus(err) == websocket.StatusPolicyViolation {
+			return tunnelResponse{}, fmt.Errorf("read response: %w", ErrEntitlementExpiredMidSession)
+		}
 		return tunnelResponse{}, fmt.Errorf("read response: %w", err)
 	}
 
@@ -470,6 +555,22 @@ func (c *RelayClient) closeConn() {
 	if c.conn != nil {
 		c.conn.CloseNow()
 	}
+}
+
+// relayErrorCode reads the "code" field from one of the relay's own JSON
+// error bodies ({"code":"<code>"}, docs/relay-entitlement.md), or "" if the
+// body is not that shape. A malformed or absent body must never be treated as
+// a match for any specific code: this is what keeps a bare 409 from a
+// desktop-reconnect race (no body at all) from being misclassified as the
+// relay's too_many_clients refusal, which shares the same status.
+func relayErrorCode(body []byte) string {
+	var decoded struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return ""
+	}
+	return decoded.Code
 }
 
 // validateDialInputs checks the relay URL, session id, and desktop public key
