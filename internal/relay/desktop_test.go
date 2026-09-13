@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +190,67 @@ func TestALocalFailureDoesNotEndTheSession(t *testing.T) {
 		if resp.Status != http.StatusBadGateway {
 			t.Fatalf("attempt %d: expected 502 for a dead local API, got %d", attempt, resp.Status)
 		}
+	}
+}
+
+func TestOversizedResponseBecomesSealed502WithoutAdvancingNoiseTwice(t *testing.T) {
+	keypair, _ := core.NewDesktopKeypair()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/huge-header" {
+			w.Header().Set("X-Huge", strings.Repeat("h", maxTunnelPayload))
+			_, _ = w.Write(make([]byte, maxTunnelBody))
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("still synchronized"))
+	}))
+	defer local.Close()
+
+	handler := NewSessionHandler(keypair, NewForwarder(local.URL, local.Client()))
+	phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	opening, _ := phone.StartHandshake()
+	reply, err := handler.HandleFrame(context.Background(), opening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := phone.FinishHandshake(reply); err != nil {
+		t.Fatal(err)
+	}
+
+	request, _ := EncodeRequestParts(http.MethodGet, "/huge-header", nil, nil)
+	sealed, _ := phone.Seal(request)
+	response, err := handler.HandleFrame(context.Background(), sealed)
+	if err != nil {
+		t.Fatalf("oversized local response should become a sealed 502: %v", err)
+	}
+	if len(response) > maxTunnelPayload {
+		t.Fatalf("sealed fallback is %d bytes, limit %d", len(response), maxTunnelPayload)
+	}
+	opened, err := phone.Open(response)
+	if err != nil {
+		t.Fatalf("open fallback: %v", err)
+	}
+	decoded, err := DecodeResponse(opened)
+	if err != nil || decoded.Status != http.StatusBadGateway || len(decoded.Header) != 0 || len(decoded.Body) != 0 {
+		t.Fatalf("fallback=%#v err=%v", decoded, err)
+	}
+
+	// If the oversized response was sealed and then replaced, the sender nonce
+	// advanced twice and this second request cannot decrypt. A successful normal
+	// response proves the size check happened before sealing.
+	request, _ = EncodeRequestParts(http.MethodGet, "/ok", nil, nil)
+	sealed, _ = phone.Seal(request)
+	response, err = handler.HandleFrame(context.Background(), sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err = phone.Open(response)
+	if err != nil {
+		t.Fatalf("Noise state desynchronized after 502 fallback: %v", err)
+	}
+	decoded, err = DecodeResponse(opened)
+	if err != nil || decoded.Status != http.StatusOK || string(decoded.Body) != "still synchronized" {
+		t.Fatalf("next response=%#v err=%v", decoded, err)
 	}
 }
 

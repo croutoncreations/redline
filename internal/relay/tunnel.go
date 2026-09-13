@@ -22,12 +22,22 @@ const maxTunnelPayload = 1024 * 1024
 const relayChannelBytes = 8
 const maxHostWireFrame = maxTunnelPayload + relayChannelBytes
 
-// tunnelEnvelopeSlack reserves room for everything wrapped around the body:
-// the JSON envelope, response headers, and the 16-byte AEAD tag Seal adds.
-// Headers are the variable part, so the reservation is generous.
+// Noise transport messages use ChaChaPoly with a 16-byte authentication tag.
+// The exact outbound check uses this before Seal so rejecting a response does
+// not spend a nonce the phone can never observe.
+const noiseTagBytes = 16
+
+var errResponseTooLarge = errors.New("response exceeds tunnel payload")
+
+// tunnelEnvelopeSlack keeps ordinary maximum-body responses comfortably below
+// the wire ceiling. It is only a body-reading bound; correctness does not rely
+// on this estimate because every complete JSON response is checked exactly,
+// including all forwarded headers and Noise overhead, before sealing.
 const tunnelEnvelopeSlack = 16 * 1024
 
-// maxTunnelBody is the largest response body forwarded in a single frame.
+// maxTunnelBody is the largest response body read for a single frame. The
+// exact encoded response check may reject a smaller body when unusually large
+// headers consume the remaining payload budget.
 //
 // There is no chunking: one request is one frame, one response is one frame.
 // The size is derived rather than chosen, because base64 in JSON expands the
@@ -124,11 +134,25 @@ func EncodeResponse(r *http.Response) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeds the %d-byte tunnel limit", maxTunnelBody)
 	}
 
-	return json.Marshal(TunnelResponse{
+	return encodeTunnelResponse(TunnelResponse{
 		Status: r.StatusCode,
 		Header: r.Header,
 		Body:   body,
 	})
+}
+
+// encodeTunnelResponse applies the encrypted payload ceiling before Noise Seal
+// can advance its nonce. JSON/base64 expansion and all response headers are
+// measured from the actual encoded bytes rather than estimated from body size.
+func encodeTunnelResponse(resp TunnelResponse) ([]byte, error) {
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("encode response: %w", err)
+	}
+	if len(encoded) > maxTunnelPayload-noiseTagBytes {
+		return nil, fmt.Errorf("%w: encoded response with Noise overhead exceeds the %d-byte tunnel limit", errResponseTooLarge, maxTunnelPayload)
+	}
+	return encoded, nil
 }
 
 // DecodeResponse deserialises a frame back into a TunnelResponse.

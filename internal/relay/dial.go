@@ -9,7 +9,6 @@ import (
 	"path"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -82,11 +81,10 @@ func (e *EntitlementSignalError) Error() string {
 	return "relay requires entitlement renewal: " + string(e.Signal)
 }
 
-// errBadFrame marks a frame this desktop could not read, which ends the Noise
-// session but says nothing about the relay's health.
-//
-// Separated from a transport failure because the two deserve opposite
-// responses: reconnect at once after a bad frame, back off after an outage.
+// errBadFrame marks a connection-level relay envelope violation. The channel
+// cannot be identified safely, so the host reconnects with the same bounded
+// backoff as transport failures. In particular, untrusted malformed input must
+// never create an immediate reconnect hot loop.
 var errBadFrame = errors.New("handle frame")
 
 // NewDialer creates a Dialer from the given options.
@@ -135,15 +133,8 @@ func (d *Dialer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if errors.Is(err, errBadFrame) {
-				// A malformed host envelope is a protocol reset rather than a
-				// relay outage, so reconnect promptly with an empty channel map.
-				bo.reset()
-				d.logf("relay: %v; reconnecting", err)
-				continue
-			}
-			// Anything else means the relay is unavailable or dropped us.
-			// Sleep the backoff, then try again.
+			// Every connection-level failure, including an untrusted malformed
+			// envelope, sleeps the bounded backoff before trying again.
 			wait := bo.next()
 			// Reported at every attempt rather than only the first: a relay
 			// that is down stays down quietly, and the growing interval is
@@ -225,10 +216,7 @@ func (d *Dialer) connect(ctx context.Context) error {
 // authentication failures delete that channel, while malformed host envelopes
 // reconnect the whole host because their channel cannot be identified safely.
 func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
-	var writeMu sync.Mutex
 	mux := newSessionMultiplexer(ctx, d.opts.Keypair, d.opts.Forwarder, func(writeCtx context.Context, frame []byte) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
 		if err := conn.Write(writeCtx, websocket.MessageBinary, frame); err != nil {
 			// Unblock the sole reader so connect can discard every channel and
 			// enter the normal reconnect path.

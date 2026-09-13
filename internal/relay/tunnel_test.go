@@ -225,6 +225,37 @@ func TestTheLargestAllowedBodyFitsInAFrame(t *testing.T) {
 	}
 }
 
+func TestResponseEncodingAccountsForHeadersAtExactEncryptedBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		headerSize int
+		wantError  bool
+	}{
+		{name: "ordinary headers", headerSize: 1024},
+		{name: "huge headers", headerSize: maxTunnelPayload, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			rec.Header().Set("X-Boundary", strings.Repeat("h", tc.headerSize))
+			rec.WriteHeader(http.StatusOK)
+			_, _ = rec.Write(make([]byte, maxTunnelBody))
+			encoded, err := EncodeResponse(rec.Result())
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("encoded %d bytes plus Noise overhead past %d-byte payload", len(encoded), maxTunnelPayload)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(encoded) + noiseTagBytes; got > maxTunnelPayload {
+				t.Fatalf("encrypted response size=%d limit=%d", got, maxTunnelPayload)
+			}
+		})
+	}
+}
+
 // Multiplexing adds an eight-byte channel to the existing payload ceiling.
 // The desktop is the host, so its WebSocket read limit must accept the whole
 // host wire frame without shrinking the payload that was valid in Phase 1.2.

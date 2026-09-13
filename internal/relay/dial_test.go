@@ -777,32 +777,180 @@ func mustTestKeypair(t *testing.T) noise.DHKey {
 }
 
 // A malformed host envelope has no trustworthy channel id, so it reconnects
-// the host promptly rather than guessing which phone state to discard.
-func TestDialerReconnectsPromptlyAfterAMalformedHostFrame(t *testing.T) {
-	var dials int32
-	relay := fakeRelay(t, func(conn *websocket.Conn) {
-		atomic.AddInt32(&dials, 1)
-		_ = conn.Write(context.Background(), websocket.MessageBinary, []byte("short"))
-		time.Sleep(50 * time.Millisecond)
-		conn.CloseNow()
-	})
-	defer relay.Close()
+// the host with outage backoff rather than letting an untrusted relay create a
+// hot loop. The next healthy connection must still recover.
+func TestDialerBacksOffAndRecoversAfterMalformedHostEnvelopes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame []byte
+	}{
+		{name: "short", frame: []byte("short")},
+		{name: "oversize", frame: make([]byte, maxHostWireFrame+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dials := make(chan time.Time, 2)
+			var attempts atomic.Int32
+			relay := fakeRelay(t, func(conn *websocket.Conn) {
+				dials <- time.Now()
+				if attempts.Add(1) == 1 {
+					_ = conn.Write(context.Background(), websocket.MessageBinary, tc.frame)
+					conn.CloseNow()
+					return
+				}
+				_, _, _ = conn.Read(context.Background())
+			})
+			defer relay.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	dialer := NewDialer(DialerOptions{
-		RelayURL: relay.URL, SessionID: "test-session-1234", Keypair: mustTestKeypair(t),
-		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
-	})
-	go dialer.Run(ctx)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			dialer := NewDialer(DialerOptions{
+				RelayURL: relay.URL, SessionID: "test-session-1234", Keypair: mustTestKeypair(t),
+				Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+			})
+			go dialer.Run(ctx)
 
-	deadline := time.After(2 * time.Second)
-	for atomic.LoadInt32(&dials) < 3 {
-		select {
-		case <-deadline:
-			t.Fatalf("only %d dials in two seconds; malformed host frames are backing off", atomic.LoadInt32(&dials))
-		case <-time.After(10 * time.Millisecond):
+			first := <-dials
+			select {
+			case second := <-dials:
+				if elapsed := second.Sub(first); elapsed < time.Second {
+					t.Fatalf("malformed envelope caused hot reconnect after %v", elapsed)
+				}
+				cancel()
+			case <-ctx.Done():
+				t.Fatal("dialer did not recover after malformed envelope backoff")
+			}
+		})
+	}
+}
+
+func TestClosedChannelResponseWaitingForHostWriterIsDiscarded(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	responses := make(chan []byte, 4)
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder("http://127.0.0.1:1", nil), func(ctx context.Context, frame []byte) error {
+		if ctx.Err() != nil {
+			t.Errorf("shared host writer received canceled channel context: %v", ctx.Err())
 		}
+		responses <- append([]byte(nil), frame...)
+		return nil
+	})
+	defer mux.Close()
+
+	channelA := relayChannel{1}
+	phoneA, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+	openingA, _ := phoneA.StartHandshake()
+
+	// Hold the host writer so A's worker reaches the serialized write boundary.
+	// Closing A while it waits deterministically reproduces the stale response
+	// race without relying on scheduler timing.
+	mux.writeMu.Lock()
+	if err := mux.Dispatch(append(channelA[:], openingA...)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		mux.mu.Lock()
+		entry := mux.sessions[channelA]
+		processing := entry != nil && entry.processing
+		mux.mu.Unlock()
+		if processing {
+			break
+		}
+		if time.Now().After(deadline) {
+			mux.writeMu.Unlock()
+			t.Fatal("channel A did not reach the host writer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := mux.Dispatch(channelA[:]); err != nil {
+		mux.writeMu.Unlock()
+		t.Fatal(err)
+	}
+
+	// B and C both become ready while the same writer is held, exercising
+	// contention between live channels after A has been canceled.
+	type pendingPhone struct {
+		channel relayChannel
+		phone   *core.NoiseSession
+	}
+	pending := []pendingPhone{{channel: relayChannel{2}}, {channel: relayChannel{3}}}
+	for i := range pending {
+		phone, _ := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+		opening, _ := phone.StartHandshake()
+		pending[i].phone = phone
+		if err := mux.Dispatch(append(pending[i].channel[:], opening...)); err != nil {
+			mux.writeMu.Unlock()
+			t.Fatal(err)
+		}
+	}
+	mux.writeMu.Unlock()
+
+	for range pending {
+		select {
+		case response := <-responses:
+			if response[0] == channelA[0] {
+				t.Fatal("stale channel A response reached the shared host writer")
+			}
+			var matched *pendingPhone
+			for i := range pending {
+				if response[0] == pending[i].channel[0] {
+					matched = &pending[i]
+					break
+				}
+			}
+			if matched == nil {
+				t.Fatalf("response used unknown channel %x", response[:relayChannelBytes])
+			}
+			if err := matched.phone.FinishHandshake(response[relayChannelBytes:]); err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("live channel write was blocked by canceled channel A")
+		}
+	}
+
+	request, _ := EncodeRequestParts(http.MethodGet, "/still-live", nil, nil)
+	sealed, _ := pending[0].phone.Seal(request)
+	if err := mux.Dispatch(append(pending[0].channel[:], sealed...)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-responses:
+		if response[0] != pending[0].channel[0] {
+			t.Fatalf("operational response crossed channel: %x", response[:relayChannelBytes])
+		}
+		opened, err := pending[0].phone.Open(response[relayChannelBytes:])
+		if err != nil {
+			t.Fatalf("channel B lost Noise synchronization: %v", err)
+		}
+		decoded, err := DecodeResponse(opened)
+		if err != nil || decoded.Status != http.StatusBadGateway {
+			t.Fatalf("channel B response=%#v err=%v", decoded, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("channel B stopped operating after channel A cancellation")
+	}
+	select {
+	case response := <-responses:
+		t.Fatalf("unexpected stale response after live writes: %x", response[:relayChannelBytes])
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestMultiplexerRejectsOversizedResponseBeforeSharedWriter(t *testing.T) {
+	keypair := mustTestKeypair(t)
+	var writes atomic.Int32
+	mux := newSessionMultiplexer(context.Background(), keypair, NewForwarder("http://127.0.0.1:1", nil), func(context.Context, []byte) error {
+		writes.Add(1)
+		return nil
+	})
+	defer mux.Close()
+	channel := relayChannel{1}
+	entry := &multiplexedSession{}
+	if err := mux.writeResponse(channel, entry, make([]byte, maxTunnelPayload+1)); !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("oversized response error=%v", err)
+	}
+	if writes.Load() != 0 {
+		t.Fatal("oversized response reached shared host writer")
 	}
 }
 
@@ -880,8 +1028,8 @@ func TestDialerReconnectReadsLatestTokenSource(t *testing.T) {
 		if got != "new-token" {
 			t.Fatalf("reconnect token=%q want newest token", got)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("forced reconnect did not occur")
+	case <-time.After(4 * time.Second):
+		t.Fatal("forced reconnect did not occur after bounded backoff")
 	}
 }
 

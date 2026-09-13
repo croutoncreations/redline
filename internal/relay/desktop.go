@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -122,13 +123,24 @@ func (h *SessionHandler) HandleFrameAt(ctx context.Context, frame []byte, at tim
 // sealResponse encodes a TunnelResponse and seals it for the phone. It must be
 // called while h.mu is held.
 func (h *SessionHandler) sealResponse(resp TunnelResponse) ([]byte, error) {
-	encoded, err := json.Marshal(resp)
+	encoded, err := encodeTunnelResponse(resp)
+	if errors.Is(err, errResponseTooLarge) {
+		// Reject before Seal advances the nonce. The small fallback is sealed
+		// exactly once, so this channel and every other channel remain in sync.
+		encoded, err = encodeTunnelResponse(TunnelResponse{Status: http.StatusBadGateway})
+	}
 	if err != nil {
-		return nil, fmt.Errorf("encode response: %w", err)
+		return nil, err
 	}
 	sealed, err := h.session.Seal(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("seal response: %w", err)
+	}
+	// Defense in depth against a Noise suite overhead change. At this point the
+	// nonce is spent, so the caller drops only this channel; the oversized bytes
+	// must never be prefixed or offered to the shared host writer.
+	if len(sealed) > maxTunnelPayload {
+		return nil, fmt.Errorf("%w: sealed response is %d bytes", errResponseTooLarge, len(sealed))
 	}
 	return sealed, nil
 }
@@ -163,7 +175,10 @@ const maxRelayChannels = 25
 
 // channelTimer is the narrow timer seam used by the per-channel idle reaper.
 // time.Timer satisfies it; tests can inject a deterministic clock and invoke
-// eviction without sleeping.
+// eviction without sleeping. The afterFunc seam must follow time.AfterFunc's
+// asynchronous callback contract: it must return before fn begins, because a
+// newly-created timer is installed while the multiplexer lock is held and fn
+// acquires that same lock.
 type channelTimer interface {
 	Stop() bool
 	Reset(time.Duration) bool
@@ -190,6 +205,7 @@ type sessionMultiplexer struct {
 	cancel    context.CancelFunc
 	keypair   noise.DHKey
 	forwarder *Forwarder
+	writeMu   sync.Mutex
 	write     func(context.Context, []byte) error
 	now       func() time.Time
 	idleAfter time.Duration
@@ -297,19 +313,38 @@ func (m *sessionMultiplexer) serve(channel relayChannel, entry *multiplexedSessi
 				m.drop(channel, entry)
 				return
 			}
-			if !m.active(channel, entry) {
-				return
-			}
-			wire := make([]byte, relayChannelBytes+len(reply))
-			copy(wire, channel[:])
-			copy(wire[relayChannelBytes:], reply)
-			if err := m.write(entry.ctx, wire); err != nil {
-				entry.cancel()
+			if err := m.writeResponse(channel, entry, reply); err != nil {
+				// Production write failures close the host transport so readLoop
+				// reconnects. A defensive size failure spends only this channel.
+				m.drop(channel, entry)
 				return
 			}
 			m.finishProcessing(channel, entry)
 		}
 	}
+}
+
+// writeResponse serializes the host WebSocket write, then checks channel
+// identity while holding the session lock. A close or replacement that wins
+// before the writer boundary makes this response stale and it is silently
+// discarded. The host-scoped context is deliberate: canceling one channel
+// must never turn its queued write into a shared transport failure.
+func (m *sessionMultiplexer) writeResponse(channel relayChannel, entry *multiplexedSession, reply []byte) error {
+	if len(reply) > maxTunnelPayload {
+		return fmt.Errorf("%w: encrypted response is %d bytes", errResponseTooLarge, len(reply))
+	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.sessions[channel] != entry {
+		return nil
+	}
+	wire := make([]byte, relayChannelBytes+len(reply))
+	copy(wire, channel[:])
+	copy(wire[relayChannelBytes:], reply)
+	return m.write(m.ctx, wire)
 }
 
 func (m *sessionMultiplexer) active(channel relayChannel, entry *multiplexedSession) bool {

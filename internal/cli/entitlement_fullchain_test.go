@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +140,189 @@ func (a *fullchainRelayAuthority) snapshot() (fullchainClaims, int64, uint64, []
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.claims, a.alarmUnix, a.generation, append([]fullchainAuthorityInstall(nil), a.installations...)
+}
+
+func TestEntitlementClose1008RenewsAndReconnectsFullChain(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keypair, err := core.NewDesktopKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"path":%q,"ok":true}`, r.URL.Path)
+	}))
+	defer local.Close()
+
+	const sessionID = "session-close1008-1234"
+	sid := relay.SessionSID(sessionID)
+	now := time.Now().UTC().Truncate(time.Second)
+	oldExp := now.Add(2 * time.Hour).Unix()
+	oldToken := fullchainToken(private, oldExp, sid, 5)
+	hostTokens := make(chan string, 3)
+	refreshTokens := make(chan string, 1)
+	firstPhone := make(chan error, 1)
+	freshPhone := make(chan error, 1)
+	var connections atomic.Int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/session/"+sessionID+"/entitlement", func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-Redline-Entitlement")
+		if _, validationErr := validateFullchainToken(public, token, sid, time.Now()); validationErr != nil {
+			http.Error(w, "not entitled", http.StatusPaymentRequired)
+			return
+		}
+		refreshTokens <- token
+		// This response is reachable only after signature, expiry, session, and
+		// client-cap verification above. It stands in for a relay whose 1008
+		// close has already removed the host socket.
+		http.Error(w, "no_host", http.StatusLocked)
+	})
+	mux.HandleFunc("/v1/session/"+sessionID, func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-Redline-Entitlement")
+		if _, validationErr := validateFullchainToken(public, token, sid, time.Now()); validationErr != nil {
+			http.Error(w, "not entitled", http.StatusPaymentRequired)
+			return
+		}
+		conn, acceptErr := websocket.Accept(w, r, nil)
+		if acceptErr != nil {
+			return
+		}
+		defer conn.CloseNow()
+		connection := connections.Add(1)
+		hostTokens <- token
+
+		phone, phoneErr := core.NewInitiatorSession(core.DesktopPublicKey(keypair))
+		if phoneErr == nil {
+			channel := [8]byte{byte(connection), 2, 3, 4, 5, 6, 7, 8}
+			opening, _ := phone.StartHandshake()
+			phoneErr = conn.Write(context.Background(), websocket.MessageBinary, append(channel[:], opening...))
+			var reply []byte
+			if phoneErr == nil {
+				_, reply, phoneErr = conn.Read(context.Background())
+			}
+			if phoneErr == nil && (len(reply) < len(channel) || string(reply[:len(channel)]) != string(channel[:])) {
+				phoneErr = errors.New("handshake response used wrong channel")
+			}
+			if phoneErr == nil {
+				phoneErr = phone.FinishHandshake(reply[len(channel):])
+			}
+			request, _ := relay.EncodeRequestParts(http.MethodGet, fmt.Sprintf("/phone-%d", connection), nil, nil)
+			var sealed []byte
+			if phoneErr == nil {
+				sealed, phoneErr = phone.Seal(request)
+			}
+			if phoneErr == nil {
+				phoneErr = conn.Write(context.Background(), websocket.MessageBinary, append(channel[:], sealed...))
+			}
+			if phoneErr == nil {
+				_, reply, phoneErr = conn.Read(context.Background())
+			}
+			if phoneErr == nil {
+				var opened []byte
+				opened, phoneErr = phone.Open(reply[len(channel):])
+				if phoneErr == nil {
+					var response relay.TunnelResponse
+					response, phoneErr = relay.DecodeResponse(opened)
+					if phoneErr == nil && (response.Status != http.StatusOK || !strings.Contains(string(response.Body), `"ok":true`)) {
+						phoneErr = fmt.Errorf("fresh phone response status=%d body=%q", response.Status, response.Body)
+					}
+				}
+			}
+		}
+		if connection == 1 {
+			firstPhone <- phoneErr
+			if phoneErr == nil {
+				_ = conn.Close(websocket.StatusPolicyViolation, "entitlement expired")
+			}
+			return
+		}
+		freshPhone <- phoneErr
+		_, _, _ = conn.Read(context.Background())
+	})
+	tlsRelay := httptest.NewTLSServer(mux)
+	defer tlsRelay.Close()
+
+	initial := config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: tlsRelay.URL, SessionID: sessionID},
+		Readiness:         config.RelayReadinessActive, Dial: true, EntitlementToken: config.NewRelayEntitlementToken(oldToken.Value()),
+		RenewsAt: now.Add(30 * time.Minute), ExpiresAt: time.Unix(oldExp, 0), MaxClients: 5,
+	}
+	coordinator := config.NewRelayCoordinator(initial)
+	releaseIssuer := make(chan struct{})
+	controller := config.NewEntitlementController(config.EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: initial, Licenses: fullchainLicenseStore{},
+		Issuer:    fullchainIssuer{release: releaseIssuer, private: private},
+		Cache:     &fullchainCache{current: relay.CachedEntitlement{Token: oldToken, Exp: oldExp, ObtainedAt: now.Add(-time.Hour).Unix(), SID: sid, MaxClients: 5}},
+		RelayHTTP: tlsRelay.Client(),
+	})
+	signals := make(chan relay.EntitlementSignal, 1)
+	supervisor := newRelaySupervisor(coordinator, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
+		dialer := relay.NewDialer(relay.DialerOptions{
+			RelayURL: snapshot.URL, SessionID: snapshot.SessionID, Keypair: keypair,
+			Forwarder: relay.NewForwarder(local.URL, local.Client()), EntitlementTokenSource: tokenSource, HTTPClient: tlsRelay.Client(),
+			EntitlementSignal: func(signal relay.EntitlementSignal) {
+				signals <- signal
+				controller.TriggerRelayEntitlement(signal)
+			},
+		})
+		return dialer.Run, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	controllerDone := make(chan struct{})
+	go func() { controller.Run(ctx); close(controllerDone) }()
+	supervisorDone := make(chan error, 1)
+	go func() { supervisorDone <- supervisor.Run(ctx) }()
+
+	if got := <-hostTokens; got != oldToken.Value() {
+		t.Fatal("initial host did not use old current token")
+	}
+	if err := <-firstPhone; err != nil {
+		t.Fatalf("initial active phone request: %v", err)
+	}
+	select {
+	case signal := <-signals:
+		if signal != relay.EntitlementExpired {
+			t.Fatalf("1008 signal=%s", signal)
+		}
+	case <-ctx.Done():
+		t.Fatal("relay 1008 did not reach entitlement controller")
+	}
+	close(releaseIssuer)
+	newToken := <-refreshTokens
+	if newToken == "" || newToken == oldToken.Value() {
+		t.Fatal("issuer renewal was not post-verified by refresh")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for coordinator.Current().ReconnectGeneration != initial.ReconnectGeneration+1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	current := coordinator.Current()
+	if current.ReconnectGeneration != 1 || current.EntitlementToken.Value() != newToken || !current.CanDial() {
+		t.Fatalf("423 no_host did not publish reconnect authority: %#v", current)
+	}
+	select {
+	case got := <-hostTokens:
+		if got != newToken {
+			t.Fatal("supervisor reconnect did not use new current token")
+		}
+	case <-ctx.Done():
+		t.Fatal("supervisor did not reconnect after verified 423 no_host")
+	}
+	if err := <-freshPhone; err != nil {
+		t.Fatalf("fresh phone after reconnect: %v", err)
+	}
+
+	cancel()
+	<-controllerDone
+	if err := <-supervisorDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestEntitlementRefreshFullChain joins the controller, supervisor, real
@@ -368,8 +552,8 @@ func TestEntitlementRefreshFullChain(t *testing.T) {
 		if got != newToken {
 			t.Fatal("internal reconnect did not use newest runtime token")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("forced internal reconnect did not reach relay")
+	case <-time.After(4 * time.Second):
+		t.Fatal("forced internal reconnect did not reach relay after bounded backoff")
 	}
 	installed, alarm, generation, installations = authority.snapshot()
 	if installed != newClaims || alarm != newClaims.Exp || generation != 2 {
