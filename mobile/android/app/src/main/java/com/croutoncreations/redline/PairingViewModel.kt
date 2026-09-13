@@ -109,7 +109,6 @@ class PairingViewModel(
                             relayUrl = request.relayUrl,
                             desktopKey = request.desktopKey,
                             relaySession = request.relaySession,
-                            entitlementToken = request.entitlementToken,
                         ),
                     )
                     _state.value = PairingUiState(working = false, pairedTo = baseUrl)

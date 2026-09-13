@@ -324,6 +324,16 @@ private fun FailureMessage(failure: UsageUiState.Failure, onRetry: () -> Unit) {
         UsageUiState.Failure.ENTITLEMENT_REFUSED ->
             "Remote access needs a current subscription. Renew it to reach Redline from " +
                 "outside your tailnet; on your own network the app still works."
+        // The Mac, not the phone, is the thing to check: the relay itself and
+        // this phone's own connection may both be fine.
+        UsageUiState.Failure.HOST_OFFLINE ->
+            "Your Mac is not connected to the relay right now. Check that Redline is " +
+                "running there, or connect over your tailnet instead."
+        // The desktop and subscription are both fine here; another phone is
+        // the thing occupying the one slot the relay currently allows.
+        UsageUiState.Failure.TOO_MANY_PHONES ->
+            "Too many phones are already connected to this Mac through the relay. " +
+                "Disconnect one, or connect over your tailnet instead."
     }
     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

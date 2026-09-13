@@ -15,7 +15,11 @@ data class PairingRequest(
     @SerialName("relay_url") val relayUrl: String = "",
     @SerialName("desktop_key") val desktopKey: String = "",
     @SerialName("relay_session") val relaySession: String = "",
-    @SerialName("entitlement_token") val entitlementToken: String = "",
+    // No longer populated by any desktop this app pairs with (the phone
+    // never holds an entitlement token, docs/relay-entitlement.md), but kept
+    // in the model -- and tolerated, then discarded -- so an old QR still
+    // scanned from a not-yet-updated desktop parses instead of failing.
+    @SerialName("entitlement_token") private val legacyEntitlementToken: String = "",
 )
 
 /**
@@ -56,7 +60,6 @@ class CorePairingSource : PairingSource {
                         request.relayUrl,
                         request.relaySession,
                         request.desktopKey,
-                        request.entitlementToken,
                     ).also {
                         relay = it
                         Log.i(TAG, "redeem: relay session established")

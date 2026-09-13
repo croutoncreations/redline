@@ -30,7 +30,6 @@ class PairingViewModelTest {
         var relayUrl: String? = null
         var desktopKey: String? = null
         var relaySession: String? = null
-        var entitlementToken: String? = null
         var pairingTransactions = 0
         fun update(baseUrl: String, token: String) {
             this.baseUrl = baseUrl
@@ -41,12 +40,10 @@ class PairingViewModelTest {
             relayUrl: String,
             desktopKey: String,
             relaySession: String,
-            entitlementToken: String,
         ) {
             this.relayUrl = relayUrl
             this.desktopKey = desktopKey
             this.relaySession = relaySession
-            this.entitlementToken = entitlementToken
         }
 
         override fun updatePairing(configuration: PairingConfiguration) {
@@ -56,7 +53,6 @@ class PairingViewModelTest {
                 configuration.relayUrl,
                 configuration.desktopKey,
                 configuration.relaySession,
-                configuration.entitlementToken,
             )
         }
 
@@ -187,7 +183,7 @@ class PairingViewModelTest {
                 parse = {
                     """{"base_url":"","pairing_token":"one-time-token",""" +
                         """"relay_url":"https://relay.example","desktop_key":"key==",""" +
-                        """"relay_session":"session","entitlement_token":"ent"}"""
+                        """"relay_session":"session"}"""
                 },
                 redeem = { request -> seen = request; "durable-api-token" },
             ),
@@ -203,13 +199,40 @@ class PairingViewModelTest {
         assertEquals("https://relay.example", request.relayUrl)
         assertEquals("key==", request.desktopKey)
         assertEquals("session", request.relaySession)
-        assertEquals("ent", request.entitlementToken)
 
         assertEquals("", settings.baseUrl)
         assertEquals("durable-api-token", settings.token)
         assertEquals("https://relay.example", settings.relayUrl)
         assertEquals(1, settings.pairingTransactions)
         assertTrue(model.state.value.isPaired)
+    }
+
+    /**
+     * A QR from a desktop that has not yet been rebuilt may still carry the
+     * legacy `entitlement_token` field. Parsing must tolerate it (not fail the
+     * scan) while never storing or forwarding it: the phone never holds an
+     * entitlement token (docs/relay-entitlement.md).
+     */
+    @Test
+    fun toleratesAndDiscardsALegacyEntitlementTokenField() = runTest(dispatcher) {
+        val settings = FakeSettings()
+        val model = PairingViewModel(
+            source(
+                parse = {
+                    """{"base_url":"https://macbook.example.ts.net","pairing_token":"one-time-token",""" +
+                        """"relay_url":"https://relay.example","desktop_key":"key==",""" +
+                        """"relay_session":"session-abcdefghij0123","entitlement_token":"legacy-secret"}"""
+                },
+            ),
+            settings,
+            dispatcher,
+        )
+
+        model.pair(validScan)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue("a legacy field must not fail the scan", model.state.value.isPaired)
+        assertEquals("https://relay.example", settings.relayUrl)
     }
 
     @Test

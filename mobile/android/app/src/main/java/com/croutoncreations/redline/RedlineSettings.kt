@@ -31,7 +31,6 @@ data class PairingConfiguration(
     val relayUrl: String,
     val desktopKey: String,
     val relaySession: String,
-    val entitlementToken: String,
 )
 
 interface PairingStore {
@@ -100,14 +99,6 @@ class RedlineSettings(private val context: Context) : PairingStore {
     val relaySession: String
         get() = preferences.getString(KEY_RELAY_SESSION, null) ?: ""
 
-    /**
-     * Authorises use of the relay. Empty while the relay is free to use; the
-     * relay says nothing about who the token belongs to, only that it is
-     * signed and unexpired.
-     */
-    val entitlementToken: String
-        get() = preferences.getString(KEY_ENTITLEMENT, null) ?: ""
-
     /** Whether a relayed fallback is possible at all. */
     val relayConfigured: Boolean
         get() = relayConfigurationComplete(relayUrl, desktopKey, relaySession)
@@ -116,11 +107,9 @@ class RedlineSettings(private val context: Context) : PairingStore {
         relayUrl: String,
         desktopKey: String,
         relaySession: String,
-        entitlementToken: String,
     ) {
         preferences.edit()
             .putString(KEY_RELAY_URL, relayUrl)
-            .putString(KEY_ENTITLEMENT, entitlementToken)
             .putString(KEY_DESKTOP_KEY, desktopKey)
             .putString(KEY_RELAY_SESSION, relaySession)
             .apply()
@@ -141,9 +130,13 @@ class RedlineSettings(private val context: Context) : PairingStore {
             .putString(KEY_BASE_URL, configuration.baseUrl)
             .putString(KEY_TOKEN, configuration.token)
             .putString(KEY_RELAY_URL, configuration.relayUrl)
-            .putString(KEY_ENTITLEMENT, configuration.entitlementToken)
             .putString(KEY_DESKTOP_KEY, configuration.desktopKey)
             .putString(KEY_RELAY_SESSION, configuration.relaySession)
+            // The phone never holds an entitlement token (docs/relay-entitlement.md):
+            // admission is host-gated, not token-gated. Any value from a QR
+            // scanned before this change is discarded, not carried forward,
+            // and any value stored by an older install is removed below.
+            .remove(KEY_ENTITLEMENT)
             .apply()
     }
 
@@ -161,6 +154,8 @@ class RedlineSettings(private val context: Context) : PairingStore {
             .remove(KEY_RELAY_URL)
             .remove(KEY_DESKTOP_KEY)
             .remove(KEY_RELAY_SESSION)
+            // Removed even though nothing writes it anymore, so an entitlement
+            // token stored by an older install does not survive unpairing.
             .remove(KEY_ENTITLEMENT)
             .apply()
         // Also remove credentials written by pre-fail-closed versions.
@@ -173,6 +168,9 @@ class RedlineSettings(private val context: Context) : PairingStore {
         const val KEY_RELAY_URL = "relay_url"
         const val KEY_DESKTOP_KEY = "desktop_key"
         const val KEY_RELAY_SESSION = "relay_session"
+        // No longer written; kept only as the key to remove on every write and
+        // every clear(), so an entitlement token stored by an older install
+        // (before the phone stopped holding one) cannot linger indefinitely.
         const val KEY_ENTITLEMENT = "entitlement_token"
 
         const val ENCRYPTED_FILE = "redline.secure"

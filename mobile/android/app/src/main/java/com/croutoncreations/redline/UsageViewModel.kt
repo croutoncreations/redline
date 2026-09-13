@@ -47,11 +47,19 @@ data class UsageUiState(
     val transport: Transport = Transport.Direct,
 ) {
     /**
-     * ENTITLEMENT_REFUSED is separate from UNREACHABLE because the remedy is
-     * different: the desktop may be healthy and the network fine, and the user
-     * needs to renew rather than investigate their wifi.
+     * Each relay refusal beyond UNREACHABLE has its own remedy, so each is its
+     * own case rather than folding into one generic "relay problem":
+     *
+     * - ENTITLEMENT_REFUSED: the desktop may be healthy and the network fine;
+     *   the subscription needs renewing (connect-time 402, or a mid-session
+     *   1008 close once a Durable Object alarm fires -- both share this
+     *   remedy, so both read as this one case here).
+     * - HOST_OFFLINE: the phone, relay, and subscription may all be fine; the
+     *   Mac just is not dialled into the relay right now (423 `no_host`).
+     * - TOO_MANY_PHONES: the desktop is online and current; another phone's
+     *   session needs to be closed first (409 `too_many_clients`).
      */
-    enum class Failure { UNAUTHORIZED, UNREACHABLE, ENTITLEMENT_REFUSED }
+    enum class Failure { UNAUTHORIZED, UNREACHABLE, ENTITLEMENT_REFUSED, HOST_OFFLINE, TOO_MANY_PHONES }
 
     val hasData: Boolean get() = view != null
 
@@ -137,6 +145,24 @@ interface UsageSource {
      * core-backed source can actually tell.
      */
     fun isEntitlementRefused(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because no entitled host (this
+     * desktop) is currently attached to the session.
+     *
+     * Default false, matching [isEntitlementRefused]: only the core-backed
+     * source can actually tell.
+     */
+    fun isHostOffline(error: Throwable): Boolean = false
+
+    /**
+     * Reports whether the relay refused because the session was already at
+     * its signed client cap.
+     *
+     * Default false, matching [isEntitlementRefused]: only the core-backed
+     * source can actually tell.
+     */
+    fun isTooManyPhones(error: Throwable): Boolean = false
 
 
     /**
@@ -338,6 +364,8 @@ class UsageViewModel(
                         source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
                         source.isEntitlementRefused(error) ->
                             UsageUiState.Failure.ENTITLEMENT_REFUSED
+                        source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
+                        source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
                         else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }
@@ -422,6 +450,8 @@ class UsageViewModel(
                         source.isUnauthorized(error) -> UsageUiState.Failure.UNAUTHORIZED
                         source.isEntitlementRefused(error) ->
                             UsageUiState.Failure.ENTITLEMENT_REFUSED
+                        source.isHostOffline(error) -> UsageUiState.Failure.HOST_OFFLINE
+                        source.isTooManyPhones(error) -> UsageUiState.Failure.TOO_MANY_PHONES
                         else -> UsageUiState.Failure.UNREACHABLE
                     }
                     _state.update { it.fail(failure) }

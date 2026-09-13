@@ -27,12 +27,10 @@ class UnpairTest {
             relayUrl: String,
             desktopKey: String,
             relaySession: String,
-            entitlementToken: String,
         ) {
             values["relay_url"] = relayUrl
             values["desktop_key"] = desktopKey
             values["relay_session"] = relaySession
-            values["entitlement_token"] = entitlementToken
         }
 
         override fun updatePairing(configuration: PairingConfiguration) {
@@ -41,7 +39,6 @@ class UnpairTest {
                 configuration.relayUrl,
                 configuration.desktopKey,
                 configuration.relaySession,
-                configuration.entitlementToken,
             )
         }
 
@@ -52,13 +49,13 @@ class UnpairTest {
 
     private fun paired() = FakeStore().apply {
         update("https://macbook.example.ts.net", "durable-api-token")
-        updateRelay("https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123", "ent.token")
+        updateRelay("https://relay.example.com", "ZGVza3RvcC1rZXk=", "session-abcdefghij0123")
     }
 
     @Test
     fun `unpairing removes every stored field`() {
         val store = paired()
-        assertEquals(6, store.values.size)
+        assertEquals(5, store.values.size)
 
         store.clear()
 
@@ -97,7 +94,7 @@ class UnpairTest {
 
         // Cancelling.
         confirming = false
-        assertEquals("cancelling must not touch the store", 6, store.values.size)
+        assertEquals("cancelling must not touch the store", 5, store.values.size)
         assertFalse(confirming)
     }
 

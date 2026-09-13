@@ -122,7 +122,6 @@ class PairingOnDeviceTest {
                 relayUrl = "https://relay.example.com",
                 desktopKey = "desktop-key",
                 relaySession = "relay-session-01234567",
-                entitlementToken = "",
             ),
         )
 

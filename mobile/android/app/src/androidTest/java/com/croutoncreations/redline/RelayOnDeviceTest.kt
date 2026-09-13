@@ -34,7 +34,7 @@ class RelayOnDeviceTest {
             Triple(relayUrl, "short", "key"),
         )
         for ((url, session, key) in cases) {
-            val failed = runCatching { Core.dialRelay(url, session, key, "") }.isFailure
+            val failed = runCatching { Core.dialRelay(url, session, key) }.isFailure
             assertTrue("dialRelay accepted $url / $session", failed)
         }
     }
@@ -52,7 +52,7 @@ class RelayOnDeviceTest {
             desktopKey != null && session != null,
         )
 
-        val client = Core.dialRelay(relayUrl, session, desktopKey, "")
+        val client = Core.dialRelay(relayUrl, session, desktopKey)
         client.setAuthToken("desktop-api-token")
         try {
             val body = client.request("GET", "/v1/dashboard", "")

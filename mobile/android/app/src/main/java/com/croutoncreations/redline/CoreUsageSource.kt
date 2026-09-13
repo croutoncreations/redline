@@ -31,4 +31,8 @@ class CoreUsageSource(private val client: CoreClientHolder) : UsageSource {
 
     override fun isEntitlementRefused(error: Throwable): Boolean =
         client.isEntitlementRefused(error)
+
+    override fun isHostOffline(error: Throwable): Boolean = client.isHostOffline(error)
+
+    override fun isTooManyPhones(error: Throwable): Boolean = client.isTooManyPhones(error)
 }

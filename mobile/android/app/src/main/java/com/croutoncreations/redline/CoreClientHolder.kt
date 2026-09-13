@@ -127,7 +127,6 @@ class CoreClientHolder(private val settings: RedlineSettings) {
                 settings.relayUrl,
                 settings.relaySession,
                 settings.desktopKey,
-                settings.entitlementToken,
             ).also {
                 it.setAuthToken(settings.token)
                 relay = it
@@ -156,14 +155,47 @@ class CoreClientHolder(private val settings: RedlineSettings) {
     }
 
     /**
-     * Reports whether the relay declined for lack of a current subscription.
+     * Reports whether the relay declined for lack of a current subscription --
+     * either at connect time (`ErrEntitlementRefused`) or mid-session, when a
+     * previously working relay closes at 1008 because the Durable Object's
+     * alarm fired (`ErrEntitlementExpiredMidSession`). Both share one remedy
+     * -- renew the subscription -- so both read as the same failure here; only
+     * the Go core distinguishes them, for logging.
      *
      * Distinct from unreachability: the desktop may be healthy and the network
      * fine, and the remedy is to renew rather than to check the network.
      */
     fun isEntitlementRefused(error: Throwable): Boolean {
         val exception = error as? Exception ?: return false
-        return runCatching { Core.isEntitlementRefused(exception) }.getOrDefault(false)
+        return runCatching {
+            Core.isEntitlementRefused(exception) || Core.isEntitlementExpiredMidSession(exception)
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Reports whether the relay refused because no entitled host (this
+     * desktop) is currently attached to the session.
+     *
+     * Distinct from every other relay refusal: the phone, the relay, and the
+     * subscription may all be fine. The remedy is to check the Mac, not the
+     * phone's own network or its subscription.
+     */
+    fun isHostOffline(error: Throwable): Boolean {
+        val exception = error as? Exception ?: return false
+        return runCatching { Core.isHostOffline(exception) }.getOrDefault(false)
+    }
+
+    /**
+     * Reports whether the relay refused because the session was already at
+     * its signed client cap.
+     *
+     * Distinct from every other relay refusal: the desktop is online and the
+     * subscription is current. The remedy is to close another phone's
+     * connection to this same Mac.
+     */
+    fun isTooManyPhones(error: Throwable): Boolean {
+        val exception = error as? Exception ?: return false
+        return runCatching { Core.isTooManyPhones(exception) }.getOrDefault(false)
     }
 
     /** Reports whether an error means the credential was rejected. */
