@@ -299,6 +299,73 @@ struct PairDeviceModelTests {
         #expect(model.step == .code)
         #expect(defaults.bool(forKey: PairDeviceModel.connectionChoiceMadeKey))
     }
+
+    /// Whether a trusted host exists is a static fact of `redline.yaml`, not
+    /// something that changes within one window session -- re-probing it on
+    /// every "Change…" click would only mint more full-access pairing
+    /// tokens (`createPairingToken()`'s doc comment) to re-answer a question
+    /// already known. This is the one stub in this file with mutable static
+    /// state, so it is used by exactly one test -- no concurrent test shares
+    /// `PairingCountingStub`, avoiding the race the other stubs' comments
+    /// warn about.
+    @Test("The trusted-host probe mints a pairing token once per window session, not once per 'Change…' click")
+    func trustedHostProbeIsNotRepeatedOnChangeConnection() async throws {
+        let suiteName = "ai.redline.mac.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PairingCountingStub.self]
+        PairingCountingStub.mintCount = 0
+        let client = RedlineAPIClient(
+            baseURL: URL(string: "http://127.0.0.1:7436")!,
+            token: "local-token",
+            session: URLSession(configuration: configuration)
+        )
+
+        let model = PairDeviceModel(client: client, defaults: defaults)
+        await model.start()
+        #expect(model.step == .chooseConnection)
+        #expect(PairingCountingStub.mintCount == 1)
+
+        // Simulate the QR view's "Change…" link being clicked repeatedly
+        // after the first probe already resolved.
+        model.changeConnection()
+        try await Task.sleep(for: .milliseconds(50))
+        model.changeConnection()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(PairingCountingStub.mintCount == 1)
+    }
+}
+
+/// Reports the resolver's true unconfigured default from `/v1/relay/status`
+/// and counts every `/v1/pairing` mint, for the token-churn regression test
+/// above. This is the only stub in this file with mutable static state, and
+/// is used by exactly one test, so it cannot race with any other test's use
+/// of it.
+private final class PairingCountingStub: URLProtocol {
+    nonisolated(unsafe) static var mintCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let body: Data
+        switch (request.httpMethod, path) {
+        case ("GET", "/v1/relay/status"):
+            body = Data(#"{"state":"off","mode":"off","connection":"disconnected"}"#.utf8)
+        case ("POST", "/v1/pairing"):
+            PairingCountingStub.mintCount += 1
+            body = Data(#"{"pairing_token":"tok","expires_at":"2026-01-01T00:10:00Z","pairing_url":"https://mac.example.ts.net/pair?t=tok","routes":["direct"],"endpoint":"mac.example.ts.net:443"}"#.utf8)
+        default:
+            body = Data("{}".utf8)
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 
 /// Reports a genuine, already-made "self-hosted" choice from every request --

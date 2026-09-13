@@ -217,23 +217,51 @@ final class PairDeviceModel: ObservableObject {
         }
     }
 
+    /// Cached result of the trusted-host probe below, kept for the lifetime
+    /// of this model (one window session). Whether a trusted host exists is
+    /// a static fact of `redline.yaml`'s `api.trusted_hosts` that cannot
+    /// change without a service restart, so re-probing on every "Change…"
+    /// click would only mint additional full-access pairing tokens
+    /// (`createPairingToken()`'s doc comment) to re-answer a question this
+    /// model already knows the answer to. A failed probe is deliberately not
+    /// cached: a transient network error should not permanently show "no
+    /// trusted host" for the rest of this window's life.
+    private var trustedHostProbe: Bool?
+    private var isChoosingConnection = false
+
     private func enterChooseConnection() async {
         step = .chooseConnection
+        if let cached = trustedHostProbe {
+            trustedHostAvailable = cached
+            return
+        }
         trustedHostAvailable = nil
         do {
             // The same probe the existing QR flow makes: a fresh pairing
             // token's `routes` says whether this Mac has a trusted host,
             // with no separate capability endpoint required.
             let pairing = try await client.createPairingToken()
-            trustedHostAvailable = pairing.routes.contains(.direct)
+            let available = pairing.routes.contains(.direct)
+            trustedHostProbe = available
+            trustedHostAvailable = available
         } catch {
             trustedHostAvailable = false
         }
     }
 
     /// Reopens step one. Shown on the QR view's "Change…" link.
+    ///
+    /// Guarded against re-entrancy, matching the pattern the three configure
+    /// actions below already use: without it, rapid repeated clicks before
+    /// the first probe resolves could fire multiple concurrent
+    /// `createPairingToken()` calls, each minting its own token.
     func changeConnection() {
-        Task { await enterChooseConnection() }
+        guard !isChoosingConnection else { return }
+        isChoosingConnection = true
+        Task {
+            defer { isChoosingConnection = false }
+            await enterChooseConnection()
+        }
     }
 
     /// Choice (a): tailnet only. Setting relay explicitly to off is what
