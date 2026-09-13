@@ -5,15 +5,17 @@ plugins {
 }
 
 android {
-    namespace = "ai.redline.app"
-    compileSdk = 34
+    namespace = "com.croutoncreations.redline"
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "ai.redline.app"
+        applicationId = "com.croutoncreations.redline"
         // Matches the -androidapi passed to gomobile in
         // scripts/build-mobile-core.sh.
         minSdk = 26
-        targetSdk = 34
+        // Google Play requires targetSdk 36 for new apps after Aug 31 2026;
+        // compileSdk is bumped to match above, per Android convention.
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -193,8 +195,8 @@ val checkNoTestOnlyDeclarations by tasks.registering {
     group = "verification"
     description = "Fails if a declaration is referenced only from tests."
 
-    val mainDir = layout.projectDirectory.dir("src/main/java/ai/redline/app").asFile
-    val testDir = layout.projectDirectory.dir("src/test/java/ai/redline/app").asFile
+    val mainDir = layout.projectDirectory.dir("src/main/java/com/croutoncreations/redline").asFile
+    val testDir = layout.projectDirectory.dir("src/test/java/com/croutoncreations/redline").asFile
 
     inputs.dir(mainDir).withPropertyName("mainSources").withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(testDir).withPropertyName("testSources").withPathSensitivity(PathSensitivity.RELATIVE)
