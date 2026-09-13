@@ -218,8 +218,18 @@ func (m *RelayManager) Subscribe() (<-chan ResolvedRelay, func()) {
 }
 func (m *RelayManager) Run(ctx context.Context) {
 	// A pending deactivation is retried before the controller is allowed to load
-	// credentials or contact an issuer for entitlement renewal.
+	// credentials or contact an issuer for entitlement renewal. Gate the
+	// controller unconditionally from the in-memory snapshot alone, before any
+	// fallible disk/Keychain/issuer work below: a transient failure inside
+	// Deactivate must never leave the controller free to renew and re-register
+	// while the durable intent remains unresolved. PrepareGeneration cannot
+	// itself fail on I/O; it only revokes authority and bumps the generation,
+	// so the controller stays gated (uncommitted) even if Deactivate's own
+	// internal retry never reaches its matching commit.
 	if m.coordinator.Current().Deactivation != nil {
+		if m.controller != nil {
+			m.controller.PrepareGeneration(ctx)
+		}
 		_, _ = m.Deactivate(ctx)
 	}
 	if m.controller != nil {
@@ -303,13 +313,16 @@ func (m *RelayManager) SetConnected(connected bool) {
 	m.SetConnection(RelayConnectionIdentity{URL: current.URL, SessionID: current.SessionID, ReconnectGeneration: current.ReconnectGeneration, ConnectionGeneration: generation}, connected)
 }
 
-func (m *RelayManager) Status() RelayStatus { return NewRelayStatus(m.coordinator.Current()) }
+func (m *RelayManager) Status() RelayStatus { return relayStatus(m.coordinator.Current(), m.now) }
 
 // NewRelayStatus constructs the closed public view from one immutable runtime
-// snapshot, mapping internal staging values fail-closed.
-func NewRelayStatus(current ResolvedRelay) RelayStatus { return relayStatus(current) }
+// snapshot, mapping internal staging values fail-closed. It never samples wall
+// time for a coherent snapshot; time.Now is used only as the explicit,
+// injectable fallback for the rare malformed/internal-staging case, so the
+// same coherent snapshot always renders identically across repeated calls.
+func NewRelayStatus(current ResolvedRelay) RelayStatus { return relayStatus(current, time.Now) }
 
-func relayStatus(current ResolvedRelay) RelayStatus {
+func relayStatus(current ResolvedRelay, now func() time.Time) RelayStatus {
 	state := current.Readiness
 	switch state {
 	case RelayReadinessOff, RelayReadinessSelfHosted, RelayReadinessNeedsLicense, RelayReadinessActive, RelayReadinessRenewPending, RelayReadinessUnavailable, RelayReadinessLapsed, RelayReadinessNoSeat, RelayReadinessInvalidKey:
@@ -321,7 +334,7 @@ func relayStatus(current ResolvedRelay) RelayStatus {
 		// status boundary as an impossible variant.
 		state = RelayReadinessUnavailable
 		if current.UnavailableSince.IsZero() {
-			current.UnavailableSince = time.Now().UTC()
+			current.UnavailableSince = now().UTC()
 		}
 	}
 	status := RelayStatus{
@@ -345,7 +358,7 @@ func relayStatus(current ResolvedRelay) RelayStatus {
 		status.ExpiresAt = &value
 	case RelayReadinessUnavailable:
 		if current.UnavailableSince.IsZero() {
-			current.UnavailableSince = time.Now().UTC()
+			current.UnavailableSince = now().UTC()
 		}
 		value := current.UnavailableSince
 		status.Since = &value
@@ -442,9 +455,22 @@ func (m *RelayManager) configureTransactionLocked(ctx context.Context, request R
 		}
 	}
 	if request.Mode == RelayModeHosted {
-		nextState.URL, nextState.IssuerURL = DefaultHostedRelayURL, DefaultIssuerURL
+		nextState.URL = DefaultHostedRelayURL
+		nextState.IssuerURL = DefaultIssuerURL
+		if request.LicenseKey == "" && previousState.Mode == RelayModeHosted && previousState.IssuerURL != "" {
+			// Reusing an existing credential must never silently move it to a
+			// different issuer. Preserve the issuer the credential is already
+			// bound to; only an explicit new key may change it.
+			nextState.IssuerURL = previousState.IssuerURL
+		}
 	} else if request.Mode == RelayModeSelfHosted {
 		nextState.URL = request.URL
+	}
+	if request.Mode == RelayModeHosted && request.LicenseKey == "" && hadLicense && previousState.Mode != RelayModeHosted {
+		// The existing Keychain credential was never proven to belong to this
+		// issuer generation (managed state was not already hosted), so it must
+		// not be reused across an issuer boundary without an explicit key.
+		return RelayStatus{}, &RelayManagementError{Code: "license_key_required", Err: errors.New("a license_key is required to enable hosted relay")}
 	}
 	licenseChanged := request.LicenseKey != "" && (!hadLicense || request.LicenseKey != previousLicense)
 	changedAuthority := previousState.Mode != nextState.Mode || previousState.URL != nextState.URL || previousState.IssuerURL != nextState.IssuerURL || previousState.SessionID != nextState.SessionID || licenseChanged || clearLicense || previousState.Deactivation != nil
@@ -484,6 +510,12 @@ func (m *RelayManager) configureTransactionLocked(ctx context.Context, request R
 	}
 
 	durable := false
+	// safeToRestorePrevious is true only when we have positive proof (a
+	// successful reload matching the exact previous state) that disk still
+	// holds the old value. Restoring the previous Keychain credential in any
+	// other ambiguous case could pair it with a disk state that actually holds
+	// the new issuer, disclosing the old credential to the wrong issuer.
+	safeToRestorePrevious := false
 	err = m.state.Save(nextState)
 	if err == nil {
 		durable = true
@@ -491,15 +523,33 @@ func (m *RelayManager) configureTransactionLocked(ctx context.Context, request R
 		var uncertain *RelayStateCommitError
 		if errors.As(err, &uncertain) {
 			observed, observedExists, loadErr := m.state.Load()
-			if loadErr == nil && observedExists && relayManagedStatesEqual(observed, nextState) {
+			switch {
+			case loadErr == nil && observedExists && relayManagedStatesEqual(observed, nextState):
 				durable = true
+			case loadErr == nil && observedExists && relayManagedStatesEqual(observed, previousState):
+				safeToRestorePrevious = true
+			case loadErr == nil && !observedExists && !exists:
+				safeToRestorePrevious = true
 			}
+		} else {
+			// Rename never published (a plain, non-commit-uncertain failure): disk
+			// provably still holds the previous state.
+			safeToRestorePrevious = true
 		}
 	}
 	if !durable {
 		var compensation error
 		if licenseMutated {
-			compensation = m.restoreLicense(ctx, previousLicense, hadLicense)
+			if safeToRestorePrevious {
+				compensation = m.restoreLicense(ctx, previousLicense, hadLicense)
+			} else {
+				// Disk state after this rename is unproven. Never restore a
+				// credential that might now mismatch the issuer actually on disk;
+				// fail closed by clearing Keychain authority instead. The next
+				// resolve/startup will observe whatever generation truly landed
+				// and require an explicit key before any issuer call.
+				compensation = m.licenses.Clear(ctx)
+			}
 		}
 		m.abortPrepared(prepared, previousRuntime)
 		if compensation != nil {
@@ -514,7 +564,7 @@ func (m *RelayManager) configureTransactionLocked(ctx context.Context, request R
 	}
 	m.coordinator.Update(next)
 	if m.controller == nil || !changedAuthority {
-		return relayStatus(next), nil
+		return relayStatus(next, m.now), nil
 	}
 	updates, unsubscribe := m.coordinator.Subscribe()
 	defer unsubscribe()
@@ -522,10 +572,10 @@ func (m *RelayManager) configureTransactionLocked(ctx context.Context, request R
 		// The managed mutation is already durable. Reconcile it visibly and
 		// fail-closed rather than returning a failure that hides persisted state.
 		m.publishFailClosed(next)
-		return relayStatus(m.coordinator.Current()), nil
+		return relayStatus(m.coordinator.Current(), m.now), nil
 	}
 	if next.Mode != RelayModeHosted || next.Readiness == RelayReadinessNeedsLicense {
-		return relayStatus(next), nil
+		return relayStatus(next, m.now), nil
 	}
 	return m.waitForHostedAttempt(ctx, updates, next.Generation, prepared.attemptID)
 }
@@ -579,7 +629,7 @@ func (m *RelayManager) waitForHostedAttempt(ctx context.Context, updates <-chan 
 				continue
 			}
 			if current.Readiness != RelayReadinessHostedConfigured {
-				return relayStatus(current), nil
+				return relayStatus(current, m.now), nil
 			}
 		case <-waitCtx.Done():
 			return RelayStatus{}, &RelayManagementError{Code: "pending", Err: errors.New("relay activation is still pending")}
@@ -746,7 +796,16 @@ func (m *RelayManager) Deactivate(ctx context.Context) (RelayStatus, error) {
 		}
 	}
 	if currentID == "" {
-		return RelayStatus{}, &RelayManagementError{Code: "activation_not_found", Err: errors.New("issuer returned no current activation")}
+		// The issuer already has no current activation for this credential: the
+		// remote side of deactivation is a no-op. Complete the durable transition
+		// directly instead of returning an error that would leave the intent
+		// stuck forever (every retry would re-discover the same empty list).
+		generation.state.Generation++
+		generation.state.Deactivation = &RelayDeactivationIntent{StateGeneration: generation.state.Generation, RemoteDeleted: true}
+		if durable, _ := m.saveObservedState(generation.state); !durable {
+			return RelayStatus{}, &RelayManagementError{Code: "state_unavailable", Err: errors.New("could not persist relay deactivation absence")}
+		}
+		return m.finishDeactivationLocked(ctx, generation, "", prepared)
 	}
 	return m.finishDeactivationLocked(ctx, generation, currentID, prepared)
 }
@@ -815,9 +874,9 @@ func (m *RelayManager) finishDeactivationLocked(ctx context.Context, generation 
 	next := ResolvedRelay{RelayManagedState: off, Readiness: RelayReadinessOff}
 	m.coordinator.Update(next)
 	if m.controller != nil && !m.controller.CommitGeneration(prepared) {
-		return relayStatus(next), nil
+		return relayStatus(next, m.now), nil
 	}
-	return relayStatus(next), nil
+	return relayStatus(next, m.now), nil
 }
 
 func (m *RelayManager) saveObservedState(state RelayManagedState) (bool, error) {

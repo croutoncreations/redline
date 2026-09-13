@@ -123,7 +123,10 @@ type issuerEntitlementRequest struct {
 }
 
 type activationsResponse struct {
-	Activations []Activation `json:"activations"`
+	// A pointer distinguishes a missing or null "activations" from a
+	// genuinely empty list; both a malformed and an absent field are rejected
+	// rather than silently treated as zero devices.
+	Activations *[]Activation `json:"activations"`
 }
 
 type noSeatResponse struct {
@@ -276,15 +279,19 @@ func (c *IssuerClient) Activations(ctx context.Context, licenseKey string) ([]Ac
 		return nil, classifyStatus(resp.StatusCode)
 	}
 	var result activationsResponse
-	if err := decodeStrict(raw, &result); err != nil || len(result.Activations) > maxActivationCount {
+	if err := decodeStrict(raw, &result); err != nil || result.Activations == nil || len(*result.Activations) > maxActivationCount {
 		return nil, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 	}
-	for _, activation := range result.Activations {
+	for _, activation := range *result.Activations {
 		if !validActivationID(activation.ID) || activation.FirstSeen.IsZero() || !validLabel(activation.Label) {
 			return nil, &IssuerError{Kind: IssuerInvalidResponse, Status: resp.StatusCode}
 		}
 	}
-	return result.Activations, nil
+	activations := *result.Activations
+	if activations == nil {
+		activations = []Activation{}
+	}
+	return activations, nil
 }
 
 func (c *IssuerClient) DeleteActivation(ctx context.Context, licenseKey, id string) error {

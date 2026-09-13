@@ -767,6 +767,13 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	}()
 	for {
 		generation := c.generation()
+		if licenseLoaded && generation != startupGeneration {
+			// The startup credential load raced a concurrent PrepareGeneration: it
+			// was never covered by that barrier's cancel/drain. Discard the stale
+			// hint so the new generation always loads its own credential instead
+			// of silently reusing one issued for a different generation/issuer.
+			license, licenseErr, licenseLoaded = "", nil, false
+		}
 		c.mu.Lock()
 		committed := generation == c.committedGeneration
 		attemptID := c.attemptSequence

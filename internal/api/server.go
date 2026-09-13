@@ -482,6 +482,9 @@ func (s *Server) relayDevices(w http.ResponseWriter, r *http.Request) {
 		writeRelayManagementError(w, err)
 		return
 	}
+	if devices == nil {
+		devices = []relay.Activation{}
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Devices []relay.Activation `json:"devices"`
 	}{Devices: devices})
@@ -542,7 +545,7 @@ func writeRelayManagementError(w http.ResponseWriter, err error) {
 			status = http.StatusBadRequest
 		case "invalid_key":
 			status = http.StatusUnprocessableEntity
-		case "needs_license", "lapsed", "no_seat", "not_hosted", "deactivation_pending":
+		case "needs_license", "lapsed", "no_seat", "not_hosted", "deactivation_pending", "license_key_required":
 			status = http.StatusConflict
 		case "activation_not_found", "not_found":
 			status = http.StatusNotFound
@@ -572,10 +575,14 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
+	// Derive both the public status and the route plan from exactly one
+	// immutable snapshot. A second independent Status() call could observe a
+	// newer generation and advertise its URL/session while only the readiness
+	// happens to match, silently mixing two different configurations.
 	snapshot := s.relayRuntime.Current()
 	publicRelayState := snapshot.Readiness
 	if s.relayManager != nil {
-		publicRelayState = s.relayManager.Status().State
+		publicRelayState = config.NewRelayStatus(snapshot).State
 	}
 	if publicRelayState != snapshot.Readiness {
 		snapshot.Readiness = publicRelayState

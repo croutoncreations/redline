@@ -173,12 +173,26 @@ redline relay deactivate
 
 `relay deactivate` first makes the local relay non-dialable, durably records a non-secret
 retry intent, requires exactly one issuer activation marked as the current Mac, and then
-deletes that activation. If issuer deletion fails, relay access stays off while the intent
-and Keychain credential remain available for a retry (including after service restart).
-After remote deletion succeeds, Redline clears the Keychain credential and the intent and
-commits `off`. Reconfiguration is refused while an intent is pending. Deleting the current
-id with `relay device deactivate` uses this same transaction; deleting another id does not
-turn off this Mac. Activation ids contain only ASCII letters, digits, `_`, and `-`.
+deletes that activation. If the issuer already reports no current activation for this
+credential (it was already deleted remotely, e.g. by a prior interrupted attempt), the
+deactivation is treated as idempotently complete rather than an error, so it can never
+strand the intent. If issuer deletion fails, relay access stays off while the intent
+and Keychain credential remain available for a retry (including after service restart);
+a pending intent unconditionally gates the entitlement controller from any renewal call for
+the rest of that process's lifetime, even if the retry attempt embedded in service startup
+itself fails transiently. After remote deletion succeeds, Redline clears the Keychain
+credential and the intent and commits `off`. Reconfiguration is refused while an intent is
+pending. Deleting the current id with `relay device deactivate` uses this same transaction;
+deleting another id does not turn off this Mac. Activation ids contain only ASCII letters,
+digits, `_`, and `-`.
+
+A stored hosted credential is bound to the issuer it was activated against. Switching
+`hosted` configuration to a different issuer (including moving to or from a custom
+`issuer_url`, or enabling hosted mode after any non-hosted generation) requires a fresh
+`license_key`; reusing a credential across issuers without an explicit key is refused
+with `license_key_required` rather than silently sent to the new issuer. A label-only or
+other presentation-only hosted change with no issuer change may still reuse the existing
+credential without a new key.
 
 `relay off` only disables local relay use and does not delete a seat. Hosted activation
 waits for the correlated first issuer attempt. If that bounded wait expires, the API

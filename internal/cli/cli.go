@@ -531,7 +531,11 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		}
 	case <-ctx.Done():
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The drain budget must exceed the longest legitimate admitted operation
+	// (Configure's up-to-16s hosted-attempt wait, itself bounding a 15s issuer
+	// HTTP call) plus margin, or shutdown can interrupt an already-persisted
+	// mutation and leave its caller without an acknowledgement.
+	shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	if err := management.CloseAdmission(shutdown); err != nil {
 		fmt.Fprintln(stderr, "relay management shutdown:", err)
 		exitCode = 1

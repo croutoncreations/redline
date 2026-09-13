@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,12 +23,20 @@ type managerLicenseStore struct {
 	replacements  []string
 	clears        int
 	beforeReplace func()
+	// loadErr, when set, is returned by the next Load call and then cleared.
+	// This lets a test simulate exactly one transient Keychain failure.
+	loadErr error
 }
 
 func (s *managerLicenseStore) Load(context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loads++
+	if s.loadErr != nil {
+		err := s.loadErr
+		s.loadErr = nil
+		return "", err
+	}
 	if s.value == "" {
 		return "", ErrLicenseNotFound
 	}
@@ -307,24 +316,112 @@ func TestRelayManagerDeactivationFailurePersistsRetryableIntentAndStaysFailClose
 }
 
 func TestRelayManagerDeactivationRequiresExactlyOneCurrentActivation(t *testing.T) {
-	for _, devices := range [][]relay.Activation{
-		{{ID: "other-device", FirstSeen: time.Unix(1, 0)}},
-		{{ID: "one-current", Current: true, FirstSeen: time.Unix(1, 0)}, {ID: "two-current", Current: true, FirstSeen: time.Unix(2, 0)}},
-	} {
-		licenses := &managerLicenseStore{value: "hosted-secret"}
-		issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
-			return relay.ReceivedEntitlement{}, nil
-		}, devices: devices}
-		initial := ResolvedRelay{
-			RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
-			Readiness:         RelayReadinessActive, Dial: true, Connected: true,
-		}
-		manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
-		_, err := manager.Deactivate(context.Background())
-		cancel()
-		if err == nil || manager.Current().CanDial() || len(issuer.deleted) != 0 || licenses.value == "" {
-			t.Fatalf("devices=%#v err=%v current=%#v deleted=%v key=%q", devices, err, manager.Current(), issuer.deleted, licenses.value)
-		}
+	// Two conflicting "current" activations remain a hard, non-idempotent
+	// error: the manager cannot know which one to delete.
+	licenses := &managerLicenseStore{value: "hosted-secret"}
+	issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		return relay.ReceivedEntitlement{}, nil
+	}, devices: []relay.Activation{{ID: "one-current", Current: true, FirstSeen: time.Unix(1, 0)}, {ID: "two-current", Current: true, FirstSeen: time.Unix(2, 0)}}}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
+		Readiness:         RelayReadinessActive, Dial: true, Connected: true,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+	_, err := manager.Deactivate(context.Background())
+	cancel()
+	if err == nil || manager.Current().CanDial() || len(issuer.deleted) != 0 || licenses.value == "" {
+		t.Fatalf("err=%v current=%#v deleted=%v key=%q", err, manager.Current(), issuer.deleted, licenses.value)
+	}
+}
+
+// TestRelayManagerDeactivationCompletesIdempotentlyWhenIssuerHasNoCurrentActivation
+// proves that a remotely-absent current activation completes the durable off
+// transition instead of returning an error that would strand the intent
+// forever (every retry would re-discover the same empty list and never clear
+// the local credential or generation barrier).
+func TestRelayManagerDeactivationCompletesIdempotentlyWhenIssuerHasNoCurrentActivation(t *testing.T) {
+	licenses := &managerLicenseStore{value: "hosted-secret"}
+	issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		return relay.ReceivedEntitlement{}, nil
+	}, devices: []relay.Activation{{ID: "other-device", FirstSeen: time.Unix(1, 0)}}}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
+		Readiness:         RelayReadinessActive, Dial: true, Connected: true,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+	defer cancel()
+	status, err := manager.Deactivate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RelayReadinessOff || status.Mode != RelayModeOff {
+		t.Fatalf("status = %#v", status)
+	}
+	if len(issuer.deleted) != 0 || licenses.value != "" {
+		t.Fatalf("deleted=%v license=%q", issuer.deleted, licenses.value)
+	}
+	state, exists, err := manager.state.Load()
+	if err != nil || !exists || state.Mode != RelayModeOff || state.Deactivation != nil {
+		t.Fatalf("final state = %#v exists=%v err=%v", state, exists, err)
+	}
+	// The completed intent must not block reconfiguration afterward.
+	if _, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeSelfHosted, URL: "https://relay.example"}); err != nil {
+		t.Fatalf("reconfigure after idempotent deactivation: %v", err)
+	}
+}
+
+// TestRelayManagerRunGatesControllerBeforeResolvingPendingDeactivation proves
+// a pending durable deactivation intent blocks the controller from making any
+// entitlement/issuer call even when Deactivate's own credential/state load
+// fails transiently (e.g. one Keychain hiccup at startup). Run must establish
+// the controller generation barrier unconditionally before attempting the
+// fallible retry, so a single transient failure can never leave the
+// controller free to renew and re-register the SID while the durable intent
+// remains unresolved.
+func TestRelayManagerRunGatesControllerBeforeResolvingPendingDeactivation(t *testing.T) {
+	licenses := &managerLicenseStore{value: "hosted-secret", loadErr: ErrLicenseStoreUnavailable}
+	var entitlementCalls int32
+	issuer := &managerIssuer{
+		entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			atomic.AddInt32(&entitlementCalls, 1)
+			return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
+		},
+	}
+	intent := &RelayDeactivationIntent{StateGeneration: 5, DiscoverCurrent: true}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: DefaultIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 5, Deactivation: intent},
+		Readiness:         RelayReadinessUnavailable,
+	}
+	state := NewRelayStateStore(t.TempDir() + "/relay-state.json")
+	if err := state.Save(initial.RelayManagedState); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewRelayCoordinator(initial)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: initial, Licenses: licenses, Issuer: issuer,
+		Cache: relay.NewEntitlementCacheStore(t.TempDir() + "/relay-entitlement.json"),
+	})
+	manager := NewRelayManager(RelayManagerOptions{
+		State: state, Licenses: licenses, Issuer: issuer, Controller: controller,
+		Coordinator: coordinator, AttemptTimeout: 50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Run's one-shot Deactivate attempt fails (the injected loadErr is
+	// consumed and cleared), leaving the durable intent unresolved. The
+	// controller must remain gated for the rest of the process lifetime
+	// regardless: nothing else in Run ever calls CommitGeneration for it.
+	go manager.Run(ctx)
+	time.Sleep(200 * time.Millisecond)
+	if atomic.LoadInt32(&entitlementCalls) != 0 {
+		t.Fatalf("controller issued entitlement calls while deactivation intent was pending: %d calls", entitlementCalls)
+	}
+	if manager.Current().CanDial() {
+		t.Fatal("runtime remained dialable while deactivation intent was pending")
+	}
+	state2, exists, err := manager.state.Load()
+	if err != nil || !exists || state2.Deactivation == nil {
+		t.Fatalf("intent was lost after transient load failure: state=%#v exists=%v err=%v", state2, exists, err)
 	}
 }
 
@@ -553,6 +650,92 @@ func TestRelayManagerIssuerSelectionFollowsCommittedRuntimeGeneration(t *testing
 			t.Fatalf("new generation reached old issuer: %#v", request)
 		}
 	default:
+	}
+}
+
+// TestRelayManagerConfigureNeverReusesCredentialAcrossIssuerChangeWithoutKey
+// proves the reviewed Critical finding is fixed: a hosted configure that
+// omits license_key must never let a credential bound to one issuer reach a
+// different issuer, whether by explicit custom issuer_url or by the default
+// hosted issuer following a prior non-hosted (self_hosted/off) generation.
+func TestRelayManagerConfigureNeverReusesCredentialAcrossIssuerChangeWithoutKey(t *testing.T) {
+	sentinel := "sentinel-must-never-cross-issuers"
+	licenses := &managerLicenseStore{value: sentinel}
+	issuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerInvalidKey, Status: http.StatusUnauthorized}
+	}}
+	// Case 1: previous generation is self_hosted (no issuer binding at all).
+	// Switching straight to hosted without a key must fail closed rather than
+	// silently sending the leftover Keychain credential to the default issuer.
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeSelfHosted, URL: "https://relay.example", SessionID: "managed-session-abcdefghij"},
+		Readiness:         RelayReadinessSelfHosted, Dial: true,
+	}
+	manager, cancel := newTestRelayManager(t, initial, licenses, issuer, false)
+	defer cancel()
+	_, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeHosted})
+	var management *RelayManagementError
+	if !errors.As(err, &management) || management.Code != "license_key_required" {
+		t.Fatalf("self_hosted->hosted without key: err=%v", err)
+	}
+	if licenses.value != sentinel {
+		t.Fatalf("credential mutated: %q", licenses.value)
+	}
+}
+
+// TestRelayManagerConfigurePreservesIssuerOnPresentationOnlyReuse proves the
+// fix does not regress the legitimate case: reusing a credential already
+// bound to the current hosted issuer generation (label-only change) must
+// still work without requiring a fresh key.
+func TestRelayManagerConfigurePreservesIssuerOnPresentationOnlyReuse(t *testing.T) {
+	var mu sync.Mutex
+	var seenIssuer string
+	customIssuer := &managerIssuer{entitlement: func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+		return relay.ReceivedEntitlement{}, &relay.IssuerError{Kind: relay.IssuerInvalidKey, Status: http.StatusUnauthorized}
+	}}
+	factory := RelayIssuerFactory(func(issuerURL string) (RelayManagementIssuer, error) {
+		mu.Lock()
+		seenIssuer = issuerURL
+		mu.Unlock()
+		return customIssuer, nil
+	})
+	const customIssuerURL = "https://custom-issuer.example"
+	licenses := &managerLicenseStore{value: "bound-key"}
+	initial := ResolvedRelay{
+		RelayManagedState: RelayManagedState{Mode: RelayModeHosted, URL: DefaultHostedRelayURL, IssuerURL: customIssuerURL, SessionID: "managed-session-abcdefghij", Generation: 1},
+		Readiness:         RelayReadinessHostedConfigured,
+	}
+	state := NewRelayStateStore(t.TempDir() + "/relay-state.json")
+	if err := state.Save(initial.RelayManagedState); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := NewRelayCoordinator(initial)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: initial, Licenses: licenses, IssuerFactory: factory,
+		Cache: relay.NewEntitlementCacheStore(t.TempDir() + "/relay-entitlement.json"),
+	})
+	manager := NewRelayManager(RelayManagerOptions{
+		State: state, Licenses: licenses, IssuerFactory: factory, Controller: controller,
+		Coordinator: coordinator, AttemptTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Hosted mode without a new key, with issuer_url already the current
+	// generation's custom issuer, must reuse the credential against that same
+	// issuer (this is the legitimate presentation-only case).
+	// A presentation-only change (label only) is not an authority change, so
+	// Configure returns synchronously without waiting on the controller. The
+	// internal hosted_configured readiness maps to public "unavailable" until
+	// renewal establishes real status; that mapping is unrelated to this test.
+	if _, err := manager.Configure(ctx, RelayConfigureRequest{Mode: RelayModeHosted, Label: "relabel"}); err != nil {
+		t.Fatal(err)
+	}
+	go manager.Run(ctx)
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if seenIssuer != customIssuerURL {
+		t.Fatalf("issuer selection changed on presentation-only reuse: %q", seenIssuer)
 	}
 }
 

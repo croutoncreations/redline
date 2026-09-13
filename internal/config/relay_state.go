@@ -185,7 +185,11 @@ func validateRelayManagedState(state RelayManagedState) error {
 	if state.Deactivation != nil {
 		validTarget := validRelayActivationID(state.Deactivation.ActivationID) && !state.Deactivation.DiscoverCurrent
 		validDiscovery := state.Deactivation.ActivationID == "" && state.Deactivation.DiscoverCurrent && !state.Deactivation.RemoteDeleted
-		if (!validTarget && !validDiscovery) || state.Deactivation.StateGeneration == 0 || state.Deactivation.StateGeneration != state.Generation {
+		// A completed-idempotently intent (issuer already reports no current
+		// activation) has neither a target id nor a pending discovery; it is
+		// already remotely settled and only needs the durable off transition.
+		validAlreadyAbsent := state.Deactivation.ActivationID == "" && !state.Deactivation.DiscoverCurrent && state.Deactivation.RemoteDeleted
+		if (!validTarget && !validDiscovery && !validAlreadyAbsent) || state.Deactivation.StateGeneration == 0 || state.Deactivation.StateGeneration != state.Generation {
 			return fmt.Errorf("relay deactivation intent is malformed")
 		}
 		if state.Mode != RelayModeHosted && !(state.Mode == RelayModeOff && state.Deactivation.RemoteDeleted) {

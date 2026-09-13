@@ -188,7 +188,13 @@ func TestRelayManagementAPIConfigureAndIssuerOperationsNeverEchoSecrets(t *testi
 	if refused := relayRequest(t, handler, http.MethodGet, "/v1/relay/devices", token, ""); refused.Code != http.StatusConflict {
 		t.Fatalf("self-hosted devices status=%d body=%s", refused.Code, refused.Body.String())
 	}
-	if hosted := relayRequest(t, handler, http.MethodPost, "/v1/relay/configure", token, `{"mode":"hosted"}`); hosted.Code != http.StatusOK {
+	// The stored credential was never bound to the hosted issuer (the prior
+	// generation was self_hosted, which does not use licenses at all), so an
+	// explicit key is required before it may be sent to the hosted issuer.
+	if hosted := relayRequest(t, handler, http.MethodPost, "/v1/relay/configure", token, `{"mode":"hosted"}`); hosted.Code != http.StatusConflict {
+		t.Fatalf("hosted configure without key status=%d body=%s", hosted.Code, hosted.Body.String())
+	}
+	if hosted := relayRequest(t, handler, http.MethodPost, "/v1/relay/configure", token, `{"mode":"hosted","license_key":"`+secret+`"}`); hosted.Code != http.StatusOK || strings.Contains(hosted.Body.String(), secret) {
 		t.Fatalf("hosted configure status=%d body=%s", hosted.Code, hosted.Body.String())
 	}
 	devices := relayRequest(t, handler, http.MethodGet, "/v1/relay/devices", token, "")
