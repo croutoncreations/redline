@@ -1,0 +1,90 @@
+name: Android release
+
+# Builds a signed Android App Bundle and uploads it to the Play internal
+# track. Android binaries are distributed through Google Play only: this
+# workflow never publishes a GitHub APK or any other binary artifact
+# (docs/mobile-distribution-plan.md, docs/handoff-relay-launch-prompt.md).
+#
+# Triggered by pushing a tag of the form mobile-v<version>, e.g. mobile-v0.2.0.
+# The tag's version becomes both the AAB's versionName and (via the run
+# number appended to a fixed offset) a monotonically increasing versionCode,
+# matching how the macOS release derives its build number.
+on:
+  push:
+    tags:
+      - "mobile-v*"
+
+# Read-only checkout; nothing here needs to write to the repository. The Play
+# upload and signing credentials are consumed as secrets, not permissions.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: android-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Derive versionName and versionCode from the tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#mobile-v}"
+          if [[ -z "${version}" || "${version}" == "${tag}" ]]; then
+            printf 'tag %q does not match mobile-v<version>\n' "${tag}" >&2
+            exit 1
+          fi
+          printf 'name=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          # The Play internal track requires a strictly increasing
+          # versionCode across every upload ever made for this application
+          # id, including from a different branch or a rerun of the same
+          # tag. The workflow run id is unique and monotonically assigned by
+          # GitHub across the whole repository, which is the property this
+          # actually needs; a per-tag counter would collide on a rerun.
+          printf 'code=%s\n' "${GITHUB_RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      # The same silent-skip and stale-AAR failure modes the ci.yml android
+      # job guards against apply here too: this is a separate workflow with
+      # its own gomobile build, not a reuse of that job's artifacts.
+      - name: Install gomobile at the version go.mod pins
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build the Go core for Android
+        run: |
+          gomobile init
+          ./scripts/build-mobile-core.sh android
+          mkdir -p mobile/android/app/libs
+          cp mobile/build/redlinecore.aar mobile/android/app/libs/redlinecore.aar
+
+      - name: Build the signed release App Bundle
+        working-directory: mobile/android
+        env:
+          REDLINE_ANDROID_KEYSTORE_B64: ${{ secrets.REDLINE_ANDROID_KEYSTORE_B64 }}
+          REDLINE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.REDLINE_ANDROID_KEYSTORE_PASSWORD }}
+          REDLINE_ANDROID_KEY_ALIAS: ${{ secrets.REDLINE_ANDROID_KEY_ALIAS }}
+          REDLINE_ANDROID_KEY_PASSWORD: ${{ secrets.REDLINE_ANDROID_KEY_PASSWORD }}
+          REDLINE_ANDROID_VERSION_CODE: ${{ steps.version.outputs.code }}
+          REDLINE_VERSION: ${{ steps.version.outputs.name }}
+        run: |
+          ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest bundleRelease
+
+      # r0adkll/upload-google-play, pinned to the v1.1.5 tag's exact commit.
+      - name: Upload to the Play internal track
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.croutoncreations.redline
+          releaseFiles: mobile/android/app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed

@@ -1,6 +1,6 @@
 # Redline mobile + relay: distribution and licensing plan
 
-Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1 and the Phase 2 desktop entitlement, pairing, management API, and CLI milestones are implemented. Phase 3 macOS management UI and later-phase descriptions below remain design, not released UI.
+Current-state record for the `jf-mobile-app` branch and the remaining plan for shipping it. Phase 1, the Phase 2 desktop entitlement/pairing/management API/CLI milestones, the Phase 3 macOS Pair a Device wizard and menu-bar relay status, and the Phase 4 Android application-id rename, phone-side entitlement cleanup, and Play release workflow are implemented. Later-phase descriptions below (issuer, ops/docs) remain design, not released.
 
 ## 1. Where the branch stands
 
@@ -13,9 +13,9 @@ The relay boundary now provides:
 
 Gaps that matter for shipping, in phase order:
 
-1. **Finish phone cleanup and errors (Phase 4).** Pairing no longer emits a host entitlement and the Go mobile parser discards the legacy fragment. Phase 4 still deletes Android persisted legacy values and adds structured client errors.
-2. **Desktop setup and status UI (Phase 3).** The authenticated management API and relay CLI exist, but Pair a Device does not yet configure hosted/self-hosted mode or activate a license, and the menu bar has no renewal/lapse state.
-3. **Android release (Phase 4).** Final application id, SDK 36 target, upload signing, Play-only AAB workflow, privacy verification, and listing work remain.
+1. **Phone cleanup and errors (Phase 4) — done.** Pairing no longer emits a host entitlement (only tolerates and discards a legacy field from an older QR); `DialRelay` no longer takes an entitlement-token argument at all; `RedlineSettings` deletes the legacy persisted value on every write and every clear; 423 `no_host` and 409 `too_many_clients` map to distinct, user-facing failure states (`HOST_OFFLINE`, `TOO_MANY_PHONES`) alongside the existing `ENTITLEMENT_REFUSED`, which now also covers a mid-session 1008 close, not only the connect-time 402.
+2. **Desktop setup and status UI (Phase 3) — done.** Pair a Device is a two-step flow (tailnet-only / hosted / self-hosted) that writes managed state via the authenticated management API; the menu bar shows a relay status line and a "Manage subscription…" action.
+3. **Android release (Phase 4) — mostly done.** Application id is `com.croutoncreations.redline`; `compileSdk`/`targetSdk` are 36; `signingConfigs.release` reads from environment variables with no committed keystore; `versionCode`/`versionName` are CI-derived; `.github/workflows/android-release.yml` builds a signed AAB and uploads it to the Play internal track on a `mobile-v*` tag, with every action pinned to a reviewed commit SHA. Remaining: an actual Play Console listing, privacy policy page, and Data Safety form submission (`docs/android-release.md` describes the one-time setup; the account/listing itself is a manual, non-code step).
 4. **Issuer and key rotation (Phase 5).** Checkout, seat activation, token issuance, recovery, portal, webhook ordering, and the new production signing key live in the separate private issuer repository. No production relay deployment is usable until that key exists and the guarded retired public key is replaced.
 5. **Launch operations/docs (Phase 6).** Rate limits, paid capacity, monitoring, threat-model/privacy publication, README/CHANGELOG launch copy, and final coordinated cutover remain.
 
@@ -25,18 +25,15 @@ Not reviewed here: usage-meter/pace/reserve work, which is unrelated to mobile d
 
 Short answer: yes to both, and they do not conflict. The repo is already public under Apache-2.0 with signed macOS releases, and the app lives in the same repo, so it is open source the moment the branch merges. Apache-2.0 apps on Play are routine. What you need is release engineering and store compliance, not a licensing decision.
 
-**Decide before the first upload (irreversible):**
+**Decided (implemented):**
 
-- **Application ID.** It is `ai.redline.app`. The ID can never change after publishing, and Play convention is a reverse domain you control. If you do not own `redline.ai`, use `com.croutoncreations.redline`. Also check that a "Redline" listing does not collide with an existing trademarked app name; a subtitle like "Redline for Crouton Creations" or "Redline Dispatcher" may be needed.
-- **Developer account.** If you do not already have a Play Console account, personal accounts created after Nov 2023 must run a closed test with at least 12 testers for 14 continuous days before production access; organization accounts are exempt. If Crouton Creations has a D-U-N-S number, an org account skips the wait ([Play Console help](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en)).
+- **Application ID** is `com.croutoncreations.redline` (a domain the project actually controls, since it does not own `redline.ai`). `namespace` and the Kotlin package were renamed to match; this id can never change after the first Play upload.
+- **Build changes** landed as a single commit chain on top of the branch: `targetSdk`/`compileSdk` bumped to 36 (AGP bumped 8.5.2 → 8.10.1 to support it), `signingConfigs.release` reads `REDLINE_ANDROID_KEYSTORE_B64`/`_PASSWORD`/`REDLINE_ANDROID_KEY_ALIAS`/`REDLINE_ANDROID_KEY_PASSWORD` with no committed keystore and no signing config at all when those are unset (local/PR builds stay unsigned-debug), `versionCode` comes from `REDLINE_ANDROID_VERSION_CODE` (CI supplies the workflow run id) and `versionName` from `REDLINE_VERSION` (CI supplies the release tag's version), and `.github/workflows/android-release.yml` builds the AAB and uploads to the Play internal track on every `mobile-v*` tag with every action pinned to a reviewed commit SHA. R8 remains off (`isMinifyEnabled = false`): the gomobile-generated `redlinecore` classes need keep rules first, and the ~19 MB AAR is already handled by the App Bundle's per-ABI delivery without it.
 
-**Build changes (a short PR on top of the branch):**
+**Still to decide/do (manual, not code):**
 
-- `targetSdk` must be 36 for new apps after Aug 31 2026; 34 will be rejected outright. Bump and re-test the camera permission flow.
-- Add `signingConfigs.release` read from environment variables (`REDLINE_ANDROID_KEYSTORE_B64`, keystore password, alias, and key password), never a committed keystore. Enroll in Play App Signing and keep the upload key distinct from Google's app-signing key.
-- Derive `versionCode` from CI (run number or tag) and `versionName` from the git tag, matching how the macOS release is versioned.
-- Turn on R8 (`isMinifyEnabled = true`) only after adding keep rules for the gomobile-generated `redlinecore` classes; or ship the first release unminified and do it later. The AAR is ~19 MB, so App Bundle + per-ABI splits matter more than R8.
-- A release workflow: on tag, build the Go core, assemble a signed AAB, and upload it to the Play internal track. Pin every workflow action to a full reviewed commit SHA and grant minimal permissions. Android binaries initially ship only through Google Play; the Apache-2.0 source remains public, but no GitHub APK or cross-channel update path is required.
+- **Developer account.** If you do not already have a Play Console account, personal accounts created after Nov 2023 must run a closed test with at least 12 testers for 14 continuous days before production access; organization accounts are exempt. If Crouton Creations has a D-U-N-S number, an org account skips the wait ([Play Console help](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en)). See `docs/android-release.md` for the full one-time setup checklist, including Play App Signing enrollment and the service-account credential the release workflow consumes.
+- Check that a "Redline" listing does not collide with an existing trademarked app name; a subtitle like "Redline for Crouton Creations" or "Redline Dispatcher" may be needed.
 
 **Store compliance:**
 
@@ -155,13 +152,17 @@ What must stay in the public repo is the **contract**: a `docs/relay-entitlement
 - CLI: `redline relay status | activate <key> | devices | device deactivate <id> | setup --url <url> | off`.
 - macOS: Pair a Device wizard (see Appendix A); menu-bar relay status line; "Manage subscription" opens the provider portal.
 
-## Appendix E. Android changes (tracked)
+## Appendix E. Android changes — Phase 4 result
 
-- `applicationId`/`namespace`/package → `com.croutoncreations.redline`.
-- `targetSdk` 36; `signingConfigs.release` from env; CI-derived `versionCode`; an App Bundle so Play performs per-ABI delivery.
-- Stop reading/storing `entitlement` from the pairing fragment (keep tolerant parsing for old QRs); map 423 to "Mac is offline".
-- Release workflow: signed AAB to the Play internal track on tag; no GitHub APK initially.
-- Privacy policy URL, Data Safety answers, listing assets.
+- `applicationId`/`namespace`/package renamed to `com.croutoncreations.redline` (mechanical, git-mv rename; every source file moved and every `package` declaration updated).
+- `compileSdk`/`targetSdk` 36 (AGP bumped 8.5.2 → 8.10.1 to support it); `signingConfigs.release` from env, absent entirely when unset; `versionCode`/`versionName` from env, CI-supplied; verified end-to-end with a locally generated test keystore producing a correctly signed, correctly versioned release APK and AAB.
+- `mobile/core/pairing.go`'s `PairingRequest` no longer serializes an `entitlement_token` field at all (it was never populated); the Android `PairingRequest` model keeps a private, tolerated-but-discarded `legacyEntitlementToken` field so an old QR from a not-yet-rebuilt desktop still parses.
+- `mobile/core/relayclient.go`'s `DialRelay` dropped its `entitlementToken` parameter entirely (the phone never holds one); 423 `no_host` and 409 `too_many_clients` map to new `ErrHostOffline`/`ErrTooManyPhones` sentinels (distinguished from a desktop-reconnect-race plain 409 by the relay's own JSON error body, never by status code alone); a mid-session WebSocket close at 1008 maps to a new `ErrEntitlementExpiredMidSession`, surfaced to the Android UI as the same `ENTITLEMENT_REFUSED` failure as the connect-time 402 (same remedy, one user-facing case) while remaining distinct in the Go layer for logging.
+- `RedlineSettings.kt` no longer writes `entitlement_token`, and removes it on every `updatePairing`/`clear()` call so a value stored by an older install cannot persist across a re-pair or an unpair.
+- Android UI gained two new failure cases (`UsageUiState.Failure.HOST_OFFLINE`, `TOO_MANY_PHONES`) with distinct copy in `UsageScreen.kt` naming the actual remedy (check the Mac; disconnect another phone), wired through `CoreClientHolder`/`CoreUsageSource`; `QueueScreen.kt`/`RunsScreen.kt` gained the same enum cases in their exhaustive `when` blocks for compilation, without wiring new detection (matching the pre-existing scope boundary, where only the usage screen's core-backed source classifies relay-specific failures).
+- `.github/workflows/android-release.yml`: on a `mobile-v*` tag, builds the Go core, runs the same guards/tests as `ci.yml`'s `android` job, assembles and signs a release AAB, and uploads it to the Play internal track via `r0adkll/upload-google-play` pinned to a reviewed commit SHA. No GitHub APK.
+- `docs/android-release.md`: one-time Play Console setup (App Signing enrollment, service account, privacy policy URL, Data Safety verification guidance) and the per-release tag-push flow.
+- Not yet done: the actual Play Console listing, privacy policy page, Data Safety form submission, and screenshot/listing assets — these are manual account-side steps this repository's code cannot perform.
 
 ## Appendix F. Issuer (separate repo, tracked)
 

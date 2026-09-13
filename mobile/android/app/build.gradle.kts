@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -16,14 +18,52 @@ android {
         // Google Play requires targetSdk 36 for new apps after Aug 31 2026;
         // compileSdk is bumped to match above, per Android convention.
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI supplies a real build number per release (the Play internal
+        // track requires a strictly increasing versionCode); local and PR
+        // builds fall back to 1, which is fine because they are never
+        // uploaded anywhere versionCode monotonicity matters.
+        versionCode = (System.getenv("REDLINE_ANDROID_VERSION_CODE") ?: "1").toInt()
+        // Matches how the macOS release is versioned (REDLINE_VERSION in
+        // scripts/build-macos-app.sh): the git tag drives both.
+        versionName = System.getenv("REDLINE_VERSION") ?: "0.1.0-dev"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Populated only when every credential is present, so an unsigned local
+    // or PR build is unaffected -- there is deliberately no committed
+    // keystore, and a partially configured signing block would fail the
+    // build with a confusing missing-alias error rather than a clear one.
+    val releaseKeystoreBase64 = System.getenv("REDLINE_ANDROID_KEYSTORE_B64")
+    val releaseKeystorePassword = System.getenv("REDLINE_ANDROID_KEYSTORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("REDLINE_ANDROID_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("REDLINE_ANDROID_KEY_PASSWORD")
+    val hasReleaseSigningCredentials = listOf(
+        releaseKeystoreBase64, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword,
+    ).all { !it.isNullOrBlank() }
+
+    if (hasReleaseSigningCredentials) {
+        signingConfigs {
+            create("release") {
+                // Decoded once per build into the build directory, never
+                // committed and never logged: this is the upload key, kept
+                // distinct from the Play App Signing key it uploads to.
+                val decodedKeystore = layout.buildDirectory.file("redline-release.keystore").get().asFile
+                decodedKeystore.parentFile.mkdirs()
+                decodedKeystore.writeBytes(Base64.getDecoder().decode(releaseKeystoreBase64))
+                storeFile = decodedKeystore
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigningCredentials) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
