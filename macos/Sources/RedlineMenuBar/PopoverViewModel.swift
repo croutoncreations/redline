@@ -11,6 +11,11 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var tasksBeingControlled = Set<String>()
     @Published private(set) var showsBuilderUpdatesPrompt = false
     @Published private(set) var installationIssue: InstallationIssue?
+    /// The most recently fetched relay status, or nil before the first
+    /// successful `relayStatus()` call. Kept separate from `snapshot` and its
+    /// own error channel: a broken relay-status call must never blank out an
+    /// otherwise-healthy dashboard, and vice versa.
+    @Published private(set) var relayStatus: RelayStatus?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -40,6 +45,15 @@ final class PopoverViewModel: ObservableObject {
 
     func apply(installationIssue: InstallationIssue?) {
         self.installationIssue = installationIssue
+    }
+
+    /// Records the latest relay status for the menu bar's status line and the
+    /// "Manage subscription…" menu item. Called independently of
+    /// `apply(_ snapshot:)` / `apply(error:)`; a relay-status failure has no
+    /// effect here, and an older status is simply left in place rather than
+    /// cleared, so the menu item does not flicker on a transient failure.
+    func apply(relayStatus: RelayStatus) {
+        self.relayStatus = relayStatus
     }
 
     func apply(error: String) {

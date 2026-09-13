@@ -11,6 +11,7 @@ struct StatusPopoverActions {
     let showAgentPermissionHelp: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
     let pairDevice: @MainActor () -> Void
+    let manageSubscription: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
 
@@ -20,6 +21,7 @@ struct StatusPopoverView: View {
 
     private var snapshot: DashboardSnapshot? { model.snapshot }
     private var trayState: TrayState? { snapshot.map(TrayState.init) }
+    private var relayStatus: RelayStatus? { model.relayStatus }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -166,6 +168,12 @@ struct StatusPopoverView: View {
 					}
 				}
                 Text(activityDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                if let relayStatus {
+                    Text(RelayStatusLine.line(for: relayStatus))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             if model.isRefreshing {
@@ -430,6 +438,9 @@ struct StatusPopoverView: View {
                 .help("Enable or manage job notifications")
             Menu {
                 Button("Pair a Device…", action: actions.pairDevice)
+                if relayStatus?.mode == .hosted {
+                    Button("Manage subscription…", action: actions.manageSubscription)
+                }
                 Divider()
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
