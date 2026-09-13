@@ -11,8 +11,18 @@ final class MenuBarController: NSObject {
     private let popoverModel: PopoverViewModel
     private let updates: NativeUpdateController
     private let dashboardURL: URL
-    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
+    private lazy var dashboardWindow = DashboardWindowController(
+        dashboardURL: dashboardURL,
+        // The same handlers the menu bar uses, so the two menus cannot do
+        // subtly different things under the same labels.
+        actions: DashboardMenuActions(
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
+            checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
+            showAppSetup: { [weak self] in self?.showAppSetup() }
+        )
+    )
     private lazy var runLogWindow = RunLogWindowController(client: client)
+    private lazy var pairDeviceWindow = PairDeviceWindowController(client: client)
     private lazy var notifications = NativeNotificationController(
         onOpenRun: { [weak self] runID in self?.openRun(runID) }
     )
@@ -27,6 +37,7 @@ final class MenuBarController: NSObject {
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAgentPermissionHelp: { [weak self] in self?.showAgentPermissionHelp() },
             showAppSetup: showAppSetup,
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
             quit: { NSApplication.shared.terminate(nil) }
         )
     )

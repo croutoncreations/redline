@@ -617,6 +617,164 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 	}
 }
 
+// The dashboard read model carries every run and task, which is most of its
+// weight. A phone renders only the providers and health, so it can ask for
+// those instead of downloading the rest to discard it.
+// A blocked candidate carries its cooldown as a timestamp, not only inside a
+// sentence. Clients that want to say "cooldown for 4h 20m" should not have to
+// parse English out of the reason and re-derive the time.
+// seedCooldownTask creates a recurring task that is inside its cooldown.
+func seedCooldownTask(t *testing.T, db *store.DB) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "cooldown-profile", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	lastCompleted := apiNow.Add(-time.Hour)
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "cooling-down", Name: "Cooling down", Priority: 100,
+		ExecutionProfileID: "cooldown-profile", Type: domain.Recurring,
+		MinInterval: 24 * time.Hour, LastCompletedAt: &lastCompleted,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	// Candidates are only evaluated once a snapshot exists; without one the
+	// handler short-circuits and never reaches the cooldown check.
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow, Source: "native",
+		Weekly: decision.UsageWindow{Remaining: 0.8, ResetsAt: apiNow.Add(48 * time.Hour)},
+	}, []byte(codexPayload)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidatesExposeCooldownAsATimestamp(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	seedCooldownTask(t, db)
+
+	var response struct {
+		Candidates []struct {
+			TaskID     string     `json:"task_id"`
+			Eligible   bool       `json:"eligible"`
+			Reason     string     `json:"reason"`
+			EligibleAt *time.Time `json:"eligible_at"`
+		} `json:"candidates"`
+	}
+	getJSON(t, server.URL+"/v1/providers/codex-main/candidates", &response)
+
+	var found bool
+	for _, candidate := range response.Candidates {
+		if candidate.TaskID != "cooling-down" {
+			continue
+		}
+		found = true
+		if candidate.Eligible {
+			t.Fatal("a task inside its cooldown is not eligible")
+		}
+		if candidate.EligibleAt == nil {
+			t.Fatalf("a cooldown must be exposed as a timestamp; reason was %q", candidate.Reason)
+		}
+		// The prose stays for existing readers.
+		if !strings.Contains(candidate.Reason, "cooldown until") {
+			t.Errorf("reason = %q", candidate.Reason)
+		}
+	}
+	if !found {
+		t.Fatal("seeded task missing from the candidate list")
+	}
+}
+
+func TestDashboardFieldsSelectorTrimsTheResponse(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+
+	full := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &full)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health"} {
+		if _, ok := full[key]; !ok {
+			t.Fatalf("unfiltered response is missing %q", key)
+		}
+	}
+
+	trimmed := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard?fields=providers,health", &trimmed)
+
+	if _, ok := trimmed["providers"]; !ok {
+		t.Error("requested field providers is missing")
+	}
+	if _, ok := trimmed["health"]; !ok {
+		t.Error("requested field health is missing")
+	}
+	for _, omitted := range []string{"runs", "tasks", "attempts"} {
+		if _, ok := trimmed[omitted]; ok {
+			t.Errorf("field %q was not requested but was returned", omitted)
+		}
+	}
+
+	// generated_at identifies which snapshot this is, so it is always present:
+	// a client cannot tell stale data from fresh without it.
+	if _, ok := trimmed["generated_at"]; !ok {
+		t.Error("generated_at must always be present")
+	}
+}
+
+// An unknown field name is a client bug. Silently returning everything would
+// hide it until someone wondered why the phone was slow.
+func TestDashboardFieldsSelectorRejectsUnknownFields(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	requestStatus(t, http.MethodGet, server.URL+"/v1/dashboard?fields=providers,nonsense", "", http.StatusBadRequest)
+}
+
+// Without the parameter nothing changes, so the web dashboard keeps working.
+func TestDashboardWithoutFieldsIsUnchanged(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	body := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &body)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health", "scheduler"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("default response lost %q", key)
+		}
+	}
+}
+
+// The stream is where the saving compounds: it re-sends the whole read model
+// every few seconds, so a phone that only renders providers should not receive
+// every run each time.
+func TestDashboardEventsHonourTheFieldsSelector(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		server.URL+"/v1/dashboard/events?fields=providers,health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buffer := make([]byte, 16384)
+	n, err := resp.Body.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	body := string(buffer[:n])
+	if !strings.Contains(body, "event: dashboard\n") {
+		t.Fatalf("not an SSE frame: %q", body)
+	}
+	if !strings.Contains(body, `"providers"`) {
+		t.Error("requested field providers is missing from the stream")
+	}
+	if strings.Contains(body, `"runs"`) || strings.Contains(body, `"tasks"`) {
+		t.Errorf("stream carried fields that were not requested: %q", body)
+	}
+}
+
 func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
@@ -1325,6 +1483,88 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 		t.Fatalf("rejections = %#v", result.Result.CandidateRejections)
 	}
 	if strings.Join(result.Result.RequiredPools, ",") != "session,weekly" {
+		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
+// A Spark task consumes Spark's own pair of allowances. Its short window is
+// not Codex's account short window, but the configured rolling reserve means
+// the same thing there: background work must leave that fraction for the
+// person using Spark interactively.
+func TestSparkTaskWaitsAtItsModelShortReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.25, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil {
+		t.Fatalf("selected Spark task inside reserve: %#v", result.SelectedTask)
+	}
+	if len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short reserve is protected") {
+		t.Fatalf("rejections = %#v", result.Result.CandidateRejections)
+	}
+}
+
+func TestSparkTaskFailsClosedWhenItsShortAllowanceIsMissing(t *testing.T) {
+	payload := fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
+	server, db := newAPIServer(t, payload)
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil || len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short allowance is missing") {
+		t.Fatalf("selected=%#v rejections=%#v", result.SelectedTask, result.Result.CandidateRejections)
+	}
+}
+
+func TestModelGroupWithOnlyShortRoleDoesNotInventAWeeklyRequirement(t *testing.T) {
+	server, db := newAPIServerConfigured(t, codexSparkAllowancePayload(.80, .80, .80), func(cfg *config.Config) {
+		provider := cfg.Providers["codex-main"]
+		provider.ModelGroups = map[string]config.ModelGroup{
+			"spark": {Aliases: []string{"spark"}, RequiredAllowanceRoles: []string{" Short "}},
+		}
+		cfg.Providers["codex-main"] = provider
+	})
+	createCodexCandidate(t, db, "spark-profile", "spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short" {
+		t.Fatalf("selected=%#v required=%#v", result.SelectedTask, result.Result.RequiredPools)
+	}
+}
+
+func TestSparkTaskRequiresBothSparkAllowancesAboveReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.26, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || result.SelectedTask.ID != "spark-task" {
+		t.Fatalf("selected=%#v result=%#v", result.SelectedTask, result.Result)
+	}
+	if strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short,model:spark:weekly" {
 		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
 	}
 }
@@ -3007,6 +3247,11 @@ func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
 
 func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	t.Helper()
+	return newAPIServerConfigured(t, payload, nil)
+}
+
+func newAPIServerConfigured(t *testing.T, payload string, configure func(*config.Config)) (*httptest.Server, *store.DB) {
+	t.Helper()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, payload)
 	}))
@@ -3017,6 +3262,9 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := testConfig(usage.URL)
+	if configure != nil {
+		configure(&cfg)
+	}
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -3183,6 +3431,34 @@ func createClaudeCandidate(
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func createCodexCandidate(t *testing.T, db *store.DB, profileID, model, taskID string) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: profileID, ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		Model: model, WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: taskID, Name: taskID, Priority: 100, ExecutionProfileID: profileID, Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func codexSparkAllowancePayload(short, sparkWeekly, accountWeekly float64) string {
+	return fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark","used":%f,"limit":100,"periodDurationMs":18000000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), (1-accountWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		(1-short)*100, apiNow.Add(4*time.Hour).Format(time.RFC3339Nano),
+		(1-sparkWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
 }
 
 func claudeAllowancePayload(fableRemaining, sharedRemaining float64, untilReset time.Duration) string {

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +32,8 @@ import (
 	"github.com/jfox/redline/internal/domain"
 	"github.com/jfox/redline/internal/launchmetrics"
 	"github.com/jfox/redline/internal/mcpserver"
+	"github.com/jfox/redline/internal/pairing"
+	"github.com/jfox/redline/internal/relay"
 	autoscheduler "github.com/jfox/redline/internal/scheduler"
 	"github.com/jfox/redline/internal/store"
 	"gopkg.in/yaml.v3"
@@ -411,22 +412,80 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.LoadForService(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	cfg.APIToken, err = apiauth.EnsureToken(configPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
+	// Claim the service boundary before RelayResolver can initialize or update
+	// managed state. A losing second service therefore cannot mutate state.
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	defer listener.Close()
+	licenseStore := config.DefaultLicenseStore()
+	resolver := config.NewRelayResolver(
+		config.NewRelayStateStore(config.DefaultRelayStatePath(cfg.Relay.KeypairPath, cfg.Database)),
+		licenseStore,
+	)
+	resolvedRelay, err := resolver.Resolve(context.Background(), cfg.Relay)
+	if err != nil {
+		fmt.Fprintln(stderr, "relay:", err)
+		return 1
+	}
+	if err := config.ValidateEffectiveRelay(cfg, resolvedRelay); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	// From this boundary onward service components read one typed runtime
+	// snapshot. Bootstrap YAML remains bootstrap-only and cannot be mistaken for
+	// managed mode, readiness, or dialability.
+	relayRuntime := config.NewRelayCoordinator(resolvedRelay)
+	var entitlementController *config.EntitlementController
+	if resolvedRelay.Mode == config.RelayModeHosted {
+		issuer, issuerErr := relay.NewIssuerClient(resolvedRelay.IssuerURL, nil)
+		if issuerErr != nil {
+			fmt.Fprintln(stderr, "relay issuer:", issuerErr)
+			return 1
+		}
+		identityPath := relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database)
+		entitlementController = config.NewEntitlementController(config.EntitlementControllerOptions{
+			Coordinator: relayRuntime,
+			Initial:     resolvedRelay,
+			Licenses:    licenseStore,
+			Issuer:      issuer,
+			Cache:       relay.NewEntitlementCacheStore(relay.DefaultEntitlementCachePath(identityPath)),
+			Revocations: relay.NewEntitlementRevocationStore(relay.DefaultEntitlementRevocationPath(relay.DefaultEntitlementCachePath(identityPath))),
+		})
+	}
+	relayManager := newRelaySupervisor(relayRuntime, func(snapshot config.ResolvedRelay, tokenSource func() string) (relayDialerRun, error) {
+		dialer, err := newRelayDialer(cfg, snapshot, tokenSource, listener.Addr().String(), func(signal relay.EntitlementSignal) {
+			if entitlementController != nil {
+				entitlementController.TriggerRelayEntitlement(signal)
+			}
+		}, func(format string, args ...any) {
+			fmt.Fprintf(stderr, format+"\n", args...)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return dialer.Run, nil
+	})
+	defer relayManager.Close()
+	initialRelay := relayManager.Initial()
+	switch initialRelay.Readiness {
+	case config.RelayReadinessNeedsLicense:
+		fmt.Fprintln(stderr, "relay: needs_license")
+	case config.RelayReadinessUnavailable:
+		fmt.Fprintln(stderr, "relay: unavailable (secure store unavailable)")
+	}
+	cfg.APIToken, err = apiauth.EnsureToken(configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	database, err := store.Open(cfg.Database)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -441,7 +500,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	apiServer := api.NewServer(cfg, database, now)
+	apiServer := api.NewServerWithRelayRuntime(cfg, database, now, relayRuntime)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	apiServer.StartScheduler(ctx)
@@ -451,26 +510,93 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
-	errors := make(chan error, 1)
-	go func() { errors <- server.Serve(listener) }()
+
+	// Remote access is opt-in. The supervisor dials out and follows the same
+	// coordinator observed by API pairing instead of retaining startup state.
+	if initialRelay.CanDial() {
+		fmt.Fprintf(stdout, "Relay enabled via %s\n", initialRelay.URL)
+	}
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relayManager.Run(ctx) }()
+	controllerDone := make(chan struct{})
+	if entitlementController != nil {
+		go func() {
+			entitlementController.Run(ctx)
+			close(controllerDone)
+		}()
+	} else {
+		close(controllerDone)
+	}
+
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve(listener) }()
+	relayFinished := false
+	serverFinished := false
+	exitCode := 0
 	select {
-	case err := <-errors:
+	case err := <-serverDone:
+		serverFinished = true
 		stop()
-		apiServer.Wait()
 		if err != nil && err != http.ErrServerClosed {
 			fmt.Fprintln(stderr, err)
-			return 1
+			exitCode = 1
+		}
+	case err := <-relayDone:
+		relayFinished = true
+		stop()
+		if err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			exitCode = 1
 		}
 	case <-ctx.Done():
+	}
+	if !serverFinished {
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
 			fmt.Fprintln(stderr, err)
-			return 1
+			exitCode = 1
 		}
-		apiServer.Wait()
+		cancel()
+		<-serverDone
 	}
-	return 0
+	apiServer.Wait()
+	if !relayFinished {
+		if err := <-relayDone; err != nil {
+			fmt.Fprintln(stderr, "relay:", err)
+			exitCode = 1
+		}
+	}
+	<-controllerDone
+	return exitCode
+}
+
+// newRelayDialer builds the outbound relay leg for a service that has remote
+// access enabled.
+//
+// The session id has already been resolved from atomically managed state rather
+// than minted per start, so a phone remains paired across service restarts.
+func newRelayDialer(cfg config.Config, snapshot config.ResolvedRelay, tokenSource func() string, localAddr string, signal func(relay.EntitlementSignal), logf func(string, ...any)) (*relay.Dialer, error) {
+	keypair, err := relay.LoadOrCreateKeypair(
+		relay.DefaultKeypairPath(cfg.Relay.KeypairPath, cfg.Database),
+	)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := strings.TrimSpace(snapshot.SessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("resolved relay session_id is required when dial is enabled")
+	}
+	return relay.NewDialer(relay.DialerOptions{
+		RelayURL:               snapshot.URL,
+		SessionID:              sessionID,
+		Keypair:                keypair,
+		EntitlementTokenSource: tokenSource,
+		EntitlementSignal:      signal,
+		Logf:                   logf,
+		// Requests are replayed against this service's own listener, so the
+		// phone reaches exactly the API a local browser would.
+		Forwarder: relay.NewForwarder("http://"+localAddr, &http.Client{Timeout: 30 * time.Second}),
+	}), nil
 }
 
 // resolveTokenConfigPath returns the config path whose API token the running
@@ -699,18 +825,13 @@ func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Wri
 	return 0
 }
 
-type tailscaleStatus struct {
-	Self struct {
-		DNSName string `json:"DNSName"`
-	} `json:"Self"`
-}
-
 func runPair(client apiclient.Client, args []string, configPath string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	qrOutput := flags.Bool("qr", false, "print a terminal pairing QR code")
 	host := flags.String("host", "", "Tailscale MagicDNS hostname")
 	port := flags.Int("port", 443, "Tailscale Serve HTTPS port")
+	relayOnly := flags.Bool("relay-only", false, "emit a relay-only code even when a tailnet host is available")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -722,93 +843,49 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 		fmt.Fprintln(stderr, "--port must be between 1 and 65535")
 		return 1
 	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	_ = configPath // Pairing state belongs to the authenticated running service.
+	var code struct {
+		Token       string          `json:"pairing_token"`
+		ExpiresAt   time.Time       `json:"expires_at"`
+		PairingURL  string          `json:"pairing_url"`
+		Routes      []pairing.Route `json:"routes"`
+		Endpoint    string          `json:"endpoint"`
+		RelayStatus string          `json:"relay_status"`
 	}
-	selectedHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))
-	if selectedHost == "" {
-		selectedHost, err = tailscaleDNSName()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-	}
-	trusted := false
-	for _, configuredHost := range cfg.API.TrustedHosts {
-		if strings.EqualFold(configuredHost, selectedHost) {
-			trusted = true
-			break
-		}
-	}
-	if !trusted {
-		fmt.Fprintf(stderr, "host %q is not listed in api.trusted_hosts\n", selectedHost)
-		return 1
-	}
-	var pairing struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", nil, &pairing); err != nil {
+	request := map[string]any{"host": *host, "port": *port, "relay_only": *relayOnly}
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/pairing", request, &code); err != nil {
 		fmt.Fprintln(stderr, "create pairing token:", err)
 		return 1
 	}
-	if pairing.Token == "" || !pairing.ExpiresAt.After(time.Now()) {
-		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential")
+	if code.Token == "" || code.PairingURL == "" || !code.ExpiresAt.After(time.Now()) {
+		fmt.Fprintln(stderr, "create pairing token: service returned an invalid pairing credential or no usable route")
 		return 1
 	}
-	pairingURL := mobilePairingURL(selectedHost, *port, pairing.Token)
-	code, err := qrcode.New(pairingURL, qrcode.Medium)
+	qr, err := qrcode.New(code.PairingURL, qrcode.Medium)
 	if err != nil {
 		fmt.Fprintln(stderr, "create pairing QR:", err)
 		return 1
 	}
-	endpoint := selectedHost
-	if *port != 443 {
-		endpoint = net.JoinHostPort(selectedHost, strconv.Itoa(*port))
+	fmt.Fprintf(stdout, "Relay: %s\n", strings.ReplaceAll(code.RelayStatus, "_", " "))
+
+	// Says exactly which routes the code offers, because "from a device on
+	// your tailnet" was wrong for two of the three.
+	hasDirect, hasRelay := false, false
+	for _, route := range code.Routes {
+		hasDirect = hasDirect || route == pairing.RouteDirect
+		hasRelay = hasRelay || route == pairing.RouteRelay
 	}
-	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
-	renderTerminalQR(stdout, code.Bitmap())
+	switch {
+	case hasDirect && hasRelay:
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s) and falls back to the relay:\n", code.Endpoint)
+	case hasDirect:
+		fmt.Fprintf(stdout, "Scan this QR code to pair — pairs over your tailnet (%s):\n", code.Endpoint)
+	default:
+		fmt.Fprintln(stdout, "Scan this QR code to pair — pairs over the relay only:")
+	}
+	renderTerminalQR(stdout, qr.Bitmap())
 	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
 	return 0
-}
-
-func mobilePairingURL(host string, port int, token string) string {
-	endpoint := host
-	if port != 443 {
-		endpoint = net.JoinHostPort(host, strconv.Itoa(port))
-	}
-	pairingURL := url.URL{Scheme: "https", Host: endpoint, Path: "/pair"}
-	fragment := url.Values{}
-	fragment.Set("pairing_token", token)
-	pairingURL.Fragment = fragment.Encode()
-	return pairingURL.String()
-}
-
-func tailscaleDNSName() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "tailscale", "status", "--json").CombinedOutput()
-	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("read Tailscale status: command timed out")
-		}
-		detail := strings.TrimSpace(string(output))
-		if detail != "" {
-			return "", fmt.Errorf("read Tailscale status: %s", detail)
-		}
-		return "", fmt.Errorf("read Tailscale status: %w", err)
-	}
-	var status tailscaleStatus
-	if err := json.Unmarshal(output, &status); err != nil {
-		return "", fmt.Errorf("decode Tailscale status: %w", err)
-	}
-	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), "."))
-	if host == "" {
-		return "", fmt.Errorf("Tailscale status did not include this device's MagicDNS name")
-	}
-	return host, nil
 }
 
 func renderTerminalQR(output io.Writer, bitmap [][]bool) {

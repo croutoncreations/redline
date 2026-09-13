@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,7 @@ type providerPayload struct {
 type usageLine struct {
 	Type             string  `json:"type"`
 	Label            string  `json:"label"`
+	Value            string  `json:"value"`
 	Used             float64 `json:"used"`
 	Limit            float64 `json:"limit"`
 	ResetsAt         string  `json:"resetsAt"`
@@ -139,6 +141,12 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 	}
 	weeklyFound := false
 	for _, line := range selected.Lines {
+		if strings.EqualFold(line.Type, "text") {
+			if count, ok := bankedResets(line); ok {
+				snapshot.BankedResets = &count
+			}
+			continue
+		}
 		if !strings.EqualFold(line.Type, "progress") {
 			continue
 		}
@@ -150,11 +158,25 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
-		if strings.TrimSpace(line.ResetsAt) == "" && scope == "account" && role == "short" {
-			// The short window is optional and OpenUsage can briefly report it
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" {
+			// A short window is optional and OpenUsage can briefly report one
 			// without a reset while provider state is refreshing. Preserve the
-			// valid weekly snapshot rather than inventing a reset or failing over.
+			// rest of the snapshot rather than inventing a reset or failing
+			// over: the weekly is usually fine and is what most of the screen
+			// is made of.
+			//
+			// This covers model-scoped short windows (Codex's Spark) as well as
+			// the account one. Guarding only on scope == "account" meant a
+			// resetless Spark line rejected the entire Codex snapshot, so the
+			// screen showed nothing at all -- the same asymmetry this branch
+			// exists to prevent, one scope over.
 			snapshot.Confidence = "medium"
+			if scope == "account" {
+				// Only the account window drives the "not available" row; a
+				// missing model pool is simply absent, as it is for a provider
+				// that has no such pool.
+				snapshot.ShortWindowUnavailable = true
+			}
 			continue
 		}
 		resetInferred := false
@@ -207,6 +229,18 @@ func normalizeLabel(label string) (key, scope, role string) {
 		return "weekly", "account", "weekly"
 	case "fable":
 		return "model:fable:weekly", "model", "weekly"
+	// Spark is a separate product with its own pair of windows, not Codex's
+	// version of Session. OpenAI: GPT-5.3-Codex-Spark "runs on specialized
+	// low-latency hardware [so] usage is governed by a separate usage limit",
+	// and it stays usable after the main weekly is gone. Putting it in the
+	// account short window claimed Codex has a general five hour limit it does
+	// not have, and showed a separate budget where people read their main one.
+	//
+	// Model-scoped like Fable, so the screen names it rather than guessing.
+	case "spark":
+		return "model:spark:short", "model", "short"
+	case "spark weekly":
+		return "model:spark:weekly", "model", "weekly"
 	default:
 		return "", "", ""
 	}
@@ -228,4 +262,33 @@ func parseTime(name, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return parsed, nil
+}
+
+// bankedResets reads the count of on-demand quota resets from a text line.
+//
+// These are resets the account can spend to refill an exhausted window, which
+// makes them most useful at exactly the moment the weekly is gone. The value
+// arrives as prose ("2 available"), so only a leading integer is trusted and
+// anything else is reported as absent rather than guessed at: a wrong count
+// here would send someone looking for a reset they do not have.
+func bankedResets(line usageLine) (int, bool) {
+	if !strings.EqualFold(strings.TrimSpace(line.Label), "rate limit resets") {
+		return 0, false
+	}
+	fields := strings.Fields(strings.TrimSpace(line.Value))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	// "none" is the other spelling of zero this field uses. Reading it costs
+	// one comparison and avoids the row vanishing the day upstream rewords
+	// "0 available", which is the failure mode of parsing someone else's
+	// presentation string.
+	if strings.EqualFold(fields[0], "none") {
+		return 0, true
+	}
+	count, err := strconv.Atoi(fields[0])
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	return count, true
 }

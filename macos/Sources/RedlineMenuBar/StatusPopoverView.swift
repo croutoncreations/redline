@@ -10,6 +10,7 @@ struct StatusPopoverActions {
     let enableNotifications: @MainActor () -> Void
     let showAgentPermissionHelp: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
+    let pairDevice: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
 
@@ -428,6 +429,8 @@ struct StatusPopoverView: View {
                 .buttonStyle(.bordered)
                 .help("Enable or manage job notifications")
             Menu {
+                Button("Pair a Device…", action: actions.pairDevice)
+                Divider()
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
                 Button("Agent Permissions…", action: actions.showAgentPermissionHelp)

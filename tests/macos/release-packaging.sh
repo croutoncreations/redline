@@ -73,6 +73,10 @@ for executable in \
   [[ " ${slices} " == *" arm64 "* ]]
   [[ " ${slices} " == *" x86_64 "* ]]
 done
+for architecture in arm64 x86_64; do
+  otool -arch "${architecture}" -L "${app_path}/Contents/Resources/bin/redline" | \
+    grep -F '/System/Library/Frameworks/Security.framework/' >/dev/null
+done
 codesign --verify --deep --strict "${app_path}"
 signature_details="$(codesign -dvv "${app_path}" 2>&1)"
 [[ "${signature_details}" == *"runtime"* ]]

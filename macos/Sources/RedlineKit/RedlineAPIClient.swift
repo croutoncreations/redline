@@ -71,6 +71,32 @@ public struct RedlineAPIClient: Sendable {
         _ = try await request(endpoint(["v1", "runs", runID, "read"]), method: "POST", as: ReadResult.self)
     }
 
+    /// Mints a short-lived pairing token.
+    ///
+    /// The same endpoint `redline pair --qr` uses, so a code from the menu bar
+    /// and a code from the terminal are interchangeable.
+    public func createPairingToken() async throws -> PairingToken {
+        try await request(baseURL.appending(path: "v1/pairing"), method: "POST", as: PairingToken.self)
+    }
+
+    /// Where a pairing code is in its life, so the sheet can stop showing a
+    /// spent one and say the phone got in.
+    ///
+    /// The pairing token goes in a header: it is a full-access credential for
+    /// ten minutes, and a path or query string lands in access logs.
+    public func pairingStatus(of pairingToken: String) async throws -> PairingStatus {
+        let answer: PairingStatusAnswer = try await request(
+            baseURL.appending(path: "v1/pairing/status"),
+            method: "GET",
+            as: PairingStatusAnswer.self,
+            headers: ["X-Redline-Pairing-Token": pairingToken]
+        )
+        // Anything this build does not recognise reads as expired: the remedy
+        // -- offer a new code -- is the same, and a newer service must not be
+        // able to wedge an older sheet.
+        return PairingStatus(rawValue: answer.status) ?? .expired
+    }
+
     public func markAllRunsRead() async throws {
         _ = try await request(endpoint(["v1", "runs", "read-all"]), method: "POST", as: ReadResult.self)
     }
@@ -90,11 +116,16 @@ public struct RedlineAPIClient: Sendable {
         return URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + encoded.joined(separator: "/"))!
     }
 
-    private func request<T: Decodable>(_ url: URL, method: String, as type: T.Type) async throws -> T {
+    private func request<T: Decodable>(
+        _ url: URL, method: String, as type: T.Type, headers: [String: String] = [:]
+    ) async throws -> T {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         if method == "POST" {
             request.httpBody = Data("{}".utf8)
@@ -102,12 +133,107 @@ public struct RedlineAPIClient: Sendable {
         }
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw Error.invalidResponse }
-        guard response.statusCode == 200 else { throw Error.status(response.statusCode) }
+        // Any 2xx, not just 200: creating a pairing token answers 201, and
+        // insisting on 200 made the pairing window fail every time with
+        // "Redline returned HTTP 201".
+        guard (200..<300).contains(response.statusCode) else {
+            throw Error.status(response.statusCode)
+        }
         return try JSONDecoder().decode(type, from: data)
     }
 }
 
 private struct ReadResult: Codable { let read: Bool }
+
+private struct PairingStatusAnswer: Codable { let status: String }
+
+/// Where a pairing code is in its life.
+public enum PairingStatus: String, Sendable {
+    /// Minted, not yet scanned.
+    case pending
+    /// A phone spent it and holds the credential.
+    case redeemed
+    /// Past its ten minutes, or never issued; either way, a new code is the
+    /// answer.
+    case expired
+}
+
+/// A way a phone can reach the desktop, as the service names them.
+///
+/// Decoded leniently: an unknown route from a newer service is dropped rather
+/// than failing the whole pairing, since the URL is still good.
+public enum PairingRoute: String, Codable, Sendable {
+    case direct
+    case relay
+}
+
+/// A single-use credential a phone exchanges for a durable API token, and the
+/// code that carries it.
+///
+/// The service composes `pairingURL`, so this client has no opinion about its
+/// shape. The menu bar used to build the URL itself from a trusted host and
+/// the token, and nothing else; when the QR grew relay fields the CLI got them
+/// and the sheet did not, so every phone paired from the desktop app had no
+/// relay and no way to know. One builder now, and every surface renders what
+/// it is handed.
+public struct PairingToken: Codable, Sendable {
+    public let token: String
+    /// RFC 3339, kept as a string because the shared decoder has no date
+    /// strategy and every other timestamp in this client is handled the same
+    /// way. Changing that globally to serve one field would risk every
+    /// existing model.
+    public let expiresAt: String
+    /// What the phone scans. Absent from an older service, and from a desktop
+    /// with neither a trusted host nor a relay -- a token is still minted for
+    /// the web pair page, but there is nowhere to send a phone.
+    public let pairingURL: String?
+    /// The routes the code offers, for the sheet to say out loud.
+    public let routes: [PairingRoute]
+    /// The direct host:port the code names, or nil for a relay-only code.
+    public let endpoint: String?
+
+    enum CodingKeys: String, CodingKey {
+        case token = "pairing_token"
+        case expiresAt = "expires_at"
+        case pairingURL = "pairing_url"
+        case routes
+        case endpoint
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decode(String.self, forKey: .token)
+        expiresAt = try container.decode(String.self, forKey: .expiresAt)
+        pairingURL = try container.decodeIfPresent(String.self, forKey: .pairingURL)
+        endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint)
+        // Unknown route names are skipped, not fatal: a newer service adding a
+        // route must not stop an older app from showing a code that works.
+        let names = try container.decodeIfPresent([String].self, forKey: .routes) ?? []
+        routes = names.compactMap(PairingRoute.init(rawValue:))
+    }
+
+    public init(token: String, expiresAt: String, pairingURL: String?, routes: [PairingRoute], endpoint: String?) {
+        self.token = token
+        self.expiresAt = expiresAt
+        self.pairingURL = pairingURL
+        self.routes = routes
+        self.endpoint = endpoint
+    }
+
+    /// The expiry as a date, or nil if the service sent something unparseable.
+    ///
+    /// The formatter is built per call rather than shared, because
+    /// ISO8601DateFormatter is not Sendable and this runs once per window.
+    public var expiry: Date? {
+        let formatter = ISO8601DateFormatter()
+        // The service includes fractional seconds, which the default options
+        // reject outright rather than ignoring.
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: expiresAt) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: expiresAt)
+    }
+}
 
 public struct ProviderControlResult: Codable, Sendable {
     public let providerAccountID: String

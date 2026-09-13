@@ -1,0 +1,44 @@
+name = "redline-relay"
+main = "src/index.js"
+compatibility_date = "2025-08-01"
+
+# This top-level configuration is the self-hoster's starting point. Running
+# `npx wrangler deploy` publishes an open relay to a workers.dev URL. To use a
+# custom domain, add a top-level route like the production example below.
+# Hosted Redline production is closed and lives only under [env.production].
+# Entitlement verification keys are public by construction; private issuer
+# key material must never appear in this repository or in a relay deployment.
+
+[[durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "RelaySession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelaySession"]
+
+[vars]
+ALLOW_UNENTITLED = "true"
+ENTITLEMENT_PUBLIC_KEY = ""
+MAX_CLIENTS_DEFAULT = "5"
+
+[env.production]
+routes = [
+  { pattern = "redline-relay.croutoncreations.com", custom_domain = true }
+]
+
+[[env.production.durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "RelaySession"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelaySession"]
+
+[env.production.vars]
+ALLOW_UNENTITLED = "false"
+# RETIRED pre-cutover verifier value. `npm run deploy` rejects this exact key;
+# Phase 5 must replace it with the future issuer Worker's new public key before
+# the coordinated production cutover. Its private half must not be recreated.
+ENTITLEMENT_PUBLIC_KEY = "GvAg4IZvAvBKgx3STrizOwtSLT62TYmMnny+xOq1FlI="
+MAX_CLIENTS_DEFAULT = "5"

@@ -99,6 +99,144 @@ func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
 	if got.Confidence != "medium" {
 		t.Fatalf("confidence = %q, want medium", got.Confidence)
 	}
+	// Dropping the window silently leaves every client unable to tell "this
+	// provider has no five hour limit" from "it has one and we could not read
+	// it", and they render those two very differently. Confidence cannot carry
+	// this: it also drops to medium for an inferred model weekly reset.
+	if !got.ShortWindowUnavailable {
+		t.Fatal("a dropped short window must be reported as unavailable")
+	}
+}
+
+// A provider that simply has no five hour window must not be marked
+// unavailable, or every client grows a permanent "unknown" row for it.
+func TestParseDoesNotMarkAbsentShortWindowUnavailable(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShortWindowUnavailable {
+		t.Fatal("a provider with no short window must not be marked unavailable")
+	}
+}
+
+// An inferred model weekly reset also lowers confidence to medium. That must
+// not be mistaken for a missing five hour window.
+func TestParseKeepsInferredModelResetSeparateFromAMissingShortWindow(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"5-hour","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-07-26T04:00:00Z"},
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"},
+        {"type":"progress","label":"Fable","used":10,"limit":100,"periodDurationMs":604800000,"resetsAt":""}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium", got.Confidence)
+	}
+	if got.ShortWindowUnavailable {
+		t.Fatal("an inferred model reset must not mark the short window unavailable")
+	}
+	if got.Short == nil {
+		t.Fatal("the short window was present and must be kept")
+	}
+}
+
+// Spark is a separate allowance, not Codex's version of Claude's Session.
+//
+// OpenAI's pricing page: GPT-5.3-Codex-Spark "runs on specialized low-latency
+// hardware [so] usage is governed by a separate usage limit". Users confirm the
+// direction that matters here -- "I always use it once I'm out of weekly" -- and
+// a bug report shows Spark at 100% while the weekly sat at 37%. The two move
+// independently, and Spark remains usable after the weekly is gone.
+//
+// So Spark must NOT populate the account short window. Doing that labelled it
+// "5-hour window" on the phone, which claims Codex has a general five hour
+// limit it does not have, and puts a separate product's budget in the slot
+// people read as their main allowance.
+func TestParseKeepsSparkOutOfTheAccountShortWindow(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "plan":"Pro 5x",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"},
+        {"type":"progress","label":"Spark Weekly","used":40,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-10T19:46:33.000Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Short != nil {
+		t.Fatalf("Codex has no general five hour window; got %#v", got.Short)
+	}
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatal("Spark must not occupy the session allowance")
+	}
+	// The account weekly is the real Weekly line, untouched by Spark Weekly.
+	assertClose(t, got.Weekly.Remaining, 0)
+}
+
+// Both Spark windows are carried as their own model-scoped allowances, the way
+// Claude's Fable is, so the screen can name them instead of guessing.
+func TestParseCarriesBothSparkWindowsAsTheirOwnAllowances(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-09-04T00:46:33.000Z"},
+        {"type":"progress","label":"Spark Weekly","used":40,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-10T19:46:33.000Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short, ok := got.Allowance("model:spark:short")
+	if !ok {
+		t.Fatalf("Spark five hour allowance missing: %#v", got.Allowances)
+	}
+	assertClose(t, short.Remaining, .8)
+	if short.SourceLabel != "Spark" {
+		t.Fatalf("Spark should keep its own name, got %q", short.SourceLabel)
+	}
+	if short.Scope != "model" {
+		t.Fatalf("Spark is a model-scoped allowance, got scope %q", short.Scope)
+	}
+
+	weekly, ok := got.Allowance("model:spark:weekly")
+	if !ok {
+		t.Fatalf("Spark weekly allowance missing: %#v", got.Allowances)
+	}
+	assertClose(t, weekly.Remaining, .6)
+	if weekly.SourceLabel != "Spark Weekly" {
+		t.Fatalf("Spark Weekly should keep its own name, got %q", weekly.SourceLabel)
+	}
+	// The two must stay distinct: 0.8 and 0.6 arriving in one bucket would mean
+	// one overwrote the other.
+	if short.ResetsAt.Equal(weekly.ResetsAt) {
+		t.Fatal("the two Spark windows must keep their own reset times")
+	}
 }
 
 func TestParsePreservesClaudeFableAllowance(t *testing.T) {
@@ -225,5 +363,194 @@ func assertClose(t *testing.T, got, want float64) {
 	t.Helper()
 	if got < want-1e-9 || got > want+1e-9 {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// "Rate Limit Resets" is the count of banked quota resets the account can spend
+// on demand to refill an exhausted window. It is genuinely useful when the
+// weekly is gone -- it is the thing that gets you running again -- so it is
+// worth surfacing, but only if it is labelled as what it is. Shown as a bare
+// number it reads like another usage meter.
+func TestParseReadsBankedRateLimitResets(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":100,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"2 available"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil {
+		t.Fatal("banked resets should be reported when the provider sends them")
+	}
+	if *got.BankedResets != 2 {
+		t.Fatalf("banked resets = %d, want 2", *got.BankedResets)
+	}
+}
+
+// None available is a real answer and different from "not reported": one says
+// you have no resets to spend, the other says we do not know.
+func TestParseDistinguishesZeroResetsFromAbsent(t *testing.T) {
+	withZero := `{
+      "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"0 available"}
+      ]}`
+	got, err := openusage.Parse([]byte(withZero), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil || *got.BankedResets != 0 {
+		t.Fatalf("zero available must be reported as zero, got %v", got.BankedResets)
+	}
+
+	without := `{
+      "providerId":"claude","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"}
+      ]}`
+	got, err = openusage.Parse([]byte(without), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("a provider that does not report resets must stay nil, got %v", *got.BankedResets)
+	}
+}
+
+// The value is prose from another system, so an unexpected shape must not fail
+// the whole snapshot: the usage numbers matter more than this one extra.
+func TestParseIgnoresUnreadableResetText(t *testing.T) {
+	payload := `{
+      "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"text","label":"Rate Limit Resets","value":"see dashboard"}
+      ]}`
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatalf("unreadable reset text must not fail the snapshot: %v", err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("unparseable text should report nothing, got %v", *got.BankedResets)
+	}
+	assertClose(t, got.Weekly.Remaining, .5)
+}
+
+// A short window arriving without a reset time must never take the whole
+// snapshot with it.
+//
+// The account short window has tolerated this since before Spark existed. The
+// model-scoped one did not, so a resetless Spark line rejected the entire Codex
+// snapshot and the screen showed nothing at all -- including the weekly, which
+// was perfectly good. That is the same asymmetry, one scope over.
+func TestParseSkipsAResetlessSparkWithoutLosingTheSnapshot(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark","used":20,"limit":100,"periodDurationMs":18000000,"resetsAt":""}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatalf("a resetless Spark must not fail the snapshot: %v", err)
+	}
+	// The weekly survives, which is the whole point.
+	assertClose(t, got.Weekly.Remaining, .5)
+	if _, ok := got.Allowance("model:spark:short"); ok {
+		t.Fatal("a window with no reset must be skipped rather than invented")
+	}
+	// Skipping a window the provider offered is a partial reading, and the
+	// snapshot should say so.
+	if got.Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium after skipping a window", got.Confidence)
+	}
+}
+
+// The same must hold for a resetless Spark Weekly, which takes the inferred
+// reset path rather than being skipped.
+func TestParseInfersAResetlessSparkWeeklyFromTheAccountWeekly(t *testing.T) {
+	payload := `{
+      "providerId":"codex",
+      "fetchedAt":"2026-09-03T18:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+        {"type":"progress","label":"Spark Weekly","used":40,"limit":100,"periodDurationMs":604800000,"resetsAt":""}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "codex")
+	if err != nil {
+		t.Fatalf("a resetless Spark Weekly must not fail the snapshot: %v", err)
+	}
+	allowance, ok := got.Allowance("model:spark:weekly")
+	if !ok {
+		t.Fatal("a model weekly should inherit the account weekly reset")
+	}
+	if !allowance.ResetInferred {
+		t.Fatal("an inherited reset must be marked inferred")
+	}
+}
+
+// The reset count comes from another system's presentation string, so the
+// wording can change without warning. Two spellings of "none" are common
+// enough to be worth reading, since the alternative is a row that silently
+// disappears the day upstream rewords it.
+func TestParseReadsWordedResetCounts(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{"0 available", 0},
+		{"2 available", 2},
+		{"none available", 0},
+		{"None", 0},
+		{"1 reset available", 1},
+	} {
+		payload := `{
+          "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+          "lines":[
+            {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+            {"type":"text","label":"Rate Limit Resets","value":"` + tc.value + `"}
+          ]}`
+		got, err := openusage.Parse([]byte(payload), "codex")
+		if err != nil {
+			t.Fatalf("%q: %v", tc.value, err)
+		}
+		if got.BankedResets == nil {
+			t.Fatalf("%q was not read as a count", tc.value)
+		}
+		if *got.BankedResets != tc.want {
+			t.Fatalf("%q read as %d, want %d", tc.value, *got.BankedResets, tc.want)
+		}
+	}
+}
+
+// Anything genuinely unreadable still reports nothing rather than a guess: a
+// wrong count would send someone looking for a reset they do not have.
+func TestParseStillRefusesUnreadableResetText(t *testing.T) {
+	for _, value := range []string{"see dashboard", "", "--", "lots"} {
+		payload := `{
+          "providerId":"codex","fetchedAt":"2026-09-03T18:00:00Z",
+          "lines":[
+            {"type":"progress","label":"Weekly","used":50,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-09-07T03:03:02.000Z"},
+            {"type":"text","label":"Rate Limit Resets","value":"` + value + `"}
+          ]}`
+		got, err := openusage.Parse([]byte(payload), "codex")
+		if err != nil {
+			t.Fatalf("%q must not fail the snapshot: %v", value, err)
+		}
+		if got.BankedResets != nil {
+			t.Fatalf("%q was read as %d rather than reported absent", value, *got.BankedResets)
+		}
 	}
 }

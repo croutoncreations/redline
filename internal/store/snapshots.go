@@ -17,10 +17,12 @@ func (d *DB) ListSnapshots(ctx context.Context, provider string, limit int) ([]d
 		limit = 500
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider, observed_at, short_remaining,
-short_resets_at, weekly_remaining, weekly_resets_at, source, confidence
+short_resets_at, weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+short_window_unavailable
 FROM (
     SELECT id, provider, observed_at, short_remaining, short_resets_at,
-           weekly_remaining, weekly_resets_at, source, confidence
+           weekly_remaining, weekly_resets_at, source, confidence, banked_resets,
+           short_window_unavailable
     FROM usage_snapshots WHERE provider = ?
     ORDER BY observed_at DESC, id DESC LIMIT ?
 ) ORDER BY observed_at ASC, id ASC`, provider, limit)
@@ -36,12 +38,21 @@ FROM (
 		var observedAt, weeklyReset string
 		var shortRemaining sql.NullFloat64
 		var shortReset sql.NullString
+		var bankedResets sql.NullInt64
 		if err := rows.Scan(
 			&id,
 			&snapshot.Provider, &observedAt, &shortRemaining, &shortReset,
 			&snapshot.Weekly.Remaining, &weeklyReset, &snapshot.Source, &snapshot.Confidence,
+			&bankedResets,
+			&snapshot.ShortWindowUnavailable,
 		); err != nil {
 			return nil, fmt.Errorf("scan usage snapshot: %w", err)
+		}
+		if bankedResets.Valid {
+			// Zero and absent stay distinct here as they do everywhere else:
+			// none banked versus not reported.
+			count := int(bankedResets.Int64)
+			snapshot.BankedResets = &count
 		}
 		if snapshot.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt); err != nil {
 			return nil, fmt.Errorf("parse stored observation time: %w", err)
