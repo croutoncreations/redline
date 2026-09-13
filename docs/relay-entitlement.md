@@ -146,18 +146,19 @@ are not written into it.
 
 Terminal `invalid_key`, `lapsed`, and `no_seat` decisions instead write
 `relay-entitlement-revocation.json` beside the cache. Its exact closed schema is
-`{"schema_version":2,"credential_fingerprint":"…","revoked_token_hashes":["<64 lowercase hex characters>"]}`.
-Each entry is SHA-256 over the exact entitlement-token bytes. Entries are
-sorted, unique, and contain neither token plaintext nor a reversible license
-credential. Unknown, omitted, duplicate, and explicit-null JSON members fail
-closed. The file has the same 0600, owner, no-follow, atomic replacement,
-inter-process locking, and parent-directory fsync guarantees as the cache, but
-uses its own path and lock. Same-fingerprint writes merge under that lock, so
-concurrent writers cannot drop hashes. Entries never delete. Growth is expected
-to stay small because normal authority renews around half of the maximum
-fourteen-day lifetime; the list is intentionally unbounded rather than risk
-dropping an unexpired revoked authority during unusually frequent accepted
-refreshes.
+`{"schema_version":3,"revocations":{"<credential_fingerprint>":["<64 lowercase hex characters>"]}}`.
+Each map value is a sorted, unique list of SHA-256 hashes over exact
+entitlement-token bytes. The ledger contains neither token plaintext nor a
+reversible license credential. Unknown, omitted, duplicate, explicit-null, and
+noncanonical-order JSON fail closed. The file has the same 0600, owner,
+no-follow, atomic replacement, inter-process locking, and parent-directory
+fsync guarantees as the cache, but uses its own path and lock. Every write
+merges every credential entry under that lock, so concurrent writers cannot
+drop hashes for either the same or a different fingerprint. Credential entries
+and hashes are never deleted. Growth is expected to stay small because normal
+authority renews around half of the maximum fourteen-day lifetime; the ledger
+is intentionally unbounded rather than risk dropping an unexpired revoked
+authority during unusually frequent accepted refreshes.
 
 Startup loads the Keychain credential, then the credential-bound cache, and
 finally the marker immediately before publication. A matching marker rejects a
@@ -168,16 +169,21 @@ requires the closed schema, fingerprint, owner, mode, and no-follow checks, but
 bypasses wall-clock publication checks; its token is never published and is
 used only to ensure terminal handling hashes durable authority. Loading the
 marker after potentially blocking cache I/O also catches a terminal write while
-the cache load was blocked. A marker for a replaced credential does not affect
-the new fingerprint.
+the cache load was blocked. Only the ledger entry for the cache credential is consulted, so another
+credential's revocations do not affect it while switching back to an earlier
+credential still preserves all of that credential's prior exact revocations.
 
-Runtime authority is revoked immediately. Terminal handling records every known
-current, durable, pending, or in-flight token hash before the bounded,
-parent-cancellation-independent shutdown barrier completes. The marker writer
-has an independent path, lock, and worker, so an old cache Save may become
-visible later but its exact token remains denied at restart. A newly
-relay-accepted token with a distinct hash is immediately eligible and may be
-cached without clearing the marker.
+Runtime authority is revoked immediately. Credential replacement synchronously
+collects and enqueues every known startup, current, pending, or in-flight token
+hash before advancing the generation and canceling old work. Terminal handling
+does the same before the bounded, parent-cancellation-independent shutdown
+barrier completes. Ledger merges and failed-merge retries are independent of
+which credential generation is current. The ledger writer has an independent
+path, lock, and worker, so an old cache Save may become visible later but its
+exact token remains denied at restart. After issuer validation and relay
+acceptance, the controller reloads the durable ledger immediately before
+runtime/cache commit. A listed exact token is neither published nor cached; a
+distinct accepted token is eligible without clearing any ledger entry.
 
 A cache Save can report parent-directory-fsync uncertainty after atomic rename.
 That is durability uncertainty, not authorization failure: if a later restart

@@ -87,19 +87,21 @@ replacement. Its closed JSON shape is exactly `mode`, `url`, `issuer_url`, `labe
 atomic durability rules and contains schema version, credential fingerprint, `token`,
 `exp`, `obtained_at`, `sid`, and `max_clients`. The independently locked
 `relay-entitlement-revocation.json` has the exact closed schema
-`{"schema_version":2,"credential_fingerprint":"…","revoked_token_hashes":["<SHA-256 lowercase hex>"]}`.
-It stores sorted, unique hashes of exact revoked entitlement-token bytes—never token
-plaintext or a reversible license. Startup loads the Keychain license, then the cache, then
-the marker immediately before publication. For a matching fingerprint, cached authority is
-rejected if and only if its exact token hash is listed; timestamps do not affect revocation,
-so clock rollback cannot revive it. A security- and schema-validated candidate read lets a
-terminal decision hash a durable future-dated cache without ever publishing that token.
-Terminal handling includes all known current, durable, pending, and in-flight authorities,
-and same-fingerprint marker writes merge under the inter-process lock. Hashes are never
-cleared or deleted; the intentionally unbounded list grows slowly at the normal roughly
-seven-day renewal cadence and avoids ever dropping an unexpired revoked token. A marker for
-a replaced credential is ignored. A distinct token newly accepted by the relay is eligible
-without a clock comparison or marker clearing.
+`{"schema_version":3,"revocations":{"<credential_fingerprint>":["<SHA-256 lowercase hex>"]}}`.
+Each credential maps to sorted, unique hashes of exact revoked entitlement-token
+bytes—never token plaintext or a reversible license. Startup loads the Keychain license,
+then the cache, then the ledger immediately before publication. The cache credential's
+entry rejects authority if and only if its exact token hash is listed; timestamps do not
+affect revocation, so clock rollback and switching away from and back to a credential
+cannot revive it. A security- and schema-validated candidate read lets a terminal decision
+hash a durable future-dated cache without ever publishing that token. Credential
+replacement synchronously enqueues all known startup, current, pending, and in-flight old
+hashes before generation advance or cancellation. Every ledger write merges all same- and
+different-fingerprint entries under the inter-process lock; completions, failures, and
+bounded-shutdown retries are generation-independent. Credential entries and hashes are
+never cleared or deleted. After issuer validation and relay acceptance, the controller
+reloads the ledger before commit: a listed exact token is not cached or published, while a
+distinct token is eligible without a clock comparison or ledger clearing.
 
 A cache Save may return parent-directory-fsync uncertainty after its rename is already
 visible. That status remains `persistence_degraded` in the running process, but it is not an

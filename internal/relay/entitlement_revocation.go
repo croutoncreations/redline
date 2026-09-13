@@ -13,14 +13,21 @@ import (
 	"sort"
 )
 
-const EntitlementRevocationSchemaVersion = 2
+const EntitlementRevocationSchemaVersion = 3
 
-// EntitlementRevocation is a durable credential-bound set of revoked token
-// authorities. It contains only one-way token hashes, never bearer plaintext.
+// EntitlementRevocation is an append-only ledger of credential-bound revoked
+// token authorities. It contains only one-way token hashes, never bearer
+// plaintext.
 type EntitlementRevocation struct {
-	SchemaVersion         int      `json:"schema_version"`
-	CredentialFingerprint string   `json:"credential_fingerprint"`
-	RevokedTokenHashes    []string `json:"revoked_token_hashes"`
+	SchemaVersion int                 `json:"schema_version"`
+	Revocations   map[string][]string `json:"revocations"`
+}
+
+func NewEntitlementRevocation(fingerprint string, hashes ...string) EntitlementRevocation {
+	return canonicalRevocation(EntitlementRevocation{
+		SchemaVersion: EntitlementRevocationSchemaVersion,
+		Revocations:   map[string][]string{fingerprint: append([]string(nil), hashes...)},
+	})
 }
 
 // EntitlementTokenHash identifies the exact bearer bytes without retaining the
@@ -30,10 +37,11 @@ func EntitlementTokenHash(token Secret) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (marker EntitlementRevocation) Revokes(token Secret) bool {
+func (marker EntitlementRevocation) Revokes(fingerprint string, token Secret) bool {
+	hashes := marker.Revocations[fingerprint]
 	hash := EntitlementTokenHash(token)
-	index := sort.SearchStrings(marker.RevokedTokenHashes, hash)
-	return index < len(marker.RevokedTokenHashes) && marker.RevokedTokenHashes[index] == hash
+	index := sort.SearchStrings(hashes, hash)
+	return index < len(hashes) && hashes[index] == hash
 }
 
 func validTokenHash(hash string) bool {
@@ -45,28 +53,53 @@ func validTokenHash(hash string) bool {
 }
 
 func validateEntitlementRevocation(marker EntitlementRevocation) error {
-	if marker.SchemaVersion != EntitlementRevocationSchemaVersion || marker.CredentialFingerprint == "" || len(marker.RevokedTokenHashes) == 0 {
-		return errors.New("invalid entitlement revocation marker")
+	if marker.SchemaVersion != EntitlementRevocationSchemaVersion || len(marker.Revocations) == 0 {
+		return errors.New("invalid entitlement revocation ledger")
 	}
-	for index, hash := range marker.RevokedTokenHashes {
-		if !validTokenHash(hash) || (index > 0 && marker.RevokedTokenHashes[index-1] >= hash) {
-			return errors.New("invalid entitlement revocation token hashes")
+	for fingerprint, hashes := range marker.Revocations {
+		if fingerprint == "" || len(hashes) == 0 {
+			return errors.New("invalid entitlement revocation credential entry")
+		}
+		for index, hash := range hashes {
+			if !validTokenHash(hash) || (index > 0 && hashes[index-1] >= hash) {
+				return errors.New("invalid entitlement revocation token hashes")
+			}
 		}
 	}
 	return nil
 }
 
 func canonicalRevocation(marker EntitlementRevocation) EntitlementRevocation {
-	hashes := append([]string(nil), marker.RevokedTokenHashes...)
-	sort.Strings(hashes)
-	unique := hashes[:0]
-	for _, hash := range hashes {
-		if len(unique) == 0 || unique[len(unique)-1] != hash {
-			unique = append(unique, hash)
-		}
+	canonical := EntitlementRevocation{
+		SchemaVersion: marker.SchemaVersion,
+		Revocations:   make(map[string][]string, len(marker.Revocations)),
 	}
-	marker.RevokedTokenHashes = unique
-	return marker
+	for fingerprint, values := range marker.Revocations {
+		hashes := append([]string(nil), values...)
+		sort.Strings(hashes)
+		unique := hashes[:0]
+		for _, hash := range hashes {
+			if len(unique) == 0 || unique[len(unique)-1] != hash {
+				unique = append(unique, hash)
+			}
+		}
+		canonical.Revocations[fingerprint] = unique
+	}
+	return canonical
+}
+
+func mergeRevocations(left, right EntitlementRevocation) EntitlementRevocation {
+	merged := EntitlementRevocation{
+		SchemaVersion: EntitlementRevocationSchemaVersion,
+		Revocations:   make(map[string][]string, len(left.Revocations)+len(right.Revocations)),
+	}
+	for fingerprint, hashes := range left.Revocations {
+		merged.Revocations[fingerprint] = append([]string(nil), hashes...)
+	}
+	for fingerprint, hashes := range right.Revocations {
+		merged.Revocations[fingerprint] = append(merged.Revocations[fingerprint], hashes...)
+	}
+	return canonicalRevocation(merged)
 }
 
 func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
@@ -74,9 +107,8 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 		return EntitlementRevocation{}, fmt.Errorf("decode entitlement revocation: %w", err)
 	}
 	var encoded struct {
-		SchemaVersion         *int      `json:"schema_version"`
-		CredentialFingerprint *string   `json:"credential_fingerprint"`
-		RevokedTokenHashes    *[]string `json:"revoked_token_hashes"`
+		SchemaVersion *int                 `json:"schema_version"`
+		Revocations   *map[string][]string `json:"revocations"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -87,14 +119,10 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return EntitlementRevocation{}, errors.New("decode entitlement revocation: trailing data")
 	}
-	if encoded.SchemaVersion == nil || encoded.CredentialFingerprint == nil || encoded.RevokedTokenHashes == nil {
+	if encoded.SchemaVersion == nil || encoded.Revocations == nil {
 		return EntitlementRevocation{}, errors.New("decode entitlement revocation: missing or null field")
 	}
-	marker := EntitlementRevocation{
-		SchemaVersion:         *encoded.SchemaVersion,
-		CredentialFingerprint: *encoded.CredentialFingerprint,
-		RevokedTokenHashes:    *encoded.RevokedTokenHashes,
-	}
+	marker := EntitlementRevocation{SchemaVersion: *encoded.SchemaVersion, Revocations: *encoded.Revocations}
 	if err := validateEntitlementRevocation(marker); err != nil {
 		return EntitlementRevocation{}, err
 	}
@@ -102,8 +130,8 @@ func decodeEntitlementRevocation(raw []byte) (EntitlementRevocation, error) {
 }
 
 // EntitlementRevocationStore has its own path and process/file locks, so cache
-// I/O cannot delay a terminal marker operation. Same-credential writes merge
-// under the inter-process lock and therefore cannot drop an existing hash.
+// I/O cannot delay a terminal ledger operation. All writes merge under the
+// inter-process lock and therefore cannot drop any credential's existing hash.
 type EntitlementRevocationStore struct {
 	path string
 	lock entitlementCacheLock
@@ -169,17 +197,33 @@ func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker Ent
 		if err != nil {
 			return err
 		}
-		if existing.CredentialFingerprint == marker.CredentialFingerprint {
-			marker.RevokedTokenHashes = append(marker.RevokedTokenHashes, existing.RevokedTokenHashes...)
-			marker = canonicalRevocation(marker)
-			if len(marker.RevokedTokenHashes) == len(existing.RevokedTokenHashes) {
-				return op.syncDirectory()
-			}
+		merged := mergeRevocations(existing, marker)
+		if revocationLedgersEqual(existing, merged) {
+			return op.syncDirectory()
 		}
+		marker = merged
 	}
 	raw, err := json.Marshal(marker)
 	if err != nil {
 		return err
 	}
 	return op.write(append(raw, '\n'))
+}
+
+func revocationLedgersEqual(left, right EntitlementRevocation) bool {
+	if len(left.Revocations) != len(right.Revocations) {
+		return false
+	}
+	for fingerprint, leftHashes := range left.Revocations {
+		rightHashes, ok := right.Revocations[fingerprint]
+		if !ok || len(leftHashes) != len(rightHashes) {
+			return false
+		}
+		for index := range leftHashes {
+			if leftHashes[index] != rightHashes[index] {
+				return false
+			}
+		}
+	}
+	return true
 }

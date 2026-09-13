@@ -339,14 +339,8 @@ func TestEntitlementRevocationHashesAreExactMonotonicAndSecretFree(t *testing.T)
 	fingerprint := CredentialFingerprint("hash-revocation-license")
 	firstToken := NewSecret("first-plaintext-entitlement")
 	secondToken := NewSecret("second-plaintext-entitlement")
-	first := EntitlementRevocation{
-		SchemaVersion: EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint,
-		RevokedTokenHashes: []string{EntitlementTokenHash(firstToken)},
-	}
-	second := EntitlementRevocation{
-		SchemaVersion: EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint,
-		RevokedTokenHashes: []string{EntitlementTokenHash(secondToken)},
-	}
+	first := NewEntitlementRevocation(fingerprint, EntitlementTokenHash(firstToken))
+	second := NewEntitlementRevocation(fingerprint, EntitlementTokenHash(secondToken))
 	var wg sync.WaitGroup
 	for _, marker := range []EntitlementRevocation{first, second} {
 		wg.Add(1)
@@ -359,7 +353,7 @@ func TestEntitlementRevocationHashesAreExactMonotonicAndSecretFree(t *testing.T)
 	}
 	wg.Wait()
 	got, exists, err := store.Load()
-	if err != nil || !exists || len(got.RevokedTokenHashes) != 2 || !got.Revokes(firstToken) || !got.Revokes(secondToken) {
+	if err != nil || !exists || len(got.Revocations[fingerprint]) != 2 || !got.Revokes(fingerprint, firstToken) || !got.Revokes(fingerprint, secondToken) {
 		t.Fatalf("merged marker=%#v exists=%v err=%v", got, exists, err)
 	}
 	raw, err := os.ReadFile(path)
@@ -368,6 +362,36 @@ func TestEntitlementRevocationHashesAreExactMonotonicAndSecretFree(t *testing.T)
 	}
 	if strings.Contains(string(raw), firstToken.Value()) || strings.Contains(string(raw), secondToken.Value()) {
 		t.Fatalf("marker leaked token plaintext: %s", raw)
+	}
+}
+
+func TestEntitlementRevocationLedgerPreservesDifferentCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
+	store := NewEntitlementRevocationStore(path)
+	firstFingerprint := CredentialFingerprint("first-ledger-license")
+	secondFingerprint := CredentialFingerprint("second-ledger-license")
+	firstToken := NewSecret("first-ledger-token")
+	secondToken := NewSecret("second-ledger-token")
+	thirdToken := NewSecret("third-ledger-token")
+	if err := store.SaveContext(context.Background(), NewEntitlementRevocation(firstFingerprint, EntitlementTokenHash(firstToken))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveContext(context.Background(), NewEntitlementRevocation(secondFingerprint, EntitlementTokenHash(secondToken))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveContext(context.Background(), NewEntitlementRevocation(firstFingerprint, EntitlementTokenHash(thirdToken))); err != nil {
+		t.Fatal(err)
+	}
+	got, exists, err := store.Load()
+	if err != nil || !exists || !got.Revokes(firstFingerprint, firstToken) || !got.Revokes(secondFingerprint, secondToken) || !got.Revokes(firstFingerprint, thirdToken) {
+		t.Fatalf("ledger=%#v exists=%v err=%v", got, exists, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), firstToken.Value()) || strings.Contains(string(raw), secondToken.Value()) || strings.Contains(string(raw), thirdToken.Value()) {
+		t.Fatalf("ledger leaked token plaintext: %s", raw)
 	}
 }
 
@@ -406,10 +430,7 @@ func TestExactRevocationRejectsOldSaveAndAllowsDistinctAuthority(t *testing.T) {
 		}
 	}
 	old := authority(now)
-	marker := EntitlementRevocation{
-		SchemaVersion: EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint,
-		RevokedTokenHashes: []string{EntitlementTokenHash(old.Token)},
-	}
+	marker := NewEntitlementRevocation(fingerprint, EntitlementTokenHash(old.Token))
 	if err := markers.SaveContext(context.Background(), marker); err != nil {
 		t.Fatal(err)
 	}
@@ -417,11 +438,11 @@ func TestExactRevocationRejectsOldSaveAndAllowsDistinctAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, valid, err := cache.Load(sid, fingerprint, now)
-	if err != nil || !valid || !marker.Revokes(loaded.Token) {
+	if err != nil || !valid || !marker.Revokes(fingerprint, loaded.Token) {
 		t.Fatalf("old cache candidate=%#v valid=%v err=%v", loaded, valid, err)
 	}
 	newer := authority(now.Add(time.Second))
-	if marker.Revokes(newer.Token) {
+	if marker.Revokes(fingerprint, newer.Token) {
 		t.Fatal("distinct relay-accepted authority was revoked")
 	}
 	if err := cache.Save(newer); err != nil {
@@ -547,15 +568,12 @@ func TestEntitlementRevocationStorePersistsClosedMarkerBesideCache(t *testing.T)
 	fingerprint := CredentialFingerprint("revoked-license")
 	token := NewSecret("revoked-token-plaintext")
 	store := NewEntitlementRevocationStore(markerPath)
-	marker := EntitlementRevocation{
-		SchemaVersion: EntitlementRevocationSchemaVersion, CredentialFingerprint: fingerprint,
-		RevokedTokenHashes: []string{EntitlementTokenHash(token)},
-	}
+	marker := NewEntitlementRevocation(fingerprint, EntitlementTokenHash(token))
 	if err := store.SaveContext(context.Background(), marker); err != nil {
 		t.Fatal(err)
 	}
 	got, exists, err := store.Load()
-	if err != nil || !exists || !got.Revokes(token) {
+	if err != nil || !exists || !got.Revokes(fingerprint, token) {
 		t.Fatalf("marker=%#v exists=%v err=%v", got, exists, err)
 	}
 	raw, err := os.ReadFile(markerPath)
@@ -566,7 +584,7 @@ func TestEntitlementRevocationStorePersistsClosedMarkerBesideCache(t *testing.T)
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		t.Fatal(err)
 	}
-	if len(shape) != 3 || shape["schema_version"] != float64(EntitlementRevocationSchemaVersion) || shape["credential_fingerprint"] != fingerprint {
+	if len(shape) != 2 || shape["schema_version"] != float64(EntitlementRevocationSchemaVersion) || shape["revocations"] == nil {
 		t.Fatalf("marker schema=%v", shape)
 	}
 	if strings.Contains(string(raw), token.Value()) || strings.Contains(string(raw), "revoked-license") {
@@ -588,11 +606,10 @@ func TestEntitlementRevocationStoreUsesIndependentLockFromCache(t *testing.T) {
 	defer cache.lock.release()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	marker := EntitlementRevocation{
-		SchemaVersion:         EntitlementRevocationSchemaVersion,
-		CredentialFingerprint: CredentialFingerprint("independent-lock-license"),
-		RevokedTokenHashes:    []string{EntitlementTokenHash(NewSecret("independent-token"))},
-	}
+	marker := NewEntitlementRevocation(
+		CredentialFingerprint("independent-lock-license"),
+		EntitlementTokenHash(NewSecret("independent-token")),
+	)
 	if err := markerStore.SaveContext(ctx, marker); err != nil {
 		t.Fatalf("cache lock delayed independent marker: %v", err)
 	}
@@ -602,12 +619,15 @@ func TestEntitlementRevocationStoreRejectsNonCanonicalShapes(t *testing.T) {
 	fingerprint := CredentialFingerprint("strict-marker-license")
 	hash := EntitlementTokenHash(NewSecret("strict-token"))
 	for _, raw := range []string{
-		fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked_token_hashes":null}`, fingerprint),
-		fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q}`, fingerprint),
-		fmt.Sprintf(`{"schema_version":1,"credential_fingerprint":%q,"revoked_token_hashes":[%q]}`, fingerprint, hash),
-		fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked_token_hashes":[%q],"token":"x"}`, fingerprint, hash),
-		fmt.Sprintf(`{"schema_version":2,"credential_fingerprint":%q,"revoked_token_hashes":[%q,%q]}`, fingerprint, hash, hash),
-		fmt.Sprintf(`{"schema_version":2,"schema_version":2,"credential_fingerprint":%q,"revoked_token_hashes":[%q]}`, fingerprint, hash),
+		`{"schema_version":3,"revocations":null}`,
+		`{"schema_version":3}`,
+		fmt.Sprintf(`{"schema_version":2,"revocations":{%q:[%q]}}`, fingerprint, hash),
+		fmt.Sprintf(`{"schema_version":3,"revocations":{%q:[%q]},"token":"x"}`, fingerprint, hash),
+		fmt.Sprintf(`{"schema_version":3,"revocations":{%q:[%q,%q]}}`, fingerprint, hash, hash),
+		fmt.Sprintf(`{"schema_version":3,"revocations":{%q:[%q,%q]}}`, fingerprint, hash, strings.Repeat("0", 64)),
+		fmt.Sprintf(`{"schema_version":3,"schema_version":3,"revocations":{%q:[%q]}}`, fingerprint, hash),
+		fmt.Sprintf(`{"schema_version":3,"revocations":{%q:[%q],%q:[%q]}}`, fingerprint, hash, fingerprint, hash),
+		fmt.Sprintf(`{"schema_version":3,"revocations":{%q:null}}`, fingerprint),
 	} {
 		path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
 		if err := os.WriteFile(path, []byte(raw+"\n"), 0o600); err != nil {
