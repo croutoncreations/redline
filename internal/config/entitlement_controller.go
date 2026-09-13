@@ -35,6 +35,7 @@ type entitlementRevocationCandidateCache interface {
 
 type entitlementRevocations interface {
 	Load() (relay.EntitlementRevocation, bool, error)
+	CommitIfUnrevoked(context.Context, string, string, func() bool) (relay.EntitlementRevocation, bool, error)
 	SaveContext(context.Context, relay.EntitlementRevocation) error
 }
 
@@ -42,6 +43,9 @@ type noopEntitlementRevocations struct{}
 
 func (noopEntitlementRevocations) Load() (relay.EntitlementRevocation, bool, error) {
 	return relay.EntitlementRevocation{}, false, nil
+}
+func (noopEntitlementRevocations) CommitIfUnrevoked(_ context.Context, _, _ string, commit func() bool) (relay.EntitlementRevocation, bool, error) {
+	return relay.EntitlementRevocation{}, commit(), nil
 }
 func (noopEntitlementRevocations) SaveContext(context.Context, relay.EntitlementRevocation) error {
 	return nil
@@ -384,6 +388,7 @@ type EntitlementController struct {
 	mu        sync.Mutex
 	triggerMu sync.Mutex
 	running   bool
+	closing   bool
 	runCtx    context.Context
 
 	credentialGeneration  uint64
@@ -426,10 +431,15 @@ func NewEntitlementController(opts EntitlementControllerOptions) *EntitlementCon
 }
 
 // TriggerLicenseChanged supersedes work and runtime authority for the previous
-// credential generation. Credential replacement and its validation remain the
-// responsibility of the later management API, not this controller.
-func (c *EntitlementController) TriggerLicenseChanged() {
+// credential generation. It returns false without mutation after shutdown has
+// established its closing boundary. Credential replacement and its validation
+// remain the responsibility of the later management API, not this controller.
+func (c *EntitlementController) TriggerLicenseChanged() bool {
 	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return false
+	}
 	oldGeneration := c.credentialGeneration
 	// Collect and enqueue every old-generation authority before advancing the
 	// generation or permitting attempt cancellation to return. Ledger requests
@@ -453,6 +463,7 @@ func (c *EntitlementController) TriggerLicenseChanged() {
 		cancel()
 	}
 	c.enqueue(entitlementTrigger{reason: triggerLicenseChanged, generation: generation})
+	return true
 }
 
 // TriggerRelayEntitlement handles the dialer's authoritative 402/1008 typed
@@ -510,7 +521,7 @@ func (c *EntitlementController) generation() uint64 {
 func (c *EntitlementController) startAttempt(parent context.Context, generation uint64) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	c.mu.Lock()
-	if generation != c.credentialGeneration {
+	if c.closing || generation != c.credentialGeneration {
 		cancel()
 	} else {
 		c.attemptCancel = cancel
@@ -553,7 +564,7 @@ func (c *EntitlementController) markerForGenerationLocked(generation uint64) (re
 
 func (c *EntitlementController) Run(ctx context.Context) {
 	c.mu.Lock()
-	if c.running {
+	if c.running || c.closing {
 		c.mu.Unlock()
 		return
 	}
@@ -562,6 +573,7 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
+		c.closing = true
 		if c.expiryCancel != nil {
 			c.expiryCancel()
 			c.expiryCancel = nil
@@ -647,10 +659,11 @@ func (c *EntitlementController) Run(ctx context.Context) {
 	c.revocationPersistence = revocationPersistence
 	c.mu.Unlock()
 	defer func() {
+		// Establish the closing boundary while revocation submissions still point
+		// at this worker. TriggerLicenseChanged cannot advance the credential
+		// generation after the barrier takes its final request snapshot.
 		c.mu.Lock()
-		if c.revocationPersistence == revocationPersistence {
-			c.revocationPersistence = nil
-		}
+		c.closing = true
 		c.mu.Unlock()
 		// Cancel old authority I/O before entering the independent marker barrier.
 		// Both workers share one shutdown budget, but blocked cache I/O cannot
@@ -665,6 +678,11 @@ func (c *EntitlementController) Run(ctx context.Context) {
 			remaining = 0
 		}
 		persistence.shutdown(ctx, remaining)
+		c.mu.Lock()
+		if c.revocationPersistence == revocationPersistence {
+			c.revocationPersistence = nil
+		}
+		c.mu.Unlock()
 	}()
 	for {
 		generation := c.generation()
@@ -881,21 +899,57 @@ func (c *EntitlementController) renew(ctx context.Context, generation, attemptRe
 		c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
 		return 0, false
 	}
-	// Relay acceptance alone cannot revive an exact token that a prior terminal
-	// decision revoked. Re-read the durable ledger immediately before commit so
-	// another process's merge also takes precedence over runtime and cache.
-	marker, markerExists, markerErr := c.opts.Revocations.Load()
-	if markerErr != nil || (markerExists && marker.Revokes(next.CredentialFingerprint, next.Token)) {
-		c.publishFallbackForGeneration(generation, base, current, *authorityGeneration)
-		return 0, false
-	}
 	if c.opts.BeforeCommit != nil {
 		c.opts.BeforeCommit()
 	}
-	if !c.commitIssued(ctx, generation, attemptRelaySequence, base, current, authorityGeneration, persistence, next, issued.Entitlement) {
+	// The durable ledger check and the short in-memory authority commit share
+	// both ledger locks. A concurrent append therefore wins before this callback
+	// or follows one controller-owned commit whose later event revokes it.
+	marker, committed, markerErr := c.opts.Revocations.CommitIfUnrevoked(ctx, next.CredentialFingerprint, relay.EntitlementTokenHash(next.Token), func() bool {
+		return c.commitIssued(ctx, generation, attemptRelaySequence, base, current, authorityGeneration, persistence, next, issued.Entitlement)
+	})
+	if markerErr != nil {
+		c.publishRejectedIssuedForGeneration(generation, base, current, authorityGeneration, marker, next, true)
+		return 0, false
+	}
+	if marker.Revokes(next.CredentialFingerprint, next.Token) {
+		c.publishRejectedIssuedForGeneration(generation, base, current, authorityGeneration, marker, next, false)
+		return 0, false
+	}
+	if !committed {
 		return 0, false
 	}
 	return base.RenewsAt.Sub(c.opts.Clock.Now()), false
+}
+
+func (c *EntitlementController) publishRejectedIssuedForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration *uint64, marker relay.EntitlementRevocation, issued relay.CachedEntitlement, forceUnavailable bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if generation != c.credentialGeneration || c.closing {
+		return false
+	}
+	currentFingerprint := current.CredentialFingerprint
+	if currentFingerprint == "" {
+		currentFingerprint = issued.CredentialFingerprint
+	}
+	currentRevoked := current.Token.Value() != "" && (relay.EntitlementTokenHash(current.Token) == relay.EntitlementTokenHash(issued.Token) || marker.Revokes(currentFingerprint, current.Token))
+	if forceUnavailable || currentRevoked {
+		*current = relay.CachedEntitlement{}
+		*authorityGeneration = generation
+		c.authorityEpoch++
+		if c.expiryCancel != nil {
+			c.expiryCancel()
+			c.expiryCancel = nil
+		}
+		publishUnavailable(c.opts.Coordinator, base, c.opts.Clock.Now())
+		return true
+	}
+	if *authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), c.opts.Clock.Now()) {
+		publishPending(c.opts.Coordinator, base, *current)
+	} else {
+		publishUnavailable(c.opts.Coordinator, base, c.opts.Clock.Now())
+	}
+	return true
 }
 
 func (c *EntitlementController) publishFallbackForGeneration(generation uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration uint64) bool {
@@ -954,7 +1008,7 @@ func (c *EntitlementController) publishTerminalForGeneration(generation uint64, 
 func (c *EntitlementController) commitIssued(parent context.Context, generation, attemptRelaySequence uint64, base *ResolvedRelay, current *relay.CachedEntitlement, authorityGeneration *uint64, persistence *entitlementPersistenceWorker, next relay.CachedEntitlement, issued relay.Entitlement) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if generation != c.credentialGeneration {
+	if parent.Err() != nil || c.closing || generation != c.credentialGeneration {
 		return false
 	}
 	// Validation skew is issuer-response validation only. Runtime publication

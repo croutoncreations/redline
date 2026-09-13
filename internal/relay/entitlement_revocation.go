@@ -38,10 +38,13 @@ func EntitlementTokenHash(token Secret) string {
 }
 
 func (marker EntitlementRevocation) Revokes(fingerprint string, token Secret) bool {
+	return marker.RevokesHash(fingerprint, EntitlementTokenHash(token))
+}
+
+func (marker EntitlementRevocation) RevokesHash(fingerprint, tokenHash string) bool {
 	hashes := marker.Revocations[fingerprint]
-	hash := EntitlementTokenHash(token)
-	index := sort.SearchStrings(hashes, hash)
-	return index < len(hashes) && hashes[index] == hash
+	index := sort.SearchStrings(hashes, tokenHash)
+	return index < len(hashes) && hashes[index] == tokenHash
 }
 
 func validTokenHash(hash string) bool {
@@ -172,6 +175,40 @@ func (s *EntitlementRevocationStore) Load() (EntitlementRevocation, bool, error)
 		return EntitlementRevocation{}, false, err
 	}
 	return marker, true, nil
+}
+
+// CommitIfUnrevoked holds both the process and inter-process ledger locks while
+// checking one exact credential-bound token hash and running commit. The
+// callback must only perform short in-memory publication; filesystem or network
+// I/O would unnecessarily block revocation appends.
+func (s *EntitlementRevocationStore) CommitIfUnrevoked(ctx context.Context, fingerprint, tokenHash string, commit func() bool) (EntitlementRevocation, bool, error) {
+	if fingerprint == "" || !validTokenHash(tokenHash) || commit == nil {
+		return EntitlementRevocation{}, false, errors.New("invalid guarded entitlement commit")
+	}
+	if err := s.lock.acquire(ctx); err != nil {
+		return EntitlementRevocation{}, false, err
+	}
+	defer s.lock.release()
+	op, err := beginEntitlementCacheOperationContext(ctx, s.path)
+	if err != nil {
+		return EntitlementRevocation{}, false, err
+	}
+	defer op.close()
+	raw, exists, err := op.read()
+	if err != nil {
+		return EntitlementRevocation{}, false, err
+	}
+	var marker EntitlementRevocation
+	if exists {
+		marker, err = decodeEntitlementRevocation(raw)
+		if err != nil {
+			return EntitlementRevocation{}, false, err
+		}
+		if marker.RevokesHash(fingerprint, tokenHash) {
+			return marker, false, nil
+		}
+	}
+	return marker, commit(), nil
 }
 
 func (s *EntitlementRevocationStore) SaveContext(ctx context.Context, marker EntitlementRevocation) error {

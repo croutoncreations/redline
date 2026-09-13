@@ -333,6 +333,45 @@ func TestEntitlementCacheIsExactOwnerOnlyAndRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestEntitlementRevocationStoreSerializesAppendBeforeGuardedCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
+	guardStore := NewEntitlementRevocationStore(path)
+	appendStore := NewEntitlementRevocationStore(path)
+	fingerprint := CredentialFingerprint("guarded-commit-license")
+	token := NewSecret("guarded-commit-token")
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	type commitResult struct {
+		committed      bool
+		callbackCalled bool
+		err            error
+	}
+	result := make(chan commitResult, 1)
+
+	go func() {
+		close(beforeCommit)
+		<-releaseCommit
+		callbackCalled := false
+		_, committed, err := guardStore.CommitIfUnrevoked(context.Background(), fingerprint, EntitlementTokenHash(token), func() bool {
+			callbackCalled = true
+			return true
+		})
+		result <- commitResult{committed: committed, callbackCalled: callbackCalled, err: err}
+	}()
+	<-beforeCommit
+	if err := appendStore.SaveContext(context.Background(), NewEntitlementRevocation(fingerprint, EntitlementTokenHash(token))); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCommit)
+	got := <-result
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.callbackCalled || got.committed {
+		t.Fatal("guarded commit accepted an exact revocation appended before lock acquisition")
+	}
+}
+
 func TestEntitlementRevocationHashesAreExactMonotonicAndSecretFree(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
 	store := NewEntitlementRevocationStore(path)

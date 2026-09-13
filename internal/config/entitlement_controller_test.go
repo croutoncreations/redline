@@ -115,6 +115,15 @@ func (s *controllerRevocationStore) Load() (relay.EntitlementRevocation, bool, e
 	return s.marker, s.exists, nil
 }
 
+func (s *controllerRevocationStore) CommitIfUnrevoked(_ context.Context, fingerprint, tokenHash string, commit func() bool) (relay.EntitlementRevocation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.exists && s.marker.RevokesHash(fingerprint, tokenHash) {
+		return s.marker, false, nil
+	}
+	return s.marker, commit(), nil
+}
+
 func (s *controllerRevocationStore) SaveContext(_ context.Context, marker relay.EntitlementRevocation) error {
 	s.mu.Lock()
 	var err error
@@ -140,11 +149,32 @@ type uncancellableControllerRevocations struct {
 func (s *uncancellableControllerRevocations) Load() (relay.EntitlementRevocation, bool, error) {
 	return relay.EntitlementRevocation{}, false, nil
 }
+func (s *uncancellableControllerRevocations) CommitIfUnrevoked(_ context.Context, _, _ string, commit func() bool) (relay.EntitlementRevocation, bool, error) {
+	return relay.EntitlementRevocation{}, commit(), nil
+}
 func (s *uncancellableControllerRevocations) SaveContext(_ context.Context, marker relay.EntitlementRevocation) error {
 	s.started <- marker
 	<-s.release
 	close(s.returned)
 	return nil
+}
+
+type blockingDurableControllerRevocations struct {
+	store   *relay.EntitlementRevocationStore
+	started chan relay.EntitlementRevocation
+	release chan struct{}
+}
+
+func (s *blockingDurableControllerRevocations) Load() (relay.EntitlementRevocation, bool, error) {
+	return s.store.Load()
+}
+func (s *blockingDurableControllerRevocations) CommitIfUnrevoked(ctx context.Context, fingerprint, tokenHash string, commit func() bool) (relay.EntitlementRevocation, bool, error) {
+	return s.store.CommitIfUnrevoked(ctx, fingerprint, tokenHash, commit)
+}
+func (s *blockingDurableControllerRevocations) SaveContext(_ context.Context, marker relay.EntitlementRevocation) error {
+	s.started <- marker
+	<-s.release
+	return s.store.SaveContext(context.Background(), marker)
 }
 
 type blockingControllerCache struct {
@@ -457,6 +487,131 @@ func TestEntitlementControllerRejectsReissuedRevokedTokenBeforeCommit(t *testing
 	}
 	cancel()
 	<-done
+}
+
+func TestEntitlementControllerGuardedCommitSerializesConcurrentExactRevocation(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("guarded-controller-license")
+	exp := now.Add(time.Hour).Unix()
+	token := controllerToken(t, exp, sid, 5)
+	directory := t.TempDir()
+	cache := relay.NewEntitlementCacheStore(filepath.Join(directory, "relay-entitlement.json"))
+	markerPath := relay.DefaultEntitlementRevocationPath(filepath.Join(directory, "relay-entitlement.json"))
+	guardStore := relay.NewEntitlementRevocationStore(markerPath)
+	appendStore := relay.NewEntitlementRevocationStore(markerPath)
+	beforeCommit := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "guarded-controller-license"},
+		Cache: cache, Revocations: guardStore, Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{
+				Entitlement: relay.Entitlement{Token: token, Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}, ReceivedAt: now,
+			}, nil
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+		BeforeCommit: func() {
+			close(beforeCommit)
+			<-releaseCommit
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	<-beforeCommit
+	if err := appendStore.SaveContext(context.Background(), relay.NewEntitlementRevocation(fingerprint, relay.EntitlementTokenHash(token))); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCommit)
+	got := waitRelayState(t, coordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("concurrently revoked token became runtime authority: %#v", got)
+	}
+	if cached, valid, err := cache.Load(sid, fingerprint, now); valid || cached.Token.Value() != "" {
+		t.Fatalf("concurrently revoked token became cache authority: cached=%#v valid=%v err=%v", cached, valid, err)
+	}
+	cancel()
+	<-done
+}
+
+func TestEntitlementControllerRevokedIssuedTokenNeverRepublishesRevokedFallback(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("revoked-fallback-license")
+	currentExp := now.Add(2 * time.Hour).Unix()
+	currentToken := controllerToken(t, currentExp, sid, 5)
+	distinctToken := controllerToken(t, now.Add(time.Hour).Unix(), sid, 5)
+	for _, tc := range []struct {
+		name          string
+		issued        relay.Secret
+		revokeCurrent bool
+		wantState     RelayReadiness
+		wantFallback  bool
+	}{
+		{name: "issued token is current fallback", issued: currentToken, wantState: RelayReadinessUnavailable},
+		{name: "ledger independently revokes current fallback", issued: distinctToken, revokeCurrent: true, wantState: RelayReadinessUnavailable},
+		{name: "distinct current fallback remains unrevoked", issued: distinctToken, wantState: RelayReadinessRenewPending, wantFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := &controllerCache{value: relay.CachedEntitlement{
+				SchemaVersion: relay.EntitlementCacheSchemaVersion, CredentialFingerprint: fingerprint,
+				Token: currentToken, Exp: currentExp, ObtainedAt: now.Add(-time.Minute).Unix(), SID: sid, MaxClients: 5,
+			}, exists: true, saved: make(chan relay.CachedEntitlement, 1)}
+			markerPath := filepath.Join(t.TempDir(), "relay-entitlement-revocation.json")
+			guardStore := relay.NewEntitlementRevocationStore(markerPath)
+			appendStore := relay.NewEntitlementRevocationStore(markerPath)
+			beforeCommit := make(chan struct{})
+			releaseCommit := make(chan struct{})
+			coordinator := NewRelayCoordinator(base)
+			controller := NewEntitlementController(EntitlementControllerOptions{
+				Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "revoked-fallback-license"},
+				Cache: cache, Revocations: guardStore, Clock: &controllerClock{now: now, delays: make(chan time.Duration, 1)},
+				Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+					exp := now.Add(time.Hour).Unix()
+					if tc.issued.Value() == currentToken.Value() {
+						exp = currentExp
+					}
+					return relay.ReceivedEntitlement{Entitlement: relay.Entitlement{Token: tc.issued, Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}, ReceivedAt: now}, nil
+				}),
+				Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+				BeforeCommit: func() {
+					close(beforeCommit)
+					<-releaseCommit
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { controller.Run(ctx); close(done) }()
+			<-beforeCommit
+			hashes := []string{relay.EntitlementTokenHash(tc.issued)}
+			if tc.revokeCurrent {
+				hashes = append(hashes, relay.EntitlementTokenHash(currentToken))
+			}
+			if err := appendStore.SaveContext(context.Background(), relay.NewEntitlementRevocation(fingerprint, hashes...)); err != nil {
+				t.Fatal(err)
+			}
+			close(releaseCommit)
+			got := waitRelayState(t, coordinator, tc.wantState)
+			if tc.wantFallback {
+				if !got.CanDial() || got.EntitlementToken.Value() != currentToken.Value() {
+					t.Fatalf("distinct unrevoked fallback was not retained: %#v", got)
+				}
+			} else if got.CanDial() || got.EntitlementToken.Value() != "" {
+				t.Fatalf("revoked fallback was published: %#v", got)
+			}
+			select {
+			case saved := <-cache.saved:
+				t.Fatalf("ledger-revoked issued token was cached: %#v", saved)
+			default:
+			}
+			cancel()
+			<-done
+		})
+	}
 }
 
 func TestEntitlementControllerChecksMarkerAfterBlockedStartupCacheLoad(t *testing.T) {
@@ -1566,6 +1721,97 @@ func TestEntitlementControllerLicenseTriggerEnqueuesAndRetriesOldRevocationBefor
 	if err != nil || !exists || !marker.Revokes(fingerprint, token) {
 		t.Fatalf("trigger then cancel lost old authority: marker=%#v exists=%v err=%v", marker, exists, err)
 	}
+}
+
+func TestEntitlementControllerLicenseTriggerIsRejectedAfterShutdownBoundary(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	base := hostedControllerBase()
+	sid := relay.SessionSID(base.SessionID)
+	fingerprint := relay.CredentialFingerprint("closing-license")
+	exp := now.Add(time.Hour).Unix()
+	token := controllerToken(t, exp, sid, 5)
+	directory := t.TempDir()
+	cache := relay.NewEntitlementCacheStore(filepath.Join(directory, "relay-entitlement.json"))
+	durableMarkers := relay.NewEntitlementRevocationStore(relay.DefaultEntitlementRevocationPath(filepath.Join(directory, "relay-entitlement.json")))
+	markers := &blockingDurableControllerRevocations{
+		store: durableMarkers, started: make(chan relay.EntitlementRevocation, 1), release: make(chan struct{}),
+	}
+	calls := 0
+	coordinator := NewRelayCoordinator(base)
+	controller := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: coordinator, Initial: base, Licenses: controllerLicenseStore{value: "closing-license"}, Cache: cache, Revocations: markers,
+		Clock: &controllerClock{now: now, delays: make(chan time.Duration, 2)}, PersistenceDrainTimeout: time.Second,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			calls++
+			if calls == 1 {
+				return relay.ReceivedEntitlement{Entitlement: relay.Entitlement{Token: token, Exp: exp, MaxClients: 5, Seats: 1, SeatsUsed: 1}, ReceivedAt: now}, nil
+			}
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerInvalidKey}
+		}),
+		Refresh: func(context.Context, *http.Client, string, string, relay.Secret) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { controller.Run(ctx); close(done) }()
+	_ = waitRelayState(t, coordinator, RelayReadinessActive)
+	deadline := time.Now().Add(time.Second)
+	for coordinator.Current().PersistenceDegraded && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	controller.TriggerRelayEntitlement(relay.EntitlementExpired)
+	_ = waitRelayState(t, coordinator, RelayReadinessInvalidKey)
+	<-markers.started
+	cancel()
+	deadline = time.Now().Add(time.Second)
+	for {
+		controller.mu.Lock()
+		closing := controller.closing
+		generation := controller.credentialGeneration
+		controller.mu.Unlock()
+		if closing {
+			if controller.TriggerLicenseChanged() {
+				t.Fatal("license trigger was accepted after closing boundary")
+			}
+			controller.mu.Lock()
+			gotGeneration := controller.credentialGeneration
+			controller.mu.Unlock()
+			if gotGeneration != generation {
+				t.Fatalf("closing trigger advanced generation from %d to %d", generation, gotGeneration)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("controller did not establish closing boundary before durability barrier")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("shutdown completed before blocked revocation barrier was released")
+	default:
+	}
+	close(markers.release)
+	<-done
+	if marker, exists, err := durableMarkers.Load(); err != nil || !exists || !marker.Revokes(fingerprint, token) {
+		t.Fatalf("shutdown marker=%#v exists=%v err=%v", marker, exists, err)
+	}
+
+	restartCoordinator := NewRelayCoordinator(base)
+	restart := NewEntitlementController(EntitlementControllerOptions{
+		Coordinator: restartCoordinator, Initial: base, Licenses: controllerLicenseStore{value: "closing-license"}, Cache: cache, Revocations: durableMarkers,
+		Issuer: controllerReceivedIssuerFunc(func(context.Context, string, string, string) (relay.ReceivedEntitlement, error) {
+			return relay.ReceivedEntitlement{ReceivedAt: now}, &relay.IssuerError{Kind: relay.IssuerUnavailable, Retryable: true}
+		}),
+	})
+	restartCtx, restartCancel := context.WithCancel(context.Background())
+	restartDone := make(chan struct{})
+	go func() { restart.Run(restartCtx); close(restartDone) }()
+	got := waitRelayState(t, restartCoordinator, RelayReadinessUnavailable)
+	if got.CanDial() || got.EntitlementToken.Value() != "" {
+		t.Fatalf("restart revived cache after blocked shutdown trigger: %#v", got)
+	}
+	restartCancel()
+	<-restartDone
 }
 
 func TestEntitlementControllerTerminalShutdownDrainIsBounded(t *testing.T) {
