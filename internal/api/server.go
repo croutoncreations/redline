@@ -719,8 +719,20 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
-	if strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase) == "" {
-		return tokenSyncResult{}, fmt.Errorf("usage_monitor gatepost_database is not configured")
+	gatepostPath := strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase)
+	if gatepostPath == "" {
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
+	}
+	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	if _, statErr := os.Stat(resolvedGatepostPath); statErr != nil {
+		// Gatepost is an optional, unreleased companion tool. A configured but
+		// missing database is not an error on every monitor cycle: log at debug
+		// level and report zero Gatepost insertions instead of failing.
+		log.Printf("redline %s usage_monitor: gatepost_database %q not found, skipping Gatepost import", providerID, gatepostPath)
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	}
 	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
 	if err != nil {

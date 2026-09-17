@@ -103,6 +103,20 @@ func TestUsageMonitorDefaultsAndValidatesInterval(t *testing.T) {
 	}
 }
 
+func TestUsageMonitorEnabledWithoutGatepostDatabase(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+usage_monitor:
+  enabled: true
+  poll_interval: 5m`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("expected usage_monitor to be valid without gatepost_database: %v", err)
+	}
+	if cfg.UsageMonitor.GatepostDatabase != "" {
+		t.Fatalf("gatepost_database = %q, want empty", cfg.UsageMonitor.GatepostDatabase)
+	}
+}
+
 func TestNotificationsAreDisabledByDefault(t *testing.T) {
 	cfg, err := config.Load(writeConfig(t, validConfig))
 	if err != nil {

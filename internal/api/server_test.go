@@ -914,6 +914,45 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 	}
 }
 
+func TestTokenSyncSkipsGatepostWhenDatabaseNotConfigured(t *testing.T) {
+	directory := t.TempDir()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://127.0.0.1:1")
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	result := postJSON[struct {
+		Read     int `json:"read"`
+		Inserted int `json:"inserted"`
+	}](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	if result.Read != 0 || result.Inserted != 0 {
+		t.Fatalf("expected zero Gatepost reads/insertions without gatepost_database configured, got %#v", result)
+	}
+}
+
+func TestTokenSyncSkipsGatepostWhenDatabaseFileMissing(t *testing.T) {
+	directory := t.TempDir()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.UsageMonitor.GatepostDatabase = filepath.Join(directory, "missing-viewer.db")
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	result := postJSON[struct {
+		Read     int `json:"read"`
+		Inserted int `json:"inserted"`
+	}](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	if result.Read != 0 || result.Inserted != 0 {
+		t.Fatalf("expected a missing gatepost_database file to be skipped, not errored: %#v", result)
+	}
+}
+
 func TestTokenSyncBackfillsCompletedOwnedRun(t *testing.T) {
 	directory := t.TempDir()
 	viewerPath := filepath.Join(directory, "viewer.db")

@@ -31,7 +31,7 @@ var piProviderTransport = map[string]string{
 // provider and cache-token fields. Only explicit subscription transports are
 // mapped; API and other providers are intentionally ignored.
 func LoadGatepostPi(ctx context.Context, databasePath, targetProvider string, after time.Time) ([]capacity.TokenObservation, error) {
-	resolved, err := expandHome(databasePath)
+	resolved, err := ExpandHome(databasePath)
 	if err != nil {
 		return nil, err
 	}
