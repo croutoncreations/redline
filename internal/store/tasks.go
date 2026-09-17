@@ -616,9 +616,20 @@ func scanTask(row scanner) (domain.Task, error) {
 func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
 
 func parseStoredTime(value string) (time.Time, error) {
+	return parseStoredTimeField("stored timestamp", value)
+}
+
+// parseStoredTimeField decodes an RFC3339Nano timestamp column, labeling the
+// error with which field failed. It is the shared decode used by every
+// RFC3339Nano-encoded timestamp column in this package, including the raw
+// (non-UTC-normalized) ones in sqlite.go, snapshots.go, and
+// token_observations.go — decoding doesn't depend on the writer having
+// normalized to UTC, since time.Parse already resolves whatever offset the
+// stored string carries.
+func parseStoredTimeField(field, value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse stored timestamp: %w", err)
+		return time.Time{}, fmt.Errorf("parse %s: %w", field, err)
 	}
 	return parsed, nil
 }

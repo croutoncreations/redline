@@ -677,19 +677,19 @@ FROM usage_snapshots WHERE provider = ?`
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("query latest snapshot: %w", err)
 	}
-	if s.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt); err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored observation time: %w", err)
+	if s.ObservedAt, err = parseStoredTimeField("stored observation time", observedAt); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
-	if s.Weekly.ResetsAt, err = time.Parse(time.RFC3339Nano, weeklyReset); err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored weekly reset: %w", err)
+	if s.Weekly.ResetsAt, err = parseStoredTimeField("stored weekly reset", weeklyReset); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
 	if shortRemaining.Valid != shortReset.Valid {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("stored short window is incomplete")
 	}
 	if shortRemaining.Valid {
-		parsed, err := time.Parse(time.RFC3339Nano, shortReset.String)
+		parsed, err := parseStoredTimeField("stored short reset", shortReset.String)
 		if err != nil {
-			return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored short reset: %w", err)
+			return decision.UsageSnapshot{}, nil, err
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
@@ -716,9 +716,9 @@ FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotI
 			&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds, &allowance.ResetInferred); err != nil {
 			return nil, fmt.Errorf("scan allowance window: %w", err)
 		}
-		allowance.ResetsAt, err = time.Parse(time.RFC3339Nano, reset)
+		allowance.ResetsAt, err = parseStoredTimeField("allowance reset", reset)
 		if err != nil {
-			return nil, fmt.Errorf("parse allowance reset: %w", err)
+			return nil, err
 		}
 		allowances = append(allowances, allowance)
 	}

@@ -110,16 +110,20 @@ func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 		&observation.CacheCreationTokens, &observation.Confidence); err != nil {
 		return capacity.TokenObservation{}, fmt.Errorf("scan token observation: %w", err)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, observedAt)
+	parsed, err := parseStoredTimeField("token observation time", observedAt)
 	if err != nil {
-		return capacity.TokenObservation{}, fmt.Errorf("parse token observation time: %w", err)
+		return capacity.TokenObservation{}, err
 	}
 	observation.ObservedAt = parsed
 	return observation, nil
 }
 
+// formatTokenTime intentionally diverges from formatTime: fixed-width
+// fractions preserve chronological order in SQLite TEXT keys, which plain
+// RFC3339Nano does not (it trims trailing zero fractional digits). Decoding
+// still goes through the shared parseStoredTimeField, since parsing doesn't
+// depend on the fixed width.
 func formatTokenTime(value time.Time) string {
-	// Fixed-width fractions preserve chronological order in SQLite TEXT keys.
 	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 }
 
@@ -132,9 +136,5 @@ func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source st
 	if value == "" {
 		return time.Time{}, nil
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse latest token observation time: %w", err)
-	}
-	return parsed, nil
+	return parseStoredTimeField("latest token observation time", value)
 }
