@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,53 @@ import (
 	"github.com/jfox/redline/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+func TestOpenRestrictsDatabaseFilePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("database file mode = %o, want 0600", perm)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		info, err := os.Stat(path + suffix)
+		if err != nil {
+			t.Fatalf("stat %s%s: %v", path, suffix, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s%s mode = %o, want 0600", path, suffix, perm)
+		}
+	}
+}
+
+func TestOpenTightensPreExistingWorldReadableDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("database file mode = %o, want 0600 after opening a pre-existing 0644 database", perm)
+	}
+}
 
 func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,15 @@ func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("database path is required")
 	}
+	// The database holds task prompts, harness/prepare/finalize shell commands
+	// (which operators may embed credentials in), and runtime connection
+	// credential references. Restrict it like the API token and artifact
+	// files rather than leaving it at the process umask's default, which is
+	// commonly world-readable (0644) and would let any other local account
+	// read it straight off disk, bypassing the HTTP bearer-token boundary.
+	if err := restrictToOwner(path); err != nil {
+		return nil, err
+	}
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
@@ -32,12 +42,38 @@ func Open(path string) (*DB, error) {
 		database.Close()
 		return nil, fmt.Errorf("configure SQLite database: %w", err)
 	}
+	// WAL mode creates -wal and -shm sidecar files, which hold uncommitted
+	// page data and are just as sensitive as the main database file.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			database.Close()
+			return nil, fmt.Errorf("restrict SQLite auxiliary file %q: %w", path+suffix, err)
+		}
+	}
 	store := &DB{db: database}
 	if err := store.migrate(context.Background()); err != nil {
 		database.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+// restrictToOwner ensures the database file exists and is only accessible by
+// its owner. It fixes permissions on a pre-existing file too, so upgrading
+// from a version that created the database with the default umask still
+// tightens access on next start.
+func restrictToOwner(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("create SQLite database %q: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("create SQLite database %q: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("restrict SQLite database %q: %w", path, err)
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.db.Close() }
