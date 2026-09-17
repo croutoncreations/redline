@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Redline now builds and runs on Linux and Windows in addition to macOS: the CLI resolves a
+  platform-appropriate default data directory (`~/.config/redline` on Linux,
+  `%AppData%\redline` on Windows, unchanged `~/Library/Application Support/Redline` on macOS),
+  workspace/notification hooks and the `command` harness type run through `cmd.exe` on Windows
+  instead of assuming `/bin/sh`, and CI now cross-compiles for linux/windows on amd64/arm64 and
+  runs a Linux and Windows smoke test of `serve`, `health`, `scheduler status`, and `task list`.
 - Added a `redline demo` staging mode that seeds fully isolated, synthetic usage, discovery,
   revision, Hermes, and execution state for screenshots, recordings, and release rehearsals, with
   synthetic data clearly labeled in both the web dashboard and native menu-bar UI.
@@ -20,6 +26,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Added launch screenshots and a README gallery covering the CLI, dashboard, and native app,
   captured entirely from the new demo staging mode so no personal repositories, paths, or live
   data appear in the images.
+
+### Changed
+
+- `usage_monitor.gatepost_database` is now optional. Gatepost is an unreleased, private tool; the
+  bundled `config.example.yaml` no longer requires it, and enabling `usage_monitor` without it
+  simply skips the Gatepost/Pi import (still recording Redline's own run token counts) instead of
+  producing a recurring error on every monitor cycle. A path that is explicitly configured but
+  points at a missing file is skipped the same way; a configured path that exists but fails to
+  open or query still surfaces an error.
+- Renamed the LaunchAgent label from `com.jfox.redline` to `com.croutoncreations.redline` ahead of
+  public release under the `croutoncreations` GitHub org. Existing installs with the old
+  `com.jfox.redline` LaunchAgent are still detected and offered the same in-app migration (stop,
+  back up, and hand ownership to the app) so upgrading users are not left with two competing
+  agents. The app's bundle identifier (`ai.redline.mac`) is unchanged.
 
 ### Fixed
 
