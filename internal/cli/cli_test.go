@@ -415,6 +415,24 @@ func TestTaskDisableConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+func TestTaskRetryPrintsCorrectPastTense(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tasks/review/retry" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"id":"review","name":"Review","state":"queued"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "task", "retry", "review"},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 0 || stdout.String() != "retried task review\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestSchedulerExecuteConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/scheduler/execute" {

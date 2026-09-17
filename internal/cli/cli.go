@@ -669,13 +669,20 @@ func runResource(
 		if *jsonOutput || args[0] == "dispatch" {
 			writeJSON(stdout, output)
 		} else {
-			fmt.Fprintf(stdout, "%sd task %s\n", args[0], task.ID)
+			fmt.Fprintf(stdout, "%s task %s\n", taskControlPastTense(args[0]), task.ID)
 		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown %s command %q\n", strings.TrimSuffix(resource, "s"), args[0])
 		return 1
 	}
+}
+
+func taskControlPastTense(action string) string {
+	if action == "retry" {
+		return "retried"
+	}
+	return action + "d"
 }
 
 func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
