@@ -163,6 +163,27 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "scheduler status failed" }
             & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 task list
             if ($LASTEXITCODE -ne 0) { throw "task list failed" }
+
+            # Probe the API token's effective ACL. Redline creates api-token
+            # beside the config with 0600, which Windows ignores; the file
+            # inherits its directory's DACL instead. Print it, then fail if a
+            # broad group can read it.
+            $tokenPath = Join-Path (Get-Location) "api-token"
+            if (-not (Test-Path $tokenPath)) { throw "api-token was not created at $tokenPath" }
+            $acl = Get-Acl -Path $tokenPath
+            Write-Host "--- api-token owner: $($acl.Owner)"
+            Write-Host "--- api-token ACL:"
+            $acl.Access | Format-Table IdentityReference, FileSystemRights, AccessControlType, IsInherited -AutoSize | Out-String | Write-Host
+            $broad = $acl.Access | Where-Object {
+              $_.AccessControlType -eq "Allow" -and
+              $_.IdentityReference.Value -match '^(BUILTIN\\Users|Everyone|NT AUTHORITY\\Authenticated Users|NT AUTHORITY\\INTERACTIVE)$' -and
+              ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadData)
+            }
+            if ($broad) {
+              $names = ($broad | ForEach-Object { $_.IdentityReference.Value }) -join ", "
+              throw "api-token is readable by broad groups: $names"
+            }
+            Write-Host "--- api-token ACL check passed: no broad group has read access"
           }
           finally {
             if (-not $process.HasExited) {
