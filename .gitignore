@@ -2,6 +2,8 @@
 *.db-*
 bin/
 /redline
+/redline.yaml
+/api-token
 .artifacts/
 .devx/*
 !.devx/README.md
