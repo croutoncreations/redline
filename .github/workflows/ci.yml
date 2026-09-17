@@ -135,43 +135,44 @@ jobs:
               trigger_margin: 0.02
               rolling_reserve: 0.25
           '@ | Set-Content -Path smoke-config.yaml -Encoding utf8
-      - name: Start service
+      # Windows runners terminate a step's process tree when the step ends, so
+      # the service must be started, exercised, and stopped within one step.
+      - name: Serve, wait for health, exercise, stop
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path smoke-state | Out-Null
           $process = Start-Process -FilePath .\redline.exe `
             -ArgumentList "--config", "smoke-config.yaml", "serve", "--listen", "127.0.0.1:7436" `
             -RedirectStandardOutput serve.out.log -RedirectStandardError serve.err.log `
             -PassThru -NoNewWindow
-          $process.Id | Out-File -FilePath serve.pid -Encoding ascii
-      - name: Wait for health
-        shell: pwsh
-        run: |
-          $healthy = $false
-          for ($i = 0; $i -lt 30; $i++) {
-            & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 health
-            if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
-            Start-Sleep -Seconds 1
+          try {
+            $healthy = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              if ($process.HasExited) {
+                throw "redline serve exited early with code $($process.ExitCode)"
+              }
+              & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 health
+              if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) {
+              throw "redline did not become healthy in time (process alive: $(-not $process.HasExited))"
+            }
+            & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 scheduler status
+            if ($LASTEXITCODE -ne 0) { throw "scheduler status failed" }
+            & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 task list
+            if ($LASTEXITCODE -ne 0) { throw "task list failed" }
           }
-          if (-not $healthy) {
-            Write-Error "redline did not become healthy in time"
-            Get-Content serve.out.log, serve.err.log -ErrorAction SilentlyContinue
-            exit 1
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "--- serve.out.log"
+            Get-Content serve.out.log -ErrorAction SilentlyContinue
+            Write-Host "--- serve.err.log"
+            Get-Content serve.err.log -ErrorAction SilentlyContinue
           }
-      - name: Exercise scheduler status and task list
-        shell: pwsh
-        run: |
-          & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 scheduler status
-          & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 task list
-      - name: Stop service
-        if: always()
-        shell: pwsh
-        run: |
-          if (Test-Path serve.pid) {
-            $processId = Get-Content serve.pid
-            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-          }
-          Get-Content serve.out.log, serve.err.log -ErrorAction SilentlyContinue
 
   macos:
     runs-on: macos-15
