@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 type ContextStore interface {

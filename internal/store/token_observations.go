@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 )
 
 func (d *DB) SaveTokenObservations(ctx context.Context, observations []capacity.TokenObservation) (int, error) {

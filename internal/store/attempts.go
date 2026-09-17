@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func (d *DB) RecordDispatchAttempt(ctx context.Context, attempt domain.DispatchAttempt) (int64, error) {

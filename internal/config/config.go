@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 	"gopkg.in/yaml.v3"
 )
 

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/notification"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/notification"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 func TestCommandSinkSendsJSONOnStdinAndMetadataInEnvironment(t *testing.T) {

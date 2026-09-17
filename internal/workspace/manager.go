@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)

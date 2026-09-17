@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 func TestTokenObservationsAreIdempotentAndQueryableByProvider(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/tokenlog"
+	"github.com/croutoncreations/redline/internal/tokenlog"
 	_ "modernc.org/sqlite"
 )
 

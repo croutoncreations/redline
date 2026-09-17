@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/activity"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/harness"
-	"github.com/jfox/redline/internal/workspace"
+	"github.com/croutoncreations/redline/internal/activity"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
+	"github.com/croutoncreations/redline/internal/workspace"
 )
 
 type Store interface {

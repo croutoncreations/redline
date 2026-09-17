@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 // TestUnreadRunActivityCountAndMarkAllRead exercises MarkAllRunActivityRead and

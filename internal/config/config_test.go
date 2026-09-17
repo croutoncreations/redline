@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestLoadParsesTrustedAPIHosts(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func validateRuntimeConnection(item domain.RuntimeConnection) error {

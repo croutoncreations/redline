@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 	_ "modernc.org/sqlite"
 )
 

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/harness"
-	"github.com/jfox/redline/internal/hermes"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
+	"github.com/croutoncreations/redline/internal/hermes"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 func TestCodexAdapterBuildsNoninteractiveCommand(t *testing.T) {

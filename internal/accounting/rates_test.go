@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/accounting"
+	"github.com/croutoncreations/redline/internal/accounting"
 )
 
 func TestClaudeQuotesModelAndCacheClassesAsAPIDollarEquivalent(t *testing.T) {

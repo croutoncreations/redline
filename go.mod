@@ -1,4 +1,4 @@
-module github.com/jfox/redline
+module github.com/croutoncreations/redline
 
 go 1.25.13
 

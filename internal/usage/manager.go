@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 type Source interface {

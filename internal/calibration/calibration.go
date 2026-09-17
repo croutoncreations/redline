@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 type Confidence string

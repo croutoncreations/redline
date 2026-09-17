@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func (d *DB) RecordRunEvent(ctx context.Context, event domain.RunEvent) (domain.RunEvent, error) {

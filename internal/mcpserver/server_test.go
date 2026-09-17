@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/apiclient"
-	"github.com/jfox/redline/internal/mcpserver"
+	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

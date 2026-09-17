@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 )
 
 var piSubscriptionProvider = map[string]string{

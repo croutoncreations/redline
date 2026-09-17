@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 type Store interface {

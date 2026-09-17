@@ -13,12 +13,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jfox/redline/internal/apiclient"
-	"github.com/jfox/redline/internal/artifacts"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
