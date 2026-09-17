@@ -17,6 +17,8 @@ test-results/
 macos/.build/
 dist/
 
+relay-identity.json
+
 # Per-worktree developer scaffolding. These are generated per branch and
 # hardcode absolute worktree paths, local ports, and personal hostnames, so
 # they are never portable between machines.
