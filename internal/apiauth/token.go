@@ -45,6 +45,10 @@ func EnsureToken(configPath string) (string, error) {
 	if err := file.Close(); err != nil {
 		return "", fmt.Errorf("close API token %q: %w", path, err)
 	}
+	if err := protectTokenFile(path); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("secure API token %q: %w", path, err)
+	}
 	return token, nil
 }
 
@@ -82,6 +86,9 @@ func RotateToken(configPath string) (string, error) {
 	}
 	if err := temporary.Close(); err != nil {
 		return "", fmt.Errorf("close replacement API token: %w", err)
+	}
+	if err := protectTokenFile(temporaryPath); err != nil {
+		return "", fmt.Errorf("secure replacement API token: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return "", fmt.Errorf("replace API token %q: %w", path, err)

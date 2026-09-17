@@ -14,6 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   workspace/notification hooks and the `command` harness type run through `cmd.exe` on Windows
   instead of assuming `/bin/sh`, and CI now cross-compiles for linux/windows on amd64/arm64 and
   runs a Linux and Windows smoke test of `serve`, `health`, `scheduler status`, and `task list`.
+  On Windows the `api-token` file receives an explicit owner-only ACL (current user and SYSTEM)
+  when created or rotated, since the POSIX `0600` mode is ignored there and the file would
+  otherwise inherit its directory's permissions; the Windows smoke test asserts this.
 - Added a `redline demo` staging mode that seeds fully isolated, synthetic usage, discovery,
   revision, Hermes, and execution state for screenshots, recordings, and release rehearsals, with
   synthetic data clearly labeled in both the web dashboard and native menu-bar UI.
