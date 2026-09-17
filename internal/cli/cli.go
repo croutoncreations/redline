@@ -250,7 +250,13 @@ func prepareDemoState(requested string) (string, bool, error) {
 		return "", false, err
 	}
 	if production, prodErr := appdir.Default(); prodErr == nil {
-		if root == production {
+		// Windows paths are case-insensitive; filepath.Abs does not
+		// canonicalize case, so compare case-insensitively there.
+		sameDirectory := root == production
+		if runtime.GOOS == "windows" {
+			sameDirectory = strings.EqualFold(root, production)
+		}
+		if sameDirectory {
 			return "", false, fmt.Errorf("demo state cannot use Redline's production state directory")
 		}
 	}
