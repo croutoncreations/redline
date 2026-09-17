@@ -112,6 +112,20 @@ public struct LegacyLaunchAgent: Equatable, Sendable {
         }
         return nil
     }
+
+    /// Discovers a legacy LaunchAgent by checking each candidate plist path in
+    /// order and returning the first one found. This lets a LaunchAgent label
+    /// rename (e.g. com.jfox.redline -> com.croutoncreations.redline) keep
+    /// recognizing an install at the pre-rename path as legacy, so upgrading
+    /// users are migrated into the app rather than ending up with two agents.
+    public static func discoverLegacy(atCandidatePaths plistURLs: [URL]) throws -> LegacyLaunchAgent? {
+        for plistURL in plistURLs {
+            if let agent = try discover(at: plistURL) {
+                return agent
+            }
+        }
+        return nil
+    }
 }
 
 public struct InstallationIssue: Equatable, Sendable {

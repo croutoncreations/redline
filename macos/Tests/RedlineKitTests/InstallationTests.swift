@@ -145,6 +145,45 @@ import Testing
     #expect(agent.executableURL == URL(fileURLWithPath: "/usr/local/bin/redline"))
 }
 
+@Test func discoverLegacyRecognizesPreRenameLaunchAgentLabel() throws {
+    // The LaunchAgent label was renamed from com.jfox.redline to
+    // com.croutoncreations.redline. Existing installs may still have a
+    // plist at the old path; it must still be discovered as a legacy agent
+    // so upgrading users are migrated instead of ending up with two agents.
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let preRenamePlist = root.appending(path: "com.jfox.redline.plist")
+    let renamedPlist = root.appending(path: "com.croutoncreations.redline.plist")
+    let config = root.appending(path: "redline.yaml")
+    let payload: [String: Any] = [
+        "Label": "com.jfox.redline",
+        "ProgramArguments": ["/usr/local/bin/redline", "--config", config.path, "serve"],
+    ]
+    let data = try PropertyListSerialization.data(fromPropertyList: payload, format: .xml, options: 0)
+    try data.write(to: preRenamePlist)
+
+    let discovered = try LegacyLaunchAgent.discoverLegacy(atCandidatePaths: [preRenamePlist, renamedPlist])
+    let agent = try #require(discovered)
+    #expect(agent.label == "com.jfox.redline")
+    #expect(agent.plistURL == preRenamePlist)
+    #expect(agent.configURL == config)
+
+    // Once migrated onto the new label, the pre-rename path no longer
+    // exists and the renamed path is discovered instead.
+    try FileManager.default.removeItem(at: preRenamePlist)
+    let renamedPayload: [String: Any] = [
+        "Label": "com.croutoncreations.redline",
+        "ProgramArguments": ["/usr/local/bin/redline", "--config", config.path, "serve"],
+    ]
+    let renamedData = try PropertyListSerialization.data(fromPropertyList: renamedPayload, format: .xml, options: 0)
+    try renamedData.write(to: renamedPlist)
+    let afterMigration = try #require(try LegacyLaunchAgent.discoverLegacy(atCandidatePaths: [preRenamePlist, renamedPlist]))
+    #expect(afterMigration.label == "com.croutoncreations.redline")
+
+    #expect(try LegacyLaunchAgent.discoverLegacy(atCandidatePaths: []) == nil)
+}
+
 @Test func legacyServiceIssuePersistsUntilTheAgentIsRemoved() throws {
     let plist = URL(fileURLWithPath: "/Users/test/Library/LaunchAgents/com.jfox.redline.plist")
     let config = URL(fileURLWithPath: "/Users/test/Library/Application Support/Redline/redline.yaml")
