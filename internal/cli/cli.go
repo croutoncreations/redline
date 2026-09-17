@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/apiauth"
 	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/appdir"
 	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/calibration"
 	"github.com/croutoncreations/redline/internal/capacity"
@@ -184,7 +186,7 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	fmt.Fprintf(stdout, "Synthetic state: %s\n", root)
 	fmt.Fprintln(stdout, "This process does not read real Redline data or invoke provider harnesses.")
 	if *openDashboard {
-		if err := exec.Command("open", address).Start(); err != nil {
+		if err := openInBrowser(address); err != nil {
 			fmt.Fprintf(stderr, "open dashboard: %v\n", err)
 		}
 	}
@@ -206,6 +208,21 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	}
 	apiServer.Wait()
 	return 0
+}
+
+// openInBrowser opens address in the platform's default browser. macOS uses
+// "open", Windows uses "cmd /c start" (the leading "" argument is the empty
+// window-title start expects), and everything else falls back to xdg-open,
+// which most Linux desktop environments provide.
+func openInBrowser(address string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", address).Start()
+	case "windows":
+		return exec.Command("cmd", "/c", "start", "", address).Start()
+	default:
+		return exec.Command("xdg-open", address).Start()
+	}
 }
 
 func validateDemoListen(address string) error {
@@ -232,8 +249,7 @@ func prepareDemoState(requested string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		production := filepath.Join(home, "Library", "Application Support", "Redline")
+	if production, prodErr := appdir.Default(); prodErr == nil {
 		if root == production {
 			return "", false, fmt.Errorf("demo state cannot use Redline's production state directory")
 		}
@@ -486,11 +502,11 @@ func resolveTokenConfigPath(configPath string) string {
 	if configPath != "redline.yaml" {
 		return configPath
 	}
-	home, err := os.UserHomeDir()
+	dataDir, err := appdir.Default()
 	if err != nil {
 		return configPath
 	}
-	standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
+	standard := filepath.Join(dataDir, "redline.yaml")
 	if _, err := apiauth.ReadToken(standard); err != nil {
 		return configPath
 	}

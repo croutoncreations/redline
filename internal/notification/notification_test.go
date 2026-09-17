@@ -24,7 +24,8 @@ func TestCommandSinkSendsJSONOnStdinAndMetadataInEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.command.Name != "/bin/sh" || strings.Join(runner.command.Args, " ") != "-lc ./notify" ||
+	wantName, wantArgs := redprocess.ShellCommand("./notify")
+	if runner.command.Name != wantName || strings.Join(runner.command.Args, " ") != strings.Join(wantArgs, " ") ||
 		!strings.Contains(runner.stdin, `"type":"run.completed"`) ||
 		!containsNotificationEnv(runner.command.Env, "REDLINE_EVENT_TYPE=run.completed") {
 		t.Fatalf("command=%#v stdin=%s", runner.command, runner.stdin)

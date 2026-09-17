@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -102,7 +103,10 @@ func ReadToken(configPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// Windows has no POSIX permission bits: os.Stat reports a fixed mode
+	// (typically 0666/0444) regardless of ACLs, so this check would always
+	// fail there. Skip it on Windows rather than rejecting every token.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("API token %q must not be accessible by group or other users", path)
 	}
 	data, err := os.ReadFile(path)

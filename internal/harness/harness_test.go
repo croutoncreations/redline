@@ -198,7 +198,8 @@ func TestGenericCommandHarnessReceivesPromptAndEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.command.Name != "/bin/sh" || strings.Join(runner.command.Args, " ") != "-lc agent --run" || runner.stdin != "do work" {
+	wantName, wantArgs := redprocess.ShellCommand("agent --run")
+	if runner.command.Name != wantName || strings.Join(runner.command.Args, " ") != strings.Join(wantArgs, " ") || runner.stdin != "do work" {
 		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
 	}
 	if !contains(runner.command.Env, "REDLINE_RUN_ID=run-3") ||

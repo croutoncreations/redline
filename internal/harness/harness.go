@@ -323,8 +323,7 @@ func buildCommand(
 		if request.Profile.HarnessCommand == "" {
 			return redprocess.Command{}, fmt.Errorf("command harness requires harness_command")
 		}
-		base.Name = "/bin/sh"
-		base.Args = []string{"-lc", request.Profile.HarnessCommand}
+		base.Name, base.Args = redprocess.ShellCommand(request.Profile.HarnessCommand)
 		base.Stdin = strings.NewReader(prompt)
 	default:
 		return redprocess.Command{}, fmt.Errorf("unsupported harness %q", request.Profile.HarnessType)
