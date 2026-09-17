@@ -613,7 +613,14 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// formatTime uses a fixed-width fractional-seconds layout rather than
+// time.RFC3339Nano: RFC3339Nano omits the fraction entirely when it is
+// exactly zero, which makes whole-second timestamps sort lexicographically
+// *after* fractional ones in the same second, breaking every ORDER BY/>=/<
+// comparison SQLite does on these TEXT columns.
+func formatTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 func parseStoredTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)

@@ -41,6 +41,41 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// TestSQLiteLatestSnapshotOrdersByRealTimeNotStringLexOrder guards against a
+// timestamp-encoding bug: RFC3339Nano omits the fractional-seconds field
+// entirely when it is exactly zero, so a whole-second timestamp ("...:00Z")
+// sorts lexicographically *after* a fractional one in the same second
+// ("...:00.5Z"), even though it is chronologically earlier.
+func TestSQLiteLatestSnapshotOrdersByRealTimeNotStringLexOrder(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Lands exactly on the second (ns=0), mimicking an external tool that
+	// reports whole-second timestamps.
+	older := usageSnapshot(time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC), .52)
+	older.Source = "openusage"
+	// Genuinely later, but within the same second.
+	newer := usageSnapshot(older.ObservedAt.Add(500*time.Millisecond), .51)
+	newer.Source = "native"
+	if err := db.SaveSnapshot(t.Context(), older, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(t.Context(), newer, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(t.Context(), older.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "native" || !got.ObservedAt.Equal(newer.ObservedAt) {
+		t.Fatalf("latest = %#v, want the chronologically newer snapshot", got)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
