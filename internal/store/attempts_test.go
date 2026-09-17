@@ -73,3 +73,29 @@ func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
 		t.Fatalf("attempts = %#v", got)
 	}
 }
+
+// formatTime uses RFC3339Nano, which trims trailing zeros from the fractional
+// seconds. That produces variable-length timestamp strings, and SQLite
+// compares TEXT columns byte-wise -- so a record completed 50ms after the
+// range's lower bound can still fail the ">=" comparison and be wrongly
+// excluded, because the shorter string's terminating "Z" outranks the digit
+// that would have continued the longer string.
+func TestListDispatchAttemptsRangeIncludesRecordsWithLongerFractionalSeconds(t *testing.T) {
+	db := openTaskDB(t)
+	since := time.Date(2026, 8, 1, 0, 0, 0, 100_000_000, time.UTC) // formats to ...T00:00:00.1Z
+	until := since.Add(time.Hour)
+	completedAt := since.Add(50 * time.Millisecond) // formats to ...T00:00:00.15Z, chronologically after since
+	if _, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{
+		ProviderAccountID: "codex", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT",
+		StartedAt: completedAt, CompletedAt: completedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ListDispatchAttemptsRange(context.Background(), "automatic", since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ProviderAccountID != "codex" {
+		t.Fatalf("attempts = %#v, want the record completed 50ms after `since` to be included", got)
+	}
+}
