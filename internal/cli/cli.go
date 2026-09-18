@@ -116,7 +116,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 }
 
 func writeHelp(output io.Writer) {
-	fmt.Fprintln(output, "Redline — budget-aware dispatch for deferred LLM work")
+	fmt.Fprintln(output, "Redline - budget-aware dispatch for deferred LLM work")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")

@@ -100,7 +100,7 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
 		writable, ok := store.(writableSecretStore)
 		if !ok {
-			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential—run `claude auth login`")
+			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential - run `claude auth login`")
 		}
 		if file.ClaudeAIOAuth.RefreshToken == "" {
 			return Credential{}, fmt.Errorf("claude token expired without a refresh token")

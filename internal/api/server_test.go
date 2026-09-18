@@ -3429,8 +3429,8 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 // When this fails: bump CACHE in sw.js, then update wantCacheName and
 // wantFingerprint below.
 func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
-	const wantCacheName = "redline-mobile-v2"
-	const wantFingerprint = "c98ef22d08734fd8"
+	const wantCacheName = "redline-mobile-v3"
+	const wantFingerprint = "2b834f1c2377fc40"
 
 	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
 	if err != nil {

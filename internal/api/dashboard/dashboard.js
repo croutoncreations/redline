@@ -949,10 +949,10 @@ async function updateTaskRuntimeJobs(selected='') {
     const jobs=await apiRequest(`/v1/runtime-connections/${encodeURIComponent(context.runtime_connection_id)}/jobs`);
     select.innerHTML='<option value="">New Hermes session from prompt</option>' + jobs.map(job => {
       const details=[job.provider,job.model,job.enabled ? '' : 'disabled'].filter(Boolean).join(' · ');
-      return `<option value="${escapeHTML(job.id)}">${escapeHTML(job.name || job.id)}${details ? ` — ${escapeHTML(details)}` : ''}</option>`;
+      return `<option value="${escapeHTML(job.id)}">${escapeHTML(job.name || job.id)}${details ? ` - ${escapeHTML(details)}` : ''}</option>`;
     }).join('');
     if (selected && !jobs.some(job => job.id === selected)) {
-      select.innerHTML += `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} — unavailable</option>`;
+      select.innerHTML += `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} - unavailable</option>`;
     }
     select.value=selected || '';
     status.textContent=`${jobs.length} existing job${jobs.length === 1 ? '' : 's'} available from ${context.runtime_connection_id}.`;
@@ -1043,7 +1043,7 @@ function providerKind() {
 }
 function modelLabel(model) {
   const detail = [model.context_window ? `${model.context_window} context` : '', model.max_output ? `${model.max_output} output` : ''].filter(Boolean).join(' · ');
-  const identity = model.label && model.label !== model.id ? `${model.label} — ${model.id}` : model.id;
+  const identity = model.label && model.label !== model.id ? `${model.label} - ${model.id}` : model.id;
   return detail ? `${identity} · ${detail}` : identity;
 }
 function suggestedModels(harness) {

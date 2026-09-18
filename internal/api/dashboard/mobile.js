@@ -376,7 +376,7 @@ function renderCandidates(data, providerID) {
     const cardClass = `m-candidate-card${eligible ? ' eligible' : ''}`;
     const reasonClass = `m-candidate-reason${eligible ? ' eligible' : ''}`;
     const reason = eligible
-      ? (ready ? 'Eligible — will dispatch next' : `Eligible (provider not ready: ${data.provider_reason || 'unknown'})`)
+      ? (ready ? 'Eligible - will dispatch next' : `Eligible (provider not ready: ${data.provider_reason || 'unknown'})`)
       : (c.reason || 'Not eligible');
     return `<div class="${esc(cardClass)}" data-testid="candidate-${esc(c.task_id)}">
       <div class="m-candidate-header">

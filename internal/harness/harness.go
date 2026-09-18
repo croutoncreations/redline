@@ -334,7 +334,7 @@ func buildCommand(
 func claudeWorkspaceBoundary(directory string) string {
 	return fmt.Sprintf(
 		`Your exact workspace directory is %q. Perform all task work inside that directory. `+
-			`Resolve every relative path from that directory, and use that directory—not another checkout—as the project root. `+
+			`Resolve every relative path from that directory, and use that directory - not another checkout - as the project root. `+
 			`Do not read or modify a parent checkout or another worktree.`,
 		directory,
 	)
