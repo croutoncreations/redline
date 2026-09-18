@@ -572,7 +572,7 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	var shortReset any
 	if s.Short != nil {
 		shortRemaining = s.Short.Remaining
-		shortReset = s.Short.ResetsAt.Format(time.RFC3339Nano)
+		shortReset = formatTime(s.Short.ResetsAt)
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -587,11 +587,11 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 		ctx,
 		query,
 		s.Provider,
-		s.ObservedAt.Format(time.RFC3339Nano),
+		formatTime(s.ObservedAt),
 		shortRemaining,
 		shortReset,
 		s.Weekly.Remaining,
-		s.Weekly.ResetsAt.Format(time.RFC3339Nano),
+		formatTime(s.Weekly.ResetsAt),
 		s.Source,
 		s.Confidence,
 		raw,
@@ -618,7 +618,7 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
 			allowance.Scope, allowance.Role, allowance.Remaining,
-			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds, allowance.ResetInferred)
+			formatTime(allowance.ResetsAt), allowance.PeriodDurationSeconds, allowance.ResetInferred)
 		if err != nil {
 			return fmt.Errorf("save allowance %q: %w", allowance.Key, err)
 		}

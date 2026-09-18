@@ -613,7 +613,15 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// formatTime uses a fixed-width fractional second so lexicographic TEXT
+// comparison in SQLite (ORDER BY, >=, <=) agrees with chronological order.
+// time.RFC3339Nano omits the fraction entirely when it is zero, which makes a
+// whole-second timestamp ("...:00Z") sort after any timestamp in the same
+// second that has a fractional remainder ("...:00.5Z" < "...:00Z" byte-wise,
+// since '.' < 'Z'), even though the fractional timestamp happened later.
+func formatTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 func parseStoredTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)

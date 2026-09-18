@@ -41,6 +41,40 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// Observation timestamps are stored as RFC3339Nano text and compared/ordered
+// as SQLite TEXT. RFC3339Nano omits the fractional field entirely when
+// nanoseconds are zero, so a whole-second timestamp ("...:00Z") sorts after
+// any timestamp in the same second that has a fractional remainder
+// ("...:00.5Z" < "...:00Z" byte-wise, since '.' < 'Z'), even though the
+// fractional timestamp is chronologically later. LatestSnapshot must still
+// pick the snapshot that actually happened last.
+func TestSQLiteLatestSnapshotOrdersChronologicallyNotLexicographically(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	earlier := usageSnapshot(time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC), 0.50)
+	later := usageSnapshot(time.Date(2026, 7, 16, 18, 0, 0, 500_000_000, time.UTC), 0.40)
+	if err := db.SaveSnapshot(ctx, earlier, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(ctx, later, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(later.ObservedAt) || got.Weekly.Remaining != 0.40 {
+		t.Fatalf("latest = %#v, want the chronologically later snapshot (observed_at=%s, remaining=0.40)",
+			got, later.ObservedAt)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
