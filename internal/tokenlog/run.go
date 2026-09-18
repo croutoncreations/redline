@@ -69,6 +69,17 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			if record.Type != "turn.completed" {
 				continue
 			}
+			// Overwrite rather than accumulate. turn.completed.usage is
+			// ThreadTokenUsage.total, a running session total, not that turn's
+			// own usage: codex exec discards the per-request .last delta when
+			// building the JSONL stream (openai/codex#17539). Summing across
+			// records would therefore add cumulative totals to each other and
+			// over-report by roughly N(N+1)/2 for N turns.
+			//
+			// Redline also runs `codex exec` once per run and never `exec
+			// resume`, so a run is a single turn in practice. Both halves of
+			// this have been proposed as bug fixes more than once; see
+			// TestLoadRunArtifactKeepsLastCodexTotalRatherThanSumming.
 			input := record.Usage.InputTokens - record.Usage.CachedInputTokens
 			if input < 0 {
 				input = 0
