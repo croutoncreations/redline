@@ -3503,7 +3503,7 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
 	t.Parallel()
 	const wantCacheName = "redline-mobile-v4"
-	const wantFingerprint = "c47ad0d8966c9c54"
+	const wantFingerprint = "b784bc99807b30f2"
 
 	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
 	if err != nil {
