@@ -456,8 +456,9 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 // Deliberately excluded are the columns defaulting to SQLite's
 // CURRENT_TIMESTAMP (provider_controls.updated_at, schema_migrations.applied_at,
 // usage_snapshots.created_at, token_observations.created_at). Those hold
-// "YYYY-MM-DD HH:MM:SS", never RFC3339, and are not used for ordering. The
-// guard below skips them anyway, but leaving them out keeps the intent clear.
+// "YYYY-MM-DD HH:MM:SS", never RFC3339, and are not used for ordering. Values
+// that do not parse as RFC3339 are left untouched anyway, but leaving these
+// columns out keeps the intent clear.
 var fixedWidthTimestampColumns = []struct{ table, column string }{
 	{"agent_contexts", "created_at"},
 	{"dispatch_attempts", "started_at"},
@@ -482,7 +483,7 @@ var fixedWidthTimestampColumns = []struct{ table, column string }{
 	{"usage_snapshots", "weekly_resets_at"},
 }
 
-// migrateFixedWidthTimestampsV24 rewrites RFC3339Nano timestamps written by
+// migrateFixedWidthTimestampsV24 rewrites RFC3339 timestamps written by
 // earlier versions into the fixed-width storedTimeLayout.
 //
 // Without this, the formatTime change only helps rows written after the
@@ -490,14 +491,20 @@ var fixedWidthTimestampColumns = []struct{ table, column string }{
 // "…T18:00:00.000000000Z", so ordering stays wrong until existing rows are
 // rewritten.
 //
-// The UPDATE pads the fractional part to nine digits:
-//   - no fraction   "…:00Z"       -> "…:00.000000000Z"
-//   - short         "…:00.5Z"     -> "…:00.500000000Z"
-//   - full width    unchanged (length 30 is already correct)
+// Each value is parsed in Go and re-encoded through formatTime rather than
+// rewritten with string surgery in SQL. That handles every RFC3339 form the
+// old writers could produce, including numeric offsets: SaveSnapshot used to
+// call Format(time.RFC3339Nano) directly, without formatTime's .UTC()
+// normalization, so a provider reporting "2026-07-16T20:00:00+05:00" was
+// stored with that offset intact. Such a value sorts above any "…Z" value
+// (all digits < 'Z'), which would have left a stale snapshot winning
+// ORDER BY observed_at DESC even after this migration.
 //
-// The LIKE guard restricts this to RFC3339 UTC values, so CURRENT_TIMESTAMP
-// values and NULLs pass through untouched. Timestamps are written via
-// value.UTC(), so a trailing "Z" is the only offset form that occurs.
+// Re-encoding through formatTime also guarantees the migration cannot drift
+// from the writer if storedTimeLayout ever changes.
+//
+// Values that do not parse as RFC3339 (notably SQLite CURRENT_TIMESTAMP,
+// "YYYY-MM-DD HH:MM:SS") and NULLs are left exactly as they are.
 func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
 	for _, target := range fixedWidthTimestampColumns {
 		// A database can reach this migration without every table present:
@@ -511,15 +518,53 @@ func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
 		if !exists {
 			continue
 		}
-		statement := fmt.Sprintf(`
-UPDATE %[1]s SET %[2]s = substr(%[2]s, 1, 19) || '.' ||
-    substr((CASE WHEN length(%[2]s) > 20 THEN substr(%[2]s, 21, length(%[2]s) - 21) ELSE '' END)
-        || '000000000', 1, 9) || 'Z'
-WHERE %[2]s IS NOT NULL
-  AND %[2]s LIKE '____-__-__T__:__:__%%Z'
-  AND length(%[2]s) <> 30`, target.table, target.column)
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("normalize %s.%s timestamps: %w", target.table, target.column, err)
+		if err := rewriteTimestampColumn(ctx, tx, target.table, target.column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewriteTimestampColumn re-encodes one column's RFC3339 values in place,
+// keyed by the existing value so no assumption is made about the table having
+// a usable primary key.
+func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column string) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT DISTINCT %[2]s FROM %[1]s WHERE %[2]s IS NOT NULL AND %[2]s <> ''`, table, column))
+	if err != nil {
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+	var stored []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s.%s timestamp: %w", table, column, err)
+		}
+		stored = append(stored, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+
+	for _, value := range stored {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			// Not an RFC3339 timestamp (e.g. a CURRENT_TIMESTAMP default).
+			// Leave it alone rather than guessing at its format.
+			continue
+		}
+		normalized := formatTime(parsed)
+		if normalized == value {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %[1]s SET %[2]s = ? WHERE %[2]s = ?`, table, column), normalized, value); err != nil {
+			return fmt.Errorf("normalize %s.%s timestamps: %w", table, column, err)
 		}
 	}
 	return nil

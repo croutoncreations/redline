@@ -182,8 +182,86 @@ INSERT INTO usage_snapshots (
 	}
 }
 
+// Before this change SaveSnapshot called Format(time.RFC3339Nano) directly,
+// without formatTime's .UTC() normalization, so a provider reporting a
+// numeric offset (openusage.parseTime preserves the parsed zone) was stored
+// as e.g. "2026-07-16T20:00:00+05:00". Digits sort below 'Z', so such a row
+// outranks every "…Z" value under ORDER BY observed_at DESC and keeps winning
+// LatestSnapshot even after newer rows arrive. The migration must normalize
+// offset forms to UTC, not just pad Z-form fractions.
+func TestMigrationNormalizesLegacyOffsetFormTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 20:00 at +05:00 is 15:00Z — earlier than the 16:00Z row added below.
+	plusFive := time.FixedZone("plus-five", 5*60*60)
+	legacy := time.Date(2026, 7, 16, 20, 0, 0, 0, plusFive).Format(time.RFC3339Nano)
+	if legacy != "2026-07-16T20:00:00+05:00" {
+		t.Fatalf("fixture encoding = %q, want an offset form", legacy)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+DELETE FROM schema_migrations WHERE version >= 24;
+INSERT INTO usage_snapshots (
+    provider, observed_at, short_remaining, short_resets_at,
+    weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+) VALUES ('codex', ?, 0.3, ?, 0.99, ?, 'openusage', 'high', '{"sequence":"legacy"}');`,
+		legacy, legacy, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// A genuinely newer snapshot, written after the upgrade.
+	newer := usageSnapshot(time.Date(2026, 7, 16, 16, 0, 0, 0, time.UTC), 0.11)
+	if err := db.SaveSnapshot(t.Context(), newer, []byte(`{"sequence":"new"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(newer.ObservedAt) || got.Weekly.Remaining != 0.11 {
+		t.Fatalf("latest = %#v, want the newer 16:00Z snapshot; a legacy offset row is still winning",
+			got)
+	}
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var stored string
+	if err := raw.QueryRow(
+		`SELECT observed_at FROM usage_snapshots WHERE raw_payload = '{"sequence":"legacy"}'`,
+	).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "2026-07-16T15:00:00.000000000Z" {
+		t.Fatalf("legacy observed_at = %q, want it normalized to UTC fixed width", stored)
+	}
+}
+
 // CURRENT_TIMESTAMP columns hold "YYYY-MM-DD HH:MM:SS", not RFC3339. The
-// migration's LIKE guard must leave them alone rather than corrupting them.
+// migration must leave values it cannot parse alone rather than corrupt them.
 func TestMigrationLeavesNonRFC3339TimestampsUntouched(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
 	db, err := store.Open(path)
