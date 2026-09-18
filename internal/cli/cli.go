@@ -858,8 +858,12 @@ func renderTerminalQR(output io.Writer, bitmap [][]bool) {
 	}
 	for y := -margin; y < len(bitmap)+margin; y += 2 {
 		for x := -margin; x < width+margin; x++ {
-			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
-			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			// go-qrcode sets bitmap[y][x] true for DARK modules ("bitmap[y][x]
+			// is true if the pixel at (x, y) is set"), so the cell value is
+			// used directly. Negating it inverted the code — rendering the
+			// quiet zone as solid ink — which scanners cannot read.
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && bitmap[y+1][x]
 			switch {
 			case top && bottom:
 				fmt.Fprint(output, "█")
