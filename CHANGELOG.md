@@ -20,6 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Added launch screenshots and a README gallery covering the CLI, dashboard, and native app,
   captured entirely from the new demo staging mode so no personal repositories, paths, or live
   data appear in the images.
+- Added a guided four-step first-run setup on the dashboard: it confirms each provider's CLI
+  installation, agent sign-in, and subscription-usage access; helps create a workspace and
+  execution profile with the account, harness, and model preselected where possible; and finishes
+  by creating a first job that's saved enabled (the global scheduler stays off until you turn it
+  on deliberately). It's safe to skip or interrupt — a resumable "Getting started" checklist stays
+  on the dashboard and picks up at the first incomplete step. New jobs created from the dashboard
+  now default to "Enabled after creation," with an explicit opt-out for saving a disabled draft.
+  Stock-Mac provider discovery and native app handoff around first launch are also more reliable.
 
 ### Fixed
 
