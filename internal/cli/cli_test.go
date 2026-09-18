@@ -427,6 +427,44 @@ func TestTaskDisableConsumesServiceAPI(t *testing.T) {
 	}
 }
 
+// The confirmation line built the past tense by appending "d" to the control
+// verb, which produced "retryd task review". The existing enable/disable
+// tests all pass --json, so none of them exercised this branch.
+func TestTaskControlConfirmationUsesCorrectPastTense(t *testing.T) {
+	for _, testCase := range []struct {
+		action string
+		state  string
+		want   string
+	}{
+		{action: "retry", state: "queued", want: "retried task review\n"},
+		{action: "enable", state: "queued", want: "enabled task review\n"},
+		{action: "disable", state: "disabled", want: "disabled task review\n"},
+	} {
+		t.Run(testCase.action, func(t *testing.T) {
+			wantPath := "/v1/tasks/review/" + testCase.action
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != wantPath {
+					t.Errorf("path = %s, want %s", r.URL.Path, wantPath)
+				}
+				_, _ = fmt.Fprintf(w, `{"id":"review","name":"Review","state":%q}`, testCase.state)
+			}))
+			defer server.Close()
+
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run(
+				[]string{"--api", server.URL, "task", testCase.action, "review"},
+				&stdout, &stderr, time.Now,
+			)
+			if exit != 0 {
+				t.Fatalf("exit = %d, stderr = %s", exit, stderr.String())
+			}
+			if stdout.String() != testCase.want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), testCase.want)
+			}
+		})
+	}
+}
+
 func TestSchedulerExecuteConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/scheduler/execute" {
