@@ -1,32 +1,196 @@
-# Redline
+<h1 align="center">Redline</h1>
 
-Redline is a budget-aware dispatcher for deferred LLM work. It models subscription
-allowances, maintains a durable priority queue, and explains which task would be admitted.
+<p align="center"><strong>Never waste your AI subscription quota again.</strong></p>
 
-Redline includes a local service, CLI, web dashboard, and native macOS menu-bar app. An opt-in
-scheduler evaluates configured providers and launches eligible Codex CLI, Claude Code, Pi, or
-generic-command tasks unattended.
+<p align="center">
+Redline watches your Codex and Claude allowances and dispatches queued agent jobs when there's
+capacity to spare - with an explanation for every decision.
+</p>
 
-**[Download Redline for macOS](https://github.com/croutoncreations/redline/releases/latest)** ·
-[Getting started](docs/getting-started.md) · [Demo staging](docs/demo-staging.md) · [Troubleshooting](docs/troubleshooting.md)
-
-Requires macOS 13 or later. Release builds are signed, notarized, and Universal for Apple Silicon
-and Intel Macs.
+<p align="center">
+  <a href="https://github.com/croutoncreations/redline/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/croutoncreations/redline?style=flat-square"></a>
+  <a href="https://github.com/croutoncreations/redline/releases/latest"><img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black?style=flat-square"></a>
+  <a href="https://github.com/croutoncreations/redline/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/croutoncreations/redline/ci.yml?branch=main&style=flat-square"></a>
+  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
+</p>
 
 <p align="center">
   <img src="docs/assets/launch/redline-overview-near-expiry-dark.png" width="900" alt="Redline dashboard showing allowance near expiry, an explained RUN decision, and queued work">
 </p>
-<p align="center"><sub>Near-expiry demo: Redline holds the configured reserve, explains the surplus, and admits deferred work.</sub></p>
 
-> **Stay in the loop.** Redline is built by
-> [Crouton Creations](https://www.croutoncreations.com/?utm_source=redline&utm_medium=github&utm_campaign=redline).
-> [Get new open-source tools and practical builder notes](https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=github&utm_campaign=redline)
-> when they ship.
+You're paying for a Codex or Claude subscription. Every five hours or every week, your quota
+resets - and whatever you didn't use is gone. Redline watches those allowances and lets you queue
+up the work that's always on your backlog: test gaps, refactors, dependency bumps, doc sweeps. When
+you're comfortably behind on usage or running out of time before a reset, Redline fires up one of
+those jobs using your coding agent of choice (Codex CLI, Claude Code, Pi, whatever you've got).
 
-## See Redline at work
+Jobs are called *tasks* in the CLI and API; the dashboard and this page say *job*.
 
-These screenshots use Redline's isolated synthetic demo fixtures. They contain no personal
-repositories, filesystem paths, credentials, or live allowance data.
+## Why Redline
+
+- **Every decision is explained.** Each cycle records `RUN`, `WAIT`, or fail-closed `UNKNOWN`
+  with the reasoning, so you always know why a job did or did not start.
+- **Safe by default.** Automatic dispatch is off until you turn it on. A configured reserve (a
+  slice of your allowance Redline will never spend) is always held back for your interactive
+  work, and stale telemetry means *wait*, never *run*.
+- **Works with your agents.** Codex CLI, Claude Code, Pi, Hermes, or any command. Redline does
+  not replace your harness; it decides when to launch it.
+- **Isolated by design.** Jobs run in Git worktrees or DevX sessions, and completed runs keep
+  their result, artifacts, and logs so unattended work does not disappear.
+- **Local only.** A loopback service, a SQLite file, and your existing CLI logins. No cloud, no
+  account, no telemetry.
+
+## Install
+
+### macOS app (recommended)
+
+Requires macOS 13 or later. Universal binary, signed and notarized.
+
+```bash
+brew install --cask croutoncreations/tap/redline
+```
+
+Or [download the DMG](https://github.com/croutoncreations/redline/releases/latest), drag
+**Redline** to Applications, and launch it. The menu-bar app bundles the service, dashboard, and
+CLI; a four-step guide walks you through connecting an account, creating a profile, and queueing a
+first job. Automatic dispatch stays off until you enable it.
+
+→ [Getting started in five minutes](docs/getting-started.md)
+
+### CLI and headless service (macOS, Linux, Windows)
+
+Run Redline without the menu-bar app - on a Linux box that dispatches overnight, for example.
+
+```bash
+brew install croutoncreations/tap/redline          # macOS / Linux
+go install github.com/croutoncreations/redline/cmd/redline@latest
+```
+
+Or grab a prebuilt archive from [Releases](https://github.com/croutoncreations/redline/releases/latest).
+Linux and Windows builds are exercised in CI; Windows is newer and less battle-tested, so please
+[report anything odd](https://github.com/croutoncreations/redline/issues).
+
+```bash
+curl -fsSLo redline.yaml https://raw.githubusercontent.com/croutoncreations/redline/main/config.example.yaml
+# edit providers and policy, then:
+redline serve --config redline.yaml   # dashboard at http://127.0.0.1:7436
+redline status --provider codex-main
+```
+
+→ [CLI reference](docs/cli.md) · [Run as a launchd service](docs/launchd.md)
+
+<details>
+<summary><strong>Install with your coding agent</strong></summary>
+
+Paste this into a trusted local coding agent. It installs the signed release, keeps safe defaults,
+discovers your existing harnesses, and proposes a couple of editable starter jobs without enabling
+automatic dispatch on its own.
+
+```text
+Help me install and configure Redline from the official Crouton Creations release:
+https://github.com/croutoncreations/redline/releases/latest
+
+Before changing anything, confirm this Mac meets the published requirements and show me the release
+version and signing identity you intend to install. Download the notarized DMG and its SHA-256 file,
+verify the checksum, copy Redline.app into /Applications, and launch it. Do not bypass Gatekeeper,
+disable quarantine, install an unsigned build, or replace an existing configuration without asking.
+
+In Redline, leave automatic dispatch disabled while we configure it. Check which of Codex CLI,
+Claude Code, Pi, DevX, and Hermes are already installed; do not install or authenticate another
+tool without asking. Reuse OpenUsage if its loopback API is healthy, otherwise let Redline use its
+native collectors.
+
+Walk me through creating one isolated execution profile for a repository I choose. Then suggest two
+small, reviewable starter jobs based on that repository and my available harnesses. Show me each
+editable prompt, provider, model, dispatch tier, recurrence, workspace behavior, and any command it
+could execute. Ask before saving jobs and again before enabling automatic dispatch. Finish by
+showing current allowance status, why the scheduler is waiting or running, where Redline stores its
+configuration/database/logs, and how to pause all providers.
+```
+
+See [Agent-assisted install](docs/agent-install.md) for what the agent must not do.
+
+</details>
+
+## How it works
+
+```text
+  Monitor            Decide                 Dispatch              Review
+  ───────            ──────                 ────────              ──────
+  5-hour + weekly    policy + pace gap  →   next eligible job  →  result, artifacts,
+  allowance per      RUN / WAIT / UNKNOWN   in an isolated        logs, lifecycle
+  account            (explained)            workspace             events
+```
+
+1. **Monitor.** Redline reads the same 5-hour and weekly windows your CLIs see, reusing a local
+   [OpenUsage](https://www.openusage.ai/) API when one is running or collecting natively
+   when it is not.
+2. **Decide.** A policy compares remaining allowance to remaining time. If you have more allowance
+   left than an even burn pace would predict (the *pace gap*) by more than the policy's trigger,
+   and the reserve is still intact, the provider is eligible. When a window is about to reset with
+   allowance unspent (*near expiry*), Redline can release the reserve too rather than let it lapse.
+3. **Dispatch.** Jobs unlock by tier (*behind pace* → *well behind* → *capacity likely to expire*),
+   then by priority. Redline claims the job, prepares an isolated worktree or DevX session, and
+   launches the *harness* - the coding-agent CLI the job's execution profile names. One job at a
+   time unless you say otherwise.
+4. **Review.** Completed runs keep a concise result, delivery artifacts (such as a draft PR link),
+   bounded output, and a lifecycle timeline - in the dashboard, the menu bar, the CLI, or over MCP.
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>Claude - WAIT</strong></td>
+    <td width="50%" align="center"><strong>Claude - RUN (near expiry)</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/launch/claude-wait-dark.png" alt="Claude WAIT decision with explanation"></td>
+    <td><img src="docs/assets/launch/claude-near-expiry-dark.png" alt="Claude near-expiry RUN decision with explanation"></td>
+  </tr>
+</table>
+
+<details>
+<summary>More decision examples (Codex and Claude: WAIT, RUN, near expiry, UNKNOWN)</summary>
+
+| Codex WAIT | Codex RUN |
+|---|---|
+| ![Codex WAIT decision](docs/assets/launch/codex-wait-dark.png) | ![Codex RUN decision](docs/assets/launch/codex-run-dark.png) |
+
+| Codex near expiry | Codex UNKNOWN |
+|---|---|
+| ![Codex near-expiry RUN decision](docs/assets/launch/codex-near-expiry-dark.png) | ![Codex UNKNOWN decision caused by stale telemetry](docs/assets/launch/codex-unknown-dark.png) |
+
+| Claude RUN | Claude UNKNOWN |
+|---|---|
+| ![Claude RUN decision](docs/assets/launch/claude-run-dark.png) | ![Claude UNKNOWN decision caused by stale telemetry](docs/assets/launch/claude-unknown-dark.png) |
+
+</details>
+
+→ [Scheduling and the allowance model](docs/scheduling.md) explains policies, tiers, calibration,
+and the token-capacity estimates in depth.
+
+## Give your agent access
+
+Redline ships an MCP server so Codex, Claude Code, or Pi can check allowance, inspect the queue,
+add jobs, and ask *why is the scheduler waiting?* without leaving the conversation.
+
+```bash
+# Claude Code
+claude mcp add --scope user redline -- redline mcp
+
+# Codex CLI
+codex mcp add redline -- redline mcp
+```
+
+Use `/Applications/Redline.app/Contents/Resources/bin/redline` if the CLI is not on your `PATH`.
+Read-only tools are the default; the single dispatch tool is annotated as mutating so hosts can
+gate it.
+
+→ [MCP and agent guide](docs/mcp.md) - tool reference, Pi bridge setup, and a suggested agent
+instruction.
+
+## More screenshots
+
+<details>
+<summary>Menu bar, active work, completed runs, and configuration</summary>
 
 <table>
   <tr>
@@ -39,21 +203,14 @@ repositories, filesystem paths, credentials, or live allowance data.
   </tr>
 </table>
 
-### Review what finished
-
-Completed runs retain a concise result, delivery artifacts, and bounded formatted output so useful
-work does not disappear just because it ran unattended.
-
 <p align="center">
   <img src="docs/assets/launch/redline-completed-run-detail-dark.png" width="900" alt="Completed Redline run with result summary, test evidence, formatted output, and a draft pull request link">
 </p>
 
-### Configure jobs and execution environments
-
 <table>
   <tr>
     <td width="50%" align="center"><strong>Job configuration</strong></td>
-    <td width="50%" align="center"><strong>Execution environment</strong></td>
+    <td width="50%" align="center"><strong>Execution profile</strong></td>
   </tr>
   <tr>
     <td><img src="docs/assets/launch/redline-job-configuration-dark.png" alt="Redline job editor with task prompt, provider, priority, recurrence, and dispatch tier"></td>
@@ -61,611 +218,35 @@ work does not disappear just because it ran unattended.
   </tr>
 </table>
 
-### Understand every admission decision
-
-Redline records why each provider chose `WAIT`, `RUN`, or fail-closed `UNKNOWN`. Near-expiry is a
-specific `RUN` case: unused allowance is approaching reset while the configured reserve remains held.
-
-<details>
-<summary><strong>Claude Code decision gallery</strong></summary>
-
-| WAIT | RUN |
-|---|---|
-| ![Claude WAIT decision](docs/assets/launch/claude-wait-dark.png) | ![Claude RUN decision](docs/assets/launch/claude-run-dark.png) |
-
-| Near expiry | UNKNOWN |
-|---|---|
-| ![Claude near-expiry RUN decision](docs/assets/launch/claude-near-expiry-dark.png) | ![Claude UNKNOWN decision caused by stale telemetry](docs/assets/launch/claude-unknown-dark.png) |
+All screenshots come from Redline's isolated synthetic demo mode and contain no personal
+repositories, paths, credentials, or live allowance data.
 
 </details>
 
-<details>
-<summary><strong>Codex decision gallery</strong></summary>
+## Documentation
 
-| WAIT | RUN |
+| Using Redline | Reference |
 |---|---|
-| ![Codex WAIT decision](docs/assets/launch/codex-wait-dark.png) | ![Codex RUN decision](docs/assets/launch/codex-run-dark.png) |
-
-| Near expiry | UNKNOWN |
-|---|---|
-| ![Codex near-expiry RUN decision](docs/assets/launch/codex-near-expiry-dark.png) | ![Codex UNKNOWN decision caused by stale telemetry](docs/assets/launch/codex-unknown-dark.png) |
-
-</details>
-
-## Architecture
-
-```text
-CLI / MCP / dashboard / native app
-              |
-              v
-       local HTTP service
-         |           |
-         v           v
-      SQLite      OpenUsage/native + Gatepost logs
-         |
-         v
- opt-in scheduler
-```
-
-Only `redline serve` reads configuration and opens SQLite. All operational CLI commands
-consume the local HTTP API. SQLite is authoritative for usage history, profiles, tasks,
-queue order, pause state, runs, and scheduler decisions. YAML is used for service config
-and profile/task import; large run artifacts will remain on the filesystem.
-
-## Implemented behavior
-
-- Sticky per-provider allowance-source selection: reuse a healthy OpenUsage loopback API, then
-  fall back to native Codex and Claude collectors after repeated failures.
-- Model-specific Claude allowance ingestion and scheduling; Fable tasks require both shared Claude
-  capacity and the Fable weekly pool, while Haiku, Sonnet, and Opus use shared pools only.
-- Optional 5-hour limits: Codex works when its temporary short limit is absent.
-- Prorated current and final 5-hour slots for limited providers.
-- Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
-- Empirical 5-hour and weekly processed-token capacity estimates from Codex, Claude Code, and
-  explicitly mapped Pi subscription sessions.
-- Versioned Codex-credit and Claude API-dollar-equivalent allowance estimates with pricing coverage.
-- Independent read-only usage monitoring while automatic dispatch remains disabled.
-- Policy-configured pace thresholds for unrestricted providers.
-- Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
-- SQLite migrations, WAL mode, foreign keys, and durable snapshot history.
-- Execution-profile and one-off/recurring-task persistence.
-- Priority-descending, oldest-first eligible task selection.
-- Pool-aware candidate scanning so an exhausted Fable task cannot starve eligible non-Fable work.
-- `min_interval` and `require_repo_change` eligibility.
-- Task enable/disable/retry and provider pause/resume.
-- Persistent simulated scheduler decision history.
-- Existing-directory, Git worktree, DevX, and generic-command workspace providers.
-- Configurable DevX creation arguments such as `workspace_args: [--target, host]`.
-- Optional workspace setup/finalize hooks and opt-in cleanup policies.
-- Noninteractive Codex CLI, Claude Code, Hermes Gateway, and generic-command harness adapters.
-- Local/remote runtime connections and agent contexts for selecting runtime-owned profiles,
-  projects, working directories, and isolated sessions.
-- Transactional asynchronous run admission with configurable provider and allowance-pool limits.
-- Run artifacts, recurring completion/requeue, and interrupted-run recovery.
-- Graceful service shutdown.
-- Opt-in automatic scheduling with immediate startup evaluation and configurable polling.
-- Per-provider cycle status, active-run suppression, and automatic repository revision checks.
-- Durable dispatch-attempt history, including usage/admission errors that produce no decision.
-- Explainable task-selection rejections for cooldowns, repository state, budget pools, and dispatch tiers.
-- Admission contention is recorded as a normal `WAIT`, not a false scheduler failure.
-- Bounded stdout/stderr tail inspection through the service API and CLI.
-- Opt-in command notifications for run completion/failure and scheduler errors.
-- Durable notification delivery history and 24-hour operational health summaries.
-- Ordered lifecycle audit events for every run, with prompt text excluded from event snapshots.
-- Interrupted-run recovery appends a terminal lifecycle event and records whether its workspace was preserved.
-- Captured prepare/finalize hook stdout and stderr exposed through the service API and CLI.
-- API-backed stdio MCP server with bounded operational reads, explicit task/provider controls,
-  and a separately annotated scheduler-dispatch tool.
-
-## Quick start
-
-For the signed menu-bar app, follow the [five-minute getting-started guide](docs/getting-started.md).
-The source workflow below is intended for contributors and custom deployments.
-
-Copy and adjust the example config. Redline reuses OpenUsage when it is running, but can collect
-Codex and Claude subscription windows natively when it is unavailable:
-
-```bash
-cp config.example.yaml redline.yaml
-go run ./cmd/redline --config redline.yaml serve
-```
-
-If you already have the native app or another Redline instance running, port `7436` is taken and
-`serve` exits with `bind: address already in use`. Point the source build at a different port with
-`--listen`, then use a matching `--api` value for the CLI commands below:
-
-```bash
-go run ./cmd/redline --config redline.yaml serve --listen 127.0.0.1:17436
-go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
-```
-
-Prefer a guided setup? Copy the bounded prompt in
-[`docs/agent-install.md`](docs/agent-install.md) into a trusted local coding agent. It verifies the
-signed release, preserves safe defaults, discovers existing harnesses, and proposes a couple of
-editable starter jobs without enabling automatic dispatch on its own.
-
-In another terminal, all commands use the API:
-
-```bash
-go run ./cmd/redline usage refresh --provider codex-main --json
-go run ./cmd/redline status --provider codex-main
-go run ./cmd/redline calibration --provider claude-main
-go run ./cmd/redline token sync --provider claude-main
-go run ./cmd/redline capacity --provider claude-main
-go run ./cmd/redline decision --provider codex-main
-go run ./cmd/redline scheduler evaluate --provider codex-main --json
-go run ./cmd/redline scheduler execute --provider codex-main --json
-go run ./cmd/redline scheduler status
-go run ./cmd/redline scheduler attempts --provider codex-main
-go run ./cmd/redline run list
-go run ./cmd/redline run events <run-id>
-go run ./cmd/redline run logs <run-id> --stream stderr
-go run ./cmd/redline health
-go run ./cmd/redline notification list
-```
-
-The default API is `http://127.0.0.1:7436`. Override it before the command:
-
-```bash
-go run ./cmd/redline --api http://127.0.0.1:8000 status --provider claude-main
-```
-
-Claude status includes supplemental model pools reported by OpenUsage:
-
-```text
-claude: 5-hour 100.0% remaining, 73.0% weekly remaining (...)
-  Fable: 48.0% remaining (...)
-```
-
-## Profiles and tasks
-
-```bash
-go run ./cmd/redline profile add --file examples/codex-devx-profile.yaml --json
-go run ./cmd/redline profile add --file examples/claude-worktree-profile.yaml --json
-go run ./cmd/redline profile add --file examples/claude-fable-devx-profile.yaml --json
-go run ./cmd/redline task add --file examples/add-tests-task.yaml --json
-go run ./cmd/redline profile list
-go run ./cmd/redline task list
-go run ./cmd/redline task disable add-tests
-go run ./cmd/redline task enable add-tests
-go run ./cmd/redline candidates --provider codex-main
-go run ./cmd/redline task dispatch add-tests
-```
-
-Each task has a `dispatch_tier` that controls when it becomes eligible:
-
-```yaml
-dispatch_tier: behind # behind, well_behind, or expiring
-priority: 60
-```
-
-The active provider policy first decides whether background work is safe. Redline then derives the
-currently unlocked tier from the weekly pace gap, or from unavoidable throughput overflow when a
-five-hour window exists. `priority` only orders tasks whose tiers are already unlocked. Recurrence
-intervals, repository-change checks, and enable/disable state remain independent eligibility gates.
-Existing databases migrate tasks to `behind`, preserving the prior default behavior.
-
-Policies may set `pace_gap_trigger` to admit work whenever the fraction of weekly allowance
-remaining exceeds the fraction of time remaining by that amount. For example, `0.30` means Redline
-can run when an account is at least 30 percentage points behind an even weekly burn pace. The
-standard bundled policy uses `0.30`, early uses `0.15`, and late omits the setting so that it
-continues to require a configured time threshold or unavoidable overflow.
-
-Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fable`,
-`claude-fable-5`, and `claude-fable-latest` model aliases. Haiku, Sonnet, and Opus remain
-account-pool-only models.
-
-The dashboard discovers installed Codex CLI, Claude Code, Pi, and Hermes harnesses, shows each CLI version,
-and builds model choices from local, refreshable catalogs rather than hardcoded presets. Codex uses
-its own model cache. Pi uses its offline model listing; those subscription-backed Pi models also
-supply Claude Code's versioned choices because Claude Code accepts full model names but does not
-provide a model-list command. Pi profiles retain provider-qualified model IDs such as
-`openai-codex/gpt-5.6-sol` and `anthropic-cli/claude-opus-4-8`, keeping the model tied to the usage
-pool Redline monitors. **Other model** and **Custom command** remain available when discovery is
-incomplete or a local integration is not built in.
-
-For Hermes, choose **Hermes** as the harness and import the current Hermes Desktop connection.
-Redline reuses the Desktop-authenticated remote Gateway session, discovers its profiles, projects,
-authenticated model catalogs, and existing scheduled jobs, and persists the selected execution
-context. A task can either start a new isolated Hermes session from its prompt or select an existing
-Hermes job from the dashboard. Existing jobs should remain paused in Hermes while Redline owns
-admission; this avoids Hermes' native schedule racing Redline's allowance-aware scheduler.
-
-After triggering either form, Redline follows the remote session to a terminal state rather than
-treating the initial Gateway response as completion. The external job and session IDs, actual
-provider/model, final assistant output, lifecycle events, and reported input/output/cache token
-totals are retained with the Redline run. Those observations are attributed to the provider and
-model allowance selected by the execution profile, including separate model pools such as Fable.
-The Gateway owns the remote filesystem; local prepare/finalize commands are therefore disabled for
-runtime-owned workspaces.
-
-Hermes connections can also reference standalone credentials without storing their contents in
-Redline. Choose an environment-variable name or a protected JSON file (`0600`) containing one of:
-
-```json
-{"session_token":"the Hermes dashboard session token"}
-```
-
-```json
-{"provider":"basic","username":"redline","password":"a strong password"}
-```
-
-Session-token connections use Hermes' `X-Hermes-Session-Token` HTTP contract and authenticated
-WebSocket query. Basic credentials are exchanged through `/auth/password-login`; Redline retains
-only the resulting in-memory cookie jar for that operation. Environment variables must be present
-in the service process—launchd installations will usually find a protected credential file simpler.
-Connection and agent-context records can be created, edited, and removed through the dashboard,
-HTTP API, or MCP. Referenced records cannot be deleted.
-
-Repository paths previously used by profiles are remembered as suggestions and can always be typed
-directly. The advanced **Allowance routing override** corresponds to `budget_model_group`; leave it
-automatic unless a provider exposes a separate model-specific pool that model-name inference cannot
-identify. Provider-qualified Pi Fable IDs are inferred automatically.
-
-For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
-activation, MCP servers, rules, and session persistence. This reduces startup variability and
-prevents a background one-word task from inheriting a large interactive environment:
-
-```bash
-go run ./cmd/redline profile add --file examples/codex-minimal-devx-profile.yaml
-go run ./cmd/redline profile add --file examples/claude-minimal-devx-profile.yaml
-```
-
-Minimal profiles deliberately omit repository instructions and disable tools. Do not use them for
-code changes, tests, reviews, or any task that needs `AGENTS.md`, `CLAUDE.md`, skills, MCP servers,
-or filesystem tools. Use a normal profile with only the customizations that task requires.
-
-Simulated evaluation records the decision and selected task but does not change task state.
-Execution atomically claims the task and returns a preparing run while work continues in the
-service:
-
-```bash
-go run ./cmd/redline scheduler evaluate --provider codex-main --revision "$(git rev-parse HEAD)"
-go run ./cmd/redline scheduler execute --provider codex-main --revision "$(git rev-parse HEAD)"
-go run ./cmd/redline run show <run-id>
-go run ./cmd/redline scheduler history --provider codex-main
-go run ./cmd/redline pause --provider codex-main
-go run ./cmd/redline resume --provider codex-main
-```
-
-## API
-
-The main endpoints are:
-
-```text
-GET  /v1/health
-GET  /v1/health/details?window={duration}
-GET  /v1/dashboard
-GET  /v1/dashboard/events
-POST /v1/pairing
-POST /v1/providers/{account}/refresh
-GET  /v1/providers/{account}/status
-GET  /v1/providers/{account}/candidates
-GET  /v1/providers/{account}/calibration
-GET  /v1/providers/{account}/capacity
-POST /v1/providers/{account}/token-sync
-POST /v1/providers/{account}/decision
-PATCH /v1/providers/{account}/policy
-PATCH /v1/providers/{account}/concurrency
-POST /v1/providers/{account}/pause|resume
-GET|POST /v1/profiles
-GET  /v1/profile-options?refresh={true|false}
-GET|PATCH|DELETE /v1/profiles/{id}
-GET  /v1/runtime-connections/imports
-GET|POST /v1/runtime-connections
-GET|PATCH|DELETE /v1/runtime-connections/{id}
-POST /v1/runtime-connections/{id}/discover
-GET  /v1/runtime-connections/{id}/jobs
-POST /v1/runtime-connections/{id}/jobs/{job}/run
-GET|POST /v1/agent-contexts
-GET|PATCH|DELETE /v1/agent-contexts/{id}
-GET|POST /v1/tasks
-GET  /v1/task-templates
-GET|PATCH|DELETE /v1/tasks/{id}
-POST /v1/tasks/{id}/enable|disable|retry
-POST /v1/tasks/{id}/dispatch
-POST /v1/scheduler/evaluate
-POST /v1/scheduler/execute
-GET  /v1/scheduler/decisions?provider={account}
-GET  /v1/scheduler/status
-GET  /v1/usage-monitor/status
-GET  /v1/scheduler/attempts?provider={account}
-GET  /v1/metrics/launch?days={n}&provider={account}
-GET  /v1/runs
-GET  /v1/runs/{id}
-GET  /v1/runs/{id}/events?limit={n}
-GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
-POST /v1/runs/{id}/read
-POST /v1/runs/read-all
-GET  /v1/notifications
-```
-
-The native app opens an authenticated local dashboard backed by
-`http://127.0.0.1:7436/`. It summarizes current provider allowances,
-the dispatch queue, recent runs, scheduler decisions, and bounded run-log tails. Jobs and execution
-profiles can be created and managed there. A server-sent event stream keeps the page current while
-it is open; the aggregate API does not expose task prompts or lifecycle commands.
-
-Each provider's usage detail includes a dispatch-policy selector. Selecting a named policy stores
-an override in SQLite; selecting **Default** returns to the provider-level YAML policy when present,
-or to `active_policy` otherwise.
-
-The service accepts loopback hosts by default. On first service or app launch, Redline creates a
-random API credential named `api-token` beside the selected configuration with mode `0600`. The
-native app exchanges it for an HttpOnly, same-site dashboard session; CLI and MCP clients read it
-automatically from the `--config` location (or the standard macOS Application Support location).
-Cross-origin requests and untrusted Host headers are rejected independently. Exact Tailscale
-MagicDNS hostnames may be added under `api.trusted_hosts` for HTTPS access through Tailscale Serve;
-keep Redline bound to loopback and proxy it with `tailscale serve --bg localhost:7436`. Remote
-session cookies are Secure. Do not copy the credential into logs or expose Redline publicly with
-Tailscale Funnel. See [Mobile dashboard setup](docs/mobile.md) for the HTTPS proxy and pairing flow.
-
-For a direct API call:
-
-```bash
-REDLINE_API_TOKEN="$(<"$HOME/Library/Application Support/Redline/api-token")"
-curl -H "Authorization: Bearer $REDLINE_API_TOKEN" \
-  http://127.0.0.1:7436/v1/health
-```
-
-## Launch metrics
-
-Redline can report exact automatic RUN/WAIT/UNKNOWN decisions and job outcomes, alongside
-coverage- and confidence-labeled estimates of allowance converted to completed work:
-
-```bash
-go run ./cmd/redline metrics launch --days 21
-```
-
-See [the launch-metrics methodology](docs/launch-metrics.md) for definitions and caveats.
-
-## MCP and agent access
-
-Run `redline mcp` as a local stdio MCP server. It delegates every operation to the running
-loopback service; it never opens SQLite or starts a second scheduler:
-
-```bash
-go run ./cmd/redline --api http://127.0.0.1:7436 mcp
-```
-
-The MCP surface provides compact usage/capacity summaries, bounded task/profile/run inspection,
-task, execution-profile, runtime-connection, and agent-context management, provider controls,
-runtime discovery, dry scheduler evaluation, and an explicitly mutating dispatch tool.
-See [the MCP and agent guide](docs/mcp.md) for tool semantics, Codex and Claude Code setup, Pi
-bridges, and a suggested agent instruction.
-
-For durable macOS operation, see [the launchd guide](docs/launchd.md). The LaunchAgent template
-uses `RunAtLoad` and `KeepAlive`, captures stdout/stderr, and documents the required harness `PATH`.
-
-## Native macOS menu bar
-
-The first native shell lives under `macos/`. It shows provider allowance, scheduler, active-run,
-and operational-health state through a compact menu-bar summary and native quick-status popover.
-It embeds the full local dashboard in a native app window for management.
-Configured release builds use Sparkle 2 for automatic and manual signed update checks; local builds
-remain update-disabled unless an HTTPS appcast and Ed25519 public key are explicitly supplied.
-It adopts an already-running Redline service or starts the Go service embedded in its app bundle,
-so the eventual install remains a single application rather than separate UI and daemon packages.
-On first run it can create a safe starter configuration with automatic dispatch disabled. Its
-**App Setup…** flow can enable launch at login and replace an existing `com.jfox.redline`
-LaunchAgent without moving the configured database, queue, history, or run artifacts; the old plist
-is retained as a recoverable backup.
-
-```bash
-swift test --package-path macos --disable-xctest
-./scripts/build-macos-app.sh
-open dist/Redline.app
-```
-
-`--disable-xctest` skips an empty legacy XCTest bundle that some SwiftPM toolchain versions fail to
-load (all suites here use the Swift Testing framework); omit it if your toolchain doesn't need the
-workaround.
-
-See [the native macOS guide](docs/native-macos.md) for service ownership, packaging, and release
-configuration.
-
-## Execution lifecycle
-
-```text
-queued task -> preparing workspace -> running harness -> finalize -> optional cleanup
-            -> completed (one-off) or requeued (recurring)
-            -> failed on workspace/harness failure
-```
-
-Redline does not impose a maximum runtime. Once admitted, the harness owns the task until it
-exits. Finalize or cleanup failure is recorded separately and does not turn a successful agent
-run into a failed run. On service startup, runs interrupted by a prior process exit are marked
-failed for explicit inspection and retry.
-
-Cleanup defaults to `never`. Supported values are `never`, `on_success`, and `always`.
-Agent instructions and lifecycle hooks remain responsible for commit, push, and PR behavior.
-
-## Automatic dispatch
-
-Automatic execution is disabled by default. Enable it in the service configuration only after
-profiles and tasks have been reviewed:
-
-```yaml
-scheduler:
-  enabled: true
-  poll_interval: 5m
-```
-
-The service evaluates every configured provider once at startup and then at the configured
-interval. Each cycle skips paused providers, then fills available capacity up to
-`max_concurrent_runs` (default `1`). Optional `pool_concurrency` entries independently cap
-overlap within allowance pools such as `model:fable:weekly`. Each candidate task's Git revision
-is resolved independently, and automatic decisions are recorded with `"trigger":"automatic"`.
-The dashboard can persist a provider-level override without rewriting the YAML configuration;
-resetting the override restores the configured default. Remote Hermes jobs must also satisfy the
-selected runtime connection and agent context limits, so the effective concurrency is the
-strictest applicable provider, allowance-pool, connection, or context limit.
-Inspect the live loop with:
-
-```bash
-go run ./cmd/redline scheduler status
-```
-
-### Window-cost calibration
-
-`window_weekly_cost` is the bootstrap estimate of how much weekly allowance one completely
-consumed five-hour window represents. Provider usage feeds report the two percentages but do not
-report this conversion directly. Redline learns it by grouping snapshots that share the same
-five-hour and weekly reset boundaries and aggregating:
-
-```text
-weekly usage increase / five-hour usage increase
-```
-
-The configured value remains authoritative while evidence is insufficient or low-confidence.
-An observed value becomes effective after at least two informative five-hour windows totaling at
-least one full window of consumption; four windows and two full windows of consumption are marked
-high-confidence. Sub-second reset timestamp jitter is normalized during grouping. Inspect both the
-evidence and the value currently used by the scheduler with:
-
-```bash
-go run ./cmd/redline calibration --provider claude-main
-go run ./cmd/redline decision --provider claude-main --json
-```
-
-Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
-`calibration_confidence`. Providers without a five-hour window, such as Codex while that limit is
-temporarily absent, cannot produce paired calibration evidence and continue using pace rules.
-
-### Empirical token capacity
-
-The read-only usage monitor imports Codex and Claude Code assistant-call records from Gatepost and
-refreshes OpenUsage snapshots independently from automatic scheduling. It also reads Pi session
-files from Gatepost's session index and includes only explicit subscription transports:
-
-```text
-Pi anthropic-cli  -> Claude subscription allowance
-Pi openai-codex   -> Codex subscription allowance
-```
-
-Other Pi providers are excluded rather than inferred from model names.
-
-```yaml
-usage_monitor:
-  enabled: true
-  poll_interval: 5m
-  gatepost_database: ~/.gatepost/viewer.db
-```
-
-Redline accumulates local processed tokens until the provider's quantized percentage moves, then
-closes a correlation span without crossing a 5-hour or weekly reset. It reports estimated input,
-output, cache-read, cache-creation, and total capacity where the source preserves those classes.
-Gatepost's broad Codex/Claude index currently provides context/input-like and output tokens. Pi's
-raw records preserve input, output, cache-read, and cache-creation classes.
-
-```bash
-go run ./cmd/redline token sync --provider claude-main
-go run ./cmd/redline capacity --provider claude-main
-```
-
-The capacity report includes direct 5-hour and weekly estimates and a second weekly estimate derived
-from `estimated_5h_tokens / window_weekly_cost`. These are explicitly empirical processed-token
-equivalents, not provider billing ledgers or guaranteed fixed caps. Model choice, cache accounting,
-long-context multipliers, service-side policy, partial local-log coverage, and percentage rounding
-can all change the observed relationship. Redline therefore exposes evidence counts, observed
-percentage movement, token classes, source, and confidence rather than presenting a precise quota.
-
-Each window also reports attribution coverage: total provider-reported drain, the fraction with
-matching local token observations, unattributed spans, and evidence composition by harness source
-and model. Incomplete attribution caps confidence even when many spans exist. Overall report
-confidence is the weaker available window, and `ratio_derived_difference` quantifies disagreement
-between the direct weekly estimate and the 5-hour-derived cross-check. The dashboard loads this
-evidence on demand from a provider's expanded usage card so routine live updates remain inexpensive.
-
-Weighted accounting is reported alongside raw processed tokens. Codex uses OpenAI's token-based
-subscription credit card; Claude uses current API pricing as an explicit proxy because Anthropic
-does not publish an equivalent subscription rate card. Unknown models remain unpriced and reduce
-`pricing_coverage`. Exact Pi token classes produce a narrow quote; collapsed direct-session context
-and unknown Claude cache-write duration produce low/high bounds. Raw observations are never mutated
-when a rate card changes.
-
-## Operational history and run output
-
-Scheduler decisions answer “what did the budget model conclude?” Dispatch attempts answer “what
-happened operationally when Redline tried to release work?” Attempts persist `admitted`, `wait`,
-`no_task`, and `error` outcomes for both manual and automatic execution:
-
-```bash
-go run ./cmd/redline scheduler attempts --provider codex-main
-```
-
-When budget permits work but no job can be admitted, `task_selection_reason` and bounded
-`candidate_rejections` explain cooldown deadlines, unchanged or unreadable repositories,
-model-pool exhaustion, saturated concurrency pools, and locked dispatch tiers. Concurrent
-scheduler requests are serialized at admission; requests exceeding a configured provider or pool
-limit record an `active_run` WAIT rather than degrading operational health. Different providers
-always have independent capacity.
-
-Completed run output can be inspected without reading artifact paths directly. Responses are tail
-bounded to 64 KiB and may only resolve regular files beneath the configured `run_artifacts_dir`;
-paths and symlinks that escape that root are rejected.
-
-```bash
-go run ./cmd/redline run logs <run-id>
-go run ./cmd/redline run logs <run-id> --stream stderr --tail-bytes 8192
-go run ./cmd/redline run logs <run-id> --json
-```
-
-The lifecycle timeline records workspace preparation, harness execution, finalization, cleanup,
-and the terminal run result. Task prompts are intentionally omitted. Execution-profile fields,
-including lifecycle commands, are retained for reproducibility, so secrets should be passed via
-the environment rather than embedded in profile command strings.
-
-```bash
-go run ./cmd/redline run events <run-id>
-go run ./cmd/redline run logs <run-id> --stream prepare_stderr
-go run ./cmd/redline run logs <run-id> --stream finalize_stdout
-```
-
-## Notifications and health
-
-Native macOS alerts can be enabled from the Redline app and cover job starts, completions, and
-failures. Command notifications are disabled by default. When enabled, Redline invokes a trusted
-local command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, and `scheduler.error`.
-
-```yaml
-notifications:
-  enabled: true
-  command: ./scripts/redline-notify
-  timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error]
-```
-
-The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
-`REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
-outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
-possibly non-idempotent hook.
-
-```bash
-go run ./cmd/redline notification list
-go run ./cmd/redline health --window 24h
-```
-
-Detailed health reports active/recent run counts, dispatch errors, and notification failures.
-The lightweight `/v1/health` probe remains independent of recent operational failures.
-
-## Development
-
-```bash
-go test -race ./...
-go vet ./...
-go test -cover ./...
-npm install
-npx playwright install chromium # first run only
-npm run test:dashboard
-```
-
-The Playwright suite runs the embedded dashboard in an isolated browser with deterministic API and
-server-sent-event fixtures. It covers task/profile workflows, dynamic harness and model selection,
-run logs, live updates, responsive layout, and loading/error states without touching a live queue or
-using provider quota.
+| [Getting started](docs/getting-started.md) | [CLI](docs/cli.md) |
+| [Execution profiles and tasks](docs/profiles-and-tasks.md) | [HTTP API](docs/api.md) |
+| [Scheduling and the allowance model](docs/scheduling.md) | [Architecture](docs/architecture.md) |
+| [Runs, logs, and notifications](docs/runs-and-notifications.md) | [Hermes integration](docs/hermes.md) |
+| [MCP and agent access](docs/mcp.md) | [Native macOS app](docs/native-macos.md) |
+| [Mobile dashboard](docs/mobile.md) · [launchd](docs/launchd.md) | [Outcome metrics](docs/launch-metrics.md) |
+| [Troubleshooting](docs/troubleshooting.md) | [Changelog](CHANGELOG.md) · [Releasing](docs/releasing.md) |
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building
+from source, running the Go, Playwright, and Swift test suites, and packaging the macOS app.
 
 ## License
 
-Redline is licensed under the [Apache License 2.0](LICENSE).
+Apache License 2.0 - see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+<sub>Built by <a href="https://www.croutoncreations.com/?utm_source=redline&utm_medium=github&utm_campaign=redline">Crouton Creations</a>.
+<a href="https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=github&utm_campaign=redline">Get new open-source tools and builder notes</a> when they ship.</sub>
+</p>

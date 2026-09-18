@@ -32,8 +32,9 @@ existing launchd configuration path, the standard Application Support path, then
 configuration. This preserves a legacy service's exact storage locations and never overwrites an
 existing file.
 
-When `~/Library/LaunchAgents/com.jfox.redline.plist` exists, **App Setup…** offers an explicit
-migration. Redline first refuses migration while a task is active, enables the main app as a macOS
+When a legacy LaunchAgent plist exists under `~/Library/LaunchAgents/` (either
+`com.croutoncreations.redline.plist` or the pre-rename `com.jfox.redline.plist`), **App Setup…**
+offers an explicit migration. Redline first refuses migration while a task is active, enables the main app as a macOS
 login item, and only then stops the legacy service. The old plist is moved into
 `~/Library/Application Support/Redline/Legacy LaunchAgents/`; the config, SQLite database, run
 history, queue, and artifacts remain in their existing locations. If macOS requires login-item

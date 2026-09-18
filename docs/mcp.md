@@ -12,36 +12,18 @@ session cannot stop the service or an admitted run.
 
 ## Setup
 
-The Redline service must already be running. For a source checkout, build a stable command path:
+The Redline service (the menu-bar app or `redline serve`) must already be running.
+
+Register the server with Claude Code for the current user:
 
 ```bash
-go build -o "$PWD/dist/redline" ./cmd/redline
+claude mcp add --scope user redline -- redline mcp
 ```
 
-Pass the same `--config` path used by the service when it is not in the standard macOS location.
-The MCP client reads the protected sibling `api-token` automatically. `REDLINE_API_TOKEN` is
-available for supervised environments that inject the token without a readable config path.
-
-Register that command with Codex:
+Or with Codex CLI:
 
 ```bash
-codex mcp add redline -- \
-  /absolute/path/to/redline/dist/redline \
-  --api http://127.0.0.1:7436 mcp
-```
-
-Register it for the current user in Claude Code:
-
-```bash
-claude mcp add --scope user redline -- \
-  /absolute/path/to/redline/dist/redline \
-  --api http://127.0.0.1:7436 mcp
-```
-
-After a release containing the MCP server is installed, the bundled executable can be used instead:
-
-```text
-/Applications/Redline.app/Contents/Resources/bin/redline
+codex mcp add redline -- redline mcp
 ```
 
 The current Pi CLI does not provide a built-in MCP registration command. Pi installations using an
@@ -50,11 +32,38 @@ MCP bridge extension can register the same stdio process with the bridge's gener
 ```json
 {
   "redline": {
-    "command": "/absolute/path/to/redline",
-    "args": ["--api", "http://127.0.0.1:7436", "mcp"]
+    "command": "redline",
+    "args": ["mcp"]
   }
 }
 ```
+
+### Finding the `redline` executable
+
+The commands above assume `redline` is on your `PATH`, which is the case after
+`brew install croutoncreations/tap/redline` or `go install`. If you only installed the macOS app,
+use the bundled executable's absolute path instead:
+
+```text
+/Applications/Redline.app/Contents/Resources/bin/redline
+```
+
+For a source checkout, build a stable command path with
+`go build -o "$PWD/dist/redline" ./cmd/redline` and use that absolute path.
+
+### Non-default service locations
+
+`redline mcp` connects to `http://127.0.0.1:7436` and reads the protected `api-token` beside the
+configuration in the standard location. If the service uses a different port or configuration
+path, pass the same `--api` and `--config` values before `mcp`:
+
+```bash
+claude mcp add --scope user redline -- \
+  redline --config /path/to/redline.yaml --api http://127.0.0.1:17436 mcp
+```
+
+`REDLINE_API_TOKEN` is available for supervised environments that inject the token without a
+readable config path.
 
 Restart an already-open agent host after registering the server.
 

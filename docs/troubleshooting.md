@@ -89,7 +89,8 @@ Useful read-only commands include:
 /Applications/Redline.app/Contents/Resources/bin/redline run list
 ```
 
-For source installs and custom service locations, see the main [README](../README.md).
+For source installs and custom service locations, see [CONTRIBUTING.md](../CONTRIBUTING.md) and
+the [CLI reference](cli.md).
 
 ## Uninstall completely
 
@@ -102,11 +103,17 @@ If you may want the task history later, first copy
    credential, SQLite history, and run artifacts.
 4. Remove `~/Library/Logs/Redline/` to delete service logs.
 
-People who used the pre-app LaunchAgent should also remove its retired files:
+CLI-only installs on Linux and Windows keep the same files under `~/.config/redline/` and
+`%AppData%\redline\` respectively; remove that directory and the `redline` binary.
+
+People who used the pre-app LaunchAgent should also remove its retired files (the label was
+`com.jfox.redline` before the public release; run both lines if you are unsure which you had):
 
 ```bash
-launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.jfox.redline.plist" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/com.jfox.redline.plist"
+for label in com.croutoncreations.redline com.jfox.redline; do
+  launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/$label.plist" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$label.plist"
+done
 ```
 
 The LaunchAgent command only targets Redline's legacy user service. It is harmless when that file

@@ -3,8 +3,8 @@
 Redline exposes an auditable metrics report through the service API and CLI:
 
 ```bash
-go run ./cmd/redline metrics launch --days 21
-go run ./cmd/redline metrics launch --days 7 --provider claude-main
+redline metrics launch --days 21
+redline metrics launch --days 7 --provider claude-main
 ```
 
 The equivalent authenticated service endpoint is `GET /v1/metrics/launch?days=21`.
@@ -35,6 +35,6 @@ Fractional `conversion_rate_*` fields and display-ready `conversion_percent_*` f
 
 ## Capacity reclaimed estimate
 
-This is the weekly-allowance equivalent used by completed jobs admitted in `window_slots` mode—the discrete-window rule that identified weekly allowance exceeding the capacity of the remaining five-hour windows. Pace-threshold admissions are excluded.
+This is the weekly-allowance equivalent used by completed jobs admitted in `window_slots` mode - the discrete-window rule that identified weekly allowance exceeding the capacity of the remaining five-hour windows. Pace-threshold admissions are excluded.
 
 The value is best read as **measured managed usage while capacity was at risk**. It is not a counterfactual claim that every unit would certainly have expired without Redline.
