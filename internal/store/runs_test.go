@@ -16,6 +16,53 @@ import (
 // call.  A second correctness risk is that active runs (preparing/running)
 // must never appear in the unread count, so the test verifies the state
 // machine boundary explicitly.
+// ListRuns orders by started_at DESC over a TEXT column. Under RFC3339Nano,
+// 100ms encodes to ".1Z" and 120ms to ".12Z"; ".1Z" sorts above ".12Z"
+// byte-wise because 'Z' > '2', so the older run would be listed first.
+func TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths(t *testing.T) {
+	db := openTaskDB(t)
+	base := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	earlier := base.Add(100 * time.Millisecond)
+	later := base.Add(120 * time.Millisecond)
+	if !earlier.Before(later) {
+		t.Fatalf("fixture invariant broken: %v is not before %v", earlier, later)
+	}
+
+	// Separate provider accounts so both runs can be admitted concurrently
+	// without tripping the per-provider concurrency limit of 1.
+	admit := func(providerAccountID, taskID, runID string, startedAt time.Time) {
+		t.Helper()
+		profile := domain.ExecutionProfile{
+			ID: "p-" + taskID, ProviderAccountID: providerAccountID,
+			HarnessType: "codex-cli", WorkspaceProvider: "existing-directory",
+		}
+		if err := db.CreateProfile(t.Context(), profile, base); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CreateTask(t.Context(), domain.Task{
+			ID: taskID, Name: taskID, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}, base); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(t.Context(), runID, taskID, providerAccountID, "", startedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admit("codex-earlier", "task-earlier", "run-earlier", earlier)
+	admit("codex-later", "task-later", "run-later", later)
+
+	runs, err := db.ListRuns(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want 2", len(runs))
+	}
+	if runs[0].ID != "run-later" || runs[1].ID != "run-earlier" {
+		t.Fatalf("ListRuns order = [%s, %s], want [run-later, run-earlier]", runs[0].ID, runs[1].ID)
+	}
+}
+
 func TestUnreadRunActivityCountAndMarkAllRead(t *testing.T) {
 	db := openTaskDB(t)
 	ctx := context.Background()

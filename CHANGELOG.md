@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Stored timestamps now use a fixed-width nanosecond field so that the byte-wise ordering SQLite
+  applies to TEXT columns matches real chronological order. Previously `time.RFC3339Nano` trimmed
+  trailing zeros and dropped the fraction entirely on a whole second, so `…T18:00:00Z` sorted after
+  `…T18:00:00.5Z` and `…:00.1Z` after `…:00.12Z`. That corrupted `LatestSnapshot` (the scheduler
+  could dispatch against a stale usage reading), run listings, dispatch-attempt ordering, and the
+  `completed_at >= ?` range filter behind launch metrics. A new migration rewrites timestamps in
+  existing databases, including legacy values stored with a numeric UTC offset; columns holding
+  SQLite `CURRENT_TIMESTAMP` values are left untouched.
 - Pi cache tokens are no longer double-counted when a session record carries more than one
   spelling of the same counter. Pi's JSONL schema expresses cache reads and writes as flat
   `cacheRead`/`cacheWrite`, a `cacheCreation` alias, and a nested `cache:{read,write}` object;
