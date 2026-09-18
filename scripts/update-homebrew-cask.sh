@@ -41,7 +41,7 @@ cask "redline" do
 
   url "https://github.com/${release_repo}/releases/download/v#{version}/${dmg_name}"
   name "Redline"
-  desc "Budget-aware dispatcher that spends spare Codex and Claude subscription quota on queued agent jobs"
+  desc "Spends spare Codex and Claude subscription quota on queued agent jobs"
   homepage "https://github.com/${release_repo}"
 
   livecheck do
@@ -49,8 +49,7 @@ cask "redline" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :ventura"
-  conflicts_with formula: "redline"
+  depends_on macos: :ventura
 
   app "Redline.app"
   binary "#{appdir}/Redline.app/Contents/Resources/bin/redline"
@@ -67,8 +66,9 @@ cask "redline" do
     Redline installs a signed, notarized menu-bar app. Automatic dispatch is
     off until you enable it in the app.
 
-    A standalone CLI formula is also available:
-      brew install croutoncreations/tap/redline
+    This cask links the app's bundled CLI as "redline". The standalone
+    formula (brew install croutoncreations/tap/redline) installs its own
+    "redline"; install one or the other, not both.
   EOS
 end
 EOF
