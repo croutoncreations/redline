@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `prompt_file` is now confined to the workspace even when it is a symlink. The containment check
+  was purely lexical, so a symlink inside the workspace pointing outside it passed validation and
+  the harness read the link target — credentials, keys, any readable file — directly into the
+  model prompt. Both the workspace root and the resolved file are now checked. Symlinks that stay
+  inside the workspace keep working.
+
 - Stored timestamps now use a fixed-width nanosecond field so that the byte-wise ordering SQLite
   applies to TEXT columns matches real chronological order. Previously `time.RFC3339Nano` trimmed
   trailing zeros and dropped the fraction entirely on a whole second, so `…T18:00:00Z` sorted after
