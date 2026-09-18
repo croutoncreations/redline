@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The SQLite database is now restricted to its owner. It was created under the process umask,
+  commonly `0644`, leaving it world-readable along with its `-wal` and `-shm` sidecars — so any
+  other local account could read task prompts, operator-authored prepare/finalize shell commands,
+  and runtime credential references straight off disk, bypassing the HTTP bearer-token boundary.
+  Existing databases are tightened on the next start. On Windows an owner-only DACL is applied,
+  since the POSIX mode bits are ignored there, matching how the `api-token` file is protected.
+
 - `prompt_file` is now confined to the workspace even when it is a symlink. The containment check
   was purely lexical, so a symlink inside the workspace pointing outside it passed validation and
   the harness read the link target — credentials, keys, any readable file — directly into the
