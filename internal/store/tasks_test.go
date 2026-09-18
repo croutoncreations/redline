@@ -15,6 +15,7 @@ import (
 )
 
 func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -45,6 +46,7 @@ func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
 }
 
 func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -71,6 +73,7 @@ func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
 }
 
 func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -106,6 +109,7 @@ func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
 }
 
 func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	want := domain.ExecutionProfile{
@@ -133,6 +137,7 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 }
 
 func TestExecutionProfileCanBeUpdatedAndDeletedWhenUnused(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "editable", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -159,6 +164,7 @@ func TestExecutionProfileCanBeUpdatedAndDeletedWhenUnused(t *testing.T) {
 }
 
 func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "in-use", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -174,6 +180,7 @@ func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
 }
 
 func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -207,6 +214,7 @@ func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
 }
 
 func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}, now); err != nil {
@@ -222,6 +230,7 @@ func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
 }
 
 func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
@@ -246,6 +255,7 @@ func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T)
 }
 
 func TestSchedulerDecisionIsPersistedWithoutMutatingTask(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -275,6 +285,7 @@ func TestSchedulerDecisionIsPersistedWithoutMutatingTask(t *testing.T) {
 }
 
 func TestTaskControlTransitionsAndRequeuesRetryAtBottom(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -305,6 +316,7 @@ func TestTaskControlTransitionsAndRequeuesRetryAtBottom(t *testing.T) {
 }
 
 func TestProviderPauseStatePersists(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -324,6 +336,7 @@ func TestProviderPauseStatePersists(t *testing.T) {
 }
 
 func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -350,6 +363,7 @@ func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
 }
 
 func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -380,6 +394,7 @@ func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *test
 }
 
 func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -409,6 +424,7 @@ func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 }
 
 func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
@@ -458,6 +474,7 @@ func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
 }
 
 func TestRunAdmissionEnforcesRuntimeConnectionAndAgentContextLimits(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	connection := domain.RuntimeConnection{
@@ -519,6 +536,7 @@ func TestRunAdmissionEnforcesRuntimeConnectionAndAgentContextLimits(t *testing.T
 }
 
 func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profiles := []domain.ExecutionProfile{
@@ -563,6 +581,7 @@ func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
 }
 
 func TestAdmissionAllowsConfiguredProviderConcurrency(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "first", "second", "third")
@@ -581,6 +600,7 @@ func TestAdmissionAllowsConfiguredProviderConcurrency(t *testing.T) {
 }
 
 func TestAdmissionEnforcesOnlyConfiguredPoolLimits(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
@@ -601,6 +621,7 @@ func TestAdmissionEnforcesOnlyConfiguredPoolLimits(t *testing.T) {
 }
 
 func TestConcurrentAdmissionHonorsConfiguredProviderLimit(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "first", "second", "third")
@@ -636,6 +657,7 @@ func TestConcurrentAdmissionHonorsConfiguredProviderLimit(t *testing.T) {
 }
 
 func TestConcurrentAdmissionHonorsConfiguredPoolLimit(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
@@ -711,6 +733,7 @@ func createAdmissionTasks(t *testing.T, db *store.DB, now time.Time, taskIDs ...
 }
 
 func TestHasActiveRun(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
@@ -738,6 +761,7 @@ func TestHasActiveRun(t *testing.T) {
 }
 
 func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -790,6 +814,7 @@ func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
 }
 
 func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -817,6 +842,7 @@ func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
 }
 
 func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "redline.db")
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	db, err := store.Open(databasePath)

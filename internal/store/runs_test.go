@@ -64,6 +64,7 @@ func TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths(t *testing.T)
 }
 
 func TestUnreadRunActivityCountAndMarkAllRead(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
@@ -195,6 +196,7 @@ func TestUnreadRunActivityCountAndMarkAllRead(t *testing.T) {
 // returns ErrNotFound when targeting a run that is still active, preventing
 // callers from prematurely clearing the unread flag on in-progress work.
 func TestMarkRunActivityReadRequiresTerminalRun(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)

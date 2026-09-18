@@ -41,6 +41,7 @@ import (
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 
 func TestLaunchMetricsReportsAutomaticWaitRate(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	for _, attempt := range []domain.DispatchAttempt{
 		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
@@ -72,6 +73,7 @@ func TestLaunchMetricsReportsAutomaticWaitRate(t *testing.T) {
 }
 
 func TestDashboardPageAndAssetsAreServed(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	for _, test := range []struct {
 		path        string
@@ -122,6 +124,7 @@ func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 }
 
 func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	for _, test := range []struct {
 		path        string
@@ -172,6 +175,7 @@ func TestMobileDashboardPageAndAssetsAreServed(t *testing.T) {
 }
 
 func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	for _, test := range []struct {
 		name   string
@@ -219,6 +223,7 @@ func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 }
 
 func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -272,6 +277,7 @@ func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *tes
 }
 
 func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -293,6 +299,7 @@ func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
 }
 
 func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +320,7 @@ func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
 }
 
 func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -401,6 +409,7 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 }
 
 func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -466,6 +475,7 @@ func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T)
 }
 
 func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -517,6 +527,7 @@ func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
 }
 
 func TestDashboardSessionRenewalOnlyAppliesToValidCookies(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -565,6 +576,7 @@ func TestDashboardSessionRenewalOnlyAppliesToValidCookies(t *testing.T) {
 }
 
 func TestTaskTemplatesAreEditableStarters(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	resp, err := http.Get(server.URL + "/v1/task-templates")
 	if err != nil {
@@ -590,6 +602,7 @@ func TestTaskTemplatesAreEditableStarters(t *testing.T) {
 }
 
 func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -618,6 +631,7 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 }
 
 func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -649,6 +663,7 @@ func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.
 }
 
 func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.SetProviderPaused(t.Context(), "codex-main", true); err != nil {
 		t.Fatal(err)
@@ -734,6 +749,7 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 }
 
 func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
 		Provider:   "claude",
@@ -768,6 +784,7 @@ func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T
 }
 
 func TestDashboardReportsStoreFailures(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -783,6 +800,7 @@ func TestDashboardReportsStoreFailures(t *testing.T) {
 }
 
 func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "run-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
@@ -802,6 +820,7 @@ func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
 }
 
 func TestRunActivityCanBeMarkedRead(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "activity-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
@@ -836,6 +855,7 @@ func TestRunActivityCanBeMarkedRead(t *testing.T) {
 }
 
 func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, claudePayload) }))
 	defer usage.Close()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
@@ -880,6 +900,7 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 }
 
 func TestTokenSyncIncludesExplicitPiSubscriptionProvider(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	viewerPath := filepath.Join(directory, "viewer.db")
 	piPath := filepath.Join(directory, "pi.jsonl")
@@ -954,6 +975,7 @@ func TestTokenSyncSkipsGatepostWhenDatabaseFileMissing(t *testing.T) {
 }
 
 func TestTokenSyncBackfillsCompletedOwnedRun(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	viewerPath := filepath.Join(directory, "viewer.db")
 	viewer, err := sql.Open("sqlite", viewerPath)
@@ -1017,6 +1039,7 @@ CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, 
 }
 
 func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	profile := postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "codex-devx", "provider_account_id": "codex-main",
@@ -1068,6 +1091,7 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 }
 
 func TestTaskCRUDOverServiceAPI(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
@@ -1130,6 +1154,7 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 }
 
 func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
@@ -1149,6 +1174,7 @@ func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
 }
 
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "editable-profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
@@ -1192,6 +1218,7 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 }
 
 func TestListAndTaskControlEndpoints(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "listed-profile", "provider_account_id": "codex-main", "harness_type": "pi", "model": "openai-codex/gpt-5.6-sol", "workspace_provider": "devx",
@@ -1224,6 +1251,7 @@ func TestListAndTaskControlEndpoints(t *testing.T) {
 }
 
 func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", `{`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", `{"id":"bad","provider_account_id":"missing","harness_type":"pi","workspace_provider":"devx"}`, http.StatusBadRequest)
@@ -1242,6 +1270,7 @@ func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
 }
 
 func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
@@ -1255,6 +1284,7 @@ func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
 }
 
 func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) {
+	t.Parallel()
 	payload := `{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[{"type":"progress","label":"Weekly","used":50,"limit":100,"resetsAt":"2026-07-18T18:00:00Z"}]}`
 	server, _ := newAPIServer(t, payload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
@@ -1279,6 +1309,7 @@ func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) 
 }
 
 func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
 		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
@@ -1308,6 +1339,7 @@ func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
 }
 
 func TestSchedulerExplainsRepositoryRevisionFailure(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -1347,6 +1379,7 @@ func TestSchedulerExplainsRepositoryRevisionFailure(t *testing.T) {
 }
 
 func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, claudeAllowancePayload(0, 1.0, 23*time.Hour))
 	createClaudeCandidate(t, db, "fable-profile", "fable", "fable", "fable-task", 100)
 	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 50)
@@ -1369,6 +1402,7 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 }
 
 func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))
 	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 100)
 	createClaudeCandidate(t, db, "fable-profile", "claude-fable-5", "", "fable-task", 50)
@@ -1390,6 +1424,7 @@ func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 }
 
 func TestFableSignalDoesNotReleaseOpusTask(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))
 	createClaudeCandidate(t, db, "opus-profile", "opus", "", "opus-task", 100)
 
@@ -1403,6 +1438,7 @@ func TestFableSignalDoesNotReleaseOpusTask(t *testing.T) {
 }
 
 func TestExecutionSkipsExhaustedFableAndAdmitsOpus(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, claudeAllowancePayload(0, 1.0, 23*time.Hour))
 	}))
@@ -1442,6 +1478,7 @@ func TestExecutionSkipsExhaustedFableAndAdmitsOpus(t *testing.T) {
 }
 
 func TestSimulatedSchedulerResolvesTaskRepositoryLikeExecution(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -1482,6 +1519,7 @@ func TestSimulatedSchedulerResolvesTaskRepositoryLikeExecution(t *testing.T) {
 }
 
 func TestServiceProviderStatusAndDecision(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	refresh := postJSON[decision.UsageSnapshot](
 		t, server.URL+"/v1/providers/claude-main/refresh", map[string]any{},
@@ -1508,6 +1546,7 @@ func TestServiceProviderStatusAndDecision(t *testing.T) {
 }
 
 func TestServiceHealth(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/health")
 	if err != nil {
@@ -1520,6 +1559,7 @@ func TestServiceHealth(t *testing.T) {
 }
 
 func TestDetailedHealthStartsHealthy(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/health/details?window=12h")
 	if err != nil {
@@ -1536,6 +1576,7 @@ func TestDetailedHealthStartsHealthy(t *testing.T) {
 }
 
 func TestDetailedHealthRejectsInvalidWindow(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	for _, configured := range []string{"invalid", "0s", "-1h"} {
 		resp, err := http.Get(server.URL + "/v1/health/details?window=" + url.QueryEscape(configured))
@@ -1550,6 +1591,7 @@ func TestDetailedHealthRejectsInvalidWindow(t *testing.T) {
 }
 
 func TestNotificationDeliveryHistoryEndpoint(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, claudePayload)
 	id, err := db.CreateNotificationDelivery(t.Context(), domain.EventRunFailed, json.RawMessage(`{"type":"run.failed"}`), apiNow)
 	if err != nil {
@@ -1573,6 +1615,7 @@ func TestNotificationDeliveryHistoryEndpoint(t *testing.T) {
 }
 
 func TestSchedulerStatusIsExposedWhenDisabled(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/scheduler/status")
 	if err != nil {
@@ -1589,6 +1632,7 @@ func TestSchedulerStatusIsExposedWhenDisabled(t *testing.T) {
 }
 
 func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -1645,6 +1689,7 @@ func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testin
 }
 
 func TestAutomaticSchedulerFillsConfiguredProviderConcurrency(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -1708,6 +1753,7 @@ func TestAutomaticSchedulerFillsConfiguredProviderConcurrency(t *testing.T) {
 }
 
 func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int32
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -1768,6 +1814,7 @@ func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T)
 }
 
 func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
@@ -1810,6 +1857,7 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 }
 
 func TestAutomaticSchedulerDoesNotPersistShutdownCancellationAsAnError(t *testing.T) {
+	t.Parallel()
 	requestStarted := make(chan struct{})
 	usage := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		close(requestStarted)
@@ -1876,6 +1924,7 @@ func TestAutomaticSchedulerCompletesHermesRemoteRunAndRecordsUsage(t *testing.T)
 }
 
 func TestAutomaticHermesCredentialFailureLeavesAuditableFailedRun(t *testing.T) {
+	t.Parallel()
 	handler, db := automaticHermesServer(t, "https://gateway.invalid", "REDLINE_MISSING_HERMES_CREDENTIAL")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2016,6 +2065,7 @@ func hermesSchedulerGateway(t *testing.T, token string) *httptest.Server {
 }
 
 func TestManualExecutePersistsNoTaskAttemptAndListsIt(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/scheduler/execute", map[string]any{
 		"provider_account_id": "codex-main",
@@ -2036,6 +2086,7 @@ func TestManualExecutePersistsNoTaskAttemptAndListsIt(t *testing.T) {
 }
 
 func TestPausedManualExecuteIsPersistedBeforeConflictResponse(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/providers/codex-main/pause", map[string]any{})
 	data, _ := json.Marshal(map[string]string{"provider_account_id": "codex-main"})
@@ -2054,6 +2105,7 @@ func TestPausedManualExecuteIsPersistedBeforeConflictResponse(t *testing.T) {
 }
 
 func TestRunLogsRejectArtifactOutsideConfiguredRoot(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -2099,6 +2151,7 @@ func TestRunLogsRejectArtifactOutsideConfiguredRoot(t *testing.T) {
 }
 
 func TestMissingOptionalLifecycleLogIsAnEmptySuccessfulTail(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "logs-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
@@ -2124,6 +2177,7 @@ func TestMissingOptionalLifecycleLogIsAnEmptySuccessfulTail(t *testing.T) {
 }
 
 func TestEmptyRunListIsJSONArray(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, claudePayload)
 	resp, err := http.Get(server.URL + "/v1/runs")
 	if err != nil {
@@ -2138,6 +2192,7 @@ func TestEmptyRunListIsJSONArray(t *testing.T) {
 }
 
 func TestRunEventsEndpointReturnsTimeline(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	now := apiNow
 	profile := domain.ExecutionProfile{ID: "events-profile", ProviderAccountID: "codex-main", HarnessType: "command", WorkspaceProvider: "existing-directory"}
@@ -2172,6 +2227,7 @@ func TestRunEventsEndpointReturnsTimeline(t *testing.T) {
 }
 
 func TestPausedProviderDoesNotSelectTask(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	postJSON[map[string]any](t, server.URL+"/v1/providers/codex-main/pause", map[string]any{})
 	result := postJSON[struct {
@@ -2186,6 +2242,7 @@ func TestPausedProviderDoesNotSelectTask(t *testing.T) {
 }
 
 func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	initial := postJSON[decisionResponseForTest](t, server.URL+"/v1/providers/codex-main/decision", map[string]any{})
 	if initial.Result.Policy != "standard" || initial.Result.Decision != decision.Admit {
@@ -2267,6 +2324,7 @@ func TestProviderPolicyOverrideChangesDecisionAndPersistsInDashboard(t *testing.
 }
 
 func TestProviderConcurrencyOverridePersistsInDashboardAndCanBeCleared(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	var updated struct {
 		MaxConcurrentRuns int    `json:"max_concurrent_runs"`
@@ -2314,6 +2372,7 @@ func TestProviderConcurrencyOverridePersistsInDashboardAndCanBeCleared(t *testin
 }
 
 func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
+	t.Parallel()
 	server, db := newAPIServer(t, claudePayload)
 	weeklyReset := time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC)
 	for _, snapshot := range []decision.UsageSnapshot{
@@ -2360,6 +2419,7 @@ func calibrationSnapshot(observed time.Time, shortRemaining, weeklyRemaining flo
 }
 
 func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -2406,6 +2466,7 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 }
 
 func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2472,6 +2533,7 @@ func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
 }
 
 func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2512,6 +2574,7 @@ func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 }
 
 func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2669,6 +2732,7 @@ func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *
 }
 
 func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
+	t.Parallel()
 	var usageRequests atomic.Int32
 	usageBarrier := make(chan struct{})
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -2747,6 +2811,7 @@ func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 }
 
 func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, claudeAllowancePayload(1, 1, 24*time.Hour))
 	}))
@@ -2851,6 +2916,7 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 }
 
 func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -2909,6 +2975,7 @@ func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
 }
 
 func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -3001,6 +3068,7 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 }
 
 func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
+	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
@@ -3063,6 +3131,7 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 }
 
 func TestRuntimeConnectionAndAgentContextConfigurationAPI(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
 		"id": "hermes-pi", "runtime": "hermes", "transport": "gateway",
@@ -3121,6 +3190,7 @@ func TestRuntimeConnectionAndAgentContextConfigurationAPI(t *testing.T) {
 }
 
 func TestRuntimeJobsCanBeDiscoveredAndTriggered(t *testing.T) {
+	t.Parallel()
 	triggered := atomic.Bool{}
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -3157,6 +3227,7 @@ func TestRuntimeJobsCanBeDiscoveredAndTriggered(t *testing.T) {
 }
 
 func TestRuntimeConfigurationAPIUsesEmptyArraysAndRejectsIncompleteHermesProfile(t *testing.T) {
+	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
 	var connections []domain.RuntimeConnection
 	getJSON(t, server.URL+"/v1/runtime-connections", &connections)
@@ -3368,6 +3439,7 @@ const claudePayload = `{
   ]}`
 
 func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -3429,6 +3501,7 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 // When this fails: bump CACHE in sw.js, then update wantCacheName and
 // wantFingerprint below.
 func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
+	t.Parallel()
 	const wantCacheName = "redline-mobile-v4"
 	const wantFingerprint = "c47ad0d8966c9c54"
 
@@ -3480,6 +3553,7 @@ func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
 // is not reachable from any current handler and is not covered here; it is
 // hardening for future streaming handlers.
 func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
