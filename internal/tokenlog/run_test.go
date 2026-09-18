@@ -76,6 +76,40 @@ func TestLoadRunArtifactReadsCodexTurnUsageAndSeparatesCachedInput(t *testing.T)
 	}
 }
 
+// TestLoadRunArtifactKeepsLastCodexTotalRatherThanSumming pins the semantics of
+// turn.completed.usage: it is ThreadTokenUsage.total, a running session total,
+// not the individual turn's usage. codex exec discards the per-request .last
+// delta when building its JSONL stream (openai/codex#17539), so the final
+// record already carries the whole run and summing records double-counts.
+//
+// The fixture is a real cumulative series copied from a Codex rollout log
+// rather than invented numbers, because a hand-made fixture with independent
+// per-turn values silently encodes the opposite (wrong) assumption and then
+// passes under either implementation. Note total.input is non-decreasing and
+// 12674 == 6098 + 6576, which is what makes it a total rather than a delta.
+func TestLoadRunArtifactKeepsLastCodexTotalRatherThanSumming(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "codex.jsonl")
+	data := `{"type":"thread.started","thread_id":"abc"}
+{"type":"turn.completed","usage":{"input_tokens":6098,"cached_input_tokens":0,"output_tokens":47}}
+{"type":"turn.completed","usage":{"input_tokens":12674,"cached_input_tokens":0,"output_tokens":94}}
+{"type":"turn.completed","usage":{"input_tokens":19829,"cached_input_tokens":0,"output_tokens":139}}
+{"type":"turn.completed","usage":{"input_tokens":37739,"cached_input_tokens":0,"output_tokens":388}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenlog.LoadRunArtifact(path, "codex-cli", "run-cumulative", "gpt-5.6-sol", time.Now())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("observations=%#v err=%v", got, err)
+	}
+	item := got[0]
+	// The final cumulative total, not 6098+12674+19829+37739 = 76340.
+	if item.InputTokens != 37739 || item.OutputTokens != 388 {
+		t.Fatalf("input=%d output=%d, want 37739/388; summing would give 76340/668",
+			item.InputTokens, item.OutputTokens)
+	}
+}
+
 // TestNormalizeHermesProviderDirectAnthropicNames verifies that the literal
 // provider strings "anthropic" and "anthropic-cli" both map to "claude".
 // Bug class: if these cases fall through to the default branch, tokens would be
