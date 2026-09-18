@@ -460,7 +460,7 @@ func (s *server) runEvents(ctx context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, Output{}, err
 	}
 	total := len(items)
-	items = truncate(items, limit)
+	items = truncateOldest(items, limit)
 	views := make([]runEventView, 0, len(items))
 	for _, item := range items {
 		views = append(views, viewRunEvent(item))
@@ -757,6 +757,16 @@ func truncate[T any](items []T, limit int) []T {
 		return items
 	}
 	return items[:limit]
+}
+
+// truncateOldest keeps the most recent `limit` items from a slice ordered
+// oldest-first (as run events are), dropping from the front instead of the
+// back so callers polling for a terminal event still see it.
+func truncateOldest[T any](items []T, limit int) []T {
+	if len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
 }
 
 func listOutput[T any](kind string, items []T, requested int) (*mcp.CallToolResult, Output, error) {

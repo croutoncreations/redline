@@ -294,6 +294,37 @@ func TestRunEventsBoundLargePayloads(t *testing.T) {
 	}
 }
 
+func TestRunEventsKeepsMostRecentWhenTruncated(t *testing.T) {
+	// The store returns the most recent `limit` events in ascending (oldest
+	// first) order, mirroring internal/store.ListRunEvents. A truncated
+	// response must drop the oldest events, not the newest.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs/run-1/events", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": 1, "run_id": "run-1", "type": "run.started", "occurred_at": "2026-07-24T12:00:00Z", "payload": map[string]any{}},
+			{"id": 2, "run_id": "run-1", "type": "workspace.prepared", "occurred_at": "2026-07-24T12:00:01Z", "payload": map[string]any{}},
+			{"id": 3, "run_id": "run-1", "type": "run.completed", "occurred_at": "2026-07-24T12:00:02Z", "payload": map[string]any{}},
+		})
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_run_events", map[string]any{
+		"run_id": "run-1", "limit": 2,
+	})
+	if result.IsError {
+		t.Fatalf("events error: %s", contentText(result))
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"run.completed"`) {
+		t.Fatalf("truncated events dropped the most recent event: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"type":"run.started"`) {
+		t.Fatalf("truncated events should drop the oldest event, got: %s", encoded)
+	}
+}
+
 func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	var created map[string]any
 	var dispatched map[string]any
