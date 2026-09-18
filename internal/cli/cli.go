@@ -858,8 +858,8 @@ func renderTerminalQR(output io.Writer, bitmap [][]bool) {
 	}
 	for y := -margin; y < len(bitmap)+margin; y += 2 {
 		for x := -margin; x < width+margin; x++ {
-			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
-			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && bitmap[y+1][x]
 			switch {
 			case top && bottom:
 				fmt.Fprint(output, "█")
