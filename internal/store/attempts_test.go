@@ -64,6 +64,7 @@ func TestListDispatchAttemptsRangeIncludesSubSecondAndVariableWidthFractions(t *
 }
 
 func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
@@ -101,6 +102,7 @@ func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 }
 
 func TestDispatchAttemptValidation(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	_, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{})
 	if err == nil {
@@ -109,6 +111,7 @@ func TestDispatchAttemptValidation(t *testing.T) {
 }
 
 func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	for _, attempt := range []domain.DispatchAttempt{

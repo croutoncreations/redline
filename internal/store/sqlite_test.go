@@ -14,6 +14,7 @@ import (
 )
 
 func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -309,6 +310,7 @@ VALUES ('codex-main', 0, '2026-09-18 13:45:01');`); err != nil {
 }
 
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -328,6 +330,7 @@ func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 }
 
 func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -350,6 +353,7 @@ func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
 }
 
 func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")
 	db, err := store.Open(path)
 	if err != nil {
@@ -424,6 +428,7 @@ FROM usage_snapshots LIMIT 1;`); err != nil {
 }
 
 func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -458,6 +463,7 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 }
 
 func TestOpenMigratesExistingVersionTwoDatabase(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")
 	legacy, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -480,6 +486,7 @@ INSERT INTO schema_migrations(version) VALUES (2);`); err != nil {
 }
 
 func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -502,6 +509,7 @@ func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
 }
 
 func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -529,6 +537,7 @@ func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
 }
 
 func TestSQLiteReportsMissingProvider(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
