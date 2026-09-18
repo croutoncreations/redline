@@ -64,7 +64,8 @@ final class MenuBarController: NSObject {
 
     func start() {
         Task {
-            await supervisor.ensureRunning()
+            let failure = await supervisor.ensureRunning()
+            popoverModel.apply(startupFailure: failure)
             await refresh()
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
@@ -100,7 +101,8 @@ final class MenuBarController: NSObject {
     }
 
     func reconnectAfterServiceMigration() async {
-        await supervisor.ensureRunning()
+        let failure = await supervisor.ensureRunning()
+        popoverModel.apply(startupFailure: failure)
         await refresh()
     }
 
@@ -134,8 +136,14 @@ final class MenuBarController: NSObject {
         guard let button = statusItem.button else { return }
         button.image = GaugeIcon.image(activity: nil, remainingPercent: nil, offline: true)
         button.attributedTitle = providerSummary([], unreadRuns: 0)
-        button.toolTip = "Redline offline: \(detail)"
-        button.setAccessibilityLabel("Redline is offline")
+        if let failure = popoverModel.startupFailure {
+            let reason = failure.detail ?? failure.summary
+            button.toolTip = "Redline could not start: \(reason)"
+            button.setAccessibilityLabel("Redline could not start: \(reason)")
+        } else {
+            button.toolTip = "Redline offline: \(detail)"
+            button.setAccessibilityLabel("Redline is offline")
+        }
     }
 
     private func providerSummary(_ badges: [ProviderBadge], unreadRuns: Int) -> NSAttributedString {

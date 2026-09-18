@@ -11,6 +11,10 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var tasksBeingControlled = Set<String>()
     @Published private(set) var showsBuilderUpdatesPrompt = false
     @Published private(set) var installationIssue: InstallationIssue?
+    /// Populated when the app launched the embedded service and it failed to
+    /// come up. Distinct from `errorMessage` (a transient fetch failure): this
+    /// carries the service's own diagnostic so a bad config is visible here.
+    @Published private(set) var startupFailure: ServiceStartupFailure?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -30,7 +34,12 @@ final class PopoverViewModel: ObservableObject {
         )
         errorMessage = nil
         actionError = nil
+        startupFailure = nil
         onSnapshot?(snapshot)
+    }
+
+    func apply(startupFailure: ServiceStartupFailure?) {
+        self.startupFailure = startupFailure
     }
 
     func dismissBuilderUpdatesPrompt() {
