@@ -23,6 +23,15 @@ func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("database path is required")
 	}
+	// The database holds task prompts, operator-authored prepare/finalize
+	// shell commands, and runtime credential references. Created under the
+	// process umask it is commonly 0644, letting any other local account read
+	// it straight off disk and bypass the HTTP bearer-token boundary. Restrict
+	// it before SQLite writes anything, matching how the API token file is
+	// already protected.
+	if err := restrictToOwner(path); err != nil {
+		return nil, err
+	}
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
@@ -31,6 +40,15 @@ func Open(path string) (*DB, error) {
 	if _, err := database.Exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("configure SQLite database: %w", err)
+	}
+	// WAL mode creates -wal and -shm sidecars holding uncommitted page data,
+	// which is just as sensitive as the main file. They are created by SQLite
+	// above, so they are tightened here rather than up front.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := restrictToOwner(path + suffix); err != nil {
+			database.Close()
+			return nil, err
+		}
 	}
 	store := &DB{db: database}
 	if err := store.migrate(context.Background()); err != nil {
