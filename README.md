@@ -214,7 +214,7 @@ instruction.
   </tr>
   <tr>
     <td><img src="docs/assets/launch/redline-job-configuration-dark.png" alt="Redline job editor with task prompt, provider, priority, recurrence, and dispatch tier"></td>
-    <td><img src="docs/assets/launch/redline-environment-configuration-dark.png" alt="Redline execution profile editor with harness, model, repository, workspace isolation, and lifecycle settings"></td>
+    <td><img src="docs/assets/launch/redline-execution-profile-dark.png" alt="Redline execution profile editor with harness, model, repository, workspace isolation, and lifecycle settings"></td>
   </tr>
 </table>
 
