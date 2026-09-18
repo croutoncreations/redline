@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Unknown keys in `redline.yaml` are now reported as warnings on startup instead of preventing
+  the service from starting, so a configuration written for another Redline build still loads.
+  Type errors, malformed YAML, and invalid values remain fatal.
+- When the menu-bar app's embedded service fails to start, the popover now shows the service's
+  own diagnostic (typically the configuration error) with a **Show log** button, and the menu-bar
+  tooltip reads "Redline could not start" rather than a generic offline state.
+- `redline version` inside the macOS app bundle now reports the release version, commit, and
+  build date instead of `dev`.
+
 ### Added
 
 - Homebrew distribution through `croutoncreations/homebrew-tap`: `brew install --cask
