@@ -37,6 +37,7 @@ import (
 	"github.com/croutoncreations/redline/internal/mcpserver"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,16 +62,24 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	global.SetOutput(stderr)
 	configPath := global.String("config", "redline.yaml", "service configuration file")
 	apiURL := global.String("api", "http://127.0.0.1:7436", "Redline service API URL")
+	showVersion := global.Bool("version", false, "print the Redline version and exit")
 	if err := global.Parse(args); err != nil {
 		return 1
 	}
+	if *showVersion {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "version":
+		fmt.Fprintln(stdout, version.String())
+		return 0
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
 	case "demo":
@@ -121,7 +130,8 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair")
+	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair,")
+	fmt.Fprintln(output, "          version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")

@@ -16,6 +16,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/apiauth"
 	"github.com/croutoncreations/redline/internal/cli"
+	"github.com/croutoncreations/redline/internal/version"
 )
 
 func TestTaskDispatchConsumesServiceAPIWithoutBody(t *testing.T) {
@@ -156,6 +157,17 @@ func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
 		!strings.Contains(stdout.String(), "github.com/croutoncreations/redline") ||
 		!strings.Contains(stdout.String(), "utm_medium=cli") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestVersionCommandAndFlagPrintBuildVersion(t *testing.T) {
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		var stdout, stderr bytes.Buffer
+		exit := cli.Run(args, &stdout, &stderr, time.Now)
+		if exit != 0 || stderr.Len() != 0 ||
+			!strings.HasPrefix(stdout.String(), "redline "+version.Version) {
+			t.Fatalf("args=%v exit=%d stdout=%q stderr=%q", args, exit, stdout.String(), stderr.String())
+		}
 	}
 }
 

@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Homebrew distribution through `croutoncreations/homebrew-tap`: `brew install --cask
+  croutoncreations/tap/redline` installs the signed macOS app and
+  `brew install croutoncreations/tap/redline` installs the standalone CLI on macOS or Linux.
+  Tagged releases now publish CLI archives for darwin/linux/windows on amd64/arm64 with
+  `checksums.txt` via GoReleaser, and `redline version` / `redline --version` report the
+  release version, commit, and build date. See `docs/releasing.md`.
 - Redline now builds and runs on Linux and Windows in addition to macOS: the CLI resolves a
   platform-appropriate default data directory (`~/.config/redline` on Linux,
   `%AppData%\redline` on Windows, unchanged `~/Library/Application Support/Redline` on macOS),
