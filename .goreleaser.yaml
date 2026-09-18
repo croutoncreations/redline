@@ -1,0 +1,102 @@
+# GoReleaser builds and publishes the Redline CLI / headless service for
+# every supported platform and updates the Homebrew formula in
+# croutoncreations/homebrew-tap.
+#
+# The signed, notarized macOS app DMG is produced separately by
+# scripts/package-macos-release.sh (it needs a Developer ID identity and a
+# notarytool keychain profile that cannot live in CI). That script uploads the
+# DMG to the same GitHub release and updates the Homebrew cask via
+# scripts/update-homebrew-cask.sh.
+#
+# Local dry run (no upload, no tap push):
+#   goreleaser release --snapshot --clean
+version: 2
+project_name: redline
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: redline
+    main: ./cmd/redline
+    binary: redline
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/croutoncreations/redline/internal/version.Version={{.Version}}
+      - -X github.com/croutoncreations/redline/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/croutoncreations/redline/internal/version.Date={{.Date}}
+
+archives:
+  - id: redline
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - NOTICE
+      - config.example.yaml
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^ci:"
+      - "^docs:"
+
+release:
+  github:
+    owner: croutoncreations
+    name: redline
+  # The DMG is uploaded to this same release by the macOS packaging step, so
+  # never replace existing assets and leave the release published as-is.
+  mode: keep-existing
+  draft: false
+  prerelease: auto
+
+brews:
+  - name: redline
+    ids: [redline]
+    homepage: https://github.com/croutoncreations/redline
+    description: "Budget-aware dispatcher that spends spare Codex and Claude subscription quota on queued agent jobs"
+    license: Apache-2.0
+    directory: Formula
+    commit_author:
+      name: redline-release-bot
+      email: redline@croutoncreations.com
+    commit_msg_template: "redline {{ .Tag }}"
+    repository:
+      owner: croutoncreations
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    caveats: |
+      The CLI is also bundled inside Redline.app. If you use the menu-bar app,
+      you do not need this formula; the app's copy lives at
+      /Applications/Redline.app/Contents/Resources/bin/redline.
+
+      For the app itself:  brew install --cask croutoncreations/tap/redline
+    test: |
+      assert_match "redline #{version}", shell_output("#{bin}/redline version")
+    install: |
+      bin.install "redline"
+
+announce:
+  skip: true
