@@ -118,10 +118,10 @@ func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 	return observation, nil
 }
 
-func formatTokenTime(value time.Time) string {
-	// Fixed-width fractions preserve chronological order in SQLite TEXT keys.
-	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
-}
+// formatTokenTime encodes token-observation timestamps. It is an alias for
+// formatTime: both write the same fixed-width layout, and token_observations
+// is ordered and range-filtered on observed_at just like the other tables.
+func formatTokenTime(value time.Time) string { return formatTime(value) }
 
 func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source string) (time.Time, error) {
 	var value string

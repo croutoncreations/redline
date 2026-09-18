@@ -435,8 +435,92 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 			return fmt.Errorf("record requested task dispatch target migration: %w", err)
 		}
 	}
+	if version < 24 {
+		if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (24)`); err != nil {
+			return fmt.Errorf("record fixed-width timestamp migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+// fixedWidthTimestampColumns lists every TEXT column written through
+// formatTime/formatTokenTime, i.e. every column holding an RFC3339 timestamp
+// that SQLite orders or range-filters byte-wise.
+//
+// Deliberately excluded are the columns defaulting to SQLite's
+// CURRENT_TIMESTAMP (provider_controls.updated_at, schema_migrations.applied_at,
+// usage_snapshots.created_at, token_observations.created_at). Those hold
+// "YYYY-MM-DD HH:MM:SS", never RFC3339, and are not used for ordering. The
+// guard below skips them anyway, but leaving them out keeps the intent clear.
+var fixedWidthTimestampColumns = []struct{ table, column string }{
+	{"agent_contexts", "created_at"},
+	{"dispatch_attempts", "started_at"},
+	{"dispatch_attempts", "completed_at"},
+	{"execution_profiles", "created_at"},
+	{"notification_deliveries", "created_at"},
+	{"notification_deliveries", "updated_at"},
+	{"run_events", "occurred_at"},
+	{"runs", "started_at"},
+	{"runs", "completed_at"},
+	{"runs", "activity_read_at"},
+	{"runtime_connections", "created_at"},
+	{"scheduler_decisions", "created_at"},
+	{"tasks", "last_started_at"},
+	{"tasks", "last_completed_at"},
+	{"tasks", "created_at"},
+	{"tasks", "updated_at"},
+	{"token_observations", "observed_at"},
+	{"usage_allowance_windows", "resets_at"},
+	{"usage_snapshots", "observed_at"},
+	{"usage_snapshots", "short_resets_at"},
+	{"usage_snapshots", "weekly_resets_at"},
+}
+
+// migrateFixedWidthTimestampsV24 rewrites RFC3339Nano timestamps written by
+// earlier versions into the fixed-width storedTimeLayout.
+//
+// Without this, the formatTime change only helps rows written after the
+// upgrade: a legacy "…T18:00:00Z" still sorts after a new
+// "…T18:00:00.000000000Z", so ordering stays wrong until existing rows are
+// rewritten.
+//
+// The UPDATE pads the fractional part to nine digits:
+//   - no fraction   "…:00Z"       -> "…:00.000000000Z"
+//   - short         "…:00.5Z"     -> "…:00.500000000Z"
+//   - full width    unchanged (length 30 is already correct)
+//
+// The LIKE guard restricts this to RFC3339 UTC values, so CURRENT_TIMESTAMP
+// values and NULLs pass through untouched. Timestamps are written via
+// value.UTC(), so a trailing "Z" is the only offset form that occurs.
+func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
+	for _, target := range fixedWidthTimestampColumns {
+		// A database can reach this migration without every table present:
+		// one stamped at an early version skips the migrations that would
+		// have created them (see TestOpenMigratesExistingVersionTwoDatabase).
+		// Nothing to rewrite in that case.
+		exists, err := tableExists(ctx, tx, target.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		statement := fmt.Sprintf(`
+UPDATE %[1]s SET %[2]s = substr(%[2]s, 1, 19) || '.' ||
+    substr((CASE WHEN length(%[2]s) > 20 THEN substr(%[2]s, 21, length(%[2]s) - 21) ELSE '' END)
+        || '000000000', 1, 9) || 'Z'
+WHERE %[2]s IS NOT NULL
+  AND %[2]s LIKE '____-__-__T__:__:__%%Z'
+  AND length(%[2]s) <> 30`, target.table, target.column)
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("normalize %s.%s timestamps: %w", target.table, target.column, err)
+		}
 	}
 	return nil
 }
@@ -572,7 +656,7 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	var shortReset any
 	if s.Short != nil {
 		shortRemaining = s.Short.Remaining
-		shortReset = s.Short.ResetsAt.Format(time.RFC3339Nano)
+		shortReset = formatTime(s.Short.ResetsAt)
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -587,11 +671,11 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 		ctx,
 		query,
 		s.Provider,
-		s.ObservedAt.Format(time.RFC3339Nano),
+		formatTime(s.ObservedAt),
 		shortRemaining,
 		shortReset,
 		s.Weekly.Remaining,
-		s.Weekly.ResetsAt.Format(time.RFC3339Nano),
+		formatTime(s.Weekly.ResetsAt),
 		s.Source,
 		s.Confidence,
 		raw,
@@ -618,7 +702,7 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
 			allowance.Scope, allowance.Role, allowance.Remaining,
-			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds, allowance.ResetInferred)
+			formatTime(allowance.ResetsAt), allowance.PeriodDurationSeconds, allowance.ResetInferred)
 		if err != nil {
 			return fmt.Errorf("save allowance %q: %w", allowance.Key, err)
 		}
