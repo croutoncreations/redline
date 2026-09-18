@@ -6,16 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
+## [0.1.7] - 2026-09-18
 
-- Unknown keys in `redline.yaml` are now reported as warnings on startup instead of preventing
-  the service from starting, so a configuration written for another Redline build still loads.
-  Type errors, malformed YAML, and invalid values remain fatal.
-- When the menu-bar app's embedded service fails to start, the popover now shows the service's
-  own diagnostic (typically the configuration error) with a **Show log** button, and the menu-bar
-  tooltip reads "Redline could not start" rather than a generic offline state.
-- `redline version` inside the macOS app bundle now reports the release version, commit, and
-  build date instead of `dev`.
+First public release. Redline is now open source under the Apache 2.0 license at
+`github.com/croutoncreations/redline`, with a rewritten README, reorganized documentation, and
+Homebrew distribution.
 
 ### Added
 
@@ -23,8 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   croutoncreations/tap/redline` installs the signed macOS app and
   `brew install croutoncreations/tap/redline` installs the standalone CLI on macOS or Linux.
   Tagged releases now publish CLI archives for darwin/linux/windows on amd64/arm64 with
-  `checksums.txt` via GoReleaser, and `redline version` / `redline --version` report the
-  release version, commit, and build date. See `docs/releasing.md`.
+  `checksums.txt` via GoReleaser. See `docs/releasing.md`.
+- `redline version` and `redline --version` report the release version, commit, and build date,
+  both in the standalone CLI and inside the macOS app bundle.
 - Redline now builds and runs on Linux and Windows in addition to macOS: the CLI resolves a
   platform-appropriate default data directory (`~/.config/redline` on Linux,
   `%AppData%\redline` on Windows, unchanged `~/Library/Application Support/Redline` on macOS),
@@ -49,6 +45,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The README is rewritten for first-time visitors (install, how it works, MCP setup); reference
+  material moved to `docs/` (`architecture`, `scheduling`, `profiles-and-tasks`, `hermes`,
+  `api`, `cli`, `runs-and-notifications`, `releasing`) and contributor instructions to
+  `CONTRIBUTING.md`.
+- Unknown keys in `redline.yaml` are now reported as warnings on startup instead of preventing
+  the service from starting, so a configuration written for another Redline build still loads.
+  Type errors, malformed YAML, and invalid values remain fatal.
+- When the menu-bar app's embedded service fails to start, the popover now shows the service's
+  own diagnostic (typically the configuration error) with a **Show log** button, and the menu-bar
+  tooltip reads "Redline could not start" rather than a generic offline state.
 - `usage_monitor.gatepost_database` is now optional. Gatepost is an unreleased, private tool; the
   bundled `config.example.yaml` no longer requires it, and enabling `usage_monitor` without it
   simply skips the Gatepost/Pi import (still recording Redline's own run token counts) instead of
@@ -60,6 +66,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `com.jfox.redline` LaunchAgent are still detected and offered the same in-app migration (stop,
   back up, and hand ownership to the app) so upgrading users are not left with two competing
   agents. The app's bundle identifier (`ai.redline.mac`) is unchanged.
+- The Go module path is now `github.com/croutoncreations/redline`, so
+  `go install github.com/croutoncreations/redline/cmd/redline@latest` works.
+- User-facing strings use hyphens rather than em dashes.
 
 ### Fixed
 
