@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pi cache tokens are no longer double-counted when a session record carries more than one
+  spelling of the same counter. Pi's JSONL schema expresses cache reads and writes as flat
+  `cacheRead`/`cacheWrite`, a `cacheCreation` alias, and a nested `cache:{read,write}` object;
+  these were being summed as if independent, so a record written across a schema migration could
+  report two to three times its real cache usage. Redline now takes the largest alias, matching
+  how Hermes records are already reconciled. Inflated usage made the scheduler under-dispatch,
+  leaving paid subscription capacity unused.
+
 ## [0.1.7] - 2026-09-18
 
 First public release. Redline is now open source under the Apache 2.0 license at
