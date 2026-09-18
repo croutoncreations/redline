@@ -448,6 +448,9 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(stderr, "config %s: %s\n", configPath, warning)
+	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)

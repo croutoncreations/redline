@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -27,6 +28,11 @@ type Config struct {
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
 	DemoScenario string `yaml:"-"`
+	// Warnings lists non-fatal problems found while loading, currently unknown
+	// keys. A configuration written for a newer or different Redline build
+	// should still start; the service logs these so the operator can see what
+	// was ignored.
+	Warnings []string `yaml:"-"`
 }
 
 type Notifications struct {
@@ -201,16 +207,57 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
-	var cfg Config
-	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
+	cfg, warnings, err := decode(data)
+	if err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
+	cfg.Warnings = warnings
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// decode parses YAML strictly first. When the only problems are unknown keys,
+// it re-parses leniently and reports those keys as warnings instead of
+// failing, so a config carrying keys from another Redline version still loads.
+// Type mismatches, malformed YAML, and every other decode error remain fatal.
+func decode(data []byte) (Config, []string, error) {
+	var cfg Config
+	strict := yaml.NewDecoder(strings.NewReader(string(data)))
+	strict.KnownFields(true)
+	err := strict.Decode(&cfg)
+	if err == nil {
+		return cfg, nil, nil
+	}
+	unknown, onlyUnknown := unknownFieldMessages(err)
+	if !onlyUnknown {
+		return Config{}, nil, err
+	}
+	cfg = Config{}
+	lenient := yaml.NewDecoder(strings.NewReader(string(data)))
+	if err := lenient.Decode(&cfg); err != nil {
+		return Config{}, nil, err
+	}
+	return cfg, unknown, nil
+}
+
+// unknownFieldMessages inspects a yaml.v3 decode error. It returns one message
+// per unknown-field problem and whether *every* problem was of that kind.
+func unknownFieldMessages(err error) ([]string, bool) {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return nil, false
+	}
+	messages := make([]string, 0, len(typeErr.Errors))
+	for _, problem := range typeErr.Errors {
+		// yaml.v3 phrases these as: line N: field foo not found in type config.Config
+		if !strings.Contains(problem, " not found in type ") {
+			return nil, false
+		}
+		messages = append(messages, "ignoring unknown key: "+problem)
+	}
+	return messages, len(messages) > 0
 }
 
 func (cfg *Config) validate() error {

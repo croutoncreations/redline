@@ -47,6 +47,46 @@ temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/redline-macos-package.XXXXXX")"
 trap 'rm -rf "${temporary_root}"' EXIT
 mkdir -p "${release_output_root}"
 
+# version_is_older A B exits 0 when dotted version A sorts before B. Pure bash:
+# BSD sort on macOS has not always supported -V, and a failing command inside
+# an if would silently evaluate false and defeat the guard below.
+version_is_older() {
+  local IFS=.
+  local -a a=($1) b=($2)
+  local i
+  for ((i = 0; i < 3; i++)); do
+    local x="${a[i]:-0}" y="${b[i]:-0}"
+    if (( 10#$x < 10#$y )); then return 0; fi
+    if (( 10#$x > 10#$y )); then return 1; fi
+  done
+  return 1
+}
+
+# generate_appcast indexes every DMG in the output directory and emits an
+# appcast entry for each. Older DMGs are wanted: Sparkle uses them to build
+# binary deltas. A DMG at or above this version, though, means the directory
+# holds a newer or duplicate build whose entry would point users at the wrong
+# download. Refuse in that case and list what would otherwise be indexed.
+other_dmgs=()
+while IFS= read -r candidate; do
+  [[ "$(basename "${candidate}")" == "$(basename "${dmg_path}")" ]] && continue
+  other_dmgs+=("${candidate}")
+done < <(find "${release_output_root}" -maxdepth 1 -name 'Redline-*.dmg' -print 2>/dev/null | sort)
+if (( ${#other_dmgs[@]} > 0 )); then
+  printf 'Existing DMGs in %s will be indexed into appcast.xml alongside this build:\n' "${release_output_root}"
+  for other in "${other_dmgs[@]}"; do
+    other_version="$(basename "${other}")"
+    other_version="${other_version#Redline-}"
+    other_version="${other_version%%-*}"
+    printf '  %s (version %s)\n' "$(basename "${other}")" "${other_version}"
+    if ! version_is_older "${other_version}" "${version}"; then
+      printf 'Refusing to package: %s is version %s, which is not older than %s.\n' "$(basename "${other}")" "${other_version}" "${version}" >&2
+      printf 'Move or delete it, or set REDLINE_RELEASE_OUTPUT_DIR to a directory containing only older releases.\n' >&2
+      exit 1
+    fi
+  done
+fi
+
 notarize() {
   local submission_path="$1"
   local label="$2"
