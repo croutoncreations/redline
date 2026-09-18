@@ -543,17 +543,20 @@ async function openRunDetail(runID) {
   const body = $('#m-run-detail-body');
   body.innerHTML = '<p class="m-inline-muted">Loading…</p>';
 
-  // Mark read
-  try {
-    await apiFetch(`/v1/runs/${encodeURIComponent(runID)}/read`, {method: 'POST'});
-    // Update unread count locally
-    if (dashboard) {
-      const r = dashboard.runs.find(x => x.id === runID);
-      if (r) r.activity_read_at = new Date().toISOString();
-      dashboard.unread_runs = Math.max(0, (dashboard.unread_runs || 0) - 1);
-      renderRuns(dashboard.runs, dashboard.unread_runs);
-    }
-  } catch (_) {}
+  // Mark read — only for runs that are actually still unread, so reopening an
+  // already-read run can't decrement the badge for other genuinely unread runs.
+  if (run && !run.activity_read_at && (run.state === 'completed' || run.state === 'failed')) {
+    try {
+      await apiFetch(`/v1/runs/${encodeURIComponent(runID)}/read`, {method: 'POST'});
+      // Update unread count locally
+      if (dashboard) {
+        const r = dashboard.runs.find(x => x.id === runID);
+        if (r) r.activity_read_at = new Date().toISOString();
+        dashboard.unread_runs = Math.max(0, (dashboard.unread_runs || 0) - 1);
+        renderRuns(dashboard.runs, dashboard.unread_runs);
+      }
+    } catch (_) {}
+  }
 
   // Load events
   try {
