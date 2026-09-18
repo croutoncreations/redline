@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `redline_run_events` no longer drops the newest events when a response is truncated. Run events
+  arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
+  `run.failed` event an agent polling for completion is waiting on.
+- `redline_runs_list` now forwards the requested limit to the API. `/v1/runs` defaults to 50 rows
+  when no limit is sent, so asking for more silently returned 50 and reported them as untruncated.
+
 - The SQLite database is now restricted to its owner. It was created under the process umask,
   commonly `0644`, leaving it world-readable along with its `-wal` and `-shm` sidecars — so any
   other local account could read task prompts, operator-authored prepare/finalize shell commands,
