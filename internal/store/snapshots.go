@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 func (d *DB) ListSnapshots(ctx context.Context, provider string, limit int) ([]decision.UsageSnapshot, error) {

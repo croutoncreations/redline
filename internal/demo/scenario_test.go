@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/demo"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/demo"
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {

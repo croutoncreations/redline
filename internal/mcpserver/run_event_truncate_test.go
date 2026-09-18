@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestViewRunEventDoesNotSplitMultiByteRuneOnTruncation(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {

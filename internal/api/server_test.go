@@ -24,18 +24,18 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/jfox/redline/internal/api"
-	"github.com/jfox/redline/internal/artifacts"
-	"github.com/jfox/redline/internal/calibration"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/discovery"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/launchmetrics"
-	"github.com/jfox/redline/internal/scheduler"
-	"github.com/jfox/redline/internal/store"
-	"github.com/jfox/redline/internal/workspace"
+	"github.com/croutoncreations/redline/internal/api"
+	"github.com/croutoncreations/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/calibration"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/discovery"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/launchmetrics"
+	"github.com/croutoncreations/redline/internal/scheduler"
+	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/workspace"
 )
 
 var apiNow = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -911,6 +911,45 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].Source != "gatepost-pi" || observations[0].CacheReadTokens != 30 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
+	}
+}
+
+func TestTokenSyncSkipsGatepostWhenDatabaseNotConfigured(t *testing.T) {
+	directory := t.TempDir()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://127.0.0.1:1")
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	result := postJSON[struct {
+		Read     int `json:"read"`
+		Inserted int `json:"inserted"`
+	}](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	if result.Read != 0 || result.Inserted != 0 {
+		t.Fatalf("expected zero Gatepost reads/insertions without gatepost_database configured, got %#v", result)
+	}
+}
+
+func TestTokenSyncSkipsGatepostWhenDatabaseFileMissing(t *testing.T) {
+	directory := t.TempDir()
+	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.UsageMonitor.GatepostDatabase = filepath.Join(directory, "missing-viewer.db")
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+	result := postJSON[struct {
+		Read     int `json:"read"`
+		Inserted int `json:"inserted"`
+	}](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+	if result.Read != 0 || result.Inserted != 0 {
+		t.Fatalf("expected a missing gatepost_database file to be skipped, not errored: %#v", result)
 	}
 }
 

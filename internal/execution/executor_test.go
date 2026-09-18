@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/execution"
-	"github.com/jfox/redline/internal/harness"
-	"github.com/jfox/redline/internal/store"
-	"github.com/jfox/redline/internal/workspace"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/execution"
+	"github.com/croutoncreations/redline/internal/harness"
+	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/workspace"
 )
 
 func TestSuccessfulExecutionCompletesRunAndRequeuesRecurringTask(t *testing.T) {

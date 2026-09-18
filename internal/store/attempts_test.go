@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {

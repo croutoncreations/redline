@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jfox/redline/internal/accounting"
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/accounting"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 type Confidence string

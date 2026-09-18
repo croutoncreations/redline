@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
-	"github.com/jfox/redline/internal/workspace"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/workspace"
 )
 
 func TestExistingDirectoryWorkspace(t *testing.T) {
@@ -150,7 +150,8 @@ func TestCommandWorkspaceConsumesJSONContract(t *testing.T) {
 	repo := t.TempDir()
 	created := filepath.Join(repo, "custom")
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if command.Name != "/bin/sh" || strings.Join(command.Args, " ") != "-lc prepare-workspace" {
+		wantName, wantArgs := redprocess.ShellCommand("prepare-workspace")
+		if command.Name != wantName || strings.Join(command.Args, " ") != strings.Join(wantArgs, " ") {
 			t.Fatalf("command = %#v", command)
 		}
 		_ = os.MkdirAll(created, 0o755)
@@ -251,7 +252,8 @@ func TestBuiltInWorkspaceRunsPrepareHookInsideWorkspace(t *testing.T) {
 	called := false
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
 		called = true
-		if command.Name != "/bin/sh" || command.Dir != repo || strings.Join(command.Args, " ") != "-lc setup-workspace" {
+		wantName, wantArgs := redprocess.ShellCommand("setup-workspace")
+		if command.Name != wantName || command.Dir != repo || strings.Join(command.Args, " ") != strings.Join(wantArgs, " ") {
 			t.Fatalf("command = %#v", command)
 		}
 		return 0, nil

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 	"gopkg.in/yaml.v3"
 )
 
@@ -306,9 +306,6 @@ func (cfg *Config) validate() error {
 	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
 		return err
-	}
-	if cfg.UsageMonitor.Enabled && strings.TrimSpace(cfg.UsageMonitor.GatepostDatabase) == "" {
-		return fmt.Errorf("usage_monitor is enabled but gatepost_database is empty")
 	}
 	if cfg.Notifications.Timeout != "" {
 		if _, err := positiveDuration("notifications timeout", cfg.Notifications.Timeout); err != nil {

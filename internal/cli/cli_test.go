@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/apiauth"
-	"github.com/jfox/redline/internal/cli"
+	"github.com/croutoncreations/redline/internal/apiauth"
+	"github.com/croutoncreations/redline/internal/cli"
 )
 
 func TestTaskDispatchConsumesServiceAPIWithoutBody(t *testing.T) {

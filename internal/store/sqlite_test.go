@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/store"
 	_ "modernc.org/sqlite"
 )
 

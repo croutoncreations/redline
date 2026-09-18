@@ -4,7 +4,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jfox/redline/internal/cli"
+	"github.com/croutoncreations/redline/internal/cli"
 )
 
 func main() {

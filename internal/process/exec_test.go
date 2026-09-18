@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	redprocess "github.com/jfox/redline/internal/process"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 func TestExecRunnerAlignsPWDWithCommandDirectory(t *testing.T) {

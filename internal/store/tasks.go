@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now time.Time) error {

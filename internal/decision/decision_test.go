@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 var now = time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)

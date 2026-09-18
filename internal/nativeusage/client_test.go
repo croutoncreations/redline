@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/nativeusage"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/nativeusage"
 )
 
 func TestClaudeNativeSnapshotMatchesProviderWindows(t *testing.T) {

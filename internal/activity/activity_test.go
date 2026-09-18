@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/activity"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/activity"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestBuildPrefersStructuredResultAndFindsArtifacts(t *testing.T) {

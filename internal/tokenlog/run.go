@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 type runUsage struct {

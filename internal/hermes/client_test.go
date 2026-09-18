@@ -18,8 +18,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
 )
 
 func TestLoadDesktopConnectionDiscoversRemoteGatewayWithoutCredentials(t *testing.T) {

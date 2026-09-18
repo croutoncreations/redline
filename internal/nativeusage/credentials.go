@@ -50,7 +50,14 @@ func NewDefaultCredentials() *DefaultCredentials {
 	return &DefaultCredentials{
 		HTTPClient: &http.Client{Timeout: 15 * time.Second}, Now: time.Now,
 		ClaudeStore: newClaudeSecretStore(home, user),
-		CodexStore:  firstFileStore{Paths: []string{filepath.Join(home, ".config/codex/auth.json"), filepath.Join(home, ".codex/auth.json")}},
+		// Codex CLI stores its OAuth credentials at ~/.codex/auth.json on
+		// macOS, Linux, and Windows (os.UserHomeDir resolves %USERPROFILE% on
+		// Windows). ~/.config/codex/auth.json is also checked first for Linux
+		// installs that follow the XDG base directory convention.
+		CodexStore: firstFileStore{Paths: []string{
+			filepath.Join(home, ".config", "codex", "auth.json"),
+			filepath.Join(home, ".codex", "auth.json"),
+		}},
 	}
 }
 

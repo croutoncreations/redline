@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/accounting"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/accounting"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 type Status string

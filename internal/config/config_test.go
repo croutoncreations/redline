@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestLoadParsesTrustedAPIHosts(t *testing.T) {
@@ -100,6 +100,20 @@ func TestUsageMonitorDefaultsAndValidatesInterval(t *testing.T) {
 	cfg.UsageMonitor.PollInterval = "nope"
 	if _, err := cfg.UsageMonitorInterval(); err == nil {
 		t.Fatal("expected invalid usage monitor interval")
+	}
+}
+
+func TestUsageMonitorEnabledWithoutGatepostDatabase(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+usage_monitor:
+  enabled: true
+  poll_interval: 5m`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("expected usage_monitor to be valid without gatepost_database: %v", err)
+	}
+	if cfg.UsageMonitor.GatepostDatabase != "" {
+		t.Fatalf("gatepost_database = %q, want empty", cfg.UsageMonitor.GatepostDatabase)
 	}
 }
 

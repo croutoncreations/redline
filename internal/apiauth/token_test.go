@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/apiauth"
+	"github.com/croutoncreations/redline/internal/apiauth"
 )
 
 func TestEnsureTokenCreatesAndReusesProtectedCredential(t *testing.T) {

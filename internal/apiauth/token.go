@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -30,7 +31,7 @@ func EnsureToken(configPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := createPrivateFile(path)
 	if os.IsExist(err) {
 		return ReadToken(configPath)
 	}
@@ -61,16 +62,11 @@ func RotateToken(configPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".api-token-*")
+	temporary, temporaryPath, err := createPrivateTemp(filepath.Dir(path), ".api-token-")
 	if err != nil {
 		return "", fmt.Errorf("create replacement API token: %w", err)
 	}
-	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return "", fmt.Errorf("secure replacement API token: %w", err)
-	}
 	if _, err := temporary.WriteString(token + "\n"); err != nil {
 		_ = temporary.Close()
 		return "", fmt.Errorf("write replacement API token: %w", err)
@@ -88,6 +84,28 @@ func RotateToken(configPath string) (string, error) {
 	return token, nil
 }
 
+// createPrivateTemp is os.CreateTemp with private-at-creation semantics: the
+// file is created exclusively with an owner-only mode or DACL so no other
+// principal can open it before the token is written and renamed into place.
+func createPrivateTemp(dir, prefix string) (*os.File, string, error) {
+	for attempt := 0; attempt < 10000; attempt++ {
+		suffix := make([]byte, 8)
+		if _, err := rand.Read(suffix); err != nil {
+			return nil, "", err
+		}
+		candidate := filepath.Join(dir, prefix+base64.RawURLEncoding.EncodeToString(suffix))
+		file, err := createPrivateFile(candidate)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return file, candidate, nil
+	}
+	return nil, "", fmt.Errorf("could not allocate a unique temporary file in %q", dir)
+}
+
 func generateToken() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -102,7 +120,10 @@ func ReadToken(configPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// Windows has no POSIX permission bits: os.Stat reports a fixed mode
+	// (typically 0666/0444) regardless of ACLs, so this check would always
+	// fail there. Skip it on Windows rather than rejecting every token.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("API token %q must not be accessible by group or other users", path)
 	}
 	data, err := os.ReadFile(path)
