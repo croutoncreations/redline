@@ -117,9 +117,11 @@ redline version
 go install github.com/croutoncreations/redline/cmd/redline@vX.Y.Z
 ```
 
-The cask links the app's bundled CLI as `redline`, and the formula installs its own, so installing
-both leaves two on `PATH`. Most people want one or the other: the app for a Mac they sit at, the
-formula for a headless box. The cask's caveats say so.
+The cask links the app's bundled CLI as `redline`, and the formula installs its own, and both
+target `$(brew --prefix)/bin/redline`. Homebrew will not link the second one: whichever is
+installed first owns the path, and the other reports a link conflict or is skipped with a warning.
+Install one or the other: the app for a Mac you sit at, the formula for a headless box. The cask's
+caveats say so.
 
 To test a cask before pushing it, Homebrew requires it to live in a tap:
 

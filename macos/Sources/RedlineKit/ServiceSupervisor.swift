@@ -36,8 +36,11 @@ public final class ServiceSupervisor {
 
     @discardableResult
     public func ensureRunning() async -> ServiceStartupFailure? {
+        // Every path through here reflects the *current* state: a stale
+        // diagnostic from an earlier launch must not outlive a call that did
+        // not attempt to launch.
+        lastStartupFailure = nil
         if await client.isCompatible() {
-            lastStartupFailure = nil
             return nil
         }
         guard let launchConfiguration else {
