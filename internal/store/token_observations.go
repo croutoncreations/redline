@@ -110,9 +110,9 @@ func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 		&observation.CacheCreationTokens, &observation.Confidence); err != nil {
 		return capacity.TokenObservation{}, fmt.Errorf("scan token observation: %w", err)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, observedAt)
+	parsed, err := parseStoredTimeField("token observation time", observedAt)
 	if err != nil {
-		return capacity.TokenObservation{}, fmt.Errorf("parse token observation time: %w", err)
+		return capacity.TokenObservation{}, err
 	}
 	observation.ObservedAt = parsed
 	return observation, nil
@@ -132,9 +132,5 @@ func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source st
 	if value == "" {
 		return time.Time{}, nil
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse latest token observation time: %w", err)
-	}
-	return parsed, nil
+	return parseStoredTimeField("latest token observation time", value)
 }

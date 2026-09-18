@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/croutoncreations/redline/internal/decision"
 )
@@ -43,19 +42,19 @@ FROM (
 		); err != nil {
 			return nil, fmt.Errorf("scan usage snapshot: %w", err)
 		}
-		if snapshot.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt); err != nil {
-			return nil, fmt.Errorf("parse stored observation time: %w", err)
+		if snapshot.ObservedAt, err = parseStoredTimeField("stored observation time", observedAt); err != nil {
+			return nil, err
 		}
-		if snapshot.Weekly.ResetsAt, err = time.Parse(time.RFC3339Nano, weeklyReset); err != nil {
-			return nil, fmt.Errorf("parse stored weekly reset: %w", err)
+		if snapshot.Weekly.ResetsAt, err = parseStoredTimeField("stored weekly reset", weeklyReset); err != nil {
+			return nil, err
 		}
 		if shortRemaining.Valid != shortReset.Valid {
 			return nil, fmt.Errorf("stored short window is incomplete")
 		}
 		if shortRemaining.Valid {
-			reset, parseErr := time.Parse(time.RFC3339Nano, shortReset.String)
+			reset, parseErr := parseStoredTimeField("stored short reset", shortReset.String)
 			if parseErr != nil {
-				return nil, fmt.Errorf("parse stored short reset: %w", parseErr)
+				return nil, parseErr
 			}
 			snapshot.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: reset}
 		}
