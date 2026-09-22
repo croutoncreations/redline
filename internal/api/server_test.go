@@ -1233,6 +1233,7 @@ func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/valid", `{"provider_account_id":"missing"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"bad-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"never"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"overflow-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"1e100d"}`, http.StatusBadRequest)
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
 		"id": "valid-task", "name": "Valid", "execution_profile_id": "valid", "type": "one_off",
 	})
