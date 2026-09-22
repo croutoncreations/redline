@@ -355,6 +355,88 @@ min_interval: 7d
 	}
 }
 
+func TestResourceAddReportsDefinitionLoadContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource string
+		path     func(t *testing.T) string
+		want     string
+		action   string
+	}{
+		{
+			name:     "missing task file",
+			resource: "task",
+			path: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing-task.yaml")
+			},
+			want:   "read file",
+			action: "check the --file path and permissions",
+		},
+		{
+			name:     "malformed profile YAML",
+			resource: "profile",
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "broken-profile.yaml")
+				if err := os.WriteFile(path, []byte("name: broken\nharness: [\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+			want:   "decode YAML",
+			action: "fix the YAML syntax in the file",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := test.path(t)
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run(
+				[]string{test.resource, "add", "--file", path},
+				&stdout, &stderr, time.Now,
+			)
+			if exit != 1 || stdout.Len() != 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+			}
+			for _, want := range []string{"load " + test.resource + " definition", path, test.want, test.action} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr=%q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestResourceAddReportsSourceFileWhenAPIRejectsDefinition(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/tasks" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = fmt.Fprint(w, `{"error":"priority must be between 0 and 100, got 101"}`)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "invalid-priority.yaml")
+	if err := os.WriteFile(path, []byte("id: urgent\npriority: 101\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run(
+		[]string{"--api", server.URL, "task", "add", "--file", path},
+		&stdout, &stderr, time.Now,
+	)
+	if exit != 1 || stdout.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"create task from definition", path, "POST /v1/tasks", "422",
+		"priority must be between 0 and 100, got 101",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr=%q, want it to contain %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestAPIErrorIsReported(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
