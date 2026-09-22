@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified the source quickstart's tool, network, provider-login, port, and generated-file
+  prerequisites, and made dashboard dependency installation reproducible with `npm ci`.
+
+### Fixed
+
+- Prevented onboarding navigation while an execution profile is being saved, so returning to the
+  workspace step cannot expose a persisted profile name as editable.
+- Ignored the local `redline.yaml` and protected `api-token` files created by the documented source
+  quickstart, preventing accidental commits of machine-specific configuration or credentials.
+
 ## [0.1.7] - 2026-09-18
 
 First public release. Redline is now open source under the Apache 2.0 license at

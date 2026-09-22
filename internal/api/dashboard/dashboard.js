@@ -236,13 +236,15 @@ async function saveOnboardingJob() {
 
 async function advanceOnboarding() {
   const button = $('#onboarding-next');
+  const back = $('#onboarding-back');
   button.disabled = true;
+  back.disabled = true;
   try {
     if (onboardingStep === 3) { await saveOnboardingProfile(); showOnboardingStep(4); }
     else if (onboardingStep === 4) await saveOnboardingJob();
     else showOnboardingStep(onboardingStep + 1);
   } catch (error) { showOnboardingError(error.message); }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; back.disabled = false; }
 }
 
 async function openOnboarding(step=1) {
