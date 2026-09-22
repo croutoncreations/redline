@@ -73,7 +73,7 @@ Linux and Windows builds are exercised in CI; Windows is newer and less battle-t
 ```bash
 curl -fsSLo redline.yaml https://raw.githubusercontent.com/croutoncreations/redline/main/config.example.yaml
 # edit providers and policy, then:
-redline serve --config redline.yaml   # dashboard at http://127.0.0.1:7436
+redline --config redline.yaml serve   # dashboard at http://127.0.0.1:7436
 redline status --provider codex-main
 ```
 

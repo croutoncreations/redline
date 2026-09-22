@@ -13,8 +13,8 @@ When running from source, substitute `go run ./cmd/redline` for `redline`.
 
 ```bash
 redline version                                           # release version, commit, build date
-redline serve --config redline.yaml                       # run the service
-redline serve --config redline.yaml --listen 127.0.0.1:17436
+redline --config redline.yaml serve                       # run the service
+redline --config redline.yaml serve --listen 127.0.0.1:17436
 redline mcp                                               # stdio MCP server (see mcp.md)
 redline health
 redline health --window 24h
