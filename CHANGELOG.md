@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject `prompt_file` symlinks that resolve outside the prepared workspace so a repository cannot
+  substitute an out-of-workspace file as the agent prompt.
+
 ## [0.1.7] - 2026-09-18
 
 First public release. Redline is now open source under the Apache 2.0 license at

@@ -272,6 +272,31 @@ func TestPromptFileRejectsTraversalOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestPromptFileRejectsSymlinkOutsideWorkspace(t *testing.T) {
+	workspaceDir := t.TempDir()
+	outsideFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("do not leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptFile := filepath.Join(workspaceDir, "task.md")
+	if err := os.Symlink(outsideFile, promptFile); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	adapter := harness.Adapter{Runner: &captureRunner{}}
+	_, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-7", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: "task.md"},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: workspaceDir},
+	})
+	if err == nil {
+		t.Fatal("expected error for prompt_file symlink escaping workspace")
+	}
+	if !strings.Contains(err.Error(), "escapes workspace") {
+		t.Fatalf("error = %v, want mention of escaping workspace", err)
+	}
+}
+
 func TestHermesHarnessUsesAgentContextAndPersistsExternalSession(t *testing.T) {
 	contexts := fakeContexts{
 		context: domain.AgentContext{
