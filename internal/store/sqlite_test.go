@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"path/filepath"
@@ -187,6 +188,76 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 	}
 	if _, ok := got.Allowance("weekly"); !ok {
 		t.Fatalf("legacy weekly was not normalized: %#v", got.Allowances)
+	}
+}
+
+func TestOpenMigratesVersionOneSnapshotWithoutLosingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := time.Date(2026, 7, 16, 18, 2, 3, 456000000, time.UTC)
+	shortReset := observedAt.Add(4 * time.Hour)
+	weeklyReset := observedAt.Add(7 * 24 * time.Hour)
+	rawPayload := []byte(`{"legacy":true,"sequence":7}`)
+	if _, err := legacy.Exec(`CREATE TABLE schema_migrations (
+version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+INSERT INTO schema_migrations(version) VALUES (1);
+CREATE TABLE usage_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    short_remaining REAL NOT NULL,
+    short_resets_at TEXT NOT NULL,
+    weekly_remaining REAL NOT NULL,
+    weekly_resets_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    confidence TEXT NOT NULL DEFAULT '',
+    raw_payload BLOB,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO usage_snapshots (
+    id, provider, observed_at, short_remaining, short_resets_at,
+    weekly_remaining, weekly_resets_at, source, confidence, raw_payload, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		7, "claude", observedAt.Format(time.RFC3339Nano), 0.25, shortReset.Format(time.RFC3339Nano),
+		0.75, weeklyReset.Format(time.RFC3339Nano), "openusage", "high", rawPayload,
+		observedAt.Add(time.Second).Format(time.RFC3339Nano)); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("migrate v1 database: %v", err)
+	}
+	defer db.Close()
+
+	got, raw, err := db.LatestSnapshot(t.Context(), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(observedAt) || got.Source != "openusage" || got.Confidence != "high" {
+		t.Fatalf("migrated snapshot metadata = %#v", got)
+	}
+	if got.Short == nil || got.Short.Remaining != 0.25 || !got.Short.ResetsAt.Equal(shortReset) {
+		t.Fatalf("migrated short window = %#v", got.Short)
+	}
+	if got.Weekly.Remaining != 0.75 || !got.Weekly.ResetsAt.Equal(weeklyReset) {
+		t.Fatalf("migrated weekly window = %#v", got.Weekly)
+	}
+	if !bytes.Equal(raw, rawPayload) {
+		t.Fatalf("migrated raw payload = %q, want %q", raw, rawPayload)
+	}
+	if session, ok := got.Allowance("session"); !ok || session.Remaining != 0.25 || !session.ResetsAt.Equal(shortReset) {
+		t.Fatalf("migrated session allowance = %#v, found=%t", session, ok)
+	}
+	if weekly, ok := got.Allowance("weekly"); !ok || weekly.Remaining != 0.75 || !weekly.ResetsAt.Equal(weeklyReset) {
+		t.Fatalf("migrated weekly allowance = %#v, found=%t", weekly, ok)
 	}
 }
 
