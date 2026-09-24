@@ -299,6 +299,21 @@ function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
 }
+// Banked resets are on-demand refills of an exhausted window. Absent means the
+// provider did not report them, which is not the same as zero, so the row is
+// only drawn when a count is known.
+function bankedResets(snap) {
+  const count = snap?.banked_resets;
+  if (count == null) return '';
+  // A stored expiry can lapse while the snapshot sits unrefreshed; never
+  // show "Expires … ago".
+  const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
+  const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+  const detail = expires
+    ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
+    : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
+  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets <i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i></span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
+}
 function policyControl(item, provider) {
   const defaultPolicy = item.default_policy || item.policy || 'default';
   const selected = item.policy_source === 'override' ? item.policy : '';
@@ -405,6 +420,8 @@ function providerCompact(item) {
       const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));
     });
+    const resets = bankedResets(snap);
+    if (resets) windows.push(resets);
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
     details = `${decisionDetail}${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }

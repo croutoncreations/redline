@@ -189,6 +189,8 @@ button { color: inherit; font: inherit; }
 .m-meter-bar.warn::-moz-progress-bar { background: var(--amber); }
 .m-meter-bar.danger::-moz-progress-bar { background: #ff7b72; }
 .m-reset { color: var(--muted); font: 8px ui-monospace, monospace; margin-top: 4px; }
+.m-banked-resets { border-top: 1px dashed var(--line); padding-top: 10px; }
+.m-banked-resets.soon .m-reset { color: var(--amber); }
 .m-inline-muted { color:var(--muted); font-size:12px; margin:0 0 10px; }
 .m-inline-error, .m-source-error { color:#ff918b; font-size:12px; }
 .m-source-error { display:block; font-family:ui-monospace,monospace; }
