@@ -572,7 +572,9 @@ struct StatusPopoverView: View {
     private func bankedResetSummary(_ provider: ProviderSummary) -> (text: String, expiringSoon: Bool)? {
         guard let count = provider.snapshot?.bankedResets, count > 0 else { return nil }
         let noun = count == 1 ? "banked reset" : "banked resets"
-        guard let expires = parseTimestamp(provider.snapshot?.bankedResetsExpireAt) else {
+        // A stored expiry can lapse while the snapshot sits unrefreshed.
+        guard let expires = parseTimestamp(provider.snapshot?.bankedResetsExpireAt),
+              expires.timeIntervalSinceNow > 0 else {
             return ("\(count) \(noun)", false)
         }
         let formatter = DateFormatter()

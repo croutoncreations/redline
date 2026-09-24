@@ -67,7 +67,9 @@ func (m *Manager) saveLockoutsLocked() {
 		}
 	}
 	for key, state := range m.resetStates {
-		if state.lastError != "" && state.nextFetch.After(now) {
+		// Keep failures, and lockouts restored from disk that have not been
+		// answered since (they carry no error in memory).
+		if (state.lastError != "" || !state.known) && state.nextFetch.After(now) {
 			saved.BankedResets[key] = state.nextFetch
 		}
 	}

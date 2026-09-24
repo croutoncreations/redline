@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,7 +123,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	// account asked, so the answer is cached per provider credential rather
 	// than per account: one request serves every account, and none of them
 	// multiplies the load on a rate-limited endpoint.
-	key := snapshot.Provider
+	key := providerKey(snapshot.Provider)
 	now := m.Now().UTC()
 	m.mu.Lock()
 	if m.resetStates == nil {
@@ -274,7 +275,7 @@ func (m *Manager) Status(accountID string) Status {
 // fetchNative calls the native source unless the provider is still inside a
 // rate-limit penalty, in which case it fails without sending anything.
 func (m *Manager) fetchNative(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
-	key := provider.Provider
+	key := providerKey(provider.Provider)
 	now := m.Now().UTC()
 	m.mu.Lock()
 	until := m.nativeBlockedUntil[key]
@@ -310,6 +311,11 @@ func rateLimitWait(err error) (time.Duration, bool) {
 }
 
 const rateLimitFloor = 15 * time.Minute
+
+// providerKey is the one spelling of a provider used for every lockout, so a
+// rate limit seen by the native fetch and by the reset lookup is shared even
+// when the config writes the provider as "Claude".
+func providerKey(provider string) string { return strings.ToLower(strings.TrimSpace(provider)) }
 
 func (m *Manager) fetch(ctx context.Context, accountID string, provider config.Provider, source Source) (decision.UsageSnapshot, []byte, error) {
 	var snapshot decision.UsageSnapshot

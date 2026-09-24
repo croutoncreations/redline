@@ -3,7 +3,9 @@ package usage_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +213,53 @@ func TestNativeRateLimitGatesRequestsAndSurvivesRestart(t *testing.T) {
 	native.results[1].snapshot = claudeSnapshot(now)
 	if _, _, err := restarted.Fetch(context.Background(), "claude-main", provider); err != nil || native.calls != 2 {
 		t.Fatalf("did not resume after the lockout: calls=%d err=%v", native.calls, err)
+	}
+}
+
+// A 429 on the native fetch must also silence the reset lookup, however the
+// config spells the provider.
+func TestNativeLockoutSilencesResetLookupRegardlessOfProviderCase(t *testing.T) {
+	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	native := &fakeSource{name: "native", results: []sourceResult{{err: retryAfterError(time.Hour)}}}
+	resets := &fakeResets{}
+	manager := usage.NewManager(repeatSource(claudeSnapshot(now), 1), native, func() time.Time { return now })
+	manager.BankedResets = resets
+	_, _, _ = manager.Fetch(context.Background(), "a", config.Provider{Provider: " Claude ", UsageSource: "native"})
+	fetch(t, manager, "b", autoClaude())
+	if resets.calls != 0 {
+		t.Fatalf("reset lookup ignored a native lockout recorded under another spelling: %d calls", resets.calls)
+	}
+}
+
+// A lockout restored from disk must survive being saved again, or a second
+// restart would reopen it.
+func TestRestoredResetLockoutSurvivesASecondRestart(t *testing.T) {
+	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "usage-lockouts.json")
+	resets := &fakeResets{results: []resetResult{{err: retryAfterError(2 * time.Hour)}}}
+	first := usage.NewManager(repeatSource(claudeSnapshot(now), 1), &fakeSource{name: "native"}, func() time.Time { return now })
+	first.BankedResets = resets
+	first.SetLockoutPath(path)
+	fetch(t, first, "claude-main", autoClaude())
+
+	// Second process: restores the lockout, then saves for an unrelated
+	// reason (a native 429 on Codex).
+	codexNative := &fakeSource{name: "native", results: []sourceResult{{err: retryAfterError(time.Minute)}}}
+	second := usage.NewManager(&fakeSource{name: "openusage"}, codexNative, func() time.Time { return now })
+	second.SetLockoutPath(path)
+	_, _, _ = second.Fetch(context.Background(), "codex-main", config.Provider{Provider: "codex", UsageSource: "native"})
+	saved, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(saved), `"banked_resets":{"claude"`) {
+		t.Fatalf("the re-save dropped the restored claude reset lockout: %s (%v)", saved, err)
+	}
+
+	now = now.Add(time.Hour)
+	third := usage.NewManager(repeatSource(claudeSnapshot(now), 1), &fakeSource{name: "native"}, func() time.Time { return now })
+	third.BankedResets = resets
+	third.SetLockoutPath(path)
+	fetch(t, third, "claude-main", autoClaude())
+	if resets.calls != 1 {
+		t.Fatalf("lookups = %d: a second restart reopened the reset lockout", resets.calls)
 	}
 }
 
