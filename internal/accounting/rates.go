@@ -91,24 +91,30 @@ func codexRate(model string) (rate, bool) {
 		return rate{unit: UnitCodexCredits, version: version, input: input, cacheRead: cached,
 			output: output, cacheWriteLow: input, cacheWriteHigh: input}
 	}
+	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
+		model = model[slash+1:]
+	}
+	inFamily := func(name string) bool {
+		return model == name || strings.HasPrefix(model, name+"-")
+	}
 	switch {
-	case model == "gpt-5.6-sol" || strings.Contains(model, "5.6-sol"):
+	case inFamily("gpt-5.6-sol"):
 		return makeRate(125, 12.5, 750), true
-	case model == "gpt-5.6-terra" || strings.Contains(model, "5.6-terra"):
+	case inFamily("gpt-5.6-terra"):
 		return makeRate(62.5, 6.25, 375), true
-	case model == "gpt-5.6-luna" || strings.Contains(model, "5.6-luna"):
+	case inFamily("gpt-5.6-luna"):
 		return makeRate(25, 2.5, 150), true
-	case model == "gpt-5.5-cyber" || strings.Contains(model, "5.5-cyber"):
+	case inFamily("gpt-5.5-cyber"):
 		return makeRate(500, 50, 3000), true
-	case model == "gpt-5.5" || strings.HasPrefix(model, "gpt-5.5-"):
+	case inFamily("gpt-5.5"):
 		return makeRate(125, 12.5, 750), true
-	case model == "gpt-5.4-mini" || strings.Contains(model, "5.4-mini"):
+	case inFamily("gpt-5.4-mini"):
 		return makeRate(18.75, 1.875, 113), true
-	case model == "gpt-5.4" || strings.HasPrefix(model, "gpt-5.4-"):
+	case inFamily("gpt-5.4"):
 		return makeRate(62.5, 6.25, 375), true
-	case strings.Contains(model, "5.3-codex"):
+	case inFamily("gpt-5.3-codex"):
 		return makeRate(43.75, 4.375, 350), true
-	case model == "gpt-5.2" || strings.HasPrefix(model, "gpt-5.2-"):
+	case inFamily("gpt-5.2"):
 		return makeRate(43.75, 4.375, 350), true
 	default:
 		return rate{}, false
