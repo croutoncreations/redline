@@ -188,6 +188,19 @@ function renderUsageDetail(item) {
         <div class="m-reset">Resets ${esc(relative(a.resets_at))}${a.reset_inferred ? ' (inferred)' : ''}</div>
       </div>`);
     });
+    // Banked resets: on-demand refills. Absent means not reported, not zero.
+    if (snap.banked_resets != null) {
+      const count = snap.banked_resets;
+      const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
+      const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+      const detail = expires
+        ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
+        : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
+      windows.push(`<div class="m-banked-resets${soon ? ' soon' : ''}" data-testid="banked-resets">
+        <div class="m-meter-head"><span>Banked resets</span><b>${esc(count)} available</b></div>
+        <div class="m-reset">${esc(detail)}</div>
+      </div>`);
+    }
     metersHTML = `<div class="m-meters">${windows.join('')}</div>`;
   } else {
     metersHTML = `<p class="m-inline-muted">${esc(item.error || 'No usage data available.')}</p>`;

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,6 +201,26 @@ func newServer(
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
 	}
+	// Persist rate-limit lockouts beside the on-disk database, which the
+	// store has already opened (and so created) by now. A path with no file
+	// behind it is in-memory or a test placeholder; persisting there would
+	// scatter the lockout file into the working tree.
+	if databasePath, err := filepath.Abs(cfg.Database); err == nil {
+		if info, statErr := os.Stat(databasePath); statErr == nil && info.Mode().IsRegular() {
+			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
+		}
+	}
+	// The banked-reset lookup reads the one local Claude Code login. With
+	// several Claude accounts configured it cannot tell which account that
+	// login belongs to, and a count shown on the wrong account is worse
+	// than none.
+	claudeAccounts := 0
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Provider, "claude") {
+			claudeAccounts++
+		}
+	}
+	server.usageSources.SkipBankedResets = claudeAccounts > 1
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
