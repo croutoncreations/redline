@@ -120,6 +120,8 @@ Homebrew distribution.
 
 ### Fixed
 
+- `task add` and `profile add` errors now identify the operation and source definition file for
+  read failures, malformed YAML, and API validation rejections.
 - Corrected the app icon's redline arc, which was drawn from a different circle than the white
   track and only met it at one end; the icon now shares one center, radius, and stroke width with
   the live menu-bar gauge, and the needle pivots from the dial's actual center.

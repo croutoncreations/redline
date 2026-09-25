@@ -647,6 +647,7 @@ func runResource(
 		writeJSON(stdout, output)
 		return 0
 	case "add":
+		resourceName := strings.TrimSuffix(resource, "s")
 		flags := flag.NewFlagSet(resource+" add", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		file := flags.String("file", "", "YAML definition")
@@ -659,7 +660,7 @@ func runResource(
 		}
 		request, err := readYAML(*file)
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "load %s definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		var output any
@@ -669,7 +670,7 @@ func runResource(
 			output = &domain.ExecutionProfile{}
 		}
 		if err := client.Do(context.Background(), http.MethodPost, "/v1/"+resource, request, output); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "create %s from definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		if *jsonOutput {
@@ -1104,11 +1105,11 @@ func providerFlags(name string, args []string, stderr io.Writer) (string, bool, 
 func readYAML(path string) (any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read definition: %w", err)
+		return nil, fmt.Errorf("read file: %w; check the --file path and permissions", err)
 	}
 	var value any
 	if err := yaml.Unmarshal(data, &value); err != nil {
-		return nil, fmt.Errorf("decode YAML definition: %w", err)
+		return nil, fmt.Errorf("decode YAML: %w; fix the YAML syntax in the file", err)
 	}
 	return value, nil
 }
