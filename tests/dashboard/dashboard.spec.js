@@ -639,6 +639,7 @@ test('locks a persisted onboarding profile name when revisiting workspace setup'
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.locator('#onboarding-repository').fill('/repo/redline');
   await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
   await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
