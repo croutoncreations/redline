@@ -6,17 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
-
-- Clarified the source quickstart's tool, network, provider-login, port, and generated-file
-  prerequisites, and made dashboard dependency installation reproducible with `npm ci`.
-
 ### Fixed
 
-- Prevented onboarding navigation while an execution profile is being saved, so returning to the
-  workspace step cannot expose a persisted profile name as editable.
-- Ignored the local `redline.yaml` and protected `api-token` files created by the documented source
-  quickstart, preventing accidental commits of machine-specific configuration or credentials.
+- `redline_run_events` no longer drops the newest events when a response is truncated. Run events
+  arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
+  `run.failed` event an agent polling for completion is waiting on.
+- `redline_runs_list` now forwards the requested limit to the API. `/v1/runs` defaults to 50 rows
+  when no limit is sent, so asking for more silently returned 50 and reported them as untruncated.
+
+- The SQLite database is now restricted to its owner. It was created under the process umask,
+  commonly `0644`, leaving it world-readable along with its `-wal` and `-shm` sidecars — so any
+  other local account could read task prompts, operator-authored prepare/finalize shell commands,
+  and runtime credential references straight off disk, bypassing the HTTP bearer-token boundary.
+  Existing databases are tightened on the next start. On Windows an owner-only DACL is applied,
+  since the POSIX mode bits are ignored there, matching how the `api-token` file is protected.
+
+- `prompt_file` is now confined to the workspace even when it is a symlink. The containment check
+  was purely lexical, so a symlink inside the workspace pointing outside it passed validation and
+  the harness read the link target — credentials, keys, any readable file — directly into the
+  model prompt. Both the workspace root and the resolved file are now checked. Symlinks that stay
+  inside the workspace keep working.
+- The terminal pairing QR code is no longer rendered with inverted module polarity. `go-qrcode`
+  sets a bitmap cell to true for a *dark* module, but the renderer negated it, so dark and light
+  were swapped and the four-module quiet zone was drawn as solid ink. The resulting code could not
+  be scanned, blocking mobile pairing from the CLI.
+- Stored timestamps now use a fixed-width nanosecond field so that the byte-wise ordering SQLite
+  applies to TEXT columns matches real chronological order. Previously `time.RFC3339Nano` trimmed
+  trailing zeros and dropped the fraction entirely on a whole second, so `…T18:00:00Z` sorted after
+  `…T18:00:00.5Z` and `…:00.1Z` after `…:00.12Z`. That corrupted `LatestSnapshot` (the scheduler
+  could dispatch against a stale usage reading), run listings, dispatch-attempt ordering, and the
+  `completed_at >= ?` range filter behind launch metrics. A new migration rewrites timestamps in
+  existing databases, including legacy values stored with a numeric UTC offset; columns holding
+  SQLite `CURRENT_TIMESTAMP` values are left untouched.
+- Pi cache tokens are no longer double-counted when a session record carries more than one
+  spelling of the same counter. Pi's JSONL schema expresses cache reads and writes as flat
+  `cacheRead`/`cacheWrite`, a `cacheCreation` alias, and a nested `cache:{read,write}` object;
+  these were being summed as if independent, so a record written across a schema migration could
+  report two to three times its real cache usage. Redline now takes the largest alias, matching
+  how Hermes records are already reconciled. Inflated usage made the scheduler under-dispatch,
+  leaving paid subscription capacity unused.
 
 ## [0.1.7] - 2026-09-18
 
@@ -54,6 +82,14 @@ Homebrew distribution.
 - Added launch screenshots and a README gallery covering the CLI, dashboard, and native app,
   captured entirely from the new demo staging mode so no personal repositories, paths, or live
   data appear in the images.
+- Added a guided four-step first-run setup on the dashboard: it confirms each provider's CLI
+  installation, agent sign-in, and subscription-usage access; helps create a workspace and
+  execution profile with the account, harness, and model preselected where possible; and finishes
+  by creating a first job that's saved enabled (the global scheduler stays off until you turn it
+  on deliberately). It's safe to skip or interrupt — a resumable "Getting started" checklist stays
+  on the dashboard and picks up at the first incomplete step. New jobs created from the dashboard
+  now default to "Enabled after creation," with an explicit opt-out for saving a disabled draft.
+  Stock-Mac provider discovery and native app handoff around first launch are also more reliable.
 
 ### Changed
 
@@ -84,6 +120,8 @@ Homebrew distribution.
 
 ### Fixed
 
+- `task add` and `profile add` errors now identify the operation and source definition file for
+  read failures, malformed YAML, and API validation rejections.
 - Corrected the app icon's redline arc, which was drawn from a different circle than the white
   track and only met it at one end; the icon now shares one center, radius, and stroke width with
   the live menu-bar gauge, and the needle pivots from the dial's actual center.

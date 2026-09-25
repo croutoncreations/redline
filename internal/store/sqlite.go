@@ -23,6 +23,15 @@ func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("database path is required")
 	}
+	// The database holds task prompts, operator-authored prepare/finalize
+	// shell commands, and runtime credential references. Created under the
+	// process umask it is commonly 0644, letting any other local account read
+	// it straight off disk and bypass the HTTP bearer-token boundary. Restrict
+	// it before SQLite writes anything, matching how the API token file is
+	// already protected.
+	if err := restrictToOwner(path); err != nil {
+		return nil, err
+	}
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
@@ -31,6 +40,15 @@ func Open(path string) (*DB, error) {
 	if _, err := database.Exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("configure SQLite database: %w", err)
+	}
+	// WAL mode creates -wal and -shm sidecars holding uncommitted page data,
+	// which is just as sensitive as the main file. They are created by SQLite
+	// above, so they are tightened here rather than up front.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := restrictToOwner(path + suffix); err != nil {
+			database.Close()
+			return nil, err
+		}
 	}
 	store := &DB{db: database}
 	if err := store.migrate(context.Background()); err != nil {
@@ -435,8 +453,163 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 			return fmt.Errorf("record requested task dispatch target migration: %w", err)
 		}
 	}
+	if version < 24 {
+		if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (24)`); err != nil {
+			return fmt.Errorf("record fixed-width timestamp migration: %w", err)
+		}
+	}
+	if version < 26 {
+		// Version 26 rather than 25: builds of the unmerged mobile branch
+		// (PR #86) stamped 24 and 25 for different migrations (banked_resets
+		// and short_window_unavailable), so the banked columns are added
+		// only when missing and the version sits above both histories. That
+		// branch will need its own guarded v27+ for short_window_unavailable
+		// when it merges. Nullable on purpose: "not reported" is not zero.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets", "INTEGER"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets_expire_at", "TEXT"); err != nil {
+			return err
+		}
+		// Those mobile-branch databases skipped main's v24 timestamp rewrite
+		// because their MAX(version) was already 24 or 25. The rewrite is
+		// idempotent, so rerun it; on a database that did run it, it
+		// rewrites nothing.
+		if version >= 24 {
+			if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (26)`); err != nil {
+			return fmt.Errorf("record banked resets migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+// fixedWidthTimestampColumns lists every TEXT column written through
+// formatTime/formatTokenTime, i.e. every column holding an RFC3339 timestamp
+// that SQLite orders or range-filters byte-wise.
+//
+// Deliberately excluded are the columns defaulting to SQLite's
+// CURRENT_TIMESTAMP (provider_controls.updated_at, schema_migrations.applied_at,
+// usage_snapshots.created_at, token_observations.created_at). Those hold
+// "YYYY-MM-DD HH:MM:SS", never RFC3339, and are not used for ordering. Values
+// that do not parse as RFC3339 are left untouched anyway, but leaving these
+// columns out keeps the intent clear.
+var fixedWidthTimestampColumns = []struct{ table, column string }{
+	{"agent_contexts", "created_at"},
+	{"dispatch_attempts", "started_at"},
+	{"dispatch_attempts", "completed_at"},
+	{"execution_profiles", "created_at"},
+	{"notification_deliveries", "created_at"},
+	{"notification_deliveries", "updated_at"},
+	{"run_events", "occurred_at"},
+	{"runs", "started_at"},
+	{"runs", "completed_at"},
+	{"runs", "activity_read_at"},
+	{"runtime_connections", "created_at"},
+	{"scheduler_decisions", "created_at"},
+	{"tasks", "last_started_at"},
+	{"tasks", "last_completed_at"},
+	{"tasks", "created_at"},
+	{"tasks", "updated_at"},
+	{"token_observations", "observed_at"},
+	{"usage_allowance_windows", "resets_at"},
+	{"usage_snapshots", "observed_at"},
+	{"usage_snapshots", "short_resets_at"},
+	{"usage_snapshots", "weekly_resets_at"},
+}
+
+// migrateFixedWidthTimestampsV24 rewrites RFC3339 timestamps written by
+// earlier versions into the fixed-width storedTimeLayout.
+//
+// Without this, the formatTime change only helps rows written after the
+// upgrade: a legacy "…T18:00:00Z" still sorts after a new
+// "…T18:00:00.000000000Z", so ordering stays wrong until existing rows are
+// rewritten.
+//
+// Each value is parsed in Go and re-encoded through formatTime rather than
+// rewritten with string surgery in SQL. That handles every RFC3339 form the
+// old writers could produce, including numeric offsets: SaveSnapshot used to
+// call Format(time.RFC3339Nano) directly, without formatTime's .UTC()
+// normalization, so a provider reporting "2026-07-16T20:00:00+05:00" was
+// stored with that offset intact. Such a value sorts above any "…Z" value
+// (all digits < 'Z'), which would have left a stale snapshot winning
+// ORDER BY observed_at DESC even after this migration.
+//
+// Re-encoding through formatTime also guarantees the migration cannot drift
+// from the writer if storedTimeLayout ever changes.
+//
+// Values that do not parse as RFC3339 (notably SQLite CURRENT_TIMESTAMP,
+// "YYYY-MM-DD HH:MM:SS") and NULLs are left exactly as they are.
+func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
+	for _, target := range fixedWidthTimestampColumns {
+		// A database can reach this migration without every table present:
+		// one stamped at an early version skips the migrations that would
+		// have created them (see TestOpenMigratesExistingVersionTwoDatabase).
+		// Nothing to rewrite in that case.
+		exists, err := tableExists(ctx, tx, target.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if err := rewriteTimestampColumn(ctx, tx, target.table, target.column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewriteTimestampColumn re-encodes one column's RFC3339 values in place,
+// keyed by the existing value so no assumption is made about the table having
+// a usable primary key.
+func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column string) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT DISTINCT %[2]s FROM %[1]s WHERE %[2]s IS NOT NULL AND %[2]s <> ''`, table, column))
+	if err != nil {
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+	var stored []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s.%s timestamp: %w", table, column, err)
+		}
+		stored = append(stored, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
+	}
+
+	for _, value := range stored {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			// Not an RFC3339 timestamp (e.g. a CURRENT_TIMESTAMP default).
+			// Leave it alone rather than guessing at its format.
+			continue
+		}
+		normalized := formatTime(parsed)
+		if normalized == value {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %[1]s SET %[2]s = ? WHERE %[2]s = ?`, table, column), normalized, value); err != nil {
+			return fmt.Errorf("normalize %s.%s timestamps: %w", table, column, err)
+		}
 	}
 	return nil
 }
@@ -564,6 +737,64 @@ func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	return count > 0, nil
 }
 
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
+	hasTable, err := tableExists(ctx, tx, table)
+	if err != nil || !hasTable {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s column: %w", table, err)
+		}
+		found = found || name == column
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// bankedResetColumns converts a snapshot's optional reset report for storage.
+func bankedResetColumns(s decision.UsageSnapshot) (count, expires any) {
+	if s.BankedResets != nil {
+		count = *s.BankedResets
+	}
+	if s.BankedResetsExpireAt != nil {
+		expires = formatTime(*s.BankedResetsExpireAt)
+	}
+	return count, expires
+}
+
+// scanBankedResets restores the optional reset report, keeping zero distinct
+// from absent.
+func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires sql.NullString) error {
+	if count.Valid {
+		value := int(count.Int64)
+		s.BankedResets = &value
+	}
+	if expires.Valid && expires.String != "" {
+		parsed, err := parseStoredTimeField("stored banked reset expiry", expires.String)
+		if err != nil {
+			return err
+		}
+		s.BankedResetsExpireAt = &parsed
+	}
+	return nil
+}
+
 func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []byte) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("validate snapshot: %w", err)
@@ -572,29 +803,33 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	var shortReset any
 	if s.Short != nil {
 		shortRemaining = s.Short.Remaining
-		shortReset = s.Short.ResetsAt.Format(time.RFC3339Nano)
+		shortReset = formatTime(s.Short.ResetsAt)
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin snapshot save: %w", err)
 	}
 	defer tx.Rollback()
+	bankedResets, bankedResetsExpireAt := bankedResetColumns(s)
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
+banked_resets, banked_resets_expire_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
 		s.Provider,
-		s.ObservedAt.Format(time.RFC3339Nano),
+		formatTime(s.ObservedAt),
 		shortRemaining,
 		shortReset,
 		s.Weekly.Remaining,
-		s.Weekly.ResetsAt.Format(time.RFC3339Nano),
+		formatTime(s.Weekly.ResetsAt),
 		s.Source,
 		s.Confidence,
 		raw,
+		bankedResets,
+		bankedResetsExpireAt,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -618,7 +853,7 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, allowance.Key, allowance.SourceLabel,
 			allowance.Scope, allowance.Role, allowance.Remaining,
-			allowance.ResetsAt.Format(time.RFC3339Nano), allowance.PeriodDurationSeconds, allowance.ResetInferred)
+			formatTime(allowance.ResetsAt), allowance.PeriodDurationSeconds, allowance.ResetInferred)
 		if err != nil {
 			return fmt.Errorf("save allowance %q: %w", allowance.Key, err)
 		}
@@ -645,7 +880,8 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
+banked_resets, banked_resets_expire_at
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -659,6 +895,8 @@ FROM usage_snapshots WHERE provider = ?`
 	var shortRemaining sql.NullFloat64
 	var shortReset sql.NullString
 	var raw []byte
+	var bankedResets sql.NullInt64
+	var bankedResetsExpireAt sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Provider,
@@ -670,6 +908,8 @@ FROM usage_snapshots WHERE provider = ?`
 		&s.Source,
 		&s.Confidence,
 		&raw,
+		&bankedResets,
+		&bankedResetsExpireAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)
@@ -677,21 +917,24 @@ FROM usage_snapshots WHERE provider = ?`
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("query latest snapshot: %w", err)
 	}
-	if s.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt); err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored observation time: %w", err)
+	if s.ObservedAt, err = parseStoredTimeField("stored observation time", observedAt); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
-	if s.Weekly.ResetsAt, err = time.Parse(time.RFC3339Nano, weeklyReset); err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored weekly reset: %w", err)
+	if s.Weekly.ResetsAt, err = parseStoredTimeField("stored weekly reset", weeklyReset); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
 	if shortRemaining.Valid != shortReset.Valid {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("stored short window is incomplete")
 	}
 	if shortRemaining.Valid {
-		parsed, err := time.Parse(time.RFC3339Nano, shortReset.String)
+		parsed, err := parseStoredTimeField("stored short reset", shortReset.String)
 		if err != nil {
-			return decision.UsageSnapshot{}, nil, fmt.Errorf("parse stored short reset: %w", err)
+			return decision.UsageSnapshot{}, nil, err
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
+	}
+	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
 	if err != nil {
@@ -716,9 +959,9 @@ FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotI
 			&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds, &allowance.ResetInferred); err != nil {
 			return nil, fmt.Errorf("scan allowance window: %w", err)
 		}
-		allowance.ResetsAt, err = time.Parse(time.RFC3339Nano, reset)
+		allowance.ResetsAt, err = parseStoredTimeField("allowance reset", reset)
 		if err != nil {
-			return nil, fmt.Errorf("parse allowance reset: %w", err)
+			return nil, err
 		}
 		allowances = append(allowances, allowance)
 	}

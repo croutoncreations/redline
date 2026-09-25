@@ -613,12 +613,43 @@ func scanTask(row scanner) (domain.Task, error) {
 	return task, nil
 }
 
-func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+// storedTimeLayout is an RFC3339 layout with a fixed-width nanosecond field.
+//
+// Timestamps are persisted in TEXT columns that SQLite compares byte-wise, so
+// the encoding must make lexicographic order agree with chronological order.
+// time.RFC3339Nano does not: it trims trailing zeros from the fraction and
+// drops the decimal point entirely when the fraction is zero, which breaks
+// both ORDER BY and range (>=, <) comparisons. For example:
+//
+//	"2026-07-16T18:00:00Z"   > "2026-07-16T18:00:00.5Z"   (but is earlier)
+//	"2026-07-16T18:00:00.1Z" > "2026-07-16T18:00:00.12Z"  (but is earlier)
+//
+// Padding the fraction to a constant nine digits makes every encoded
+// timestamp the same length, so byte-wise comparison is chronological.
+//
+// Existing rows are rewritten into this layout by migration 24; keep the two
+// in sync if this layout ever changes.
+const storedTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatTime(value time.Time) string { return value.UTC().Format(storedTimeLayout) }
 
 func parseStoredTime(value string) (time.Time, error) {
+	return parseStoredTimeField("stored timestamp", value)
+}
+
+// parseStoredTimeField decodes an RFC3339 timestamp column, labeling the error
+// with which field failed. It is the shared decode for every timestamp column
+// in this package.
+//
+// Parsing stays tolerant of any RFC3339 form rather than requiring
+// storedTimeLayout: current writers all normalize through formatTime, but
+// databases predating that still hold trimmed-fraction and numeric-offset
+// values until migration 24 rewrites them, and time.Parse resolves whatever
+// offset the stored string carries.
+func parseStoredTimeField(field, value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse stored timestamp: %w", err)
+		return time.Time{}, fmt.Errorf("parse %s: %w", field, err)
 	}
 	return parsed, nil
 }

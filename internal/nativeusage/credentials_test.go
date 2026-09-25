@@ -30,6 +30,31 @@ func TestClaudeCredentialsRefreshAndPersistWithCompareAndSwap(t *testing.T) {
 	}
 }
 
+func TestAccessWithoutRefreshNeverRotatesSharedClaudeToken(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	original := []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"refresh","expiresAt":1784743200000}}`)
+	store := &memorySecretStore{value: append([]byte(nil), original...)}
+	refreshCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshCalls++
+		_, _ = w.Write([]byte(`{"access_token":"new","refresh_token":"next","expires_in":3600}`))
+	}))
+	defer server.Close()
+	credentials := &DefaultCredentials{HTTPClient: server.Client(), Now: func() time.Time { return now }, ClaudeStore: store, ClaudeRefreshURL: server.URL}
+	if _, err := credentials.AccessWithoutRefresh(context.Background(), "claude"); err == nil {
+		t.Fatal("a near-expiry token should be reported unavailable, not refreshed")
+	}
+	if refreshCalls != 0 || store.swaps != 0 || !bytes.Equal(store.value, original) {
+		t.Fatalf("refresh calls=%d swaps=%d: the shared credential was touched", refreshCalls, store.swaps)
+	}
+	fresh := &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"live","expiresAt":1784757600000}}`)}
+	credentials.ClaudeStore = fresh
+	got, err := credentials.AccessWithoutRefresh(context.Background(), "claude")
+	if err != nil || got.AccessToken != "live" {
+		t.Fatalf("credential=%#v err=%v", got, err)
+	}
+}
+
 func TestCredentialRefreshRejectsConcurrentReplacement(t *testing.T) {
 	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
 	store := &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"refresh","expiresAt":1784743200000}}`), changeBeforeSwap: true}

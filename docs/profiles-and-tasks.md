@@ -25,6 +25,25 @@ redline task dispatch add-tests
 
 See the [`examples/`](../examples) directory for the full set of starter profiles and tasks.
 
+## Task prompts
+
+A task needs either an inline `prompt` or a `prompt_file` naming a file the harness reads from the
+prepared workspace at run time:
+
+```yaml
+prompt: Add table-driven tests for the parser package.
+# ...or, instead:
+prompt_file: prompts/add-tests.md
+```
+
+`prompt_file` is resolved relative to the workspace directory and is confined to it. Redline
+rejects an absolute path, one that traverses upward out of the workspace, and one that resolves
+outside it through a symlink.
+
+Because the file is read when the task runs rather than when it is created, editing it changes
+what the next run receives — useful for prompts kept under version control alongside the code they
+operate on.
+
 ## Dispatch tier and priority
 
 ```yaml

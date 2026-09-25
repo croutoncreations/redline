@@ -647,6 +647,7 @@ func runResource(
 		writeJSON(stdout, output)
 		return 0
 	case "add":
+		resourceName := strings.TrimSuffix(resource, "s")
 		flags := flag.NewFlagSet(resource+" add", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		file := flags.String("file", "", "YAML definition")
@@ -659,7 +660,7 @@ func runResource(
 		}
 		request, err := readYAML(*file)
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "load %s definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		var output any
@@ -669,7 +670,7 @@ func runResource(
 			output = &domain.ExecutionProfile{}
 		}
 		if err := client.Do(context.Background(), http.MethodPost, "/v1/"+resource, request, output); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "create %s from definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		if *jsonOutput {
@@ -704,13 +705,24 @@ func runResource(
 		if *jsonOutput || args[0] == "dispatch" {
 			writeJSON(stdout, output)
 		} else {
-			fmt.Fprintf(stdout, "%sd task %s\n", args[0], task.ID)
+			fmt.Fprintf(stdout, "%s task %s\n", taskControlPastTense(args[0]), task.ID)
 		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown %s command %q\n", strings.TrimSuffix(resource, "s"), args[0])
 		return 1
 	}
+}
+
+// taskControlPastTense renders a task control verb in the past tense for the
+// confirmation line. Appending "d" suits enable and disable but produces
+// "retryd" for retry. The remaining control, dispatch, takes the JSON branch
+// above and never reaches here.
+func taskControlPastTense(action string) string {
+	if action == "retry" {
+		return "retried"
+	}
+	return action + "d"
 }
 
 func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
@@ -858,8 +870,12 @@ func renderTerminalQR(output io.Writer, bitmap [][]bool) {
 	}
 	for y := -margin; y < len(bitmap)+margin; y += 2 {
 		for x := -margin; x < width+margin; x++ {
-			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
-			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			// go-qrcode sets bitmap[y][x] true for DARK modules ("bitmap[y][x]
+			// is true if the pixel at (x, y) is set"), so the cell value is
+			// used directly. Negating it inverted the code — rendering the
+			// quiet zone as solid ink — which scanners cannot read.
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && bitmap[y+1][x]
 			switch {
 			case top && bottom:
 				fmt.Fprint(output, "█")
@@ -1089,11 +1105,11 @@ func providerFlags(name string, args []string, stderr io.Writer) (string, bool, 
 func readYAML(path string) (any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read definition: %w", err)
+		return nil, fmt.Errorf("read file: %w; check the --file path and permissions", err)
 	}
 	var value any
 	if err := yaml.Unmarshal(data, &value); err != nil {
-		return nil, fmt.Errorf("decode YAML definition: %w", err)
+		return nil, fmt.Errorf("decode YAML: %w; fix the YAML syntax in the file", err)
 	}
 	return value, nil
 }
