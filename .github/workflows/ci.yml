@@ -75,7 +75,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
       # The Go core is compiled into the app through gomobile, and this is the
       # only place the two are built together. Four bugs on the mobile branch
       # shipped with every Go test green because the fault lived in the
