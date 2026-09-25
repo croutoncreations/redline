@@ -1678,8 +1678,11 @@ func TestEntitlementControllerIndependentMarkerWinsAfterBoundedShutdownAndObsole
 		t.Fatalf("terminal issuer call=%d", call)
 	}
 	terminal := waitRelayState(t, coordinator, RelayReadinessInvalidKey)
-	if terminal.CanDial() || !terminal.PersistenceDegraded {
-		t.Fatalf("terminal state did not revoke immediately with pending durability: %#v", terminal)
+	// Revocation must be immediate. PersistenceDegraded is not asserted here:
+	// the independent marker write races this observation and may already be
+	// durable (flaked on CI); the loop below checks it becomes durable.
+	if terminal.CanDial() {
+		t.Fatalf("terminal state did not revoke immediately: %#v", terminal)
 	}
 	deadline := time.Now().Add(time.Second)
 	for coordinator.Current().PersistenceDegraded && time.Now().Before(deadline) {
