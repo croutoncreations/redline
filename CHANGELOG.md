@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Banked quota resets.** Claude and Codex both now grant one-time resets that refill an
+  exhausted usage limit. The dashboard, mobile page, and macOS menu bar show how many an account
+  holds and when the soonest one expires. A provider that does not report resets shows nothing,
+  and zero is shown as "none available", so the two are never confused. Codex resets come from
+  OpenUsage or the native usage endpoint. Claude resets are read from Anthropic's usage endpoint
+  at most every 30 minutes, without ever refreshing Claude Code's shared login. They are not read
+  when several Claude accounts are configured, because the one local login cannot be attributed
+  to any of them.
+
 ### Changed
 
 - **Breaking for source builds:** Redline now requires Go 1.26 or later. Upgrade the local Go
@@ -16,6 +27,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reason, making remote-runtime failures actionable without debug logging.
 - Task documentation now explains inline `prompt` precedence, runtime `prompt_file` reads, and
   workspace containment, and the API reference includes the pairing redemption endpoint.
+- `task add` and `profile add` errors now identify the operation and source definition file for
+  read failures, malformed YAML, and API validation rejections.
+- Native usage requests now back off after the provider rate-limits them. Anthropic tightened its
+  usage endpoint in late September and lengthens the penalty when asked again during it, so
+  Redline waits for `Retry-After` (at least 15 minutes, since the endpoint has answered
+  `retry-after: 0` while still limiting) and remembers the lockout across restarts in
+  `usage-lockouts.json` beside the database.
 
 ### Security
 
@@ -66,6 +84,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Activity summaries now fall back to "Run completed successfully." when a run's output path
   cannot be read, instead of treating a failed read as a buffer of NUL bytes.
 - `redline task retry` now confirms that it "retried" a task instead of printing "retryd."
+- Custom day durations such as `min_interval: "1e100d"` are now rejected with HTTP 400. They
+  previously overflowed and were stored as roughly 292 years.
+- Unknown Codex models are no longer priced by partial name match. A model such as
+  `gpt-5.6-solarium` used to receive the `gpt-5.6-sol` rate, overstating its cost; exact names,
+  versioned variants, and provider-qualified IDs are still priced.
+- Updated `modernc.org/libc` to v1.77.1. v1.77.0 was retracted upstream because parsing `"nan"`
+  crashed with a stack overflow on Linux, a path reachable through the SQLite driver.
+- The README and CLI reference now put the global `--config` flag before `serve`; the documented
+  order was rejected with `flag provided but not defined: -config`.
+- The macOS guide now describes the menu bar status accurately: `WAIT`, `RUN`, and `ATTN`, with
+  offline and startup failures reported separately.
+- Databases upgraded by pre-release mobile builds now get the timestamp-ordering repair above,
+  which they had skipped because of a schema version collision.
+- The onboarding wizard's **Back** button is disabled while an execution profile is saving, so a
+  late save can no longer push the wizard forward again and leave a saved profile name editable.
 
 ## [0.1.7] - 2026-09-18
 
@@ -141,8 +174,6 @@ Homebrew distribution.
 
 ### Fixed
 
-- `task add` and `profile add` errors now identify the operation and source definition file for
-  read failures, malformed YAML, and API validation rejections.
 - Corrected the app icon's redline arc, which was drawn from a different circle than the white
   track and only met it at one end; the icon now shares one center, radius, and stroke width with
   the live menu-bar gauge, and the needle pivots from the dial's actual center.
