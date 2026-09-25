@@ -2,11 +2,14 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 // TestUnreadRunActivityCountAndMarkAllRead exercises MarkAllRunActivityRead and
@@ -126,6 +129,115 @@ func TestCompletedRunCursorDoesNotLoseOlderOrBurstingRuns(t *testing.T) {
 	}
 	if len(ids) != 107 || ids[0] != "run-a" || ids[len(ids)-1] != "run-old" {
 		t.Fatalf("cursor returned %d runs, last=%v", len(ids), ids[len(ids)-1:])
+	}
+}
+
+func TestCompletionSequenceMigrationBackfillsV26AndContinuesAfterReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	makeRun := func(id string, complete bool) {
+		t.Helper()
+		profile := domain.ExecutionProfile{ID: "p-" + id, ProviderAccountID: "provider-" + id,
+			HarnessType: "claude-code", WorkspaceProvider: "existing-directory"}
+		if err := db.CreateProfile(ctx, profile, base); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CreateTask(ctx, domain.Task{ID: id, Name: id, ExecutionProfileID: profile.ID, Type: domain.OneOff}, base); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, "run-"+id, id, profile.ProviderAccountID, "", base); err != nil {
+			t.Fatal(err)
+		}
+		if complete {
+			if err := db.CompleteRun(ctx, "run-"+id, domain.RunCompletion{State: domain.RunCompleted}, base); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	makeRun("old", true)
+	makeRun("b", true)
+	makeRun("a", true)
+	makeRun("failed", false)
+	if err := db.CompleteRun(ctx, "run-failed", domain.RunCompletion{State: domain.RunFailed}, base); err != nil {
+		t.Fatal(err)
+	}
+	makeRun("live", false)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the on-disk v26 layout, not merely its migration version.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`DROP INDEX idx_runs_completion_sequence`,
+		`ALTER TABLE runs DROP COLUMN completion_sequence`,
+		`DELETE FROM schema_migrations WHERE version >= 27`,
+		`UPDATE runs SET completed_at = '2026-09-24T11:00:00.000000000Z' WHERE id = 'run-old'`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("downgrade statement %q: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatalf("upgrade v26 with existing runs: %v", err)
+	}
+	page, cursor, err := db.ListCompletedRuns(ctx, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != 4 || len(page) != 4 || page[0].ID != "run-old" || page[1].ID != "run-a" ||
+		page[2].ID != "run-b" || page[3].ID != "run-failed" || page[3].State != domain.RunFailed {
+		t.Fatalf("backfill order/cursor = %v / %d", page, cursor)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated database: %v", err)
+	}
+	defer db.Close()
+	makeRun("new", true)
+	if err := db.RecoverInterruptedRuns(ctx, base.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	page, cursor, err = db.ListCompletedRuns(ctx, 4, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != 6 || len(page) != 2 || page[0].ID != "run-new" ||
+		page[1].ID != "run-live" || page[1].State != domain.RunFailed {
+		t.Fatalf("post-migration and recovery order/cursor = %v / %d", page, cursor)
+	}
+	if err := db.RecoverInterruptedRuns(ctx, base.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if afterRecovery, err := db.LatestCompletedRunCursor(ctx); err != nil || afterRecovery != cursor {
+		t.Fatalf("repeated recovery cursor = %d, err=%v, want %d", afterRecovery, err, cursor)
+	}
+	// The unique index covers backfilled rows and future completions.
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var uniqueIndex string
+	if err := check.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_completion_sequence'`).Scan(&uniqueIndex); err != nil {
+		t.Fatalf("completion index missing: %v", err)
+	}
+	if _, err := check.ExecContext(ctx, `UPDATE runs SET completion_sequence = 1 WHERE id = 'run-live'`); err == nil {
+		t.Fatal("completion sequence index should reject duplicate values")
 	}
 }
 
