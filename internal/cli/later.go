@@ -28,19 +28,20 @@ const maxInlinePromptBytes = 256 * 1024
 // taskFlagValues holds the flag-based task definition shared by `task add`
 // (without --file) and `later`.
 type taskFlagValues struct {
-	name       string
-	prompt     string
-	promptFile string
-	profile    string
-	defaultPro string
-	harness    string
-	cwd        string
-	taskType   string
-	tier       string
-	priority   int
-	interval   string
-	disabled   bool
-	jsonOutput bool
+	name         string
+	prompt       string
+	promptFile   string
+	profile      string
+	defaultPro   string
+	harness      string
+	cwd          string
+	taskType     string
+	tier         string
+	priority     int
+	interval     string
+	disabled     bool
+	jsonOutput   bool
+	allowDefault bool
 }
 
 type laterResult struct {
@@ -55,11 +56,13 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 	flags := flag.NewFlagSet("task add", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	values := taskFlagValues{}
+	file := flags.String("file", "", "YAML definition (exclusive with task flags)")
 	flags.StringVar(&values.name, "name", "", "task name")
 	flags.StringVar(&values.prompt, "prompt", "", "inline agent instructions; '-' reads them from stdin")
 	flags.StringVar(&values.promptFile, "prompt-file", "", "workspace-relative prompt file read when the task runs")
 	flags.StringVar(&values.profile, "profile", "", "execution profile ID, or 'auto' to match the current repository")
-	flags.StringVar(&values.defaultPro, "default-profile", "", "profile used when --profile auto finds no repository match")
+	flags.StringVar(&values.defaultPro, "default-profile", "", "profile used when --profile auto finds no repository match (requires --allow-default-profile)")
+	flags.BoolVar(&values.allowDefault, "allow-default-profile", false, "acknowledge routing to a possibly unrelated repository")
 	flags.StringVar(&values.harness, "harness", "claude-code", "harness type matched by --profile auto")
 	flags.StringVar(&values.cwd, "cwd", "", "directory used by --profile auto (default: current directory)")
 	flags.StringVar(&values.taskType, "type", string(domain.OneOff), "one_off or recurring")
@@ -74,6 +77,34 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 	if flags.NArg() != 0 {
 		fmt.Fprintf(stderr, "unexpected argument %q; quote the prompt and pass it with --prompt\n", flags.Arg(0))
 		return 1
+	}
+	if *file != "" {
+		var mixed string
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name != "file" && f.Name != "json" {
+				mixed = f.Name
+			}
+		})
+		if mixed != "" {
+			fmt.Fprintf(stderr, "--file cannot be combined with --%s\n", mixed)
+			return 1
+		}
+		request, err := readYAML(*file)
+		if err != nil {
+			fmt.Fprintf(stderr, "load task definition %q: %v\n", *file, err)
+			return 1
+		}
+		var task domain.Task
+		if err := client.Do(context.Background(), http.MethodPost, "/v1/tasks", request, &task); err != nil {
+			fmt.Fprintf(stderr, "create task from definition %q: %v\n", *file, err)
+			return 1
+		}
+		if values.jsonOutput {
+			writeJSON(stdout, task)
+		} else {
+			fmt.Fprintln(stdout, "created task")
+		}
+		return 0
 	}
 	if strings.TrimSpace(values.name) == "" {
 		fmt.Fprintln(stderr, "--name is required (or use --file)")
@@ -91,6 +122,10 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 		}
 		values.prompt = prompt
 	}
+	if len(values.prompt) > maxInlinePromptBytes {
+		fmt.Fprintf(stderr, "prompt exceeds %d bytes\n", maxInlinePromptBytes)
+		return 1
+	}
 	if strings.TrimSpace(values.prompt) == "" && strings.TrimSpace(values.promptFile) == "" {
 		fmt.Fprintln(stderr, "--prompt or --prompt-file is required")
 		return 1
@@ -101,7 +136,7 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 		return 1
 	}
 	if values.jsonOutput {
-		writeJSON(stdout, result)
+		writeJSON(stdout, result.Task)
 	} else {
 		fmt.Fprintf(stdout, "created task %s (profile %s, tier %s)\n",
 			result.Task.ID, result.Task.ExecutionProfileID, result.Task.DispatchTier)
@@ -117,8 +152,10 @@ func runLater(client apiclient.Client, args []string, stdin io.Reader, stdout, s
 	flags.SetOutput(stderr)
 	values := taskFlagValues{taskType: string(domain.OneOff)}
 	flags.StringVar(&values.name, "name", "", "task name (default: derived from the text)")
+	flags.StringVar(&values.prompt, "prompt", "", "task text; '-' reads from stdin (recommended for hooks)")
 	flags.StringVar(&values.profile, "profile", "auto", "execution profile ID, or 'auto' to match the current repository")
-	flags.StringVar(&values.defaultPro, "default-profile", "", "profile used when no profile matches the current repository")
+	flags.StringVar(&values.defaultPro, "default-profile", "", "profile used when no profile matches the current repository (requires --allow-default-profile)")
+	flags.BoolVar(&values.allowDefault, "allow-default-profile", false, "acknowledge routing to a possibly unrelated repository")
 	flags.StringVar(&values.harness, "harness", "claude-code", "harness type matched by --profile auto")
 	flags.StringVar(&values.cwd, "cwd", "", "directory used to find the repository (default: current directory)")
 	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, or expiring")
@@ -131,7 +168,14 @@ func runLater(client apiclient.Client, args []string, stdin io.Reader, stdout, s
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	text := strings.Join(flags.Args(), " ")
+	if values.prompt != "" && flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "--prompt cannot be combined with positional text")
+		return 1
+	}
+	text := values.prompt
+	if text == "" {
+		text = strings.Join(flags.Args(), " ")
+	}
 	if text == "-" {
 		prompt, err := readBoundedPrompt(stdin)
 		if err != nil {
@@ -161,6 +205,9 @@ func runLater(client apiclient.Client, args []string, stdin io.Reader, stdout, s
 	if values.jsonOutput {
 		writeJSON(stdout, result)
 		return 0
+	}
+	if result.ProfileResolution == "default" {
+		fmt.Fprintf(stdout, "WARNING: no matching repository profile; using default profile %s, which may target a different repository.\n", result.Task.ExecutionProfileID)
 	}
 	fmt.Fprintf(stdout, "Queued Redline task %s (tier %s, profile %s).\n",
 		result.Task.ID, result.Task.DispatchTier, result.Task.ExecutionProfileID)
@@ -225,7 +272,7 @@ func resolveTaskProfile(ctx context.Context, client apiclient.Client, values tas
 			return matches[0], "repository", repository, nil
 		case 0:
 		default:
-			if values.defaultPro != "" && contains(matches, values.defaultPro) {
+			if values.allowDefault && values.defaultPro != "" && contains(matches, values.defaultPro) {
 				return values.defaultPro, "default", repository, nil
 			}
 			return "", "", repository, fmt.Errorf(
@@ -233,7 +280,7 @@ func resolveTaskProfile(ctx context.Context, client apiclient.Client, values tas
 				values.harness, repository, strings.Join(matches, ", "))
 		}
 	}
-	if values.defaultPro != "" {
+	if values.defaultPro != "" && values.allowDefault {
 		return values.defaultPro, "default", repository, nil
 	}
 	if repoErr != nil {
@@ -368,20 +415,17 @@ func runWatch(ctx context.Context, client apiclient.Client, args []string, stdou
 		fmt.Fprintln(stderr, "--interval must be at least 100ms and --count must not be negative")
 		return 1
 	}
-	const window = 50
-	listPath := "/v1/runs?limit=" + fmt.Sprint(window)
-	var initial []domain.Run
-	if err := client.Do(ctx, http.MethodGet, listPath, nil, &initial); err != nil {
+	const pageSize = 100
+	const endpoint = "/v1/runs/completions"
+	var page struct {
+		Cursor int64        `json:"cursor"`
+		Runs   []domain.Run `json:"runs"`
+	}
+	if err := client.Do(ctx, http.MethodGet, endpoint+"?baseline=true", nil, &page); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	reported := make(map[string]bool, len(initial))
-	for _, run := range initial {
-		if runFinished(run.State) {
-			reported[run.ID] = true
-		}
-	}
-	names := map[string]string{}
+	cursor := page.Cursor
 	emitted := 0
 	failing := false
 	ticker := time.NewTicker(*interval)
@@ -392,43 +436,43 @@ func runWatch(ctx context.Context, client apiclient.Client, args []string, stdou
 			return 0
 		case <-ticker.C:
 		}
-		var runs []domain.Run
-		if err := client.Do(ctx, http.MethodGet, listPath, nil, &runs); err != nil {
-			if ctx.Err() != nil {
-				return 0
+		for {
+			query := url.Values{"limit": {fmt.Sprint(pageSize)}, "after": {fmt.Sprint(cursor)}}
+			page = struct {
+				Cursor int64        `json:"cursor"`
+				Runs   []domain.Run `json:"runs"`
+			}{}
+			if err := client.Do(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil, &page); err != nil {
+				if ctx.Err() != nil {
+					return 0
+				}
+				if !failing {
+					fmt.Fprintf(stderr, "redline run watch: %v (retrying)\n", err)
+					failing = true
+				}
+				break
 			}
-			if !failing {
-				fmt.Fprintf(stderr, "redline run watch: %v (retrying)\n", err)
-				failing = true
+			failing = false
+			for _, run := range page.Runs {
+				writeJSONLine(stdout, runWatchEvent{
+					TaskID: run.TaskID, Task: lookupTaskName(ctx, client, run.TaskID), RunID: run.ID,
+					Status: string(run.State), Summary: truncateRunes(run.Summary, 200),
+					PRURL: pullRequestURL(run.Artifacts), CompletedAt: run.CompletedAt,
+				})
+				emitted++
+				if *count > 0 && emitted >= *count {
+					return 0
+				}
 			}
-			continue
-		}
-		failing = false
-		// The API lists newest first; report oldest first.
-		for index := len(runs) - 1; index >= 0; index-- {
-			run := runs[index]
-			if !runFinished(run.State) || reported[run.ID] {
-				continue
+			if len(page.Runs) == 0 {
+				break
 			}
-			reported[run.ID] = true
-			if _, ok := names[run.TaskID]; !ok {
-				names[run.TaskID] = lookupTaskName(ctx, client, run.TaskID)
-			}
-			writeJSONLine(stdout, runWatchEvent{
-				TaskID: run.TaskID, Task: names[run.TaskID], RunID: run.ID,
-				Status: string(run.State), Summary: truncateRunes(run.Summary, 200),
-				PRURL: pullRequestURL(run.Artifacts), CompletedAt: run.CompletedAt,
-			})
-			emitted++
-			if *count > 0 && emitted >= *count {
-				return 0
+			cursor = page.Cursor
+			if len(page.Runs) < pageSize {
+				break
 			}
 		}
 	}
-}
-
-func runFinished(state domain.RunState) bool {
-	return state == domain.RunCompleted || state == domain.RunFailed
 }
 
 func lookupTaskName(ctx context.Context, client apiclient.Client, taskID string) string {

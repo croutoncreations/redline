@@ -50,8 +50,8 @@ redline candidates --provider codex-main
 
 `task add` without `--file` builds the task from flags. `--prompt -` reads the prompt from stdin
 (up to 256 KiB). `--profile auto` picks the Claude Code profile whose `repository` is the git top
-level of the current directory (`--cwd` overrides the directory, `--harness` the harness type, and
-`--default-profile` is used when nothing matches). Other flags: `--prompt-file`, `--type`
+level of the current directory (`--cwd` overrides the directory and `--harness` the harness type).
+A non-matching `--default-profile` requires `--allow-default-profile`. Other flags: `--prompt-file`, `--type`
 (`one_off` default), `--tier` (`behind` default), `--priority` (50 default), `--min-interval`, and
 `--disabled` to save a draft.
 
@@ -61,12 +61,18 @@ level of the current directory (`--cwd` overrides the directory, `--harness` the
 redline later "finish the parser refactor and run go test ./..."
 echo "write the migration and its test" | redline later -
 redline later --tier expiring --json "sweep the docs for stale flags"
+# For hook-supplied text, pass it through stdin: redline later --prompt - --json
 ```
 
 `later` queues free text as a one-off task using `--profile auto` resolution. It never dispatches
 and never bypasses limits: the task starts in a fresh harness session only when the provider is
-behind pace (or near expiry for `--tier expiring`) and above its reserve. With `--json` it prints
-the created task, how the profile was chosen, and the matched repository.
+behind pace (or near expiry for `--tier expiring`) and above its reserve. If no profile matches,
+it fails closed unless `--default-profile ID --allow-default-profile` is passed explicitly; the
+text output warns that the fallback may target another repository. Hooks should pass untrusted
+text via `--prompt -` and stdin, never as positional flags. For positional text starting with a
+hyphen, use `redline later -- "-something"`. With `--json` it prints the created task, how the
+profile was chosen, and the matched repository. `task add --json`, in both YAML and flag mode,
+prints the created task object directly.
 
 ## Scheduler
 
@@ -98,7 +104,9 @@ redline run watch --jsonl --interval 30s --count 1
 
 `run watch --jsonl` prints one JSON line per run that finishes after the watch starts:
 `{"task_id", "task", "run_id", "status", "summary", "pr_url", "completed_at"}`. It polls the
-loopback API every 10 seconds by default and only reports new completions.
+loopback API every 10 seconds by default and pages through completions with a durable sequence
+cursor, including runs that started before the watch began but finished afterward. Cursor state is
+in memory, so restarting a watcher begins at the latest completion, not the previous position.
 
 ## Machine-readable output
 

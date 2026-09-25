@@ -109,7 +109,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
-		if len(remaining) > 1 && remaining[1] == "add" && !hasFileFlag(remaining[2:]) {
+		if len(remaining) > 1 && remaining[1] == "add" {
 			return runTaskAddFlags(client, remaining[2:], stdin, stdout, stderr)
 		}
 		return runResource(client, "tasks", remaining[1:], stdout, stderr)
@@ -1094,16 +1094,6 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "unknown run command %q\n", args[0])
 		return 1
 	}
-}
-
-// hasFileFlag reports whether `task add` arguments use the YAML --file form.
-func hasFileFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "--file" || arg == "-file" || strings.HasPrefix(arg, "--file=") || strings.HasPrefix(arg, "-file=") {
-			return true
-		}
-	}
-	return false
 }
 
 func validRunLogStream(stream string) bool {

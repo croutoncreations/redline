@@ -95,15 +95,12 @@ func TestTaskAddWithFlagsCreatesTaskWithoutYAML(t *testing.T) {
 		t.Fatalf("create body = %#v", api.created)
 	}
 	var output struct {
-		Task struct {
-			ID string `json:"id"`
-		} `json:"task"`
-		ProfileResolution string `json:"profile_resolution"`
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatalf("stdout is not JSON: %v %s", err, stdout.String())
 	}
-	if output.Task.ID != "task-123" || output.ProfileResolution != "explicit" {
+	if output.ID != "task-123" {
 		t.Fatalf("output = %#v", output)
 	}
 }
@@ -125,6 +122,44 @@ func TestTaskAddWithFlagsValidatesRequiredFields(t *testing.T) {
 		if exit != 1 || !strings.Contains(stderr.String(), test.want) {
 			t.Errorf("%v: exit=%d stderr=%s", test.args, exit, stderr.String())
 		}
+	}
+}
+
+func TestTaskAddFileRejectsIgnoredDisabledAndOtherFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	for _, extra := range [][]string{{"--disabled"}, {"--type", "recurring"}, {"--priority", "50"}, {"--default-profile", "p"}} {
+		stdout.Reset()
+		stderr.Reset()
+		args := append([]string{"task", "add", "--file", "would-not-exist.yaml"}, extra...)
+		exit := cli.RunWithInput(args, nil, &stdout, &stderr, time.Now)
+		if exit != 1 || !strings.Contains(stderr.String(), "--file cannot be combined") {
+			t.Errorf("args=%v exit=%d stderr=%s", args, exit, stderr.String())
+		}
+	}
+}
+
+func TestTaskAddPromptValueIsNotMistakenForYAMLMode(t *testing.T) {
+	api := &taskAPI{t: t, profiles: "[]"}
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.RunWithInput([]string{"--api", server.URL, "task", "add", "--name", "Literal flag",
+		"--prompt", "--file", "--profile", "p", "--json"}, nil, &stdout, &stderr, time.Now)
+	if exit != 0 || api.created["prompt"] != "--file" {
+		t.Fatalf("exit=%d stderr=%s body=%#v", exit, stderr.String(), api.created)
+	}
+}
+
+func TestLaterHookPromptTreatsFlagsAsText(t *testing.T) {
+	api := &taskAPI{t: t, profiles: "[]"}
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.RunWithInput([]string{"--api", server.URL, "later", "--profile", "p", "--prompt", "-"},
+		strings.NewReader("--profile other-repo do work"), &stdout, &stderr, time.Now)
+	if exit != 0 || api.created["execution_profile_id"] != "p" ||
+		api.created["prompt"] != "--profile other-repo do work" {
+		t.Fatalf("exit=%d stderr=%s body=%#v", exit, stderr.String(), api.created)
 	}
 }
 
@@ -200,6 +235,18 @@ func TestLaterReadsTextFromStdinAndPrintsNoBypassExplanation(t *testing.T) {
 	}
 }
 
+func TestLaterDoesNotSilentlyUseDefaultProfile(t *testing.T) {
+	api := &taskAPI{t: t, profiles: "[]"}
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.RunWithInput([]string{"--api", server.URL, "later", "--cwd", t.TempDir(),
+		"--default-profile", "some-other-repo", "do work"}, nil, &stdout, &stderr, time.Now)
+	if exit == 0 || api.creates != 0 {
+		t.Fatalf("default fallback must require opt-in: exit=%d body=%#v", exit, api.created)
+	}
+}
+
 func TestLaterFallsBackToDefaultProfile(t *testing.T) {
 	outside := t.TempDir()
 	api := &taskAPI{t: t, profiles: "[]"}
@@ -207,7 +254,7 @@ func TestLaterFallsBackToDefaultProfile(t *testing.T) {
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
 	exit := cli.RunWithInput([]string{"--api", server.URL, "later", "--cwd", outside,
-		"--default-profile", "claude-default", "--json", "tidy docs"}, nil, &stdout, &stderr, time.Now)
+		"--default-profile", "claude-default", "--allow-default-profile", "--json", "tidy docs"}, nil, &stdout, &stderr, time.Now)
 	if exit != 0 || api.created["execution_profile_id"] != "claude-default" {
 		t.Fatalf("exit=%d stderr=%s body=%#v", exit, stderr.String(), api.created)
 	}
@@ -247,7 +294,7 @@ func TestLaterRejectsAmbiguousProfilesUnlessDefaultMatches(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	exit = cli.RunWithInput([]string{"--api", server.URL, "later", "--cwd", repo,
-		"--default-profile", "claude-b", "x"}, nil, &stdout, &stderr, time.Now)
+		"--default-profile", "claude-b", "--allow-default-profile", "x"}, nil, &stdout, &stderr, time.Now)
 	if exit != 0 || api.created["execution_profile_id"] != "claude-b" {
 		t.Fatalf("exit=%d stderr=%s body=%#v", exit, stderr.String(), api.created)
 	}
@@ -264,22 +311,22 @@ func TestLaterRequiresText(t *testing.T) {
 func TestRunWatchEmitsOneLinePerNewlyFinishedRun(t *testing.T) {
 	var polls atomic.Int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("limit") == "" {
-			t.Errorf("run watch should bound the list with a limit")
+	mux.HandleFunc("GET /v1/runs/completions", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("baseline") == "true" {
+			fmt.Fprint(w, `{"cursor":1,"runs":[]}`)
+			return
+		}
+		if r.URL.Query().Get("limit") != "100" {
+			t.Errorf("run watch should bound the page with a limit")
 		}
 		switch polls.Add(1) {
 		case 1:
-			// Baseline: an old completed run must never be reported.
-			fmt.Fprint(w, `[{"id":"old","task_id":"t0","state":"completed"},{"id":"r1","task_id":"t1","state":"running"}]`)
-		case 2:
-			fmt.Fprint(w, `[{"id":"r1","task_id":"t1","state":"running"},{"id":"old","task_id":"t0","state":"completed"}]`)
+			fmt.Fprint(w, `{"cursor":1,"runs":[]}`)
 		default:
-			fmt.Fprint(w, `[
-				{"id":"r2","task_id":"t2","state":"failed","summary":"tests failed"},
+			fmt.Fprint(w, `{"cursor":3,"runs":[
 				{"id":"r1","task_id":"t1","state":"completed","summary":"done",
 				 "artifacts":[{"type":"report","url":"https://example.com/r"},{"type":"pull_request","url":"https://github.com/o/r/pull/123"}]},
-				{"id":"old","task_id":"t0","state":"completed"}]`)
+				{"id":"r2","task_id":"t2","state":"failed","summary":"tests failed"}]}`)
 		}
 	})
 	mux.HandleFunc("GET /v1/tasks/{task}", func(w http.ResponseWriter, r *http.Request) {
