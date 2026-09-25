@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- API bearer authentication now accepts case-insensitive authorization schemes as required by HTTP,
+  so clients that send `bearer` instead of `Bearer` no longer receive a false `401 Unauthorized`.
 - `redline_run_events` no longer drops the newest events when a response is truncated. Run events
   arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
   `run.failed` event an agent polling for completion is waiting on.
