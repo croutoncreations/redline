@@ -51,8 +51,9 @@ the app.
 
 - Gauge-style status icon with a red limit segment and a state indicator.
 - A state-colored gauge with a usage-sensitive needle plus compact provider logos and weekly
-  availability; the full `WAIT`, `RUN`, `ATTN`, or `OFFLINE` description remains in accessibility
-  text and the quick panel.
+  availability; the full `WAIT`, `RUN`, or `ATTN` description remains in accessibility text and
+  the quick panel. A separate connectivity check reports when Redline itself is offline or failed
+  to start, outside that state vocabulary.
 - Current weekly and five-hour availability for Codex and Claude.
 - Model-specific allowances such as Fable in a provider submenu.
 - Active-run, scheduler, operational-health, and service-ownership summaries.
