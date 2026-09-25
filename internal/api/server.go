@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -2419,7 +2420,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func parseDuration(value string) (time.Duration, error) {
 	if strings.HasSuffix(value, "d") {
 		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
-		if err != nil || days <= 0 {
+		if err != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 ||
+			days > float64(math.MaxInt64)/float64(24*time.Hour) {
 			return 0, fmt.Errorf("invalid duration")
 		}
 		return time.Duration(days * float64(24*time.Hour)), nil
