@@ -6,13 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- `redline_run_events` no longer drops the newest events when a response is truncated. Run events
-  arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
-  `run.failed` event an agent polling for completion is waiting on.
-- `redline_runs_list` now forwards the requested limit to the API. `/v1/runs` defaults to 50 rows
-  when no limit is sent, so asking for more silently returned 50 and reported them as untruncated.
+- **Banked quota resets.** Claude and Codex both now grant one-time resets that refill an
+  exhausted usage limit. The dashboard, mobile page, and macOS menu bar show how many an account
+  holds and when the soonest one expires. A provider that does not report resets shows nothing,
+  and zero is shown as "none available", so the two are never confused. Codex resets come from
+  OpenUsage or the native usage endpoint. Claude resets are read from Anthropic's usage endpoint
+  at most every 30 minutes, without ever refreshing Claude Code's shared login. They are not read
+  when several Claude accounts are configured, because the one local login cannot be attributed
+  to any of them.
+
+### Changed
+
+- **Breaking for source builds:** Redline now requires Go 1.26 or later. Upgrade the local Go
+  toolchain before building or contributing; prebuilt CLI archives, the macOS app, and Homebrew
+  installs need no migration.
+- Hermes Gateway failures now include the HTTP or RPC method, endpoint, response status, and the
+  Gateway's response body where available. Invalid Gateway URLs also report the rejected value and
+  reason, making remote-runtime failures actionable without debug logging.
+- Task documentation now explains inline `prompt` precedence, runtime `prompt_file` reads, and
+  workspace containment, and the API reference includes the pairing redemption endpoint.
+- `task add` and `profile add` errors now identify the operation and source definition file for
+  read failures, malformed YAML, and API validation rejections.
+- Native usage requests now back off after the provider rate-limits them. Anthropic tightened its
+  usage endpoint in late September and lengthens the penalty when asked again during it, so
+  Redline waits for `Retry-After` (at least 15 minutes, since the endpoint has answered
+  `retry-after: 0` while still limiting) and remembers the lockout across restarts in
+  `usage-lockouts.json` beside the database.
+
+### Security
 
 - The SQLite database is now restricted to its owner. It was created under the process umask,
   commonly `0644`, leaving it world-readable along with its `-wal` and `-shm` sidecars — so any
@@ -20,12 +43,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and runtime credential references straight off disk, bypassing the HTTP bearer-token boundary.
   Existing databases are tightened on the next start. On Windows an owner-only DACL is applied,
   since the POSIX mode bits are ignored there, matching how the `api-token` file is protected.
-
 - `prompt_file` is now confined to the workspace even when it is a symlink. The containment check
   was purely lexical, so a symlink inside the workspace pointing outside it passed validation and
   the harness read the link target — credentials, keys, any readable file — directly into the
   model prompt. Both the workspace root and the resolved file are now checked. Symlinks that stay
   inside the workspace keep working.
+- Root-level `redline.yaml` and `api-token` files created by the quickstart are now ignored by Git,
+  reducing the risk of committing the local API bearer token from a Redline checkout.
+
+### Fixed
+
+- `redline_run_events` no longer drops the newest events when a response is truncated. Run events
+  arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
+  `run.failed` event an agent polling for completion is waiting on.
+- `redline_runs_list` now forwards the requested limit to the API. `/v1/runs` defaults to 50 rows
+  when no limit is sent, so asking for more silently returned 50 and reported them as untruncated.
 - The terminal pairing QR code is no longer rendered with inverted module polarity. `go-qrcode`
   sets a bitmap cell to true for a *dark* module, but the renderer negated it, so dark and light
   were swapped and the four-module quiet zone was drawn as solid ink. The resulting code could not
@@ -45,6 +77,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   report two to three times its real cache usage. Redline now takes the largest alias, matching
   how Hermes records are already reconciled. Inflated usage made the scheduler under-dispatch,
   leaving paid subscription capacity unused.
+- Opening an already-read run on the mobile dashboard no longer decrements the badge for a
+  different unread run. Only unread completed or failed runs are now marked read when opened.
+- Relative times near unit boundaries now roll over to the next unit in both dashboards: values
+  just under an hour or day display as `1 hr` or `1 day` instead of `60 mins` or `24 hrs`.
+- Activity summaries now fall back to "Run completed successfully." when a run's output path
+  cannot be read, instead of treating a failed read as a buffer of NUL bytes.
+- `redline task retry` now confirms that it "retried" a task instead of printing "retryd."
+- Custom day durations such as `min_interval: "1e100d"` are now rejected with HTTP 400. They
+  previously overflowed and were stored as roughly 292 years.
+- Unknown Codex models are no longer priced by partial name match. A model such as
+  `gpt-5.6-solarium` used to receive the `gpt-5.6-sol` rate, overstating its cost; exact names,
+  versioned variants, and provider-qualified IDs are still priced.
+- Updated `modernc.org/libc` to v1.77.1. v1.77.0 was retracted upstream because parsing `"nan"`
+  crashed with a stack overflow on Linux, a path reachable through the SQLite driver.
+- The README and CLI reference now put the global `--config` flag before `serve`; the documented
+  order was rejected with `flag provided but not defined: -config`.
+- The macOS guide now describes the menu bar status accurately: `WAIT`, `RUN`, and `ATTN`, with
+  offline and startup failures reported separately.
+- Databases upgraded by pre-release mobile builds now get the timestamp-ordering repair above,
+  which they had skipped because of a schema version collision.
+- The onboarding wizard's **Back** button is disabled while an execution profile is saving, so a
+  late save can no longer push the wizard forward again and leave a saved profile name editable.
 
 ## [0.1.7] - 2026-09-18
 
@@ -120,8 +174,6 @@ Homebrew distribution.
 
 ### Fixed
 
-- `task add` and `profile add` errors now identify the operation and source definition file for
-  read failures, malformed YAML, and API validation rejections.
 - Corrected the app icon's redline arc, which was drawn from a different circle than the white
   track and only met it at one end; the icon now shares one center, radius, and stroke width with
   the live menu-bar gauge, and the needle pivots from the dial's actual center.
