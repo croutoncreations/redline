@@ -264,7 +264,8 @@ WHERE id = ? AND state IN ('preparing', 'running')`, runID).Scan(&taskID, &sourc
 	_, err = tx.ExecContext(ctx, `UPDATE runs SET state = ?, completed_at = ?, exit_code = ?,
 output_file = ?, error_file = ?, error = ?, finalize_state = ?, finalize_error = ?,
 activity_summary = ?, activity_outcome = ?, activity_artifacts_json = ?,
-activity_warnings_json = ?, actual_provider = ?, actual_model = ?, activity_read_at = NULL
+activity_warnings_json = ?, actual_provider = ?, actual_model = ?, activity_read_at = NULL,
+completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM runs)
 WHERE id = ?`,
 		completion.State, formatTime(now), completion.ExitCode, completion.OutputFile,
 		completion.ErrorFile, completion.Error, completion.FinalizeState, completion.FinalizeError,
@@ -358,6 +359,66 @@ func (d *DB) ListRuns(ctx context.Context, limit int) ([]domain.Run, error) {
 	return runs, rows.Err()
 }
 
+// ListCompletedRuns pages by a sequence allocated inside the completion
+// transaction, so timestamps, IDs, and out-of-order commits cannot hide runs.
+func (d *DB) ListCompletedRuns(ctx context.Context, after int64, limit int) ([]domain.Run, int64, error) {
+	if limit < 1 || limit > 100 {
+		return nil, after, fmt.Errorf("completion page limit must be between 1 and 100")
+	}
+	if after < 0 {
+		return nil, after, fmt.Errorf("completion cursor must not be negative")
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT completion_sequence FROM runs
+WHERE completion_sequence > ? ORDER BY completion_sequence ASC LIMIT ?`, after, limit)
+	if err != nil {
+		return nil, after, fmt.Errorf("list completed run cursors: %w", err)
+	}
+	var sequences []int64
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			rows.Close()
+			return nil, after, err
+		}
+		sequences = append(sequences, sequence)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, after, err
+	}
+	rows.Close()
+	if len(sequences) == 0 {
+		return []domain.Run{}, after, nil
+	}
+	// Fetch full run details with the sequence in one ordered query. The
+	// sequence is immutable after completion.
+	rows, err = d.db.QueryContext(ctx, runSelect+`
+ WHERE completion_sequence > ? ORDER BY completion_sequence ASC LIMIT ?`, after, limit)
+	if err != nil {
+		return nil, after, fmt.Errorf("list completed runs: %w", err)
+	}
+	defer rows.Close()
+	runs := make([]domain.Run, 0, len(sequences))
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, after, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, after, err
+	}
+	return runs, sequences[len(runs)-1], nil
+}
+
+// LatestCompletedRunCursor returns the last completion before a watcher starts.
+func (d *DB) LatestCompletedRunCursor(ctx context.Context) (int64, error) {
+	var sequence int64
+	err := d.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(completion_sequence), 0) FROM runs`).Scan(&sequence)
+	return sequence, err
+}
+
 func (d *DB) RecoverInterruptedRuns(ctx context.Context, now time.Time) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -396,7 +457,8 @@ activity_summary = 'The Redline service restarted while this job was active.',
 activity_outcome = 'failed',
 activity_warnings_json = CASE WHEN workspace_directory <> ''
     THEN '["The workspace was preserved for manual recovery."]' ELSE '[]' END,
-activity_read_at = NULL
+activity_read_at = NULL,
+completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM runs)
 WHERE id = ?`, formatTime(now), item.runID); err != nil {
 			return fmt.Errorf("recover interrupted run: %w", err)
 		}

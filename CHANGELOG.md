@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline later "<text>"` queues free text as a one-off task for the repository in the current
+  directory. It matches the git top level against Claude Code execution profiles; a fallback to
+  `--default-profile` requires `--allow-default-profile`. It never dispatches: the task runs only
+  when usage is behind pace and above the reserve.
+- `redline task add` accepts flags (`--name`, `--prompt`/`--prompt -`, `--prompt-file`,
+  `--profile ID|auto`, `--type`, `--tier`, `--priority`, `--min-interval`, `--disabled`) so scripts
+  and hooks can queue work without writing YAML. `--file` keeps working as before.
+- `redline run watch --jsonl` pages through newly finished runs using the loopback service's
+  transactional completion sequence, including runs that started earlier, with the task name,
+  status, summary, and pull request URL when one was opened.
+- `redline_task_delete` MCP tool, annotated destructive, for cancelling a task that has never run.
+  Tasks with run history still have to be disabled.
+- `redline_task_create` accepts `enabled: false` to save a task as a disabled draft.
+
+### Changed
+
+- The bug-hunt starter template now checks open pull requests, including drafts, before choosing a
+  bug and again before pushing, so unattended runs skip root causes already in flight instead of
+  opening duplicate pull requests.
+
 ## [0.1.8] - 2026-09-25
 
 ### Added

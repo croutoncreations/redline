@@ -31,7 +31,11 @@ func Catalog() []Template {
 			Requirements: []string{"Repository access", "Test and static-analysis tools"},
 			Prompt: `Find ONE real, demonstrable bug in this repository and fix it.
 
+Before choosing a bug, list this repository's open pull requests, including drafts (for example, gh pr list --state open --limit 100). Skip any bug whose root cause is already being fixed by an open pull request, even if it was reported through a different symptom, and pick a different one.
+
 Use issues, static analysis, failing tests, and suspicious error or boundary handling as leads. Reproduce the bug before changing code, ideally with a failing test. Fix the root cause minimally, rerun the reproduction, and run the affected test suite. Do not treat a design preference as a bug.
+
+Immediately before pushing or opening a pull request, list open pull requests again. If one now addresses the same root cause, do not push; summarize your findings instead.
 
 Make one cohesive, reviewable change. If no bug can be reproduced, make no changes and summarize what you ruled out.`,
 		},
