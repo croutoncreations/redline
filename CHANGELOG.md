@@ -6,8 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped Go module dependencies (`go-sdk`, `modernc.org/sqlite`, `golang.org/x/*`, and their
+  transitive pins). The `go` directive moves from 1.25 to 1.26 to match what `x/sys` and
+  `modernc.org/libc` now require, raising the minimum Go toolchain needed to build Redline from
+  source.
+
 ### Fixed
 
+- The `redline task retry <id>` CLI confirmation no longer prints "retryd task" instead of
+  "retried task". Enable and disable build their past tense by appending "d" to the verb, which
+  doesn't work for retry.
+- The dashboard and mobile PWA's relative-time labels no longer show "60 mins" or "24 hrs" for
+  timestamps just under an hour or a day away; they now roll over to "1 hr" and "1 day" like every
+  other bucket boundary.
+- Hermes Gateway client errors (discover, list/trigger jobs, poll runs, read messages) now include
+  the HTTP method, URL, and response body instead of a bare status code, and a rejected Gateway URL
+  now says why (parse failure, missing host, wrong scheme) instead of just "invalid Hermes Gateway
+  URL".
+- Fixed a rare case where a run whose output or result file couldn't actually be read (for example
+  it resolved to a directory) produced a summary made of NUL bytes instead of falling back to the
+  default "Run completed successfully." message.
+- The mobile dashboard's unread-run badge no longer under-counts after opening a run that was
+  already marked read on a prior visit; it now applies the same already-read/terminal-state guard
+  the desktop dashboard uses before decrementing.
 - `redline_run_events` no longer drops the newest events when a response is truncated. Run events
   arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
   `run.failed` event an agent polling for completion is waiting on.
