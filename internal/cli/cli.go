@@ -54,6 +54,12 @@ type schedulerResponse struct {
 }
 
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	return RunWithInput(args, os.Stdin, stdout, stderr, now)
+}
+
+// RunWithInput is Run with an explicit stdin, used by commands that accept a
+// prompt on standard input ("-").
+func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now func() time.Time) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		writeHelp(stdout)
 		return 0
@@ -72,7 +78,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -103,12 +109,22 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
+		if len(remaining) > 1 && remaining[1] == "add" && !hasFileFlag(remaining[2:]) {
+			return runTaskAddFlags(client, remaining[2:], stdin, stdout, stderr)
+		}
 		return runResource(client, "tasks", remaining[1:], stdout, stderr)
+	case "later":
+		return runLater(client, remaining[1:], stdin, stdout, stderr)
 	case "profile":
 		return runResource(client, "profiles", remaining[1:], stdout, stderr)
 	case "scheduler":
 		return runScheduler(client, remaining[1:], stdout, stderr)
 	case "run":
+		if len(remaining) > 1 && remaining[1] == "watch" {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runWatch(ctx, client, remaining[2:], stdout, stderr)
+		}
 		return runRuns(client, remaining[1:], stdout, stderr)
 	case "notification":
 		return runNotifications(client, remaining[1:], stdout, stderr)
@@ -130,9 +146,11 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair,")
-	fmt.Fprintln(output, "          version")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
+	fmt.Fprintln(output, "          pair, version")
 	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
+	fmt.Fprintln(output, "                     is behind pace and above your reserve")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
@@ -994,7 +1012,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 
 func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs>")
+		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs|watch>")
 		return 1
 	}
 	switch args[0] {
@@ -1078,6 +1096,16 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 	}
 }
 
+// hasFileFlag reports whether `task add` arguments use the YAML --file form.
+func hasFileFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--file" || arg == "-file" || strings.HasPrefix(arg, "--file=") || strings.HasPrefix(arg, "-file=") {
+			return true
+		}
+	}
+	return false
+}
+
 func validRunLogStream(stream string) bool {
 	switch stream {
 	case "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr":
@@ -1118,6 +1146,11 @@ func writeJSON(writer io.Writer, value any) {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(value)
+}
+
+// writeJSONLine writes one compact JSON object followed by a newline.
+func writeJSONLine(writer io.Writer, value any) {
+	_ = json.NewEncoder(writer).Encode(value)
 }
 
 func writeDecisionText(w io.Writer, response decisionResponse) {
