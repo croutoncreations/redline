@@ -66,6 +66,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_task_create",
 		"redline_task_update",
 		"redline_task_control",
+		"redline_task_delete",
 		"redline_profile_create",
 		"redline_profile_update",
 		"redline_profile_delete",
@@ -133,6 +134,14 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	}
 	if tools["redline_profile_delete"].Annotations.IdempotentHint {
 		t.Fatal("profile delete should not be annotated idempotent because a repeated delete returns not found")
+	}
+	if tools["redline_task_delete"].Annotations == nil || tools["redline_task_delete"].Annotations.ReadOnlyHint ||
+		tools["redline_task_delete"].Annotations.DestructiveHint == nil ||
+		!*tools["redline_task_delete"].Annotations.DestructiveHint {
+		t.Fatal("task delete should be annotated as mutating and destructive")
+	}
+	if tools["redline_task_delete"].Annotations.IdempotentHint {
+		t.Fatal("task delete should not be annotated idempotent because a repeated delete returns not found")
 	}
 	if tools["redline_runtime_connection_delete"].Annotations == nil ||
 		tools["redline_runtime_connection_delete"].Annotations.DestructiveHint == nil ||
@@ -464,6 +473,21 @@ func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	if created["min_interval"] != "1h" || created["execution_profile_id"] != "codex-devx" {
 		t.Fatalf("created body = %#v", created)
 	}
+	if _, present := created["enabled"]; present {
+		t.Fatalf("enabled should be omitted when not requested so the API default applies: %#v", created)
+	}
+
+	draftResult := callTool(t, session, "redline_task_create", map[string]any{
+		"id": "draft-task", "name": "Draft task", "prompt": "Later.", "priority": 50,
+		"execution_profile_id": "codex-devx", "type": "one_off", "dispatch_tier": "behind",
+		"enabled": false,
+	})
+	if draftResult.IsError {
+		t.Fatalf("draft create error: %s", contentText(draftResult))
+	}
+	if enabled, ok := created["enabled"].(bool); !ok || enabled {
+		t.Fatalf("draft create should forward enabled=false, body = %#v", created)
+	}
 
 	dispatchResult := callTool(t, session, "redline_scheduler_dispatch", map[string]any{
 		"provider_account_id": "codex-main",
@@ -562,6 +586,49 @@ func TestProfileCRUDToolsUseExistingAPIValidation(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("profile delete endpoint was not called")
+	}
+}
+
+func TestTaskDeleteToolCallsDeleteEndpoint(t *testing.T) {
+	var deletedPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /v1/tasks/{task}", func(w http.ResponseWriter, r *http.Request) {
+		deletedPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_task_delete", map[string]any{"id": "later/parser"})
+	if result.IsError {
+		t.Fatalf("delete error: %s", contentText(result))
+	}
+	if deletedPath != "/v1/tasks/later%2Fparser" {
+		t.Fatalf("delete path = %q", deletedPath)
+	}
+	var output struct {
+		Data struct {
+			ID      string `json:"id"`
+			Deleted bool   `json:"deleted"`
+		} `json:"data"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Data.ID != "later/parser" || !output.Data.Deleted {
+		t.Fatalf("structured output = %#v", output)
+	}
+
+	empty := callTool(t, session, "redline_task_delete", map[string]any{"id": ""})
+	if !empty.IsError {
+		t.Fatal("empty id should be rejected before calling the API")
+	}
+}
+
+func TestTaskDeleteConflictBecomesVisibleToolError(t *testing.T) {
+	session := connect(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":"conflict: task \"ran\" has run or scheduler history; disable it instead"}`)
+	}))
+	result := callTool(t, session, "redline_task_delete", map[string]any{"id": "ran"})
+	if !result.IsError || !strings.Contains(contentText(result), "disable it instead") {
+		t.Fatalf("expected visible conflict, got error=%v content=%s", result.IsError, contentText(result))
 	}
 }
 

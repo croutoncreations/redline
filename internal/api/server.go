@@ -357,6 +357,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/metrics/launch", server.launchMetrics)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/completions", server.listRunCompletions)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
@@ -2408,6 +2409,43 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 	}
 	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
 	return err
+}
+
+func (s *Server) listRunCompletions(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("baseline") == "true" {
+		cursor, err := s.store.LatestCompletedRunCursor(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cursor": cursor, "runs": []domain.Run{}})
+		return
+	}
+	limit := 100
+	if raw := query.Get("limit"); raw != "" {
+		var err error
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "limit must be between 1 and 100"})
+			return
+		}
+	}
+	cursor := int64(0)
+	if raw := query.Get("after"); raw != "" {
+		var err error
+		cursor, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cursor < 0 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after must be a nonnegative completion cursor"})
+			return
+		}
+	}
+	runs, next, err := s.store.ListCompletedRuns(r.Context(), cursor, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "cursor": next})
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {

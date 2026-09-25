@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -60,6 +61,71 @@ func TestListRunsOrdersChronologicallyAcrossFractionalSecondWidths(t *testing.T)
 	}
 	if runs[0].ID != "run-later" || runs[1].ID != "run-earlier" {
 		t.Fatalf("ListRuns order = [%s, %s], want [run-later, run-earlier]", runs[0].ID, runs[1].ID)
+	}
+}
+
+func TestCompletedRunCursorDoesNotLoseOlderOrBurstingRuns(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := t.Context()
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "watch-profile", ProviderAccountID: "watch-provider",
+		HarnessType: "claude-code", WorkspaceProvider: "existing-directory"}
+	if err := db.CreateProfile(ctx, profile, base); err != nil {
+		t.Fatal(err)
+	}
+	// Start a run before the watcher baseline; it completes only after the
+	// baseline, when 105 newer runs have already completed.
+	makeRun := func(id string, at time.Time) {
+		t.Helper()
+		if err := db.CreateTask(ctx, domain.Task{ID: id, Name: id, ExecutionProfileID: profile.ID, Type: domain.OneOff}, base); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, "run-"+id, id, profile.ProviderAccountID, "", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeRun("z", base)
+	if err := db.CompleteRun(ctx, "run-z", domain.RunCompletion{State: domain.RunCompleted}, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := db.LatestCompletedRunCursor(ctx)
+	if err != nil || baseline != 1 {
+		t.Fatalf("baseline = %d err=%v", baseline, err)
+	}
+	// This later commit has an earlier timestamp and lower lexical ID than
+	// the baseline. A timestamp/ID cursor would silently skip it.
+	makeRun("a", base)
+	if err := db.CompleteRun(ctx, "run-a", domain.RunCompletion{State: domain.RunCompleted}, base.Add(time.Minute-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 105 {
+		id := fmt.Sprintf("task-%03d", i)
+		makeRun(id, base.Add(time.Duration(i+1)*time.Second))
+		if err := db.CompleteRun(ctx, "run-"+id, domain.RunCompletion{State: domain.RunCompleted}, base.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeRun("old", base)
+	if err := db.CompleteRun(ctx, "run-old", domain.RunCompletion{State: domain.RunFailed}, base.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	cursor := baseline
+	for {
+		page, next, err := db.ListCompletedRuns(ctx, cursor, 30)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, run := range page {
+			ids = append(ids, run.ID)
+		}
+		cursor = next
+	}
+	if len(ids) != 107 || ids[0] != "run-a" || ids[len(ids)-1] != "run-old" {
+		t.Fatalf("cursor returned %d runs, last=%v", len(ids), ids[len(ids)-1:])
 	}
 }
 

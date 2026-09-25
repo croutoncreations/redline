@@ -492,6 +492,27 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 			return fmt.Errorf("record banked resets migration: %w", err)
 		}
 	}
+	if version < 27 {
+		if err := addColumnIfMissing(ctx, tx, "runs", "completion_sequence", "INTEGER"); err != nil {
+			return fmt.Errorf("add run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `WITH ordered AS MATERIALIZED (
+    SELECT id, (SELECT COALESCE(MAX(completion_sequence), 0) FROM runs) +
+        ROW_NUMBER() OVER (ORDER BY completed_at, id) AS seq
+    FROM runs WHERE completed_at IS NOT NULL AND completion_sequence IS NULL
+)
+UPDATE runs SET completion_sequence = (SELECT seq FROM ordered WHERE ordered.id = runs.id)
+WHERE completed_at IS NOT NULL AND completion_sequence IS NULL;`); err != nil {
+			return fmt.Errorf("backfill run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_completion_sequence
+ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != nil {
+			return fmt.Errorf("index run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (27)`); err != nil {
+			return fmt.Errorf("record run completion sequence migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
