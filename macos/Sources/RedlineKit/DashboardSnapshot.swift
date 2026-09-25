@@ -336,15 +336,33 @@ public struct UsageSnapshot: Codable, Sendable {
     public let weekly: UsageWindow?
     public let allowances: [AllowanceSummary]
     public let source: String?
+    /// On-demand quota resets the account holds. Nil means not reported,
+    /// which is different from zero.
+    public let bankedResets: Int?
+    /// When the soonest-expiring banked reset lapses, if known.
+    public let bankedResetsExpireAt: String?
 
-    public init(short: UsageWindow?, weekly: UsageWindow?, allowances: [AllowanceSummary], source: String?) {
+    public init(
+        short: UsageWindow?,
+        weekly: UsageWindow?,
+        allowances: [AllowanceSummary],
+        source: String?,
+        bankedResets: Int? = nil,
+        bankedResetsExpireAt: String? = nil
+    ) {
         self.short = short
         self.weekly = weekly
         self.allowances = allowances
         self.source = source
+        self.bankedResets = bankedResets
+        self.bankedResetsExpireAt = bankedResetsExpireAt
     }
 
-    enum CodingKeys: String, CodingKey { case short, weekly, allowances, source }
+    enum CodingKeys: String, CodingKey {
+        case short, weekly, allowances, source
+        case bankedResets = "banked_resets"
+        case bankedResetsExpireAt = "banked_resets_expire_at"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -352,6 +370,8 @@ public struct UsageSnapshot: Codable, Sendable {
         weekly = try container.decodeIfPresent(UsageWindow.self, forKey: .weekly)
         allowances = try container.decodeIfPresent([AllowanceSummary].self, forKey: .allowances) ?? []
         source = try container.decodeIfPresent(String.self, forKey: .source)
+        bankedResets = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
+        bankedResetsExpireAt = try? container.decodeIfPresent(String.self, forKey: .bankedResetsExpireAt)
     }
 }
 
