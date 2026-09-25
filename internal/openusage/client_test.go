@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/openusage"
 )
 
 const fixture = `[

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 // Detection failing is not a failure when there is a configured host to use

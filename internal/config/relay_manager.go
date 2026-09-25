@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jfox/redline/internal/relay"
+	"github.com/croutoncreations/redline/internal/relay"
 )
 
 // RelayConnectionState is a presentation of proven dialer state. "connected"

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/nativeusage"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/nativeusage"
 )
 
 func TestClaudeNativeSnapshotMatchesProviderWindows(t *testing.T) {
@@ -89,4 +89,8 @@ type staticCredentials struct{ token, account string }
 
 func (s staticCredentials) Access(context.Context, string) (nativeusage.Credential, error) {
 	return nativeusage.Credential{AccessToken: s.token, AccountID: s.account}, nil
+}
+
+func (s staticCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (nativeusage.Credential, error) {
+	return s.Access(ctx, provider)
 }

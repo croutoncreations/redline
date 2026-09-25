@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 type Client struct {
@@ -142,8 +142,13 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 	weeklyFound := false
 	for _, line := range selected.Lines {
 		if strings.EqualFold(line.Type, "text") {
-			if count, ok := bankedResets(line); ok {
-				snapshot.BankedResets = &count
+			if resets, ok := bankedResets(line); ok {
+				if resets.NextExpiresAt != nil && !resets.NextExpiresAt.After(observedAt) {
+					// Already lapsed when observed; the count may be stale
+					// too, but the expiry is certainly wrong. Keep the count.
+					resets.NextExpiresAt = nil
+				}
+				snapshot.ApplyBankedResets(&resets)
 			}
 			continue
 		}
@@ -264,31 +269,37 @@ func parseTime(name, value string) (time.Time, error) {
 	return parsed, nil
 }
 
-// bankedResets reads the count of on-demand quota resets from a text line.
+// bankedResets reads on-demand quota resets from OpenUsage's "Rate Limit
+// Resets" text line ("2 available", resetsAt = soonest expiry).
 //
-// These are resets the account can spend to refill an exhausted window, which
-// makes them most useful at exactly the moment the weekly is gone. The value
-// arrives as prose ("2 available"), so only a leading integer is trusted and
-// anything else is reported as absent rather than guessed at: a wrong count
-// here would send someone looking for a reset they do not have.
-func bankedResets(line usageLine) (int, bool) {
+// The count arrives as prose, so only a leading integer (or "none") is
+// trusted; anything else is reported as absent rather than guessed at, since
+// a wrong count would send someone looking for a reset they do not have. An
+// unparseable expiry drops only the expiry, not the count.
+func bankedResets(line usageLine) (decision.BankedResets, bool) {
 	if !strings.EqualFold(strings.TrimSpace(line.Label), "rate limit resets") {
-		return 0, false
+		return decision.BankedResets{}, false
 	}
-	fields := strings.Fields(strings.TrimSpace(line.Value))
+	value := strings.TrimSpace(line.Value)
+	fields := strings.Fields(value)
 	if len(fields) == 0 {
-		return 0, false
+		return decision.BankedResets{}, false
 	}
-	// "none" is the other spelling of zero this field uses. Reading it costs
-	// one comparison and avoids the row vanishing the day upstream rewords
-	// "0 available", which is the failure mode of parsing someone else's
-	// presentation string.
-	if strings.EqualFold(fields[0], "none") {
-		return 0, true
+	var count int
+	switch {
+	case strings.EqualFold(fields[0], "none"), strings.EqualFold(fields[0], "no"),
+		strings.Contains(strings.ToLower(value), "no rate limit resets"):
+		count = 0
+	default:
+		parsed, err := strconv.Atoi(fields[0])
+		if err != nil || parsed < 0 {
+			return decision.BankedResets{}, false
+		}
+		count = parsed
 	}
-	count, err := strconv.Atoi(fields[0])
-	if err != nil || count < 0 {
-		return 0, false
+	resets := decision.BankedResets{Available: count}
+	if expires, err := parseTime("resetsAt", strings.TrimSpace(line.ResetsAt)); err == nil {
+		resets.NextExpiresAt = &expires
 	}
-	return count, true
+	return resets, true
 }

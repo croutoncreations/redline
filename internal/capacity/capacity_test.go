@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 func TestEstimateCorrelatesTokenUsageWithQuantizedWindowDrain(t *testing.T) {

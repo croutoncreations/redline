@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 // Window is one usage allowance rendered for display.

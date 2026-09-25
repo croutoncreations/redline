@@ -50,7 +50,14 @@ func NewDefaultCredentials() *DefaultCredentials {
 	return &DefaultCredentials{
 		HTTPClient: &http.Client{Timeout: 15 * time.Second}, Now: time.Now,
 		ClaudeStore: newClaudeSecretStore(home, user),
-		CodexStore:  firstFileStore{Paths: []string{filepath.Join(home, ".config/codex/auth.json"), filepath.Join(home, ".codex/auth.json")}},
+		// Codex CLI stores its OAuth credentials at ~/.codex/auth.json on
+		// macOS, Linux, and Windows (os.UserHomeDir resolves %USERPROFILE% on
+		// Windows). ~/.config/codex/auth.json is also checked first for Linux
+		// installs that follow the XDG base directory convention.
+		CodexStore: firstFileStore{Paths: []string{
+			filepath.Join(home, ".config", "codex", "auth.json"),
+			filepath.Join(home, ".codex", "auth.json"),
+		}},
 	}
 }
 
@@ -76,6 +83,32 @@ type claudeCredentialsFile struct {
 	} `json:"claudeAiOauth"`
 }
 
+// AccessWithoutRefresh returns the current credential but never refreshes or
+// rewrites it. Used for supplementary lookups that must not rotate Claude
+// Code's shared refresh token behind its back: a token near expiry is simply
+// reported as unavailable, and the next Claude Code session will refresh it.
+func (d *DefaultCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (Credential, error) {
+	if !strings.EqualFold(provider, "claude") {
+		return d.Access(ctx, provider)
+	}
+	store := d.ClaudeStore
+	if store == nil {
+		return Credential{}, fmt.Errorf("claude credential store is unavailable")
+	}
+	raw, err := store.Read(ctx)
+	if err != nil {
+		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
+	}
+	var file claudeCredentialsFile
+	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
+		return Credential{}, fmt.Errorf("claude credentials are invalid")
+	}
+	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		return Credential{}, fmt.Errorf("claude token is near expiry; skipping lookup rather than refreshing Claude Code's credential")
+	}
+	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
+}
+
 func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	store := d.ClaudeStore
 	if store == nil {
@@ -93,7 +126,7 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
 		writable, ok := store.(writableSecretStore)
 		if !ok {
-			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential—run `claude auth login`")
+			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential - run `claude auth login`")
 		}
 		if file.ClaudeAIOAuth.RefreshToken == "" {
 			return Credential{}, fmt.Errorf("claude token expired without a refresh token")

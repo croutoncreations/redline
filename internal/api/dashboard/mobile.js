@@ -10,7 +10,11 @@ const pct = (r) => Math.max(0, Math.min(100, Math.round((r || 0) * 100)));
 function relative(value) {
   if (!value) return '—';
   const secs = Math.round((new Date(value) - Date.now()) / 1000), abs = Math.abs(secs);
-  const [n, u] = abs < 60 ? [abs,'sec'] : abs < 3600 ? [Math.round(abs/60),'min'] : abs < 86400 ? [Math.round(abs/3600),'hr'] : [Math.round(abs/86400),'day'];
+  let n, u;
+  if (abs < 60) { n = abs; u = 'sec'; }
+  else if (abs < 3600) { n = Math.round(abs/60); u = 'min'; if (n >= 60) { n = 1; u = 'hr'; } }
+  else if (abs < 86400) { n = Math.round(abs/3600); u = 'hr'; if (n >= 24) { n = 1; u = 'day'; } }
+  else { n = Math.round(abs/86400); u = 'day'; }
   return secs >= 0 ? `in ${n} ${u}${n===1?'':'s'}` : `${n} ${u}${n===1?'':'s'} ago`;
 }
 function shortTime(value) {
@@ -184,6 +188,19 @@ function renderUsageDetail(item) {
         <div class="m-reset">Resets ${esc(relative(a.resets_at))}${a.reset_inferred ? ' (inferred)' : ''}</div>
       </div>`);
     });
+    // Banked resets: on-demand refills. Absent means not reported, not zero.
+    if (snap.banked_resets != null) {
+      const count = snap.banked_resets;
+      const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
+      const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+      const detail = expires
+        ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
+        : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
+      windows.push(`<div class="m-banked-resets${soon ? ' soon' : ''}" data-testid="banked-resets">
+        <div class="m-meter-head"><span>Banked resets</span><b>${esc(count)} available</b></div>
+        <div class="m-reset">${esc(detail)}</div>
+      </div>`);
+    }
     metersHTML = `<div class="m-meters">${windows.join('')}</div>`;
   } else {
     metersHTML = `<p class="m-inline-muted">${esc(item.error || 'No usage data available.')}</p>`;
@@ -376,7 +393,7 @@ function renderCandidates(data, providerID) {
     const cardClass = `m-candidate-card${eligible ? ' eligible' : ''}`;
     const reasonClass = `m-candidate-reason${eligible ? ' eligible' : ''}`;
     const reason = eligible
-      ? (ready ? 'Eligible — will dispatch next' : `Eligible (provider not ready: ${data.provider_reason || 'unknown'})`)
+      ? (ready ? 'Eligible - will dispatch next' : `Eligible (provider not ready: ${data.provider_reason || 'unknown'})`)
       : (c.reason || 'Not eligible');
     return `<div class="${esc(cardClass)}" data-testid="candidate-${esc(c.task_id)}">
       <div class="m-candidate-header">
@@ -543,17 +560,20 @@ async function openRunDetail(runID) {
   const body = $('#m-run-detail-body');
   body.innerHTML = '<p class="m-inline-muted">Loading…</p>';
 
-  // Mark read
-  try {
-    await apiFetch(`/v1/runs/${encodeURIComponent(runID)}/read`, {method: 'POST'});
-    // Update unread count locally
-    if (dashboard) {
-      const r = dashboard.runs.find(x => x.id === runID);
-      if (r) r.activity_read_at = new Date().toISOString();
-      dashboard.unread_runs = Math.max(0, (dashboard.unread_runs || 0) - 1);
-      renderRuns(dashboard.runs, dashboard.unread_runs);
-    }
-  } catch (_) {}
+  // Mark read — only for runs that are actually still unread, so reopening an
+  // already-read run can't decrement the badge for other genuinely unread runs.
+  if (run && !run.activity_read_at && (run.state === 'completed' || run.state === 'failed')) {
+    try {
+      await apiFetch(`/v1/runs/${encodeURIComponent(runID)}/read`, {method: 'POST'});
+      // Update unread count locally
+      if (dashboard) {
+        const r = dashboard.runs.find(x => x.id === runID);
+        if (r) r.activity_read_at = new Date().toISOString();
+        dashboard.unread_runs = Math.max(0, (dashboard.unread_runs || 0) - 1);
+        renderRuns(dashboard.runs, dashboard.unread_runs);
+      }
+    } catch (_) {}
+  }
 
   // Load events
   try {

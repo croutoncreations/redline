@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/jfox/redline/mobile/core"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 // The desktop leg is the piece that makes the relay useful: it holds the Noise

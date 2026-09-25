@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	core "github.com/jfox/redline/mobile/core"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 func TestMobilePairingURLCarriesRelayDetails(t *testing.T) {

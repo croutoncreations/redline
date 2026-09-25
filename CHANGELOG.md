@@ -6,8 +6,126 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-25
+
 ### Added
 
+- **Banked quota resets.** Claude and Codex both now grant one-time resets that refill an
+  exhausted usage limit. The dashboard, mobile page, and macOS menu bar show how many an account
+  holds and when the soonest one expires. A provider that does not report resets shows nothing,
+  and zero is shown as "none available", so the two are never confused. Codex resets come from
+  OpenUsage or the native usage endpoint. Claude resets are read from Anthropic's usage endpoint
+  at most every 30 minutes, without ever refreshing Claude Code's shared login. They are not read
+  when several Claude accounts are configured, because the one local login cannot be attributed
+  to any of them.
+
+### Changed
+
+- **Breaking for source builds:** Redline now requires Go 1.26 or later. Upgrade the local Go
+  toolchain before building or contributing; prebuilt CLI archives, the macOS app, and Homebrew
+  installs need no migration.
+- Hermes Gateway failures now include the HTTP or RPC method, endpoint, response status, and the
+  Gateway's response body where available. Invalid Gateway URLs also report the rejected value and
+  reason, making remote-runtime failures actionable without debug logging.
+- Task documentation now explains inline `prompt` precedence, runtime `prompt_file` reads, and
+  workspace containment, and the API reference includes the pairing redemption endpoint.
+- `task add` and `profile add` errors now identify the operation and source definition file for
+  read failures, malformed YAML, and API validation rejections.
+- Native usage requests now back off after the provider rate-limits them. Anthropic tightened its
+  usage endpoint in late September and lengthens the penalty when asked again during it, so
+  Redline waits for `Retry-After` (at least 15 minutes, since the endpoint has answered
+  `retry-after: 0` while still limiting) and remembers the lockout across restarts in
+  `usage-lockouts.json` beside the database.
+
+### Security
+
+- The SQLite database is now restricted to its owner. It was created under the process umask,
+  commonly `0644`, leaving it world-readable along with its `-wal` and `-shm` sidecars — so any
+  other local account could read task prompts, operator-authored prepare/finalize shell commands,
+  and runtime credential references straight off disk, bypassing the HTTP bearer-token boundary.
+  Existing databases are tightened on the next start. On Windows an owner-only DACL is applied,
+  since the POSIX mode bits are ignored there, matching how the `api-token` file is protected.
+- `prompt_file` is now confined to the workspace even when it is a symlink. The containment check
+  was purely lexical, so a symlink inside the workspace pointing outside it passed validation and
+  the harness read the link target — credentials, keys, any readable file — directly into the
+  model prompt. Both the workspace root and the resolved file are now checked. Symlinks that stay
+  inside the workspace keep working.
+- Root-level `redline.yaml` and `api-token` files created by the quickstart are now ignored by Git,
+  reducing the risk of committing the local API bearer token from a Redline checkout.
+
+### Fixed
+
+- `redline_run_events` no longer drops the newest events when a response is truncated. Run events
+  arrive oldest-first, so trimming the tail removed exactly the terminal `run.completed` or
+  `run.failed` event an agent polling for completion is waiting on.
+- `redline_runs_list` now forwards the requested limit to the API. `/v1/runs` defaults to 50 rows
+  when no limit is sent, so asking for more silently returned 50 and reported them as untruncated.
+- The terminal pairing QR code is no longer rendered with inverted module polarity. `go-qrcode`
+  sets a bitmap cell to true for a *dark* module, but the renderer negated it, so dark and light
+  were swapped and the four-module quiet zone was drawn as solid ink. The resulting code could not
+  be scanned, blocking mobile pairing from the CLI.
+- Stored timestamps now use a fixed-width nanosecond field so that the byte-wise ordering SQLite
+  applies to TEXT columns matches real chronological order. Previously `time.RFC3339Nano` trimmed
+  trailing zeros and dropped the fraction entirely on a whole second, so `…T18:00:00Z` sorted after
+  `…T18:00:00.5Z` and `…:00.1Z` after `…:00.12Z`. That corrupted `LatestSnapshot` (the scheduler
+  could dispatch against a stale usage reading), run listings, dispatch-attempt ordering, and the
+  `completed_at >= ?` range filter behind launch metrics. A new migration rewrites timestamps in
+  existing databases, including legacy values stored with a numeric UTC offset; columns holding
+  SQLite `CURRENT_TIMESTAMP` values are left untouched.
+- Pi cache tokens are no longer double-counted when a session record carries more than one
+  spelling of the same counter. Pi's JSONL schema expresses cache reads and writes as flat
+  `cacheRead`/`cacheWrite`, a `cacheCreation` alias, and a nested `cache:{read,write}` object;
+  these were being summed as if independent, so a record written across a schema migration could
+  report two to three times its real cache usage. Redline now takes the largest alias, matching
+  how Hermes records are already reconciled. Inflated usage made the scheduler under-dispatch,
+  leaving paid subscription capacity unused.
+- Opening an already-read run on the mobile dashboard no longer decrements the badge for a
+  different unread run. Only unread completed or failed runs are now marked read when opened.
+- Relative times near unit boundaries now roll over to the next unit in both dashboards: values
+  just under an hour or day display as `1 hr` or `1 day` instead of `60 mins` or `24 hrs`.
+- Activity summaries now fall back to "Run completed successfully." when a run's output path
+  cannot be read, instead of treating a failed read as a buffer of NUL bytes.
+- `redline task retry` now confirms that it "retried" a task instead of printing "retryd."
+- Custom day durations such as `min_interval: "1e100d"` are now rejected with HTTP 400. They
+  previously overflowed and were stored as roughly 292 years.
+- Unknown Codex models are no longer priced by partial name match. A model such as
+  `gpt-5.6-solarium` used to receive the `gpt-5.6-sol` rate, overstating its cost; exact names,
+  versioned variants, and provider-qualified IDs are still priced.
+- Updated `modernc.org/libc` to v1.77.1. v1.77.0 was retracted upstream because parsing `"nan"`
+  crashed with a stack overflow on Linux, a path reachable through the SQLite driver.
+- The README and CLI reference now put the global `--config` flag before `serve`; the documented
+  order was rejected with `flag provided but not defined: -config`.
+- The macOS guide now describes the menu bar status accurately: `WAIT`, `RUN`, and `ATTN`, with
+  offline and startup failures reported separately.
+- Databases upgraded by pre-release mobile builds now get the timestamp-ordering repair above,
+  which they had skipped because of a schema version collision.
+- The onboarding wizard's **Back** button is disabled while an execution profile is saving, so a
+  late save can no longer push the wizard forward again and leave a saved profile name editable.
+
+## [0.1.7] - 2026-09-18
+
+First public release. Redline is now open source under the Apache 2.0 license at
+`github.com/croutoncreations/redline`, with a rewritten README, reorganized documentation, and
+Homebrew distribution.
+
+### Added
+
+- Homebrew distribution through `croutoncreations/homebrew-tap`: `brew install --cask
+  croutoncreations/tap/redline` installs the signed macOS app and
+  `brew install croutoncreations/tap/redline` installs the standalone CLI on macOS or Linux.
+  Tagged releases now publish CLI archives for darwin/linux/windows on amd64/arm64 with
+  `checksums.txt` via GoReleaser. See `docs/releasing.md`.
+- `redline version` and `redline --version` report the release version, commit, and build date,
+  both in the standalone CLI and inside the macOS app bundle.
+- Redline now builds and runs on Linux and Windows in addition to macOS: the CLI resolves a
+  platform-appropriate default data directory (`~/.config/redline` on Linux,
+  `%AppData%\redline` on Windows, unchanged `~/Library/Application Support/Redline` on macOS),
+  workspace/notification hooks and the `command` harness type run through `cmd.exe` on Windows
+  instead of assuming `/bin/sh`, and CI now cross-compiles for linux/windows on amd64/arm64 and
+  runs a Linux and Windows smoke test of `serve`, `health`, `scheduler status`, and `task list`.
+  On Windows the `api-token` file is created with an explicit owner-only ACL (current user and
+  SYSTEM) passed to `CreateFile`, since the POSIX `0600` mode is ignored there and the file
+  would otherwise inherit its directory's permissions; the Windows smoke test asserts this.
 - Added a `redline demo` staging mode that seeds fully isolated, synthetic usage, discovery,
   revision, Hermes, and execution state for screenshots, recordings, and release rehearsals, with
   synthetic data clearly labeled in both the web dashboard and native menu-bar UI.
@@ -20,6 +138,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Added launch screenshots and a README gallery covering the CLI, dashboard, and native app,
   captured entirely from the new demo staging mode so no personal repositories, paths, or live
   data appear in the images.
+- Added a guided four-step first-run setup on the dashboard: it confirms each provider's CLI
+  installation, agent sign-in, and subscription-usage access; helps create a workspace and
+  execution profile with the account, harness, and model preselected where possible; and finishes
+  by creating a first job that's saved enabled (the global scheduler stays off until you turn it
+  on deliberately). It's safe to skip or interrupt — a resumable "Getting started" checklist stays
+  on the dashboard and picks up at the first incomplete step. New jobs created from the dashboard
+  now default to "Enabled after creation," with an explicit opt-out for saving a disabled draft.
+  Stock-Mac provider discovery and native app handoff around first launch are also more reliable.
+
+### Changed
+
+- The README is rewritten for first-time visitors (install, how it works, MCP setup); reference
+  material moved to `docs/` (`architecture`, `scheduling`, `profiles-and-tasks`, `hermes`,
+  `api`, `cli`, `runs-and-notifications`, `releasing`) and contributor instructions to
+  `CONTRIBUTING.md`.
+- Unknown keys in `redline.yaml` are now reported as warnings on startup instead of preventing
+  the service from starting, so a configuration written for another Redline build still loads.
+  Type errors, malformed YAML, and invalid values remain fatal.
+- When the menu-bar app's embedded service fails to start, the popover now shows the service's
+  own diagnostic (typically the configuration error) with a **Show log** button, and the menu-bar
+  tooltip reads "Redline could not start" rather than a generic offline state.
+- `usage_monitor.gatepost_database` is now optional. Gatepost is an unreleased, private tool; the
+  bundled `config.example.yaml` no longer requires it, and enabling `usage_monitor` without it
+  simply skips the Gatepost/Pi import (still recording Redline's own run token counts) instead of
+  producing a recurring error on every monitor cycle. A path that is explicitly configured but
+  points at a missing file is skipped the same way; a configured path that exists but fails to
+  open or query still surfaces an error.
+- Renamed the LaunchAgent label from `com.jfox.redline` to `com.croutoncreations.redline` ahead of
+  public release under the `croutoncreations` GitHub org. Existing installs with the old
+  `com.jfox.redline` LaunchAgent are still detected and offered the same in-app migration (stop,
+  back up, and hand ownership to the app) so upgrading users are not left with two competing
+  agents. The app's bundle identifier (`ai.redline.mac`) is unchanged.
+- The Go module path is now `github.com/croutoncreations/redline`, so
+  `go install github.com/croutoncreations/redline/cmd/redline@latest` works.
+- User-facing strings use hyphens rather than em dashes.
 
 ### Fixed
 

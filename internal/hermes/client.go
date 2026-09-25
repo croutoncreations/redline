@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -18,7 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -861,9 +862,16 @@ WHERE host_key = ? AND name IN ('hermes_session_at', 'hermes_session_rt')`, pars
 }
 
 func normalizeBaseURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", fmt.Errorf("invalid Hermes Gateway URL")
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid Hermes Gateway URL %q: %w", trimmed, err)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("invalid Hermes Gateway URL %q: missing host", trimmed)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("invalid Hermes Gateway URL %q: scheme must be http or https, got %q", trimmed, parsed.Scheme)
 	}
 	parsed.RawQuery, parsed.Fragment = "", ""
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
@@ -874,34 +882,60 @@ func getJSON(ctx context.Context, client *http.Client, target string, result any
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("GET %s: %w", target, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
-		return httpStatusError{code: response.StatusCode}
+		return newHTTPStatusError(http.MethodGet, target, response)
 	}
-	return json.NewDecoder(response.Body).Decode(result)
+	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+		return fmt.Errorf("decode response from GET %s: %w", target, err)
+	}
+	return nil
 }
 
 func postJSON(ctx context.Context, client *http.Client, target string, result any) error {
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("POST %s: %w", target, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
-		return httpStatusError{code: response.StatusCode}
+		return newHTTPStatusError(http.MethodPost, target, response)
 	}
-	return json.NewDecoder(response.Body).Decode(result)
+	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+		return fmt.Errorf("decode response from POST %s: %w", target, err)
+	}
+	return nil
 }
 
+// httpStatusError carries enough detail to act on a non-2xx Gateway response:
+// which request failed and what the Gateway said about it. isHTTPStatus type-asserts
+// on it directly, so it must keep being returned unwrapped by getJSON/postJSON.
 type httpStatusError struct {
-	code int
+	method string
+	target string
+	code   int
+	body   string
+}
+
+func newHTTPStatusError(method, target string, response *http.Response) httpStatusError {
+	const maxBody = 2048
+	body, _ := io.ReadAll(io.LimitReader(response.Body, maxBody))
+	return httpStatusError{
+		method: method,
+		target: target,
+		code:   response.StatusCode,
+		body:   strings.TrimSpace(string(body)),
+	}
 }
 
 func (e httpStatusError) Error() string {
-	return fmt.Sprintf("HTTP %d", e.code)
+	if e.body == "" {
+		return fmt.Sprintf("%s %s: HTTP %d", e.method, e.target, e.code)
+	}
+	return fmt.Sprintf("%s %s: HTTP %d: %s", e.method, e.target, e.code, e.body)
 }
 
 func isHTTPStatus(err error, code int) bool {
@@ -958,8 +992,11 @@ func dialGateway(
 		var ticket struct {
 			Ticket string `json:"ticket"`
 		}
-		if decodeErr := json.NewDecoder(response.Body).Decode(&ticket); decodeErr != nil || ticket.Ticket == "" {
-			return nil, fmt.Errorf("decode Hermes WebSocket ticket")
+		if decodeErr := json.NewDecoder(response.Body).Decode(&ticket); decodeErr != nil {
+			return nil, fmt.Errorf("decode Hermes WebSocket ticket: %w", decodeErr)
+		}
+		if ticket.Ticket == "" {
+			return nil, fmt.Errorf("hermes WebSocket ticket response was missing the ticket field")
 		}
 		queryValue = ticket.Ticket
 	}
@@ -1006,7 +1043,7 @@ func (g *gatewayClient) call(ctx context.Context, method string, params any, res
 	if err := wsjson.Write(ctx, g.socket, map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": method, "params": params,
 	}); err != nil {
-		return err
+		return fmt.Errorf("send Hermes RPC %s: %w", method, err)
 	}
 	select {
 	case frame := <-response:

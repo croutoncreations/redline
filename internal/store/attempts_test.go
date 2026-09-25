@@ -5,10 +5,66 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
+// Timestamps are stored as TEXT and compared byte-wise by SQLite, so the
+// encoding must keep lexicographic order aligned with chronological order.
+// A whole-second timestamp and a fractional one in the same second are the
+// case RFC3339Nano gets wrong: it emits "…:00Z" and "…:00.5Z", and
+// "…:00Z" > "…:00.5Z" byte-wise even though it happened first.
+func TestDispatchAttemptsOrderAcrossWholeSecondBoundary(t *testing.T) {
+	db := openTaskDB(t)
+	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for _, attempt := range []domain.DispatchAttempt{
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start},
+		{ProviderAccountID: "codex-main", Trigger: "automatic", Outcome: domain.DispatchWait,
+			Decision: "WAIT", StartedAt: start, CompletedAt: start.Add(500 * time.Millisecond)},
+	} {
+		if _, err := db.RecordDispatchAttempt(t.Context(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.ListDispatchAttempts(t.Context(), "codex-main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("attempts = %#v, want 2", got)
+	}
+	if !got[0].CompletedAt.After(got[1].CompletedAt) {
+		t.Fatalf("expected newest-first order, got %v then %v", got[0].CompletedAt, got[1].CompletedAt)
+	}
+}
+
+// The same encoding bug also breaks the range filter's completed_at >= ?
+// comparison, which silently drops attempts from launch metrics.
+func TestListDispatchAttemptsRangeIncludesSubSecondAndVariableWidthFractions(t *testing.T) {
+	db := openTaskDB(t)
+	// since formats to "…T00:00:00.1Z" under RFC3339Nano; completedAt formats
+	// to "…T00:00:00.15Z", which is chronologically later but sorts lower
+	// byte-wise, so the row would be wrongly excluded from [since, until).
+	since := time.Date(2026, 8, 1, 0, 0, 0, 100_000_000, time.UTC)
+	until := since.Add(time.Hour)
+	completedAt := since.Add(50 * time.Millisecond)
+	if _, err := db.RecordDispatchAttempt(t.Context(), domain.DispatchAttempt{
+		ProviderAccountID: "codex", Trigger: "automatic", Outcome: domain.DispatchWait, Decision: "WAIT",
+		StartedAt: completedAt, CompletedAt: completedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ListDispatchAttemptsRange(t.Context(), "automatic", since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ProviderAccountID != "codex" {
+		t.Fatalf("attempts = %#v, want the attempt completed 50ms after `since` to be included", got)
+	}
+}
+
 func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	start := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
@@ -46,6 +102,7 @@ func TestDispatchAttemptsRoundTripNewestFirst(t *testing.T) {
 }
 
 func TestDispatchAttemptValidation(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	_, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{})
 	if err == nil {
@@ -54,6 +111,7 @@ func TestDispatchAttemptValidation(t *testing.T) {
 }
 
 func TestListDispatchAttemptsRangeFiltersTriggerAndTime(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	for _, attempt := range []domain.DispatchAttempt{

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 type Store interface {
@@ -97,8 +97,9 @@ func (s CommandSink) Deliver(ctx context.Context, event domain.NotificationEvent
 	if err != nil {
 		return fmt.Errorf("encode notification command payload: %w", err)
 	}
+	shellName, shellArgs := redprocess.ShellCommand(s.Command)
 	exitCode, err := s.runner().Run(ctx, redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-lc", s.Command}, Stdin: strings.NewReader(string(payload)),
+		Name: shellName, Args: shellArgs, Stdin: strings.NewReader(string(payload)),
 		Env: append(os.Environ(),
 			"REDLINE_EVENT_TYPE="+event.Type,
 			"REDLINE_PROVIDER_ACCOUNT_ID="+event.ProviderAccountID,

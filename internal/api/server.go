@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -22,29 +24,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croutoncreations/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/calibration"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/discovery"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/execution"
+	"github.com/croutoncreations/redline/internal/harness"
+	"github.com/croutoncreations/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/launchmetrics"
+	"github.com/croutoncreations/redline/internal/nativeusage"
+	"github.com/croutoncreations/redline/internal/notification"
+	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/pairing"
+	"github.com/croutoncreations/redline/internal/relay"
+	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
+	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/tasktemplate"
+	"github.com/croutoncreations/redline/internal/tokenlog"
+	"github.com/croutoncreations/redline/internal/usage"
+	"github.com/croutoncreations/redline/internal/workspace"
 	"github.com/google/uuid"
-	"github.com/jfox/redline/internal/artifacts"
-	"github.com/jfox/redline/internal/calibration"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/discovery"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/execution"
-	"github.com/jfox/redline/internal/harness"
-	"github.com/jfox/redline/internal/hermes"
-	"github.com/jfox/redline/internal/launchmetrics"
-	"github.com/jfox/redline/internal/nativeusage"
-	"github.com/jfox/redline/internal/notification"
-	"github.com/jfox/redline/internal/openusage"
-	"github.com/jfox/redline/internal/pairing"
-	"github.com/jfox/redline/internal/relay"
-	autoscheduler "github.com/jfox/redline/internal/scheduler"
-	"github.com/jfox/redline/internal/store"
-	"github.com/jfox/redline/internal/tasktemplate"
-	"github.com/jfox/redline/internal/tokenlog"
-	"github.com/jfox/redline/internal/usage"
-	"github.com/jfox/redline/internal/workspace"
 )
 
 type Executor interface {
@@ -267,6 +269,26 @@ func newServer(
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
 	}
+	// Persist rate-limit lockouts beside the on-disk database, which the
+	// store has already opened (and so created) by now. A path with no file
+	// behind it is in-memory or a test placeholder; persisting there would
+	// scatter the lockout file into the working tree.
+	if databasePath, err := filepath.Abs(cfg.Database); err == nil {
+		if info, statErr := os.Stat(databasePath); statErr == nil && info.Mode().IsRegular() {
+			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
+		}
+	}
+	// The banked-reset lookup reads the one local Claude Code login. With
+	// several Claude accounts configured it cannot tell which account that
+	// login belongs to, and a count shown on the wrong account is worse
+	// than none.
+	claudeAccounts := 0
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Provider, "claude") {
+			claudeAccounts++
+		}
+	}
+	server.usageSources.SkipBankedResets = claudeAccounts > 1
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -1074,8 +1096,22 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
-	if strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase) == "" {
-		return tokenSyncResult{}, fmt.Errorf("usage_monitor gatepost_database is not configured")
+	gatepostPath := strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase)
+	if gatepostPath == "" {
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
+	}
+	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
+	if err != nil {
+		return tokenSyncResult{}, err
+	}
+	if _, statErr := os.Stat(resolvedGatepostPath); os.IsNotExist(statErr) {
+		// Gatepost is an optional, unreleased companion tool. A configured but
+		// missing database is not an error on every monitor cycle: log and
+		// report zero Gatepost insertions instead of failing.
+		log.Printf("redline %s usage_monitor: gatepost_database %q not found, skipping Gatepost import", providerID, gatepostPath)
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
+	} else if statErr != nil {
+		return tokenSyncResult{}, fmt.Errorf("inspect Gatepost database %q: %w", resolvedGatepostPath, statErr)
 	}
 	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
 	if err != nil {
@@ -2805,7 +2841,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func parseDuration(value string) (time.Duration, error) {
 	if strings.HasSuffix(value, "d") {
 		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
-		if err != nil || days <= 0 {
+		if err != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 ||
+			days > float64(math.MaxInt64)/float64(24*time.Hour) {
 			return 0, fmt.Errorf("invalid duration")
 		}
 		return time.Duration(days * float64(24*time.Hour)), nil

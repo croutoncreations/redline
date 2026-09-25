@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jfox.redline</string>
+  <string>com.croutoncreations.redline</string>
   <key>ProgramArguments</key>
   <array>
     <string>__REDLINE_BINARY__</string>

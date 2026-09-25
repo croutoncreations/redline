@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jfox/redline/internal/relay"
+	"github.com/croutoncreations/redline/internal/relay"
 )
 
 const (

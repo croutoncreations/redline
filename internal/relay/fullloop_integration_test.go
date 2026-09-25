@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/jfox/redline/mobile/core"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 // TestFullLoopPhoneToDesktop is the whole product in one test: the phone's

@@ -13,12 +13,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jfox/redline/internal/apiclient"
-	"github.com/jfox/redline/internal/artifacts"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -437,8 +437,14 @@ func (s *server) profileGet(ctx context.Context, _ *mcp.CallToolRequest, input i
 }
 
 func (s *server) runsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
+	// Forward the bound limit: /v1/runs defaults to 50 rows when the query
+	// parameter is absent, so a request for more silently returned 50 and
+	// reported them as untruncated. Ask for one extra so listOutput can tell
+	// "exactly limit rows exist" from "more are available".
+	limit := boundedLimit(input.Limit)
+	path := "/v1/runs?limit=" + strconv.Itoa(limit+1)
 	var items []domain.Run
-	if err := s.client.Do(ctx, http.MethodGet, "/v1/runs", nil, &items); err != nil {
+	if err := s.client.Do(ctx, http.MethodGet, path, nil, &items); err != nil {
 		return nil, Output{}, err
 	}
 	return listOutput("run", items, input.Limit)
@@ -460,7 +466,7 @@ func (s *server) runEvents(ctx context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, Output{}, err
 	}
 	total := len(items)
-	items = truncate(items, limit)
+	items = truncateOldest(items, limit)
 	views := make([]runEventView, 0, len(items))
 	for _, item := range items {
 		views = append(views, viewRunEvent(item))
@@ -757,6 +763,20 @@ func truncate[T any](items []T, limit int) []T {
 		return items
 	}
 	return items[:limit]
+}
+
+// truncateOldest keeps the most recent `limit` items from a slice ordered
+// oldest-first, dropping from the front rather than the back.
+//
+// Run events arrive that way: store.ListRunEvents selects the newest rows
+// with ORDER BY id DESC and re-sorts them ascending, so the terminal event is
+// last. Trimming the tail would drop exactly the event an agent polling for
+// completion is waiting on.
+func truncateOldest[T any](items []T, limit int) []T {
+	if len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
 }
 
 func listOutput[T any](kind string, items []T, requested int) (*mcp.CallToolResult, Output, error) {

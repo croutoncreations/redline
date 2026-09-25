@@ -63,15 +63,21 @@ if [[ "${build_arch}" == "universal" ]]; then
 fi
 swift build --package-path "${repository_root}/macos" -c release "${swift_arch_args[@]}"
 swift_bin_path="$(swift build --package-path "${repository_root}/macos" -c release "${swift_arch_args[@]}" --show-bin-path)"
+# Bake the same version metadata GoReleaser stamps into the standalone CLI so
+# `redline version` from the app bundle matches the release it shipped in.
+version_package="github.com/croutoncreations/redline/internal/version"
+git_commit="$(git -C "${repository_root}" rev-parse --short HEAD 2>/dev/null || printf unknown)"
+build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+go_ldflags="-s -w -X ${version_package}.Version=${version} -X ${version_package}.Commit=${git_commit} -X ${version_package}.Date=${build_date}"
 if [[ "${build_arch}" == "universal" ]]; then
-  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="clang -arch arm64" go build -trimpath -o "${temporary_root}/redline-arm64" "${repository_root}/cmd/redline"
-  CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="clang -arch x86_64" go build -trimpath -o "${temporary_root}/redline-x86_64" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="clang -arch arm64" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-arm64" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="clang -arch x86_64" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-x86_64" "${repository_root}/cmd/redline"
   lipo -create \
     "${temporary_root}/redline-arm64" \
     "${temporary_root}/redline-x86_64" \
     -output "${temporary_root}/redline"
 else
-  CGO_ENABLED=1 GOOS=darwin GOARCH="${go_arch}" CC="clang -arch ${build_arch}" go build -trimpath -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH="${go_arch}" CC="clang -arch ${build_arch}" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
 fi
 
 if [[ -e "${app_path}" ]]; then

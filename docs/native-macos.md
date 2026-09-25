@@ -32,8 +32,9 @@ existing launchd configuration path, the standard Application Support path, then
 configuration. This preserves a legacy service's exact storage locations and never overwrites an
 existing file.
 
-When `~/Library/LaunchAgents/com.jfox.redline.plist` exists, **App Setup…** offers an explicit
-migration. Redline first refuses migration while a task is active, enables the main app as a macOS
+When a legacy LaunchAgent plist exists under `~/Library/LaunchAgents/` (either
+`com.croutoncreations.redline.plist` or the pre-rename `com.jfox.redline.plist`), **App Setup…**
+offers an explicit migration. Redline first refuses migration while a task is active, enables the main app as a macOS
 login item, and only then stops the legacy service. The old plist is moved into
 `~/Library/Application Support/Redline/Legacy LaunchAgents/`; the config, SQLite database, run
 history, queue, and artifacts remain in their existing locations. If macOS requires login-item
@@ -50,8 +51,9 @@ the app.
 
 - Gauge-style status icon with a red limit segment and a state indicator.
 - A state-colored gauge with a usage-sensitive needle plus compact provider logos and weekly
-  availability; the full `WAIT`, `RUN`, `ATTN`, or `OFFLINE` description remains in accessibility
-  text and the quick panel.
+  availability; the full `WAIT`, `RUN`, or `ATTN` description remains in accessibility text and
+  the quick panel. A separate connectivity check reports when Redline itself is offline or failed
+  to start, outside that state vocabulary.
 - Current weekly and five-hour availability for Codex and Claude.
 - Model-specific allowances such as Fable in a provider submenu.
 - Active-run, scheduler, operational-health, and service-ownership summaries.

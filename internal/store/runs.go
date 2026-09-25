@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func (d *DB) HasActiveRun(ctx context.Context, providerAccountID string) (bool, error) {

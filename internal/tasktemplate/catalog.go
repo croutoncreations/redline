@@ -3,7 +3,7 @@ package tasktemplate
 import (
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 // Template is an editable starting point. Creating a task copies these values;

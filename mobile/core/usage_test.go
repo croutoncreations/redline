@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/mobile/core"
+	"github.com/croutoncreations/redline/mobile/core"
 )
 
 // fixedNow is the clock every test renders against, so relative times are

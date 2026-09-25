@@ -231,6 +231,12 @@ struct StatusPopoverView: View {
                 if !provider.snapshotStale, let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }
             .font(.system(size: 10))
+            if let banked = bankedResetSummary(provider) {
+                Label(banked.text, systemImage: "arrow.counterclockwise.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(banked.expiringSoon ? .orange : .secondary)
+                    .help("One-time resets granted by the provider. Spending one refills an exhausted usage limit; redeem it from the provider's app or CLI.")
+            }
             Button {
                 Task { await model.setPaused(!provider.paused, providerID: provider.id) }
             } label: {
@@ -258,7 +264,21 @@ struct StatusPopoverView: View {
                 Label("\(snapshot?.health.activeRuns ?? 0) running", systemImage: "bolt.fill")
             }
             .font(.system(size: 12, weight: .medium))
-            if let error = model.errorMessage {
+            if let failure = model.startupFailure {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(failure.summary, systemImage: "exclamationmark.octagon.fill")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.red)
+                    if let detail = failure.detail {
+                        Text(detail)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button("Show log") { NSWorkspace.shared.open(failure.logURL) }
+                        .font(.system(size: 11))
+                }
+            } else if let error = model.errorMessage {
                 Label(error, systemImage: "wifi.exclamationmark").font(.system(size: 11)).foregroundStyle(.red)
             } else if let health = snapshot?.health, health.status != "healthy" {
                 let currentFailures = snapshot?.latestAttemptsByProvider.filter { $0.outcome == "error" } ?? []
@@ -506,6 +526,7 @@ struct StatusPopoverView: View {
     }
 
     private var activityTitle: String {
+        if model.startupFailure != nil { return "Redline could not start" }
         guard model.errorMessage == nil else { return "Redline is offline" }
         if model.installationIssue != nil { return "Redline setup needs attention" }
         return switch trayState?.activity {
@@ -517,6 +538,7 @@ struct StatusPopoverView: View {
     }
 
     private var activityDetail: String {
+        if model.startupFailure != nil { return "Fix the configuration, then relaunch Redline" }
         if model.errorMessage != nil { return "The local service could not be reached" }
         if let issue = model.installationIssue { return issue.title }
         if trayState?.activity == .attention { return "The service is online, but recent operations failed" }
@@ -525,7 +547,7 @@ struct StatusPopoverView: View {
     }
 
     private var activityColor: Color {
-        guard model.errorMessage == nil else { return .red }
+        guard model.errorMessage == nil, model.startupFailure == nil else { return .red }
         if model.installationIssue != nil { return .orange }
         return switch trayState?.activity {
         case .running: .blue
@@ -557,6 +579,22 @@ struct StatusPopoverView: View {
             return "5h \(short)%\(reset)"
         }
         return relativeReset(provider.snapshot?.weekly?.resetsAt).map { "Resets \($0)" }
+    }
+
+    /// Only shown when at least one reset is banked; zero is not worth the
+    /// space in a popover, and "not reported" must never look like zero.
+    private func bankedResetSummary(_ provider: ProviderSummary) -> (text: String, expiringSoon: Bool)? {
+        guard let count = provider.snapshot?.bankedResets, count > 0 else { return nil }
+        let noun = count == 1 ? "banked reset" : "banked resets"
+        // A stored expiry can lapse while the snapshot sits unrefreshed.
+        guard let expires = parseTimestamp(provider.snapshot?.bankedResetsExpireAt),
+              expires.timeIntervalSinceNow > 0 else {
+            return ("\(count) \(noun)", false)
+        }
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        let soon = expires.timeIntervalSinceNow < 3 * 86400
+        return ("\(count) \(noun) · expires \(formatter.string(from: expires))", soon)
     }
 
     private func relativeReset(_ timestamp: String?) -> String? {

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	core "github.com/croutoncreations/redline/mobile/core"
 	"github.com/flynn/noise"
-	core "github.com/jfox/redline/mobile/core"
 )
 
 // These tests run the desktop's dial loop against a stand-in relay, so the

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jfox/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/artifacts"
 )
 
 func TestReaderReturnsBoundedTail(t *testing.T) {

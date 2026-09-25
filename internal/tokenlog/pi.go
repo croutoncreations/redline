@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 )
 
 var piSubscriptionProvider = map[string]string{
@@ -31,7 +31,7 @@ var piProviderTransport = map[string]string{
 // provider and cache-token fields. Only explicit subscription transports are
 // mapped; API and other providers are intentionally ignored.
 func LoadGatepostPi(ctx context.Context, databasePath, targetProvider string, after time.Time) ([]capacity.TokenObservation, error) {
-	resolved, err := expandHome(databasePath)
+	resolved, err := ExpandHome(databasePath)
 	if err != nil {
 		return nil, err
 	}
@@ -127,8 +127,17 @@ func loadPiFile(ctx context.Context, sessionID, path, targetProvider string, aft
 		if !ok || !observedAt.After(after) {
 			continue
 		}
-		cacheRead := record.Message.Usage.CacheRead + record.Message.Usage.Cache.Read
-		cacheCreation := record.Message.Usage.CacheWrite + record.Message.Usage.CacheCreation + record.Message.Usage.Cache.Write
+		// cacheRead/cache.read and cacheWrite/cacheCreation/cache.write are
+		// alternate spellings of the same two counters across Pi schema
+		// versions, not independent quantities. A record that carries more
+		// than one spelling of a counter (as happens across a schema
+		// migration) must not have them summed, which would double-count
+		// cache tokens, inflate usage, and cause the scheduler to
+		// under-dispatch. Taking the largest matches how the Hermes path in
+		// run.go already reconciles its own aliased cache fields.
+		cacheRead := max(record.Message.Usage.CacheRead, record.Message.Usage.Cache.Read)
+		cacheCreation := max(record.Message.Usage.CacheWrite,
+			record.Message.Usage.CacheCreation, record.Message.Usage.Cache.Write)
 		if record.Message.Usage.Input < 0 || record.Message.Usage.Output < 0 || cacheRead < 0 || cacheCreation < 0 {
 			continue
 		}

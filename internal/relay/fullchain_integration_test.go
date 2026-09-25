@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	core "github.com/jfox/redline/mobile/core"
+	core "github.com/croutoncreations/redline/mobile/core"
 	"testing"
 )
 

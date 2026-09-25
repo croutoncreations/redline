@@ -16,6 +16,10 @@ final class PopoverViewModel: ObservableObject {
     /// own error channel: a broken relay-status call must never blank out an
     /// otherwise-healthy dashboard, and vice versa.
     @Published private(set) var relayStatus: RelayStatus?
+    /// Populated when the app launched the embedded service and it failed to
+    /// come up. Distinct from `errorMessage` (a transient fetch failure): this
+    /// carries the service's own diagnostic so a bad config is visible here.
+    @Published private(set) var startupFailure: ServiceStartupFailure?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -35,7 +39,12 @@ final class PopoverViewModel: ObservableObject {
         )
         errorMessage = nil
         actionError = nil
+        startupFailure = nil
         onSnapshot?(snapshot)
+    }
+
+    func apply(startupFailure: ServiceStartupFailure?) {
+        self.startupFailure = startupFailure
     }
 
     func dismissBuilderUpdatesPrompt() {

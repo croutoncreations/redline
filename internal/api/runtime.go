@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
 )
 
 func (s *Server) discoverRuntimeImports(w http.ResponseWriter, _ *http.Request) {

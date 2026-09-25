@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 func TestResolvedRelayEntitlementTokenStaysOutOfSerializationAndFormatting(t *testing.T) {

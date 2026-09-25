@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 )
 
 func (d *DB) SaveTokenObservations(ctx context.Context, observations []capacity.TokenObservation) (int, error) {
@@ -110,18 +110,18 @@ func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 		&observation.CacheCreationTokens, &observation.Confidence); err != nil {
 		return capacity.TokenObservation{}, fmt.Errorf("scan token observation: %w", err)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, observedAt)
+	parsed, err := parseStoredTimeField("token observation time", observedAt)
 	if err != nil {
-		return capacity.TokenObservation{}, fmt.Errorf("parse token observation time: %w", err)
+		return capacity.TokenObservation{}, err
 	}
 	observation.ObservedAt = parsed
 	return observation, nil
 }
 
-func formatTokenTime(value time.Time) string {
-	// Fixed-width fractions preserve chronological order in SQLite TEXT keys.
-	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
-}
+// formatTokenTime encodes token-observation timestamps. It is an alias for
+// formatTime: both write the same fixed-width layout, and token_observations
+// is ordered and range-filtered on observed_at just like the other tables.
+func formatTokenTime(value time.Time) string { return formatTime(value) }
 
 func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source string) (time.Time, error) {
 	var value string
@@ -132,9 +132,5 @@ func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source st
 	if value == "" {
 		return time.Time{}, nil
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse latest token observation time: %w", err)
-	}
-	return parsed, nil
+	return parseStoredTimeField("latest token observation time", value)
 }

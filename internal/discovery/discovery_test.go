@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/discovery"
+	"github.com/croutoncreations/redline/internal/discovery"
 )
 
 func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {

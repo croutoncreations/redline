@@ -3,7 +3,11 @@ const escapeHTML = (value = "") => String(value).replace(/[&<>'"]/g, c => ({'&':
 const relative = (value) => {
   if (!value) return "—";
   const seconds = Math.round((new Date(value) - Date.now()) / 1000), abs = Math.abs(seconds);
-  const [amount, unit] = abs < 60 ? [abs,"sec"] : abs < 3600 ? [Math.round(abs/60),"min"] : abs < 86400 ? [Math.round(abs/3600),"hr"] : [Math.round(abs/86400),"day"];
+  let amount, unit;
+  if (abs < 60) { amount = abs; unit = "sec"; }
+  else if (abs < 3600) { amount = Math.round(abs/60); unit = "min"; if (amount >= 60) { amount = 1; unit = "hr"; } }
+  else if (abs < 86400) { amount = Math.round(abs/3600); unit = "hr"; if (amount >= 24) { amount = 1; unit = "day"; } }
+  else { amount = Math.round(abs/86400); unit = "day"; }
   return seconds >= 0 ? `in ${amount} ${unit}${amount === 1 ? "" : "s"}` : `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
 };
 const shortTime = (value) => value ? new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)) : "—";
@@ -236,13 +240,15 @@ async function saveOnboardingJob() {
 
 async function advanceOnboarding() {
   const button = $('#onboarding-next');
+  const back = $('#onboarding-back');
   button.disabled = true;
+  back.disabled = true;
   try {
     if (onboardingStep === 3) { await saveOnboardingProfile(); showOnboardingStep(4); }
     else if (onboardingStep === 4) await saveOnboardingJob();
     else showOnboardingStep(onboardingStep + 1);
   } catch (error) { showOnboardingError(error.message); }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; back.disabled = false; }
 }
 
 async function openOnboarding(step=1) {
@@ -294,6 +300,21 @@ async function considerFirstRun(data) {
 function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
+}
+// Banked resets are on-demand refills of an exhausted window. Absent means the
+// provider did not report them, which is not the same as zero, so the row is
+// only drawn when a count is known.
+function bankedResets(snap) {
+  const count = snap?.banked_resets;
+  if (count == null) return '';
+  // A stored expiry can lapse while the snapshot sits unrefreshed; never
+  // show "Expires … ago".
+  const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
+  const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+  const detail = expires
+    ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
+    : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
+  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets <i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i></span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
 }
 function policyControl(item, provider) {
   const defaultPolicy = item.default_policy || item.policy || 'default';
@@ -401,6 +422,8 @@ function providerCompact(item) {
       const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));
     });
+    const resets = bankedResets(snap);
+    if (resets) windows.push(resets);
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
     details = `${decisionDetail}${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
@@ -949,10 +972,10 @@ async function updateTaskRuntimeJobs(selected='') {
     const jobs=await apiRequest(`/v1/runtime-connections/${encodeURIComponent(context.runtime_connection_id)}/jobs`);
     select.innerHTML='<option value="">New Hermes session from prompt</option>' + jobs.map(job => {
       const details=[job.provider,job.model,job.enabled ? '' : 'disabled'].filter(Boolean).join(' · ');
-      return `<option value="${escapeHTML(job.id)}">${escapeHTML(job.name || job.id)}${details ? ` — ${escapeHTML(details)}` : ''}</option>`;
+      return `<option value="${escapeHTML(job.id)}">${escapeHTML(job.name || job.id)}${details ? ` - ${escapeHTML(details)}` : ''}</option>`;
     }).join('');
     if (selected && !jobs.some(job => job.id === selected)) {
-      select.innerHTML += `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} — unavailable</option>`;
+      select.innerHTML += `<option value="${escapeHTML(selected)}">${escapeHTML(selected)} - unavailable</option>`;
     }
     select.value=selected || '';
     status.textContent=`${jobs.length} existing job${jobs.length === 1 ? '' : 's'} available from ${context.runtime_connection_id}.`;
@@ -1043,7 +1066,7 @@ function providerKind() {
 }
 function modelLabel(model) {
   const detail = [model.context_window ? `${model.context_window} context` : '', model.max_output ? `${model.max_output} output` : ''].filter(Boolean).join(' · ');
-  const identity = model.label && model.label !== model.id ? `${model.label} — ${model.id}` : model.id;
+  const identity = model.label && model.label !== model.id ? `${model.label} - ${model.id}` : model.id;
   return detail ? `${identity} · ${detail}` : identity;
 }
 function suggestedModels(harness) {

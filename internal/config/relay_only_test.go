@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 // With remote access on and no tailnet, a user running relay-only has no

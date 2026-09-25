@@ -18,8 +18,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
 )
 
 func TestLoadDesktopConnectionDiscoversRemoteGatewayWithoutCredentials(t *testing.T) {
@@ -310,6 +310,51 @@ func TestListJobsFallsBackToDesktopCronAPIWhenGatewayRouteRejectsMethod(t *testi
 	}
 	if !reflect.DeepEqual(requested, want) {
 		t.Fatalf("requests = %#v, want %#v", requested, want)
+	}
+}
+
+func TestListJobsErrorIncludesMethodTargetAndGatewayBody(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"database unavailable"}`))
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return gateway.Client(), gateway.URL, nil
+	}}
+
+	_, err := client.ListJobs(t.Context(), domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := []string{
+		"GET", gateway.URL + "/api/jobs", "HTTP 500", `{"error":"database unavailable"}`,
+	}
+	for _, part := range want {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), part)
+		}
+	}
+}
+
+func TestLoadDesktopConnectionRejectsInvalidRemoteURLWithReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "connection.json")
+	if err := os.WriteFile(path, []byte(`{
+		"mode":"remote",
+		"remote":{"url":"ftp://hermes.test"},
+		"profiles":{}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := hermes.LoadDesktopConnection(path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, part := range []string{"ftp://hermes.test", "scheme must be http or https"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), part)
+		}
 	}
 }
 

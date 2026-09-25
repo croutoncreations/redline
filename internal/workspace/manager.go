@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -100,8 +100,9 @@ func (m Manager) Finalize(ctx context.Context, request FinalizeRequest) error {
 		return err
 	}
 	defer closeArtifacts()
+	shellName, shellArgs := redprocess.ShellCommand(request.Profile.FinalizeCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-lc", request.Profile.FinalizeCommand},
+		Name: shellName, Args: shellArgs,
 		Dir: request.Workspace.Directory, Env: hookEnvironment(request),
 		Stdout: stdout, Stderr: stderr,
 	})
@@ -171,8 +172,9 @@ func (m Manager) runSetupHook(
 		return err
 	}
 	defer closeArtifacts()
+	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-lc", profile.PrepareCommand}, Dir: prepared.Directory,
+		Name: shellName, Args: shellArgs, Dir: prepared.Directory,
 		Env: append(os.Environ(),
 			"REDLINE_RUN_ID="+runID,
 			"REDLINE_TASK_NAME="+taskName,
@@ -262,8 +264,9 @@ func (m Manager) prepareCommand(
 		return domain.Workspace{}, fmt.Errorf("command workspace requires prepare_command")
 	}
 	var stdout, stderr bytes.Buffer
+	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-lc", profile.PrepareCommand}, Dir: profile.Repository,
+		Name: shellName, Args: shellArgs, Dir: profile.Repository,
 		Env: append(os.Environ(),
 			"REDLINE_RUN_ID="+runID,
 			"REDLINE_TASK_NAME="+taskName,

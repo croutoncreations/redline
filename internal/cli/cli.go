@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,22 +22,24 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
-	"github.com/jfox/redline/internal/api"
-	"github.com/jfox/redline/internal/apiauth"
-	"github.com/jfox/redline/internal/apiclient"
-	"github.com/jfox/redline/internal/artifacts"
-	"github.com/jfox/redline/internal/calibration"
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/demo"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/launchmetrics"
-	"github.com/jfox/redline/internal/mcpserver"
-	"github.com/jfox/redline/internal/pairing"
-	"github.com/jfox/redline/internal/relay"
-	autoscheduler "github.com/jfox/redline/internal/scheduler"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/api"
+	"github.com/croutoncreations/redline/internal/apiauth"
+	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/appdir"
+	"github.com/croutoncreations/redline/internal/artifacts"
+	"github.com/croutoncreations/redline/internal/calibration"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/demo"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/launchmetrics"
+	"github.com/croutoncreations/redline/internal/mcpserver"
+	"github.com/croutoncreations/redline/internal/pairing"
+	"github.com/croutoncreations/redline/internal/relay"
+	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
+	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,16 +64,24 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	global.SetOutput(stderr)
 	configPath := global.String("config", "redline.yaml", "service configuration file")
 	apiURL := global.String("api", "http://127.0.0.1:7436", "Redline service API URL")
+	showVersion := global.Bool("version", false, "print the Redline version and exit")
 	if err := global.Parse(args); err != nil {
 		return 1
 	}
+	if *showVersion {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|relay>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "version":
+		fmt.Fprintln(stdout, version.String())
+		return 0
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
 	case "demo":
@@ -118,12 +129,13 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 }
 
 func writeHelp(output io.Writer) {
-	fmt.Fprintln(output, "Redline — budget-aware dispatch for deferred LLM work")
+	fmt.Fprintln(output, "Redline - budget-aware dispatch for deferred LLM work")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair, relay")
+	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair,")
+	fmt.Fprintln(output, "          relay, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
@@ -188,7 +200,7 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	fmt.Fprintf(stdout, "Synthetic state: %s\n", root)
 	fmt.Fprintln(stdout, "This process does not read real Redline data or invoke provider harnesses.")
 	if *openDashboard {
-		if err := exec.Command("open", address).Start(); err != nil {
+		if err := openInBrowser(address); err != nil {
 			fmt.Fprintf(stderr, "open dashboard: %v\n", err)
 		}
 	}
@@ -210,6 +222,21 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	}
 	apiServer.Wait()
 	return 0
+}
+
+// openInBrowser opens address in the platform's default browser. macOS uses
+// "open", Windows uses "cmd /c start" (the leading "" argument is the empty
+// window-title start expects), and everything else falls back to xdg-open,
+// which most Linux desktop environments provide.
+func openInBrowser(address string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", address).Start()
+	case "windows":
+		return exec.Command("cmd", "/c", "start", "", address).Start()
+	default:
+		return exec.Command("xdg-open", address).Start()
+	}
 }
 
 func validateDemoListen(address string) error {
@@ -236,9 +263,14 @@ func prepareDemoState(requested string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		production := filepath.Join(home, "Library", "Application Support", "Redline")
-		if root == production {
+	if production, prodErr := appdir.Default(); prodErr == nil {
+		// Windows paths are case-insensitive; filepath.Abs does not
+		// canonicalize case, so compare case-insensitively there.
+		sameDirectory := root == production
+		if runtime.GOOS == "windows" {
+			sameDirectory = strings.EqualFold(root, production)
+		}
+		if sameDirectory {
 			return "", false, fmt.Errorf("demo state cannot use Redline's production state directory")
 		}
 	}
@@ -419,6 +451,9 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
+	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(stderr, "config %s: %s\n", configPath, warning)
 	}
 	// Claim the service boundary before RelayResolver can initialize or update
 	// managed state. A losing second service therefore cannot mutate state.
@@ -603,11 +638,11 @@ func resolveTokenConfigPath(configPath string) string {
 	if configPath != "redline.yaml" {
 		return configPath
 	}
-	home, err := os.UserHomeDir()
+	dataDir, err := appdir.Default()
 	if err != nil {
 		return configPath
 	}
-	standard := filepath.Join(home, "Library", "Application Support", "Redline", "redline.yaml")
+	standard := filepath.Join(dataDir, "redline.yaml")
 	if _, err := apiauth.ReadToken(standard); err != nil {
 		return configPath
 	}
@@ -729,6 +764,7 @@ func runResource(
 		writeJSON(stdout, output)
 		return 0
 	case "add":
+		resourceName := strings.TrimSuffix(resource, "s")
 		flags := flag.NewFlagSet(resource+" add", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		file := flags.String("file", "", "YAML definition")
@@ -741,7 +777,7 @@ func runResource(
 		}
 		request, err := readYAML(*file)
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "load %s definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		var output any
@@ -751,7 +787,7 @@ func runResource(
 			output = &domain.ExecutionProfile{}
 		}
 		if err := client.Do(context.Background(), http.MethodPost, "/v1/"+resource, request, output); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "create %s from definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		if *jsonOutput {
@@ -786,13 +822,24 @@ func runResource(
 		if *jsonOutput || args[0] == "dispatch" {
 			writeJSON(stdout, output)
 		} else {
-			fmt.Fprintf(stdout, "%sd task %s\n", args[0], task.ID)
+			fmt.Fprintf(stdout, "%s task %s\n", taskControlPastTense(args[0]), task.ID)
 		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown %s command %q\n", strings.TrimSuffix(resource, "s"), args[0])
 		return 1
 	}
+}
+
+// taskControlPastTense renders a task control verb in the past tense for the
+// confirmation line. Appending "d" suits enable and disable but produces
+// "retryd" for retry. The remaining control, dispatch, takes the JSON branch
+// above and never reaches here.
+func taskControlPastTense(action string) string {
+	if action == "retry" {
+		return "retried"
+	}
+	return action + "d"
 }
 
 func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
@@ -1006,8 +1053,12 @@ func renderTerminalQR(output io.Writer, bitmap [][]bool) {
 	}
 	for y := -margin; y < len(bitmap)+margin; y += 2 {
 		for x := -margin; x < width+margin; x++ {
-			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
-			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			// go-qrcode sets bitmap[y][x] true for DARK modules ("bitmap[y][x]
+			// is true if the pixel at (x, y) is set"), so the cell value is
+			// used directly. Negating it inverted the code — rendering the
+			// quiet zone as solid ink — which scanners cannot read.
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && bitmap[y+1][x]
 			switch {
 			case top && bottom:
 				fmt.Fprint(output, "█")
@@ -1237,11 +1288,11 @@ func providerFlags(name string, args []string, stderr io.Writer) (string, bool, 
 func readYAML(path string) (any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read definition: %w", err)
+		return nil, fmt.Errorf("read file: %w; check the --file path and permissions", err)
 	}
 	var value any
 	if err := yaml.Unmarshal(data, &value); err != nil {
-		return nil, fmt.Errorf("decode YAML definition: %w", err)
+		return nil, fmt.Errorf("decode YAML: %w; fix the YAML syntax in the file", err)
 	}
 	return value, nil
 }

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/capacity"
 	_ "modernc.org/sqlite"
 )
 
@@ -20,7 +20,7 @@ import (
 // not preserve cache-read/cache-creation classes, so observations are marked
 // medium confidence and should not be interpreted as provider billing tokens.
 func LoadGatepost(ctx context.Context, path, provider string, after time.Time) ([]capacity.TokenObservation, error) {
-	resolved, err := expandHome(path)
+	resolved, err := ExpandHome(path)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,10 @@ ORDER BY m.ts, m.session_id, m.ordinal`
 	return result, nil
 }
 
-func expandHome(path string) (string, error) {
+// ExpandHome resolves a leading "~" in path to the current user's home
+// directory. It is exported so callers can resolve a configured Gatepost
+// database path before deciding whether to attempt to open it.
+func ExpandHome(path string) (string, error) {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {

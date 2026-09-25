@@ -19,6 +19,12 @@ final class AppInstallationCoordinator {
     private let defaults: UserDefaults
     private let supportDirectory: URL
     private let legacyPlistURL: URL
+    // Redline's LaunchAgent label was renamed from com.jfox.redline to
+    // com.croutoncreations.redline. Existing installs may still have a plist
+    // at the pre-rename path; it must keep being discovered as a legacy
+    // agent so upgrading users are migrated into the app instead of ending
+    // up with two LaunchAgents.
+    private let preRenameLegacyPlistURL: URL
 
     init(client: RedlineAPIClient, defaults: UserDefaults = .standard) throws {
         self.client = client
@@ -27,8 +33,9 @@ final class AppInstallationCoordinator {
         let home = FileManager.default.homeDirectoryForCurrentUser
         supportDirectory = home.appending(path: "Library/Application Support/Redline")
         let standardConfigURL = supportDirectory.appending(path: "redline.yaml")
-        legacyPlistURL = home.appending(path: "Library/LaunchAgents/com.jfox.redline.plist")
-        legacyAgent = try LegacyLaunchAgent.discover(at: legacyPlistURL)
+        legacyPlistURL = home.appending(path: "Library/LaunchAgents/com.croutoncreations.redline.plist")
+        preRenameLegacyPlistURL = home.appending(path: "Library/LaunchAgents/com.jfox.redline.plist")
+        legacyAgent = try LegacyLaunchAgent.discoverLegacy(atCandidatePaths: [preRenameLegacyPlistURL, legacyPlistURL])
 
         let environmentPath = ProcessInfo.processInfo.environment["REDLINE_CONFIG_PATH"]
         let persistedPath = environmentPath ?? defaults.string(forKey: Keys.preferredConfigPath)
@@ -63,7 +70,7 @@ final class AppInstallationCoordinator {
 
     @discardableResult
     func refreshInstallationIssue() -> InstallationIssue? {
-        legacyAgent = try? LegacyLaunchAgent.discover(at: legacyPlistURL)
+        legacyAgent = try? LegacyLaunchAgent.discoverLegacy(atCandidatePaths: [preRenameLegacyPlistURL, legacyPlistURL])
         return installationIssue
     }
 

@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/scheduler"
-	"github.com/jfox/redline/internal/store"
-	"github.com/jfox/redline/internal/usage"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/scheduler"
+	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/usage"
 )
 
 //go:embed dashboard/*

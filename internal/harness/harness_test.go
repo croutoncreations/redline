@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/harness"
-	"github.com/jfox/redline/internal/hermes"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
+	"github.com/croutoncreations/redline/internal/hermes"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 func TestCodexAdapterBuildsNoninteractiveCommand(t *testing.T) {
@@ -198,7 +198,8 @@ func TestGenericCommandHarnessReceivesPromptAndEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.command.Name != "/bin/sh" || strings.Join(runner.command.Args, " ") != "-lc agent --run" || runner.stdin != "do work" {
+	wantName, wantArgs := redprocess.ShellCommand("agent --run")
+	if runner.command.Name != wantName || strings.Join(runner.command.Args, " ") != strings.Join(wantArgs, " ") || runner.stdin != "do work" {
 		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
 	}
 	if !contains(runner.command.Env, "REDLINE_RUN_ID=run-3") ||
@@ -268,6 +269,82 @@ func TestPromptFileRejectsTraversalOutsideWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "escapes workspace") {
 		t.Fatalf("error = %v, want mention of escaping workspace", err)
+	}
+}
+
+// A symlink inside the workspace pointing outside it passes the lexical
+// containment check, since filepath.Rel works on strings and never touches
+// the filesystem. Without resolution the harness reads the link target —
+// credentials, keys, anything readable — straight into the model prompt.
+func TestPromptFileRejectsSymlinkEscapingWorkspace(t *testing.T) {
+	workspaceDir := t.TempDir()
+	outsideFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("do not leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(workspaceDir, "task.md")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	runner := &captureRunner{}
+	adapter := harness.Adapter{Runner: runner}
+	_, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-7", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: "task.md"},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: workspaceDir},
+	})
+	if err == nil {
+		t.Fatalf("expected error for prompt_file symlink escaping workspace, got stdin %q", runner.stdin)
+	}
+	if !strings.Contains(err.Error(), "escapes workspace") {
+		t.Fatalf("error = %v, want mention of escaping workspace", err)
+	}
+	if strings.Contains(runner.stdin, "do not leak") {
+		t.Fatalf("leaked outside file contents into the prompt: %q", runner.stdin)
+	}
+}
+
+// A symlink that stays inside the workspace is legitimate and must still work,
+// so the fix rejects escapes rather than symlinks in general.
+func TestPromptFileAllowsSymlinkInsideWorkspace(t *testing.T) {
+	workspaceDir := t.TempDir()
+	target := filepath.Join(workspaceDir, "real-prompt.md")
+	if err := os.WriteFile(target, []byte("from linked file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(workspaceDir, "task.md")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	runner := &captureRunner{}
+	adapter := harness.Adapter{Runner: runner}
+	if _, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-8", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: "task.md"},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: workspaceDir},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.stdin != "from linked file" {
+		t.Fatalf("stdin = %q, want the in-workspace symlink to resolve", runner.stdin)
+	}
+}
+
+// A missing prompt_file must still surface as a read failure, not as a
+// symlink-resolution error.
+func TestPromptFileMissingReportsReadFailure(t *testing.T) {
+	adapter := harness.Adapter{Runner: &captureRunner{}}
+	_, err := adapter.Run(context.Background(), harness.Request{
+		RunID: "run-9", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", PromptFile: "absent.md"},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli"},
+		Workspace: domain.Workspace{Directory: t.TempDir()},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing prompt_file")
+	}
+	if !strings.Contains(err.Error(), "read task prompt") {
+		t.Fatalf("error = %v, want it reported as a read failure", err)
 	}
 }
 

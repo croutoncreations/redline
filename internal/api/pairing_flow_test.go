@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 func TestPairingEndpointMintsExactlyOnceAfterPreparation(t *testing.T) {

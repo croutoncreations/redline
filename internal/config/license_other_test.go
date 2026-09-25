@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 func TestDefaultLicenseStoreReportsUnavailableOffDarwin(t *testing.T) {

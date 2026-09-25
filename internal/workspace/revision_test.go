@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/domain"
-	redprocess "github.com/jfox/redline/internal/process"
-	"github.com/jfox/redline/internal/workspace"
+	"github.com/croutoncreations/redline/internal/domain"
+	redprocess "github.com/croutoncreations/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/workspace"
 )
 
 func TestGitRevisionResolverReadsConfiguredBaseBranch(t *testing.T) {

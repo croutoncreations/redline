@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/relay"
-	core "github.com/jfox/redline/mobile/core"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/relay"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 type fullchainLicenseStore struct{}

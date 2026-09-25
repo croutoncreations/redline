@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/decision"
-	"github.com/jfox/redline/internal/usage"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/usage"
 )
 
 func TestAutoSourceStaysOnOpenUsageAfterOneTransientFailure(t *testing.T) {

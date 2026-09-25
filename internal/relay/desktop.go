@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/croutoncreations/redline/mobile/core"
 	"github.com/flynn/noise"
-	core "github.com/jfox/redline/mobile/core"
 )
 
 // SessionHandler is the desktop-side session state machine.

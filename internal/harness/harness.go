@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jfox/redline/internal/domain"
-	"github.com/jfox/redline/internal/hermes"
-	redprocess "github.com/jfox/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/hermes"
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 type ContextStore interface {
@@ -323,8 +323,7 @@ func buildCommand(
 		if request.Profile.HarnessCommand == "" {
 			return redprocess.Command{}, fmt.Errorf("command harness requires harness_command")
 		}
-		base.Name = "/bin/sh"
-		base.Args = []string{"-lc", request.Profile.HarnessCommand}
+		base.Name, base.Args = redprocess.ShellCommand(request.Profile.HarnessCommand)
 		base.Stdin = strings.NewReader(prompt)
 	default:
 		return redprocess.Command{}, fmt.Errorf("unsupported harness %q", request.Profile.HarnessType)
@@ -335,7 +334,7 @@ func buildCommand(
 func claudeWorkspaceBoundary(directory string) string {
 	return fmt.Sprintf(
 		`Your exact workspace directory is %q. Perform all task work inside that directory. `+
-			`Resolve every relative path from that directory, and use that directory—not another checkout—as the project root. `+
+			`Resolve every relative path from that directory, and use that directory - not another checkout - as the project root. `+
 			`Do not read or modify a parent checkout or another worktree.`,
 		directory,
 	)
@@ -352,15 +351,48 @@ func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
 		return "", fmt.Errorf("prompt_file must be relative to the workspace, got absolute path %q", task.PromptFile)
 	}
 	path := filepath.Join(workspaceDirectory, task.PromptFile)
-	relative, err := filepath.Rel(workspaceDirectory, path)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("prompt_file %q escapes workspace directory", task.PromptFile)
+	if err := confineToWorkspace(workspaceDirectory, path, task.PromptFile); err != nil {
+		return "", err
 	}
-	data, err := os.ReadFile(path)
+	// The lexical check cannot see through symlinks, so re-check against the
+	// resolved paths before reading. A symlink inside the workspace pointing
+	// outside it would otherwise read an arbitrary file — credentials, keys —
+	// straight into the model prompt.
+	//
+	// Both sides are resolved: the workspace root itself is commonly reached
+	// through a symlink (on macOS /tmp and /var are symlinked), so comparing a
+	// resolved file against an unresolved root would reject legitimate reads.
+	resolvedRoot, err := filepath.EvalSymlinks(workspaceDirectory)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace directory: %w", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		// Keep a missing prompt_file reported as a read failure rather than a
+		// resolution failure, matching the behaviour callers already expect.
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("read task prompt: %w", err)
+		}
+		return "", fmt.Errorf("resolve prompt_file %q: %w", task.PromptFile, err)
+	}
+	if err := confineToWorkspace(resolvedRoot, resolvedPath, task.PromptFile); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		return "", fmt.Errorf("read task prompt: %w", err)
 	}
 	return string(data), nil
+}
+
+// confineToWorkspace reports whether path stays within root, treating any
+// upward traversal as an escape.
+func confineToWorkspace(root, path, promptFile string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("prompt_file %q escapes workspace directory", promptFile)
+	}
+	return nil
 }
 
 func (a Adapter) runner() redprocess.Runner {

@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 const ShortWindowDuration = 5 * time.Hour
@@ -59,9 +59,34 @@ type UsageSnapshot struct {
 	// because it also drops to medium for an inferred model weekly reset.
 	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand to
-	// refill an exhausted window. Nil when the provider does not report them,
+	// refill an exhausted window. Nil means the provider did not report it,
 	// which is different from zero: none banked versus not known.
 	BankedResets *int `json:"banked_resets,omitempty"`
+	// BankedResetsExpireAt is when the soonest-expiring banked reset lapses.
+	// Nil when there are none or the provider did not say.
+	BankedResetsExpireAt *time.Time `json:"banked_resets_expire_at,omitempty"`
+}
+
+// BankedResets is a provider's report of on-demand quota resets.
+type BankedResets struct {
+	Available     int
+	NextExpiresAt *time.Time
+}
+
+// ApplyBankedResets copies a reset report onto the snapshot. A nil report
+// leaves the snapshot saying nothing about resets.
+func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
+	if resets == nil {
+		s.BankedResets, s.BankedResetsExpireAt = nil, nil
+		return
+	}
+	count := resets.Available
+	s.BankedResets = &count
+	s.BankedResetsExpireAt = nil
+	if count > 0 && resets.NextExpiresAt != nil && !resets.NextExpiresAt.IsZero() {
+		expires := resets.NextExpiresAt.UTC()
+		s.BankedResetsExpireAt = &expires
+	}
 }
 
 func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {
@@ -118,6 +143,12 @@ func (s UsageSnapshot) Validate() error {
 	}
 	if err := unitFraction("weekly remaining", s.Weekly.Remaining); err != nil {
 		return err
+	}
+	if s.BankedResets != nil && *s.BankedResets < 0 {
+		return fmt.Errorf("banked resets cannot be negative")
+	}
+	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
+		return fmt.Errorf("banked reset expiry requires at least one banked reset")
 	}
 	if s.Short != nil {
 		if s.Short.ResetsAt.IsZero() {

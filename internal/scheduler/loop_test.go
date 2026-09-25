@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/scheduler"
+	"github.com/croutoncreations/redline/internal/scheduler"
 )
 
 func TestStatusUsesJSONArrayBeforeFirstCycle(t *testing.T) {

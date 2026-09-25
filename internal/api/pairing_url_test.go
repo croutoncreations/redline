@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/api"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/api"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 // The service composes the pairing QR itself, so every surface that shows one

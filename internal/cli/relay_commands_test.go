@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/cli"
+	"github.com/croutoncreations/redline/internal/cli"
 )
 
 func TestRelayCLIActivateRedactsHostileServiceOutput(t *testing.T) {

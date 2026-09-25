@@ -23,6 +23,15 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race ./...
+      - name: Cross-compile matrix
+        run: |
+          set -euo pipefail
+          for os in linux windows; do
+            for arch in amd64 arm64; do
+              echo "building GOOS=$os GOARCH=$arch"
+              GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -o /dev/null ./cmd/redline
+            done
+          done
 
   relay:
     runs-on: ubuntu-latest
@@ -88,6 +97,156 @@ jobs:
       - name: Guards, unit tests, and a debug build
         working-directory: mobile/android
         run: ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest assembleDebug
+
+  linux-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build redline
+        run: CGO_ENABLED=0 go build -o redline ./cmd/redline
+      - name: Write minimal smoke config
+        run: |
+          cat > smoke-config.yaml <<'EOF'
+          database: smoke-state/redline.db
+          active_policy: standard
+          scheduler:
+            enabled: false
+          usage_monitor:
+            enabled: false
+          providers:
+            codex-main:
+              provider: codex
+              usage_source: native
+              window_weekly_cost: 0.10
+          policies:
+            standard:
+              trigger_margin: 0.02
+              rolling_reserve: 0.25
+          EOF
+      - name: Start service
+        run: |
+          mkdir -p smoke-state
+          nohup ./redline --config smoke-config.yaml serve --listen 127.0.0.1:7436 > serve.log 2>&1 &
+          echo $! > serve.pid
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if ./redline --config smoke-config.yaml --api http://127.0.0.1:7436 health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "redline did not become healthy in time" >&2
+          cat serve.log >&2
+          exit 1
+      - name: Exercise scheduler status and task list
+        run: |
+          ./redline --config smoke-config.yaml --api http://127.0.0.1:7436 scheduler status
+          ./redline --config smoke-config.yaml --api http://127.0.0.1:7436 task list
+      - name: Stop service
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then
+            kill "$(cat serve.pid)" 2>/dev/null || true
+          fi
+          cat serve.log
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build redline
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "0"
+          go build -o redline.exe ./cmd/redline
+      - name: Write minimal smoke config
+        shell: pwsh
+        run: |
+          @'
+          database: smoke-state/redline.db
+          active_policy: standard
+          scheduler:
+            enabled: false
+          usage_monitor:
+            enabled: false
+          providers:
+            codex-main:
+              provider: codex
+              usage_source: native
+              window_weekly_cost: 0.10
+          policies:
+            standard:
+              trigger_margin: 0.02
+              rolling_reserve: 0.25
+          '@ | Set-Content -Path smoke-config.yaml -Encoding utf8
+      # Windows runners terminate a step's process tree when the step ends, so
+      # the service must be started, exercised, and stopped within one step.
+      - name: Serve, wait for health, exercise, stop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path smoke-state | Out-Null
+          $process = Start-Process -FilePath .\redline.exe `
+            -ArgumentList "--config", "smoke-config.yaml", "serve", "--listen", "127.0.0.1:7436" `
+            -RedirectStandardOutput serve.out.log -RedirectStandardError serve.err.log `
+            -PassThru -NoNewWindow
+          try {
+            $healthy = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              if ($process.HasExited) {
+                throw "redline serve exited early with code $($process.ExitCode)"
+              }
+              & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 health
+              if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) {
+              throw "redline did not become healthy in time (process alive: $(-not $process.HasExited))"
+            }
+            & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 scheduler status
+            if ($LASTEXITCODE -ne 0) { throw "scheduler status failed" }
+            & .\redline.exe --config smoke-config.yaml --api http://127.0.0.1:7436 task list
+            if ($LASTEXITCODE -ne 0) { throw "task list failed" }
+
+            # Probe the API token's effective ACL. Redline creates api-token
+            # beside the config with 0600, which Windows ignores; the file
+            # inherits its directory's DACL instead. Print it, then fail if a
+            # broad group can read it.
+            $tokenPath = Join-Path (Get-Location) "api-token"
+            if (-not (Test-Path $tokenPath)) { throw "api-token was not created at $tokenPath" }
+            $acl = Get-Acl -Path $tokenPath
+            Write-Host "--- api-token owner: $($acl.Owner)"
+            Write-Host "--- api-token ACL:"
+            $acl.Access | Format-Table IdentityReference, FileSystemRights, AccessControlType, IsInherited -AutoSize | Out-String | Write-Host
+            $broad = $acl.Access | Where-Object {
+              $_.AccessControlType -eq "Allow" -and
+              $_.IdentityReference.Value -match '^(BUILTIN\\Users|Everyone|NT AUTHORITY\\Authenticated Users|NT AUTHORITY\\INTERACTIVE)$' -and
+              ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadData)
+            }
+            if ($broad) {
+              $names = ($broad | ForEach-Object { $_.IdentityReference.Value }) -join ", "
+              throw "api-token is readable by broad groups: $names"
+            }
+            Write-Host "--- api-token ACL check passed: no broad group has read access"
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "--- serve.out.log"
+            Get-Content serve.out.log -ErrorAction SilentlyContinue
+            Write-Host "--- serve.err.log"
+            Get-Content serve.err.log -ErrorAction SilentlyContinue
+          }
 
   macos:
     runs-on: macos-15

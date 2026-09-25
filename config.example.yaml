@@ -27,13 +27,13 @@ scheduler:
   enabled: false
   poll_interval: 5m
 
-# Read-only monitoring is independent of automatic dispatch. Gatepost indexes
-# local Claude Code and Codex session logs; Redline correlates those processed
-# token counts with OpenUsage percentage snapshots to estimate allowance sizes.
+# Read-only monitoring is independent of automatic dispatch. It periodically
+# correlates Redline's own run token counts with OpenUsage percentage
+# snapshots to estimate allowance sizes; it does not require any external
+# tooling.
 usage_monitor:
   enabled: true
   poll_interval: 5m
-  gatepost_database: ~/.gatepost/viewer.db
 
 # Notification commands are trusted local hooks. Events are sent as JSON on stdin.
 notifications:

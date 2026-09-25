@@ -8,6 +8,7 @@ import (
 )
 
 func TestIsContextCancellationRecognizesWrappedAndDriverErrors(t *testing.T) {
+	t.Parallel()
 	for _, err := range []error{
 		context.Canceled,
 		fmt.Errorf("fetch usage: %w", context.Canceled),

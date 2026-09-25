@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/relay"
+	"github.com/croutoncreations/redline/internal/relay"
 )
 
 type controllerLicenseStore struct {

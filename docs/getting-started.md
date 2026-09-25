@@ -106,7 +106,9 @@ The standard installation stores its configuration, API token, SQLite database, 
 under:
 
 ```text
-~/Library/Application Support/Redline/
+~/Library/Application Support/Redline/      # macOS
+~/.config/redline/                          # Linux (CLI / headless)
+%AppData%\redline\                          # Windows (CLI / headless)
 ```
 
 The HTTP API listens only on `127.0.0.1` and requires a local credential. Redline does not proxy it

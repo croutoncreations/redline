@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/capacity"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/capacity"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 func TestTokenObservationsAreIdempotentAndQueryableByProvider(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestTokenObservationsAreIdempotentAndQueryableByProvider(t *testing.T) {
 }
 
 func TestTokenObservationRequiresStableIdentityAndNonnegativeCounts(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +53,7 @@ func TestTokenObservationRequiresStableIdentityAndNonnegativeCounts(t *testing.T
 }
 
 func TestListTokenObservationsBySourceExcludesAmbientUsage(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +82,7 @@ func TestListTokenObservationsBySourceExcludesAmbientUsage(t *testing.T) {
 // value causes the system to either re-ingest all history (zero when rows
 // exist) or skip new observations (non-zero when the table is empty).
 func TestLatestTokenObservationTime(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)

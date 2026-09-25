@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestLoadParsesTrustedAPIHosts(t *testing.T) {
@@ -154,6 +154,66 @@ func TestSchedulerIntervalDefaultsToFiveMinutes(t *testing.T) {
 	}
 }
 
+func TestLoadTreatsUnknownKeysAsWarnings(t *testing.T) {
+	configured := validConfig + `
+future_section:
+  enabled: true
+  url: https://example.invalid
+scheduler:
+  enabled: false
+  poll_interval: 5m
+  future_option: 42
+`
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("unknown keys must not be fatal: %v", err)
+	}
+	if len(cfg.Warnings) != 2 {
+		t.Fatalf("warnings = %q, want one per unknown key", cfg.Warnings)
+	}
+	joined := strings.Join(cfg.Warnings, "\n")
+	for _, key := range []string{"future_section", "future_option"} {
+		if !strings.Contains(joined, "field "+key+" not found") {
+			t.Fatalf("warnings %q do not mention %q", cfg.Warnings, key)
+		}
+	}
+	if cfg.ActivePolicy != "standard" || cfg.Scheduler.Enabled {
+		t.Fatalf("known fields were not decoded alongside warnings: %#v", cfg)
+	}
+}
+
+func TestLoadKeepsTypeErrorsFatal(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+scheduler:
+  enabled: definitely`, 1)
+	_, err := config.Load(writeConfig(t, configured))
+	if err == nil || !strings.Contains(err.Error(), "into bool") {
+		t.Fatalf("type mismatch must stay fatal, got err=%v", err)
+	}
+}
+
+func TestLoadKeepsMixedUnknownAndTypeErrorsFatal(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+relay:
+  enabled: true
+scheduler:
+  enabled: definitely`, 1)
+	_, err := config.Load(writeConfig(t, configured))
+	if err == nil || !strings.Contains(err.Error(), "into bool") {
+		t.Fatalf("a type error alongside an unknown key must stay fatal, got err=%v", err)
+	}
+}
+
+func TestLoadHasNoWarningsForCleanConfig(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("unexpected warnings for a clean config: %q", cfg.Warnings)
+	}
+}
+
 func TestLoadParsesAutomaticScheduler(t *testing.T) {
 	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 scheduler:
@@ -196,6 +256,20 @@ func TestUsageMonitorDefaultsAndValidatesInterval(t *testing.T) {
 	cfg.UsageMonitor.PollInterval = "nope"
 	if _, err := cfg.UsageMonitorInterval(); err == nil {
 		t.Fatal("expected invalid usage monitor interval")
+	}
+}
+
+func TestUsageMonitorEnabledWithoutGatepostDatabase(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+usage_monitor:
+  enabled: true
+  poll_interval: 5m`, 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("expected usage_monitor to be valid without gatepost_database: %v", err)
+	}
+	if cfg.UsageMonitor.GatepostDatabase != "" {
+		t.Fatalf("gatepost_database = %q, want empty", cfg.UsageMonitor.GatepostDatabase)
 	}
 }
 
@@ -247,10 +321,17 @@ notifications:
 	}
 }
 
-func TestLoadRejectsUnknownFields(t *testing.T) {
+func TestLoadWarnsAboutMisspelledFields(t *testing.T) {
+	// A typo in a known key is indistinguishable from a key from another
+	// version, so it loads with a warning rather than failing. The typo'd
+	// field keeps its zero value, which validation may still reject.
 	path := writeConfig(t, strings.Replace(validConfig, "rolling_reserve", "rolling_resrve", 1))
-	if _, err := config.Load(path); err == nil {
-		t.Fatal("expected unknown-field error")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("misspelled key must load with a warning, got err=%v", err)
+	}
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "rolling_resrve") {
+		t.Fatalf("warnings = %q, want one naming rolling_resrve", cfg.Warnings)
 	}
 }
 

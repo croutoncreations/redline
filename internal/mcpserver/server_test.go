@@ -8,12 +8,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/apiclient"
-	"github.com/jfox/redline/internal/mcpserver"
+	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -291,6 +292,132 @@ func TestRunEventsBoundLargePayloads(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"payload_truncated":true`) {
 		t.Fatalf("event result does not explain truncation: %s", encoded)
+	}
+}
+
+// store.ListRunEvents selects the newest `limit` rows (ORDER BY id DESC) and
+// re-sorts them ascending, so the terminal event is last. Trimming the tail
+// dropped exactly the event an agent polling for completion waits on.
+func TestRunEventsKeepsMostRecentWhenTruncated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs/run-1/events", func(w http.ResponseWriter, r *http.Request) {
+		// Mirror the real endpoint: honor `limit`, return oldest-first.
+		all := []map[string]any{
+			{"id": 1, "run_id": "run-1", "type": "run.started", "occurred_at": "2026-07-24T12:00:00Z", "payload": map[string]any{}},
+			{"id": 2, "run_id": "run-1", "type": "workspace.prepared", "occurred_at": "2026-07-24T12:00:01Z", "payload": map[string]any{}},
+			{"id": 3, "run_id": "run-1", "type": "run.completed", "occurred_at": "2026-07-24T12:00:02Z", "payload": map[string]any{}},
+		}
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			limit, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Errorf("limit = %q, want an integer", raw)
+			} else if limit < len(all) {
+				all = all[len(all)-limit:]
+			}
+		}
+		_ = json.NewEncoder(w).Encode(all)
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_run_events", map[string]any{
+		"run_id": "run-1", "limit": 2,
+	})
+	if result.IsError {
+		t.Fatalf("events error: %s", contentText(result))
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"run.completed"`) {
+		t.Fatalf("truncation dropped the newest event: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"type":"run.started"`) {
+		t.Fatalf("truncation should drop the oldest event, got: %s", encoded)
+	}
+}
+
+// /v1/runs defaults to 50 rows when no limit is sent, so a request for more
+// silently returned 50 and reported them as untruncated.
+func TestRunsListForwardsRequestedLimit(t *testing.T) {
+	const available = 200
+	var sawQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		sawQuery = r.URL.RawQuery
+		// Mirror internal/api.listRuns -> store.ListRuns: absent or
+		// non-positive limit falls back to 50.
+		limit := 50
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Errorf("limit = %q, want an integer", raw)
+			} else if parsed > 0 {
+				limit = parsed
+			}
+		}
+		limit = min(limit, available)
+		runs := make([]map[string]any, 0, limit)
+		for i := range limit {
+			runs = append(runs, map[string]any{
+				"id": fmt.Sprintf("run-%d", i), "task_id": "task-1",
+				"state": "completed", "started_at": "2026-07-24T12:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	})
+	session := connect(t, mux)
+
+	result := callTool(t, session, "redline_runs_list", map[string]any{"limit": 100})
+	if result.IsError {
+		t.Fatalf("runs error: %s", contentText(result))
+	}
+	if sawQuery == "" {
+		t.Fatal("runs_list did not forward a limit to /v1/runs")
+	}
+	var output struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Count != 100 {
+		t.Fatalf("count = %d, want the 100 requested runs (query was %q)", output.Count, sawQuery)
+	}
+	if !output.Truncated {
+		t.Fatal("truncated = false, want true since more runs remain available")
+	}
+}
+
+// The default limit must still be respected when the caller omits one.
+func TestRunsListUsesDefaultLimitWhenUnspecified(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil {
+			t.Errorf("limit = %q, want an integer", r.URL.Query().Get("limit"))
+			limit = 1
+		}
+		runs := make([]map[string]any, 0, limit)
+		for i := range limit {
+			runs = append(runs, map[string]any{
+				"id": fmt.Sprintf("run-%d", i), "task_id": "task-1",
+				"state": "completed", "started_at": "2026-07-24T12:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	})
+	session := connect(t, mux)
+
+	result := callTool(t, session, "redline_runs_list", map[string]any{})
+	if result.IsError {
+		t.Fatalf("runs error: %s", contentText(result))
+	}
+	var output struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Count != 20 {
+		t.Fatalf("count = %d, want the default list limit of 20", output.Count)
 	}
 }
 

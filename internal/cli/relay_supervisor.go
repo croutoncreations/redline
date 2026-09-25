@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 // relayDialerRun is injected so relay authority transitions can be tested

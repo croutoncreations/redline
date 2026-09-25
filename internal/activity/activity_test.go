@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/activity"
-	"github.com/jfox/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/activity"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestBuildPrefersStructuredResultAndFindsArtifacts(t *testing.T) {
@@ -115,5 +115,17 @@ func TestBuildPreservesMaximumLengthPlainTextSummary(t *testing.T) {
 	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
 	if got.Summary != want {
 		t.Fatalf("summary length = %d, want %d", len(got.Summary), len(want))
+	}
+}
+
+func TestBuildIgnoresUnreadableOutputFileInsteadOfReturningGarbage(t *testing.T) {
+	// OutputFile points at a directory: os.Open/Stat succeed, but ReadAt fails.
+	// readTail must surface that error so Build falls back to the default
+	// summary instead of treating a zero-filled buffer as real output.
+	dir := t.TempDir()
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: dir})
+	if got.Summary != "Run completed successfully." {
+		t.Fatalf("summary = %q, want default fallback", got.Summary)
 	}
 }

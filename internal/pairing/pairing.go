@@ -16,9 +16,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/relay"
-	core "github.com/jfox/redline/mobile/core"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/relay"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 // RelayOnlyHost is the sentinel a relay-only code carries in place of a

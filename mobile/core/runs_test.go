@@ -364,7 +364,7 @@ func TestFetchRunLogsRendersAgentTranscript(t *testing.T) {
 // Not every log is an agent transcript: plain output such as test results must
 // pass through untouched rather than being swallowed by the parser.
 func TestFetchRunLogsPassesThroughPlainText(t *testing.T) {
-	plain := "ok  \tgithub.com/jfox/redline/internal/store\t66.589s\nFAIL\tinternal/api\n"
+	plain := "ok  \tgithub.com/croutoncreations/redline/internal/store\t66.589s\nFAIL\tinternal/api\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		payload, _ := json.Marshal(map[string]string{"content": plain})
 		_, _ = w.Write(payload)

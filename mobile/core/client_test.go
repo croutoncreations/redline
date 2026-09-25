@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	core "github.com/jfox/redline/mobile/core"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 // Fallback belongs at the one place every request passes through.

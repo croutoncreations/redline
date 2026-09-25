@@ -15,8 +15,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jfox/redline/internal/relay"
-	core "github.com/jfox/redline/mobile/core"
+	"github.com/croutoncreations/redline/internal/relay"
+	core "github.com/croutoncreations/redline/mobile/core"
 )
 
 const (
@@ -438,6 +438,11 @@ func ResolveRelayBootstrap(bootstrap RelayBootstrap) (RelayManagedState, error) 
 
 func (r *RelayResolver) Resolve(ctx context.Context, bootstrap RelayBootstrap) (ResolvedRelay, error) {
 	state, managed, err := r.state.Load()
+	if errors.Is(err, errRelayStateUnsupported) && !bootstrap.Enabled {
+		// No relay configured on a platform without managed state: the
+		// service must still start, exactly as if no state file existed.
+		return ResolvedRelay{RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff}, nil
+	}
 	if err != nil {
 		return ResolvedRelay{}, fmt.Errorf("managed relay state: %w", err)
 	}

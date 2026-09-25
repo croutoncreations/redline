@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 type fakeLicenseStore struct {

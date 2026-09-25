@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/api"
-	"github.com/jfox/redline/internal/config"
-	"github.com/jfox/redline/internal/relay"
-	"github.com/jfox/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/api"
+	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/relay"
+	"github.com/croutoncreations/redline/internal/store"
 )
 
 type apiRelayLicenses struct {

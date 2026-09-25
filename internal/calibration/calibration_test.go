@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/calibration"
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/calibration"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 func TestEstimateUsesObservedRatioAfterTwoInformativeWindows(t *testing.T) {

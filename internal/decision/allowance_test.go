@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jfox/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/decision"
 )
 
 // weeklyReset is a non-zero reset time used across allowance tests.

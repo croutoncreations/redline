@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jfox/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/apiclient"
 )
 
 func TestClientEncodesRequestAndDecodesResponse(t *testing.T) {
