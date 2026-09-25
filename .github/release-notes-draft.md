@@ -2,6 +2,12 @@
 
 ## What changed
 
+- **New: banked quota resets.** When Claude or Codex grants your account a one-time reset of an
+  exhausted usage limit, Redline shows how many you hold and when the next one expires, on the
+  dashboard, the mobile page, and the menu bar.
+- Native usage collection now backs off after a provider rate-limits it, and remembers the
+  lockout across restarts. Anthropic tightened its usage endpoint in late September and
+  lengthens the penalty when asked again too soon.
 - **Breaking for source builds:** Redline now requires Go 1.26 or later. Upgrade the local Go
   toolchain before building or contributing. Prebuilt CLI archives, the macOS app, and Homebrew
   installs need no migration.
@@ -20,7 +26,12 @@
 - The dashboards now keep unread-run badges accurate and use `1 hr` and `1 day` at relative-time
   boundaries. Activity summaries also fall back cleanly when a run output cannot be read.
 - Hermes Gateway errors now include the failing operation, endpoint, status, response details, and
-  invalid-URL reason where available.
+  invalid-URL reason where available. `task add` and `profile add` errors name the definition
+  file that failed.
+- Oversized custom day durations are rejected instead of being stored as ~292 years, unknown
+  Codex models are no longer priced by partial name match, and `modernc.org/libc` moves off a
+  retracted version that could crash when parsing `"nan"`.
+- The onboarding wizard no longer lets you go back while a profile is saving.
 
 ## Install or update
 
