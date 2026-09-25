@@ -11,8 +11,9 @@ running the test suites, and packaging the macOS app. End-user installation is c
 - Xcode command-line tools with a recent Swift toolchain (macOS app only)
 - Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
 
-A signed-in Codex or Claude CLI is only needed to see live subscription usage. Building the
-service and running its tests do not require provider credentials or spend provider quota.
+Building the service and running its tests do not require provider credentials or spend provider
+quota. A signed-in Codex or Claude CLI is needed for live subscription usage and to run jobs
+through that CLI's harness; a job run with a signed-out CLI fails with login instructions.
 
 ## Run the service from source
 
