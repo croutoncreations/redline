@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-25
+
 ### Added
 
 - `redline later "<text>"` queues free text as a one-off task for the repository in the current
@@ -27,6 +29,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The bug-hunt starter template now checks open pull requests, including drafts, before choosing a
   bug and again before pushing, so unattended runs skip root causes already in flight instead of
   opening duplicate pull requests.
+
+### Fixed
+
+- Upgrading a large database no longer hangs on first start. The 0.1.8 timestamp normalization
+  migration rewrote one distinct value at a time with a full table scan each, which ran for many
+  minutes on databases with tens of thousands of snapshots; it now updates by row id and skips
+  values already normalized (a 446 MB database migrates in about two seconds).
 
 ## [0.1.8] - 2026-09-25
 

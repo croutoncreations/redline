@@ -1,7 +1,15 @@
-# Draft release notes (Unreleased)
+# Draft release notes (0.1.9)
 
 ## What changed
 
+This release rolls up 0.1.8 (CLI-only) and 0.1.9. If you used the 0.1.8 CLI, upgrade: its
+timestamp migration could take many minutes on large databases; 0.1.9 finishes in seconds.
+
+- **New: `redline later "<text>"`** queues a one-off task for the repository you are in. It
+  only runs when usage is behind pace and above the reserve. `redline task add` also takes flags
+  (`--name`, `--prompt`, `--profile`, `--priority`, …) so scripts and hooks can queue work without
+  YAML, and `redline run watch --jsonl` streams newly finished runs.
+- New `redline_task_delete` MCP tool, and `redline_task_create` can save disabled drafts.
 - **New: banked quota resets.** When Claude or Codex grants your account a one-time reset of an
   exhausted usage limit, Redline shows how many you hold and when the next one expires, on the
   dashboard, the mobile page, and the menu bar.
@@ -32,6 +40,8 @@
   Codex models are no longer priced by partial name match, and `modernc.org/libc` moves off a
   retracted version that could crash when parsing `"nan"`.
 - The onboarding wizard no longer lets you go back while a profile is saving.
+- The bug-hunt starter template checks open pull requests before choosing a bug and before
+  pushing, so unattended runs skip fixes already in flight.
 
 ## Install or update
 
