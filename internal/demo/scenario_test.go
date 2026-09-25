@@ -11,6 +11,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/demo"
+	"github.com/croutoncreations/redline/internal/domain"
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {
@@ -166,6 +167,44 @@ func TestScenarioRunStates(t *testing.T) {
 				t.Fatalf("%s runs = %d, want %d; all=%#v", tc.state, found, tc.count, runs)
 			}
 		})
+	}
+}
+
+func TestExecutorCompletesDecisionTaskWithBelievableResult(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	env, err := demo.CreateForProvider(ctx, "decision-run", "codex-main", root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	task, err := env.Database.GetTask(ctx, "demo-decision-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := env.Database.AdmitTask(ctx, "take-01", task.ID, "codex-main", "demo-revision", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := demo.Executor{Store: env.Database, Root: root, Now: func() time.Time { return now }, Delay: time.Millisecond}
+	if err := executor.Execute(ctx, run, task, domain.ExecutionProfile{ProviderAccountID: "codex-main", Model: "gpt-5.6"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := env.Database.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != domain.RunCompleted || !strings.Contains(got.Summary, "draft pull request") ||
+		len(got.Artifacts) != 1 || got.Artifacts[0].Type != "pull_request" {
+		t.Fatalf("run = %#v", got)
+	}
+	if !strings.HasPrefix(got.OutputFile, root) {
+		t.Fatalf("output %q escaped demo root %q", got.OutputFile, root)
+	}
+	body, err := os.ReadFile(got.OutputFile)
+	if err != nil || !strings.Contains(string(body), "regression test") {
+		t.Fatalf("transcript=%q err=%v", body, err)
 	}
 }
 
