@@ -590,23 +590,36 @@ func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// rewriteTimestampColumn re-encodes one column's RFC3339 values in place,
-// keyed by the existing value so no assumption is made about the table having
-// a usable primary key.
+// rewriteTimestampColumn re-encodes one column's RFC3339 values in place.
+//
+// Updates are keyed by rowid (every Redline table is a rowid table). Keying by
+// the old value instead meant one full scan of an unindexed column per
+// distinct timestamp -- quadratic, which hung startup for hours on a database
+// with tens of thousands of snapshots and dispatch attempts. Values already in
+// the fixed-width layout are filtered out in SQL so a rerun reads almost
+// nothing.
 func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column string) error {
+	// Already fixed-width UTC ("…T15:04:05.000000000Z": 30 chars, '.' at 20,
+	// 'Z' at 30) is skipped here; everything else goes through Go parsing.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-		`SELECT DISTINCT %[2]s FROM %[1]s WHERE %[2]s IS NOT NULL AND %[2]s <> ''`, table, column))
+		`SELECT rowid, %[2]s FROM %[1]s
+		 WHERE %[2]s IS NOT NULL AND %[2]s <> ''
+		   AND NOT (length(%[2]s) = 30 AND substr(%[2]s, 20, 1) = '.' AND substr(%[2]s, 30, 1) = 'Z')`, table, column))
 	if err != nil {
 		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
 	}
-	var stored []string
+	type storedValue struct {
+		rowID int64
+		value string
+	}
+	var stored []storedValue
 	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
+		var row storedValue
+		if err := rows.Scan(&row.rowID, &row.value); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan %s.%s timestamp: %w", table, column, err)
 		}
-		stored = append(stored, value)
+		stored = append(stored, row)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -616,19 +629,26 @@ func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column strin
 		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
 	}
 
-	for _, value := range stored {
-		parsed, err := time.Parse(time.RFC3339Nano, value)
+	if len(stored) == 0 {
+		return nil
+	}
+	update, err := tx.PrepareContext(ctx, fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, column))
+	if err != nil {
+		return fmt.Errorf("prepare %s.%s normalization: %w", table, column, err)
+	}
+	defer update.Close()
+	for _, row := range stored {
+		parsed, err := time.Parse(time.RFC3339Nano, row.value)
 		if err != nil {
 			// Not an RFC3339 timestamp (e.g. a CURRENT_TIMESTAMP default).
 			// Leave it alone rather than guessing at its format.
 			continue
 		}
 		normalized := formatTime(parsed)
-		if normalized == value {
+		if normalized == row.value {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-			`UPDATE %[1]s SET %[2]s = ? WHERE %[2]s = ?`, table, column), normalized, value); err != nil {
+		if _, err := update.ExecContext(ctx, normalized, row.rowID); err != nil {
 			return fmt.Errorf("normalize %s.%s timestamps: %w", table, column, err)
 		}
 	}
