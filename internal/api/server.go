@@ -505,8 +505,10 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 // authenticated requests get a refreshed expiry so an actively used browser
 // never has to re-pair; bearer clients hold the token directly and need none.
 func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
-		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	scheme, token, hasCredential := strings.Cut(authorization, " ")
+	if hasCredential && strings.EqualFold(scheme, "Bearer") &&
+		secureTokenEqual(strings.TrimSpace(token), s.config.APIToken) {
 		return true, false
 	}
 	cookie, err := r.Cookie(apiSessionCookie)
