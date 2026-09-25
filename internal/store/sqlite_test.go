@@ -183,6 +183,65 @@ INSERT INTO usage_snapshots (
 	}
 }
 
+// The rewrite used to issue one UPDATE ... WHERE column = old per distinct
+// value, a full scan of an unindexed column each time. A real database with
+// ~30k snapshots and ~37k dispatch attempts hung startup for many minutes.
+// At this size the quadratic version takes tens of seconds; the rowid-keyed
+// one takes well under the bound.
+func TestMigrationTimestampRewriteScalesLinearly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rowCount = 20000
+	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version >= 24`); err != nil {
+		t.Fatal(err)
+	}
+	// Distinct legacy values on every row, so a per-value rewrite does
+	// rowCount full scans.
+	if _, err := raw.Exec(`
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?)
+INSERT INTO usage_snapshots (provider, observed_at, weekly_remaining, weekly_resets_at, source, confidence)
+SELECT 'codex', strftime('%Y-%m-%dT%H:%M:%SZ', '2026-01-01', '+' || n || ' seconds'),
+       0.5, '2026-07-17T05:00:00Z', 'openusage', 'high' FROM seq`, rowCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("migrating %d legacy rows took %s; the rewrite is not linear", rowCount, elapsed)
+	}
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var legacy int
+	if err := raw.QueryRow(`SELECT count(*) FROM usage_snapshots WHERE length(observed_at) <> 30`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != 0 {
+		t.Fatalf("%d rows still carry legacy timestamps", legacy)
+	}
+}
+
 // Before this change SaveSnapshot called Format(time.RFC3339Nano) directly,
 // without formatTime's .UTC() normalization, so a provider reporting a
 // numeric offset (openusage.parseTime preserves the parsed zone) was stored
