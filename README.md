@@ -15,7 +15,11 @@ capacity to spare - with an explanation for every decision.
 </p>
 
 <p align="center">
-  <img src="docs/assets/launch/redline-overview-near-expiry-dark.png" width="900" alt="Redline dashboard showing allowance near expiry, an explained RUN decision, and queued work">
+  <img src="docs/assets/promo/redline-loop.gif" width="900" alt="Redline's weekly allowance bar: 71% of the week has elapsed but only 28% of the allowance is used, so 43% spare capacity triggers RUN and dispatches a queued job">
+</p>
+
+<p align="center">
+  <a href="https://croutoncreations.com/brand/redline/redline-promo-1080p.mp4"><strong>▶ Watch the 1-minute video</strong></a>
 </p>
 
 You're paying for a Codex or Claude subscription. Every five hours or every week, your quota
