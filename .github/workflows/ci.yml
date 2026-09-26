@@ -218,6 +218,8 @@ jobs:
         run: ./scripts/build-macos-app.sh
       - name: Verify ARM64 slices and signatures
         run: REDLINE_ARM64_SKIP_BUILD=1 REDLINE_ARM64_APP_PATH=dist/Redline.app tests/macos/arm64-build.sh
+      - name: Check appcast enclosure URLs
+        run: tests/macos/appcast-enclosure-urls.sh
       - name: Exercise release packaging and update feed
         run: tests/macos/release-packaging.sh
       - name: Validate Tart release rehearsal commands
