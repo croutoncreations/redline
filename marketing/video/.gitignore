@@ -1,0 +1,4 @@
+out/
+node_modules/
+# Licensed soundtrack; kept out of git. See README "Music".
+public/audio/

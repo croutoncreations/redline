@@ -166,7 +166,7 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--provider claude-main|codex-main] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open]")
+		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--provider claude-main|codex-main] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open] [--run-duration 1.2s]")
 		return 1
 	}
 	flags := flag.NewFlagSet("demo serve", flag.ContinueOnError)
@@ -177,7 +177,12 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	stateDir := flags.String("state-dir", "", "new or empty isolated state directory")
 	keep := flags.Bool("keep", false, "preserve temporary demo state after exit")
 	openDashboard := flags.Bool("open", false, "open the demo dashboard in the default browser")
+	runDuration := flags.Duration("run-duration", 0, "how long an admitted demo job stays running (default 1.2s); lengthen for recordings")
 	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if *runDuration < 0 || *runDuration > 10*time.Minute {
+		fmt.Fprintln(stderr, "--run-duration must be between 0 and 10m")
 		return 1
 	}
 	if err := validateDemoListen(*listen); err != nil {
@@ -204,10 +209,10 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 1
 	}
 	defer env.Close()
-	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
-		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
+		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now, Delay: *runDuration, Shutdown: ctx.Done()})
 	server := &http.Server{Addr: *listen, Handler: apiServer, ReadHeaderTimeout: 5 * time.Second}
 	address := "http://" + listener.Addr().String()
 	fmt.Fprintf(stdout, "Redline demo (%s) listening on %s\n", *scenario, address)

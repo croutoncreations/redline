@@ -204,10 +204,10 @@ func (m *Manager) bankedResetInterval() time.Duration {
 func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
 	mode := provider.EffectiveUsageSource()
 	if mode == "openusage" {
-		return m.fetch(ctx, accountID, provider, m.OpenUsage)
+		return m.fetch(ctx, accountID, provider, m.OpenUsage, false)
 	}
 	if mode == "native" {
-		return m.fetch(ctx, accountID, provider, m.Native)
+		return m.fetch(ctx, accountID, provider, m.Native, true)
 	}
 
 	m.mu.Lock()
@@ -317,11 +317,15 @@ const rateLimitFloor = 15 * time.Minute
 // when the config writes the provider as "Claude".
 func providerKey(provider string) string { return strings.ToLower(strings.TrimSpace(provider)) }
 
-func (m *Manager) fetch(ctx context.Context, accountID string, provider config.Provider, source Source) (decision.UsageSnapshot, []byte, error) {
+// fetch reads one pinned source. native is passed explicitly rather than
+// derived from source == m.Native: comparing interfaces panics when the
+// dynamic type is uncomparable (e.g. a struct holding a map), and the same
+// value may legitimately back both sources.
+func (m *Manager) fetch(ctx context.Context, accountID string, provider config.Provider, source Source, native bool) (decision.UsageSnapshot, []byte, error) {
 	var snapshot decision.UsageSnapshot
 	var raw []byte
 	var err error
-	if source == m.Native {
+	if native {
 		snapshot, raw, err = m.fetchNative(ctx, provider)
 	} else {
 		snapshot, raw, err = source.Fetch(ctx, provider)

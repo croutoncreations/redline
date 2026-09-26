@@ -90,7 +90,8 @@ Use the staged UI's run controls, or ask the demo API to admit one job:
 
 The demo executor briefly changes the job to running, writes a small synthetic
 log below the demo state directory, and completes it. It never starts Codex,
-Claude Code, Pi, Hermes, or a custom command. This is intended for recording the
+Claude Code, Pi, Hermes, or a custom command. Pass `--run-duration 8s` to
+`demo serve` to hold the running state long enough to film it. This is intended for recording the
 activity inbox, run details, and live-update flow without consuming allowance.
 
 Before publishing any media, manually review every frame. The fixtures avoid
