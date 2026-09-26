@@ -11,6 +11,7 @@ Agent safety contract:
 - Ask before replacing an existing configuration, and before installing or authenticating another harness or tool.
 - Never request, print, or store account passwords or app-specific passwords.
 - Never expose the loopback service beyond localhost.
+- Before saving each starter job, show its editable prompt, provider, model, dispatch tier, recurrence, workspace behavior, and any command it could execute, and get the user's approval.
 - Leave automatic dispatch disabled until the user has reviewed profiles and queued jobs, and ask before enabling it.
 - Never make publishing, deployment, merge, or destructive cleanup part of a starter job without explicit approval.
 - Prefer isolated worktree or DevX workspaces; use an existing-directory workspace for code-changing jobs only when the user explicitly accepts direct edits.
