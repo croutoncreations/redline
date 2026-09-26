@@ -28,7 +28,7 @@ export const providers: Record<ProviderId, ProviderCut> = {
     name: 'Codex',
     icon: 'brand/codex.svg',
     captures: 'codex',
-    headline: 'Never waste your Codex subscription.',
+    headline: 'Never waste your Codex quota.',
     windows: 'Reads your weekly allowance',
     others: 'Also runs Claude Code, Pi, and any agent CLI',
   },

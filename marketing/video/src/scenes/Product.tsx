@@ -7,7 +7,7 @@ import { beats } from '../theme';
 
 // Real dashboard, captured from `redline demo serve`: the capacity explainer,
 // the same job flipping to RUNNING, then its finished result.
-export const PRODUCT_BEATS = { capacity: 8, running: 6, completed: 6, detail: 6 };
+export const PRODUCT_BEATS = { capacity: 8, running: 6, completed: 5, detail: 5 };
 export const productDuration = () => beats(Object.values(PRODUCT_BEATS).reduce((a, b) => a + b, 0));
 
 const Flash: React.FC = () => {

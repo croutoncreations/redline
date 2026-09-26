@@ -2,11 +2,12 @@ import React from 'react';
 import { AbsoluteFill, Audio, Sequence, interpolate, staticFile, useVideoConfig } from 'remotion';
 import { SceneFade } from './components/primitives';
 import { ProviderId, providers } from './providers';
-import { Features } from './scenes/Features';
+import { Anywhere, anywhereDuration } from './scenes/Anywhere';
 import { Hook } from './scenes/Hook';
 import { Logo } from './scenes/Logo';
 import { Outro } from './scenes/Outro';
 import { Pace } from './scenes/Pace';
+import { Payoff } from './scenes/Payoff';
 import { Problem } from './scenes/Problem';
 import { Product, productDuration } from './scenes/Product';
 import { Queue } from './scenes/Queue';
@@ -20,7 +21,8 @@ export const timeline = () => [
   { id: 'queue', frames: bars(2) },
   { id: 'pace', frames: bars(3.5) },
   { id: 'product', frames: productDuration() },
-  { id: 'features', frames: bars(2) },
+  { id: 'anywhere', frames: anywhereDuration() },
+  { id: 'payoff', frames: bars(2) },
   { id: 'outro', frames: bars(2.5) },
 ];
 
@@ -38,7 +40,8 @@ export const Promo: React.FC<PromoProps> = ({ provider: id }) => {
     queue: <Queue />,
     pace: <Pace provider={provider} />,
     product: <Product provider={provider} />,
-    features: <Features provider={provider} />,
+    anywhere: <Anywhere provider={provider} />,
+    payoff: <Payoff />,
     outro: <Outro provider={provider} />,
   };
   let from = 0;

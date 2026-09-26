@@ -9,7 +9,7 @@ code, so copy, timing, and captures can be changed and re-rendered.
 
 | File | Use |
 |---|---|
-| `redline-<provider>-youtube-1080p.mp4` | YouTube, 16:9, ~53s, music |
+| `redline-<provider>-youtube-1080p.mp4` | YouTube, 16:9, ~62s, music |
 | `redline-<provider>-square.mp4` | X / Reddit / LinkedIn feeds, 1:1, music |
 | `redline-<provider>-loop.gif` | Silent ~11s loop for X, Reddit, READMEs, Discord |
 | `redline-<provider>-loop.mp4` | Same loop as MP4 (X turns GIFs into video anyway) |
@@ -22,6 +22,7 @@ and mentions the other supported agents near the end.
 ```bash
 npm install
 npm run capture   # re-shoot dashboard captures from `redline demo serve` (needs Go)
+./capture/native-panel.sh   # re-shoot the native menu-bar quick panel (macOS, Screen Recording permission)
 npm run studio    # live preview/scrub in the browser
 npm run render    # all cuts; or: npm run render -- codex square
 node scripts/stills.mjs PromoClaudeWide 300 900   # quick review frames → out/stills
@@ -39,7 +40,9 @@ node scripts/stills.mjs PromoClaudeWide 300 900   # quick review frames → out/
 - `src/providers.ts` holds the per-cut copy and the pace numbers. They match
   the `decision-run` demo scene, so the explainer agrees with the real UI.
 - `src/scenes/` is the storyboard, in order: Hook → Problem → Logo → Queue →
-  Pace → Product → Features → Outro.
+  Pace → Product → Anywhere (terminal, agent over MCP, menu bar) → Payoff →
+  Outro. The Anywhere copy mirrors shipped behavior: the `redline later`
+  output is verbatim and the MCP tool names are real.
 - `src/Loop.tsx` is the GIF: the Pace explainer ending on RUN, then a brand
   card.
 
