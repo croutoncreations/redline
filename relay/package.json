@@ -1,0 +1,23 @@
+{
+  "name": "redline-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "deploy": "node scripts/production-deploy-preflight.mjs && wrangler deploy --env production",
+    "deploy:self-hosted": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.3",
+    "smol-toml": "^1.6.0",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.128.0"
+  },
+  "allowScripts": {
+    "workerd@1.20260815.1": true,
+    "workerd@1.20260831.1": true,
+    "@cloudflare/vitest-pool-workers@0.22.0": true
+  }
+}

@@ -452,6 +452,7 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (23)`); err != nil {
 			return fmt.Errorf("record requested task dispatch target migration: %w", err)
 		}
+		version = 23
 	}
 	if version < 24 {
 		if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
@@ -462,16 +463,20 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		}
 	}
 	if version < 26 {
-		// Version 26 rather than 25: builds of the unmerged mobile branch
-		// (PR #86) stamped 24 and 25 for different migrations (banked_resets
-		// and short_window_unavailable), so the banked columns are added
-		// only when missing and the version sits above both histories. That
-		// branch will need its own guarded v27+ for short_window_unavailable
-		// when it merges. Nullable on purpose: "not reported" is not zero.
+		// Version 26 rather than 25: pre-release builds of the mobile branch
+		// stamped 24 and 25 for different migrations (banked_resets and
+		// short_window_unavailable), so every column is added only when
+		// missing and the version sits above both histories. Nullable
+		// banked_resets on purpose: "not reported" is not zero.
 		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets", "INTEGER"); err != nil {
 			return err
 		}
 		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets_expire_at", "TEXT"); err != nil {
+			return err
+		}
+		// Not nullable: a snapshot either reported the five hour window as
+		// unavailable or it did not, and older rows did not.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 		// Those mobile-branch databases skipped main's v24 timestamp rewrite
@@ -855,8 +860,8 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets, banked_resets_expire_at, short_window_unavailable
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -871,6 +876,7 @@ banked_resets, banked_resets_expire_at
 		raw,
 		bankedResets,
 		bankedResetsExpireAt,
+		s.ShortWindowUnavailable,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -922,7 +928,7 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at
+banked_resets, banked_resets_expire_at, short_window_unavailable
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -951,6 +957,7 @@ FROM usage_snapshots WHERE provider = ?`
 		&raw,
 		&bankedResets,
 		&bankedResetsExpireAt,
+		&s.ShortWindowUnavailable,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)
@@ -1010,4 +1017,27 @@ FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotI
 		return nil, fmt.Errorf("list allowance windows: %w", err)
 	}
 	return allowances, nil
+}
+
+// columnExists reports whether a table already has a column.
+//
+// Needed because a fresh database gets its columns from the current schema
+// while an existing one gets them from migrations, so an ALTER that is correct
+// for the second is a duplicate-column error for the first.
+func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("scan %s column: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
