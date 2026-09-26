@@ -246,6 +246,7 @@ repositories, paths, credentials, or live allowance data.
 
 Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building
 from source, running the Go, Playwright, and Swift test suites, and packaging the macOS app.
+Please report security vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
