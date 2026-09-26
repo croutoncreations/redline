@@ -48,6 +48,12 @@ node scripts/stills.mjs PromoClaudeWide 300 900   # quick review frames → out/
 
 ## Music
 
-`public/audio/launch-day-loop.mp3` is "Launch Day Loop" from Jon's
-Downloads folder. Confirm the license covers YouTube and social use before
-publishing.
+The soundtrack is "Launch Day Loop" (licensed; not committed). Put it at
+`public/audio/launch-day-loop.mp3` before rendering:
+
+```bash
+mkdir -p public/audio && cp ~/Downloads/"Launch Day Loop.mp3" public/audio/launch-day-loop.mp3
+```
+
+`npm run render` refuses to start without it, so a render never silently
+ships without music. The loops are silent and don't need it.

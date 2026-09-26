@@ -10,7 +10,7 @@
 //   redline-<p>-loop.gif            silent loop, 960px, gifski
 //   redline-<p>-loop.mp4            same loop as MP4 (X converts GIFs anyway)
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +19,11 @@ const out = join(root, 'out');
 mkdirSync(out, { recursive: true });
 
 const [onlyProvider, onlyFormat] = process.argv.slice(2);
+const soundtrack = join(root, 'public/audio/launch-day-loop.mp3');
+if (onlyFormat !== 'gif' && !existsSync(soundtrack)) {
+  console.error(`Missing soundtrack: ${soundtrack}\nIt is licensed and not committed; see README "Music".`);
+  process.exit(1);
+}
 const providers = [
   { id: 'generic', label: 'Generic' },
   { id: 'claude', label: 'Claude' },
