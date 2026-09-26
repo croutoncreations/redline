@@ -24,7 +24,13 @@ test-results/
 macos/.build/
 dist/
 
+# Runtime state written beside the database, which the quickstart puts in the
+# repo root: the relay identity keypair and managed relay state (session,
+# lock), and the usage-endpoint rate-limit lockouts.
 relay-identity.json
+relay-state.json
+.relay-state.json.lock
+usage-lockouts.json
 
 # Per-worktree developer scaffolding. These are generated per branch and
 # hardcode absolute worktree paths, local ports, and personal hostnames, so
