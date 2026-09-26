@@ -418,6 +418,12 @@ func ResolveRelayBootstrap(bootstrap RelayBootstrap) (RelayManagedState, error) 
 	if bootstrap.Enabled {
 		relayURL := strings.TrimSpace(bootstrap.URL)
 		issuerURL := strings.TrimSpace(bootstrap.IssuerURL)
+		// Earlier builds wrote the hosted relay's own address as `url:`. A URL
+		// normally selects self-hosted mode, which then rejects the hosted
+		// address; read it as what the user meant instead.
+		if strings.TrimRight(relayURL, "/") == DefaultHostedRelayURL {
+			relayURL = ""
+		}
 		if relayURL != "" {
 			if issuerURL != "" {
 				return RelayManagedState{}, fmt.Errorf("relay issuer_url is only valid for hosted bootstrap mode")

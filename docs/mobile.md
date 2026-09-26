@@ -63,6 +63,9 @@ relay:
   # issuer_url: https://issuer.example.com/api  # hosted override only
 ```
 
+Setting `url` to the hosted relay's own address (`https://redline-relay.croutoncreations.com`),
+as earlier builds did, is read as hosted mode rather than self-hosted.
+
 With no `url`, bootstrap selects Redline's hosted relay and reports `needs_license` until
 a license is present in Keychain. The service then exchanges it with the configured
 HTTPS issuer and dials only with a validated, unexpired session-bound entitlement. A
@@ -110,7 +113,10 @@ valid, unexpired, fingerprint-bound, and its exact token hash is not revoked. No
 commit receipt is required. `redline serve` permits one service/controller owner, while
 store locks preserve monotonic hash-set merges across supported processes. Entitlements have a maximum lifetime of 14 days. The session id is
 generated on first hosted or self-hosted use and persisted only in managed state. YAML
-containing `session_id`, `entitlement_token`, or `license_key` is rejected.
+containing `session_id`, `entitlement_token`, or `license_key` is rejected, and the service
+refuses to start with an error naming each key and how to recover: remove them, run
+`redline relay activate <key>` (or use Pair a Device), and re-pair phones, since the new
+session id differs from the old one.
 
 Hosted licenses are generic-password items in macOS Keychain. The exact identifiers are
 service `ai.redline.mac.relay-license`, account `hosted`. Only the local service reads the

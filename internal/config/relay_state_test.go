@@ -179,7 +179,9 @@ func TestRelayBootstrapValidationAgreesWithServiceResolution(t *testing.T) {
 		{name: "unsafe custom URL", relayYAML: "  enabled: true\n  url: http://relay.example.com", wantError: "relay url"},
 		{name: "custom URL query", relayYAML: "  enabled: true\n  url: https://relay.example.com?tenant=one", wantError: "query or fragment"},
 		{name: "custom URL fragment", relayYAML: "  enabled: true\n  url: https://relay.example.com/#section", wantError: "query or fragment"},
-		{name: "hosted URL cannot masquerade as custom", relayYAML: "  enabled: true\n  url: " + config.DefaultHostedRelayURL, wantError: "custom url"},
+		// The hosted address can't become a self-hosted (license-free) relay;
+		// spelled out in YAML it resolves to hosted mode, license and all.
+		{name: "hosted URL resolves to hosted, not custom", relayYAML: "  enabled: true\n  url: " + config.DefaultHostedRelayURL, wantMode: config.RelayModeHosted, wantURL: config.DefaultHostedRelayURL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -222,7 +224,12 @@ func TestResolveRelayBootstrapUsesManagedStatePersistencePredicate(t *testing.T)
 		{name: "self hosted", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com"}},
 		{name: "self hosted query", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com?tenant=one"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com?tenant=one"}, wantError: "query or fragment"},
 		{name: "self hosted fragment", bootstrap: config.RelayBootstrap{Enabled: true, URL: "https://relay.example.com/#section"}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: "https://relay.example.com/#section"}, wantError: "query or fragment"},
-		{name: "hosted URL as self hosted", bootstrap: config.RelayBootstrap{Enabled: true, URL: config.DefaultHostedRelayURL}, managed: config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: config.DefaultHostedRelayURL}, wantError: "custom url"},
+		// Earlier builds wrote the hosted address as `url:`; it means hosted,
+		// not a self-hosted relay that happens to share the hosted address.
+		{name: "hosted URL spelled out", bootstrap: config.RelayBootstrap{Enabled: true, URL: config.DefaultHostedRelayURL}, managed: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL}},
+		{name: "hosted URL with trailing slash", bootstrap: config.RelayBootstrap{Enabled: true, URL: config.DefaultHostedRelayURL + "/"}, managed: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: config.DefaultIssuerURL}},
+		{name: "hosted URL with issuer override", bootstrap: config.RelayBootstrap{Enabled: true, URL: config.DefaultHostedRelayURL, IssuerURL: "https://issuer.example.com/api"}, managed: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, IssuerURL: "https://issuer.example.com/api"}},
+		// Managed state is still strict: only YAML bootstrap is forgiving.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -328,11 +335,37 @@ func TestYAMLRejectsManagedSessionAndHostSecrets(t *testing.T) {
 			path := writeConfig(t, configured)
 			for name, load := range map[string]func(string) (config.Config, error){"standard": config.Load, "service": config.LoadForService} {
 				_, err := load(path)
-				if err == nil || !strings.Contains(err.Error(), field) {
+				if err == nil || !strings.Contains(err.Error(), "relay."+field+" is no longer read") {
 					t.Fatalf("%s load error = %v", name, err)
+				}
+				// The error must say how to recover, and must never echo the
+				// secret value back into logs.
+				if !strings.Contains(err.Error(), "redline relay activate") || strings.Contains(err.Error(), "must_not_parse") {
+					t.Fatalf("%s load error is not actionable or leaks the value: %v", name, err)
 				}
 			}
 		})
+	}
+}
+
+// Only YAML bootstrap reinterprets the hosted address; persisted managed
+// state claiming a self-hosted relay at the hosted address is still invalid.
+func TestManagedStateRejectsHostedURLAsSelfHosted(t *testing.T) {
+	err := config.NewRelayStateStore(filepath.Join(t.TempDir(), "relay-state.json")).Save(
+		config.RelayManagedState{Mode: config.RelayModeSelfHosted, URL: config.DefaultHostedRelayURL, SessionID: "session-custom-url-1234"})
+	if err == nil || !strings.Contains(err.Error(), "custom url") {
+		t.Fatalf("save error = %v, want custom url rejection", err)
+	}
+}
+
+// A config from an earlier mobile build carries both retired keys at once;
+// one error names both so the user fixes the file in a single pass.
+func TestYAMLRetiredRelayKeysReportedTogether(t *testing.T) {
+	configured := strings.Replace(validConfig, "active_policy: standard",
+		"active_policy: standard\nrelay:\n  enabled: true\n  url: "+config.DefaultHostedRelayURL+"\n  session_id: s\n  entitlement_token: t\nfuture_option: 1", 1)
+	_, err := config.LoadForService(writeConfig(t, configured))
+	if err == nil || !strings.Contains(err.Error(), "relay.session_id, relay.entitlement_token are no longer read") {
+		t.Fatalf("load error = %v", err)
 	}
 }
 

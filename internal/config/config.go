@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -323,6 +324,9 @@ func decode(data []byte) (Config, []string, error) {
 	if err == nil {
 		return cfg, nil, nil
 	}
+	if retired := retiredRelayFields(err); len(retired) > 0 {
+		return Config{}, nil, retiredRelayFieldsError(retired)
+	}
 	unknown, onlyUnknown := unknownFieldMessages(err)
 	if !onlyUnknown {
 		return Config{}, nil, err
@@ -345,7 +349,7 @@ func unknownFieldMessages(err error) ([]string, bool) {
 	messages := make([]string, 0, len(typeErr.Errors))
 	for _, problem := range typeErr.Errors {
 		// yaml.v3 phrases these as: line N: field foo not found in type config.Config
-		if !strings.Contains(problem, " not found in type ") || isManagedRelaySecret(problem) {
+		if !strings.Contains(problem, " not found in type ") {
 			return nil, false
 		}
 		messages = append(messages, "ignoring unknown key: "+problem)
@@ -353,20 +357,47 @@ func unknownFieldMessages(err error) ([]string, bool) {
 	return messages, len(messages) > 0
 }
 
-// isManagedRelaySecret reports whether an unknown-field problem names a relay
-// secret that lives only in managed state. Those stay fatal rather than
-// becoming a warning: a license key or session pasted into YAML is a secret
-// on disk in the wrong place, and silently ignoring it would hide that.
-func isManagedRelaySecret(problem string) bool {
-	if !strings.HasSuffix(problem, " not found in type config.RelayBootstrap") {
-		return false
+// retiredRelayFields lists relay secrets that earlier builds read from YAML
+// but that now live only in managed state or the Keychain. They stay fatal
+// rather than becoming unknown-key warnings: a license key or session pasted
+// into YAML is a secret on disk in the wrong place, and silently ignoring it
+// would hide that.
+func retiredRelayFields(err error) []string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return nil
 	}
-	for _, field := range []string{"license_key", "entitlement_token", "session_id"} {
-		if strings.Contains(problem, " field "+field+" not found ") {
-			return true
+	var retired []string
+	for _, problem := range typeErr.Errors {
+		if !strings.HasSuffix(problem, " not found in type config.RelayBootstrap") {
+			continue
+		}
+		for _, field := range []string{"license_key", "entitlement_token", "session_id"} {
+			if strings.Contains(problem, " field "+field+" not found ") && !slices.Contains(retired, field) {
+				retired = append(retired, field)
+			}
 		}
 	}
-	return false
+	return retired
+}
+
+// retiredRelayFieldsError says what to do, not just what failed to parse:
+// the raw yaml error ("field session_id not found in type
+// config.RelayBootstrap") reads like a typo, not a moved setting.
+func retiredRelayFieldsError(fields []string) error {
+	keys := make([]string, len(fields))
+	for i, field := range fields {
+		keys[i] = "relay." + field
+	}
+	verb, pronoun := "are", "them"
+	if len(keys) == 1 {
+		verb, pronoun = "is", "it"
+	}
+	return fmt.Errorf("%s %s no longer read from redline.yaml; remove %s. "+
+		"Redline now keeps the relay session in relay-state.json beside the database, "+
+		"and hosted relay access comes from a license key: run `redline relay activate <key>` "+
+		"or use Pair a Device, then re-pair phones",
+		strings.Join(keys, ", "), verb, pronoun)
 }
 
 // ValidateEffectiveRelay applies security decisions only to the authoritative
