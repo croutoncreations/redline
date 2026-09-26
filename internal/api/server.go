@@ -1223,6 +1223,15 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		RuntimeJobID: request.RuntimeJobID,
 		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		return
+	}
+	if err := validateTaskInput(task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
 	if request.Enabled != nil && !*request.Enabled {
 		task.State = domain.Disabled
 	}
@@ -1304,8 +1313,13 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	if request.DispatchTier != nil {
 		task.DispatchTier = *request.DispatchTier
 	}
-	if _, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID); err != nil {
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		return
+	}
+	if err := validateTaskInput(task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
 	if err := s.store.UpdateTask(r.Context(), task, s.now()); err != nil {
@@ -1318,6 +1332,14 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func validateTaskInput(task domain.Task, profile domain.ExecutionProfile) error {
+	if task.Prompt != "" || task.PromptFile != "" ||
+		(profile.HarnessType == "hermes" && task.RuntimeJobID != "") {
+		return nil
+	}
+	return fmt.Errorf("prompt or prompt_file is required")
 }
 
 func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
