@@ -91,7 +91,9 @@ gh release upload vX.Y.Z \
   never a same-version or newer build; the script refuses if it finds one. `generate_appcast`
   gives every DMG this release's download prefix, so the script repoints each older
   `Redline-A.B.C-*.dmg` enclosure at its own `vA.B.C` release; only the new DMG, its `.sha256`,
-  the `.delta` files, and `appcast.xml` need uploading.
+  the `.delta` files, and `appcast.xml` need uploading. The DMG being released keeps the
+  configured prefix, so a pre-release's DMG stays on its `-rc` tag. An older DMG that only ever
+  shipped as a pre-release has no final release to point at, so remove it before packaging.
 - Because the feed is served from `releases/latest/download/`, uploading `appcast.xml` to a
   GitHub **pre-release** does not affect existing users: `latest` skips pre-releases.
 
