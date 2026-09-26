@@ -20,6 +20,8 @@ capacity to spare - with an explanation for every decision.
 
 <p align="center">
   <a href="https://croutoncreations.com/brand/redline/redline-promo-1080p.mp4"><strong>▶ Watch the 1-minute video</strong></a>
+  ·
+  <a href="https://croutoncreations.com/blog/introducing-redline?utm_source=redline&utm_medium=github&utm_campaign=redline"><strong>Read why I built it</strong></a>
 </p>
 
 You're paying for a Codex or Claude subscription. Every five hours or every week, your quota
@@ -238,6 +240,7 @@ repositories, paths, credentials, or live allowance data.
 | [MCP and agent access](docs/mcp.md) | [Native macOS app](docs/native-macos.md) |
 | [Mobile dashboard](docs/mobile.md) · [launchd](docs/launchd.md) | [Outcome metrics](docs/launch-metrics.md) |
 | [Troubleshooting](docs/troubleshooting.md) | [Changelog](CHANGELOG.md) · [Releasing](docs/releasing.md) |
+| [Agent-assisted install](docs/agent-install.md) | [LLM and coding-agent index](llms.txt) |
 
 ## Contributing
 

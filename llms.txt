@@ -1,0 +1,43 @@
+# Redline
+
+> A local, budget-aware job dispatcher that runs queued coding-agent jobs in Claude Code, Codex CLI, Pi, Hermes, or a custom command when Codex or Claude subscription allowance is running behind pace or would otherwise expire.
+
+Redline watches 5-hour and weekly subscription allowances locally, explains each scheduling evaluation as RUN, WAIT, or fail-closed UNKNOWN, and dispatches eligible jobs, preferably into isolated Git worktrees or DevX sessions (Hermes runtimes and explicitly approved existing directories are also supported). It runs as a loopback service with a SQLite database and your existing CLI logins: no cloud service, no account, and no outbound product telemetry. It ships a local stdio MCP server (`redline mcp`) so agents can check allowance, inspect the queue, and add jobs.
+
+Agent safety contract:
+
+- Read and follow the user's repository instructions first.
+- For the macOS app, install only the official signed and notarized release and verify its SHA-256 checksum. Never bypass Gatekeeper, disable quarantine, or install an unsigned build.
+- Ask before replacing an existing configuration, and before installing or authenticating another harness or tool.
+- Never request, print, or store account passwords or app-specific passwords.
+- Never expose the loopback service beyond localhost.
+- Leave automatic dispatch disabled until the user has reviewed profiles and queued jobs, and ask before enabling it.
+- Never make publishing, deployment, merge, or destructive cleanup part of a starter job without explicit approval.
+- Prefer isolated worktree or DevX workspaces; use an existing-directory workspace for code-changing jobs only when the user explicitly accepts direct edits.
+- Treat profile commands and lifecycle hooks as trusted local code; change them only at the user's request.
+- Use queue and profile mutation tools only when the user asks to schedule or manage background work. To check eligibility, call `redline_scheduler_evaluate` (it records a decision but never launches work), not `redline_scheduler_dispatch`.
+
+## Essential documentation
+
+- [README](https://github.com/croutoncreations/redline/blob/main/README.md): Purpose, installation, how scheduling works, MCP setup, and screenshots.
+- [Getting started](https://github.com/croutoncreations/redline/blob/main/docs/getting-started.md): Install the app, confirm usage monitoring, create a profile, and queue a first job.
+- [Scheduling and the allowance model](https://github.com/croutoncreations/redline/blob/main/docs/scheduling.md): Policies, pace gap, reserve, dispatch tiers, near-expiry release, and calibration.
+- [Execution profiles and tasks](https://github.com/croutoncreations/redline/blob/main/docs/profiles-and-tasks.md): Harness, model, and workspace configuration and the task lifecycle.
+- [Troubleshooting](https://github.com/croutoncreations/redline/blob/main/docs/troubleshooting.md): Common failures and corrective checks.
+
+## Agent tasks
+
+- [Agent-assisted install](https://github.com/croutoncreations/redline/blob/main/docs/agent-install.md): Copyable install prompt and what an agent must not do.
+- [MCP and agent access](https://github.com/croutoncreations/redline/blob/main/docs/mcp.md): Server setup for Claude Code, Codex CLI, and Pi bridges, the read-only and state-changing tool reference, and a suggested agent instruction.
+- [CLI reference](https://github.com/croutoncreations/redline/blob/main/docs/cli.md): Commands for status, queueing tasks, and run inspection.
+- [HTTP API](https://github.com/croutoncreations/redline/blob/main/docs/api.md): The authenticated loopback API used by the dashboard, CLI, and MCP server.
+
+## Optional
+
+- [Runs, logs, and notifications](https://github.com/croutoncreations/redline/blob/main/docs/runs-and-notifications.md): Run results, artifacts, bounded logs, and notifications.
+- [Hermes integration](https://github.com/croutoncreations/redline/blob/main/docs/hermes.md): Dispatching jobs to Hermes runtimes.
+- [Native macOS app](https://github.com/croutoncreations/redline/blob/main/docs/native-macos.md): Menu-bar app, bundled service and CLI, and release packaging.
+- [Run as a launchd service](https://github.com/croutoncreations/redline/blob/main/docs/launchd.md): Headless macOS service setup.
+- [Mobile dashboard](https://github.com/croutoncreations/redline/blob/main/docs/mobile.md): Viewing Redline from a phone.
+- [Architecture](https://github.com/croutoncreations/redline/blob/main/docs/architecture.md): Service, scheduler, collectors, and storage design.
+- [Changelog](https://github.com/croutoncreations/redline/blob/main/CHANGELOG.md): Release history.
