@@ -11,13 +11,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+import { chromium } from 'playwright';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const out = resolve(here, '../public/captures');
-// Playwright is already a root devDependency for the dashboard tests.
-const { chromium } = createRequire(join(repo, 'package.json'))('@playwright/test');
 
 const VIEWPORT = { width: 1600, height: 900 }; // 16:9, rendered at 2x → 3200x1800
 const SCALE = 2;

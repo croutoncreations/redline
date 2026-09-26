@@ -6,6 +6,7 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,10 @@ type Executor struct {
 	Root  string
 	Now   func() time.Time
 	Delay time.Duration
+	// Shutdown, when closed, ends the running delay early. The API starts
+	// executors with context.Background(), so without it a long recording
+	// delay would hold `demo serve` open after Ctrl-C.
+	Shutdown <-chan struct{}
 }
 
 func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile) error {
@@ -59,10 +64,14 @@ func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task,
 	if delay <= 0 {
 		delay = 1200 * time.Millisecond
 	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(delay):
+		return e.interrupt(run, ctx.Err())
+	case <-e.Shutdown:
+		return e.interrupt(run, errors.New("demo service shutting down"))
+	case <-timer.C:
 	}
 	outputDir := filepath.Join(e.Root, "runs", run.ID)
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
@@ -84,6 +93,16 @@ func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task,
 		Summary: out.summary, Outcome: "completed", Artifacts: out.artifacts,
 		ActualProvider: providerName(profile.ProviderAccountID), ActualModel: model,
 	}, e.Now().UTC())
+}
+
+// interrupt records the run as failed so a kept --state-dir never shows a job
+// stuck in "running" after the demo process exits.
+func (e Executor) interrupt(run domain.Run, cause error) error {
+	completion := domain.RunCompletion{State: domain.RunFailed, ExitCode: -1, Error: "Demo run interrupted: " + cause.Error(), Outcome: "interrupted"}
+	if err := e.Store.CompleteRun(context.Background(), run.ID, completion, e.Now().UTC()); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
 }
 
 type demoOutput struct {

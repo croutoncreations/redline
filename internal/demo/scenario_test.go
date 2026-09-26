@@ -208,6 +208,43 @@ func TestExecutorCompletesDecisionTaskWithBelievableResult(t *testing.T) {
 	}
 }
 
+// The API launches executors with context.Background(), so a long recording
+// delay must also end when the demo process shuts down, or Ctrl-C would hang
+// for up to --run-duration.
+func TestExecutorDelayEndsOnShutdown(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	env, err := demo.CreateForProvider(ctx, "decision-run", "codex-main", root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	task, err := env.Database.GetTask(ctx, "demo-decision-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := env.Database.AdmitTask(ctx, "take-02", task.ID, "codex-main", "demo-revision", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdown := make(chan struct{})
+	executor := demo.Executor{Store: env.Database, Root: root, Now: func() time.Time { return now }, Delay: 10 * time.Minute, Shutdown: shutdown}
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Execute(ctx, run, task, domain.ExecutionProfile{ProviderAccountID: "codex-main"})
+	}()
+	close(shutdown)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Execute returned nil after shutdown; want an interruption error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute ignored shutdown and kept waiting out the recording delay")
+	}
+}
+
 func TestUnknownScenarioIsRejected(t *testing.T) {
 	if _, err := demo.Create(context.Background(), "surprise", t.TempDir(), time.Now()); err == nil {
 		t.Fatal("expected unknown scenario error")

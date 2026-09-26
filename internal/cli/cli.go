@@ -209,10 +209,10 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 1
 	}
 	defer env.Close()
-	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
-		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now, Delay: *runDuration})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
+		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now, Delay: *runDuration, Shutdown: ctx.Done()})
 	server := &http.Server{Addr: *listen, Handler: apiServer, ReadHeaderTimeout: 5 * time.Second}
 	address := "http://" + listener.Addr().String()
 	fmt.Fprintf(stdout, "Redline demo (%s) listening on %s\n", *scenario, address)

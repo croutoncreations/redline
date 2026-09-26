@@ -19,6 +19,12 @@ const out = join(root, 'out');
 mkdirSync(out, { recursive: true });
 
 const [onlyProvider, onlyFormat] = process.argv.slice(2);
+const PROVIDERS = ['generic', 'claude', 'codex'];
+const FORMATS = ['wide', 'square', 'gif'];
+if ((onlyProvider && !PROVIDERS.includes(onlyProvider)) || (onlyFormat && !FORMATS.includes(onlyFormat))) {
+  console.error(`usage: npm run render -- [${PROVIDERS.join('|')}] [${FORMATS.join('|')}]`);
+  process.exit(1);
+}
 const soundtrack = join(root, 'public/audio/launch-day-loop.mp3');
 if (onlyFormat !== 'gif' && !existsSync(soundtrack)) {
   console.error(`Missing soundtrack: ${soundtrack}\nIt is licensed and not committed; see README "Music".`);
