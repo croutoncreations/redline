@@ -55,7 +55,9 @@ export const Pace: React.FC<{ provider: ProviderCut }> = ({ provider }) => {
 
         <div style={{ width: barW, opacity: barIn, transform: `translateY(${(1 - barIn) * 30 * u}px)` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 * u, marginBottom: 96 * u }}>
-            <Img src={staticFile(provider.icon)} style={{ width: 40 * u, height: 40 * u, filter: provider.id === 'codex' ? 'invert(1)' : undefined }} />
+            {provider.icons.map(icon => (
+              <Img key={icon.src} src={staticFile(icon.src)} style={{ width: 40 * u, height: 40 * u, filter: icon.invert ? 'invert(1)' : undefined }} />
+            ))}
             <span style={{ fontFamily: font.sans, fontSize: 36 * u, fontWeight: 700, color: color.text }}>{provider.name}</span>
             <Mono size={22 * u} style={{ marginLeft: 'auto' }}>weekly allowance</Mono>
             <span style={{ fontFamily: font.mono, fontSize: 30 * u, fontWeight: 700, color: color.text }}>{Math.round((1 - fill) * 100)}% left</span>

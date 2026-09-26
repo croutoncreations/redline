@@ -70,7 +70,7 @@ const Terminal: React.FC<{ provider: ProviderCut }> = ({ provider }) => {
   // `later` matches a profile for the current repo; its --harness default is
   // claude-code, so the Codex cut names its harness explicitly.
   const cmd = provider.id === 'codex' ? 'redline later --harness codex-cli "fix the flaky auth test"' : 'redline later "fix the flaky auth test"';
-  const profile = provider.id === 'codex' ? 'atlas-codex' : 'atlas-claude';
+  const profile = { generic: 'atlas', claude: 'atlas-claude', codex: 'atlas-codex' }[provider.id];
   const typeStart = 16;
   const done = typeStart + cmd.length / 1.4;
   const out = progress(frame, done + 10, 10);
@@ -127,7 +127,7 @@ const Agent: React.FC<{ provider: ProviderCut }> = ({ provider }) => {
   const tool = progress(frame, beats(2), 12);
   return (
     <Frame eyebrow="From your agent" title="Or just ask your agent.">
-      <Window title={`${provider.name} · redline MCP`} width={(square ? 900 : 1100) * u}>
+      <Window title={`${provider.agent} · redline MCP`} width={(square ? 900 : 1100) * u}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 * u }}>
           <Bubble at={beats(0.75)} side="user">Queue a sweep of the stale TODOs for later. How much spare capacity do I have this week?</Bubble>
           <div style={{ opacity: tool, display: 'flex', gap: 12 * u, alignItems: 'center', fontFamily: font.mono, fontSize: (square ? 20 : 22) * u, color: color.muted }}>

@@ -20,6 +20,7 @@ mkdirSync(out, { recursive: true });
 
 const [onlyProvider, onlyFormat] = process.argv.slice(2);
 const providers = [
+  { id: 'generic', label: 'Generic' },
   { id: 'claude', label: 'Claude' },
   { id: 'codex', label: 'Codex' },
 ].filter(p => !onlyProvider || p.id === onlyProvider);

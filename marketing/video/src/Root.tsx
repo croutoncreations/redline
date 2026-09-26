@@ -10,6 +10,7 @@ const formats = [
   { suffix: 'Square', width: 1080, height: 1080 },
 ];
 const cuts: { id: ProviderId; label: string }[] = [
+  { id: 'generic', label: 'Generic' },
   { id: 'claude', label: 'Claude' },
   { id: 'codex', label: 'Codex' },
 ];
