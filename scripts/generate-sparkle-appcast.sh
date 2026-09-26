@@ -73,4 +73,28 @@ if ! grep -Fq "url=\"${download_url_prefix}" "${appcast_path}"; then
   exit 1
 fi
 
+# generate_appcast applies --download-url-prefix to every archive it indexes,
+# including older DMGs kept in the directory for delta generation. When the
+# prefix is a per-release GitHub download path (".../download/vX.Y.Z/"), that
+# points each older full-archive enclosure at this release, where the file
+# was never uploaded. Repoint "Redline-A.B.C-*.dmg" at its own vA.B.C
+# release. Deltas are uploaded with the new release, so they keep the
+# prefix. Enclosure URLs are not covered by the Ed25519 signatures, which
+# sign the file bytes only.
+if [[ "${download_url_prefix}" =~ ^(.*/download/)v[^/]+/$ ]]; then
+  release_download_root="${BASH_REMATCH[1]}"
+  RELEASE_PREFIX="${download_url_prefix}" RELEASE_DOWNLOAD_ROOT="${release_download_root}" \
+    perl -0pi -e '
+      my ($prefix, $root) = ($ENV{RELEASE_PREFIX}, $ENV{RELEASE_DOWNLOAD_ROOT});
+      s{url="\Q$prefix\E(Redline-(\d+(?:\.\d+){1,2})-[^"/]*\.dmg)"}{url="${root}v$2/$1"}g;
+    ' "${appcast_path}"
+  # Every full-archive DMG enclosure must now sit under its own version's tag.
+  mismatched="$(grep -oE 'url="[^"]*/download/v[^/"]+/Redline-[^"/]+\.dmg"' "${appcast_path}" |
+    sed -E 's#.*/download/v([^/]+)/Redline-([0-9.]+)-.*#\1 \2#' | awk '$1 != $2' || true)"
+  if [[ -n "${mismatched}" ]]; then
+    printf 'Appcast DMG enclosures point at the wrong release tag (tag version, DMG version):\n%s\n' "${mismatched}" >&2
+    exit 1
+  fi
+fi
+
 printf 'Generated signed Sparkle appcast %s\n' "${appcast_path}"
