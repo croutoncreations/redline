@@ -69,9 +69,15 @@ are especially security-sensitive:
   tokens) through logs, the dashboard, the API, or run artifacts, and flaws in
   how Redline reads those credentials or authenticates to Hermes.
 - **Releases and updates.** Anything that could make an official distribution
-  channel deliver unsigned, mismatched, or tampered code: the signed macOS app
-  and its Sparkle update feed, the Homebrew cask and formula, the CLI release
-  archives and `checksums.txt`, or the release workflow that publishes them.
+  channel deliver tampered code, or bypass the protection that channel relies on:
+  - the macOS app, its Sparkle update feed, and the Homebrew cask, which are
+    expected to be code-signed and notarized: a build that is unsigned, not
+    notarized, or signed by the wrong identity;
+  - the CLI release archives and Homebrew formula, which are verified by
+    checksum rather than code signing (see [Releasing](docs/releasing.md)): an
+    archive that does not match `checksums.txt` or the formula's recorded
+    checksum, or a tampered checksum file; and
+  - the release workflow that builds and publishes them.
 
 ## Out of scope
 
@@ -83,6 +89,9 @@ are especially security-sensitive:
 - Exposing the service beyond loopback yourself, for example with Tailscale
   Funnel or a public reverse proxy, without adding a separate authorization
   boundary. The documented Tailscale Serve setup is supported and in scope.
+- The CLI release archives not being code-signed or notarized. This is
+  documented in [Releasing](docs/releasing.md); report archives that fail
+  checksum verification instead.
 - Vulnerabilities that exist only in Codex CLI, Claude Code, Pi, Hermes, or
   OpenUsage themselves; please report those to their maintainers. Flaws in
   Redline's integration with them remain in scope.
