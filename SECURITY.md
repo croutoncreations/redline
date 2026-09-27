@@ -68,8 +68,10 @@ are especially security-sensitive:
   or Hermes runtime and Gateway credentials (passwords, cookies, and session
   tokens) through logs, the dashboard, the API, or run artifacts, and flaws in
   how Redline reads those credentials or authenticates to Hermes.
-- **Releases and updates.** Anything that could make the app, the Sparkle
-  update feed, or the Homebrew cask install unsigned or tampered code.
+- **Releases and updates.** Anything that could make an official distribution
+  channel deliver unsigned, mismatched, or tampered code: the signed macOS app
+  and its Sparkle update feed, the Homebrew cask and formula, the CLI release
+  archives and `checksums.txt`, or the release workflow that publishes them.
 
 ## Out of scope
 
