@@ -1,0 +1,118 @@
+name: Bug report
+description: Something in Redline is broken or behaving unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please check [Troubleshooting](https://github.com/croutoncreations/redline/blob/main/docs/troubleshooting.md) first.
+
+        **Security issue?** Do not file it here. Use [private vulnerability reporting](https://github.com/croutoncreations/redline/security/advisories/new) instead.
+
+        **Redact before pasting.** Redline logs are not sanitized automatically. Remove API tokens, provider and Hermes credentials, cookies, pairing links or QR codes, prompts, private paths, and private repository contents.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a profile with ...
+        2. Queue a job with ...
+        3. See ...
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Redline version
+      description: Output of `redline version`. The app bundles the CLI at `/Applications/Redline.app/Contents/Resources/bin/redline`.
+      placeholder: v0.1.9
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install Redline?
+      options:
+        - macOS app (DMG)
+        - macOS app (Homebrew cask)
+        - CLI (Homebrew formula)
+        - CLI (go install)
+        - CLI (release archive)
+        - Built from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: macOS 15.3, Ubuntu 24.04, Windows 11 24H2
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: harness
+    attributes:
+      label: Harness(es) involved
+      description: Which coding agents does the affected job or profile use?
+      options:
+        - label: Codex CLI
+        - label: Claude Code
+        - label: Pi
+        - label: Hermes
+        - label: Custom command
+        - label: Not related to a harness
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Usage monitoring / allowance data
+        - Scheduling decision (RUN / WAIT / UNKNOWN)
+        - Job dispatch or workspace (worktree / DevX)
+        - Run results, logs, or notifications
+        - macOS menu-bar app
+        - Dashboard (desktop or mobile)
+        - CLI
+        - MCP server
+        - Install, upgrade, or auto-update
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant decision or log output
+      description: |
+        Paste only short excerpts you have reviewed and redacted, not whole files or log directories. Useful sources:
+        - a fresh scheduling decision: `redline decision --provider <account>`
+        - a failed run: `redline run logs <run-id> --stream stderr --tail-bytes 8192`
+        - macOS app service logs in `~/Library/Logs/Redline/`
+      render: text
+    validations:
+      required: false
