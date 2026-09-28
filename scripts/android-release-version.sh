@@ -37,7 +37,9 @@ fi
 # scheme produced (about 29.8 million in 2026) and below Play's documented
 # 2,100,000,000 ceiling until about 2090.
 now="${REDLINE_RELEASE_NOW:-$(date -u +%s)}"
-if [[ ! "${now}" =~ ^[0-9]+$ ]]; then
+# At most ten digits: anything longer is far past Play's ceiling anyway, and
+# would overflow bash arithmetic into a code that passes the range check.
+if [[ ! "${now}" =~ ^[0-9]{1,10}$ ]]; then
   printf 'REDLINE_RELEASE_NOW %q is not a Unix time\n' "${now}" >&2
   exit 1
 fi

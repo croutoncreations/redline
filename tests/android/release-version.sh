@@ -55,6 +55,14 @@ if REDLINE_RELEASE_NOW=4000000000 "${script}" mobile-v1.2.3 >/dev/null 2>&1; the
   printf 'FAIL: a code past the Play ceiling was accepted\n' >&2; failures=$((failures + 1))
 fi
 
+# An override too large for bash arithmetic must be refused, not wrap around
+# into a code that passes the range check: 2^64 + 1,700,001,000 wraps to 1000.
+for bad_now in 18446744075409552616 99999999999999999999 abc; do
+  if REDLINE_RELEASE_NOW="${bad_now}" "${script}" mobile-v1.2.3 >/dev/null 2>&1; then
+    printf 'FAIL: REDLINE_RELEASE_NOW=%q was accepted\n' "${bad_now}" >&2; failures=$((failures + 1))
+  fi
+done
+
 if (( failures > 0 )); then
   printf '%d release-version check(s) failed.\n' "${failures}" >&2
   exit 1

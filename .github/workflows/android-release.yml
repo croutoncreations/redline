@@ -20,6 +20,16 @@ on:
 permissions:
   contents: read
 
+# One release at a time for this application id. Each run derives its
+# versionCode when it starts, so two overlapping runs could finish in the
+# wrong order: the newer code uploads first and Play then rejects the older
+# one. A running release is never cancelled. GitHub holds only one pending
+# run per group, though: a third tag pushed while one runs and one waits
+# replaces the waiting one, which then shows as cancelled and needs a rerun.
+concurrency:
+  group: android-release-com.croutoncreations.redline
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
