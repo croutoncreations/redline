@@ -9,6 +9,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -51,7 +55,11 @@ class MainActivity : ComponentActivity() {
         val settings = RedlineSettings(this)
         val holder = CoreClientHolder(settings)
 
-        setContent {
+        setContent { AppRoot { Content(settings, holder) } }
+    }
+
+    @Composable
+    private fun Content(settings: RedlineSettings, holder: CoreClientHolder) {
             val pairingModel: PairingViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
@@ -75,7 +83,7 @@ class MainActivity : ComponentActivity() {
             }
             if (!paired) {
                 PairingScreen(state = pairingState, onScanned = pairingModel::pair)
-                return@setContent
+                return
             }
 
             val usageModel: UsageViewModel = viewModel(
@@ -204,7 +212,31 @@ class MainActivity : ComponentActivity() {
                     },
                 )
             }
-        }
+    }
+}
+
+/** Test tag on the app's root content, used to check it clears the system bars. */
+internal const val ROOT_CONTENT_TAG = "root-content"
+
+/**
+ * The root every screen is drawn inside, kept clear of the system bars.
+ *
+ * Android 15 draws apps targeting SDK 35+ edge to edge whatever the theme
+ * says, so since the targetSdk 36 bump the window runs under the status bar
+ * and the gesture handle. The outer box keeps painting the app background
+ * there, so the bars sit on the same colour; the inner one pads the content
+ * clear of them -- and of a display cutout -- so the clock and tray no longer
+ * cover the header, nor the handle the tab bar.
+ */
+@Composable
+private fun AppRoot(content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize().background(Background)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .testTag(ROOT_CONTENT_TAG),
+        ) { content() }
     }
 }
 
