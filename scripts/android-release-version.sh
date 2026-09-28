@@ -10,6 +10,9 @@
 # Kept out of the workflow so tests/android/release-version.sh can exercise
 # it: both rules below had holes that only showed up when tested directly.
 set -euo pipefail
+# Every string comparison below means ASCII order, as semver specifies;
+# under a UTF-8 locale [[ < ]] would collate "Z" after "a".
+export LC_ALL=C
 
 tag="${1:?usage: android-release-version.sh mobile-v<version>}"
 version="${tag#mobile-v}"
@@ -35,6 +38,19 @@ fi
 # numbers, a version with a prerelease below the same version without, and
 # prerelease identifiers compared one by one -- numeric ones as numbers and
 # below alphanumeric ones, which compare as ASCII text.
+# numeric_compare A B compares two digit strings by value without bash
+# arithmetic, which overflows past 2^63 while semver bounds nothing. Leading
+# zeros cannot occur -- the tag pattern forbids them -- so the longer string
+# is the larger number, and equal lengths compare digit by digit.
+numeric_compare() {
+  if (( ${#1} != ${#2} )); then
+    (( ${#1} < ${#2} )) && echo -1 || echo 1
+  elif [[ "$1" == "$2" ]]; then echo 0
+  elif [[ "$1" < "$2" ]]; then echo -1
+  else echo 1
+  fi
+}
+
 semver_compare() {
   local a_core="${1%%-*}" b_core="${2%%-*}" a_pre="" b_pre=""
   [[ "$1" == *-* ]] && a_pre="${1#*-}"
@@ -43,11 +59,10 @@ semver_compare() {
   IFS=. read -r -a a_parts <<<"${a_core}"
   IFS=. read -r -a b_parts <<<"${b_core}"
   local i
+  local order
   for i in 0 1 2; do
-    if (( 10#${a_parts[i]} != 10#${b_parts[i]} )); then
-      (( 10#${a_parts[i]} < 10#${b_parts[i]} )) && echo -1 || echo 1
-      return
-    fi
+    order="$(numeric_compare "${a_parts[i]}" "${b_parts[i]}")"
+    if [[ "${order}" != 0 ]]; then echo "${order}"; return; fi
   done
   if [[ -z "${a_pre}" || -z "${b_pre}" ]]; then
     if [[ "${a_pre}" == "${b_pre}" ]]; then echo 0
@@ -62,7 +77,7 @@ semver_compare() {
     local x="${a_parts[i]}" y="${b_parts[i]}"
     [[ "${x}" == "${y}" ]] && continue
     if [[ "${x}" =~ ^[0-9]+$ && "${y}" =~ ^[0-9]+$ ]]; then
-      (( 10#${x} < 10#${y} )) && echo -1 || echo 1
+      numeric_compare "${x}" "${y}"
     elif [[ "${x}" =~ ^[0-9]+$ ]]; then echo -1
     elif [[ "${y}" =~ ^[0-9]+$ ]]; then echo 1
     elif [[ "${x}" < "${y}" ]]; then echo -1

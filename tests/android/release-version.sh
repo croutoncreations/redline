@@ -88,6 +88,13 @@ check_newest refused mobile-v1.0.0-rc.9 $'mobile-v1.0.0-rc.9\nmobile-v1.0.0-rc.1
 check_newest refused mobile-v1.0.0-alpha $'mobile-v1.0.0-alpha\nmobile-v1.0.0-beta'
 # Numeric identifiers rank below alphanumeric ones.
 check_newest refused mobile-v1.0.0-1 $'mobile-v1.0.0-1\nmobile-v1.0.0-alpha'
+# Numbers too big for bash arithmetic still compare by value, not by wrapped
+# value: semver puts no bound on them.
+check_newest refused mobile-v1.0.0 $'mobile-v1.0.0\nmobile-v9223372036854775808.0.0'
+check_newest refused mobile-v1.0.0-1 $'mobile-v1.0.0-1\nmobile-v1.0.0-99999999999999999999'
+# Alphanumeric identifiers compare in ASCII order, whatever the locale:
+# uppercase sorts before lowercase, so "a" is newer than "Z".
+LC_ALL=en_US.UTF-8 check_newest refused mobile-v1.0.0-Z $'mobile-v1.0.0-Z\nmobile-v1.0.0-a'
 # A malformed tag elsewhere in the repo is ignored, not a reason to refuse.
 check_newest allowed mobile-v0.3.0 $'mobile-v0.3.0\nmobile-v9.9\nmobile-vjunk'
 
