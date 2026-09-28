@@ -301,6 +301,12 @@ function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
 }
+// A window whose clock has not started: full, with no reset time yet because
+// the provider starts the countdown on first use. Says how the clock runs
+// rather than showing a made-up reset.
+function notStartedMeter(label) {
+  return `<div data-testid="short-window-not-started"><div class="meter-head"><span>${escapeHTML(label)}</span><b>100% left</b></div><progress class="meter-progress" max="100" value="100" aria-label="100% remaining"></progress><div class="reset">Starts on first use · resets 5h after</div></div>`;
+}
 // Banked resets are on-demand refills of an exhausted window. Absent means the
 // provider did not report them, which is not the same as zero, so the row is
 // only drawn when a count is known.
@@ -409,14 +415,18 @@ function providerCompact(item) {
   const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0, tone = value < 35 ? 'warn' : '';
   const pressure = providerPressure(item);
   const weeklyReset = stale ? `Last sample ${relative(snap?.observed_at)}` : weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
+  // An untouched window has no reset yet: the provider starts its clock on
+  // first use. It is full, not absent, and no reset time is invented for it.
   const shortWindow = stale ? 'Fresh usage required' : snap?.short
     ? `5h ${percent(snap.short.remaining)}% · resets ${relative(snap.short.resets_at)}`
+    : snap?.short_window_not_started ? '5h 100% · starts on first use'
     : 'No 5h limit';
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
   if (snap) {
     const windows = [];
     const lastKnown = stale ? 'Last known ' : '';
     if (snap.short) windows.push(meter(`${lastKnown}5-hour window`,snap.short.remaining,snap.short.resets_at));
+    else if (snap.short_window_not_started) windows.push(notStartedMeter(`${lastKnown}5-hour window`));
     windows.push(meter(`${lastKnown}weekly allowance`,snap.weekly.remaining,snap.weekly.resets_at));
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => {
       const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;

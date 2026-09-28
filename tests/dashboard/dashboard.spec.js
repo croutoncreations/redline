@@ -50,6 +50,26 @@ test('shows banked resets with their expiry, and nothing when the provider does 
   await expect(page.locator('[data-provider-id="claude-main"] .banked-resets')).toHaveCount(0);
 });
 
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // The provider starts the window's clock on first use, so an unused one has
+  // no reset time. It is full -- not missing -- and no reset is invented.
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).not.toContainText('No 5h limit');
+  await expect(card).toContainText('5h 100% · starts on first use');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const window = card.locator('[data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.demo = { scenario: 'overview', synthetic: true };

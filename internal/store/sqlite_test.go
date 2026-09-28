@@ -802,8 +802,11 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		Source:                 "openusage",
 		Confidence:             "medium",
 		ShortWindowUnavailable: true,
-		BankedResets:           &resets,
-		BankedResetsExpireAt:   &resetsExpire,
+		// Contradicts ShortWindowUnavailable on purpose: this fixture proves
+		// each column round-trips independently, not a realistic snapshot.
+		ShortWindowNotStarted: true,
+		BankedResets:          &resets,
+		BankedResetsExpireAt:  &resetsExpire,
 	}
 
 	// Fail loudly if a new field is added and this fixture was not updated,

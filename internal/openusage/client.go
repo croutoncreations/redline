@@ -163,6 +163,15 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" && scope == "account" && remaining == 1 {
+			// Entirely unused: the provider starts a five hour window's clock
+			// on first use, so an untouched window has no reset time yet.
+			// That is a known state -- all of it is available -- not a gap,
+			// and it must not lower confidence or read as "not available".
+			// No reset is invented for it; see ShortWindowNotStarted.
+			snapshot.ShortWindowNotStarted = true
+			continue
+		}
 		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" {
 			// A short window is optional and OpenUsage can briefly report one
 			// without a reset while provider state is refreshing. Preserve the

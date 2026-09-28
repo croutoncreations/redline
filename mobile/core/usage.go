@@ -41,6 +41,12 @@ type Window struct {
 	// ResetInferred marks a reset the collector guessed rather than read.
 	// Notification scheduling must skip these.
 	ResetInferred bool `json:"reset_inferred,omitempty"`
+	// NotStarted marks a window whose clock has not begun: nothing has been
+	// used yet, and the provider only starts the countdown on first use. It
+	// is full, and it has no reset time -- ResetsAt, ResetsInSeconds, and
+	// ElapsedPercent are all zero, and the screen should say the window
+	// starts on first use rather than show a countdown to nothing.
+	NotStarted bool `json:"not_started,omitempty"`
 }
 
 // Pool is a non-canonical allowance, such as a model-scoped quota.
@@ -257,6 +263,11 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 				}
 			}
 			provider.Session = shortWindow(item.Snapshot, now)
+			if provider.Session == nil && item.Snapshot.ShortWindowNotStarted {
+				// Full, and deliberately without a reset: the provider has
+				// not started the clock, so any time here would be made up.
+				provider.Session = &Window{RemainingPercent: 100, NotStarted: true}
+			}
 			// A provider that reports a short window at all is expected to keep
 			// reporting one, so its absence here is a gap rather than a
 			// permanent property. Claude sends one and Codex never does, and

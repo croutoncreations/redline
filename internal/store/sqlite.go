@@ -513,6 +513,16 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
+	if version < 28 {
+		// Not nullable, like short_window_unavailable: a snapshot either saw an
+		// untouched five hour window or it did not, and older rows did not.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_not_started", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (28)`); err != nil {
+			return fmt.Errorf("record short window not started migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -860,8 +870,8 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at, short_window_unavailable
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -877,6 +887,7 @@ banked_resets, banked_resets_expire_at, short_window_unavailable
 		bankedResets,
 		bankedResetsExpireAt,
 		s.ShortWindowUnavailable,
+		s.ShortWindowNotStarted,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -928,7 +939,7 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at, short_window_unavailable
+banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -958,6 +969,7 @@ FROM usage_snapshots WHERE provider = ?`
 		&bankedResets,
 		&bankedResetsExpireAt,
 		&s.ShortWindowUnavailable,
+		&s.ShortWindowNotStarted,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)

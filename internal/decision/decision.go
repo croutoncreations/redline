@@ -58,6 +58,17 @@ type UsageSnapshot struct {
 	// that says it does not know. Confidence cannot carry the distinction
 	// because it also drops to medium for an inferred model weekly reset.
 	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
+	// ShortWindowNotStarted marks a five hour window that exists and is
+	// entirely unused. The provider starts the window's clock on first use,
+	// so until then there is no reset time -- which is not the same as the
+	// number being unreadable. The whole window is available.
+	//
+	// Short stays nil in this state on purpose: there is no reset to put in
+	// it, and inventing one (observation time plus five hours) would be a
+	// time the provider never said. The scheduler already treats a nil Short
+	// as "no short window to slot", which is correct for a window that has
+	// not begun.
+	ShortWindowNotStarted bool `json:"short_window_not_started,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand to
 	// refill an exhausted window. Nil means the provider did not report it,
 	// which is different from zero: none banked versus not known.

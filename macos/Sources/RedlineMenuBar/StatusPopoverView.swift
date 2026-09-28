@@ -574,6 +574,7 @@ struct StatusPopoverView: View {
     }
 
     private func resetSummary(_ provider: ProviderSummary) -> String? {
+        if let unstarted = provider.shortWindowSummary { return unstarted }
         if let short = provider.shortPercent {
             let reset = relativeReset(provider.snapshot?.short?.resetsAt).map { " · \($0)" } ?? ""
             return "5h \(short)%\(reset)"

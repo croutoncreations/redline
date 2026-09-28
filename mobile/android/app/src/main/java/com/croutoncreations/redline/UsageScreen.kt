@@ -416,6 +416,7 @@ private fun ProviderCard(
                     "5-hour window", it.remainingPercent, it.resetsInSeconds,
                     it.resetInferred, it.resetsAt, it.elapsedPercent,
                     zones = MeterZones(reservePercent = provider.scheduling?.reservePercent ?: 0),
+                    notStarted = it.notStarted,
                 )
             }
             // The window exists but the number could not be read. Showing
@@ -594,10 +595,15 @@ private fun Meter(
     resetsAt: String = "",
     elapsedPercent: Int = 0,
     zones: MeterZones = MeterZones(),
+    notStarted: Boolean = false,
 ) {
-    val resetSentence = resetLabel(resetsInSeconds, resetInferred)
+    // A window that has not started has no reset yet: say how its clock runs
+    // instead of counting down to a time the provider has not set.
+    val resetSentence = windowResetSentence(
+        Window(resetsInSeconds = resetsInSeconds, resetInferred = resetInferred, notStarted = notStarted),
+    )
     // Only computed for display; an unparseable or absent timestamp yields "".
-    val absolute = formatResetAt(resetsAt)
+    val absolute = if (notStarted) "" else formatResetAt(resetsAt)
     val pace = paceOf(percent, elapsedPercent)
     Column(modifier = Modifier.semantics {
         contentDescription = buildString {

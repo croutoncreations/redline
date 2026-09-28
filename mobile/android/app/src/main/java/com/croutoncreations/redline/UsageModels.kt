@@ -105,6 +105,13 @@ data class Window(
      * it says nothing wrong.
      */
     @SerialName("elapsed_percent") val elapsedPercent: Int = 0,
+    /**
+     * The window's clock has not begun: nothing is used yet, and the provider
+     * starts the countdown on first use. Full, with no reset time -- the
+     * screen describes how the clock will run instead of counting down to a
+     * time that does not exist yet.
+     */
+    @SerialName("not_started") val notStarted: Boolean = false,
 )
 
 @Serializable
@@ -276,6 +283,20 @@ fun schedulingLine(
  * "Resets ~now". A window about to roll over is the moment someone is most
  * likely to be reading this line, so it is the worst place to sound broken.
  */
+/**
+ * The sentence under a window's bar.
+ *
+ * A window that has not started has no reset to count down to, so it says
+ * how its clock actually runs -- it starts on first use and resets five hours
+ * after -- rather than a made-up time.
+ */
+fun windowResetSentence(window: Window): String =
+    if (window.notStarted) {
+        "Starts on first use · resets 5h after"
+    } else {
+        resetLabel(window.resetsInSeconds, window.resetInferred)
+    }
+
 fun resetLabel(seconds: Long, inferred: Boolean): String {
     // Under a minute there is nothing useful left to count, and "in 12s" is a
     // precision the upstream data does not really have.

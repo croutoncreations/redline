@@ -445,6 +445,41 @@ func TestAMissingShortWindowIsReportedRatherThanHidden(t *testing.T) {
 	}
 }
 
+// An unused five hour window has not started, so it has no reset time yet.
+// That is a full window, not an unreadable one: the screen must show it as
+// 100% left and say its clock starts on first use, rather than "not
+// available" -- and must not invent a reset time the provider never gave.
+func TestAnUnstartedShortWindowIsFullNotUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 57, 0, 0, time.UTC)
+	payload := fmt.Sprintf(`{"generated_at":%q,"providers":[{
+	  "id":"claude-main","provider":"claude","paused":false,
+	  "usage_source":{"active":"openusage","consecutive_failures":0},
+	  "snapshot":{"provider":"claude","observed_at":%q,"source":"openusage","confidence":"high","short_window_not_started":true,
+	    "weekly":{"remaining":0.87,"resets_at":%q}}}]}`,
+		now.Format(time.RFC3339), now.Format(time.RFC3339), now.Add(26*time.Hour).Format(time.RFC3339))
+
+	provider := fetchView(t, payload, now).Providers[0]
+	if provider.SessionUnknown {
+		t.Fatal("an unstarted window is known and must not be flagged unknown")
+	}
+	session := provider.Session
+	if session == nil {
+		t.Fatal("an unstarted window must still be shown")
+	}
+	if !session.NotStarted {
+		t.Fatal("the window must say it has not started")
+	}
+	if session.RemainingPercent != 100 {
+		t.Fatalf("remaining = %d, want 100", session.RemainingPercent)
+	}
+	if !session.ResetsAt.IsZero() || session.ResetsInSeconds != 0 {
+		t.Fatalf("no reset may be invented: %#v", session)
+	}
+	if session.ElapsedPercent != 0 {
+		t.Fatalf("an unstarted window has no elapsed time: %d", session.ElapsedPercent)
+	}
+}
+
 // A provider that genuinely has no five hour limit must not grow a phantom
 // "unknown" row. Codex is exactly this case: weekly only.
 func TestAProviderWithNoShortWindowIsNotFlagged(t *testing.T) {

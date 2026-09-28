@@ -207,6 +207,47 @@ class UsageModelsTest {
         assertEquals("Live", providerStatus(provider))
     }
 
+    /**
+     * An untouched five hour window has not started: the provider only starts
+     * its clock on first use. It decodes as a full window flagged not-started,
+     * with no reset time, rather than as unknown.
+     */
+    @Test
+    fun `an unstarted session window decodes as full and not started`() {
+        val raw = """
+            {"generated_at":"2026-09-27T19:19:00Z","providers":[
+              {"id":"claude-main","provider":"claude",
+               "session":{"remaining_percent":100,"not_started":true},
+               "weekly":{"remaining_percent":87,"resets_in_seconds":403200}}
+            ]}
+        """.trimIndent()
+
+        val provider = redlineJson.decodeFromString(UsageView.serializer(), raw).providers[0]
+        val session = provider.session!!
+        assertTrue(session.notStarted)
+        assertEquals(100, session.remainingPercent)
+        assertEquals("", session.resetsAt)
+        assertFalse(provider.sessionUnknown)
+    }
+
+    /**
+     * The sentence under an unstarted window says how it actually works --
+     * five hours from first use -- rather than a countdown to a reset the
+     * provider has not set.
+     */
+    @Test
+    fun `an unstarted window describes its clock rather than a countdown`() {
+        assertEquals(
+            "Starts on first use · resets 5h after",
+            windowResetSentence(Window(remainingPercent = 100, notStarted = true)),
+        )
+        // A started window keeps its ordinary countdown.
+        assertEquals(
+            "Resets in 2h 30m",
+            windowResetSentence(Window(remainingPercent = 40, resetsInSeconds = 2 * 3600 + 30 * 60)),
+        )
+    }
+
     /** An older desktop sends no such field, and the row stays absent. */
     @Test
     fun `an older desktop payload leaves the row absent`() {

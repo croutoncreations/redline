@@ -146,6 +146,23 @@ test('banked resets row shows count and expiry, and is absent when unreported', 
   await expect(page.locator('[data-testid="provider-detail-codex-main"] [data-testid="banked-resets"]')).toHaveCount(0);
 });
 
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadMobileDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.m-rings')).toContainText('on first use');
+  await expect(card.locator('.m-rings')).not.toContainText('not available');
+  const window = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
 test('account pools displayed before model pools in detail', async ({ page }) => {
   const dashboard = dashboardFixture();
   // Add an account-scope allowance

@@ -274,7 +274,21 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     }
 
     public var weeklyPercent: Int? { snapshotStale ? nil : snapshot?.weekly.map(Self.percent) }
-    public var shortPercent: Int? { snapshotStale ? nil : snapshot?.short.map(Self.percent) }
+    public var shortPercent: Int? {
+        if snapshotStale { return nil }
+        if let short = snapshot?.short { return Self.percent(short) }
+        // An unstarted window is full; it just has no reset yet.
+        return snapshot?.shortWindowNotStarted == true ? 100 : nil
+    }
+
+    /// The popover's line for an untouched five hour window, which has no
+    /// reset to count down to. Nil otherwise: a started window is described
+    /// with its reset by the caller, and a provider with no such window has
+    /// nothing to say here.
+    public var shortWindowSummary: String? {
+        guard !snapshotStale, snapshot?.short == nil, snapshot?.shortWindowNotStarted == true else { return nil }
+        return "5h 100% · starts on first use"
+    }
     public var modelAllowances: [AllowanceSummary] {
         snapshot?.allowances.filter { $0.key.hasPrefix("model:") } ?? []
     }
@@ -341,6 +355,10 @@ public struct UsageSnapshot: Codable, Sendable {
     public let bankedResets: Int?
     /// When the soonest-expiring banked reset lapses, if known.
     public let bankedResetsExpireAt: String?
+    /// The five hour window exists and is entirely unused. The provider starts
+    /// its clock on first use, so there is no reset time yet -- the window is
+    /// full, and `short` stays nil rather than carrying an invented reset.
+    public let shortWindowNotStarted: Bool
 
     public init(
         short: UsageWindow?,
@@ -348,7 +366,8 @@ public struct UsageSnapshot: Codable, Sendable {
         allowances: [AllowanceSummary],
         source: String?,
         bankedResets: Int? = nil,
-        bankedResetsExpireAt: String? = nil
+        bankedResetsExpireAt: String? = nil,
+        shortWindowNotStarted: Bool = false
     ) {
         self.short = short
         self.weekly = weekly
@@ -356,12 +375,14 @@ public struct UsageSnapshot: Codable, Sendable {
         self.source = source
         self.bankedResets = bankedResets
         self.bankedResetsExpireAt = bankedResetsExpireAt
+        self.shortWindowNotStarted = shortWindowNotStarted
     }
 
     enum CodingKeys: String, CodingKey {
         case short, weekly, allowances, source
         case bankedResets = "banked_resets"
         case bankedResetsExpireAt = "banked_resets_expire_at"
+        case shortWindowNotStarted = "short_window_not_started"
     }
 
     public init(from decoder: Decoder) throws {
@@ -372,6 +393,8 @@ public struct UsageSnapshot: Codable, Sendable {
         source = try container.decodeIfPresent(String.self, forKey: .source)
         bankedResets = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
         bankedResetsExpireAt = try? container.decodeIfPresent(String.self, forKey: .bankedResetsExpireAt)
+        // Absent from an older desktop, which never sent the state.
+        shortWindowNotStarted = (try? container.decodeIfPresent(Bool.self, forKey: .shortWindowNotStarted)) ?? false
     }
 }
 

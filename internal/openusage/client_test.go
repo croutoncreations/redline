@@ -75,12 +75,48 @@ func TestParseAcceptsSingleProviderObject(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, 0.90)
 }
 
+// An unused five hour window has not started: the provider starts its clock
+// on first use, so there is no reset time yet. That is a fully known state --
+// the whole window is available -- and must not read as "unavailable". No
+// reset is invented either: the window is reported as not started, and the
+// scheduler keeps treating it exactly as it did (no short window to slot).
+func TestParseReportsAnUnusedShortWindowAsNotStarted(t *testing.T) {
+	payload := `{
+      "providerId":"claude",
+      "fetchedAt":"2026-07-25T23:00:00Z",
+      "lines":[
+        {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":null},
+        {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}
+      ]
+    }`
+
+	got, err := openusage.Parse([]byte(payload), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShortWindowNotStarted {
+		t.Fatal("an unused five hour window must be reported as not started")
+	}
+	if got.ShortWindowUnavailable {
+		t.Fatal("an unused five hour window is known, not unavailable")
+	}
+	if got.Short != nil {
+		t.Fatalf("no reset may be invented for a window that has not started: %#v", got.Short)
+	}
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatalf("a not-started window must not become a timed allowance: %#v", got.Allowances)
+	}
+	if got.Confidence != "high" {
+		t.Fatalf("confidence = %q, want high: nothing about this window is uncertain", got.Confidence)
+	}
+}
+
 func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
 	payload := `{
       "providerId":"claude",
       "fetchedAt":"2026-07-25T23:00:00Z",
       "lines":[
-        {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":""},
+        {"type":"progress","label":"Session","used":30,"limit":100,"periodDurationMs":18000000,"resetsAt":""},
         {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}
       ]
     }`
@@ -98,6 +134,9 @@ func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, .96)
 	if got.Confidence != "medium" {
 		t.Fatalf("confidence = %q, want medium", got.Confidence)
+	}
+	if got.ShortWindowNotStarted {
+		t.Fatal("a partly used window with no reset is unreadable, not unstarted")
 	}
 	// Dropping the window silently leaves every client unable to tell "this
 	// provider has no five hour limit" from "it has one and we could not read

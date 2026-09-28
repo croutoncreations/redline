@@ -18,6 +18,26 @@ import Testing
     #expect(absent.bankedResetsExpireAt == nil)
 }
 
+/// An untouched five hour window has no reset yet: the provider starts its
+/// clock on first use. It is full, and the menu bar says so instead of
+/// falling back to the weekly reset as if the window did not exist.
+@Test func unstartedShortWindowIsFullAndStartsOnFirstUse() throws {
+    let data = Data(#"""
+    {"health":{"status":"ok","window":"24h0m0s","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[{"id":"claude-main","provider":"claude","snapshot":{"short_window_not_started":true,"weekly":{"remaining":0.87,"resets_at":"2026-10-02T17:00:00Z"},"source":"openusage"}}]}
+    """#.utf8)
+    let provider = try DashboardSnapshot.decode(data).providers[0]
+    #expect(provider.snapshot?.shortWindowNotStarted == true)
+    #expect(provider.shortPercent == 100)
+    #expect(provider.shortWindowSummary == "5h 100% · starts on first use")
+
+    let older = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"ok","window":"24h0m0s","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[{"id":"codex-main","provider":"codex","snapshot":{"weekly":{"remaining":0.3,"resets_at":"2026-10-02T17:00:00Z"}}}]}
+    """#.utf8)).providers[0]
+    #expect(older.snapshot?.shortWindowNotStarted == false)
+    #expect(older.shortPercent == nil)
+    #expect(older.shortWindowSummary == nil)
+}
+
 @Test func dashboardSnapshotDecodesProviderWindowsAndOperationalState() throws {
     let data = Data(#"""
     {

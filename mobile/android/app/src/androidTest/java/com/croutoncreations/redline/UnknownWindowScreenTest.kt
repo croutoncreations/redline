@@ -72,6 +72,40 @@ class UnknownWindowScreenTest {
         }
     }
 
+    /**
+     * The state from the report: an untouched Claude five hour window. It is
+     * full, so it must read as full, not as "not available", and it must say
+     * the clock starts on first use rather than invent a reset time.
+     */
+    @Test
+    fun showsAnUnstartedWindowAsFull() {
+        val claude = ProviderUsage(
+            id = "claude-main",
+            provider = "claude",
+            sourceLabel = "openusage source · 0/1 active · sampled 7m ago",
+            session = Window(remainingPercent = 100, notStarted = true),
+            weekly = Window(remainingPercent = 87, resetsInSeconds = 403_200),
+        )
+        compose.setContent {
+            UsageScreen(
+                state = UsageUiState(
+                    view = UsageView(providers = listOf(claude)),
+                    live = LiveState.LIVE,
+                ),
+                onRetry = {},
+            )
+        }
+
+        compose.onNodeWithText("5-hour window").assertIsDisplayed()
+        compose.onNodeWithText("100% left").assertIsDisplayed()
+        compose.onNodeWithText("Starts on first use · resets 5h after").assertIsDisplayed()
+        compose.onNodeWithText("not available").assertDoesNotExist()
+
+        if (InstrumentationRegistry.getArguments().getString("holdForScreenshot") != null) {
+            Thread.sleep(20_000)
+        }
+    }
+
     @Test
     fun showsTheWindowAsUnavailableRatherThanHidingIt() {
         compose.setContent {
