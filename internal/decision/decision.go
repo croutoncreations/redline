@@ -161,6 +161,12 @@ func (s UsageSnapshot) Validate() error {
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
 	}
+	if s.ShortWindowNotStarted && (s.Short != nil || s.ShortWindowUnavailable) {
+		// Not started means untouched and full; it cannot coexist with a
+		// timed window or an unreadable one, and every surface would draw a
+		// full bar over whichever of those was true.
+		return fmt.Errorf("a not-started short window cannot also be timed or unavailable")
+	}
 	if s.Short != nil {
 		if s.Short.ResetsAt.IsZero() {
 			return fmt.Errorf("short-window reset timestamp is required")

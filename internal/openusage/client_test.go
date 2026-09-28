@@ -111,6 +111,61 @@ func TestParseReportsAnUnusedShortWindowAsNotStarted(t *testing.T) {
 	}
 }
 
+// "Not started" is a claim that nothing has been used, so it needs the
+// provider to have said so. Anything weaker -- no used field at all, or usage
+// too small to survive the remaining-fraction division -- is a resetless window
+// with unknown or nonzero use, which is unavailable, not full.
+func TestParseRequiresAnExplicitZeroToCallAWindowNotStarted(t *testing.T) {
+	cases := map[string]string{
+		"used missing":        `{"type":"progress","label":"Session","limit":100,"periodDurationMs":18000000,"resetsAt":null}`,
+		"used null":           `{"type":"progress","label":"Session","used":null,"limit":100,"periodDurationMs":18000000,"resetsAt":null}`,
+		"tiny positive usage": `{"type":"progress","label":"Session","used":1e-17,"limit":100,"periodDurationMs":18000000,"resetsAt":null}`,
+	}
+	for name, session := range cases {
+		t.Run(name, func(t *testing.T) {
+			payload := `{"providerId":"claude","fetchedAt":"2026-07-25T23:00:00Z","lines":[` + session + `,
+			  {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}]}`
+			got, err := openusage.Parse([]byte(payload), "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShortWindowNotStarted || !got.ShortWindowUnavailable {
+				t.Fatalf("notStarted=%v unavailable=%v, want unavailable only", got.ShortWindowNotStarted, got.ShortWindowUnavailable)
+			}
+		})
+	}
+}
+
+// Two account short-window lines that disagree must not produce a snapshot
+// that is both "not started" and "unavailable" -- every surface would show
+// the full bar. Unknown wins; so does a real timed window.
+func TestParseNeverReportsAConflictingShortWindowAsNotStarted(t *testing.T) {
+	cases := map[string]string{
+		"unused then used": `{"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":null},
+		  {"type":"progress","label":"5-hour","used":30,"limit":100,"periodDurationMs":18000000,"resetsAt":null}`,
+		"used then unused": `{"type":"progress","label":"5-hour","used":30,"limit":100,"periodDurationMs":18000000,"resetsAt":null},
+		  {"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":null}`,
+		"unused beside a timed window": `{"type":"progress","label":"Session","used":0,"limit":100,"periodDurationMs":18000000,"resetsAt":null},
+		  {"type":"progress","label":"5-hour","used":30,"limit":100,"periodDurationMs":18000000,"resetsAt":"2026-07-26T01:00:00Z"}`,
+	}
+	for name, sessions := range cases {
+		t.Run(name, func(t *testing.T) {
+			payload := `{"providerId":"claude","fetchedAt":"2026-07-25T23:00:00Z","lines":[` + sessions + `,
+			  {"type":"progress","label":"Weekly","used":4,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-07-31T17:00:00Z"}]}`
+			got, err := openusage.Parse([]byte(payload), "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShortWindowNotStarted {
+				t.Fatalf("conflicting windows reported as not started: unavailable=%v short=%#v", got.ShortWindowUnavailable, got.Short)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("resolved snapshot must be valid: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseOmitsOptionalShortWindowWithoutReset(t *testing.T) {
 	payload := `{
       "providerId":"claude",

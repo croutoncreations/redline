@@ -79,13 +79,15 @@ type providerPayload struct {
 }
 
 type usageLine struct {
-	Type             string  `json:"type"`
-	Label            string  `json:"label"`
-	Value            string  `json:"value"`
-	Used             float64 `json:"used"`
-	Limit            float64 `json:"limit"`
-	ResetsAt         string  `json:"resetsAt"`
-	PeriodDurationMS int64   `json:"periodDurationMs"`
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	Value string `json:"value"`
+	// A pointer so "used 0" can be told apart from no used field at all:
+	// only the former says a window is untouched (see ShortWindowNotStarted).
+	Used             *float64 `json:"used"`
+	Limit            float64  `json:"limit"`
+	ResetsAt         string   `json:"resetsAt"`
+	PeriodDurationMS int64    `json:"periodDurationMs"`
 }
 
 func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
@@ -163,7 +165,10 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
 		}
-		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" && scope == "account" && remaining == 1 {
+		// Tested on the reported number, not the remaining fraction: a tiny
+		// nonzero use can round 1-used/limit to exactly 1, and a missing used
+		// field defaults to zero there. Neither says the window is untouched.
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" && scope == "account" && line.Used != nil && *line.Used == 0 {
 			// Entirely unused: the provider starts a five hour window's clock
 			// on first use, so an untouched window has no reset time yet.
 			// That is a known state -- all of it is available -- not a gap,
@@ -223,6 +228,12 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 			weeklyFound = true
 		}
 	}
+	if snapshot.ShortWindowNotStarted && (snapshot.Short != nil || snapshot.ShortWindowUnavailable) {
+		// More than one account short-window line, and they disagree. A timed
+		// window is real data and an unknown one is unknown; either beats
+		// "untouched", which would draw a full bar over usage that exists.
+		snapshot.ShortWindowNotStarted = false
+	}
 	if !weeklyFound {
 		return decision.UsageSnapshot{}, fmt.Errorf(
 			"provider %q is missing required weekly usage window",
@@ -264,10 +275,14 @@ func remainingFraction(line usageLine) (float64, error) {
 	if line.Limit <= 0 {
 		return 0, fmt.Errorf("limit must be greater than zero")
 	}
-	if line.Used < 0 || line.Used > line.Limit {
+	used := 0.0
+	if line.Used != nil {
+		used = *line.Used
+	}
+	if used < 0 || used > line.Limit {
 		return 0, fmt.Errorf("used must be between zero and limit")
 	}
-	return 1 - line.Used/line.Limit, nil
+	return 1 - used/line.Limit, nil
 }
 
 func parseTime(name, value string) (time.Time, error) {

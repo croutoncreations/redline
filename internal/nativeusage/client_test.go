@@ -81,6 +81,34 @@ func TestClaudeNativeKeepsTheSnapshotWhenAUsedWindowHasNoReset(t *testing.T) {
 	}
 }
 
+// "Not started" needs the provider to have said zero. An empty or null
+// utilization is unknown use, and a resetless window with unknown use is
+// unavailable -- never a full bar.
+func TestClaudeNativeRequiresAnExplicitZeroToCallAWindowNotStarted(t *testing.T) {
+	for name, fiveHour := range map[string]string{
+		"empty object":     `{}`,
+		"null utilization": `{"utilization":null,"resets_at":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"five_hour":` + fiveHour + `,"seven_day":{"utilization":13,"resets_at":"2026-10-02T17:00:00Z"}}`))
+			}))
+			defer server.Close()
+			client := nativeusage.Client{
+				HTTPClient: server.Client(), Credentials: staticCredentials{token: "claude-token"},
+				ClaudeUsageURL: server.URL, Now: func() time.Time { return time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC) },
+			}
+			got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShortWindowNotStarted || !got.ShortWindowUnavailable {
+				t.Fatalf("notStarted=%v unavailable=%v, want unavailable only", got.ShortWindowNotStarted, got.ShortWindowUnavailable)
+			}
+		})
+	}
+}
+
 func TestClaudeNativeInfersMissingFableResetFromAccountWeeklyWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0,"resets_at":"2026-07-24T22:00:00Z"},"seven_day":{"utilization":0,"resets_at":"2026-07-31T17:00:00Z"},"limits":[{"kind":"weekly_scoped","percent":0,"scope":{"model":{"display_name":"Fable"}}}]}`))

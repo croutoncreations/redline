@@ -802,30 +802,60 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		Source:                 "openusage",
 		Confidence:             "medium",
 		ShortWindowUnavailable: true,
-		// Contradicts ShortWindowUnavailable on purpose: this fixture proves
-		// each column round-trips independently, not a realistic snapshot.
-		ShortWindowNotStarted: true,
-		BankedResets:          &resets,
-		BankedResetsExpireAt:  &resetsExpire,
+		BankedResets:           &resets,
+		BankedResetsExpireAt:   &resetsExpire,
 	}
+	// ShortWindowNotStarted cannot be valid beside a timed or unavailable
+	// window (UsageSnapshot.Validate), so it rides a second snapshot. Between
+	// the two, every field is set; each is checked on the snapshot that sets it.
+	notStarted := full
+	notStarted.ObservedAt = base.Add(-time.Minute)
+	notStarted.Short, notStarted.ShortWindowUnavailable, notStarted.ShortWindowNotStarted = nil, false, true
+	onlyOnNotStarted := map[string]bool{"ShortWindowNotStarted": true}
 
 	// Fail loudly if a new field is added and this fixture was not updated,
 	// rather than quietly testing a zero value.
-	value := reflect.ValueOf(full)
+	value, other := reflect.ValueOf(full), reflect.ValueOf(notStarted)
 	for i := 0; i < value.NumField(); i++ {
 		field := value.Type().Field(i)
 		if !field.IsExported() {
 			continue
 		}
-		if value.Field(i).IsZero() {
+		if value.Field(i).IsZero() && other.Field(i).IsZero() {
 			t.Fatalf("fixture leaves %s at its zero value; set it so the round trip is actually tested", field.Name)
+		}
+		if value.Field(i).IsZero() != onlyOnNotStarted[field.Name] {
+			t.Fatalf("%s: set it on the main fixture, or list it in onlyOnNotStarted", field.Name)
 		}
 	}
 
-	if err := db.SaveSnapshot(context.Background(), full, nil); err != nil {
-		t.Fatal(err)
+	for _, snapshot := range []decision.UsageSnapshot{notStarted, full} {
+		if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 
+	// ListSnapshots is oldest first: notStarted, observed a minute earlier,
+	// then full. LatestSnapshot returns full.
+	all, err := db.ListSnapshots(context.Background(), "codex", 10)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("ListSnapshots = %d snapshots, %v; want 2", len(all), err)
+	}
+	if !all[0].ObservedAt.Equal(notStarted.ObservedAt) || !all[0].ShortWindowNotStarted {
+		t.Error("ListSnapshots dropped ShortWindowNotStarted: it was set on write and came back false")
+	}
+	// LatestSnapshot scans separately; give it a not-started row to return.
+	notStartedOnly, err := store.Open(filepath.Join(t.TempDir(), "not-started.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notStartedOnly.Close()
+	if err := notStartedOnly.SaveSnapshot(context.Background(), notStarted, nil); err != nil {
+		t.Fatal(err)
+	}
+	if latest, _, err := notStartedOnly.LatestSnapshot(context.Background(), "codex"); err != nil || !latest.ShortWindowNotStarted {
+		t.Errorf("LatestSnapshot dropped ShortWindowNotStarted: got %v, err %v", latest.ShortWindowNotStarted, err)
+	}
 	for _, read := range []struct {
 		name string
 		get  func() (decision.UsageSnapshot, error)
@@ -842,7 +872,7 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 			if len(all) == 0 {
 				return decision.UsageSnapshot{}, fmt.Errorf("no snapshots returned")
 			}
-			return all[0], nil
+			return all[len(all)-1], nil
 		}},
 	} {
 		got, err := read.get()
@@ -855,7 +885,7 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 			if !field.IsExported() {
 				continue
 			}
-			if gotValue.Field(i).IsZero() {
+			if gotValue.Field(i).IsZero() && !onlyOnNotStarted[field.Name] {
 				t.Errorf("%s dropped %s: it was set on write and came back as its zero value",
 					read.name, field.Name)
 			}
