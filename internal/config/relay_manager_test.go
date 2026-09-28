@@ -145,6 +145,38 @@ func TestRelayManagerSelfHostedConnectionIsProvenNotConfigured(t *testing.T) {
 	}
 }
 
+// A self-hosted relay needs no entitlement. With the entitlement controller
+// running -- as it always is in the service -- configuring one, or restarting
+// with one already configured, must stay dialable rather than be published as
+// "unavailable" for lacking an entitlement it never needs.
+func TestRelayManagerSelfHostedStaysDialableWithTheEntitlementControllerRunning(t *testing.T) {
+	cases := map[string]ResolvedRelay{
+		"configured from off": {RelayManagedState: RelayManagedState{Mode: RelayModeOff}, Readiness: RelayReadinessOff},
+		"restarted self hosted": {
+			RelayManagedState: RelayManagedState{Mode: RelayModeSelfHosted, URL: "https://relay.example", SessionID: "managed-session-abcdefghij", Generation: 1},
+			Readiness:         RelayReadinessSelfHosted, Dial: true,
+		},
+	}
+	for name, initial := range cases {
+		t.Run(name, func(t *testing.T) {
+			manager, cancel := newTestRelayManager(t, initial, &managerLicenseStore{}, nil, true)
+			defer cancel()
+			if initial.Mode == RelayModeOff {
+				if _, err := manager.Configure(context.Background(), RelayConfigureRequest{Mode: RelayModeSelfHosted, URL: "https://relay.example"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if got := manager.Current(); got.Readiness != RelayReadinessSelfHosted || !got.CanDial() {
+					t.Fatalf("self-hosted relay published as %q (dial=%v)", got.Readiness, got.CanDial())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
 func TestRelayManagerPresentationOnlyChangePreservesLiveConnection(t *testing.T) {
 	licenses := &managerLicenseStore{value: "hosted-secret"}
 	initial := ResolvedRelay{

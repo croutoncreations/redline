@@ -849,7 +849,9 @@ func (c *EntitlementController) Run(ctx context.Context) {
 		// handling may all have crossed the raw signed expiration boundary.
 		now = c.opts.Clock.Now()
 		valid = authorityGeneration == generation && current.ValidAt(relay.SessionSID(base.SessionID), now)
-		if base.CanDial() && !valid {
+		// Only hosted dialing rests on an entitlement. A self-hosted relay is
+		// dialable with none, so "no valid entitlement" is not expiry for it.
+		if base.Mode == RelayModeHosted && base.CanDial() && !valid {
 			publishUnavailable(c.opts.Coordinator, &base, now)
 		}
 		if valid && base.CanDial() {
