@@ -29,7 +29,6 @@ class UnpairOnDeviceTest {
             "https://relay.example.com",
             "ZGVza3RvcC1rZXk=",
             "session-abcdefghij0123",
-            "",
         )
         assertTrue("setup should leave the device paired", settings.isPaired)
 
@@ -53,7 +52,7 @@ class UnpairOnDeviceTest {
     fun pairingAgainAfterClearingWorks() {
         val settings = RedlineSettings(context)
         settings.update("https://old.example.ts.net", "old-token")
-        settings.updateRelay("https://old-relay.example.com", "b2xkLWtleQ==", "old-session-01234567", "")
+        settings.updateRelay("https://old-relay.example.com", "b2xkLWtleQ==", "old-session-01234567")
         settings.clear()
 
         settings.update("https://new.example.ts.net", "new-token")
