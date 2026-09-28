@@ -294,7 +294,19 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		return decision.UsageSnapshot{}, fmt.Errorf("decode native claude usage: %w", err)
 	}
 	snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native", Confidence: "high"}
-	if payload.FiveHour != nil {
+	if payload.FiveHour != nil && strings.TrimSpace(payload.FiveHour.ResetsAt) == "" {
+		// Anthropic starts a five hour window's clock on first use, so an
+		// untouched window arrives with no reset. That is full, not broken:
+		// report it as not started and invent no reset. A resetless window
+		// with usage is genuinely unreadable; keep the rest of the snapshot
+		// and say so, matching the OpenUsage collector.
+		if payload.FiveHour.Utilization == 0 {
+			snapshot.ShortWindowNotStarted = true
+		} else {
+			snapshot.ShortWindowUnavailable = true
+			snapshot.Confidence = "medium"
+		}
+	} else if payload.FiveHour != nil {
 		window, allowance, err := normalizedWindow("session", "Session", "short", payload.FiveHour.Utilization, payload.FiveHour.ResetsAt, 5*time.Hour)
 		if err != nil {
 			return decision.UsageSnapshot{}, err

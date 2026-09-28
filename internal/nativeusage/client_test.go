@@ -33,6 +33,54 @@ func TestClaudeNativeSnapshotMatchesProviderWindows(t *testing.T) {
 	}
 }
 
+// The native source sees the same thing OpenUsage does: an untouched five hour
+// window has no reset, because Anthropic starts the clock on first use. That
+// must be reported as not started, not fail the whole Claude snapshot and not
+// be given an invented reset.
+func TestClaudeNativeReportsAnUnusedFiveHourWindowAsNotStarted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":13,"resets_at":"2026-10-02T17:00:00Z"}}`))
+	}))
+	defer server.Close()
+	client := nativeusage.Client{
+		HTTPClient: server.Client(), Credentials: staticCredentials{token: "claude-token"},
+		ClaudeUsageURL: server.URL, Now: func() time.Time { return time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC) },
+	}
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatalf("an unused five hour window must not fail the snapshot: %v", err)
+	}
+	if !got.ShortWindowNotStarted || got.ShortWindowUnavailable {
+		t.Fatalf("not started=%v unavailable=%v", got.ShortWindowNotStarted, got.ShortWindowUnavailable)
+	}
+	if got.Short != nil {
+		t.Fatalf("no reset may be invented: %#v", got.Short)
+	}
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatal("a not-started window must not become a timed allowance")
+	}
+}
+
+// A partly used window with no reset is genuinely unreadable: keep the rest of
+// the snapshot and say the window is unavailable, rather than failing it all.
+func TestClaudeNativeKeepsTheSnapshotWhenAUsedWindowHasNoReset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"five_hour":{"utilization":30,"resets_at":null},"seven_day":{"utilization":13,"resets_at":"2026-10-02T17:00:00Z"}}`))
+	}))
+	defer server.Close()
+	client := nativeusage.Client{
+		HTTPClient: server.Client(), Credentials: staticCredentials{token: "claude-token"},
+		ClaudeUsageURL: server.URL, Now: func() time.Time { return time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC) },
+	}
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatalf("a resetless used window must not fail the snapshot: %v", err)
+	}
+	if !got.ShortWindowUnavailable || got.ShortWindowNotStarted || got.Short != nil {
+		t.Fatalf("unavailable=%v notStarted=%v short=%#v", got.ShortWindowUnavailable, got.ShortWindowNotStarted, got.Short)
+	}
+}
+
 func TestClaudeNativeInfersMissingFableResetFromAccountWeeklyWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0,"resets_at":"2026-07-24T22:00:00Z"},"seven_day":{"utilization":0,"resets_at":"2026-07-31T17:00:00Z"},"limits":[{"kind":"weekly_scoped","percent":0,"scope":{"model":{"display_name":"Fable"}}}]}`))

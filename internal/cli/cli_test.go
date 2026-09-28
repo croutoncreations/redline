@@ -563,6 +563,22 @@ func TestStatusShowsSupplementalModelAllowance(t *testing.T) {
 	}
 }
 
+// An untouched Claude five hour window is full with no reset yet. "unrestricted"
+// would say Claude has no such limit, which is the misreading this state fixes.
+func TestStatusShowsAnUnstartedFiveHourWindowAsFull(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+          "provider":"claude","observed_at":"2026-09-28T00:27:54Z","short_window_not_started":true,
+          "weekly":{"remaining":0.87,"resets_at":"2026-10-02T17:00:00Z"},"source":"openusage"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "status", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), "5-hour 100% remaining (starts on first use)") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestPauseCommandConsumesServiceAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/providers/codex-main/pause" {

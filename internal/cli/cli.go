@@ -721,6 +721,9 @@ func runStatus(client apiclient.Client, args []string, stdout, stderr io.Writer)
 		short := "unrestricted"
 		if snapshot.Short != nil {
 			short = percent(snapshot.Short.Remaining) + " remaining"
+		} else if snapshot.ShortWindowNotStarted {
+			// Full: the provider starts the clock on first use.
+			short = "100% remaining (starts on first use)"
 		}
 		fmt.Fprintf(stdout, "%s: 5-hour %s, %s weekly remaining (observed %s)\n",
 			snapshot.Provider, short, percent(snapshot.Weekly.Remaining), snapshot.ObservedAt.Format(time.RFC3339))
@@ -1339,7 +1342,9 @@ func writeDecisionText(w io.Writer, response decisionResponse) {
 		{"Weekly reset", s.Weekly.ResetsAt.Format(time.RFC3339)},
 		{"Decision mode", string(r.Mode)},
 	}
-	if s.Short == nil {
+	if s.Short == nil && s.ShortWindowNotStarted {
+		rows = append(rows, [2]string{"5-hour window", "100% remaining (starts on first use)"})
+	} else if s.Short == nil {
 		rows = append(rows, [2]string{"5-hour window", "unrestricted"})
 	} else {
 		rows = append(rows,
