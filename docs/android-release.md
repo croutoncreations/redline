@@ -82,15 +82,18 @@ This triggers `.github/workflows/android-release.yml`, which:
 1. Builds the Go core for Android with the pinned `gomobile` toolchain (the same build every
    `ci.yml` PR already exercises, run fresh here rather than reused, since this is a separate
    workflow).
-2. Derives `versionName` from the tag (`0.2.0`) and `versionCode` from minutes since the Unix
-   epoch, which is monotonic (a later release always gets a larger value, regardless of branch,
-   rerun, or repo history) and stays within Android's Int32 versionCode type and Play's
-   documented 2,100,000,000 ceiling until the year 5962 — the property the Play internal track
-   actually requires, and one a per-tag counter would not have across a rerun of the same tag.
-   The workflow rejects an out-of-range value before it ever reaches `bundleRelease`. (An
-   earlier draft used the GitHub Actions run id instead; that counter is global and unbounded
-   across the whole repository's workflow history, with no relationship to Play's ceiling, so a
-   sufficiently long-lived repository would eventually produce a versionCode Play rejects.)
+2. Derives `versionName` and `versionCode` with `scripts/android-release-version.sh`, tested by
+   `tests/android/release-version.sh` in CI:
+   - `versionName` is the tag's version (`0.2.0`), which must be a strict semantic version: no
+     leading zeros, no empty prerelease identifiers, no build metadata. `mobile-v01.2.3` or
+     `mobile-v1.2.3-..` fails the workflow instead of becoming a Play versionName.
+   - `versionCode` is seconds since 2023-11-14 (Unix time 1,700,000,000). Play requires every
+     upload to carry a strictly larger code than the last. This increases for any two releases,
+     including a rerun after an upload, unless they start in the same second. It also stays
+     above every code the earlier minutes-since-epoch scheme produced, and below Play's
+     2,100,000,000 ceiling until about 2090. An out-of-range value fails before `bundleRelease`.
+     (Minutes repeated for two releases in one minute; the GitHub run id is unbounded and has
+     no relationship to Play's ceiling.)
 3. Runs the same guards and unit tests `ci.yml`'s `android` job runs
    (`checkNoTestOnlyDeclarations`, `checkCoreFreshness`, `testDebugUnitTest`) before
    assembling anything, so a broken build never reaches signing.

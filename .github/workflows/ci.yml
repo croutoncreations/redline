@@ -84,6 +84,8 @@ jobs:
       # exactly that -- checkCoreFreshness and checkNoTestOnlyDeclarations --
       # and until this job they ran only on a developer's machine, only when
       # that developer happened to build the APK.
+      - name: Test Android release versioning
+        run: tests/android/release-version.sh
       - name: Install gomobile at the version go.mod pins
         run: |
           go install golang.org/x/mobile/cmd/gomobile
