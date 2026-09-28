@@ -67,6 +67,7 @@ FROM (
 			}
 			snapshot.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: reset}
 		}
+		dropContradictoryNotStarted(&snapshot)
 		snapshots = append(snapshots, snapshot)
 		ids = append(ids, id)
 	}

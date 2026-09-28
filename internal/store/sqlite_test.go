@@ -432,6 +432,62 @@ func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
 	}
 }
 
+// A row written before UsageSnapshot.Validate forbade it can say a short window
+// is both not started and timed or unavailable. Loaded as-is, the decision
+// engine rejects it and dispatch pauses until a new sample arrives. Both read
+// paths drop the weaker "not started" claim instead, so the row still loads
+// as a valid snapshot.
+func TestContradictoryStoredShortWindowLoadsAsAValidSnapshot(t *testing.T) {
+	for name, contradiction := range map[string]string{
+		"not started and unavailable": `UPDATE usage_snapshots SET short_window_not_started = 1, short_window_unavailable = 1`,
+		"not started and timed":       `UPDATE usage_snapshots SET short_window_not_started = 1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "redline.db")
+			db, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			observed := time.Date(2026, 9, 27, 17, 0, 0, 0, time.UTC)
+			snapshot := usageSnapshot(observed, .52)
+			if name == "not started and unavailable" {
+				snapshot.Short = nil
+			} else if snapshot.Short == nil {
+				t.Fatal("fixture must carry a timed short window")
+			}
+			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			if _, err := raw.Exec(contradiction); err != nil {
+				t.Fatal(err)
+			}
+
+			latest, _, err := db.LatestSnapshot(t.Context(), snapshot.Provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed, err := db.ListSnapshots(t.Context(), snapshot.Provider, 10)
+			if err != nil || len(listed) != 1 {
+				t.Fatalf("ListSnapshots = %d, %v", len(listed), err)
+			}
+			for path, got := range map[string]decision.UsageSnapshot{"LatestSnapshot": latest, "ListSnapshots": listed[0]} {
+				if got.ShortWindowNotStarted {
+					t.Errorf("%s kept the contradictory not-started flag", path)
+				}
+				if err := got.Validate(); err != nil {
+					t.Errorf("%s returned a snapshot the decision engine rejects: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")

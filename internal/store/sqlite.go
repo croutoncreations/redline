@@ -993,6 +993,7 @@ FROM usage_snapshots WHERE provider = ?`
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
+	dropContradictoryNotStarted(&s)
 	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
@@ -1001,6 +1002,19 @@ FROM usage_snapshots WHERE provider = ?`
 		return decision.UsageSnapshot{}, nil, err
 	}
 	return s, raw, nil
+}
+
+// dropContradictoryNotStarted clears a "not started" flag stored beside a
+// timed or unavailable short window. SaveSnapshot has refused that since
+// UsageSnapshot.Validate forbade it, but rows written before then can still
+// carry it, and the decision engine would reject the snapshot and pause
+// dispatch until a new sample arrived. The other state is the stronger
+// evidence -- real data, or knowing the window is unreadable -- so "not
+// started" is the claim that goes.
+func dropContradictoryNotStarted(s *decision.UsageSnapshot) {
+	if s.ShortWindowNotStarted && (s.Short != nil || s.ShortWindowUnavailable) {
+		s.ShortWindowNotStarted = false
+	}
 }
 
 func (d *DB) loadAllowances(ctx context.Context, snapshotID int64) ([]decision.AllowanceWindow, error) {
