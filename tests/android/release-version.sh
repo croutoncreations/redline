@@ -9,7 +9,7 @@ failures=0
 
 accepts() {
   local tag="$1" want="$2" out
-  if ! out="$(REDLINE_RELEASE_NOW=1790563986 "${script}" "${tag}" 2>&1)"; then
+  if ! out="$(REDLINE_RELEASE_NOW=1790563986 "${script}" "${tag}" </dev/null 2>&1)"; then
     printf 'FAIL: %s rejected: %s\n' "${tag}" "${out}" >&2; failures=$((failures + 1)); return
   fi
   if ! grep -qx "name=${want}" <<<"${out}"; then
@@ -19,12 +19,12 @@ accepts() {
 
 rejects() {
   local tag="$1"
-  if REDLINE_RELEASE_NOW=1790563986 "${script}" "${tag}" >/dev/null 2>&1; then
+  if REDLINE_RELEASE_NOW=1790563986 "${script}" "${tag}" </dev/null >/dev/null 2>&1; then
     printf 'FAIL: %s was accepted\n' "${tag}" >&2; failures=$((failures + 1))
   fi
 }
 
-code_at() { REDLINE_RELEASE_NOW="$1" "${script}" mobile-v1.2.3 | sed -n 's/^code=//p'; }
+code_at() { REDLINE_RELEASE_NOW="$1" "${script}" mobile-v1.2.3 </dev/null | sed -n 's/^code=//p'; }
 
 # Semantic versions, per semver.org: no leading zeros in numeric parts or
 # numeric prerelease identifiers, and no empty prerelease identifiers.
@@ -51,17 +51,45 @@ if (( first <= 1790563986 / 60 )); then
   printf 'FAIL: code %s is not above the old minute-based code\n' "${first}" >&2; failures=$((failures + 1))
 fi
 # Play's ceiling is 2,100,000,000: refuse rather than upload past it.
-if REDLINE_RELEASE_NOW=4000000000 "${script}" mobile-v1.2.3 >/dev/null 2>&1; then
+if REDLINE_RELEASE_NOW=4000000000 "${script}" mobile-v1.2.3 </dev/null >/dev/null 2>&1; then
   printf 'FAIL: a code past the Play ceiling was accepted\n' >&2; failures=$((failures + 1))
 fi
 
 # An override too large for bash arithmetic must be refused, not wrap around
 # into a code that passes the range check: 2^64 + 1,700,001,000 wraps to 1000.
 for bad_now in 18446744075409552616 99999999999999999999 abc; do
-  if REDLINE_RELEASE_NOW="${bad_now}" "${script}" mobile-v1.2.3 >/dev/null 2>&1; then
+  if REDLINE_RELEASE_NOW="${bad_now}" "${script}" mobile-v1.2.3 </dev/null >/dev/null 2>&1; then
     printf 'FAIL: REDLINE_RELEASE_NOW=%q was accepted\n' "${bad_now}" >&2; failures=$((failures + 1))
   fi
 done
+
+# Only the newest mobile-v* tag may release. A rerun of an older tag would
+# otherwise get a newer time-derived versionCode and replace a newer build as
+# the latest on Play. Tags arrive on stdin, one per line (git tag -l output).
+newest() { REDLINE_RELEASE_NOW=1790563986 "${script}" "$1" <<<"$2" >/dev/null 2>&1; }
+check_newest() {
+  local verdict="$1" tag="$2" existing="$3"
+  if newest "${tag}" "${existing}"; then got=allowed; else got=refused; fi
+  if [[ "${got}" != "${verdict}" ]]; then
+    printf 'FAIL: %s with existing tags [%s] was %s, want %s\n' "${tag}" "${existing//$'\n'/ }" "${got}" "${verdict}" >&2
+    failures=$((failures + 1))
+  fi
+}
+check_newest allowed mobile-v0.3.0 $'mobile-v0.2.0\nmobile-v0.3.0'
+check_newest refused mobile-v0.2.0 $'mobile-v0.2.0\nmobile-v0.3.0'
+check_newest allowed mobile-v0.3.0 ''
+# Numeric, not lexical: 0.10.0 is newer than 0.9.0.
+check_newest allowed mobile-v0.10.0 $'mobile-v0.9.0\nmobile-v0.10.0'
+check_newest refused mobile-v0.9.0 $'mobile-v0.9.0\nmobile-v0.10.0'
+# A release outranks its own prereleases, and rc.10 outranks rc.9.
+check_newest refused mobile-v1.0.0-rc.1 $'mobile-v1.0.0-rc.1\nmobile-v1.0.0'
+check_newest allowed mobile-v1.0.0 $'mobile-v1.0.0-rc.1\nmobile-v1.0.0'
+check_newest refused mobile-v1.0.0-rc.9 $'mobile-v1.0.0-rc.9\nmobile-v1.0.0-rc.10'
+check_newest refused mobile-v1.0.0-alpha $'mobile-v1.0.0-alpha\nmobile-v1.0.0-beta'
+# Numeric identifiers rank below alphanumeric ones.
+check_newest refused mobile-v1.0.0-1 $'mobile-v1.0.0-1\nmobile-v1.0.0-alpha'
+# A malformed tag elsewhere in the repo is ignored, not a reason to refuse.
+check_newest allowed mobile-v0.3.0 $'mobile-v0.3.0\nmobile-v9.9\nmobile-vjunk'
 
 if (( failures > 0 )); then
   printf '%d release-version check(s) failed.\n' "${failures}" >&2

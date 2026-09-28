@@ -94,6 +94,14 @@ This triggers `.github/workflows/android-release.yml`, which:
      2,100,000,000 ceiling until about 2090. An out-of-range value fails before `bundleRelease`.
      (Minutes repeated for two releases in one minute; the GitHub run id is unbounded and has
      no relationship to Play's ceiling.)
+   - Only the newest `mobile-v*` tag, by semver precedence, may release. Because the code comes
+     from the clock rather than the tag, rerunning an older tag would give it a newer code than
+     a release already on Play, and the older build would become the latest. The workflow
+     refuses that. **To ship a missed or cancelled release, push a new tag. Do not rerun an
+     old one.**
+   - Releases run one at a time. GitHub keeps only one waiting run, so a tag pushed while one
+     release runs and another waits cancels the waiting one. The rule above makes that safe.
+     The newest tag still ships, and the cancelled one would be refused anyway.
 3. Runs the same guards and unit tests `ci.yml`'s `android` job runs
    (`checkNoTestOnlyDeclarations`, `checkCoreFreshness`, `testDebugUnitTest`) before
    assembling anything, so a broken build never reaches signing.

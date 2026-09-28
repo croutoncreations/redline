@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Prints the versionName and versionCode an Android release is built with,
-# derived from its mobile-v<version> tag, as GITHUB_OUTPUT lines:
+# derived from its mobile-v<version> tag, as GITHUB_OUTPUT lines. The
+# repository's mobile-v* tags are read from stdin (git tag -l 'mobile-v*'),
+# and anything but the newest is refused; see below.
 #
 #   name=<version>
 #   code=<versionCode>
@@ -27,6 +29,68 @@ if [[ ! "${version}" =~ ^${numeric}\.${numeric}\.${numeric}(-${identifier}(\.${i
   printf 'tag version %q is not a valid semantic version (expected mobile-vMAJOR.MINOR.PATCH[-prerelease])\n' "${version}" >&2
   exit 1
 fi
+
+# semver_compare A B prints -1, 0 or 1 as version A sorts before, equal to,
+# or after B, by semver.org precedence: numeric core parts compared as
+# numbers, a version with a prerelease below the same version without, and
+# prerelease identifiers compared one by one -- numeric ones as numbers and
+# below alphanumeric ones, which compare as ASCII text.
+semver_compare() {
+  local a_core="${1%%-*}" b_core="${2%%-*}" a_pre="" b_pre=""
+  [[ "$1" == *-* ]] && a_pre="${1#*-}"
+  [[ "$2" == *-* ]] && b_pre="${2#*-}"
+  local -a a_parts b_parts
+  IFS=. read -r -a a_parts <<<"${a_core}"
+  IFS=. read -r -a b_parts <<<"${b_core}"
+  local i
+  for i in 0 1 2; do
+    if (( 10#${a_parts[i]} != 10#${b_parts[i]} )); then
+      (( 10#${a_parts[i]} < 10#${b_parts[i]} )) && echo -1 || echo 1
+      return
+    fi
+  done
+  if [[ -z "${a_pre}" || -z "${b_pre}" ]]; then
+    if [[ "${a_pre}" == "${b_pre}" ]]; then echo 0
+    elif [[ -z "${a_pre}" ]]; then echo 1
+    else echo -1
+    fi
+    return
+  fi
+  IFS=. read -r -a a_parts <<<"${a_pre}"
+  IFS=. read -r -a b_parts <<<"${b_pre}"
+  for (( i = 0; i < ${#a_parts[@]} && i < ${#b_parts[@]}; i++ )); do
+    local x="${a_parts[i]}" y="${b_parts[i]}"
+    [[ "${x}" == "${y}" ]] && continue
+    if [[ "${x}" =~ ^[0-9]+$ && "${y}" =~ ^[0-9]+$ ]]; then
+      (( 10#${x} < 10#${y} )) && echo -1 || echo 1
+    elif [[ "${x}" =~ ^[0-9]+$ ]]; then echo -1
+    elif [[ "${y}" =~ ^[0-9]+$ ]]; then echo 1
+    elif [[ "${x}" < "${y}" ]]; then echo -1
+    else echo 1
+    fi
+    return
+  done
+  if (( ${#a_parts[@]} == ${#b_parts[@]} )); then echo 0
+  elif (( ${#a_parts[@]} < ${#b_parts[@]} )); then echo -1
+  else echo 1
+  fi
+}
+
+# Only the newest tag may release. versionCode comes from the clock, not the
+# tag, so rerunning an older tag -- one displaced from the release queue, say
+# -- would give it a newer code than a release already on Play, and the older
+# build would become the latest. Refusing here means the fix for a missed
+# release is always a new tag. Malformed tags elsewhere in the repository are
+# not this release's business and are skipped.
+while IFS= read -r other || [[ -n "${other}" ]]; do
+  other_version="${other#mobile-v}"
+  [[ "${other_version}" == "${other}" ]] && continue
+  [[ "${other_version}" =~ ^${numeric}\.${numeric}\.${numeric}(-${identifier}(\.${identifier})*)?$ ]] || continue
+  if [[ "$(semver_compare "${version}" "${other_version}")" == -1 ]]; then
+    printf 'refusing to release %s: %s is newer. Release a new tag instead; see docs/android-release.md.\n' "${tag}" "${other}" >&2
+    exit 1
+  fi
+done
 
 # Play requires every upload for an application id to carry a strictly larger
 # versionCode than the last. Seconds since a fixed epoch (2023-11-14, Unix

@@ -25,7 +25,9 @@ permissions:
 # wrong order: the newer code uploads first and Play then rejects the older
 # one. A running release is never cancelled. GitHub holds only one pending
 # run per group, though: a third tag pushed while one runs and one waits
-# replaces the waiting one, which then shows as cancelled and needs a rerun.
+# replaces the waiting one, which then shows as cancelled. Do not rerun it --
+# the version step refuses any tag but the newest, since a rerun would get a
+# newer versionCode than the release after it. Push a new tag instead.
 concurrency:
   group: android-release-com.croutoncreations.redline
   cancel-in-progress: false
@@ -41,6 +43,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Every tag, so the version step can refuse anything but the newest.
+          fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -56,7 +61,7 @@ jobs:
       # (run by CI) exercises them.
       - name: Derive versionName and versionCode from the tag
         id: version
-        run: ./scripts/android-release-version.sh "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+        run: git tag -l 'mobile-v*' | ./scripts/android-release-version.sh "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
 
       # The same silent-skip and stale-AAR failure modes the ci.yml android
       # job guards against apply here too: this is a separate workflow with
