@@ -206,10 +206,13 @@ jobs:
       - name: Cache Swift Package Manager dependencies
         uses: actions/cache@v4
         with:
-          path: ~/Library/Caches/org.swift.swiftpm
-          key: spm-${{ runner.os }}-${{ hashFiles('macos/Package.resolved') }}
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            macos/.build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('macos/Package.resolved') }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**/*.swift', 'macos/Tests/**/*.swift') }}
           restore-keys: |
-            spm-${{ runner.os }}-
+            spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('macos/Package.resolved') }}-
+            spm-${{ runner.os }}-${{ runner.arch }}-
       - name: Test native app
         run: swift test --package-path macos --disable-xctest
       - name: Test signing policy
