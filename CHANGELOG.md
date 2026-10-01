@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-01
+
+### Added
+
+- `redline demo serve --run-duration` keeps an admitted demo job in the running state for a set
+  time, and finished demo runs now carry a realistic transcript instead of a placeholder.
+- `SECURITY.md` with the supported reporting channels and scope, and a bug report issue form that
+  collects version, install method, OS, harness, and area.
+- `llms.txt` agent index linking the docs and launch post.
+
+### Fixed
+
+- The macOS app's dashboard window now shows JavaScript `confirm()` and `alert()` dialogs as
+  native sheets. Previously `WKWebView` suppressed them, so the Delete buttons for jobs, execution
+  profiles, and Hermes connections silently did nothing in the app. The web dashboard in a browser
+  was unaffected.
+- Dashboard dropdowns are now the same height as text fields; native `<select>` chrome made the
+  job and profile forms look misaligned, especially in WebKit.
+- `redline demo serve` no longer panics on startup comparing uncomparable usage sources.
+- Sparkle `appcast.xml` points each older DMG at its own release tag, so delta updates from
+  earlier versions download from the right place.
+- Relay state and usage lockout files written beside the database are ignored by git in a
+  checked-out working copy.
+
 ## [0.1.9] - 2026-09-25
 
 ### Added
