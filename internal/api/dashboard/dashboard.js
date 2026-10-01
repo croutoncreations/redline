@@ -326,6 +326,34 @@ function policyControl(item, provider) {
   const reserve = configured.rolling_reserve == null ? '' : ` · preserves ${percent(configured.rolling_reserve)}% of the current window`;
   return `<span class="policy-control"><label><span>Dispatch policy <i class="help" tabindex="0" data-help="Policies control how early Redline admits background work and how much short-window capacity it protects. Choose Default to follow YAML configuration.">?</i></span><select data-provider-policy="${escapeHTML(item.id)}" aria-label="${escapeHTML(title(provider))} dispatch policy"><option value=""${selected === '' ? ' selected' : ''}>Default · ${escapeHTML(title(defaultPolicy))}</option>${options}</select></label><small>Using ${escapeHTML(title(item.policy))} via ${escapeHTML(item.policy_source)}${escapeHTML(reserve)}</small></span>`;
 }
+const primerTime = (value, zone, weekday) => {
+  if (!value) return '—';
+  try { return new Intl.DateTimeFormat(undefined,{...(weekday ? {weekday:'short'} : {}),hour:'numeric',minute:'2-digit',timeZone:zone || undefined}).format(new Date(value)); }
+  catch { return shortTime(value); }
+};
+const primerClock = (value, zone) => primerTime(value, zone, true);
+const primerHour = (value, zone) => primerTime(value, zone, false);
+function primerOutcome(attempt) {
+  if (!attempt) return '';
+  if (attempt.outcome === 'fired') {
+    return {verified:'✓ opened a window',unverified:'⚠ sent, but no window opened',unknown:'sent, not confirmed',pending:'sent, confirming…'}[attempt.verification] || 'sent';
+  }
+  return {skipped:'skipped',failed:'✕ failed',running:'sending…'}[attempt.outcome] || attempt.outcome;
+}
+function primerSummary(item) {
+  const status = item.primer;
+  if (!status) return item.primer_error ? `<span class="primer-summary"><span class="primer-head"><span><b>Window primer</b><em>Unavailable</em></span></span><small class="primer-last failed">${escapeHTML(item.primer_error)}</small></span>` : '';
+  const settings = status.settings || {}, zone = status.timezone;
+  const on = settings.enabled;
+  const mode = settings.mode === 'reset' ? 'After every reset' : `At ${(settings.times || []).join(', ') || '—'}${settings.days?.length ? ` · ${settings.days.map(title).join(' ')}` : ''}`;
+  const next = on && status.next_ping_at ? `Next ping ${primerClock(status.next_ping_at, zone)}` : on ? 'No ping scheduled' : 'Off';
+  const unsupported = status.supported === false ? `<small class="primer-last unverified">${escapeHTML(status.unsupported_reason || 'Unsupported for this account.')}</small>` : '';
+  const forecast = on && status.forecast?.length
+    ? `<small class="primer-forecast">${status.forecast.slice(0,4).map(window => `${escapeHTML(primerHour(window.start, zone))}–${escapeHTML(primerHour(window.end, zone))}`).join(' · ')}</small>` : '';
+  const last = status.last_attempt;
+  const lastLine = last ? `<small class="primer-last ${escapeHTML(last.outcome)} ${escapeHTML(last.verification || '')}">Last ${escapeHTML(relative(last.started_at))}: ${escapeHTML(primerOutcome(last))}${last.reason ? ` — ${escapeHTML(last.reason)}` : ''}</small>` : '';
+  return `<span class="primer-summary${on ? ' on' : ''}"><span class="primer-head"><span><b>Window primer <i class="help" tabindex="0" data-help="Sends one tiny message so Claude's 5-hour window starts when you want it to. It skips when a window is already open or a Redline job is running on this account.">?</i></b><em>${escapeHTML(on ? mode : 'Off')}</em></span><button type="button" class="inline-button" data-primer-configure="${escapeHTML(item.id)}">Configure</button></span><small>${escapeHTML(next)}${on ? ` · ${escapeHTML(zone)}` : ''}</small>${unsupported}${forecast}${lastLine}</span>`;
+}
 function concurrencyStatus(item) {
   const active = item.active_runs || 0, maximum = item.max_concurrent_runs || 1;
   const source = item.concurrency_source === 'override' ? 'custom override' : `config default ${item.default_max_concurrent_runs || maximum}`;
@@ -425,7 +453,7 @@ function providerCompact(item) {
     const resets = bankedResets(snap);
     if (resets) windows.push(resets);
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
-    details = `${decisionDetail}${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
+    details = `${decisionDetail}${policyControl(item, provider)}${primerSummary(item)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
@@ -484,6 +512,12 @@ function wireProviderDetails() {
         $('#error-banner').textContent = `Could not update provider concurrency: ${error.message}`;
         control.disabled = false;
       }
+    });
+  });
+  document.querySelectorAll('[data-primer-configure]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      openPrimer(event.currentTarget.dataset.primerConfigure);
     });
   });
   document.querySelectorAll('[data-provider-concurrency-reset]').forEach(button => {
@@ -697,6 +731,7 @@ function render(data) {
   $('#policy').textContent = policies.size > 1 ? 'per provider' : ([...policies][0] || data.active_policy || '—');
   $('#next-check').textContent = data.scheduler.next_cycle_at ? relative(data.scheduler.next_cycle_at) : data.scheduler.enabled ? 'starting' : 'disabled';
   $('#scheduler-banner').hidden = data.scheduler.enabled;
+  $('#scheduler-banner-primer').hidden = !data.providers.some(provider => provider.primer?.settings?.enabled);
   $('#active-runs').textContent = data.health.active_runs;
   $('#updated-at').textContent = `Updated ${shortTime(data.generated_at)}`;
   renderHealth(data.health,data.attempts); renderFailure(data.tasks,data.runs,data.providers); renderTasks(data.tasks); renderRuns(data.runs,data.unread_runs || 0); renderAttempts(data.attempts);
@@ -940,6 +975,117 @@ async function deleteRuntimeConnection() {
     $('#profile-runtime-profile').innerHTML=''; $('#profile-runtime-project').innerHTML='';
     $('#profile-hermes-status').textContent='Choose or import a connection to discover profiles, projects, and models.';
   } catch(error) { showRuntimeError(error.message); }
+}
+let editingPrimer = '', editingPrimerZone = '', primerLoadSeq = 0;
+const PRIMER_DAYS = ['mon','tue','wed','thu','fri','sat','sun'];
+function showPrimerError(message) {
+  $('#primer-form-error').hidden = !message; $('#primer-form-error').textContent = message || '';
+}
+function primerTimezones(selected) {
+  const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch { zones = []; }
+  const choices = new Set([local, selected, 'UTC', ...zones].filter(Boolean));
+  return [`<option value="">Service local time</option>`,
+    ...[...choices].map(zone => `<option value="${escapeHTML(zone)}"${zone === selected ? ' selected' : ''}>${escapeHTML(zone)}${zone === local ? ' (this browser)' : ''}</option>`)].join('');
+}
+function syncPrimerMode() {
+  const reset = $('#primer-mode-reset').checked;
+  $('#primer-schedule-fields').hidden = reset;
+  $('#primer-mode-note').textContent = reset
+    ? 'Pings a minute after each reset so a new window starts right away and one is always open.'
+    : 'Pings a minute after each time so a window starts then. Times that fall inside an open window are skipped.';
+}
+function renderPrimerTimes(times) {
+  const rows = (times.length ? times : ['06:00']).map((value, index) =>
+    `<span class="primer-time-row"><input type="time" value="${escapeHTML(value)}" data-primer-time aria-label="Ping time ${index + 1}" required><button type="button" class="quiet-button" data-primer-remove-time aria-label="Remove time"${times.length <= 1 ? ' disabled' : ''}>×</button></span>`
+  ).join('');
+  $('#primer-times').innerHTML = rows;
+  $('#primer-times').querySelectorAll('[data-primer-remove-time]').forEach((button, index) => button.addEventListener('click', () => {
+    renderPrimerTimes(primerTimeRows().filter((_, i) => i !== index));
+  }));
+}
+// Rows keep blanks so indexes line up with what is on screen; saving drops them.
+const primerTimeRows = () => [...document.querySelectorAll('[data-primer-time]')].map(input => input.value);
+const currentPrimerTimes = () => primerTimeRows().filter(Boolean);
+function renderPrimerHistory(attempts, zone) {
+  $('#primer-history').innerHTML = attempts.length
+    ? attempts.map(attempt => `<li class="${escapeHTML(attempt.outcome)} ${escapeHTML(attempt.verification || '')}"><b>${escapeHTML(primerClock(attempt.started_at, zone))}</b><span>${escapeHTML(title(attempt.trigger))} · ${escapeHTML(primerOutcome(attempt))}</span><small>${escapeHTML(attempt.reason || '')}</small></li>`).join('')
+    : '<li class="empty">No pings yet.</li>';
+}
+async function openPrimer(providerID) {
+  // Saving is only allowed once this provider's settings have loaded, so a
+  // failed or stale load can never be written back as if it were real.
+  const token = ++primerLoadSeq;
+  editingPrimer = providerID; showPrimerError('');
+  $('#save-primer').disabled = true; $('#run-primer').disabled = true;
+  $('#primer-dialog-title').textContent = `Window primer · ${providerID}`;
+  $('#primer-dialog').showModal();
+  try {
+    const [status, history] = await Promise.all([
+      apiRequest(`/v1/providers/${encodeURIComponent(providerID)}/primer`),
+      apiRequest(`/v1/providers/${encodeURIComponent(providerID)}/primer/history?limit=10`),
+    ]);
+    if (token !== primerLoadSeq) return;
+    const settings = status.settings || {};
+    editingPrimerZone = status.timezone || '';
+    $('#primer-enabled').checked = !!settings.enabled;
+    $(settings.mode === 'reset' ? '#primer-mode-reset' : '#primer-mode-schedule').checked = true;
+    renderPrimerTimes(settings.times || []);
+    const days = settings.days?.length ? settings.days : PRIMER_DAYS;
+    document.querySelectorAll('[data-primer-day]').forEach(box => { box.checked = days.includes(box.value); });
+    $('#primer-timezone').innerHTML = primerTimezones(settings.timezone || '');
+    $('#primer-prompt').value = settings.prompt || '';
+    $('#primer-model').value = settings.model || '';
+    $('#primer-catch-up').value = Math.round((settings.catch_up_seconds || 0) / 60);
+    syncPrimerMode();
+    renderPrimerHistory(history || [], status.timezone);
+    if (status.supported === false) showPrimerError(status.unsupported_reason || 'The window primer is unsupported for this account.');
+    $('#save-primer').disabled = false; $('#run-primer').disabled = status.supported === false;
+  } catch (error) {
+    if (token === primerLoadSeq) showPrimerError(`Could not load primer settings: ${error.message}`);
+  }
+}
+function primerPayload() {
+  const days = [...document.querySelectorAll('[data-primer-day]:checked')].map(box => box.value);
+  return {
+    enabled:$('#primer-enabled').checked,
+    mode:$('#primer-mode-reset').checked ? 'reset' : 'schedule',
+    times:currentPrimerTimes(), days,
+    timezone:$('#primer-timezone').value,
+    prompt:$('#primer-prompt').value, model:$('#primer-model').value,
+    catch_up_seconds:Math.max(0,Math.round(Number($('#primer-catch-up').value || 0) * 60)),
+  };
+}
+async function savePrimer(event) {
+  event.preventDefault(); showPrimerError('');
+  const payload = primerPayload();
+  if (payload.mode === 'schedule' && !payload.days.length) { showPrimerError('Choose at least one day.'); return; }
+  if (payload.mode === 'schedule' && !payload.times.length) { showPrimerError('Add at least one time.'); return; }
+  // Requests belong to the dialog as opened; once it is reopened (token
+  // changed) their results must not touch the new form.
+  const token = primerLoadSeq, provider = editingPrimer;
+  $('#save-primer').disabled = true;
+  try {
+    await apiRequest(`/v1/providers/${encodeURIComponent(provider)}/primer`, {method:'PATCH', body:JSON.stringify(payload)});
+    if (token === primerLoadSeq) $('#primer-dialog').close();
+    await refresh();
+  } catch (error) { if (token === primerLoadSeq) showPrimerError(error.message); }
+  finally { if (token === primerLoadSeq) $('#save-primer').disabled = false; }
+}
+async function runPrimerNow() {
+  showPrimerError(''); $('#run-primer').disabled = true;
+  const token = primerLoadSeq, provider = editingPrimer, zone = editingPrimerZone;
+  try {
+    const attempt = await apiRequest(`/v1/providers/${encodeURIComponent(provider)}/primer/run`, {method:'POST', body:'{}'});
+    const history = await apiRequest(`/v1/providers/${encodeURIComponent(provider)}/primer/history?limit=10`);
+    if (token === primerLoadSeq) {
+      renderPrimerHistory(history || [], zone);
+      if (attempt?.outcome === 'failed') showPrimerError(attempt.reason || 'The ping failed.');
+    }
+    await refresh();
+  } catch (error) { if (token === primerLoadSeq) showPrimerError(error.message); }
+  finally { if (token === primerLoadSeq) $('#run-primer').disabled = false; }
 }
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
@@ -1274,6 +1420,12 @@ $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#task-type').addEventListener('change',syncIntervalField);
 $('#task-enabled').addEventListener('change',syncNewTaskActivation);
+$('#primer-form').addEventListener('submit', savePrimer);
+$('#close-primer').addEventListener('click',() => $('#primer-dialog').close());
+$('#cancel-primer').addEventListener('click',() => $('#primer-dialog').close());
+$('#run-primer').addEventListener('click', runPrimerNow);
+$('#add-primer-time').addEventListener('click',() => renderPrimerTimes([...primerTimeRows(), '']));
+document.querySelectorAll('[name="primer-mode"]').forEach(input => input.addEventListener('change', syncPrimerMode));
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());
 $('#toggle-task').addEventListener('click',toggleTask);

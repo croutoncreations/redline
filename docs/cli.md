@@ -87,6 +87,22 @@ redline pause --provider codex-main
 redline resume --provider codex-main
 ```
 
+## Window primer
+
+Start Claude's 5-hour window at chosen times, or right after every reset. See
+[Window primer](scheduling.md#window-primer).
+
+```bash
+redline primer status --provider claude-main
+redline primer set --provider claude-main --mode schedule --at 06:00,11:00 --days weekdays \
+  --tz America/Chicago --enable
+redline primer set --provider claude-main --mode reset --enable   # keep a window open 24/7
+redline primer set --provider claude-main --prompt "Reply with only: ok" --model haiku --catch-up 45m
+redline primer disable --provider claude-main
+redline primer run --provider claude-main            # skips if a window is open; --force to override
+redline primer history --provider claude-main --limit 20
+```
+
 ## Runs
 
 ```bash

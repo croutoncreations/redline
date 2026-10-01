@@ -214,6 +214,32 @@ async function loadDashboard(page, options = {}) {
       provider.policy_source = body.policy ? 'override' : 'global';
       return json(200, { policy: provider.policy, source: provider.policy_source });
     }
+    const primerMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/primer(\/run|\/history)?$/);
+    if (primerMatch) {
+      const id = decodeURIComponent(primerMatch[1]);
+      const provider = state.dashboard.providers.find(item => item.id === id);
+      if (!provider?.primer) return json(404, { error: 'provider is not configured' });
+      if (state.primerGate && method === 'GET' && !primerMatch[2]) { await state.primerGate; state.primerGate = null; }
+      if (state.primerError && method === 'GET') return json(500, { error: 'primer unavailable' });
+      state.primerHistory ||= [];
+      if (primerMatch[2] === '/history') return json(200, state.primerHistory);
+      if (primerMatch[2] === '/run' && method === 'POST') {
+        state.requests.push({ method, path: url.pathname });
+        if (state.primerRunGate) { await state.primerRunGate; state.primerRunGate = null; }
+        const attempt = { id: state.primerHistory.length + 1, provider_account_id: id, trigger: 'manual', outcome: 'fired',
+          verification: 'pending', reason: 'Ping sent; checking that a new window opened.', started_at: FIXTURE_NOW, completed_at: FIXTURE_NOW };
+        state.primerHistory.unshift(attempt);
+        provider.primer.last_attempt = attempt;
+        return json(200, attempt);
+      }
+      if (method === 'PATCH') {
+        const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+        if (body.mode === 'schedule' && body.enabled && !(body.times || []).length) return json(400, { error: 'schedule mode requires at least one time' });
+        Object.assign(provider.primer.settings, body);
+        provider.primer.configured = true;
+      }
+      return json(200, provider.primer);
+    }
     const providerRefreshMatch = url.pathname.match(/^\/v1\/providers\/([^/]+)\/refresh$/);
     if (providerRefreshMatch && method === 'POST') {
       const id = decodeURIComponent(providerRefreshMatch[1]);

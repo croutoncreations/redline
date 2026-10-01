@@ -35,7 +35,8 @@ failures.
 
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, and `scheduler.error`.
+`run.completed`, `run.failed`, `scheduler.error`, and `primer.failed` (a
+[window primer](scheduling.md#window-primer) ping failed).
 
 ```yaml
 notifications:

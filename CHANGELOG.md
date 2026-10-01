@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Window primer: start Claude's 5-hour window at scheduled times, or right after every reset, by
+  sending one tiny Haiku message through the local Claude Code login. It skips when a window is
+  already open or a Redline run is active, catches up after sleep within a configurable allowance,
+  records every attempt, and checks the next usage sample to confirm the window opened. Configure
+  it from the Claude usage card, `redline primer`, or `/v1/providers/{account}/primer`.
+- `primer.failed` notification event.
+
+### Fixed
+
+- The native Claude usage collector no longer fails the whole snapshot when no 5-hour window is
+  open (Claude reports a null reset between windows); the snapshot simply has no short window.
+
 ## [0.1.9] - 2026-09-25
 
 ### Added

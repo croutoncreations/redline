@@ -194,6 +194,53 @@ scheduler requests are serialized at admission; requests exceeding a configured 
 limit record an `active_run` WAIT rather than degrading operational health. Different providers
 always have independent capacity.
 
+## Window primer
+
+Claude's 5-hour window starts with the first message after the previous window expires, so the
+reset time depends on when you happen to start. The window primer sends one tiny message
+("Reply with only: ok", Haiku by default) so the window starts when you choose. It does not add
+allowance, and weekly limits still apply; it only moves when resets happen.
+
+Two modes are available per Claude account:
+
+- **At scheduled times** pings a minute after each configured time on the selected days, in the
+  chosen time zone (daylight saving is handled). A 06:00 time opens a window from 06:00 to 11:00.
+- **After every reset** pings a minute after each reset so a new window starts right away and one
+  is always open.
+
+The one-minute delay matters: provider resets land within about a second of the boundary, and a
+ping that arrives even slightly early falls inside the expiring window and does nothing.
+
+A ping is skipped, with the reason recorded, when a window is already open or when a Redline run
+is active on the account (that run's next message opens the window itself). If the service was
+asleep or stopped at a scheduled time, it still pings on wake within the catch-up allowance (45
+minutes by default); later than that the slot is recorded as missed so a window does not start at
+the wrong time. A time saved after it has already passed today waits for its next occurrence.
+About 90 seconds after a ping, Redline checks the next usage sample and marks the attempt
+*verified* if a window resets about five hours after the ping, *unverified* if the sample shows
+otherwise, or *unknown* if no sample arrives within 30 minutes (the ping is then presumed to have
+worked). After failed pings (signed out, CLI missing) and after pings that opened no window at
+all (the local Claude Code login may not be the monitored account), retries back off from 15
+minutes to 4 hours. One `primer.failed` notification is sent per run of failures: at the first
+hard failure, or the second ping in a row that opened no window. Attempt history is kept for 90
+days.
+
+The ping runs `claude --print` from an empty temporary directory with `--safe-mode`,
+`--no-session-persistence`, no tools, and no MCP servers. `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, every `ANTHROPIC_*BASE_URL` override, and the
+`CLAUDE_CODE_USE_*` cloud switches are removed from its environment so it always uses the local
+Claude Code subscription login; an API key would bill API credits and leave the window untouched.
+A ping that hangs is killed after two minutes, along with any child processes on macOS and Linux
+(Windows kills only the `claude` process itself).
+
+The primer is unavailable when several Claude accounts are configured: they share this machine's
+one Claude Code login, so a ping could open any of their windows and could not be verified.
+
+The primer runs independently of automatic dispatch. Configure it from the **Window primer**
+section of the Claude usage card in the dashboard, with `redline primer` (see
+[CLI reference](cli.md#window-primer)), or through the HTTP API. A Mac must be awake to ping; for
+early-morning schedules, `sudo pmset repeat wakeorpoweron MTWRF 05:55:00` wakes it shortly before.
+
 ## Outcome metrics
 
 Redline can report exact automatic RUN/WAIT/UNKNOWN decisions and job outcomes, alongside

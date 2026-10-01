@@ -145,3 +145,38 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 .onboarding-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:13px}.onboarding-error{margin:16px 25px 0}.onboarding-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:15px 25px}.onboarding-footer>div{display:flex;gap:8px}.onboarding-review{display:grid;gap:8px}.onboarding-review div{display:flex;justify-content:space-between;gap:20px;padding-bottom:8px;border-bottom:1px solid var(--line)}.onboarding-review div:last-child{border:0;padding:0}.onboarding-review span{color:var(--muted);font-size:10px}.onboarding-review strong{font-size:10px;text-align:right}
 @media(max-width:820px){.getting-started{grid-template-columns:1fr}.getting-started ol{flex-wrap:wrap}.onboarding-accounts,.safety-grid{grid-template-columns:1fr}.onboarding-fields{grid-template-columns:1fr}}
 .banked-resets{border-top:1px dashed var(--line);padding-top:10px}.banked-resets.soon .reset{color:var(--amber)}
+
+/* Window primer: compact card summary and its settings dialog. */
+.primer-summary{display:block;border:1px solid var(--line);border-left:3px solid #59636b;border-radius:8px;background:#101417;padding:10px 11px;margin-bottom:15px}
+.primer-summary.on{border-left-color:var(--green)}
+.primer-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.primer-head>span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.primer-head b{font-size:10px;font-weight:600}
+.primer-head em{font-style:normal;color:var(--text);font-size:9px}
+.primer-summary small{display:block;color:var(--muted);font:8px/1.45 ui-monospace,monospace;margin-top:6px}
+.primer-summary .primer-forecast{color:var(--text)}
+.primer-last.failed,.primer-last.unverified{color:var(--amber)}
+.primer-last.verified{color:var(--green)}
+.primer-intro{color:var(--muted);font-size:11px;line-height:1.5;margin:0}
+.primer-modes,.primer-days{border:0;padding:0;margin:0}
+.primer-modes legend,.primer-days legend{font-size:11px;font-weight:600;margin-bottom:6px}
+.primer-modes .check-field{margin-bottom:4px}
+.primer-schedule{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:start}
+.primer-schedule[hidden]{display:none}
+.primer-times{display:grid;gap:6px;margin-bottom:6px}
+.primer-time-row{display:flex;gap:6px;align-items:center}
+.primer-time-row input{flex:1}
+.primer-time-row button{padding:4px 9px}
+.primer-days div{display:flex;flex-wrap:wrap;gap:5px;align-items:flex-start}
+.primer-days label{display:inline-flex;align-items:center;justify-content:flex-start;align-self:flex-start;gap:4px;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:10px;cursor:pointer}
+.primer-days label:has(input:checked){border-color:#8a3d40;background:#2a181a}
+.primer-history{list-style:none;margin:0;padding:0;display:grid;gap:6px;max-height:220px;overflow:auto}
+.primer-history li{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:10px}
+.primer-history li small{grid-column:1/-1;color:var(--muted);font:8px/1.45 ui-monospace,monospace}
+.primer-history li.failed,.primer-history li.unverified{border-left:3px solid var(--amber)}
+.primer-history li.verified{border-left:3px solid var(--green)}
+.primer-history li.empty{color:var(--muted);display:block}
+.primer-modes .check-field{justify-content:flex-start}
+.primer-modes input[type=radio],.primer-days input[type=checkbox]{width:auto;padding:0;margin:0;flex:none;border:0;box-shadow:none;accent-color:var(--accent)}
+.primer-catch-up{align-content:start}
+.primer-catch-up input{max-width:110px;height:auto}

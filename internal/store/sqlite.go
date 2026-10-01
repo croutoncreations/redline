@@ -508,6 +508,16 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
+	// The window primer tables claim no schema version. Version 28 is already
+	// stamped by the unmerged mobile branch (short_window_not_started), and
+	// taking 29 here would make that branch's guarded v28 skip on databases
+	// that ran this one first. The schema is idempotent (IF NOT EXISTS), so
+	// it runs on every open; later changes must be written the same way
+	// (addColumnIfMissing, DROP/CREATE INDEX IF [NOT] EXISTS) until a real
+	// version can be claimed.
+	if _, err := tx.ExecContext(ctx, primerSchema); err != nil {
+		return fmt.Errorf("ensure window primer schema: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

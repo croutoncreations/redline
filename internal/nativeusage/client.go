@@ -294,7 +294,10 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		return decision.UsageSnapshot{}, fmt.Errorf("decode native claude usage: %w", err)
 	}
 	snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native", Confidence: "high"}
-	if payload.FiveHour != nil {
+	// Between windows Claude reports the five-hour block with a null reset:
+	// no window is open until the next message. That is a valid snapshot
+	// with no short window, not a malformed response.
+	if payload.FiveHour != nil && strings.TrimSpace(payload.FiveHour.ResetsAt) != "" {
 		window, allowance, err := normalizedWindow("session", "Session", "short", payload.FiveHour.Utilization, payload.FiveHour.ResetsAt, 5*time.Hour)
 		if err != nil {
 			return decision.UsageSnapshot{}, err

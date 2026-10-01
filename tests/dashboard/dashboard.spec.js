@@ -351,8 +351,19 @@ test('describes enabled jobs as waiting when the global scheduler is off', async
   await loadDashboard(page, { dashboard });
 
   await expect(page.locator('#scheduler-banner')).toContainText('nothing will run');
+  await expect(page.locator('#scheduler-banner-primer')).toBeHidden();
   await expect(page.locator('#tasks-body')).toContainText('Ready · scheduler off');
   await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
+});
+
+test('says the window primer still runs when it is on and the scheduler is off', async ({ page }) => {
+  const dashboard = withPrimer(dashboardFixture());
+  dashboard.providers[0].primer.settings.enabled = true;
+  dashboard.scheduler = { enabled: false };
+  await loadDashboard(page, { dashboard });
+  await expect(page.locator('#scheduler-banner')).toContainText('nothing will run');
+  await expect(page.locator('#scheduler-banner-primer')).toBeVisible();
+  await expect(page.locator('#scheduler-banner')).toContainText('window primer is on and runs independently');
 });
 
 test('gives actionable install and sign-in guidance when account readiness is missing', async ({ page }) => {
@@ -1003,4 +1014,122 @@ test('shows profile load failures when starting a new job', async ({ page }) => 
   await page.getByRole('button', { name: '+ New job' }).click();
 
   await expect(page.locator('#error-banner')).toContainText('Could not open job: profiles unavailable');
+});
+
+function withPrimer(dashboard, overrides = {}) {
+  dashboard.providers[0].primer = {
+    settings: { provider_account_id: 'claude-main', enabled: false, mode: 'schedule', times: ['06:00'], days: [],
+      timezone: 'UTC', prompt: 'Reply with only: ok', model: 'haiku', catch_up_seconds: 2700 },
+    configured: false, supported: true, timezone: 'UTC', forecast: [], recent: [], ...overrides,
+  };
+  return dashboard;
+}
+
+test('summarizes the window primer on the Claude card only', async ({ page }) => {
+  const dashboard = withPrimer(dashboardFixture(), {
+    configured: true, next_ping_at: '2026-07-21T06:01:00Z',
+    forecast: [{ start: '2026-07-21T06:00:00Z', end: '2026-07-21T11:00:00Z' }, { start: '2026-07-21T11:00:00Z', end: '2026-07-21T16:00:00Z' }],
+    last_attempt: { outcome: 'fired', verification: 'verified', trigger: 'schedule', reason: 'Window opened; it resets at 2026-07-20T11:00:00Z.', started_at: '2026-07-20T06:01:00Z' },
+  });
+  dashboard.providers[0].primer.settings = { ...dashboard.providers[0].primer.settings, enabled: true, times: ['06:00', '11:00'], days: ['mon', 'tue', 'wed', 'thu', 'fri'] };
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const summary = page.locator('[data-provider-id="claude-main"] .primer-summary');
+  await expect(summary).toHaveClass(/on/);
+  await expect(summary).toContainText('At 06:00, 11:00 · Mon Tue Wed Thu Fri');
+  await expect(summary).toContainText('Next ping');
+  await expect(summary).toContainText('✓ opened a window');
+  await page.getByRole('button', { name: 'Show Codex usage details' }).click();
+  await expect(page.locator('[data-provider-id="codex-main"] .primer-summary')).toHaveCount(0);
+});
+
+test('does not let a primer dialog save until its settings have loaded', async ({ page }) => {
+  const state = await loadDashboard(page, { dashboard: withPrimer(dashboardFixture()) });
+  let release;
+  state.primerGate = new Promise(resolve => { release = resolve; });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await page.locator('[data-primer-configure="claude-main"]').click();
+  const dialog = page.locator('#primer-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Ping now' })).toBeDisabled();
+  release();
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeEnabled();
+  await expect(dialog.locator('[data-primer-time]')).toHaveValue('06:00');
+
+  // A ping still running when the dialog is closed and reopened must not
+  // unlock or redraw the reopened dialog before its own load finishes.
+  let releaseRun;
+  state.primerRunGate = new Promise(resolve => { releaseRun = resolve; });
+  await dialog.getByRole('button', { name: 'Ping now' }).click();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  state.primerGate = new Promise(resolve => { release = resolve; });
+  const configure = page.locator('[data-primer-configure="claude-main"]');
+  if (!await configure.isVisible()) await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await configure.click();
+  releaseRun();
+  await page.waitForTimeout(50);
+  await expect(dialog.getByRole('button', { name: 'Ping now' })).toBeDisabled();
+  await expect(dialog.locator('#primer-history')).not.toContainText('confirming');
+  release();
+  await expect(dialog.getByRole('button', { name: 'Ping now' })).toBeEnabled();
+
+  // A failed load keeps the form locked rather than offering stale fields.
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  state.primerError = true;
+  if (!await configure.isVisible()) await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await configure.click();
+  await expect(dialog.locator('#primer-form-error')).toContainText('Could not load primer settings');
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
+test('explains when the window primer is unsupported or unavailable', async ({ page }) => {
+  const dashboard = withPrimer(dashboardFixture(), {
+    supported: false, unsupported_reason: 'several Claude accounts share this machine\'s one Claude Code login',
+  });
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(page.locator('[data-provider-id="claude-main"] .primer-summary')).toContainText('share this machine');
+  await page.locator('[data-primer-configure="claude-main"]').click();
+  const dialog = page.locator('#primer-dialog');
+  await expect(dialog.locator('#primer-form-error')).toContainText('share this machine');
+  await expect(dialog.getByRole('button', { name: 'Ping now' })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+  const broken = dashboardFixture();
+  broken.providers[0].primer_error = 'primer status: database is locked';
+  await loadDashboard(page, { dashboard: broken });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(page.locator('[data-provider-id="claude-main"] .primer-summary')).toContainText('Unavailable');
+  await expect(page.locator('[data-provider-id="claude-main"] .primer-summary')).toContainText('database is locked');
+});
+
+test('configures the window primer through its dialog', async ({ page }) => {
+  const state = await loadDashboard(page, { dashboard: withPrimer(dashboardFixture()) });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await page.locator('[data-primer-configure="claude-main"]').click();
+  const dialog = page.locator('#primer-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('[data-primer-time]')).toHaveCount(1);
+  await expect(dialog.locator('[data-primer-time]')).toHaveValue('06:00');
+
+  await dialog.getByLabel('Enable the window primer').check();
+  await dialog.getByRole('button', { name: '+ Add time' }).click();
+  await dialog.locator('[data-primer-time]').nth(1).fill('11:00');
+  await dialog.locator('[data-primer-day][value="sat"]').uncheck();
+  await dialog.locator('[data-primer-day][value="sun"]').uncheck();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toBeHidden();
+  const saved = state.requests.find(request => request.method === 'PATCH' && request.path.endsWith('/primer'));
+  expect(saved.body).toMatchObject({ enabled: true, mode: 'schedule', times: ['06:00', '11:00'], days: ['mon', 'tue', 'wed', 'thu', 'fri'], model: 'haiku' });
+
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(page.locator('[data-provider-id="claude-main"] .primer-summary')).toContainText('At 06:00, 11:00');
+  await page.locator('[data-primer-configure="claude-main"]').click();
+  await dialog.getByLabel('After every reset (24/7)').check();
+  await expect(dialog.locator('#primer-schedule-fields')).toBeHidden();
+  await expect(dialog.locator('#primer-mode-note')).toContainText('one is always open');
+  await dialog.getByRole('button', { name: 'Ping now' }).click();
+  await expect(dialog.locator('#primer-history')).toContainText('sent, confirming…');
+  expect(state.requests.some(request => request.method === 'POST' && request.path.endsWith('/primer/run'))).toBe(true);
 });
