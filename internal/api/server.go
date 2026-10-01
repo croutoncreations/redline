@@ -36,6 +36,7 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/primer"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/tasktemplate"
@@ -73,6 +74,7 @@ type Server struct {
 	artifacts    artifacts.Reader
 	scheduler    *autoscheduler.Loop
 	usageMonitor *autoscheduler.Loop
+	primer       *primer.Service
 	discovery    HarnessDiscoverer
 	hermes       HermesDiscoverer
 	usageSources *usage.Manager
@@ -121,6 +123,7 @@ func NewDemoServer(
 	server.usageSources = usage.NewManager(source, source, now)
 	server.discovery = discoverer
 	server.hermes = disabledDemoHermes{}
+	server.primer.Pinger = disabledDemoPinger{}
 	for accountID, provider := range cfg.Providers {
 		_, _, _ = server.usageSources.Fetch(context.Background(), accountID, provider)
 	}
@@ -135,6 +138,12 @@ type demoRevisionResolver struct{}
 
 func (demoRevisionResolver) Resolve(context.Context, domain.ExecutionProfile) (string, error) {
 	return "demo-revision-current", nil
+}
+
+type disabledDemoPinger struct{}
+
+func (disabledDemoPinger) Ping(context.Context, domain.PrimerSettings) (string, error) {
+	return "", fmt.Errorf("window primer pings are disabled in demo mode")
 }
 
 type disabledDemoHermes struct{}
@@ -230,6 +239,7 @@ func newServer(
 	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
 	monitorInterval, _ := cfg.UsageMonitorInterval()
 	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider)
+	server.primer = server.newPrimerService()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
@@ -246,6 +256,10 @@ func newServer(
 	mux.HandleFunc("POST /v1/providers/{provider}/decision", server.providerDecision)
 	mux.HandleFunc("PATCH /v1/providers/{provider}/policy", server.updateProviderPolicy)
 	mux.HandleFunc("PATCH /v1/providers/{provider}/concurrency", server.updateProviderConcurrency)
+	mux.HandleFunc("GET /v1/providers/{provider}/primer", server.primerStatus)
+	mux.HandleFunc("PATCH /v1/providers/{provider}/primer", server.updatePrimer)
+	mux.HandleFunc("POST /v1/providers/{provider}/primer/run", server.runPrimer)
+	mux.HandleFunc("GET /v1/providers/{provider}/primer/history", server.primerHistory)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
 	mux.HandleFunc("GET /v1/profile-options", server.profileOptions)
@@ -598,6 +612,18 @@ func (s *Server) StartScheduler(ctx context.Context) {
 	go func() {
 		defer s.loopWorkers.Done()
 		s.usageMonitor.Run(ctx)
+	}()
+	// The primer is independent of automatic dispatch: it only acts for
+	// providers whose primer the operator has enabled. Attempts a previous
+	// process left running are failed before any request can start a new
+	// one, so a live ping is never mistaken for an interrupted one.
+	if err := s.primer.Recover(ctx); err != nil {
+		log.Printf("window primer: %v", err)
+	}
+	s.loopWorkers.Add(1)
+	go func() {
+		defer s.loopWorkers.Done()
+		s.primer.Run(ctx)
 	}()
 }
 

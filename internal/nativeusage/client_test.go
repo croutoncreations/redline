@@ -33,6 +33,21 @@ func TestClaudeNativeSnapshotMatchesProviderWindows(t *testing.T) {
 	}
 }
 
+func TestClaudeNativeTreatsNullFiveHourResetAsNoOpenWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":16,"resets_at":"2026-07-24T17:00:00Z"}}`))
+	}))
+	defer server.Close()
+	client := nativeusage.Client{HTTPClient: server.Client(), Credentials: staticCredentials{token: "claude-token"}, ClaudeUsageURL: server.URL, Now: func() time.Time { return time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC) }}
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatalf("a closed window must not fail the snapshot: %v", err)
+	}
+	if got.Short != nil || got.Weekly.Remaining != .84 {
+		t.Fatalf("snapshot=%#v", got)
+	}
+}
+
 func TestClaudeNativeInfersMissingFableResetFromAccountWeeklyWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"five_hour":{"utilization":0,"resets_at":"2026-07-24T22:00:00Z"},"seven_day":{"utilization":0,"resets_at":"2026-07-31T17:00:00Z"},"limits":[{"kind":"weekly_scoped","percent":0,"scope":{"model":{"display_name":"Fable"}}}]}`))

@@ -173,6 +173,11 @@ See [Agent-assisted install](docs/agent-install.md) for what the agent must not 
 → [Scheduling and the allowance model](docs/scheduling.md) explains policies, tiers, calibration,
 and the token-capacity estimates in depth.
 
+**Choose when Claude's 5-hour window resets.** The optional
+[window primer](docs/scheduling.md#window-primer) sends one tiny Haiku message at the times you
+pick, or right after every reset, so the window starts on your schedule instead of whenever you
+happen to begin. It skips when a window is already open and checks that the new one opened.
+
 ## Give your agent access
 
 Redline ships an MCP server so Codex, Claude Code, or Pi can check allowance, inspect the queue,
