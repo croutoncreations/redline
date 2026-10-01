@@ -3,7 +3,7 @@ import RedlineKit
 import WebKit
 
 @MainActor
-final class DashboardWindowController: NSWindowController, WKNavigationDelegate, NSToolbarDelegate {
+final class DashboardWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, NSToolbarDelegate {
     private static let toolbarIdentifier = NSToolbar.Identifier("RedlineDashboardToolbar")
     private static let refreshIdentifier = NSToolbarItem.Identifier("RedlineRefresh")
     private static let statusIdentifier = NSToolbarItem.Identifier("RedlineConnectionStatus")
@@ -40,6 +40,9 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
         super.init(window: window)
 
         webView.navigationDelegate = self
+        // Without a UI delegate WKWebView silently suppresses alert()/confirm(),
+        // and confirm() returns false — which made dashboard Delete buttons no-ops.
+        webView.uiDelegate = self
         let toolbar = NSToolbar(identifier: Self.toolbarIdentifier)
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
@@ -157,6 +160,34 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
         showConnectionFailure()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo
+    ) async {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        _ = await present(alert)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo
+    ) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        return await present(alert) == .alertFirstButtonReturn
+    }
+
+    private func present(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard let window, window.isVisible else { return alert.runModal() }
+        return await alert.beginSheetModal(for: window)
     }
 
     private func showConnectionFailure() {

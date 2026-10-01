@@ -1,5 +1,6 @@
 *.db
 *.db-*
+*.db.bak*
 bin/
 /redline
 
