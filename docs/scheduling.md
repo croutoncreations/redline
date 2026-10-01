@@ -204,9 +204,10 @@ allowance, and weekly limits still apply; it only moves when resets happen.
 Two modes are available per Claude account:
 
 - **At scheduled times** pings a minute after each configured time on the selected days, in the
-  chosen time zone (daylight saving is handled). A 06:00 time opens a window from 06:00 to 11:00.
-- **After every reset** pings a minute after each reset so a new window starts right away and one
-  is always open.
+  chosen time zone (daylight saving is handled; a time that does not exist on a spring-forward
+  day is skipped that day). A 06:00 time opens a window from about 06:00 to about 11:00.
+- **After every reset** pings a minute after each reset so a new window starts within a minute or
+  two of the old one ending.
 
 The one-minute delay matters: provider resets land within about a second of the boundary, and a
 ping that arrives even slightly early falls inside the expiring window and does nothing.

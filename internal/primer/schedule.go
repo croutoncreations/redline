@@ -256,6 +256,12 @@ func ScheduledSlots(settings domain.PrimerSettings, from, to time.Time) []Slot {
 				continue
 			}
 			target := time.Date(day.Year(), day.Month(), day.Day(), parsed.Hour(), parsed.Minute(), 0, 0, location)
+			// A wall-clock time that does not exist on a spring-forward
+			// day is normalised by time.Date to an hour earlier; that
+			// day has no such slot rather than a wrong one.
+			if target.Hour() != parsed.Hour() || target.Minute() != parsed.Minute() {
+				continue
+			}
 			if target.Before(from) || !target.Before(to) {
 				continue
 			}
@@ -266,15 +272,19 @@ func ScheduledSlots(settings domain.PrimerSettings, from, to time.Time) []Slot {
 	return slots
 }
 
+// EffectiveCatchUp is the catch-up allowance actually applied: even with
+// none configured, a slot must survive until the next tick sees it.
+func EffectiveCatchUp(settings domain.PrimerSettings) time.Duration {
+	return max(time.Duration(settings.CatchUpSeconds)*time.Second, 2*TickInterval)
+}
+
 // DueScheduled returns the latest schedule slot that is due at now and still
 // within the catch-up allowance, plus the slots missed beyond it since
 // lastCheck. Slots whose target precedes the settings' save time are never
 // due: a time added after it has passed must wait for its next occurrence,
 // or the window would open at the wrong time.
 func DueScheduled(settings domain.PrimerSettings, now, lastCheck time.Time) (*Slot, []Slot) {
-	// Even with no catch-up allowance, a slot must survive until the next
-	// tick sees it.
-	catchUp := max(time.Duration(settings.CatchUpSeconds)*time.Second, 2*TickInterval)
+	catchUp := EffectiveCatchUp(settings)
 	lookback := catchUp + FireDelay
 	if !lastCheck.IsZero() && now.Sub(lastCheck) > lookback {
 		lookback = now.Sub(lastCheck) + FireDelay

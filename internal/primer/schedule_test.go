@@ -2,6 +2,7 @@ package primer_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,26 @@ func TestScheduledSlotsHonorTimezoneDaysAndDaylightSaving(t *testing.T) {
 		if slot.FireAt.Sub(slot.Target) != primer.FireDelay {
 			t.Errorf("slot %d fires %s after target", index, slot.FireAt.Sub(slot.Target))
 		}
+	}
+}
+
+func TestScheduledSlotsSkipTimesThatDoNotExistOnSpringForward(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip(err)
+	}
+	// Clocks jump from 02:00 to 03:00 on 2026-03-08; 02:30 never happens.
+	settings := scheduled([]string{"02:30", "06:00"}, nil)
+	settings.Timezone = "America/New_York"
+	from := time.Date(2026, 3, 7, 0, 0, 0, 0, location)
+	slots := primer.ScheduledSlots(settings, from, from.AddDate(0, 0, 3))
+	var got []string
+	for _, slot := range slots {
+		got = append(got, slot.Target.In(location).Format("01-02 15:04"))
+	}
+	want := []string{"03-07 02:30", "03-07 06:00", "03-08 06:00", "03-09 02:30", "03-09 06:00"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("slots=%v want %v", got, want)
 	}
 }
 

@@ -220,11 +220,17 @@ func (s *Service) tickProvider(ctx context.Context, provider string) error {
 	if s.lastCheck == nil {
 		s.lastCheck = make(map[string]time.Time)
 	}
-	lastCheck := s.lastCheck[provider]
+	lastCheck, known := s.lastCheck[provider]
 	s.lastCheck[provider] = now
 	s.mu.Unlock()
 	if !configured || !settings.Enabled {
 		return nil
+	}
+	if !known {
+		// First tick of this process: slots missed while the service was
+		// stopped count from its last activity, so they still show up as
+		// missed. A fresh install, with no activity, invents none.
+		lastCheck = s.lastActivity(ctx, provider, settings)
 	}
 	switch settings.Mode {
 	case domain.PrimerSchedule:
@@ -232,7 +238,7 @@ func (s *Service) tickProvider(ctx context.Context, provider string) error {
 		for _, slot := range missed {
 			s.recordSkip(ctx, provider, "schedule", slot, fmt.Sprintf(
 				"Missed: Redline was asleep or stopped until more than %s after the scheduled time.",
-				time.Duration(settings.CatchUpSeconds)*time.Second))
+				EffectiveCatchUp(settings).Round(time.Minute)))
 		}
 		if due != nil {
 			_, err := s.attempt(ctx, provider, settings, *due, "schedule", false)
@@ -318,6 +324,16 @@ func lastFired(recent []domain.PrimerAttempt) (domain.PrimerAttempt, bool) {
 		}
 	}
 	return domain.PrimerAttempt{}, false
+}
+
+// lastActivity is the later of the settings' save time and the newest
+// attempt's start, or zero when there is neither.
+func (s *Service) lastActivity(ctx context.Context, provider string, settings domain.PrimerSettings) time.Time {
+	last := settings.UpdatedAt
+	if recent, err := s.Store.ListPrimerAttempts(ctx, provider, 1); err == nil && len(recent) > 0 && recent[0].StartedAt.After(last) {
+		last = recent[0].StartedAt
+	}
+	return last
 }
 
 // PingNow sends a manual ping. Unless forced it still skips when a window is

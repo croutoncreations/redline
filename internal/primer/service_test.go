@@ -172,6 +172,37 @@ func TestMissedSlotsAreRecordedAfterSleep(t *testing.T) {
 	}
 }
 
+func TestMissedSlotsAreRecordedAcrossARestart(t *testing.T) {
+	h := newHarness(t)
+	h.now = time.Date(2026, 9, 29, 5, 0, 0, 0, time.UTC)
+	settings := scheduleUTC("06:00")
+	settings.CatchUpSeconds = 0
+	h.save(t, settings)
+	h.service.Tick(context.Background())
+	// The service is stopped at 05:30 and comes back at 09:00 as a new
+	// process: the 06:00 slot it slept through is recorded as missed, and
+	// the reason names the allowance actually applied.
+	h.now = time.Date(2026, 9, 29, 5, 30, 0, 0, time.UTC)
+	h.service.Tick(context.Background())
+	restarted := &primer.Service{Store: h.db, Pinger: h.pinger, Providers: h.service.Providers,
+		Latest: h.service.Latest, Refresh: h.service.Refresh, Now: h.service.Now}
+	h.now = time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	restarted.Tick(context.Background())
+	attempts := h.attempts(t)
+	if h.pinger.count() != 0 || len(attempts) != 1 || attempts[0].Outcome != domain.PrimerSkipped ||
+		!strings.Contains(attempts[0].Reason, "more than 1m0s") {
+		t.Fatalf("pings=%d attempts=%#v", h.pinger.count(), attempts)
+	}
+	// A fresh install with no activity before its slots invents nothing.
+	fresh := newHarness(t)
+	fresh.now = time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	fresh.save(t, scheduleUTC("06:00"))
+	fresh.service.Tick(context.Background())
+	if attempts := fresh.attempts(t); len(attempts) != 0 {
+		t.Fatalf("fresh start must not backfill missed slots: %#v", attempts)
+	}
+}
+
 func TestResetModeChainsWindowsAndVerifiesTheNewOne(t *testing.T) {
 	h := newHarness(t)
 	settings := primer.Defaults("claude-main")
