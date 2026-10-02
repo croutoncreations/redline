@@ -141,6 +141,37 @@ func TestElapsedResetClampsToZero(t *testing.T) {
 	}
 }
 
+// A provider that is stale because its CLI is signed out says that, briefly,
+// with the fix -- the phone has room for one line, not the desktop's paragraph.
+// Any other stale cause carries no reason, and the screen keeps "Stale".
+func TestSignedOutProviderCarriesAShortReason(t *testing.T) {
+	server := usagePayload(t, `{
+		"generated_at": "2026-10-02T04:00:00Z",
+		"providers": [
+			{"id": "claude-main", "provider": "claude", "snapshot_stale": true,
+			 "error": "Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `+"`claude auth login`"+` to sign in again",
+			 "usage_source": {"active": "openusage", "reason": "signed_out"},
+			 "snapshot": {"weekly": {"remaining": 0.22, "resets_at": "2026-10-02T17:00:00Z"}}},
+			{"id": "codex-main", "provider": "codex", "snapshot_stale": true,
+			 "error": "Usage data is stale; scheduling is paused until a fresh snapshot is available.",
+			 "usage_source": {"active": "openusage"},
+			 "snapshot": {"weekly": {"remaining": 0.4, "resets_at": "2026-10-05T19:00:00Z"}}}
+		]
+	}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := decodeUsage(t, raw)
+	if got, want := view.Providers[0].StaleReason, "Claude Code is signed out · run claude auth login on your Mac"; got != want {
+		t.Errorf("claude stale reason = %q, want %q", got, want)
+	}
+	if got := view.Providers[1].StaleReason; got != "" {
+		t.Errorf("codex stale reason = %q, want none", got)
+	}
+}
+
 // The dashboard already distinguishes these states and the app must too, so a
 // stale or paused provider is never rendered as live data.
 func TestProviderStatesAreSurfaced(t *testing.T) {

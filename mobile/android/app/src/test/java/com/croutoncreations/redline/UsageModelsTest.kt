@@ -274,6 +274,28 @@ class UsageModelsTest {
         assertEquals("Stale", providerStatus(ProviderUsage(stale = true)))
         assertEquals("Live", providerStatus(ProviderUsage()))
     }
+
+    /**
+     * Stale because the Mac's CLI signed out: the badge says so, and the line
+     * under it is the short fix rather than the desktop's full paragraph.
+     */
+    @Test
+    fun signedOutStaleProviderSaysSoAndShowsTheShortFix() {
+        val signedOut = ProviderUsage(
+            stale = true,
+            error = "Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again",
+            staleReason = "Claude Code is signed out · run claude auth login on your Mac",
+        )
+        assertEquals("Signed out", providerStatus(signedOut))
+        assertEquals("Claude Code is signed out · run claude auth login on your Mac", providerProblem(signedOut))
+
+        // Unchanged for any other stale cause: an error string outranks "Stale",
+        // exactly as before this change.
+        val plainStale = ProviderUsage(stale = true, error = "Usage data is stale; scheduling is paused until a fresh snapshot is available.")
+        assertEquals("No data", providerStatus(plainStale))
+        assertEquals(plainStale.error, providerProblem(plainStale))
+        assertEquals("", providerProblem(ProviderUsage()))
+    }
 }
 
 /**

@@ -341,8 +341,22 @@ function concurrencyStatus(item) {
   ).join('');
   return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Hermes connection and context limits, plus optional allowance-pool limits, apply independently.">?</i></b><span class="concurrency-control"><input data-provider-concurrency="${escapeHTML(item.id)}" type="number" min="1" max="32" value="${maximum}" aria-label="${escapeHTML(title(item.provider))} parallel run limit"><i>${active}/${maximum} active · ${escapeHTML(source)}</i>${reset}</span></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
 }
+// The command that signs a provider's CLI back in, or '' if unknown. Matches
+// ProviderRecovery.loginCommand on macOS.
+function loginCommand(provider) {
+  return {claude:'claude auth login', codex:'codex login'}[String(provider || '').toLowerCase()] || '';
+}
+// Stale because the provider's CLI signed out: the one stale cause a person
+// fixes, so it is named rather than left as "usage unavailable".
+function signedOut(item) {
+  return Boolean(item.snapshot_stale && item.usage_source?.reason === 'signed_out');
+}
 function providerPressure(item) {
   if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  if (signedOut(item)) {
+    const login = loginCommand(item.provider);
+    return {label:'Signed out',detail:`${login ? `Run ${login} on this Mac to sign in again.` : 'Sign in again on this Mac.'} Scheduling is paused until usage can be read.`,tone:'near'};
+  }
   if (item.snapshot_stale) return {
     label:'Usage unavailable',
     detail:'The last successful usage sample is stale. Scheduling is paused until a fresh sample is available.',
@@ -417,7 +431,8 @@ function providerCompact(item) {
   const weeklyReset = stale ? `Last sample ${relative(snap?.observed_at)}` : weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
   // An untouched window has no reset yet: the provider starts its clock on
   // first use. It is full, not absent, and no reset time is invented for it.
-  const shortWindow = stale ? 'Fresh usage required' : snap?.short
+  const login = loginCommand(item.provider);
+  const shortWindow = signedOut(item) ? (login ? `Signed out · run ${login}` : 'Signed out') : stale ? 'Fresh usage required' : snap?.short
     ? `5h ${percent(snap.short.remaining)}% · resets ${relative(snap.short.resets_at)}`
     : snap?.short_window_not_started ? '5h 100% · starts on first use'
     : 'No 5h limit';
@@ -439,7 +454,7 @@ function providerCompact(item) {
   }
   const cached = capacityCache.get(item.id);
   const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
-  const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
+  const sourceError = item.usage_source?.last_error && !signedOut(item) ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
   return `<div class="provider-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${stale ? 'Usage unavailable' : weekly ? `${value}% weekly` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress ${tone}" max="100" value="${stale ? 0 : value}" aria-label="${stale ? 'Usage unavailable' : `${value}% weekly remaining`}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? 'Last known usage' : `${escapeHTML(title(provider))} capacity`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
 }
 function wireProviderDetails() {

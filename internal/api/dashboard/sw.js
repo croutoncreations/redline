@@ -1,5 +1,5 @@
 // Redline mobile PWA service worker — caches static shell only, never /v1 API.
-const CACHE = 'redline-mobile-v6';
+const CACHE = 'redline-mobile-v7';
 const SHELL = [
   '/m',
   '/assets/mobile/mobile.css',

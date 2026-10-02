@@ -74,8 +74,17 @@ function ring(remaining, size = 40, stale = false) {
 }
 
 // ── Provider pressure label ───────────────────────────────────────────────────
+// Stale because the provider's CLI signed out on the Mac -- the one stale
+// cause a person fixes -- so it is named, with the command, not just "Stale".
+function signedOut(item) {
+  return Boolean(item.snapshot_stale && item.usage_source?.reason === 'signed_out');
+}
+function loginCommand(provider) {
+  return {claude: 'claude auth login', codex: 'codex login'}[String(provider || '').toLowerCase()] || '';
+}
 function providerPressure(item) {
   if (item.paused) return {label: 'Paused', tone: 'paused'};
+  if (signedOut(item)) return {label: 'Signed out', tone: 'near'};
   if (item.snapshot_stale) return {label: 'Stale', tone: 'near'};
   if (item.error && !item.snapshot) return {label: 'No data', tone: 'paused'};
   const d = item.latest_decision;
@@ -242,7 +251,9 @@ function renderUsageDetail(item) {
     ${decisionHTML}
     <div class="m-source-meta">
       ${esc(item.usage_source?.active || 'unknown')} source
-      ${item.usage_source?.last_error ? `<span class="m-source-error">${esc(item.usage_source.last_error)}</span>` : ''}
+      ${signedOut(item)
+        ? `<span class="m-source-error" data-testid="signed-out">${esc(loginCommand(item.provider) ? `Signed out on your Mac · run ${loginCommand(item.provider)}` : 'Signed out on your Mac · sign in again')}</span>`
+        : item.usage_source?.last_error ? `<span class="m-source-error">${esc(item.usage_source.last_error)}</span>` : ''}
       · ${esc(stateLabel)}
       ${snap ? ` · sampled ${esc(relative(snap.observed_at))}` : ''}
     </div>

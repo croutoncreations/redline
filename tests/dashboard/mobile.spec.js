@@ -65,6 +65,19 @@ test('ring falls back to short window when weekly is absent', async ({ page }) =
   expect(parseFloat(remaining)).toBeCloseTo(0.62, 2);
 });
 
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadMobileDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).toContainText('Signed out');
+  await expect(card.getByTestId('signed-out')).toContainText('claude auth login');
+  // The fix is shown once, plainly -- not again as raw collector plumbing.
+  await expect(card).not.toContainText('native usage source');
+});
+
 test('ring shows stale state when snapshot is stale', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot_stale = true;

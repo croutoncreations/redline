@@ -428,7 +428,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			age := s.now().Sub(snapshot.ObservedAt)
 			if age > maxSnapshotAge || age < 0 {
 				item.SnapshotStale = true
-				item.Error = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+				item.Error = staleUsageError(item.UsageSource.LastError)
 			}
 		}
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)
@@ -521,4 +521,26 @@ func (s *Server) projectedTrigger(
 		PaceGapTrigger: selection.Definition.PaceGapTrigger,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, pollInterval), nil
+}
+
+const staleUsageMessage = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+
+// staleUsageError is the error every surface shows for a stale provider. When
+// collection is failing for a reason it can name -- Claude Code signed out,
+// a rate limit -- that reason follows, since "stale" alone sends people
+// looking in the wrong place. The collector's own "snapshot is stale" adds
+// nothing to the message it would follow, so it is left off.
+func staleUsageError(sourceError string) string {
+	reason := strings.TrimSpace(sourceError)
+	if reason == "" || strings.HasSuffix(reason, "usage snapshot is stale") {
+		return staleUsageMessage
+	}
+	return staleUsageMessage + " " + upperFirst(reason)
+}
+
+func upperFirst(text string) string {
+	if text == "" {
+		return text
+	}
+	return strings.ToUpper(text[:1]) + text[1:]
 }

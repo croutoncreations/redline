@@ -233,6 +233,9 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let snapshot: UsageSnapshot?
     public let snapshotStale: Bool
     public let error: String?
+    /// Machine-readable cause of failing collection, when the service knows
+    /// one a person can fix ("signed_out"); nil otherwise.
+    public let usageSourceReason: String?
 
     public init(
         id: String,
@@ -240,7 +243,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         paused: Bool = false,
         snapshot: UsageSnapshot?,
         snapshotStale: Bool = false,
-        error: String? = nil
+        error: String? = nil,
+        usageSourceReason: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -248,11 +252,17 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.snapshot = snapshot
         self.snapshotStale = snapshotStale
         self.error = error
+        self.usageSourceReason = usageSourceReason
     }
 
     enum CodingKeys: String, CodingKey {
         case id, provider, paused, snapshot, error
         case snapshotStale = "snapshot_stale"
+        case usageSource = "usage_source"
+    }
+
+    private struct UsageSourceStatus: Codable {
+        let reason: String?
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,6 +273,34 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         snapshot = try container.decodeIfPresent(UsageSnapshot.self, forKey: .snapshot)
         snapshotStale = try container.decodeIfPresent(Bool.self, forKey: .snapshotStale) ?? false
         error = try container.decodeIfPresent(String.self, forKey: .error)
+        usageSourceReason = try container.decodeIfPresent(UsageSourceStatus.self, forKey: .usageSource)?.reason
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(paused, forKey: .paused)
+        try container.encodeIfPresent(snapshot, forKey: .snapshot)
+        try container.encode(snapshotStale, forKey: .snapshotStale)
+        try container.encodeIfPresent(error, forKey: .error)
+        if let usageSourceReason {
+            try container.encode(UsageSourceStatus(reason: usageSourceReason), forKey: .usageSource)
+        }
+    }
+
+    /// The provider's local login is gone; only signing in again fixes it.
+    public var signedOut: Bool { usageSourceReason == "signed_out" }
+
+    /// The line shown on a stale provider's card. A signed-out provider says
+    /// so and names the fix, rather than leaving it in a hover tooltip.
+    public var staleSummary: String {
+        if signedOut, let login = ProviderRecovery.loginCommand(for: provider) {
+            // The CLI that holds the login, which is what signed out.
+            let tool = provider.lowercased() == "claude" ? "Claude Code" : displayName
+            return "\(tool) is signed out · run \(login)"
+        }
+        return "Last usage sample is stale"
     }
 
     public var displayName: String {

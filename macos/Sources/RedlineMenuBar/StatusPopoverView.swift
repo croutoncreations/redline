@@ -217,7 +217,7 @@ struct StatusPopoverView: View {
                     .foregroundStyle(provider.snapshotStale ? .orange : .primary)
             }
             if provider.snapshotStale {
-                Label("Last usage sample is stale", systemImage: "exclamationmark.triangle.fill")
+                Label(provider.staleSummary, systemImage: provider.signedOut ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .help(provider.error ?? "Scheduling waits for fresh usage data.")

@@ -132,6 +132,20 @@ test('uses surplus-first wording for pace waits', async ({ page }) => {
   await expect(codex).not.toContainText('behind pace');
 });
 
+// "Stale" alone sent people looking in the wrong place. A provider that is
+// stale because its CLI signed out says so, with the fix, without expanding.
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Signed out');
+  await expect(claude).toContainText('claude auth login');
+  await expect(claude).not.toContainText('53% weekly');
+});
+
 test('does not present a stale usage percentage as current', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot_stale = true;

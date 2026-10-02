@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,6 +56,66 @@ func TestAccessWithoutRefreshNeverRotatesSharedClaudeToken(t *testing.T) {
 		t.Fatalf("credential=%#v err=%v", got, err)
 	}
 }
+
+// When Claude Code is signed out, the error is what a person sees on every
+// Redline surface, so it must say what happened and the one command that
+// fixes it -- not "credentials are invalid", which reads like Redline's bug.
+func TestSignedOutClaudeSaysSoAndHowToSignIn(t *testing.T) {
+	cases := map[string]secretStore{
+		// What a sign-out actually leaves: the keychain item stays, emptied.
+		"emptied credential": &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"subscriptionType":"max"}}`)},
+		// What the keychain and file stores report for an item that is not there.
+		"missing keychain item": failingSecretStore{err: fmt.Errorf("keychain item %q: %w", "Claude Code-credentials", errNoCredential)},
+		"missing file":          failingSecretStore{err: fmt.Errorf("open: %w", os.ErrNotExist)},
+		"expired, no refresh":   &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"","expiresAt":1}}`)},
+	}
+	for name, store := range cases {
+		t.Run(name, func(t *testing.T) {
+			credentials := &DefaultCredentials{Now: func() time.Time { return time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC) }, ClaudeStore: store}
+			for access, call := range map[string]func() (Credential, error){
+				"Access":               func() (Credential, error) { return credentials.Access(context.Background(), "claude") },
+				"AccessWithoutRefresh": func() (Credential, error) { return credentials.AccessWithoutRefresh(context.Background(), "claude") },
+			} {
+				_, err := call()
+				if err == nil || !errors.Is(err, ErrSignedOut) {
+					t.Fatalf("%s: err = %v, want ErrSignedOut", access, err)
+				}
+				for _, want := range []string{"Claude Code is signed out", "claude auth login"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s: %q does not say %q", access, err.Error(), want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A keychain that exists but cannot be read -- locked, or access denied -- is
+// not a sign-out, and logging in again would not fix it.
+func TestUnreadableKeychainIsNotReportedSignedOut(t *testing.T) {
+	credentials := &DefaultCredentials{ClaudeStore: failingSecretStore{err: errors.New("read keychain item: exit status 51")}}
+	_, err := credentials.Access(context.Background(), "claude")
+	if err == nil || errors.Is(err, ErrSignedOut) {
+		t.Fatalf("err = %v, want a non-signed-out error", err)
+	}
+}
+
+// A near-expiry token that still has a refresh token is not signed out:
+// AccessWithoutRefresh declines to rotate it, but the next Claude Code
+// session will. Calling that "signed out" would send people to log in for
+// nothing.
+func TestNearExpiryWithRefreshTokenIsNotReportedSignedOut(t *testing.T) {
+	store := &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"refresh","expiresAt":1}}`)}
+	credentials := &DefaultCredentials{Now: func() time.Time { return time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC) }, ClaudeStore: store}
+	_, err := credentials.AccessWithoutRefresh(context.Background(), "claude")
+	if err == nil || errors.Is(err, ErrSignedOut) {
+		t.Fatalf("err = %v, want a non-signed-out error", err)
+	}
+}
+
+type failingSecretStore struct{ err error }
+
+func (s failingSecretStore) Read(context.Context) ([]byte, error) { return nil, s.err }
 
 func TestCredentialRefreshRejectsConcurrentReplacement(t *testing.T) {
 	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)

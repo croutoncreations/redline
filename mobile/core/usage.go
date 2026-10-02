@@ -69,6 +69,10 @@ type ProviderUsage struct {
 	Paused   bool   `json:"paused"`
 	Stale    bool   `json:"stale"`
 	Error    string `json:"error,omitempty"`
+	// StaleReason is one short line saying why a stale provider is stale,
+	// when the desktop knows a cause a person can fix (its CLI is signed
+	// out). Empty otherwise, and the screen falls back to "Stale".
+	StaleReason string `json:"stale_reason,omitempty"`
 	// SourceLabel says where the numbers came from and how fresh they are,
 	// which is what to check first when two surfaces disagree.
 	SourceLabel string  `json:"source_label,omitempty"`
@@ -214,6 +218,9 @@ type dashboardPayload struct {
 		// many times it has failed in a row.
 		UsageSource struct {
 			Active string `json:"active"`
+			// Reason is set when collection is failing for a cause a person
+			// can fix, such as "signed_out".
+			Reason string `json:"reason"`
 		} `json:"usage_source"`
 		ActiveRuns        int                     `json:"active_runs"`
 		MaxConcurrentRuns int                     `json:"max_concurrent_runs"`
@@ -253,6 +260,9 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 			Paused:   item.Paused,
 			Stale:    item.SnapshotStale,
 			Error:    item.Error,
+		}
+		if item.SnapshotStale {
+			provider.StaleReason = staleReason(item.Provider, item.UsageSource.Reason)
 		}
 		if item.Snapshot != nil {
 			// The oldest sample across providers, so the header can say how
@@ -534,4 +544,21 @@ func providesShortWindow(snapshot *decision.UsageSnapshot) bool {
 	}
 	_, ok := snapshot.Allowance("session")
 	return ok
+}
+
+// staleReason is the phone's one-line explanation for a stale provider, or ""
+// when the desktop gave no cause a person can act on. The fix happens on the
+// Mac, so the line says so: the phone itself has nothing to sign in to.
+func staleReason(provider, reason string) string {
+	if reason != "signed_out" {
+		return ""
+	}
+	switch strings.ToLower(provider) {
+	case "claude":
+		return "Claude Code is signed out · run claude auth login on your Mac"
+	case "codex":
+		return "Codex is signed out · run codex login on your Mac"
+	default:
+		return "Signed out on your Mac · sign in again to resume"
+	}
 }

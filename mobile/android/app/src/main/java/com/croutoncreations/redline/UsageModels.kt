@@ -43,6 +43,11 @@ data class ProviderUsage(
     val paused: Boolean = false,
     val stale: Boolean = false,
     val error: String = "",
+    /**
+     * Why a stale provider is stale, in one line, when the Mac knows a cause
+     * a person can fix -- its CLI is signed out. Empty otherwise.
+     */
+    @SerialName("stale_reason") val staleReason: String = "",
     /** Where the numbers came from and how fresh they are. */
     @SerialName("source_label") val sourceLabel: String = "",
     val session: Window? = null,
@@ -198,11 +203,20 @@ fun formatCountdown(seconds: Long): String {
  * both mean the numbers should not be read as current.
  */
 fun providerStatus(provider: ProviderUsage): String = when {
+    provider.stale && provider.staleReason.isNotEmpty() -> "Signed out"
     provider.error.isNotEmpty() -> "No data"
     provider.paused -> "Paused"
     provider.stale -> "Stale"
     else -> "Live"
 }
+
+/**
+ * The problem line under a provider's name, or "" when there is none. A
+ * signed-out provider gets the short fix rather than the desktop's full
+ * paragraph, which is written for a wider screen.
+ */
+fun providerProblem(provider: ProviderUsage): String =
+    provider.staleReason.ifEmpty { provider.error }
 
 /**
  * Formats when a window reopens, in the reader's own timezone.

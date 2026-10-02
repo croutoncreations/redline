@@ -235,6 +235,29 @@ import Testing
     #expect(TrayState(snapshot: snapshot).menuBarTitle == "WAIT  Codex 32% · Claude —")
 }
 
+/// A signed-out provider says so on the card itself, not in a hover tooltip:
+/// "stale" alone sent people looking at the wrong thing. Other stale causes
+/// keep the generic line.
+@Test func signedOutProviderNamesTheFixInsteadOfJustStale() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[
+      {"id":"claude-main","provider":"claude","snapshot_stale":true,
+       "error":"Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again",
+       "usage_source":{"active":"openusage","reason":"signed_out","consecutive_failures":3},
+       "snapshot":{"weekly":{"remaining":0.22,"resets_at":"2026-10-02T17:00:00Z"},"source":"openusage"}},
+      {"id":"codex-main","provider":"codex","snapshot_stale":true,"error":"Usage data is stale",
+       "snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-10-05T03:24:11Z"},"source":"openusage"}}
+    ],"tasks":[],"runs":[],"attempts":[]}
+    """#.utf8))
+
+    let claude = snapshot.providers[0]
+    #expect(claude.signedOut)
+    #expect(claude.staleSummary == "Claude Code is signed out · run claude auth login")
+    let codex = snapshot.providers[1]
+    #expect(!codex.signedOut)
+    #expect(codex.staleSummary == "Last usage sample is stale")
+}
+
 private extension DashboardSnapshot {
     static func fixture(health: String, activeRuns: Int, lowestWeekly: Double, latestOutcome: String? = nil) -> DashboardSnapshot {
         DashboardSnapshot(

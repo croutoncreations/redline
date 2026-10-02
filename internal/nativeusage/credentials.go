@@ -19,6 +19,28 @@ import (
 
 var errCredentialsChanged = errors.New("credentials changed concurrently")
 
+// ErrSignedOut means Claude Code has no usable login on this machine: its
+// credential is missing, emptied (what a sign-out leaves behind), or expired
+// with nothing to refresh it. Nothing Redline can do brings it back, so the
+// message says what happened and the command that fixes it, and every
+// surface shows it as-is.
+var ErrSignedOut error = signedOutError{}
+
+type signedOutError struct{}
+
+func (signedOutError) Error() string {
+	return "Claude Code is signed out on this Mac; run `claude auth login` to sign in again"
+}
+
+// Reason is the machine-readable cause the usage manager reports beside the
+// message, so clients can offer the fix without parsing prose.
+func (signedOutError) Reason() string { return "signed_out" }
+
+// errNoCredential is what a credential store returns when no credential
+// exists at all, as opposed to one it could not read (a locked keychain, a
+// permission error), which is not a sign-out and keeps its own message.
+var errNoCredential = errors.New("no credential is stored")
+
 const (
 	claudeRefreshURL = "https://platform.claude.com/v1/oauth/token"
 	claudeClientID   = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -72,7 +94,30 @@ func (d *DefaultCredentials) Access(ctx context.Context, provider string) (Crede
 	}
 }
 
+// readClaudeCredentials reads and decodes Claude Code's credential. A missing
+// credential, or one whose access token is empty, is ErrSignedOut; a store
+// that cannot be read for any other reason keeps that reason.
+func readClaudeCredentials(ctx context.Context, store secretStore) (claudeCredentialsFile, error) {
+	raw, err := store.Read(ctx)
+	if errors.Is(err, errNoCredential) || errors.Is(err, os.ErrNotExist) {
+		return claudeCredentialsFile{}, ErrSignedOut
+	}
+	if err != nil {
+		return claudeCredentialsFile{}, fmt.Errorf("read Claude credentials: %w", err)
+	}
+	var file claudeCredentialsFile
+	if json.Unmarshal(raw, &file) != nil {
+		return claudeCredentialsFile{}, fmt.Errorf("claude credentials are invalid")
+	}
+	if strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
+		return claudeCredentialsFile{}, ErrSignedOut
+	}
+	file.raw = raw
+	return file, nil
+}
+
 type claudeCredentialsFile struct {
+	raw           []byte
 	ClaudeAIOAuth struct {
 		AccessToken      string   `json:"accessToken"`
 		RefreshToken     string   `json:"refreshToken"`
@@ -95,15 +140,14 @@ func (d *DefaultCredentials) AccessWithoutRefresh(ctx context.Context, provider 
 	if store == nil {
 		return Credential{}, fmt.Errorf("claude credential store is unavailable")
 	}
-	raw, err := store.Read(ctx)
+	file, err := readClaudeCredentials(ctx, store)
 	if err != nil {
-		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
-	}
-	var file claudeCredentialsFile
-	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
-		return Credential{}, fmt.Errorf("claude credentials are invalid")
+		return Credential{}, err
 	}
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, ErrSignedOut
+		}
 		return Credential{}, fmt.Errorf("claude token is near expiry; skipping lookup rather than refreshing Claude Code's credential")
 	}
 	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
@@ -114,14 +158,11 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	if store == nil {
 		return Credential{}, fmt.Errorf("claude credential store is unavailable")
 	}
-	raw, err := store.Read(ctx)
+	file, err := readClaudeCredentials(ctx, store)
 	if err != nil {
-		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
+		return Credential{}, err
 	}
-	var file claudeCredentialsFile
-	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
-		return Credential{}, fmt.Errorf("claude credentials are invalid")
-	}
+	raw := file.raw
 	now := d.now()
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
 		writable, ok := store.(writableSecretStore)
@@ -129,7 +170,7 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential - run `claude auth login`")
 		}
 		if file.ClaudeAIOAuth.RefreshToken == "" {
-			return Credential{}, fmt.Errorf("claude token expired without a refresh token")
+			return Credential{}, ErrSignedOut
 		}
 		payload := map[string]any{"grant_type": "refresh_token", "refresh_token": file.ClaudeAIOAuth.RefreshToken, "client_id": claudeClientID,
 			"scope": "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}

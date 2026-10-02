@@ -405,9 +405,10 @@ private fun ProviderCard(
                 Text(provider.sourceLabel, color = TextMuted, fontSize = 11.sp)
             }
 
-            if (provider.error.isNotEmpty()) {
+            val problem = providerProblem(provider)
+            if (problem.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                Text(provider.error, color = Danger, fontSize = 12.sp)
+                Text(problem, color = Danger, fontSize = 12.sp)
             }
 
             provider.session?.let {
