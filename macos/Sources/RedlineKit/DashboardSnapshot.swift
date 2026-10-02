@@ -233,6 +233,9 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let snapshot: UsageSnapshot?
     public let snapshotStale: Bool
     public let error: String?
+    /// Machine-readable cause of failing collection, when the service knows
+    /// one a person can fix ("signed_out"); nil otherwise.
+    public let usageSourceReason: String?
 
     public init(
         id: String,
@@ -240,7 +243,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         paused: Bool = false,
         snapshot: UsageSnapshot?,
         snapshotStale: Bool = false,
-        error: String? = nil
+        error: String? = nil,
+        usageSourceReason: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -248,11 +252,17 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.snapshot = snapshot
         self.snapshotStale = snapshotStale
         self.error = error
+        self.usageSourceReason = usageSourceReason
     }
 
     enum CodingKeys: String, CodingKey {
         case id, provider, paused, snapshot, error
         case snapshotStale = "snapshot_stale"
+        case usageSource = "usage_source"
+    }
+
+    private struct UsageSourceStatus: Codable {
+        let reason: String?
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,6 +273,34 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         snapshot = try container.decodeIfPresent(UsageSnapshot.self, forKey: .snapshot)
         snapshotStale = try container.decodeIfPresent(Bool.self, forKey: .snapshotStale) ?? false
         error = try container.decodeIfPresent(String.self, forKey: .error)
+        usageSourceReason = try container.decodeIfPresent(UsageSourceStatus.self, forKey: .usageSource)?.reason
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(paused, forKey: .paused)
+        try container.encodeIfPresent(snapshot, forKey: .snapshot)
+        try container.encode(snapshotStale, forKey: .snapshotStale)
+        try container.encodeIfPresent(error, forKey: .error)
+        if let usageSourceReason {
+            try container.encode(UsageSourceStatus(reason: usageSourceReason), forKey: .usageSource)
+        }
+    }
+
+    /// The provider's local login is gone; only signing in again fixes it.
+    public var signedOut: Bool { usageSourceReason == "signed_out" }
+
+    /// The line shown on a stale provider's card. A signed-out provider says
+    /// so and names the fix, rather than leaving it in a hover tooltip.
+    public var staleSummary: String {
+        if signedOut, let login = ProviderRecovery.loginCommand(for: provider) {
+            // The CLI that holds the login, which is what signed out.
+            let tool = provider.lowercased() == "claude" ? "Claude Code" : displayName
+            return "\(tool) is signed out · run \(login)"
+        }
+        return "Last usage sample is stale"
     }
 
     public var displayName: String {
@@ -274,7 +312,21 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     }
 
     public var weeklyPercent: Int? { snapshotStale ? nil : snapshot?.weekly.map(Self.percent) }
-    public var shortPercent: Int? { snapshotStale ? nil : snapshot?.short.map(Self.percent) }
+    public var shortPercent: Int? {
+        if snapshotStale { return nil }
+        if let short = snapshot?.short { return Self.percent(short) }
+        // An unstarted window is full; it just has no reset yet.
+        return snapshot?.shortWindowNotStarted == true ? 100 : nil
+    }
+
+    /// The popover's line for an untouched five hour window, which has no
+    /// reset to count down to. Nil otherwise: a started window is described
+    /// with its reset by the caller, and a provider with no such window has
+    /// nothing to say here.
+    public var shortWindowSummary: String? {
+        guard !snapshotStale, snapshot?.short == nil, snapshot?.shortWindowNotStarted == true else { return nil }
+        return "5h 100% · starts on first use"
+    }
     public var modelAllowances: [AllowanceSummary] {
         snapshot?.allowances.filter { $0.key.hasPrefix("model:") } ?? []
     }
@@ -341,6 +393,10 @@ public struct UsageSnapshot: Codable, Sendable {
     public let bankedResets: Int?
     /// When the soonest-expiring banked reset lapses, if known.
     public let bankedResetsExpireAt: String?
+    /// The five hour window exists and is entirely unused. The provider starts
+    /// its clock on first use, so there is no reset time yet -- the window is
+    /// full, and `short` stays nil rather than carrying an invented reset.
+    public let shortWindowNotStarted: Bool
 
     public init(
         short: UsageWindow?,
@@ -348,7 +404,8 @@ public struct UsageSnapshot: Codable, Sendable {
         allowances: [AllowanceSummary],
         source: String?,
         bankedResets: Int? = nil,
-        bankedResetsExpireAt: String? = nil
+        bankedResetsExpireAt: String? = nil,
+        shortWindowNotStarted: Bool = false
     ) {
         self.short = short
         self.weekly = weekly
@@ -356,12 +413,14 @@ public struct UsageSnapshot: Codable, Sendable {
         self.source = source
         self.bankedResets = bankedResets
         self.bankedResetsExpireAt = bankedResetsExpireAt
+        self.shortWindowNotStarted = shortWindowNotStarted
     }
 
     enum CodingKeys: String, CodingKey {
         case short, weekly, allowances, source
         case bankedResets = "banked_resets"
         case bankedResetsExpireAt = "banked_resets_expire_at"
+        case shortWindowNotStarted = "short_window_not_started"
     }
 
     public init(from decoder: Decoder) throws {
@@ -372,6 +431,8 @@ public struct UsageSnapshot: Codable, Sendable {
         source = try container.decodeIfPresent(String.self, forKey: .source)
         bankedResets = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
         bankedResetsExpireAt = try? container.decodeIfPresent(String.self, forKey: .bankedResetsExpireAt)
+        // Absent from an older desktop, which never sent the state.
+        shortWindowNotStarted = (try? container.decodeIfPresent(Bool.self, forKey: .shortWindowNotStarted)) ?? false
     }
 }
 

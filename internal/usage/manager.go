@@ -48,10 +48,26 @@ type Status struct {
 	Active    string    `json:"active"`
 	ChangedAt time.Time `json:"changed_at,omitempty"`
 	LastError string    `json:"last_error,omitempty"`
-	Failures  int       `json:"consecutive_failures"`
+	// Reason names a failure a person can fix, when the source knows one
+	// (ReasonSignedOut), and is empty otherwise. LastError has the words.
+	Reason   string `json:"reason,omitempty"`
+	Failures int    `json:"consecutive_failures"`
 	// BankedResetsError explains why the supplementary reset lookup is
 	// failing. It never affects scheduling.
 	BankedResetsError string `json:"banked_resets_error,omitempty"`
+}
+
+// ReasonSignedOut: the provider's local login is gone and only signing in
+// again fixes it.
+const ReasonSignedOut = "signed_out"
+
+// failureReason returns the fixable cause an error declares, if any.
+func failureReason(err error) string {
+	var reasoned interface{ Reason() string }
+	if errors.As(err, &reasoned) {
+		return reasoned.Reason()
+	}
+	return ""
 }
 
 type sourceState struct {
@@ -365,7 +381,7 @@ func (m *Manager) success(accountID, active string, now time.Time) {
 	}
 	state.Active, state.Failures = active, 0
 	if !preserveFallbackError {
-		state.LastError = ""
+		state.LastError, state.Reason = "", ""
 	}
 	m.states[accountID] = state
 }
@@ -375,7 +391,7 @@ func (m *Manager) failure(accountID string, err error) int {
 	defer m.mu.Unlock()
 	state := m.states[accountID]
 	state.Failures++
-	state.LastError = err.Error()
+	state.LastError, state.Reason = err.Error(), failureReason(err)
 	if state.Active == "" {
 		state.Active = "openusage"
 	}
@@ -387,7 +403,7 @@ func (m *Manager) probeFailure(accountID string, err error, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError = err.Error()
+	state.LastError, state.Reason = err.Error(), failureReason(err)
 	state.nextProbe = now.Add(m.reprobeInterval())
 	m.states[accountID] = state
 }
@@ -396,7 +412,7 @@ func (m *Manager) nativeFailure(accountID string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError = err.Error()
+	state.LastError, state.Reason = err.Error(), failureReason(err)
 	m.states[accountID] = state
 }
 

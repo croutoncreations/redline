@@ -1,0 +1,694 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+)
+
+// relayClientFrameLimit is the maximum size of a single WebSocket frame on the
+// wire. Must match internal/relay's maxTunnelPayload (1 MB); the relay's
+// eight-byte channel exists only on the host leg and is stripped before a
+// phone receives a frame. Keeping a local
+// constant is necessary because mobile/core cannot import internal/relay
+// (internal package visibility). If the relay package changes this value, this
+// constant must be updated to match, or the transport will silently clip large
+// frames: the library closes the socket rather than returning an error, so the
+// failure looks like an unstable relay rather than a size mismatch.
+const relayClientFrameLimit = 1024 * 1024
+
+// relayClientRequestTimeout is the default per-request timeout.
+const relayClientRequestTimeout = 30 * time.Second
+
+// relayClientHandshakeTimeout limits the initial Noise IK handshake.
+//
+// An impostor that cannot decrypt the initiator's message cannot reply, so the
+// phone would hang forever on context.Background(). A genuine relay outage is
+// indistinguishable from an impostor at dial time, so a short timeout is the
+// right answer in both cases: fail fast and let the caller decide.
+// 5 seconds is generous for a successful handshake over any reasonable
+// connection, and fast enough for unit tests.
+// relayClientHandshakeTimeout bounds the wait for the desktop's Noise reply.
+//
+// The desktop now keeps its connection across phones, so the usual reason for
+// a slow reply is a busy desktop rather than one mid-reconnect. Three seconds
+// leaves room for that while keeping a genuinely absent desktop from stalling
+// a refresh: DialRelay retries, so this bounds one attempt rather than the
+// whole wait.
+const relayClientHandshakeTimeout = 3 * time.Second
+
+// tunnelRequest is the wire format for a request going phone → desktop.
+// Must match internal/relay.TunnelRequest.
+type tunnelRequest struct {
+	Method string              `json:"method"`
+	Path   string              `json:"path"`
+	Header map[string][]string `json:"header,omitempty"`
+	Body   []byte              `json:"body,omitempty"`
+}
+
+// tunnelResponse is the wire format for a reply going desktop → phone, and
+// also the envelope RelayFallbackFull.DoFull hands back across the FFI. Must
+// match internal/relay.TunnelResponse.
+//
+// One type for both on purpose. They were two identical structs "so the wire
+// formats could evolve independently", which meant a field added to one and
+// not the other would have been a silent drop at the boundary between them --
+// the shape of fault this package has had enough of. If they ever genuinely
+// diverge, split them then, with a test that says how.
+type tunnelResponse struct {
+	Status int         `json:"status"`
+	Header http.Header `json:"header,omitempty"`
+	Body   []byte      `json:"body,omitempty"`
+}
+
+// RelayClient is the phone's end of the Noise-encrypted relay tunnel.
+//
+// Each RelayClient owns exactly one Noise session and one WebSocket connection.
+// Noise requires strictly ordered, exactly-once delivery: two concurrent writes
+// would advance the nonce out of step and corrupt every subsequent frame. The
+// mutex is held across the entire write + read pair, not just the field access.
+//
+// When the session is finished (by Close or a fatal error) the client is
+// permanently unusable. Rule 1: sessions are single-use.
+type RelayClient struct {
+	mu      sync.Mutex
+	conn    *websocket.Conn
+	session *NoiseSession
+	closed  bool
+	timeout time.Duration
+
+	// authToken is the bearer credential for every request on this session.
+	authToken string
+}
+
+// DialRelay connects to the relay, performs a full Noise IK handshake with the
+// desktop, and returns a ready-to-use RelayClient.
+//
+// relayURL must be wss://, or ws:// only for loopback addresses (tests).
+// sessionID must be 16–128 characters of [A-Za-z0-9_-].
+// desktopPublicKey must be a valid base64-encoded 32-byte Curve25519 key.
+//
+// The function fails if the handshake does not complete, which means the far
+// end did not hold the expected desktop private key: an impostor relay or a
+// misconfigured desktop is caught here rather than silently passing requests to
+// the wrong party.
+//
+// The phone never holds an entitlement token: the relay admits role=client
+// purely because an entitled host is already attached to the session
+// (docs/relay-entitlement.md). There is nothing for this call to present.
+// DialRelay opens a relayed session, retrying briefly while the desktop is
+// still reconnecting.
+//
+// Establishing the session is what races, not the socket. Closing a relayed
+// session ends the desktop's leg too, and it redials within a fraction of a
+// second; a phone that tried once inside that window connected to the relay
+// fine and then timed out waiting for a Noise reply from a partner that had
+// not arrived yet. Retrying the whole handshake is what covers it -- retrying
+// only the dial does not, because the dial was never the part that failed.
+//
+// A host-offline or too-many-phones refusal is an answer rather than a race,
+// so it returns at once instead of being repeated three times.
+func DialRelay(relayURL, sessionID, desktopPublicKey string) (*RelayClient, error) {
+	var err error
+	for attempt := 0; attempt < dialAttempts; attempt++ {
+		var client *RelayClient
+		client, err = dialRelayOnce(relayURL, sessionID, desktopPublicKey)
+		if err == nil {
+			return client, nil
+		}
+		if errors.Is(err, ErrHostOffline) || errors.Is(err, ErrTooManyPhones) || errors.Is(err, ErrEntitlementRefused) {
+			return nil, err
+		}
+		if attempt < dialAttempts-1 {
+			time.Sleep(dialRetryDelay)
+		}
+	}
+	return nil, err
+}
+
+// dialAttempts and dialRetryDelay bound the wait for the desktop to reappear.
+//
+// Closing a relayed session ends the desktop's leg too, and it redials within
+// a fraction of a second. A phone that dialled once inside that window found
+// nobody paired and reported the desktop unreachable -- seen as "relayed",
+// then "offline" on the very next refresh.
+//
+// Three attempts over roughly a second: long enough to cover the reconnect,
+// short enough that a genuinely absent desktop still fails while someone is
+// looking at the screen.
+const (
+	dialAttempts   = 3
+	dialRetryDelay = 400 * time.Millisecond
+)
+
+// ErrEntitlementRefused means the relay declined the session because the
+// entitlement was missing, expired, or not signed by the issuer it trusts.
+//
+// Distinct from unreachability: the desktop may be perfectly healthy and the
+// network fine. The user's action is to renew, not to investigate their
+// connection.
+var ErrEntitlementRefused = errors.New("this relay requires a current subscription")
+
+// IsEntitlementRefused reports whether the relay declined for lack of a valid
+// entitlement.
+//
+// A function rather than a bound sentinel because gomobile cannot express
+// errors.Is across the FFI boundary.
+func IsEntitlementRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	// gomobile may reconstruct an error from text after it crosses a Kotlin
+	// callback, losing the Go wrapping chain. The stable sentinel sentence is
+	// therefore part of this FFI classification contract.
+	return errors.Is(err, ErrEntitlementRefused) || strings.Contains(err.Error(), ErrEntitlementRefused.Error())
+}
+
+// ErrHostOffline means the relay refused a phone's role=client connection
+// with 423 because no entitled host is currently attached to the session
+// (docs/relay-entitlement.md's `no_host` code).
+//
+// Distinct from every other relay refusal: the phone, the relay, and the
+// subscription may all be fine. The desktop simply is not dialled in right
+// now -- asleep, offline, or between reconnect attempts -- and the remedy is
+// to check the Mac, not the phone's own network or its subscription.
+var ErrHostOffline = errors.New("your Mac is not connected to the relay")
+
+// IsHostOffline reports whether the relay refused the connection because no
+// entitled host is attached to this session.
+//
+// A function rather than a bound sentinel for the same FFI reason as
+// IsEntitlementRefused: gomobile may reconstruct the error from its text
+// alone after crossing a Kotlin callback.
+func IsHostOffline(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrHostOffline) || strings.Contains(err.Error(), ErrHostOffline.Error())
+}
+
+// ErrTooManyPhones means the relay refused a phone's role=client connection
+// with 409 because the session is already at its signed max_clients cap
+// (docs/relay-entitlement.md's `too_many_clients` code).
+//
+// Distinct from every other relay refusal: the desktop is online and the
+// subscription is current. The remedy is to close another phone's connection
+// to this same Mac, not to renew or reconnect.
+var ErrTooManyPhones = errors.New("too many phones are already connected to this Mac")
+
+// IsTooManyPhones reports whether the relay refused the connection because
+// the session was already at its client cap.
+func IsTooManyPhones(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrTooManyPhones) || strings.Contains(err.Error(), ErrTooManyPhones.Error())
+}
+
+// ErrEntitlementExpiredMidSession means a previously working relay session
+// was closed with WebSocket close code 1008 (docs/relay-entitlement.md),
+// which the relay sends only when a Durable Object alarm fires because the
+// desktop's entitlement reached its stored expiry.
+//
+// Distinct from ErrEntitlementRefused, which is a connect-time refusal before
+// any session existed: this happens after requests were already succeeding,
+// so the right message is "the subscription just lapsed", not a repeat of the
+// pre-connection wording.
+var ErrEntitlementExpiredMidSession = errors.New("the relay subscription expired during this session")
+
+// IsEntitlementExpiredMidSession reports whether a request failed because the
+// relay closed an established session at 1008 for entitlement expiry.
+func IsEntitlementExpiredMidSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrEntitlementExpiredMidSession) || strings.Contains(err.Error(), ErrEntitlementExpiredMidSession.Error())
+}
+
+// entitlementExpiredCloseReason is the exact reason string the relay sends
+// alongside a 1008 close for entitlement expiry (relay/src/session.js,
+// docs/relay-entitlement.md). Matching on it, not just the status code, keeps
+// an unrelated future 1008 close (a generic "policy violation" the relay
+// could send for any reason) from being reported as an entitlement lapse.
+const entitlementExpiredCloseReason = "entitlement expired"
+
+// isEntitlementExpiredClose reports whether err is a WebSocket close that
+// matches both the status code and the documented reason text the relay uses
+// exclusively for a Durable Object alarm firing at the stored exp. The relay
+// is untrusted input (docs/relay-entitlement.md), so both are required before
+// this specific, actionable-sounding classification is reported to the user;
+// checking the code alone would let any other 1008 close read as a lapsed
+// subscription.
+func isEntitlementExpiredClose(err error) bool {
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+	return closeErr.Code == websocket.StatusPolicyViolation && closeErr.Reason == entitlementExpiredCloseReason
+}
+
+func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, error) {
+	if err := validateDialInputs(relayURL, sessionID, desktopPublicKey); err != nil {
+		return nil, err
+	}
+
+	session, err := NewInitiatorSession(desktopPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("dial relay: %w", err)
+	}
+
+	target := buildSessionURL(relayURL, sessionID)
+	// role=client never presents a credential (docs/relay-entitlement.md):
+	// admission is host-gated, not token-gated, so no header is sent here.
+	conn, handshake, err := websocket.Dial(context.Background(), target, &websocket.DialOptions{})
+	if err != nil {
+		// A 402 is a billing answer, not a network one. Discarding the
+		// handshake response made an expired subscription read as "check that
+		// the desktop is running and on the same network", sending the user to
+		// look at their wifi when the remedy is to renew. That is the message
+		// every lapsed subscriber will see, so it has to be its own thing.
+		//
+		// The relay's own reason travels in the 402 body: missing, malformed,
+		// bad signature, or expired. Attached so a log can tell those apart
+		// -- one of them cost a full day to diagnose while every client
+		// showed the same words. errors.Is still matches the sentinel, so
+		// nothing downstream branches on the wording.
+		if handshake != nil && handshake.StatusCode == http.StatusPaymentRequired {
+			reason, _ := io.ReadAll(io.LimitReader(handshake.Body, 256))
+			handshake.Body.Close()
+			// Quoted: this is relay-controlled text on its way to a log, and
+			// %q turns an embedded newline into two characters rather than a
+			// forged second line.
+			return nil, fmt.Errorf("%w (relay said: %q)", ErrEntitlementRefused, strings.TrimSpace(string(reason)))
+		}
+		// 423 no_host and 409 too_many_clients are role=client's own refusal
+		// codes (docs/relay-entitlement.md), distinguished from every other
+		// non-2xx status -- including the plain 409 a desktop reconnect race
+		// produces (see dialAttempts/dialRetryDelay above) -- only by this
+		// specific machine-readable body, never by status code alone.
+		if handshake != nil && (handshake.StatusCode == http.StatusLocked || handshake.StatusCode == http.StatusConflict) {
+			reason, _ := io.ReadAll(io.LimitReader(handshake.Body, 256))
+			handshake.Body.Close()
+			switch relayErrorCode(reason) {
+			case "no_host":
+				return nil, fmt.Errorf("%w", ErrHostOffline)
+			case "too_many_clients":
+				return nil, fmt.Errorf("%w", ErrTooManyPhones)
+			}
+		}
+		// Keep the library's response details out of the error. The entitlement
+		// travels in a handshake header, which a future library error must not
+		// accidentally echo across the FFI into logs.
+		return nil, fmt.Errorf("dial relay: connect failed")
+	}
+
+	// Rule 4: set the read limit to the frame ceiling. The library default is
+	// 32 KB; exceeding it closes the socket rather than failing one read, which
+	// would look like a broken relay.
+	conn.SetReadLimit(relayClientFrameLimit)
+
+	handshakeMsg, err := session.StartHandshake()
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("dial relay: start handshake: %w", err)
+	}
+
+	if err := conn.Write(context.Background(), websocket.MessageBinary, handshakeMsg); err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("dial relay: write handshake: %w", err)
+	}
+
+	// A context with deadline so an impostor that cannot decrypt our message
+	// (and therefore cannot reply) does not leave us blocked forever. A genuine
+	// unavailable relay is indistinguishable from an impostor here, and the
+	// right answer in both cases is to fail fast and let the caller retry.
+	readCtx, cancelRead := context.WithTimeout(context.Background(), relayClientHandshakeTimeout)
+	defer cancelRead()
+
+	_, reply, err := conn.Read(readCtx)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("dial relay: read handshake reply: %w", err)
+	}
+	// FinishHandshake authenticates the far end. If the far end holds a
+	// different key than desktopPublicKey, this call fails with a decrypt
+	// error, and the connection is refused. This is the impostor check.
+	if err := session.FinishHandshake(reply); err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("dial relay: handshake authentication failed: %w", err)
+	}
+
+	return &RelayClient{
+		conn:    conn,
+		session: session,
+		timeout: relayClientRequestTimeout,
+	}, nil
+}
+
+// SetTimeoutSeconds sets the per-request timeout. The default is 30 seconds.
+// A value ≤ 0 is ignored.
+func (c *RelayClient) SetTimeoutSeconds(seconds int) {
+	if seconds <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timeout = time.Duration(seconds) * time.Second
+}
+
+// SetAuthToken sets the bearer token sent with every request.
+//
+// Every Redline endpoint requires one, so a tunnel without this reaches the
+// desktop and is turned away by it -- which looks like a broken relay and is
+// really a missing header. Held on the client rather than passed per request
+// because the token belongs to the session, not to any one call.
+func (c *RelayClient) SetAuthToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authToken = strings.TrimSpace(token)
+}
+
+// Request sends a single HTTP-like request through the tunnel and returns the
+// response body as a string.
+//
+// The mutex is held across the entire write + read pair because Noise nonces
+// advance per message: a second concurrent write would send the same nonce
+// twice and break all decryption permanently.
+//
+// A non-2xx status is returned as an error alongside the body. A malformed
+// response (bad JSON after a successful decrypt) is returned as an error but
+// does NOT close the session: the Noise cipher state is still in sync because
+// the frame decrypted correctly — only the application payload was bad.
+//
+// Rule 2: frames must arrive exactly once and in order. The mutex on this side,
+// plus the relay's ordered delivery, ensures that.
+// Rule 3: a failed request is never resent on this session. The caller must
+// decide whether to retry (with a fresh DialRelay if the session is closed).
+func (c *RelayClient) Request(method, reqPath, body string) (string, error) {
+	_, answer, err := c.requestWithStatus(method, reqPath, body)
+	return answer, err
+}
+
+// IsSpent reports whether this session can no longer carry a request.
+//
+// A Noise session does not resume: any transport close or decrypt failure ends
+// it for good. A caller that caches the client -- which the phone does, to
+// avoid a handshake per request -- has no other way to tell a live session
+// from a dead one, and reusing a dead one fails every time. On a real phone
+// that read as "relayed", then "offline" on the next refresh.
+func (c *RelayClient) IsSpent() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// Answer performs the request and returns "<status> <body>", the encoding
+// RelayFallback expects.
+//
+// A 409 or a 401 is a real answer from the desktop, not a relay failure, and
+// collapsing the two is what made every relayed response look like success.
+// Only a genuine transport or crypto failure returns an error here.
+//
+// The status is encoded into the returned string rather than read back through
+// a second call. Two calls meant two operations on shared state, which raced:
+// one client serves three view models on the phone, each on its own thread, so
+// a dispatch could report the status of a refresh that finished in between.
+func (c *RelayClient) Answer(method, reqPath, body string) (string, error) {
+	status, answer, err := c.requestWithStatus(method, reqPath, body)
+	if err != nil && status == 0 {
+		// No status means the session itself failed rather than the desktop
+		// refusing: there is no answer to report.
+		return "", err
+	}
+	return FormatRelayAnswer(status, answer), nil
+}
+
+// requestWithStatus is Request, returning the desktop's own status code.
+//
+// The status has to survive the tunnel. TunnelResponse carries it precisely
+// because 202 and 200 mean different things, and discarding it made every
+// relayed answer look like a flat success: a dispatch refused with 409 came
+// back as neither started nor refused, which is the one outcome that cannot
+// happen, and a 401 could never prompt a re-pair.
+//
+// Unexported: gomobile cannot bind three return values, and a method it cannot
+// bind makes it skip the entire file -- silently, so the AAR simply lacks every
+// type in it. Answer() is the bound entry point.
+func (c *RelayClient) requestWithStatus(method, reqPath, body string) (int, string, error) {
+	resp, err := c.exchange(method, reqPath, body)
+	if err != nil {
+		return 0, "", err
+	}
+	bodyStr := string(resp.Body)
+	if resp.Status < 200 || resp.Status >= 300 {
+		return resp.Status, bodyStr, fmt.Errorf("relay response status %d", resp.Status)
+	}
+	return resp.Status, bodyStr, nil
+}
+
+// AnswerFull carries one request and returns the desktop's whole reply --
+// status, headers and body -- as the JSON envelope RelayFallbackFull.DoFull
+// promises.
+//
+// Answer folds the reply to "<status> <body>", which is all any data endpoint
+// needs. Pairing is the exception: the credential arrives as a Set-Cookie
+// header, so without this method the relay could carry every request except
+// the first one a phone ever makes. As with Answer, a non-2xx status is the
+// desktop's own answer and is returned, not raised.
+func (c *RelayClient) AnswerFull(method, reqPath, body string) (string, error) {
+	resp, err := c.exchange(method, reqPath, body)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(tunnelResponse{
+		Status: resp.Status,
+		Header: resp.Header,
+		Body:   resp.Body,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode relay answer: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// exchange seals one request, sends it, and opens the reply.
+//
+// The mutex is held for the whole round trip: Noise nonces advance with every
+// frame, so a second request interleaved between this write and its read
+// would put the cipher state out of step and poison every later frame.
+func (c *RelayClient) exchange(method, reqPath, body string) (tunnelResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return tunnelResponse{}, errors.New("relay client is closed")
+	}
+
+	req := tunnelRequest{
+		Method: method,
+		Path:   reqPath,
+	}
+	if c.authToken != "" {
+		req.Header = map[string][]string{"Authorization": {"Bearer " + c.authToken}}
+	}
+	if body != "" {
+		req.Body = []byte(body)
+	}
+
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return tunnelResponse{}, fmt.Errorf("encode request: %w", err)
+	}
+
+	frame, err := c.session.Seal(encoded)
+	if err != nil {
+		// A Seal failure means the session is broken — close it.
+		c.closeConn()
+		return tunnelResponse{}, fmt.Errorf("seal request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	if err := c.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		c.closeConn()
+		return tunnelResponse{}, fmt.Errorf("write request: %w", err)
+	}
+
+	_, rawFrame, err := c.conn.Read(ctx)
+	if err != nil {
+		c.closeConn()
+		// 1008 is the relay's documented authoritative signal that a Durable
+		// Object alarm fired because the desktop's entitlement reached its
+		// stored exp mid-session (docs/relay-entitlement.md). Distinct from
+		// the connect-time 402 refusal: a session that was already working
+		// just stopped, so the caller needs a different message.
+		//
+		// The close reason is also checked, matching the caution already
+		// applied to the 423/409 body checks above: 1008 ("policy violation")
+		// is a generic WebSocket code the relay could send for an unrelated
+		// reason (e.g. a future policy the relay enforces that has nothing to
+		// do with entitlement), and the relay is untrusted input. Requiring
+		// the documented reason text before reporting "your subscription just
+		// lapsed" keeps a relay operator from steering that specific,
+		// actionable-sounding message onto a phone for any other 1008 close.
+		if isEntitlementExpiredClose(err) {
+			return tunnelResponse{}, fmt.Errorf("read response: %w", ErrEntitlementExpiredMidSession)
+		}
+		return tunnelResponse{}, fmt.Errorf("read response: %w", err)
+	}
+
+	plaintext, err := c.session.Open(rawFrame)
+	if err != nil {
+		// A decrypt failure means the Noise session is permanently out of step
+		// (rule 1). Close so the caller knows to re-dial.
+		c.closeConn()
+		return tunnelResponse{}, fmt.Errorf("decrypt response: %w", err)
+	}
+
+	// The frame decrypted correctly, so the cipher state is still in sync.
+	// A JSON decode failure is an application-level error, not a session error.
+	// Do NOT close the session here — the next Request will work.
+	var resp tunnelResponse
+	if err := json.Unmarshal(plaintext, &resp); err != nil {
+		return tunnelResponse{}, fmt.Errorf("decode response: %w", err)
+	}
+	return resp, nil
+}
+
+// Close shuts down the relay session and connection. Safe to call more than
+// once. After Close, Request returns an error immediately.
+//
+// Rule 1: sessions are single-use. Close marks this client as permanently
+// finished; DialRelay must be called again to establish a new session.
+func (c *RelayClient) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeConn()
+}
+
+// closeConn performs the actual teardown. Must be called with c.mu held.
+func (c *RelayClient) closeConn() {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	if c.conn != nil {
+		c.conn.CloseNow()
+	}
+}
+
+// relayErrorCode reads the "code" field from one of the relay's own JSON
+// error bodies ({"code":"<code>"}, docs/relay-entitlement.md), or "" if the
+// body is not that shape. A malformed or absent body must never be treated as
+// a match for any specific code: this is what keeps a bare 409 from a
+// desktop-reconnect race (no body at all) from being misclassified as the
+// relay's too_many_clients refusal, which shares the same status.
+func relayErrorCode(body []byte) string {
+	var decoded struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return ""
+	}
+	return decoded.Code
+}
+
+// validateDialInputs checks the relay URL, session id, and desktop public key
+// before anything is dialled.
+func validateDialInputs(relayURL, sessionID, desktopPublicKey string) error {
+	if err := validateRelayURLForDial(relayURL); err != nil {
+		return fmt.Errorf("invalid relay URL: %w", err)
+	}
+	if safeSessionID(sessionID) == "" {
+		return fmt.Errorf("invalid session ID: must be 16–128 characters of [A-Za-z0-9_-]")
+	}
+	if desktopPublicKey == "" {
+		return errors.New("desktop public key is required")
+	}
+	// Let NewInitiatorSession do the key validation: it checks base64 and
+	// length precisely. We don't need a separate check here.
+	if _, err := NewInitiatorSession(desktopPublicKey); err != nil {
+		return fmt.Errorf("invalid desktop public key: %w", err)
+	}
+	return nil
+}
+
+// validateRelayURLForDial accepts wss:// always, and ws:// only for loopback
+// addresses (used in tests against httptest.Server).
+//
+// ValidateRelayURL requires https:// because the relay is on the public
+// internet. Here we also accept ws:// for loopback to allow unit tests using
+// httptest.NewServer without TLS.
+func validateRelayURLForDial(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errors.New("relay URL is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid URL", raw)
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	host := parsed.Hostname()
+
+	switch scheme {
+	case "wss", "https":
+		// Both name the same endpoint. The desktop's own config validator
+		// requires https, because it describes an address net/http will dial,
+		// and the QR publishes that value verbatim -- so a correctly configured
+		// desktop handed every phone a URL this function used to refuse, and
+		// the fallback failed before a packet moved. Which spelling is correct
+		// depends only on which library opens the connection, which is not
+		// something a pairing payload should have to know.
+	case "ws", "http":
+		// Only for loopback — tests use httptest.Server, which gives http/ws.
+		if !isLoopbackHost(host) && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("%q must use wss:// for non-loopback hosts", raw)
+		}
+	default:
+		return fmt.Errorf("%q must use wss:// (or ws:// for loopback only)", raw)
+	}
+
+	if host == "" {
+		return fmt.Errorf("%q has no host", raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%q must not contain credentials", raw)
+	}
+	return nil
+}
+
+// buildSessionURL constructs the non-secret WebSocket URL for the phone's
+// session. Entitlement credentials travel in the handshake header, never here.
+func buildSessionURL(relayURL, sessionID string) string {
+	base, err := url.Parse(relayURL)
+	if err != nil {
+		return relayURL
+	}
+	// Normalised to the WebSocket spelling. The desktop publishes https,
+	// because that is what its own config validates, and the library dialling
+	// here wants wss for the same endpoint.
+	switch strings.ToLower(base.Scheme) {
+	case "https":
+		base.Scheme = "wss"
+	case "http":
+		base.Scheme = "ws"
+	}
+	base.Path = path.Join(base.Path, "/v1/session", sessionID)
+	query := url.Values{}
+	query.Set("role", "client")
+	base.RawQuery = query.Encode()
+	return base.String()
+}

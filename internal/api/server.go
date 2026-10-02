@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +38,8 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/pairing"
+	"github.com/croutoncreations/redline/internal/relay"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/tasktemplate"
@@ -55,6 +59,15 @@ type Notifier interface {
 
 type HarnessDiscoverer interface {
 	Discover(context.Context) discovery.Catalog
+}
+
+type relayManagement interface {
+	Status() config.RelayStatus
+	Configure(context.Context, config.RelayConfigureRequest) (config.RelayStatus, error)
+	Devices(context.Context) ([]relay.Activation, error)
+	DeactivateDevice(context.Context, string) error
+	Portal(context.Context) (*url.URL, error)
+	Deactivate(context.Context) (config.RelayStatus, error)
 }
 
 type HermesDiscoverer interface {
@@ -86,7 +99,36 @@ type Server struct {
 	started      bool
 	pairingMu    sync.Mutex
 	pairing      map[string]time.Time
+	// redeemed remembers a spent token for a short while after the fact, so
+	// the surface that showed the code can learn the phone got in. Without
+	// this a redeem was a deletion and nothing more: the sheet kept showing
+	// a dead code and had no way to say "paired".
+	redeemed         map[string]time.Time
+	relayRuntime     config.RelayRuntime
+	relayManager     relayManagement
+	mintPairingToken func() (string, error)
 }
+
+// redeemedMemory is how long a spent token stays reportable as redeemed.
+// Longer than the sheet's poll interval by a wide margin, and long enough
+// that a redeem in the token's last second is not read as an expiry by the
+// next poll; short enough that the map cannot grow without bound.
+//
+// A minute is enough only because every surface that shows a code mints a
+// fresh token each time it opens (the menu-bar sheet does so in
+// PairDeviceWindowController.show; the CLI runs once). Nothing asks about a
+// token it did not just mint, so nothing needs the answer later than this.
+// A surface that kept a token across opens would need a longer memory, and
+// this is the line to change -- together with
+// PairDeviceModel.redeemMemoryMargin in the macOS app, which must not exceed
+// it: a sheet that polls longer than the service remembers reads a real
+// redeem as expired.
+//
+// Kept in memory with the tokens themselves, so a service restart forgets a
+// redeem along with everything else: a sheet open across a restart reads
+// "expired" for a code the phone actually spent. The phone is paired either
+// way; the sheet is merely wrong about it once.
+const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
@@ -97,6 +139,25 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 		OutputDirectory: cfg.ArtifactsDirectory(), Now: now,
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
+}
+
+// NewServerWithRelayRuntime injects the service-owned resolved relay boundary.
+// NewServer remains compatible for relay-off callers through an explicit off
+// adapter and never infers runtime state from bootstrap fields.
+func NewServerWithRelayRuntime(cfg config.Config, database *store.DB, now func() time.Time, runtime config.RelayRuntime) *Server {
+	server := NewServer(cfg, database, now)
+	if runtime != nil {
+		server.relayRuntime = runtime
+	}
+	return server
+}
+
+// NewServerWithRelayManager installs the service-owned management boundary.
+// Handlers receive no Keychain or issuer dependency of their own.
+func NewServerWithRelayManager(cfg config.Config, database *store.DB, now func() time.Time, manager *config.RelayManager) *Server {
+	server := NewServerWithRelayRuntime(cfg, database, now, manager)
+	server.relayManager = manager
+	return server
 }
 
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
@@ -189,10 +250,16 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
-		pairing:   make(map[string]time.Time),
-		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
-		discovery: discovery.Service{Now: now},
-		hermes:    hermes.Client{},
+		pairing:  make(map[string]time.Time),
+		redeemed: make(map[string]time.Time),
+		relayRuntime: config.NewRelayCoordinator(config.ResolvedRelay{
+			RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+			Readiness:         config.RelayReadinessOff,
+		}),
+		mintPairingToken: randomPairingToken,
+		artifacts:        artifacts.Reader{Root: cfg.ArtifactsDirectory()},
+		discovery:        discovery.Service{Now: now},
+		hermes:           hermes.Client{},
 	}
 	server.usageSources = usage.NewManager(
 		openusage.Source{},
@@ -236,7 +303,14 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
+	mux.HandleFunc("GET /v1/relay/status", server.relayStatus)
+	mux.HandleFunc("POST /v1/relay/configure", server.configureRelay)
+	mux.HandleFunc("GET /v1/relay/devices", server.relayDevices)
+	mux.HandleFunc("DELETE /v1/relay/devices/{id}", server.deactivateRelayDevice)
+	mux.HandleFunc("POST /v1/relay/portal", server.relayPortal)
+	mux.HandleFunc("POST /v1/relay/deactivate", server.deactivateRelay)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
@@ -314,6 +388,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	if r.URL.Path == "/v1/relay/portal" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if loopbackHost(r.Host) && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) != "" {
 		writeJSON(w, http.StatusForbidden, problem{Error: "reverse proxies must preserve a configured trusted host"})
 		return
@@ -348,7 +425,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w = &noStoreWriter{ResponseWriter: w}
 		}
 	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.EscapedPath(), "/v1/relay/devices/") && !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+func validRelayActivationRequestPath(r *http.Request) bool {
+	if r.URL.RawQuery != "" || r.URL.Fragment != "" {
+		return false
+	}
+	const prefix = "/v1/relay/devices/"
+	escaped := r.URL.EscapedPath()
+	if strings.Contains(strings.ToLower(escaped), "%") {
+		return false
+	}
+	id := strings.TrimPrefix(escaped, prefix)
+	if id == "" || len(id) > 512 {
+		return false
+	}
+	for _, character := range id {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 const apiSessionCookie = "redline_api_session"
@@ -358,26 +461,218 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
-func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+func randomPairingToken() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func (s *Server) relayStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.relayManager.Status())
+}
+
+func (s *Server) configureRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	var request config.RelayConfigureRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: err.Error()})
+		return
+	}
+	status, err := s.relayManager.Configure(r.Context(), request)
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) relayDevices(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	devices, err := s.relayManager.Devices(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	if devices == nil {
+		devices = []relay.Activation{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Devices []relay.Activation `json:"devices"`
+	}{Devices: devices})
+}
+
+func (s *Server) deactivateRelayDevice(w http.ResponseWriter, r *http.Request) {
+	if !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	if err := s.relayManager.DeactivateDevice(r.Context(), r.PathValue("id")); err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) relayPortal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	portal, err := s.relayManager.Portal(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		URL string `json:"url"`
+	}{URL: portal.String()})
+}
+
+func (s *Server) deactivateRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	status, err := s.relayManager.Deactivate(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func writeRelayManagementError(w http.ResponseWriter, err error) {
+	code, status := "internal_error", http.StatusInternalServerError
+	var management *config.RelayManagementError
+	if errors.As(err, &management) {
+		code = management.Code
+		switch code {
+		case "invalid_request":
+			status = http.StatusBadRequest
+		case "invalid_key":
+			status = http.StatusUnprocessableEntity
+		case "needs_license", "lapsed", "no_seat", "not_hosted", "deactivation_pending", "license_key_required":
+			status = http.StatusConflict
+		case "activation_not_found", "not_found":
+			status = http.StatusNotFound
+		case "activation_conflict", "conflict":
+			status = http.StatusConflict
+		case "rate_limited":
+			status = http.StatusTooManyRequests
+		case "invalid_response":
+			status = http.StatusBadGateway
+		case "issuer_unavailable", "unavailable", "secure_store_unavailable", "state_unavailable", "controller_unavailable", "compensation_failed", "management_closing", "pending":
+			status = http.StatusServiceUnavailable
+		}
+	}
+	writeJSON(w, status, problem{Code: code, Error: err.Error()})
+}
+
+func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Host      string `json:"host"`
+		Port      int    `json:"port"`
+		RelayOnly bool   `json:"relay_only"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid pairing request: " + err.Error()})
+			return
+		}
+	}
+	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
+	// Derive both the public status and the route plan from exactly one
+	// immutable snapshot. A second independent Status() call could observe a
+	// newer generation and advertise its URL/session while only the readiness
+	// happens to match, silently mixing two different configurations.
+	snapshot := s.relayRuntime.Current()
+	publicRelayState := snapshot.Readiness
+	if s.relayManager != nil {
+		publicRelayState = config.NewRelayStatus(snapshot).State
+	}
+	if publicRelayState != snapshot.Readiness {
+		snapshot.Readiness = publicRelayState
+		snapshot.Dial = false
+		snapshot.Connected = false
+	}
+	plan, planErr := pairing.PlanRoutes(s.config.API.TrustedHosts, snapshot, options)
+	noRoute := errors.Is(planErr, pairing.ErrNoRoute)
+	if planErr != nil && !noRoute {
+		var callerError *pairing.CallerError
+		if errors.As(planErr, &callerError) {
+			var unavailable *pairing.RelayUnavailableError
+			if errors.As(callerError, &unavailable) {
+				writeJSON(w, http.StatusBadRequest, problem{Code: string(unavailable.Reason), Error: callerError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: callerError.Error()})
+			return
+		}
+		writeError(w, fmt.Errorf("plan pairing code: %w", planErr))
+		return
+	}
+	var prepared pairing.PreparedPlan
+	if !noRoute {
+		var err error
+		prepared, err = pairing.PrepareIdentity(plan, relay.DefaultKeypairPath(s.config.Relay.KeypairPath, s.config.Database))
+		if err != nil {
+			writeError(w, fmt.Errorf("prepare pairing identity: %w", err))
+			return
+		}
+	}
+
+	token, err := s.mintPairingToken()
+	if err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
 		return
 	}
-	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, expiry := range s.pairing {
-		if !expiry.After(s.now()) {
-			delete(s.pairing, existing)
-		}
-	}
+	s.sweepPairingLocked()
 	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
-	writeJSON(w, http.StatusCreated, struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}{Token: token, ExpiresAt: expiresAt})
+
+	// The service composes the code, so the CLI, the menu bar and any later
+	// surface all show the same one. Each used to build its own, and when the
+	// format grew relay fields one of them was not told.
+	//
+	// A desktop with no route still gets its token: the web /pair page on
+	// this machine redeems it from a browser. It just gets no URL, and the
+	// empty route list says why.
+	response := struct {
+		Token        string                     `json:"pairing_token"`
+		ExpiresAt    time.Time                  `json:"expires_at"`
+		PairingURL   string                     `json:"pairing_url,omitempty"`
+		Routes       []pairing.Route            `json:"routes"`
+		Endpoint     string                     `json:"endpoint,omitempty"`
+		RelayStatus  string                     `json:"relay_status"`
+		RelayRefusal pairing.RelayRefusalReason `json:"relay_refusal,omitempty"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(publicRelayState), RelayRefusal: plan.RelayRefusal}
+
+	if !noRoute {
+		code := prepared.Render(token)
+		response.PairingURL = code.URL
+		response.Routes = code.Routes
+		response.Endpoint = code.Endpoint
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) consumePairingToken(token string) bool {
@@ -387,7 +682,59 @@ func (s *Server) consumePairingToken(token string) bool {
 	if ok {
 		delete(s.pairing, token)
 	}
-	return ok && expiresAt.After(s.now())
+	live := ok && expiresAt.After(s.now())
+	if live {
+		s.redeemed[token] = s.now().Add(redeemedMemory)
+	}
+	return live
+}
+
+// sweepPairingLocked forgets tokens and redeem records that are past their
+// time. Called under pairingMu wherever the maps are written.
+func (s *Server) sweepPairingLocked() {
+	now := s.now()
+	for token, expiry := range s.pairing {
+		if !expiry.After(now) {
+			delete(s.pairing, token)
+		}
+	}
+	for token, until := range s.redeemed {
+		if !until.After(now) {
+			delete(s.redeemed, token)
+		}
+	}
+}
+
+// pairingStatus reports where a pairing token is in its life: pending,
+// redeemed, or expired (which also covers "never issued" -- the two are
+// indistinguishable and the remedy is the same, a new code).
+//
+// The token travels in a header. It is a full-access credential for ten
+// minutes, and a path or query string lands in access logs. The caller must
+// also hold the API token: knowing a pairing token is meant to let a phone
+// spend it, not to unlock questions on the desktop.
+func (s *Server) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.Header.Get("X-Redline-Pairing-Token"))
+	if token == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "X-Redline-Pairing-Token header is required"})
+		return
+	}
+	s.pairingMu.Lock()
+	s.sweepPairingLocked()
+	_, pending := s.pairing[token]
+	_, redeemed := s.redeemed[token]
+	s.pairingMu.Unlock()
+
+	status := "expired"
+	switch {
+	case redeemed:
+		status = "redeemed"
+	case pending:
+		status = "pending"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: status})
 }
 
 func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
@@ -398,7 +745,7 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Token string `json:"pairing_token"`
 	}
-	if err := decodeJSON(r, &request); err != nil {
+	if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -544,6 +891,14 @@ func allowedHost(hostPort string, trusted []string) bool {
 	}
 	host = strings.Trim(host, "[]")
 	for _, candidate := range trusted {
+		// An entry may carry the port a phone should pair on. That is advice
+		// for composing the pairing code, not a constraint on which port a
+		// request may arrive by: Tailscale Serve terminates TLS and forwards
+		// on loopback, so the port the request names is not the one it came
+		// in on anyway.
+		if parsed, _, err := net.SplitHostPort(candidate); err == nil {
+			candidate = parsed
+		}
 		if strings.EqualFold(host, candidate) {
 			return true
 		}
@@ -1388,6 +1743,11 @@ type candidateView struct {
 	Priority int    `json:"priority"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
+	// EligibleAt is when a cooldown lifts, so a client can render the wait in
+	// its own words and timezone. Reason states the same thing in prose;
+	// parsing a timestamp back out of that sentence would make the wording an
+	// accidental API.
+	EligibleAt *time.Time `json:"eligible_at,omitempty"`
 }
 
 type candidatesResponse struct {
@@ -1474,7 +1834,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
-			Eligible: verdict.Eligible, Reason: verdict.Reason}
+			Eligible: verdict.Eligible, Reason: verdict.Reason, EligibleAt: verdict.EligibleAt}
 		response.Candidates = append(response.Candidates, view)
 		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
 			response.SelectedTaskID = task.ID
@@ -1737,6 +2097,8 @@ type candidateVerdict struct {
 	Result   decision.Result
 	Eligible bool
 	Reason   string
+	// EligibleAt is set when the block is a cooldown with a known end.
+	EligibleAt *time.Time
 }
 
 func (s *Server) evaluateCandidate(
@@ -1748,6 +2110,8 @@ func (s *Server) evaluateCandidate(
 		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			stamp := eligibleAt.UTC()
+			verdict.EligibleAt = &stamp
 			return verdict, nil
 		}
 	}
@@ -1906,47 +2270,84 @@ func (s *Server) evaluateCandidateBudget(
 			"shared weekly allowance is exhausted"
 	}
 	if group != "" {
-		poolKey := "model:" + group + ":weekly"
-		required = append(required, poolKey)
-		allowance, found := snapshot.Allowance(poolKey)
-		if !found {
+		// Spark has a separate short window as well as a weekly one. It is not
+		// the account's short window, but a Spark task consumes it, so background
+		// work must leave the same rolling reserve for interactive Spark use.
+		// Other model groups (currently Fable) have only a weekly allowance and
+		// must not grow a made-up short-window requirement.
+		groupDefinition := configured.EffectiveModelGroups()[group]
+		requiresShort := slices.Contains(groupDefinition.RequiredAllowanceRoles, "short")
+		shortKey := "model:" + group + ":short"
+		short, hasShort := snapshot.Allowance(shortKey)
+		// A group that declares a short window fails closed when the collector
+		// cannot read it; the requirement is policy data, not a provider name
+		// embedded in the scheduler.
+		if requiresShort && !hasShort {
+			required = append(required, shortKey)
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is missing"
+				shortKey + " allowance is missing"
 		}
-		if allowance.Remaining <= 0 {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is exhausted"
+		if requiresShort && hasShort {
+			required = append(required, shortKey)
+			shortDecision := decision.Admit
+			shortReason := "model short reserve available"
+			if short.Remaining <= policy.RollingReserve {
+				shortDecision = decision.Wait
+				shortReason = "model short reserve is protected"
+			}
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: shortKey, Decision: shortDecision, Mode: decision.ModeSlots,
+				Reason: shortReason, Remaining: short.Remaining,
+			})
+			if shortDecision == decision.Wait {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					shortKey + " reserve is protected"
+			}
 		}
-		if !allowance.ResetsAt.After(s.now()) {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " reset is not in the future"
-		}
-		thresholds, thresholdErr := policy.DecisionThresholds()
-		maxAge, ageErr := s.config.SnapshotAge()
-		if thresholdErr != nil || ageErr != nil {
-			return base, false, "model-specific pace policy is invalid"
-		}
-		poolSnapshot := decision.UsageSnapshot{
-			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
-			Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
-			Source: snapshot.Source, Confidence: snapshot.Confidence,
-		}
-		poolDecision := decision.Evaluate(decision.Input{
-			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
-			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger,
-			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-		})
-		poolResults = append(poolResults, decision.PoolResult{
-			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
-			Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
-		})
-		if poolDecision.Decision == decision.Unknown {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " decision is unknown: " + poolDecision.Reason
-		}
-		if poolDecision.Decision == decision.Admit {
-			triggering = append(triggering, poolKey)
+
+		if slices.Contains(groupDefinition.RequiredAllowanceRoles, "weekly") {
+			poolKey := "model:" + group + ":weekly"
+			required = append(required, poolKey)
+			allowance, found := snapshot.Allowance(poolKey)
+			if !found {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is missing"
+			}
+			if allowance.Remaining <= 0 {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is exhausted"
+			}
+			if !allowance.ResetsAt.After(s.now()) {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " reset is not in the future"
+			}
+			thresholds, thresholdErr := policy.DecisionThresholds()
+			maxAge, ageErr := s.config.SnapshotAge()
+			if thresholdErr != nil || ageErr != nil {
+				return base, false, "model-specific pace policy is invalid"
+			}
+			poolSnapshot := decision.UsageSnapshot{
+				Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
+				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
+				Source: snapshot.Source, Confidence: snapshot.Confidence,
+			}
+			poolDecision := decision.Evaluate(decision.Input{
+				Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+				TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+				PaceGapTrigger: policy.PaceGapTrigger,
+				PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+			})
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
+				Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
+			})
+			if poolDecision.Decision == decision.Unknown {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " decision is unknown: " + poolDecision.Reason
+			}
+			if poolDecision.Decision == decision.Admit {
+				triggering = append(triggering, poolKey)
+			}
 		}
 	}
 	if len(triggering) == 0 {
@@ -2419,7 +2820,27 @@ func (s *Server) fetchAndStore(
 }
 
 type problem struct {
+	Code  string `json:"code,omitempty"`
 	Error string `json:"error"`
+}
+
+func decodeBoundedJSON(r *http.Request, target any, limit int64) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("invalid JSON: could not read request")
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("invalid JSON: request is too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("invalid JSON: request must contain one object")
+	}
+	return nil
 }
 
 func decodeJSON(r *http.Request, target any) error {

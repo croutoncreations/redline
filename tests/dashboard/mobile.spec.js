@@ -65,6 +65,19 @@ test('ring falls back to short window when weekly is absent', async ({ page }) =
   expect(parseFloat(remaining)).toBeCloseTo(0.62, 2);
 });
 
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadMobileDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).toContainText('Signed out');
+  await expect(card.getByTestId('signed-out')).toContainText('claude auth login');
+  // The fix is shown once, plainly -- not again as raw collector plumbing.
+  await expect(card).not.toContainText('native usage source');
+});
+
 test('ring shows stale state when snapshot is stale', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot_stale = true;
@@ -144,6 +157,23 @@ test('banked resets row shows count and expiry, and is absent when unreported', 
   await expect(claudeResets).toHaveClass(/soon/);
   expect(codex.snapshot.banked_resets).toBeUndefined();
   await expect(page.locator('[data-testid="provider-detail-codex-main"] [data-testid="banked-resets"]')).toHaveCount(0);
+});
+
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadMobileDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.m-rings')).toContainText('on first use');
+  await expect(card.locator('.m-rings')).not.toContainText('not available');
+  const window = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
 });
 
 test('account pools displayed before model pools in detail', async ({ page }) => {

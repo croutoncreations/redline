@@ -8,17 +8,6 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-func TestMobilePairingURLIncludesNonDefaultHTTPSPort(t *testing.T) {
-	got := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 8443, "one-time-token")
-	want := "https://macbook-pro.tail2e5d9.ts.net:8443/pair#pairing_token=one-time-token"
-	if got != want {
-		t.Fatalf("pairing URL = %q, want %q", got, want)
-	}
-	if defaultPort := mobilePairingURL("macbook-pro.tail2e5d9.ts.net", 443, "token"); defaultPort != "https://macbook-pro.tail2e5d9.ts.net/pair#pairing_token=token" {
-		t.Fatalf("default pairing URL = %q", defaultPort)
-	}
-}
-
 func TestRenderTerminalQRUsesTrueBitmapCellsAsDarkModules(t *testing.T) {
 	// go-qrcode documents Bitmap as "bitmap[y][x] is true if the pixel at
 	// (x, y) is set", i.e. true means a DARK module.
@@ -91,3 +80,11 @@ func TestRenderTerminalQRIsNotMostlyInk(t *testing.T) {
 		t.Fatalf("rendered QR is %d/%d ink; an inverted code looks like this", ink, total)
 	}
 }
+
+// The QR carries the relay address, the desktop key and the session id, but
+// not the entitlement -- so a phone that fell back to the relay dialled a
+// closed relay with an empty token and got 402. Relay fallback could not work
+// at all, and the app reported plain unreachability.
+//
+// All four travel together for the same reason the other three do: any one
+// missing leaves the phone unable to complete a relayed session.

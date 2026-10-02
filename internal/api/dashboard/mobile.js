@@ -74,8 +74,17 @@ function ring(remaining, size = 40, stale = false) {
 }
 
 // ── Provider pressure label ───────────────────────────────────────────────────
+// Stale because the provider's CLI signed out on the Mac -- the one stale
+// cause a person fixes -- so it is named, with the command, not just "Stale".
+function signedOut(item) {
+  return Boolean(item.snapshot_stale && item.usage_source?.reason === 'signed_out');
+}
+function loginCommand(provider) {
+  return {claude: 'claude auth login', codex: 'codex login'}[String(provider || '').toLowerCase()] || '';
+}
 function providerPressure(item) {
   if (item.paused) return {label: 'Paused', tone: 'paused'};
+  if (signedOut(item)) return {label: 'Signed out', tone: 'near'};
   if (item.snapshot_stale) return {label: 'Stale', tone: 'near'};
   if (item.error && !item.snapshot) return {label: 'No data', tone: 'paused'};
   const d = item.latest_decision;
@@ -125,7 +134,7 @@ function renderUsageProvider(item) {
         <span class="m-provider-status ${esc(pressure.tone)}">${esc(pressure.label)}</span>
       </span>
       <span class="m-rings" aria-label="Account allowances">
-        <span class="m-ring-cell">${ring(session?.remaining ?? null, 58, stale)}<small>Session</small><em>${session ? relative(session.resets_at) : 'not available'}</em></span>
+        <span class="m-ring-cell">${ring(session?.remaining ?? (snap?.short_window_not_started ? 1 : null), 58, stale)}<small>Session</small><em>${session ? relative(session.resets_at) : snap?.short_window_not_started ? 'on first use' : 'not available'}</em></span>
         <span class="m-ring-cell">${ring(weekly?.remaining ?? null, 58, stale)}<small>Weekly</small><em>${weekly ? `${weekly.reset_inferred ? '~ ' : ''}${relative(weekly.resets_at)}` : 'not available'}</em></span>
       </span>
     </button>
@@ -158,6 +167,14 @@ function renderUsageDetail(item) {
         <div class="m-meter-head"><span>${esc(lastKnown)}5-hour window</span><b>${v}% left</b></div>
         <progress class="m-meter-bar ${esc(tone)}" max="100" value="${v}" aria-label="${v}% remaining"></progress>
         <div class="m-reset">Resets ${esc(relative(shortWindow.resets_at))} · ${esc(shortTime(shortWindow.resets_at))}</div>
+      </div>`);
+    } else if (snap.short_window_not_started) {
+      // Full, with no reset yet: the provider starts the clock on first use,
+      // so say that instead of inventing a time.
+      windows.push(`<div data-testid="short-window-not-started">
+        <div class="m-meter-head"><span>${esc(lastKnown)}5-hour window</span><b>100% left</b></div>
+        <progress class="m-meter-bar" max="100" value="100" aria-label="100% remaining"></progress>
+        <div class="m-reset">Starts on first use · resets 5h after</div>
       </div>`);
     }
     if (weeklyWindow) {
@@ -234,7 +251,9 @@ function renderUsageDetail(item) {
     ${decisionHTML}
     <div class="m-source-meta">
       ${esc(item.usage_source?.active || 'unknown')} source
-      ${item.usage_source?.last_error ? `<span class="m-source-error">${esc(item.usage_source.last_error)}</span>` : ''}
+      ${signedOut(item)
+        ? `<span class="m-source-error" data-testid="signed-out">${esc(loginCommand(item.provider) ? `Signed out on your Mac · run ${loginCommand(item.provider)}` : 'Signed out on your Mac · sign in again')}</span>`
+        : item.usage_source?.last_error ? `<span class="m-source-error">${esc(item.usage_source.last_error)}</span>` : ''}
       · ${esc(stateLabel)}
       ${snap ? ` · sampled ${esc(relative(snap.observed_at))}` : ''}
     </div>
