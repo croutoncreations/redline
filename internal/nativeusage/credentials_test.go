@@ -90,6 +90,55 @@ func TestSignedOutClaudeSaysSoAndHowToSignIn(t *testing.T) {
 	}
 }
 
+// The real macOS store is read-only. An expired credential with no refresh
+// token is signed out there too; the read-only check must not get first say
+// and hide it behind "requires refresh".
+func TestExpiredWithoutRefreshIsSignedOutOnAReadOnlyStore(t *testing.T) {
+	store := plainSecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"","expiresAt":1}}`)}
+	credentials := &DefaultCredentials{Now: func() time.Time { return time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC) }, ClaudeStore: store}
+	if _, err := credentials.Access(context.Background(), "claude"); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("Access: err = %v, want ErrSignedOut", err)
+	}
+	if _, err := credentials.AccessWithoutRefresh(context.Background(), "claude"); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("AccessWithoutRefresh: err = %v, want ErrSignedOut", err)
+	}
+}
+
+// plainSecretStore can only be read, like the macOS keychain store.
+type plainSecretStore struct{ value []byte }
+
+func (s plainSecretStore) Read(context.Context) ([]byte, error) { return s.value, nil }
+
+// A credential file that cannot be reached -- a directory without permission
+// -- is not a sign-out, and logging in would not fix it.
+func TestUnreachableCredentialFileIsNotReportedSignedOut(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "claude")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"live"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	credentials := &DefaultCredentials{ClaudeStore: firstFileStore{Paths: []string{path}}}
+	_, err := credentials.Access(context.Background(), "claude")
+	if err == nil || errors.Is(err, ErrSignedOut) {
+		t.Fatalf("err = %v, want a non-signed-out error", err)
+	}
+	// A file that genuinely is not there still is a sign-out.
+	missing := &DefaultCredentials{ClaudeStore: firstFileStore{Paths: []string{filepath.Join(t.TempDir(), "absent.json")}}}
+	if _, err := missing.Access(context.Background(), "claude"); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("missing file: err = %v, want ErrSignedOut", err)
+	}
+}
+
 // A keychain that exists but cannot be read -- locked, or access denied -- is
 // not a sign-out, and logging in again would not fix it.
 func TestUnreadableKeychainIsNotReportedSignedOut(t *testing.T) {

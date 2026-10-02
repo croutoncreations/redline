@@ -165,12 +165,14 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	raw := file.raw
 	now := d.now()
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
+		// Nothing can refresh it: signed out, whether or not the store is
+		// writable. Checked first so the read-only macOS store reports it.
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, ErrSignedOut
+		}
 		writable, ok := store.(writableSecretStore)
 		if !ok {
 			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential - run `claude auth login`")
-		}
-		if file.ClaudeAIOAuth.RefreshToken == "" {
-			return Credential{}, ErrSignedOut
 		}
 		payload := map[string]any{"grant_type": "refresh_token", "refresh_token": file.ClaudeAIOAuth.RefreshToken, "client_id": claudeClientID,
 			"scope": "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}
@@ -354,10 +356,18 @@ type firstFileStore struct {
 	Paths []string
 }
 
+// locate returns the first credential file that exists. A path that cannot
+// be checked for a reason other than not existing -- a directory without
+// permission -- is reported as that error, not as "no file": the difference
+// is whether signing in again would help.
 func (s firstFileStore) locate() (string, error) {
 	for _, path := range s.Paths {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
 			return path, nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
 		}
 	}
 	return "", os.ErrNotExist

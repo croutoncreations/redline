@@ -137,4 +137,8 @@ func TestStaleUsageDoesNotRepeatItself(t *testing.T) {
 	if got := staleUsageError(""); got != staleUsageMessage {
 		t.Fatalf("got %q", got)
 	}
+	// Capitalised by character, not byte: a multi-byte first letter survives.
+	if got := staleUsageError("éclair failed"); got != staleUsageMessage+" Éclair failed" {
+		t.Fatalf("got %q", got)
+	}
 }

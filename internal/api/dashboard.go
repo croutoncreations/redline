@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
@@ -539,8 +541,9 @@ func staleUsageError(sourceError string) string {
 }
 
 func upperFirst(text string) string {
-	if text == "" {
+	first, size := utf8.DecodeRuneInString(text)
+	if size == 0 {
 		return text
 	}
-	return strings.ToUpper(text[:1]) + text[1:]
+	return string(unicode.ToUpper(first)) + text[size:]
 }
