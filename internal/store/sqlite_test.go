@@ -3,8 +3,10 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -641,5 +643,22 @@ func usageSnapshot(observed time.Time, weekly float64) decision.UsageSnapshot {
 		},
 		Source:     "openusage",
 		Confidence: "high",
+	}
+}
+
+func TestOpenErrorNamesTheDatabaseFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "redline.db")
+	if err := os.WriteFile(path, []byte("not a sqlite file, only text padding\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Open(path)
+	if err == nil {
+		t.Fatal("error = nil, want a failure opening a non-database file")
+	}
+	for _, want := range []string{`SQLite database "` + path + `"`, "file is not a database"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }

@@ -1,9 +1,11 @@
 package scheduler_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -133,5 +135,85 @@ func TestConcurrentCyclesAreSerialized(t *testing.T) {
 	<-done
 	if maximum.Load() != 1 {
 		t.Fatalf("maximum concurrent dispatches = %d", maximum.Load())
+	}
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buffer bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&buffer)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	return &buffer
+}
+
+func TestCycleLogsProviderFailureOnceUntilItClearsOrChanges(t *testing.T) {
+	logs := captureLog(t)
+	failure := errors.New(`fetch usage for provider "claude-main": OpenUsage returned HTTP 503`)
+	loop := scheduler.NewLoop(true, time.Minute, []string{"claude-main"},
+		func(context.Context, string) error { return failure }).Named("usage_monitor")
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for range 3 {
+		loop.RunCycle(context.Background(), now)
+	}
+	got := logs.String()
+	if count := strings.Count(got, "provider \"claude-main\" failed"); count != 1 {
+		t.Fatalf("logged %d failures for 3 identical cycles, want 1: %q", count, got)
+	}
+	for _, want := range []string{"redline usage_monitor:", "retrying in 1m0s", "OpenUsage returned HTTP 503"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log = %q, want it to contain %q", got, want)
+		}
+	}
+	// Status keeps the latest error for the API regardless of log dedupe.
+	if status := loop.Status(); status.Providers[0].Error == "" {
+		t.Fatalf("status = %#v, want the error retained", status)
+	}
+}
+
+func TestCycleLogsChangedFailureAndRecovery(t *testing.T) {
+	logs := captureLog(t)
+	var calls int
+	loop := scheduler.NewLoop(true, time.Minute, []string{"codex-main"}, func(context.Context, string) error {
+		calls++
+		switch calls {
+		case 1, 2:
+			return errors.New("usage source down")
+		case 3:
+			return errors.New("snapshot is stale")
+		}
+		return nil
+	})
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for range 4 {
+		loop.RunCycle(context.Background(), now)
+	}
+	got := logs.String()
+	if count := strings.Count(got, "failed, retrying"); count != 2 {
+		t.Fatalf("logged %d failures, want 2 (first and changed): %q", count, got)
+	}
+	if want := `provider "codex-main" recovered after 3 failed cycle(s)`; !strings.Contains(got, want) {
+		t.Fatalf("log = %q, want it to contain %q", got, want)
+	}
+}
+
+func TestCycleDoesNotLogFailuresCausedByShutdown(t *testing.T) {
+	logs := captureLog(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := scheduler.NewLoop(true, time.Minute, []string{"codex-main"}, func(context.Context, string) error {
+		cancel()
+		return context.Canceled
+	})
+	loop.RunCycle(ctx, time.Now())
+	if logs.Len() != 0 {
+		t.Fatalf("log = %q, want nothing when the context was canceled", logs.String())
+	}
+}
+
+func TestRunExplainsWhyADisabledLoopDoesNothing(t *testing.T) {
+	logs := captureLog(t)
+	scheduler.NewLoop(false, time.Minute, nil, func(context.Context, string) error { return nil }).Run(context.Background())
+	if want := "redline scheduler: disabled; set scheduler.enabled to true"; !strings.Contains(logs.String(), want) {
+		t.Fatalf("log = %q, want it to contain %q", logs.String(), want)
 	}
 }

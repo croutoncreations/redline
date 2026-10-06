@@ -124,7 +124,8 @@ func ReadToken(configPath string) (string, error) {
 	// (typically 0666/0444) regardless of ACLs, so this check would always
 	// fail there. Skip it on Windows rather than rejecting every token.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("API token %q must not be accessible by group or other users", path)
+		return "", fmt.Errorf("API token %q has mode %04o and must not be accessible by group or other users; run: chmod 600 %q",
+			path, info.Mode().Perm(), path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -132,7 +133,8 @@ func ReadToken(configPath string) (string, error) {
 	}
 	token := strings.TrimSpace(string(data))
 	if len(token) < 32 || len(token) > 256 {
-		return "", fmt.Errorf("API token %q has an invalid length", path)
+		return "", fmt.Errorf("API token %q has %d characters, want 32 to 256; delete the file and run `redline serve` to generate a new token",
+			path, len(token))
 	}
 	return token, nil
 }

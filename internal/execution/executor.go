@@ -152,7 +152,8 @@ func (e Executor) Execute(
 				UpdateRunExternal(context.Context, string, domain.ExternalRun) error
 			}); ok {
 				if err := externalStore.UpdateRunExternal(ctx, run.ID, external); err != nil {
-					return err
+					return fmt.Errorf("record external run (runtime connection %q, run %q, session %q) for run %s: %w",
+						external.RuntimeConnectionID, external.RunID, external.SessionID, run.ID, err)
 				}
 			}
 			e.recordEvent(ctx, run.ID, domain.RunEventExternalStarted, external)
@@ -255,7 +256,7 @@ func (e Executor) complete(
 ) error {
 	completedAt := e.now().UTC()
 	if err := e.Store.CompleteRun(ctx, run.ID, completion, completedAt); err != nil {
-		return err
+		return fmt.Errorf("record %s outcome (exit code %d) for run %s: %w", completion.State, completion.ExitCode, run.ID, err)
 	}
 	if completion.State == domain.RunFailed && harness.IsAuthenticationFailure(completion.Error) {
 		if controls, ok := e.Store.(interface {

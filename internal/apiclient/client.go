@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -44,6 +46,10 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return fmt.Errorf("%s %s: %w (is `redline serve` running at %s? point --api at the right URL)",
+				method, path, err, c.BaseURL)
+		}
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
@@ -54,6 +60,9 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		_ = json.NewDecoder(resp.Body).Decode(&problem)
 		if problem.Error == "" {
 			problem.Error = resp.Status
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			problem.Error += " (set REDLINE_API_TOKEN, or run from the directory holding redline.yaml and its api-token file, or pass --config)"
 		}
 		return fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, problem.Error)
 	}

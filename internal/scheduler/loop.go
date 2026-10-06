@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -25,6 +26,9 @@ type Status struct {
 }
 
 type Loop struct {
+	// name identifies the loop in log lines. It matches the loop's config key
+	// ("scheduler", "usage_monitor") so a log line points at what to change.
+	name      string
 	enabled   bool
 	interval  time.Duration
 	providers []string
@@ -33,6 +37,14 @@ type Loop struct {
 	mu      sync.RWMutex
 	cycleMu sync.Mutex
 	status  Status
+	// failing tracks the last logged error and consecutive failed cycles per
+	// provider so a persistent failure is logged once, not every cycle.
+	failing map[string]*failureRun
+}
+
+type failureRun struct {
+	message string
+	cycles  int
 }
 
 func NewLoop(enabled bool, interval time.Duration, providers []string, dispatch DispatchFunc) *Loop {
@@ -42,15 +54,25 @@ func NewLoop(enabled bool, interval time.Duration, providers []string, dispatch 
 	ordered := append([]string(nil), providers...)
 	sort.Strings(ordered)
 	return &Loop{
+		name:    "scheduler",
 		enabled: enabled, interval: interval, providers: ordered, dispatch: dispatch,
-		status: Status{Enabled: enabled, PollInterval: interval.String(), Providers: make([]ProviderStatus, 0)},
+		failing: make(map[string]*failureRun),
+		status:  Status{Enabled: enabled, PollInterval: interval.String(), Providers: make([]ProviderStatus, 0)},
 	}
+}
+
+// Named sets the loop's name for log output. Use the loop's config key.
+func (l *Loop) Named(name string) *Loop {
+	l.name = name
+	return l
 }
 
 func (l *Loop) Run(ctx context.Context) {
 	if !l.enabled {
+		log.Printf("redline %s: disabled; set %s.enabled to true in the config to turn it on", l.name, l.name)
 		return
 	}
+	log.Printf("redline %s: started for %d provider(s), polling every %s", l.name, len(l.providers), l.interval)
 	l.RunCycle(ctx, time.Now().UTC())
 	ticker := time.NewTicker(l.interval)
 	defer ticker.Stop()
@@ -80,9 +102,11 @@ func (l *Loop) RunCycle(ctx context.Context, now time.Time) {
 			break
 		}
 		result := ProviderStatus{ProviderAccountID: provider, CheckedAt: now}
-		if err := l.dispatch(ctx, provider); err != nil {
+		err := l.dispatch(ctx, provider)
+		if err != nil {
 			result.Error = err.Error()
 		}
+		l.logOutcome(ctx, provider, err)
 		results = append(results, result)
 	}
 	next := now.Add(l.interval)
@@ -92,6 +116,36 @@ func (l *Loop) RunCycle(ctx context.Context, now time.Time) {
 	l.status.NextCycleAt = timePointer(next)
 	l.status.Providers = results
 	l.mu.Unlock()
+}
+
+// logOutcome logs a provider failure the first time it appears or when its
+// message changes, and logs recovery once it clears. The latest error is also
+// kept in Status, but that is only visible to someone who thinks to query the
+// API; the daemon log is where a headless service gets looked at first.
+func (l *Loop) logOutcome(ctx context.Context, provider string, err error) {
+	if ctx.Err() != nil {
+		// Shutdown cancels in-flight work; that is not a provider failure.
+		return
+	}
+	previous := l.failing[provider]
+	if err == nil {
+		if previous != nil {
+			log.Printf("redline %s: provider %q recovered after %d failed cycle(s)", l.name, provider, previous.cycles)
+			delete(l.failing, provider)
+		}
+		return
+	}
+	if previous != nil && previous.message == err.Error() {
+		previous.cycles++
+		return
+	}
+	cycles := 1
+	if previous != nil {
+		cycles += previous.cycles
+	}
+	l.failing[provider] = &failureRun{message: err.Error(), cycles: cycles}
+	log.Printf("redline %s: provider %q failed, retrying in %s (repeats of this error are not logged until it clears): %v",
+		l.name, provider, l.interval, err)
 }
 
 func (l *Loop) Status() Status {

@@ -86,3 +86,37 @@ func TestClientTransportErrorIncludesMethodAndPath(t *testing.T) {
 		}
 	}
 }
+
+func TestClientConnectionRefusedSaysHowToRecover(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	unreachable := server.URL
+	server.Close()
+	client := apiclient.Client{BaseURL: unreachable, HTTPClient: server.Client()}
+	err := client.Do(context.Background(), http.MethodGet, "/v1/health", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	for _, want := range []string{"connection refused", "is `redline serve` running at " + unreachable, "--api"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestClientUnauthorizedPointsAtTheToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"Redline API authentication is required"}`)
+	}))
+	defer server.Close()
+	client := apiclient.Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	err := client.Do(context.Background(), http.MethodGet, "/v1/tasks", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	for _, want := range []string{"401", "Redline API authentication is required", "REDLINE_API_TOKEN", "api-token"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}

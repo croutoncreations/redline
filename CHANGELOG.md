@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The service log now records what used to be visible only through the API or a 500 response: each
+  HTTP 5xx with its method, path, and error (never the query string); scheduler and usage-monitor
+  failures per provider, once per distinct error and again on recovery; and why a disabled loop
+  does nothing. A run whose outcome could not be saved says so and that a restart will mark it failed.
+- Errors now name the provider, usage source, and step that failed, e.g. `fetch usage for provider
+  "codex-main" (usage_source "openusage"): ...`, instead of a bare store or network error.
+- `redline serve` startup failures are prefixed `redline serve:` and say what to do: a missing
+  config suggests `--config`, a port in use suggests `--listen`, a corrupt database names the file,
+  and an API token with bad permissions or length shows the mode or length and the fix.
+- The CLI and MCP client explain a refused connection (is `redline serve` running at that URL) and a
+  401 (set `REDLINE_API_TOKEN` or point `--config` at the config beside `api-token`).
+- A missing `usage_monitor.gatepost_database` is logged once per provider instead of every cycle.
+
 ## [0.1.9] - 2026-09-25
 
 ### Added
