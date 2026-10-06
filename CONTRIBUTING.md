@@ -6,9 +6,10 @@ running the test suites, and packaging the macOS app. End-user installation is c
 
 ## Prerequisites
 
-- Go with automatic toolchain downloads enabled (the exact version is pinned in `go.mod`)
+- Go 1.21 or later with automatic toolchain downloads enabled (the default); the exact version
+  is pinned in `go.mod` and fetched on first use
 - Node.js 18 or later and npm (dashboard tests only)
-- Xcode command-line tools with a recent Swift toolchain (macOS app only)
+- Xcode 16 or later (Swift 6.0+; `macos/Package.swift` requires it), for the macOS app only
 - Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
 
 Building the service and running its tests do not require provider credentials or spend provider
@@ -44,6 +45,14 @@ go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
 The status command reports live usage only when that provider's CLI is installed and signed in.
 Without provider credentials, the service and dashboard still start and explain the unavailable
 account state.
+
+The dashboard is at `http://127.0.0.1:7436` (or your `--listen` port), but it requires the API
+token on first visit. Open it once with the token as a query parameter and Redline stores a
+session cookie and redirects to the clean URL (a plain browser request gets a JSON `401`):
+
+```bash
+open "http://127.0.0.1:7436/?access_token=$(cat api-token)"   # macOS; elsewhere paste the URL
+```
 
 Only `redline serve` reads configuration and opens SQLite. Every other CLI command is a client of
 the local HTTP API. See [Architecture](docs/architecture.md) for the full picture and
