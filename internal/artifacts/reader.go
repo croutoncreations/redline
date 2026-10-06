@@ -88,3 +88,25 @@ func (r Reader) ReadTail(path string, requestedBytes int64) (Tail, error) {
 	}
 	return Tail{Content: string(data), SizeBytes: info.Size(), Truncated: truncated}, nil
 }
+
+// ReadFileTail returns up to the last limit bytes of the file at path. Unlike
+// Reader.ReadTail it does no root confinement or UTF-8 trimming; it is for
+// callers that already own the path and scan the bytes for evidence.
+func ReadFileTail(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	offset := max(int64(0), info.Size()-limit)
+	data := make([]byte, info.Size()-offset)
+	_, err = file.ReadAt(data, offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return data, nil
+}
