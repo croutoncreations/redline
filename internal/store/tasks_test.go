@@ -36,12 +36,12 @@ func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
 		}
 	}
 
-	got, err := db.NextEligibleTask(ctx, "codex-main", now, "")
+	candidates, err := db.DispatchCandidates(ctx, "codex-main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != "first-high" {
-		t.Fatalf("selected %q, want first-high", got.ID)
+	if len(candidates) == 0 || candidates[0].ID != "first-high" {
+		t.Fatalf("candidates = %#v, want first-high first", candidates)
 	}
 }
 
@@ -179,40 +179,6 @@ func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
 	}
 }
 
-func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
-	t.Parallel()
-	db := openTaskDB(t)
-	ctx := context.Background()
-	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
-	if err := db.CreateProfile(ctx, domain.ExecutionProfile{
-		ID: "profile", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "devx",
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	completed := now.Add(-time.Hour)
-	task := domain.Task{
-		ID: "recurring", Name: "Tests", Priority: 50,
-		ExecutionProfileID: "profile", Type: domain.Recurring,
-		MinInterval: 24 * time.Hour, RequireRepoChange: true,
-		LastCompletedAt: &completed, LastSuccessfulSourceRevision: "abc",
-	}
-	if err := db.CreateTask(ctx, task, now); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.NextEligibleTask(ctx, "claude-main", now, "def"); err == nil {
-		t.Fatal("expected interval to make task ineligible")
-	}
-	eligibleAt := now.Add(25 * time.Hour)
-	if _, err := db.NextEligibleTask(ctx, "claude-main", eligibleAt, "abc"); err == nil {
-		t.Fatal("expected unchanged revision to make task ineligible")
-	}
-	got, err := db.NextEligibleTask(ctx, "claude-main", eligibleAt, "def")
-	if err != nil || got.ID != "recurring" {
-		t.Fatalf("got %#v err=%v", got, err)
-	}
-}
-
 func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
 	t.Parallel()
 	db := openTaskDB(t)
@@ -226,31 +192,6 @@ func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
 	got, err := db.GetTask(t.Context(), "filler")
 	if err != nil || got.DispatchTier != domain.DispatchExpiring {
 		t.Fatalf("task=%#v err=%v", got, err)
-	}
-}
-
-func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T) {
-	t.Parallel()
-	db := openTaskDB(t)
-	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
-	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
-		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
-		WorkspaceProvider: "existing-directory",
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.CreateTask(context.Background(), domain.Task{
-		ID: "repo-task", Name: "Repo task", ExecutionProfileID: "profile", Type: domain.Recurring,
-		RequireRepoChange: true, LastSuccessfulSourceRevision: "old",
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	tasks, err := db.EligibleTasks(context.Background(), "codex-main", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks) != 1 || tasks[0].ID != "repo-task" {
-		t.Fatalf("tasks = %#v", tasks)
 	}
 }
 
@@ -732,34 +673,6 @@ func createAdmissionTasks(t *testing.T, db *store.DB, now time.Time, taskIDs ...
 	}
 }
 
-func TestHasActiveRun(t *testing.T) {
-	t.Parallel()
-	db := openTaskDB(t)
-	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
-	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
-		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
-		WorkspaceProvider: "existing-directory",
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.CreateTask(context.Background(), domain.Task{
-		ID: "task", Name: "Task", ExecutionProfileID: "profile", Type: domain.OneOff,
-	}, now); err != nil {
-		t.Fatal(err)
-	}
-	active, err := db.HasActiveRun(context.Background(), "codex-main")
-	if err != nil || active {
-		t.Fatalf("before admission active=%v err=%v", active, err)
-	}
-	if _, err := db.AdmitTask(context.Background(), "run", "task", "codex-main", "rev", now); err != nil {
-		t.Fatal(err)
-	}
-	active, err = db.HasActiveRun(context.Background(), "codex-main")
-	if err != nil || !active {
-		t.Fatalf("after admission active=%v err=%v", active, err)
-	}
-}
-
 func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
 	t.Parallel()
 	db := openTaskDB(t)
@@ -976,8 +889,8 @@ func TestRetryControlRequeuesFailedTaskAtQueueBottom(t *testing.T) {
 	}
 
 	// The retried task must sort behind the two tasks that were already in the queue.
-	// EligibleTasks returns tasks in priority-then-queue_sequence order.
-	eligible, err := db.EligibleTasks(ctx, "codex-main", now.Add(2*time.Minute))
+	// DispatchCandidates returns tasks in priority-then-queue_sequence order.
+	eligible, err := db.DispatchCandidates(ctx, "codex-main")
 	if err != nil {
 		t.Fatal(err)
 	}
