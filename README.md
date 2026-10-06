@@ -83,6 +83,11 @@ redline --config redline.yaml serve   # dashboard at http://127.0.0.1:7436
 redline status --provider codex-main
 ```
 
+The dashboard asks for the local API token on first visit; a bare browser request gets a `401`.
+Open `http://127.0.0.1:7436/?access_token=<contents of the api-token file beside redline.yaml>`
+once and Redline sets a session cookie and redirects to the clean URL. Treat that URL as a secret.
+See [HTTP API](docs/api.md#authentication).
+
 → [CLI reference](docs/cli.md) · [Run as a launchd service](docs/launchd.md)
 
 <details>

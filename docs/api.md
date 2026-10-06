@@ -12,6 +12,12 @@ automatically from the `--config` location or the platform default data director
 (`~/Library/Application Support/Redline` on macOS, `~/.config/redline` on Linux,
 `%AppData%\redline` on Windows).
 
+To open the dashboard in a browser from a source or headless install, visit it once with the
+token as a query parameter, for example `http://127.0.0.1:7436/?access_token=<token>`. Loopback
+hosts only: Redline sets the HttpOnly session cookie and redirects to the URL without the token.
+Treat that URL as a secret, since browser history records it. Without it a browser request is
+answered with a JSON `401`. Remote devices use [pairing](mobile.md) instead.
+
 For a direct API call:
 
 ```bash
