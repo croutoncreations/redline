@@ -29,7 +29,7 @@ redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
 redline capacity --provider claude-main
-redline metrics launch --days 21
+redline metrics launch --days 21 --provider claude-main
 ```
 
 ## Profiles and tasks
@@ -44,6 +44,7 @@ echo "Add table tests for the parser." | redline task add --name "Parser tests" 
 redline task list
 redline task enable add-tests
 redline task disable add-tests
+redline task retry add-tests
 redline task dispatch add-tests
 redline candidates --provider codex-main
 ```
@@ -124,9 +125,14 @@ redline notification list
 ## Mobile pairing
 
 ```bash
-redline pair
-redline pair --port 8443
+redline pair --qr
+redline pair --qr --host macbook-pro.example.ts.net --port 8443
 ```
+
+`pair` requires `--qr`. Without `--host` it uses this machine's Tailscale MagicDNS name, which must
+be listed in `api.trusted_hosts`; `--port` defaults to 443.
+
+To replace the API token and sign out every paired device, run `redline token rotate --yes`.
 
 See [Mobile dashboard setup](mobile.md).
 
