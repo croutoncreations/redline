@@ -23,6 +23,17 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race ./...
+
+  # Independent of the go job's vet/test steps, so it runs beside them instead
+  # of adding its four sequential builds to that job's critical path.
+  cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Cross-compile matrix
         run: |
           set -euo pipefail
