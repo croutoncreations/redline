@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/croutoncreations/redline/internal/greenlane"
 )
@@ -56,7 +57,7 @@ func run() error {
 		owner:   repoOwner,
 		repo:    repoName,
 		apiBase: "https://api.github.com",
-		client:  &http.Client{},
+		client:  &http.Client{Timeout: 30 * time.Second},
 	}
 
 	pr, err := client.GetPR(ctx, prNumber)
@@ -113,9 +114,9 @@ func run() error {
 
 	// Set conclusion for check run
 	if result.Verdict == greenlane.VerdictWouldMerge {
-		fmt.Println("::notice::Would merge if live")
+		fmt.Fprintln(os.Stderr, "::notice::Would merge if live")
 	} else {
-		fmt.Printf("::warning::Would not merge: %s\n", result.Summary)
+		fmt.Fprintf(os.Stderr, "::warning::Would not merge: %s\n", result.Summary)
 	}
 
 	return nil
@@ -276,128 +277,180 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 		return greenlane.PRInfo{}, err
 	}
 
-	// Fetch files
-	filesURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files", c.apiBase, c.owner, c.repo, number)
-	filesData, err := c.doRequest(ctx, "GET", filesURL)
-	if err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	var filesResp []struct {
-		Filename  string `json:"filename"`
-		Status    string `json:"status"`
-		Additions int    `json:"additions"`
-		Deletions int    `json:"deletions"`
-		Changes   int    `json:"changes"`
-	}
-
-	if err := json.Unmarshal(filesData, &filesResp); err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	files := make([]greenlane.PRFile, len(filesResp))
-	for i, f := range filesResp {
-		files[i] = greenlane.PRFile{
-			Filename:  f.Filename,
-			Status:    f.Status,
-			Additions: f.Additions,
-			Deletions: f.Deletions,
-			Changes:   f.Changes,
+	// Fetch files (paginated)
+	var files []greenlane.PRFile
+	page := 1
+	perPage := 100
+	for {
+		filesURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d",
+			c.apiBase, c.owner, c.repo, number, perPage, page)
+		filesData, err := c.doRequest(ctx, "GET", filesURL)
+		if err != nil {
+			return greenlane.PRInfo{}, err
 		}
-	}
 
-	// Fetch check runs
-	checksURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs",
-		c.apiBase, c.owner, c.repo, prResp.Head.SHA)
-	checksData, err := c.doRequest(ctx, "GET", checksURL)
-	if err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	var checksResp struct {
-		CheckRuns []struct {
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-			App        struct {
-				ID int64 `json:"id"`
-			} `json:"app"`
-		} `json:"check_runs"`
-	}
-
-	if err := json.Unmarshal(checksData, &checksResp); err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	checkRuns := make([]greenlane.CheckRun, len(checksResp.CheckRuns))
-	for i, c := range checksResp.CheckRuns {
-		checkRuns[i] = greenlane.CheckRun{
-			Name:       c.Name,
-			Status:     c.Status,
-			Conclusion: c.Conclusion,
-			AppID:      c.App.ID,
+		var filesResp []struct {
+			Filename  string `json:"filename"`
+			Status    string `json:"status"`
+			Additions int    `json:"additions"`
+			Deletions int    `json:"deletions"`
+			Changes   int    `json:"changes"`
 		}
-	}
 
-	// Fetch reviews
-	reviewsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.apiBase, c.owner, c.repo, number)
-	reviewsData, err := c.doRequest(ctx, "GET", reviewsURL)
-	if err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	var reviewsResp []struct {
-		ID   int64 `json:"id"`
-		User struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		State       string `json:"state"`
-		CommitID    string `json:"commit_id"`
-		SubmittedAt string `json:"submitted_at"`
-	}
-
-	if err := json.Unmarshal(reviewsData, &reviewsResp); err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	reviews := make([]greenlane.Review, len(reviewsResp))
-	for i, r := range reviewsResp {
-		reviews[i] = greenlane.Review{
-			ID:       r.ID,
-			User:     r.User.Login,
-			State:    r.State,
-			CommitID: r.CommitID,
+		if err := json.Unmarshal(filesData, &filesResp); err != nil {
+			return greenlane.PRInfo{}, err
 		}
-	}
 
-	// Fetch review comments (inline comments on the diff)
-	commentsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments", c.apiBase, c.owner, c.repo, number)
-	commentsData, err := c.doRequest(ctx, "GET", commentsURL)
-	if err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	var commentsResp []struct {
-		ID                  int64  `json:"id"`
-		PullRequestReviewID int64  `json:"pull_request_review_id"`
-		Path                string `json:"path"`
-		Line                int    `json:"line"`
-		Body                string `json:"body"`
-	}
-
-	if err := json.Unmarshal(commentsData, &commentsResp); err != nil {
-		return greenlane.PRInfo{}, err
-	}
-
-	reviewComments := make([]greenlane.ReviewComment, len(commentsResp))
-	for i, c := range commentsResp {
-		reviewComments[i] = greenlane.ReviewComment{
-			ID:       c.ID,
-			ReviewID: c.PullRequestReviewID,
-			Path:     c.Path,
-			Line:     c.Line,
-			Body:     c.Body,
+		if len(filesResp) == 0 {
+			break
 		}
+
+		for _, f := range filesResp {
+			files = append(files, greenlane.PRFile{
+				Filename:  f.Filename,
+				Status:    f.Status,
+				Additions: f.Additions,
+				Deletions: f.Deletions,
+				Changes:   f.Changes,
+			})
+		}
+
+		if len(filesResp) < perPage {
+			break
+		}
+		page++
+	}
+
+	// Fetch check runs (paginated)
+	var checkRuns []greenlane.CheckRun
+	page = 1
+	for {
+		checksURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d",
+			c.apiBase, c.owner, c.repo, prResp.Head.SHA, perPage, page)
+		checksData, err := c.doRequest(ctx, "GET", checksURL)
+		if err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		var checksResp struct {
+			CheckRuns []struct {
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+				App        struct {
+					ID int64 `json:"id"`
+				} `json:"app"`
+			} `json:"check_runs"`
+		}
+
+		if err := json.Unmarshal(checksData, &checksResp); err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		if len(checksResp.CheckRuns) == 0 {
+			break
+		}
+
+		for _, c := range checksResp.CheckRuns {
+			checkRuns = append(checkRuns, greenlane.CheckRun{
+				Name:       c.Name,
+				Status:     c.Status,
+				Conclusion: c.Conclusion,
+				AppID:      c.App.ID,
+			})
+		}
+
+		if len(checksResp.CheckRuns) < perPage {
+			break
+		}
+		page++
+	}
+
+	// Fetch reviews (paginated)
+	var reviews []greenlane.Review
+	page = 1
+	for {
+		reviewsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
+			c.apiBase, c.owner, c.repo, number, perPage, page)
+		reviewsData, err := c.doRequest(ctx, "GET", reviewsURL)
+		if err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		var reviewsResp []struct {
+			ID   int64 `json:"id"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			State       string `json:"state"`
+			CommitID    string `json:"commit_id"`
+			SubmittedAt string `json:"submitted_at"`
+		}
+
+		if err := json.Unmarshal(reviewsData, &reviewsResp); err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		if len(reviewsResp) == 0 {
+			break
+		}
+
+		for _, r := range reviewsResp {
+			reviews = append(reviews, greenlane.Review{
+				ID:       r.ID,
+				User:     r.User.Login,
+				State:    r.State,
+				CommitID: r.CommitID,
+			})
+		}
+
+		if len(reviewsResp) < perPage {
+			break
+		}
+		page++
+	}
+
+	// Fetch review comments (inline comments on the diff, paginated)
+	var reviewComments []greenlane.ReviewComment
+	page = 1
+	for {
+		commentsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d",
+			c.apiBase, c.owner, c.repo, number, perPage, page)
+		commentsData, err := c.doRequest(ctx, "GET", commentsURL)
+		if err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		var commentsResp []struct {
+			ID                  int64  `json:"id"`
+			PullRequestReviewID int64  `json:"pull_request_review_id"`
+			Path                string `json:"path"`
+			Line                int    `json:"line"`
+			Body                string `json:"body"`
+		}
+
+		if err := json.Unmarshal(commentsData, &commentsResp); err != nil {
+			return greenlane.PRInfo{}, err
+		}
+
+		if len(commentsResp) == 0 {
+			break
+		}
+
+		for _, c := range commentsResp {
+			reviewComments = append(reviewComments, greenlane.ReviewComment{
+				ID:       c.ID,
+				ReviewID: c.PullRequestReviewID,
+				Path:     c.Path,
+				Line:     c.Line,
+				Body:     c.Body,
+			})
+		}
+
+		if len(commentsResp) < perPage {
+			break
+		}
+		page++
 	}
 
 	mergeable := false

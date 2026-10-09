@@ -9,12 +9,20 @@ import (
 // checkSize implements Rule 1: size ≤ 150 changed lines
 func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 	lockfilePatterns := []string{
-		"go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-		"*.lock", "Package.resolved", "gradle.lockfile",
+		"**/go.sum",
+		"**/package-lock.json",
+		"**/pnpm-lock.yaml",
+		"**/yarn.lock",
+		"*.lock",
+		"**/Package.resolved",
+		"**/gradle.lockfile",
 	}
 
 	generatedPatterns := []string{
-		"*.pb.go", "*_gen.go", "*.generated.*", "dist/**",
+		"**/*.pb.go",
+		"**/*_gen.go",
+		"**/*.generated.*",
+		"dist/**",
 	}
 
 	regularLines := 0
@@ -66,38 +74,95 @@ func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 	}
 
 	// Check for orphaned lockfiles/generated files
-	hasManifest := false
-	hasSource := false
-	for _, file := range pr.Files {
-		if !matchesAnyPattern(file.Filename, append(lockfilePatterns, generatedPatterns...)) {
-			// Check if this could be a manifest or source file
-			if strings.Contains(file.Filename, "package.json") ||
-				strings.Contains(file.Filename, "go.mod") ||
-				strings.Contains(file.Filename, ".proto") ||
-				strings.HasSuffix(file.Filename, ".go") && !strings.HasSuffix(file.Filename, "_test.go") {
-				if len(lockfileChanges) > 0 {
-					hasManifest = true
-				}
-				if len(generatedChanges) > 0 {
-					hasSource = true
-				}
+	// Map each lockfile to its required manifest
+	lockfileManifests := map[string]string{
+		"go.sum":            "go.mod",
+		"package-lock.json": "package.json",
+		"pnpm-lock.yaml":    "package.json",
+		"yarn.lock":         "package.json",
+		"Package.resolved":  "Package.swift",
+		"gradle.lockfile":   "build.gradle",
+	}
+
+	generatedSources := map[string][]string{
+		".pb.go":      {".proto"},
+		"_gen.go":     {".go"},
+		".generated.": {".go", ".ts", ".js"},
+	}
+
+	// Check lockfiles
+	for _, lockfile := range lockfileChanges {
+		manifest, ok := lockfileManifests[filepath.Base(lockfile)]
+		if !ok {
+			// Generic *.lock pattern - skip validation
+			continue
+		}
+
+		// Check if the matching manifest in the same directory exists in the PR
+		lockDir := filepath.Dir(lockfile)
+		manifestPath := filepath.Join(lockDir, manifest)
+		if lockDir == "." {
+			manifestPath = manifest
+		}
+
+		hasManifest := false
+		for _, file := range pr.Files {
+			if file.Filename == manifestPath {
+				hasManifest = true
+				break
+			}
+		}
+
+		if !hasManifest {
+			return RuleResult{
+				Name:    "Size",
+				Pass:    false,
+				Message: fmt.Sprintf("Lockfile %s changed without matching %s in same directory", lockfile, manifest),
 			}
 		}
 	}
 
-	if len(lockfileChanges) > 0 && !hasManifest {
-		return RuleResult{
-			Name:    "Size",
-			Pass:    false,
-			Message: fmt.Sprintf("Lockfile changed without manifest change: %s", strings.Join(lockfileChanges, ", ")),
-		}
-	}
+	// Check generated files
+	for _, genFile := range generatedChanges {
+		hasSource := false
 
-	if len(generatedChanges) > 0 && !hasSource {
-		return RuleResult{
-			Name:    "Size",
-			Pass:    false,
-			Message: fmt.Sprintf("Generated file changed without source change: %s", strings.Join(generatedChanges, ", ")),
+		// Find which pattern matched
+		var requiredExts []string
+		for pattern, exts := range generatedSources {
+			if strings.Contains(genFile, pattern) {
+				requiredExts = exts
+				break
+			}
+		}
+
+		if len(requiredExts) == 0 {
+			// dist/** or unknown pattern - skip validation
+			continue
+		}
+
+		// Check if any source file with required extension exists
+		genDir := filepath.Dir(genFile)
+		for _, file := range pr.Files {
+			if filepath.Dir(file.Filename) != genDir {
+				continue
+			}
+			for _, ext := range requiredExts {
+				if strings.HasSuffix(file.Filename, ext) && !matchesAnyPattern(file.Filename, generatedPatterns) {
+					hasSource = true
+					break
+				}
+			}
+			if hasSource {
+				break
+			}
+		}
+
+		if !hasSource {
+			return RuleResult{
+				Name:    "Size",
+				Pass:    false,
+				Message: fmt.Sprintf("Generated file %s changed without source change in same directory", genFile),
+			}
 		}
 	}
 

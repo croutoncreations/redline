@@ -60,10 +60,10 @@ func TestCheckSize(t *testing.T) {
 		{
 			name: "lockfile without manifest fails",
 			files: []PRFile{
-				{Filename: "go.sum", Additions: 50, Deletions: 20},
+				{Filename: "go.sum", Additions: 5, Deletions: 2},
 			},
 			wantPass: false,
-			wantMsg:  "Lockfile changed without manifest change",
+			wantMsg:  "without matching go.mod",
 		},
 		{
 			name: "lockfile with manifest passes",
@@ -72,6 +72,48 @@ func TestCheckSize(t *testing.T) {
 				{Filename: "go.sum", Additions: 50, Deletions: 20},
 			},
 			wantPass: true,
+		},
+		{
+			name: "lockfile with manifest in subdirectory passes",
+			files: []PRFile{
+				{Filename: "backend/go.mod", Additions: 2, Deletions: 1},
+				{Filename: "backend/go.sum", Additions: 50, Deletions: 20},
+			},
+			wantPass: true,
+		},
+		{
+			name: "lockfile without manifest in same directory fails",
+			files: []PRFile{
+				{Filename: "frontend/package-lock.json", Additions: 30, Deletions: 20},
+				{Filename: "backend/package.json", Additions: 2, Deletions: 1},
+			},
+			wantPass: false,
+			wantMsg:  "without matching package.json in same directory",
+		},
+		{
+			name: "go.sum without go.mod in same directory fails",
+			files: []PRFile{
+				{Filename: "subdir/go.sum", Additions: 50, Deletions: 20},
+				{Filename: "go.mod", Additions: 2, Deletions: 1},
+			},
+			wantPass: false,
+			wantMsg:  "without matching go.mod in same directory",
+		},
+		{
+			name: "generated proto file with source passes",
+			files: []PRFile{
+				{Filename: "api/types.proto", Additions: 10, Deletions: 5},
+				{Filename: "api/types.pb.go", Additions: 200, Deletions: 100},
+			},
+			wantPass: true,
+		},
+		{
+			name: "generated file without source in same directory fails",
+			files: []PRFile{
+				{Filename: "api/types.pb.go", Additions: 200, Deletions: 100},
+			},
+			wantPass: false,
+			wantMsg:  "without source change in same directory",
 		},
 	}
 

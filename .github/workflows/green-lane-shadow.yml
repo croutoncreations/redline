@@ -375,6 +375,7 @@ GOEOF
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
       
       - uses: actions/setup-go@v6
         with:
@@ -435,7 +436,7 @@ GOEOF
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          ./green-lane-check > result.json 2>&1 || true
+          ./green-lane-check > result.json || true
           echo "result_file=result.json" >> $GITHUB_OUTPUT
       
       - name: Parse result and update check

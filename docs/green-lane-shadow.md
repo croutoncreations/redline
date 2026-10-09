@@ -104,7 +104,7 @@ The check run summary shows:
 ### Example Output
 
 ```
-✅ WOULD MERGE
+❌ WOULD NOT MERGE
 
 Rule Results:
 ✅ PASS: Size
