@@ -116,6 +116,7 @@ jobs:
           # Get unique package directories
           xargs -I {} dirname {} < changed_tests.txt | sort -u > test_dirs.txt
           TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
+          # shellcheck disable=SC2086
           echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
           
           echo "Test pattern: $TEST_IDS"
