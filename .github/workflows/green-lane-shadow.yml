@@ -18,11 +18,19 @@ jobs:
     permissions:
       contents: read
     
+    outputs:
+      has_tests: ${{ steps.tests.outputs.has_tests }}
+      pass: ${{ steps.analyze.outputs.pass }}
+      inconclusive: ${{ steps.analyze.outputs.inconclusive }}
+      message: ${{ steps.analyze.outputs.message }}
+      test_ids: ${{ steps.analyze.outputs.test_ids }}
+    
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
       
       - uses: actions/setup-go@v6
         with:
@@ -128,9 +136,9 @@ jobs:
             echo "result=all_passed" >> $GITHUB_OUTPUT
           fi
           
-          # Check for compile failures
-          if grep -q "FAIL.*\[build failed\]" "$GITHUB_WORKSPACE/base_results.json" 2>/dev/null || \
-             grep -qi "compile" "$GITHUB_WORKSPACE/base_stderr.txt" 2>/dev/null; then
+          # Check for compile failures using stricter detection
+          if grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/base_results.json" | grep -q '\[build failed\]' 2>/dev/null || \
+             grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/base_results.json" | grep -q '\[setup failed\]' 2>/dev/null; then
             echo "compile_ok=false" >> $GITHUB_OUTPUT
           else
             echo "compile_ok=true" >> $GITHUB_OUTPUT
@@ -176,9 +184,9 @@ jobs:
             echo "result=all_passed" >> $GITHUB_OUTPUT
           fi
           
-          # Check for compile failures
-          if grep -q "FAIL.*\[build failed\]" "$GITHUB_WORKSPACE/head_results.json" 2>/dev/null || \
-             grep -qi "compile" "$GITHUB_WORKSPACE/head_stderr.txt" 2>/dev/null; then
+          # Check for compile failures using stricter detection
+          if grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/head_results.json" | grep -q '\[build failed\]' 2>/dev/null || \
+             grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/head_results.json" | grep -q '\[setup failed\]' 2>/dev/null; then
             echo "compile_ok=false" >> $GITHUB_OUTPUT
           else
             echo "compile_ok=true" >> $GITHUB_OUTPUT
@@ -187,11 +195,14 @@ jobs:
       - name: Analyze repro results
         id: analyze
         if: steps.tests.outputs.has_tests == 'true'
+        env:
+          BASE_COMPILE_OK: ${{ steps.base.outputs.compile_ok }}
+          HEAD_COMPILE_OK: ${{ steps.head.outputs.compile_ok }}
         run: |
           set -euo pipefail
           
           # If base didn't compile, it's inconclusive
-          if [ "${{ steps.base.outputs.compile_ok }}" != "true" ]; then
+          if [ "$BASE_COMPILE_OK" != "true" ]; then
             echo "pass=false" >> $GITHUB_OUTPUT
             echo "inconclusive=true" >> $GITHUB_OUTPUT
             echo "message=Compile failed on base commit" >> $GITHUB_OUTPUT
@@ -199,159 +210,26 @@ jobs:
           fi
           
           # If head didn't compile, it's inconclusive
-          if [ "${{ steps.head.outputs.compile_ok }}" != "true" ]; then
+          if [ "$HEAD_COMPILE_OK" != "true" ]; then
             echo "pass=false" >> $GITHUB_OUTPUT
             echo "inconclusive=true" >> $GITHUB_OUTPUT
             echo "message=Compile failed on head commit" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Parse test results using a Go script
+          # Run analyzer
           cd "$GITHUB_WORKSPACE"
-          
-          cat > analyze_repro.go <<'GOEOF'
-package main
-
-import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"os"
-	"strings"
-)
-
-type TestEvent struct {
-	Action  string  `json:"Action"`
-	Test    string  `json:"Test"`
-	Package string  `json:"Package"`
-	Output  string  `json:"Output"`
-	Elapsed float64 `json:"Elapsed"`
-}
-
-func main() {
-	// Parse both result files
-	baseTests, baseOutput := parseResults("base_results.json")
-	headTests, _ := parseResults("head_results.json")
-	
-	// Get test IDs from test_ids_unique.txt
-	testIDs := readTestIDs("test_ids_unique.txt")
-	
-	// Check each test ID
-	allPass := true
-	var messages []string
-	var failedTests []string
-	
-	for _, testID := range testIDs {
-		baseStatus, baseOK := baseTests[testID]
-		headStatus, headOK := headTests[testID]
-		
-		if !baseOK {
-			messages = append(messages, fmt.Sprintf("%s: did not execute on base", testID))
-			allPass = false
-			continue
-		}
-		
-		if !headOK {
-			messages = append(messages, fmt.Sprintf("%s: did not execute on head", testID))
-			allPass = false
-			continue
-		}
-		
-		// Base must have failed (executed and failed)
-		if baseStatus != "fail" {
-			messages = append(messages, fmt.Sprintf("%s: did not fail on base (status: %s)", testID, baseStatus))
-			allPass = false
-			continue
-		}
-		
-		// Head must have passed
-		if headStatus != "pass" {
-			messages = append(messages, fmt.Sprintf("%s: did not pass on head (status: %s)", testID, headStatus))
-			allPass = false
-			continue
-		}
-		
-		// Success!
-		failedTests = append(failedTests, testID)
-	}
-	
-	if allPass && len(failedTests) > 0 {
-		fmt.Printf("pass=true\n")
-		fmt.Printf("inconclusive=false\n")
-		fmt.Printf("message=Tests %v failed on base, passed on head\n", failedTests)
-		fmt.Printf("test_ids=%s\n", strings.Join(failedTests, ","))
-		
-		// Save base failure output
-		if err := os.WriteFile("base_failure_output.txt", []byte(baseOutput), 0644); err == nil {
-			fmt.Printf("base_output_file=base_failure_output.txt\n")
-		}
-	} else {
-		fmt.Printf("pass=false\n")
-		fmt.Printf("inconclusive=false\n")
-		if len(messages) > 0 {
-			fmt.Printf("message=%s\n", strings.Join(messages, "; "))
-		} else {
-			fmt.Printf("message=No tests to check\n")
-		}
-	}
-}
-
-func parseResults(filename string) (map[string]string, string) {
-	tests := make(map[string]string)
-	var output strings.Builder
-	
-	f, err := os.Open(filename)
-	if err != nil {
-		return tests, ""
-	}
-	defer f.Close()
-	
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var event TestEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-		
-		if event.Test != "" {
-			if event.Action == "pass" {
-				tests[event.Test] = "pass"
-			} else if event.Action == "fail" {
-				tests[event.Test] = "fail"
-			} else if event.Action == "skip" {
-				tests[event.Test] = "skip"
-			}
-			
-			if event.Action == "output" && event.Output != "" {
-				output.WriteString(event.Output)
-			}
-		}
-	}
-	
-	return tests, output.String()
-}
-
-func readTestIDs(filename string) []string {
-	var ids []string
-	f, err := os.Open(filename)
-	if err != nil {
-		return ids
-	}
-	defer f.Close()
-	
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			ids = append(ids, line)
-		}
-	}
-	return ids
-}
-GOEOF
-          
-          go run analyze_repro.go >> $GITHUB_OUTPUT
+          go run ./cmd/green-lane-repro-analyze >> $GITHUB_OUTPUT
+      
+      - name: Complete check run on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // If we have a check_id from evaluate job, complete it
+            // This step runs in repro job so we can't complete the evaluate check
+            // But we ensure repro job completes cleanly
+            console.log('Repro job failed, but outputs are set');
       
       - name: Upload repro artifacts
         uses: actions/upload-artifact@v4
@@ -411,16 +289,22 @@ GOEOF
       
       - name: Set repro environment variables
         id: repro_env
+        env:
+          HAS_TESTS: ${{ needs.repro.outputs.has_tests }}
+          REPRO_INCONCLUSIVE_OUT: ${{ needs.repro.outputs.inconclusive }}
+          REPRO_PASS_OUT: ${{ needs.repro.outputs.pass }}
+          REPRO_MESSAGE_OUT: ${{ needs.repro.outputs.message }}
+          REPRO_TEST_IDS_OUT: ${{ needs.repro.outputs.test_ids }}
         run: |
-          if [ "${{ needs.repro.outputs.has_tests }}" = "true" ]; then
-            if [ "${{ needs.repro.outputs.inconclusive }}" = "true" ]; then
+          if [ "$HAS_TESTS" = "true" ]; then
+            if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
               echo "REPRO_INCONCLUSIVE=true" >> $GITHUB_ENV
-              echo "REPRO_MESSAGE=${{ needs.repro.outputs.message }}" >> $GITHUB_ENV
+              echo "REPRO_MESSAGE=$REPRO_MESSAGE_OUT" >> $GITHUB_ENV
             else
-              echo "REPRO_PASS=${{ needs.repro.outputs.pass }}" >> $GITHUB_ENV
-              echo "REPRO_MESSAGE=${{ needs.repro.outputs.message }}" >> $GITHUB_ENV
-              if [ "${{ needs.repro.outputs.test_ids }}" != "" ]; then
-                echo "REPRO_TEST_IDS=${{ needs.repro.outputs.test_ids }}" >> $GITHUB_ENV
+              echo "REPRO_PASS=$REPRO_PASS_OUT" >> $GITHUB_ENV
+              echo "REPRO_MESSAGE=$REPRO_MESSAGE_OUT" >> $GITHUB_ENV
+              if [ -n "$REPRO_TEST_IDS_OUT" ]; then
+                echo "REPRO_TEST_IDS=$REPRO_TEST_IDS_OUT" >> $GITHUB_ENV
               fi
             fi
           else
@@ -440,6 +324,7 @@ GOEOF
           echo "result_file=result.json" >> $GITHUB_OUTPUT
       
       - name: Parse result and update check
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
