@@ -163,6 +163,7 @@ jobs:
           
           echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
           
+          # shellcheck disable=SC2086
           if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/base_results.json" 2> "$GITHUB_WORKSPACE/base_stderr.txt"; then
             # Test failure is expected
             echo "result=some_failed" >> $GITHUB_OUTPUT
@@ -211,6 +212,7 @@ jobs:
           
           echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
           
+          # shellcheck disable=SC2086
           if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/head_results.json" 2> "$GITHUB_WORKSPACE/head_stderr.txt"; then
             echo "result=some_failed" >> $GITHUB_OUTPUT
           else
