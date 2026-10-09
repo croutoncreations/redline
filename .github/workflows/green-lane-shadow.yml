@@ -251,7 +251,7 @@ jobs:
           
           # Run analyzer
           cd "$GITHUB_WORKSPACE"
-          go run ./cmd/green-lane-repro-analyze >> $GITHUB_OUTPUT
+          go run ./cmd/green-lane-repro-analyze >> "$GITHUB_OUTPUT"
       
       - name: Complete check run on failure
         if: failure()
@@ -408,7 +408,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           ./green-lane-check > result.json || true
-          echo "result_file=result.json" >> $GITHUB_OUTPUT
+          echo "result_file=result.json" >> "$GITHUB_OUTPUT"
       
       - name: Parse result and update check
         if: always()
