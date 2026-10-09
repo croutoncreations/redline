@@ -235,17 +235,21 @@ jobs:
           
           # If base didn't compile, it's inconclusive
           if [ "$BASE_COMPILE_OK" != "true" ]; then
-            echo "pass=false" >> $GITHUB_OUTPUT
-            echo "inconclusive=true" >> $GITHUB_OUTPUT
-            echo "message=Compile failed on base commit" >> $GITHUB_OUTPUT
+            {
+              echo "pass=false"
+              echo "inconclusive=true"
+              echo "message=Compile failed on base commit"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
           # If head didn't compile, it's inconclusive
           if [ "$HEAD_COMPILE_OK" != "true" ]; then
-            echo "pass=false" >> $GITHUB_OUTPUT
-            echo "inconclusive=true" >> $GITHUB_OUTPUT
-            echo "message=Compile failed on head commit" >> $GITHUB_OUTPUT
+            {
+              echo "pass=false"
+              echo "inconclusive=true"
+              echo "message=Compile failed on head commit"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
