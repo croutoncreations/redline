@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, edited]
   pull_request_review:
     types: [submitted, dismissed]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -14,7 +17,10 @@ permissions:
 jobs:
   repro:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+    if: |
+      github.event_name == 'pull_request' || 
+      github.event_name == 'pull_request_review' || 
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
     permissions:
       contents: read
     
@@ -26,9 +32,38 @@ jobs:
       test_ids: ${{ steps.analyze.outputs.test_ids }}
     
     steps:
+      - name: Get PR info
+        id: pr_info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let pr_data;
+            
+            if (context.eventName === 'workflow_run') {
+              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.payload.workflow_run.head_sha
+              });
+              
+              if (prs.data.length === 0) {
+                core.setFailed('No PR found for workflow run');
+                return;
+              }
+              
+              pr_data = prs.data[0];
+            } else {
+              pr_data = context.payload.pull_request;
+            }
+            
+            core.setOutput('head_sha', pr_data.head.sha);
+            core.setOutput('base_sha', pr_data.base.sha);
+            core.setOutput('number', pr_data.number);
+            return pr_data.number;
+      
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr_info.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
       
@@ -42,8 +77,8 @@ jobs:
         run: |
           set -euo pipefail
           
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
+          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
           
           # Find changed test files
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
@@ -75,13 +110,13 @@ jobs:
           
           # Get unique test IDs and package directories
           sort -u test_ids.txt > test_ids_unique.txt
-          TEST_IDS=$(cat test_ids_unique.txt | tr '\n' '|' | sed 's/|$//')
-          echo "test_pattern=^($TEST_IDS)$" >> $GITHUB_OUTPUT
+          TEST_IDS=$(tr '\n' '|' < test_ids_unique.txt | sed 's/|$//')
+          echo "test_pattern=^($TEST_IDS)$" >> "$GITHUB_OUTPUT"
           
           # Get unique package directories
-          cat changed_tests.txt | xargs -I {} dirname {} | sort -u > test_dirs.txt
-          TEST_DIRS=$(cat test_dirs.txt | tr '\n' ' ')
-          echo "test_dirs=$TEST_DIRS" >> $GITHUB_OUTPUT
+          xargs -I {} dirname {} < changed_tests.txt | sort -u > test_dirs.txt
+          TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
+          echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
           
           echo "Test pattern: $TEST_IDS"
           echo "Test directories: $TEST_DIRS"
@@ -92,8 +127,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
           
           # Create fresh workspace for base
           mkdir -p /tmp/base-workspace
@@ -136,12 +170,11 @@ jobs:
             echo "result=all_passed" >> $GITHUB_OUTPUT
           fi
           
-          # Check for compile failures using stricter detection
-          if grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/base_results.json" | grep -q '\[build failed\]' 2>/dev/null || \
-             grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/base_results.json" | grep -q '\[setup failed\]' 2>/dev/null; then
-            echo "compile_ok=false" >> $GITHUB_OUTPUT
+          # Check for compile failures
+          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/base_results.json" 2>/dev/null; then
+            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
           else
-            echo "compile_ok=true" >> $GITHUB_OUTPUT
+            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
           fi
       
       - name: Run tests on head
@@ -150,7 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
           
           # Create fresh workspace for head
           mkdir -p /tmp/head-workspace
@@ -184,12 +217,11 @@ jobs:
             echo "result=all_passed" >> $GITHUB_OUTPUT
           fi
           
-          # Check for compile failures using stricter detection
-          if grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/head_results.json" | grep -q '\[build failed\]' 2>/dev/null || \
-             grep -q '"Action":"fail"' "$GITHUB_WORKSPACE/head_results.json" | grep -q '\[setup failed\]' 2>/dev/null; then
-            echo "compile_ok=false" >> $GITHUB_OUTPUT
+          # Check for compile failures
+          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/head_results.json" 2>/dev/null; then
+            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
           else
-            echo "compile_ok=true" >> $GITHUB_OUTPUT
+            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
           fi
       
       - name: Analyze repro results
@@ -235,7 +267,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always() && steps.tests.outputs.has_tests == 'true'
         with:
-          name: repro-results-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          name: repro-results-${{ steps.pr_info.outputs.number }}-${{ github.run_id }}
           path: |
             base_results.json
             head_results.json
@@ -247,12 +279,17 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     needs: repro
-    if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_review')
+    if: |
+      always() && (
+        github.event_name == 'pull_request' || 
+        github.event_name == 'pull_request_review' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
+      )
     
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.event.pull_request.base.ref }}
           persist-credentials: false
       
       - uses: actions/setup-go@v6
@@ -263,21 +300,59 @@ jobs:
       - name: Build evaluator
         run: go build -o green-lane-check ./cmd/green-lane-check
       
-      - name: Get PR number
+      - name: Get PR number and info
         id: pr
-        run: |
-          echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let pr_number, pr_data;
+            
+            if (context.eventName === 'workflow_run') {
+              // Get PRs associated with the workflow run's head SHA
+              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.payload.workflow_run.head_sha
+              });
+              
+              if (prs.data.length === 0) {
+                console.log('No PR found for workflow run');
+                return;
+              }
+              
+              pr_data = prs.data[0];
+              pr_number = pr_data.number;
+            } else {
+              pr_number = context.payload.pull_request.number;
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number
+              });
+              pr_data = pr.data;
+            }
+            
+            core.setOutput('number', pr_number);
+            core.setOutput('head_sha', pr_data.head.sha);
+            core.setOutput('base_ref', pr_data.base.ref);
+            return pr_number;
       
       - name: Create check run
         id: check
         uses: actions/github-script@v7
         with:
           script: |
+            const head_sha = '${{ steps.pr.outputs.head_sha }}';
+            if (!head_sha) {
+              core.setFailed('No PR found to evaluate');
+              return;
+            }
+            
             const check = await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               name: 'green-lane-shadow',
-              head_sha: context.payload.pull_request.head.sha,
+              head_sha: head_sha,
               status: 'in_progress',
               output: {
                 title: 'Green Lane Shadow Evaluation',
@@ -298,18 +373,30 @@ jobs:
         run: |
           if [ "$HAS_TESTS" = "true" ]; then
             if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
-              echo "REPRO_INCONCLUSIVE=true" >> $GITHUB_ENV
-              echo "REPRO_MESSAGE=$REPRO_MESSAGE_OUT" >> $GITHUB_ENV
+              echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
+              {
+                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
+                printf '%s\n' "$REPRO_MESSAGE_OUT"
+                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
+              } >> "$GITHUB_ENV"
             else
-              echo "REPRO_PASS=$REPRO_PASS_OUT" >> $GITHUB_ENV
-              echo "REPRO_MESSAGE=$REPRO_MESSAGE_OUT" >> $GITHUB_ENV
+              echo "REPRO_PASS=$REPRO_PASS_OUT" >> "$GITHUB_ENV"
+              {
+                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
+                printf '%s\n' "$REPRO_MESSAGE_OUT"
+                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
+              } >> "$GITHUB_ENV"
               if [ -n "$REPRO_TEST_IDS_OUT" ]; then
-                echo "REPRO_TEST_IDS=$REPRO_TEST_IDS_OUT" >> $GITHUB_ENV
+                {
+                  echo "REPRO_TEST_IDS<<__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
+                  printf '%s\n' "$REPRO_TEST_IDS_OUT"
+                  echo "__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
+                } >> "$GITHUB_ENV"
               fi
             fi
           else
-            echo "REPRO_INCONCLUSIVE=true" >> $GITHUB_ENV
-            echo "REPRO_MESSAGE=No test files changed in PR" >> $GITHUB_ENV
+            echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
+            echo "REPRO_MESSAGE=No test files changed in PR" >> "$GITHUB_ENV"
           fi
       
       - name: Run evaluation

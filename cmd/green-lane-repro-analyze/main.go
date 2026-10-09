@@ -18,8 +18,23 @@ type TestEvent struct {
 
 func main() {
 	// Parse both result files
-	baseTests, baseOutput := parseResults("base_results.json")
-	headTests, _ := parseResults("head_results.json")
+	baseTests, baseOutput, err := parseResults("base_results.json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "::error::Failed to parse base_results.json: %v\n", err)
+		fmt.Printf("pass=false\n")
+		fmt.Printf("inconclusive=true\n")
+		fmt.Printf("message=Failed to parse base test results: %v\n", err)
+		os.Exit(0)
+	}
+
+	headTests, _, err := parseResults("head_results.json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "::error::Failed to parse head_results.json: %v\n", err)
+		fmt.Printf("pass=false\n")
+		fmt.Printf("inconclusive=true\n")
+		fmt.Printf("message=Failed to parse head test results: %v\n", err)
+		os.Exit(0)
+	}
 
 	// Get test IDs from test_ids_unique.txt
 	testIDs := readTestIDs("test_ids_unique.txt")
@@ -84,22 +99,29 @@ func main() {
 	}
 }
 
-func parseResults(filename string) (map[string]string, string) {
+func parseResults(filename string) (map[string]string, string, error) {
 	tests := make(map[string]string)
 	var output strings.Builder
 
 	f, err := os.Open(filename)
 	if err != nil {
-		return tests, ""
+		return tests, "", fmt.Errorf("failed to open file: %w", err)
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	packages := make(map[string]bool)
+	completed := make(map[string]bool)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		var event TestEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
+			return tests, "", fmt.Errorf("malformed JSON at line: %w", err)
+		}
+
+		if event.Package != "" {
+			packages[event.Package] = true
 		}
 
 		if event.Test != "" {
@@ -114,10 +136,22 @@ func parseResults(filename string) (map[string]string, string) {
 			if event.Action == "output" && event.Output != "" {
 				output.WriteString(event.Output)
 			}
+		} else if event.Action == "pass" || event.Action == "fail" || event.Action == "skip" {
+			completed[event.Package] = true
 		}
 	}
 
-	return tests, output.String()
+	if err := scanner.Err(); err != nil {
+		return tests, "", fmt.Errorf("scanner error: %w", err)
+	}
+
+	for pkg := range packages {
+		if !completed[pkg] {
+			return tests, "", fmt.Errorf("package %s did not complete", pkg)
+		}
+	}
+
+	return tests, output.String(), nil
 }
 
 func readTestIDs(filename string) []string {
