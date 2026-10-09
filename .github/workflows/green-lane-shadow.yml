@@ -12,9 +12,364 @@ permissions:
   checks: write
 
 jobs:
-  evaluate:
+  repro:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+    permissions:
+      contents: read
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      
+      - name: Identify changed test files and IDs
+        id: tests
+        run: |
+          set -euo pipefail
+          
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          # Find changed test files
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
+          
+          if [ ! -s changed_tests.txt ]; then
+            echo "has_tests=false" >> $GITHUB_OUTPUT
+            echo "No test files changed"
+            exit 0
+          fi
+          
+          echo "has_tests=true" >> $GITHUB_OUTPUT
+          
+          # Extract test function names from changed test files
+          # Look for func TestXxx patterns in the diff
+          : > test_ids.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              # Extract Test function names
+              grep -E '^func (Test[A-Z][a-zA-Z0-9_]*)\(' "$file" | \
+                sed -E 's/^func (Test[A-Z][a-zA-Z0-9_]*)\(.*/\1/' >> test_ids.txt || true
+            fi
+          done < changed_tests.txt
+          
+          if [ ! -s test_ids.txt ]; then
+            echo "has_tests=false" >> $GITHUB_OUTPUT
+            echo "No test functions found in changed files"
+            exit 0
+          fi
+          
+          # Get unique test IDs and package directories
+          sort -u test_ids.txt > test_ids_unique.txt
+          TEST_IDS=$(cat test_ids_unique.txt | tr '\n' '|' | sed 's/|$//')
+          echo "test_pattern=^($TEST_IDS)$" >> $GITHUB_OUTPUT
+          
+          # Get unique package directories
+          cat changed_tests.txt | xargs -I {} dirname {} | sort -u > test_dirs.txt
+          TEST_DIRS=$(cat test_dirs.txt | tr '\n' ' ')
+          echo "test_dirs=$TEST_DIRS" >> $GITHUB_OUTPUT
+          
+          echo "Test pattern: $TEST_IDS"
+          echo "Test directories: $TEST_DIRS"
+      
+      - name: Run tests on base (with PR test files)
+        id: base
+        if: steps.tests.outputs.has_tests == 'true'
+        run: |
+          set -euo pipefail
+          
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          # Create fresh workspace for base
+          mkdir -p /tmp/base-workspace
+          cd /tmp/base-workspace
+          
+          # Checkout base commit
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
+          git checkout --quiet "$BASE_SHA"
+          
+          # Overlay PR's test files onto base
+          cd "$GITHUB_WORKSPACE"
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              mkdir -p "/tmp/base-workspace/$(dirname "$file")"
+              cp "$file" "/tmp/base-workspace/$file"
+            fi
+          done < changed_tests.txt
+          
+          cd /tmp/base-workspace
+          
+          # Calculate test file hashes
+          : > "$GITHUB_WORKSPACE/base_test_hashes.txt"
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              HASH=$(git hash-object "$file")
+              echo "$file:$HASH" >> "$GITHUB_WORKSPACE/base_test_hashes.txt"
+            fi
+          done < "$GITHUB_WORKSPACE/changed_tests.txt"
+          
+          # Run tests with -count=1 to disable caching
+          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
+          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
+          
+          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
+          
+          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/base_results.json" 2> "$GITHUB_WORKSPACE/base_stderr.txt"; then
+            # Test failure is expected
+            echo "result=some_failed" >> $GITHUB_OUTPUT
+          else
+            echo "result=all_passed" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for compile failures
+          if grep -q "FAIL.*\[build failed\]" "$GITHUB_WORKSPACE/base_results.json" 2>/dev/null || \
+             grep -qi "compile" "$GITHUB_WORKSPACE/base_stderr.txt" 2>/dev/null; then
+            echo "compile_ok=false" >> $GITHUB_OUTPUT
+          else
+            echo "compile_ok=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Run tests on head
+        id: head
+        if: steps.tests.outputs.has_tests == 'true' && steps.base.outputs.compile_ok == 'true'
+        run: |
+          set -euo pipefail
+          
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          # Create fresh workspace for head
+          mkdir -p /tmp/head-workspace
+          cd /tmp/head-workspace
+          
+          # Checkout head commit
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
+          git checkout --quiet "$HEAD_SHA"
+          
+          # Calculate test file hashes
+          cd "$GITHUB_WORKSPACE"
+          : > head_test_hashes.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              HASH=$(git hash-object "$file")
+              echo "$file:$HASH" >> head_test_hashes.txt
+            fi
+          done < changed_tests.txt
+          
+          cd /tmp/head-workspace
+          
+          # Run tests
+          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
+          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
+          
+          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
+          
+          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/head_results.json" 2> "$GITHUB_WORKSPACE/head_stderr.txt"; then
+            echo "result=some_failed" >> $GITHUB_OUTPUT
+          else
+            echo "result=all_passed" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for compile failures
+          if grep -q "FAIL.*\[build failed\]" "$GITHUB_WORKSPACE/head_results.json" 2>/dev/null || \
+             grep -qi "compile" "$GITHUB_WORKSPACE/head_stderr.txt" 2>/dev/null; then
+            echo "compile_ok=false" >> $GITHUB_OUTPUT
+          else
+            echo "compile_ok=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Analyze repro results
+        id: analyze
+        if: steps.tests.outputs.has_tests == 'true'
+        run: |
+          set -euo pipefail
+          
+          # If base didn't compile, it's inconclusive
+          if [ "${{ steps.base.outputs.compile_ok }}" != "true" ]; then
+            echo "pass=false" >> $GITHUB_OUTPUT
+            echo "inconclusive=true" >> $GITHUB_OUTPUT
+            echo "message=Compile failed on base commit" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # If head didn't compile, it's inconclusive
+          if [ "${{ steps.head.outputs.compile_ok }}" != "true" ]; then
+            echo "pass=false" >> $GITHUB_OUTPUT
+            echo "inconclusive=true" >> $GITHUB_OUTPUT
+            echo "message=Compile failed on head commit" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Parse test results using a Go script
+          cd "$GITHUB_WORKSPACE"
+          
+          cat > analyze_repro.go <<'GOEOF'
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+)
+
+type TestEvent struct {
+	Action  string  `json:"Action"`
+	Test    string  `json:"Test"`
+	Package string  `json:"Package"`
+	Output  string  `json:"Output"`
+	Elapsed float64 `json:"Elapsed"`
+}
+
+func main() {
+	// Parse both result files
+	baseTests, baseOutput := parseResults("base_results.json")
+	headTests, _ := parseResults("head_results.json")
+	
+	// Get test IDs from test_ids_unique.txt
+	testIDs := readTestIDs("test_ids_unique.txt")
+	
+	// Check each test ID
+	allPass := true
+	var messages []string
+	var failedTests []string
+	
+	for _, testID := range testIDs {
+		baseStatus, baseOK := baseTests[testID]
+		headStatus, headOK := headTests[testID]
+		
+		if !baseOK {
+			messages = append(messages, fmt.Sprintf("%s: did not execute on base", testID))
+			allPass = false
+			continue
+		}
+		
+		if !headOK {
+			messages = append(messages, fmt.Sprintf("%s: did not execute on head", testID))
+			allPass = false
+			continue
+		}
+		
+		// Base must have failed (executed and failed)
+		if baseStatus != "fail" {
+			messages = append(messages, fmt.Sprintf("%s: did not fail on base (status: %s)", testID, baseStatus))
+			allPass = false
+			continue
+		}
+		
+		// Head must have passed
+		if headStatus != "pass" {
+			messages = append(messages, fmt.Sprintf("%s: did not pass on head (status: %s)", testID, headStatus))
+			allPass = false
+			continue
+		}
+		
+		// Success!
+		failedTests = append(failedTests, testID)
+	}
+	
+	if allPass && len(failedTests) > 0 {
+		fmt.Printf("pass=true\n")
+		fmt.Printf("inconclusive=false\n")
+		fmt.Printf("message=Tests %v failed on base, passed on head\n", failedTests)
+		fmt.Printf("test_ids=%s\n", strings.Join(failedTests, ","))
+		
+		// Save base failure output
+		if err := os.WriteFile("base_failure_output.txt", []byte(baseOutput), 0644); err == nil {
+			fmt.Printf("base_output_file=base_failure_output.txt\n")
+		}
+	} else {
+		fmt.Printf("pass=false\n")
+		fmt.Printf("inconclusive=false\n")
+		if len(messages) > 0 {
+			fmt.Printf("message=%s\n", strings.Join(messages, "; "))
+		} else {
+			fmt.Printf("message=No tests to check\n")
+		}
+	}
+}
+
+func parseResults(filename string) (map[string]string, string) {
+	tests := make(map[string]string)
+	var output strings.Builder
+	
+	f, err := os.Open(filename)
+	if err != nil {
+		return tests, ""
+	}
+	defer f.Close()
+	
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var event TestEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		
+		if event.Test != "" {
+			if event.Action == "pass" {
+				tests[event.Test] = "pass"
+			} else if event.Action == "fail" {
+				tests[event.Test] = "fail"
+			} else if event.Action == "skip" {
+				tests[event.Test] = "skip"
+			}
+			
+			if event.Action == "output" && event.Output != "" {
+				output.WriteString(event.Output)
+			}
+		}
+	}
+	
+	return tests, output.String()
+}
+
+func readTestIDs(filename string) []string {
+	var ids []string
+	f, err := os.Open(filename)
+	if err != nil {
+		return ids
+	}
+	defer f.Close()
+	
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids
+}
+GOEOF
+          
+          go run analyze_repro.go >> $GITHUB_OUTPUT
+      
+      - name: Upload repro artifacts
+        uses: actions/upload-artifact@v4
+        if: always() && steps.tests.outputs.has_tests == 'true'
+        with:
+          name: repro-results-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: |
+            base_results.json
+            head_results.json
+            base_test_hashes.txt
+            head_test_hashes.txt
+            base_failure_output.txt
+          retention-days: 30
+
+  evaluate:
+    runs-on: ubuntu-latest
+    needs: repro
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_review')
     
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +387,7 @@ jobs:
       - name: Get PR number
         id: pr
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-          else
-            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-          fi
+          echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
       
       - name: Create check run
         id: check
@@ -56,6 +407,25 @@ jobs:
             });
             core.setOutput('check_id', check.data.id);
             return check.data.id;
+      
+      - name: Set repro environment variables
+        id: repro_env
+        run: |
+          if [ "${{ needs.repro.outputs.has_tests }}" = "true" ]; then
+            if [ "${{ needs.repro.outputs.inconclusive }}" = "true" ]; then
+              echo "REPRO_INCONCLUSIVE=true" >> $GITHUB_ENV
+              echo "REPRO_MESSAGE=${{ needs.repro.outputs.message }}" >> $GITHUB_ENV
+            else
+              echo "REPRO_PASS=${{ needs.repro.outputs.pass }}" >> $GITHUB_ENV
+              echo "REPRO_MESSAGE=${{ needs.repro.outputs.message }}" >> $GITHUB_ENV
+              if [ "${{ needs.repro.outputs.test_ids }}" != "" ]; then
+                echo "REPRO_TEST_IDS=${{ needs.repro.outputs.test_ids }}" >> $GITHUB_ENV
+              fi
+            fi
+          else
+            echo "REPRO_INCONCLUSIVE=true" >> $GITHUB_ENV
+            echo "REPRO_MESSAGE=No test files changed in PR" >> $GITHUB_ENV
+          fi
       
       - name: Run evaluation
         id: eval
@@ -79,7 +449,6 @@ jobs:
               const content = fs.readFileSync('result.json', 'utf8');
               result = JSON.parse(content);
             } catch (error) {
-              // Update check with error
               await github.rest.checks.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,

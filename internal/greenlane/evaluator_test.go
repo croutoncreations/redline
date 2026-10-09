@@ -315,6 +315,284 @@ func TestTokenOverlap(t *testing.T) {
 	}
 }
 
+func TestCheckReviewer(t *testing.T) {
+	config := Config{}
+	eval := NewEvaluator(config)
+
+	tests := []struct {
+		name           string
+		reviews        []Review
+		reviewComments []ReviewComment
+		headSHA        string
+		wantPass       bool
+		wantMsg        string
+	}{
+		{
+			name:     "no reviews fails",
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "CodeRabbit: no real review",
+		},
+		{
+			name: "approved human review still needs provenance",
+			reviews: []Review{
+				{User: "human-reviewer", State: "APPROVED", CommitID: "abc123"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "Human approval found, but",
+		},
+		{
+			name: "CodeRabbit with explicit approve counts",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: "abc123"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "CodeRabbit: approved",
+		},
+		{
+			name: "CodeRabbit with findings counts",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: "abc123"},
+			},
+			reviewComments: []ReviewComment{
+				{ReviewID: 1, Path: "foo.go", Line: 10, Body: "Consider refactoring"},
+				{ReviewID: 1, Path: "bar.go", Line: 20, Body: "Typo here"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "CodeRabbit: reviewed with 2 findings",
+		},
+		{
+			name: "CodeRabbit comment without findings doesn't count",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: "abc123"},
+			},
+			reviewComments: []ReviewComment{},
+			headSHA:        "abc123",
+			wantPass:       false,
+			wantMsg:        "CodeRabbit: no real review",
+		},
+		{
+			name: "CodeRabbit on wrong SHA doesn't count",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: "old-sha"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "CodeRabbit: no real review",
+		},
+		{
+			name: "CodeRabbit requesting changes fails",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "CHANGES_REQUESTED", CommitID: "abc123"},
+			},
+			reviewComments: []ReviewComment{
+				{ReviewID: 1, Path: "foo.go", Line: 10, Body: "Fix this"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "CodeRabbit: requested changes with 1 findings",
+		},
+		{
+			name: "human requesting changes fails",
+			reviews: []Review{
+				{User: "human", State: "CHANGES_REQUESTED", CommitID: "abc123"},
+			},
+			headSHA:  "abc123",
+			wantPass: false,
+			wantMsg:  "No human approval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pr := PRInfo{
+				HeadSHA:        tt.headSHA,
+				Reviews:        tt.reviews,
+				ReviewComments: tt.reviewComments,
+			}
+			result := eval.checkReviewer(pr)
+
+			if result.Pass != tt.wantPass {
+				t.Errorf("checkReviewer() pass = %v, want %v (message: %s)",
+					result.Pass, tt.wantPass, result.Message)
+			}
+
+			if tt.wantMsg != "" && !contains(result.Message, tt.wantMsg) {
+				t.Errorf("checkReviewer() message = %q, want to contain %q",
+					result.Message, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestCheckRepro(t *testing.T) {
+	config := Config{}
+	eval := NewEvaluator(config)
+
+	tests := []struct {
+		name     string
+		repro    *ReproResult
+		wantPass bool
+		wantMsg  string
+	}{
+		{
+			name:     "no repro result is inconclusive",
+			repro:    nil,
+			wantPass: false,
+			wantMsg:  "No repro job result available",
+		},
+		{
+			name: "inconclusive repro",
+			repro: &ReproResult{
+				Inconclusive: true,
+				Message:      "Compile failed on base",
+			},
+			wantPass: false,
+			wantMsg:  "Compile failed on base",
+		},
+		{
+			name: "passing repro",
+			repro: &ReproResult{
+				Pass:    true,
+				TestIDs: []string{"TestFoo", "TestBar"},
+				Message: "Tests failed on base, passed on head",
+			},
+			wantPass: true,
+			wantMsg:  "failed on base, passed on head",
+		},
+		{
+			name: "failing repro",
+			repro: &ReproResult{
+				Pass:    false,
+				Message: "TestFoo did not fail on base",
+			},
+			wantPass: false,
+			wantMsg:  "did not fail on base",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := eval.checkRepro(tt.repro)
+
+			if result.Pass != tt.wantPass {
+				t.Errorf("checkRepro() pass = %v, want %v (message: %s)",
+					result.Pass, tt.wantPass, result.Message)
+			}
+
+			if tt.wantMsg != "" && !contains(result.Message, tt.wantMsg) {
+				t.Errorf("checkRepro() message = %q, want to contain %q",
+					result.Message, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestCodeRabbitReview(t *testing.T) {
+	tests := []struct {
+		name           string
+		reviews        []Review
+		reviewComments []ReviewComment
+		headSHA        string
+		wantReviewed   bool
+		wantApproved   bool
+		wantChanges    bool
+		wantFindings   int
+	}{
+		{
+			name:         "no CodeRabbit review",
+			headSHA:      "abc123",
+			wantReviewed: false,
+		},
+		{
+			name: "CodeRabbit explicit approve",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: "abc123"},
+			},
+			headSHA:      "abc123",
+			wantReviewed: true,
+			wantApproved: true,
+		},
+		{
+			name: "CodeRabbit with findings",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: "abc123"},
+			},
+			reviewComments: []ReviewComment{
+				{ReviewID: 1, Path: "foo.go", Line: 10},
+				{ReviewID: 1, Path: "bar.go", Line: 20},
+				{ReviewID: 1, Path: "baz.go", Line: 30},
+			},
+			headSHA:      "abc123",
+			wantReviewed: true,
+			wantFindings: 3,
+		},
+		{
+			name: "CodeRabbit comment without findings",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: "abc123"},
+			},
+			headSHA:      "abc123",
+			wantReviewed: false,
+		},
+		{
+			name: "CodeRabbit on wrong SHA",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: "old-sha"},
+			},
+			headSHA:      "abc123",
+			wantReviewed: false,
+		},
+		{
+			name: "CodeRabbit requesting changes",
+			reviews: []Review{
+				{ID: 1, User: "coderabbitai[bot]", State: "CHANGES_REQUESTED", CommitID: "abc123"},
+			},
+			reviewComments: []ReviewComment{
+				{ReviewID: 1, Path: "foo.go", Line: 10},
+			},
+			headSHA:      "abc123",
+			wantReviewed: true,
+			wantChanges:  true,
+			wantFindings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pr := PRInfo{
+				HeadSHA:        tt.headSHA,
+				Reviews:        tt.reviews,
+				ReviewComments: tt.reviewComments,
+			}
+			result := checkCodeRabbitReview(pr)
+
+			if result.Reviewed != tt.wantReviewed {
+				t.Errorf("checkCodeRabbitReview() Reviewed = %v, want %v",
+					result.Reviewed, tt.wantReviewed)
+			}
+
+			if result.Approved != tt.wantApproved {
+				t.Errorf("checkCodeRabbitReview() Approved = %v, want %v",
+					result.Approved, tt.wantApproved)
+			}
+
+			if result.RequestedChanges != tt.wantChanges {
+				t.Errorf("checkCodeRabbitReview() RequestedChanges = %v, want %v",
+					result.RequestedChanges, tt.wantChanges)
+			}
+
+			if result.FindingsCount != tt.wantFindings {
+				t.Errorf("checkCodeRabbitReview() FindingsCount = %v, want %v",
+					result.FindingsCount, tt.wantFindings)
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		(len(s) > 0 && len(substr) > 0 && containsHelper(s, substr)))

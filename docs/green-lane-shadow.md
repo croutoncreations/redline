@@ -34,7 +34,17 @@ Tests that the same test IDs:
 - Execute and pass on the head commit
 - In fresh workspaces with identical blobs and dependencies
 
-**Status:** Shadow mode reports this as inconclusive. The full repro job infrastructure (separate workflow, Go test runner) is planned but not yet implemented.
+**Implementation:**
+- Identifies added/changed Go test function names from the diff
+- Runs those specific tests on base (with PR's test files overlaid) using `go test -count=1 -json -run '^(TestA|TestB)$'`
+- Runs the same tests on head in a fresh workspace
+- Each test must execute and fail on base, then execute and pass on head
+- Skipped tests count as failures
+- Compile failures on either base or head are inconclusive
+- Preserves evidence: test/fixture blob hashes, results, base failure output
+- Runs with read-only permissions and no secrets
+
+**Status:** Fully implemented. PRs without changed test files are marked inconclusive.
 
 ### 3. CI Status
 All required checks must pass on the current head SHA:
@@ -48,12 +58,22 @@ All required checks must pass on the current head SHA:
 ### 4. Cross-Vendor Reviewer
 Requires an approved review from a different AI provider than the author.
 
-**Status:** Shadow mode always reports this as needing human review. The required infrastructure does not exist yet:
+**CodeRabbit Detection (Implemented):**
+CodeRabbit (`coderabbitai[bot]`) counts as a reviewer vendor when it posts a real review on the current head SHA:
+- **Explicit approve/request-changes:** `APPROVED` or `CHANGES_REQUESTED` reviews count
+- **Inline findings:** `COMMENTED` reviews with inline review comments (not just summary/walkthrough) count
+- **Non-blocking findings are fine:** Comments without REQUEST_CHANGES don't fail the gate
+- **Empty or summary-only comments don't count:** Must have actual diff review activity
+
+The check reports CodeRabbit status separately (approved/reviewed/requested changes + findings count) even though full cross-vendor provenance is not yet implemented.
+
+**Status:** CodeRabbit detection is fully implemented. The required infrastructure for other reviewers does not exist yet:
 - Trusted dispatcher recording provenance (harness, provider/model, run ID, head SHA)
 - Read-only analyzer with structured prompts
 - Trusted publisher with separated approval credentials
 - Reviewer GitHub Apps (Claude and Codex)
-- CodeRabbit head-SHA-bound review detection
+
+Shadow mode always reports "needs human or real Apps" for the overall reviewer rule, but shows CodeRabbit evidence when available.
 
 ### 5. No Duplicate PRs
 Checks that no other open PR addresses the same root cause by:
@@ -124,36 +144,43 @@ Before switching from shadow to live merges, the following must be built and ver
 
 ### Infrastructure (Does Not Exist Yet)
 1. ✅ Evaluator logic (this implementation)
-2. ❌ **Trusted dispatcher** recording provenance for author and reviewer runs
-3. ❌ **Read-only analyzer** with structured prompts (separate job, no secrets/tokens)
-4. ❌ **Trusted publisher** that validates analyzer output and submits reviews with reviewer App tokens
-5. ❌ **Reviewer GitHub Apps** (Claude and Codex) with installation tokens
-6. ❌ **Test repro job** with Go test runner, fresh workspaces, `-count=1`, evidence preservation
-7. ❌ **Gate GitHub App** for posting the `green-lane` check (pinned via `app_id`) and merging
-8. ❌ **Branch protection ruleset** requiring `green-lane` check pinned to gate App's `app_id`
+2. ✅ Test repro job with Go test runner, fresh workspaces, `-count=1`, evidence preservation
+3. ✅ CodeRabbit head-SHA detection with inline findings check
+4. ❌ **Trusted dispatcher** recording provenance for author and reviewer runs (except CodeRabbit)
+5. ❌ **Read-only analyzer** with structured prompts (separate job, no secrets/tokens)
+6. ❌ **Trusted publisher** that validates analyzer output and submits reviews with reviewer App tokens
+7. ❌ **Reviewer GitHub Apps** (Claude and Codex) with installation tokens
+8. ❌ **Gate GitHub App** for posting the `green-lane` check (pinned via `app_id`) and merging
+9. ❌ **Branch protection ruleset** requiring `green-lane` check pinned to gate App's `app_id`
 
 ### Policy & Process
-9. ❌ **Extended denied paths** in `.github/green-lane.yml` read from base branch
-10. ❌ **Lockfile/generated limits** enforced (max 300 lines, must have matching manifest/source)
-11. ❌ **Live recheck before merge** (fully paginated duplicate query, fresh check/review state, SHA-pinned merge)
-12. ❌ **CodeRabbit head-SHA rule** implemented (counts only for real reviews with findings or explicit approve/request-changes)
+10. ❌ **Extended denied paths** in `.github/green-lane.yml` read from base branch
+11. ❌ **Lockfile/generated limits** enforced (max 300 lines, must have matching manifest/source)
+12. ❌ **Live recheck before merge** (fully paginated duplicate query, fresh check/review state, SHA-pinned merge)
 
 ### Validation
 13. ❌ **Shadow period complete:** At least 1 week with 0 wrong "would merge" calls
-14. ❌ **No provenance gaps** on PRs called eligible
+14. ❌ **No provenance gaps** on PRs called eligible (except CodeRabbit, which uses App identity)
 15. ❌ **Repro results stable** across reruns (no flaky passes)
 
 ## Current Limitations (Shadow Mode)
 
 1. **No actual merges:** This check is report-only. Manual merging is unchanged.
 
-2. **Reviewer provenance not verified:** The check cannot distinguish between Anthropic and OpenAI reviews, so it always reports "needs human" even when an approval exists. The real gate will verify cross-vendor provenance from the trusted dispatcher.
+2. **Reviewer provenance partially implemented:** 
+   - ✅ CodeRabbit detection works: The check distinguishes between real reviews (with findings or explicit approve/request-changes) and summary-only comments
+   - ❌ Other reviewer provenance not verified: Cannot distinguish between Anthropic and OpenAI reviews, so non-CodeRabbit approvals always report "needs human"
+   - The real gate will verify cross-vendor provenance from the trusted dispatcher for all reviewers
 
-3. **Test repro not enforced:** The "fails before, passes after" check is planned but not implemented. Shadow mode reports it as inconclusive.
+3. **Test repro limitations:**
+   - ✅ Fully implemented for Go test files (`*_test.go`)
+   - ❌ Not implemented for TypeScript/Jest/Vitest, Kotlin, or Swift tests
+   - PRs without changed test files are marked inconclusive
+   - The evaluator expects to see test function changes; PRs that only fix tests without changing their signatures may not be detected correctly
 
 4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
 
-5. **No policy file yet:** Denied paths are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live.
+5. **No policy file yet:** Denied paths and limits are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live.
 
 6. **Check not pinned:** The shadow check is not pinned to an App ID, so it's not a required check. The real `green-lane` check will be required and pinned to prevent spoofing.
 

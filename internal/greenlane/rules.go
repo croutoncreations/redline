@@ -206,6 +206,9 @@ func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
 
 // checkReviewer implements Rule 4: cross-vendor reviewer
 func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
+	// Check for CodeRabbit review first
+	codeRabbitReview := checkCodeRabbitReview(pr)
+
 	// In shadow mode, we don't have the full provenance infrastructure yet
 	// Check for any approved review on the head SHA
 	hasApproval := false
@@ -213,6 +216,11 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 
 	for _, review := range pr.Reviews {
 		if review.CommitID != pr.HeadSHA {
+			continue
+		}
+
+		// Skip CodeRabbit reviews since we handle them separately
+		if review.User == "coderabbitai[bot]" {
 			continue
 		}
 
@@ -224,19 +232,35 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 		}
 	}
 
-	if hasRequestChanges {
-		return RuleResult{
-			Name:    "Reviewer",
-			Pass:    false,
-			Message: "Changes requested on current head SHA",
+	// Build message with CodeRabbit status
+	var message strings.Builder
+	if codeRabbitReview.Reviewed {
+		if codeRabbitReview.Approved {
+			message.WriteString("CodeRabbit: approved with ")
+		} else if codeRabbitReview.RequestedChanges {
+			message.WriteString("CodeRabbit: requested changes with ")
+		} else {
+			message.WriteString("CodeRabbit: reviewed with ")
 		}
+		message.WriteString(fmt.Sprintf("%d findings. ", codeRabbitReview.FindingsCount))
+	} else {
+		message.WriteString("CodeRabbit: no real review on head SHA. ")
 	}
 
 	if !hasApproval {
+		message.WriteString("No human approval on current head SHA. ")
+	} else {
+		message.WriteString("Human approval found, but ")
+	}
+
+	message.WriteString("Cross-vendor provenance not verified (shadow mode: needs real Apps)")
+
+	// Either CodeRabbit or human requesting changes should fail
+	if codeRabbitReview.RequestedChanges || hasRequestChanges {
 		return RuleResult{
 			Name:    "Reviewer",
 			Pass:    false,
-			Message: "No approval on current head SHA (shadow: needs cross-vendor reviewer with provenance)",
+			Message: message.String(),
 		}
 	}
 
@@ -244,8 +268,71 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 	return RuleResult{
 		Name:    "Reviewer",
 		Pass:    false,
-		Message: "Approval found, but cross-vendor provenance not verified (shadow mode: needs human or real Apps)",
+		Message: message.String(),
 	}
+}
+
+// CodeRabbitReview represents CodeRabbit's review status
+type CodeRabbitReview struct {
+	Reviewed         bool
+	Approved         bool
+	RequestedChanges bool
+	FindingsCount    int
+}
+
+// checkCodeRabbitReview determines if CodeRabbit provided a qualifying review
+func checkCodeRabbitReview(pr PRInfo) CodeRabbitReview {
+	result := CodeRabbitReview{}
+
+	// Look for reviews from coderabbitai[bot]
+	for _, review := range pr.Reviews {
+		if review.User != "coderabbitai[bot]" {
+			continue
+		}
+
+		// Must be on the current head SHA
+		if review.CommitID != pr.HeadSHA {
+			continue
+		}
+
+		// Check for explicit approve or request changes
+		if review.State == "APPROVED" {
+			result.Reviewed = true
+			result.Approved = true
+			return result
+		}
+
+		if review.State == "CHANGES_REQUESTED" {
+			result.Reviewed = true
+			result.RequestedChanges = true
+			// Count findings from review comments
+			result.FindingsCount = countReviewComments(pr, review.ID)
+			return result
+		}
+
+		// For COMMENTED state, check if there are actual review comments (findings)
+		if review.State == "COMMENTED" {
+			findings := countReviewComments(pr, review.ID)
+			if findings > 0 {
+				result.Reviewed = true
+				result.FindingsCount = findings
+				return result
+			}
+		}
+	}
+
+	return result
+}
+
+// countReviewComments counts inline review comments for a review
+func countReviewComments(pr PRInfo, reviewID int64) int {
+	count := 0
+	for _, comment := range pr.ReviewComments {
+		if comment.ReviewID == reviewID {
+			count++
+		}
+	}
+	return count
 }
 
 // checkDuplicates implements Rule 5: no duplicate PRs

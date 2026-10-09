@@ -72,11 +72,23 @@ func run() error {
 
 	// Parse repro result
 	var reproResult *greenlane.ReproResult
-	if reproPassStr != "" {
+	reproInconclusiveStr := os.Getenv("REPRO_INCONCLUSIVE")
+	reproTestIDsStr := os.Getenv("REPRO_TEST_IDS")
+
+	if reproPassStr != "" || reproInconclusiveStr != "" {
 		reproPass := reproPassStr == "true"
+		reproInconclusive := reproInconclusiveStr == "true"
+
+		var testIDs []string
+		if reproTestIDsStr != "" {
+			testIDs = strings.Split(reproTestIDsStr, ",")
+		}
+
 		reproResult = &greenlane.ReproResult{
-			Pass:    reproPass,
-			Message: reproMessage,
+			Pass:         reproPass,
+			Inconclusive: reproInconclusive,
+			Message:      reproMessage,
+			TestIDs:      testIDs,
 		}
 	}
 
@@ -358,24 +370,55 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 		}
 	}
 
+	// Fetch review comments (inline comments on the diff)
+	commentsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments", c.apiBase, c.owner, c.repo, number)
+	commentsData, err := c.doRequest(ctx, "GET", commentsURL)
+	if err != nil {
+		return greenlane.PRInfo{}, err
+	}
+
+	var commentsResp []struct {
+		ID                  int64  `json:"id"`
+		PullRequestReviewID int64  `json:"pull_request_review_id"`
+		Path                string `json:"path"`
+		Line                int    `json:"line"`
+		Body                string `json:"body"`
+	}
+
+	if err := json.Unmarshal(commentsData, &commentsResp); err != nil {
+		return greenlane.PRInfo{}, err
+	}
+
+	reviewComments := make([]greenlane.ReviewComment, len(commentsResp))
+	for i, c := range commentsResp {
+		reviewComments[i] = greenlane.ReviewComment{
+			ID:       c.ID,
+			ReviewID: c.PullRequestReviewID,
+			Path:     c.Path,
+			Line:     c.Line,
+			Body:     c.Body,
+		}
+	}
+
 	mergeable := false
 	if prResp.Mergeable != nil {
 		mergeable = *prResp.Mergeable
 	}
 
 	return greenlane.PRInfo{
-		Number:     prResp.Number,
-		Title:      prResp.Title,
-		Body:       prResp.Body,
-		HeadSHA:    prResp.Head.SHA,
-		BaseSHA:    prResp.Base.SHA,
-		BaseBranch: prResp.Base.Ref,
-		Draft:      prResp.Draft,
-		Mergeable:  mergeable,
-		Author:     prResp.User.Login,
-		Files:      files,
-		CheckRuns:  checkRuns,
-		Reviews:    reviews,
+		Number:         prResp.Number,
+		Title:          prResp.Title,
+		Body:           prResp.Body,
+		HeadSHA:        prResp.Head.SHA,
+		BaseSHA:        prResp.Base.SHA,
+		BaseBranch:     prResp.Base.Ref,
+		Draft:          prResp.Draft,
+		Mergeable:      mergeable,
+		Author:         prResp.User.Login,
+		Files:          files,
+		CheckRuns:      checkRuns,
+		Reviews:        reviews,
+		ReviewComments: reviewComments,
 	}, nil
 }
 

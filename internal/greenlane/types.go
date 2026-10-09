@@ -55,20 +55,30 @@ type Review struct {
 	SubmittedAt time.Time
 }
 
+// ReviewComment represents an inline review comment on the diff
+type ReviewComment struct {
+	ID       int64
+	ReviewID int64
+	Path     string
+	Line     int
+	Body     string
+}
+
 // PRInfo contains information about the pull request
 type PRInfo struct {
-	Number     int
-	Title      string
-	Body       string
-	HeadSHA    string
-	BaseSHA    string
-	BaseBranch string
-	Draft      bool
-	Mergeable  bool
-	Author     string
-	Files      []PRFile
-	CheckRuns  []CheckRun
-	Reviews    []Review
+	Number         int
+	Title          string
+	Body           string
+	HeadSHA        string
+	BaseSHA        string
+	BaseBranch     string
+	Draft          bool
+	Mergeable      bool
+	Author         string
+	Files          []PRFile
+	CheckRuns      []CheckRun
+	Reviews        []Review
+	ReviewComments []ReviewComment
 }
 
 // Config represents the green-lane configuration
