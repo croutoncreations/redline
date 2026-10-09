@@ -84,12 +84,12 @@ jobs:
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
           
           if [ ! -s changed_tests.txt ]; then
-            echo "has_tests=false" >> $GITHUB_OUTPUT
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
             echo "No test files changed"
             exit 0
           fi
           
-          echo "has_tests=true" >> $GITHUB_OUTPUT
+          echo "has_tests=true" >> "$GITHUB_OUTPUT"
           
           # Extract test function names from changed test files
           # Look for func TestXxx patterns in the diff
@@ -103,7 +103,7 @@ jobs:
           done < changed_tests.txt
           
           if [ ! -s test_ids.txt ]; then
-            echo "has_tests=false" >> $GITHUB_OUTPUT
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
             echo "No test functions found in changed files"
             exit 0
           fi
@@ -167,9 +167,9 @@ jobs:
           # shellcheck disable=SC2086
           if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/base_results.json" 2> "$GITHUB_WORKSPACE/base_stderr.txt"; then
             # Test failure is expected
-            echo "result=some_failed" >> $GITHUB_OUTPUT
+            echo "result=some_failed" >> "$GITHUB_OUTPUT"
           else
-            echo "result=all_passed" >> $GITHUB_OUTPUT
+            echo "result=all_passed" >> "$GITHUB_OUTPUT"
           fi
           
           # Check for compile failures
@@ -215,9 +215,9 @@ jobs:
           
           # shellcheck disable=SC2086
           if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/head_results.json" 2> "$GITHUB_WORKSPACE/head_stderr.txt"; then
-            echo "result=some_failed" >> $GITHUB_OUTPUT
+            echo "result=some_failed" >> "$GITHUB_OUTPUT"
           else
-            echo "result=all_passed" >> $GITHUB_OUTPUT
+            echo "result=all_passed" >> "$GITHUB_OUTPUT"
           fi
           
           # Check for compile failures
