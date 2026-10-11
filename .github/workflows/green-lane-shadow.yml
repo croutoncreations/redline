@@ -294,9 +294,13 @@ jobs:
       )
     
     steps:
+      # Check out an exact, trusted commit. A workflow_run can start after the
+      # PR was merged and its branch deleted, so a branch name may no longer
+      # exist; github.sha is the default-branch commit this workflow runs at.
+      # For pull_request events the evaluator comes from the base commit.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.event.pull_request.base.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       
       - uses: actions/setup-go@v6
@@ -347,9 +351,11 @@ jobs:
       - name: Create check run
         id: check
         uses: actions/github-script@v7
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         with:
           script: |
-            const head_sha = '${{ steps.pr.outputs.head_sha }}';
+            const head_sha = process.env.HEAD_SHA;
             if (!head_sha) {
               core.setFailed('No PR found to evaluate');
               return;
@@ -420,9 +426,19 @@ jobs:
       - name: Parse result and update check
         if: always()
         uses: actions/github-script@v7
+        env:
+          CHECK_ID: ${{ steps.check.outputs.check_id }}
         with:
           script: |
             const fs = require('fs');
+            
+            // Values reach the script through env: an inline expression for a
+            // skipped step renders as nothing and breaks the JavaScript.
+            const checkId = Number(process.env.CHECK_ID);
+            if (!checkId) {
+              core.warning('No green-lane-shadow check run was created (an earlier step failed or found no PR); nothing to update.');
+              return;
+            }
             
             let result;
             try {
@@ -432,7 +448,7 @@ jobs:
               await github.rest.checks.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                check_run_id: ${{ steps.check.outputs.check_id }},
+                check_run_id: checkId,
                 status: 'completed',
                 conclusion: 'failure',
                 output: {
@@ -478,7 +494,7 @@ jobs:
             await github.rest.checks.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              check_run_id: ${{ steps.check.outputs.check_id }},
+              check_run_id: checkId,
               status: 'completed',
               conclusion: conclusion,
               output: {
