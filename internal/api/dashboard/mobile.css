@@ -212,6 +212,22 @@ button { color: inherit; font: inherit; }
 .m-btn:disabled { opacity: .45; cursor: wait; }
 .m-view-queue-btn { font-size: 10px; color: var(--accent); }
 
+/* Cursor usage (display only) */
+.m-cursor-header { cursor: default; }
+.m-cursor-card .m-provider-detail { padding-top: 10px; }
+.m-cursor-plan { margin-left: 6px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font: 600 9px ui-monospace, monospace; vertical-align: 1px; }
+.m-provider-logo.cursor .m-provider-fallback { color: var(--text); }
+.m-cursor-group { margin-top: 12px; }
+.m-cursor-group .m-pools-label { margin-bottom: 8px; text-transform: uppercase; letter-spacing: .08em; }
+.m-cursor-group .m-meters { margin-bottom: 0; }
+.m-cursor-meter { min-width: 0; }
+.m-cursor-meter .m-meter-head { gap: 8px; }
+.m-cursor-meter .m-meter-head b { white-space: nowrap; }
+.m-cursor-meter .m-reset { overflow-wrap: anywhere; }
+.m-cursor-meter.exhausted .m-meter-head b { color: #ff7b72; }
+.m-cursor-note { display: block; margin-top: 4px; color: var(--muted); }
+.m-source-meta .m-source-error { margin-top: 4px; font-size: 10px; overflow-wrap: anywhere; }
+
 /* Pool rows */
 .m-pool-row { display: flex; justify-content: space-between; font: 9px ui-monospace, monospace; color: var(--muted); padding: 3px 0; }
 .m-pool-row b { color: var(--text); font-weight: 500; }
@@ -366,3 +382,63 @@ button { color: inherit; font: inherit; }
 /* Skeleton loading */
 .m-skeleton { background: linear-gradient(90deg, #20252a 25%, #30363b 50%, #20252a 75%); background-size: 200% 100%; animation: shine 1.4s infinite; border-radius: 5px; height: 12px; }
 @keyframes shine { to { background-position: -200% 0; } }
+
+/* ── Multi-account carousel (mirrors Android) ── */
+.m-acct-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 6px; }
+.m-acct-head .m-provider-name { font-size: 13px; line-height: 1.3; }
+.m-acct-strip { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 14px; }
+.m-acct-overview {
+  min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px; cursor: pointer;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600;
+}
+.m-acct-overview.current { background: var(--line); color: var(--text); }
+.m-acct-dots { flex: 1; display: flex; gap: 5px; align-items: center; }
+.m-acct-dots i { width: 6px; height: 6px; border-radius: 3px; background: var(--line); }
+.m-acct-dots i.on { width: 16px; background: var(--accent); }
+.m-acct-step {
+  width: 44px; height: 44px; border: 0; border-radius: 22px; background: transparent;
+  font-size: 22px; cursor: pointer; color: var(--text);
+}
+.m-acct-step:disabled { color: var(--line); cursor: default; }
+.m-acct-position { padding: 2px 14px 8px; color: var(--muted); font-size: 11px; }
+.m-acct-pages { position: relative; padding: 0 10px 12px; }
+.m-acct-columns {
+  display: grid; grid-template-columns: 1fr 64px 64px 14px; gap: 6px;
+  padding: 0 10px 4px; color: var(--muted); font-size: 9px; text-align: right;
+}
+.m-acct-columns span:first-child { text-align: left; }
+.m-acct-row {
+  display: grid; grid-template-columns: 1fr 64px 64px 14px; gap: 6px; align-items: center;
+  width: 100%; min-height: 52px; margin: 0 0 6px; padding: 8px 10px; text-align: left;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); cursor: pointer;
+}
+.m-acct-row:focus-visible, .m-acct-overview:focus-visible, .m-acct-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.m-acct-name { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.m-acct-title { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.m-acct-row .m-acct-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-acct-sub { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.m-acct-plan { font: 9px ui-monospace, monospace; color: var(--muted); background: var(--line); border-radius: 4px; padding: 1px 5px; }
+.m-acct-id { font: 10px ui-monospace, monospace; color: var(--muted); }
+.m-acct-state { font-size: 10px; color: var(--muted); }
+.m-acct-state.healthy { color: var(--green); }
+.m-acct-state.near { color: var(--amber); }
+.m-acct-state.danger { color: var(--accent); }
+.m-acct-cell { display: flex; flex-direction: column; align-items: flex-end; }
+.m-acct-cell b { font: 600 13px ui-monospace, monospace; }
+.m-acct-cell.muted b { color: var(--muted); }
+.m-acct-cell em { font: normal 9px ui-sans-serif, sans-serif; color: var(--muted); text-align: right; }
+.m-acct-go { color: var(--muted); font-size: 16px; text-align: right; }
+.m-acct-page-head { display: flex; flex-direction: column; gap: 4px; padding: 0 4px 10px; }
+.m-acct-page .m-provider-decision, .m-acct-page .m-source-meta, .m-acct-page .m-meters { margin-inline: 4px; }
+.m-acct-stale-window .m-meter-head b { color: var(--muted); }
+/* Large text: the strip wraps (pill and arrows stay reachable) and the
+   column grid gives its fixed tracks to content. */
+.m-acct-head .m-provider-summary { min-width: 0; }
+.m-acct-head .m-provider-name { overflow-wrap: anywhere; }
+.m-acct-strip { flex-wrap: wrap; }
+.m-acct-dots { min-width: 40px; }
+.m-acct-columns, .m-acct-row { grid-template-columns: minmax(0, 1fr) minmax(64px, auto) minmax(64px, auto) 14px; }
+.m-acct-pages, .m-acct-page { min-width: 0; overflow-wrap: anywhere; }
+.m-acct-carousel { overflow: hidden; }
+/* Pages contain their children's margins, so a page measures what it shows. */
+.m-acct-page { display: flow-root; }

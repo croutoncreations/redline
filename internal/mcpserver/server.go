@@ -389,6 +389,9 @@ func (s *server) providerStatus(ctx context.Context, _ *mcp.CallToolRequest, inp
 	}
 	summary := fmt.Sprintf("%s has %.1f%% weekly remaining and %s.",
 		input.ProviderAccountID, snapshot.Weekly.Remaining*100, short)
+	if snapshot.WeeklyUnavailable {
+		summary = fmt.Sprintf("%s does not report a weekly limit and %s.", input.ProviderAccountID, short)
+	}
 	return nil, Output{Summary: summary, Data: snapshot}, nil
 }
 

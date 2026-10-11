@@ -33,6 +33,12 @@ struct StatusPopoverView: View {
                     installationSafetySection
                     failureSection
                     providerGrid
+                    if let cursor = snapshot?.cursorUsage {
+                        CursorUsageSection(
+                            report: cursor,
+                            scheduled: snapshot?.providers.contains { $0.provider == "cursor" } ?? false
+                        )
+                    }
                     activitySection
                     queueSection
                     recentRunsSection
@@ -186,17 +192,47 @@ struct StatusPopoverView: View {
         .padding(.vertical, 15)
     }
 
+    /// Claude accounts, when there are two or more, as compact rows; every
+    /// other provider (and a lone Claude account) keeps today's card.
+    /// Provider cards share a row only up to this many; each needs about
+    /// 180pt to keep "Pause scheduling" and its labels on one line.
+    static let sideBySideLimit = 2
+
+    private var claudeTray: AccountTray? { snapshot.flatMap { AccountTray(snapshot: $0, provider: "claude") } }
+
     @ViewBuilder private var providerGrid: some View {
-        let providers = (snapshot?.providers ?? []).sorted {
-            providerRank($0.provider) < providerRank($1.provider)
+        let tray = claudeTray
+        let providers = (snapshot?.providers ?? [])
+            .filter { tray == nil || $0.provider.lowercased() != tray!.provider }
+            .sorted { providerRank($0.provider) < providerRank($1.provider) }
+        if let tray, let snapshot {
+            AccountTraySection(
+                snapshot: snapshot,
+                provider: tray.provider,
+                expandedID: $model.expandedAccountID,
+                pausing: model.providersBeingControlled,
+                setPaused: { id, paused in Task { await model.setPaused(paused, providerID: id) } }
+            )
         }
         if !providers.isEmpty {
-            HStack(spacing: 10) {
-                ForEach(providers) { provider in
-                    providerCard(provider)
+            // Side by side only while each card keeps a readable width: two
+            // providers fit the popover; three or more (or several accounts
+            // of one provider) stack full-width instead of squeezing until
+            // labels wrap a letter per line.
+            if providers.count <= Self.sideBySideLimit {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(providers) { provider in
+                        providerCard(provider)
+                    }
+                }
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(providers) { provider in
+                        providerCard(provider)
+                    }
                 }
             }
-        } else {
+        } else if tray == nil {
             emptyRow("Usage data is not available yet.", symbol: "chart.bar.xaxis")
         }
     }
@@ -216,7 +252,10 @@ struct StatusPopoverView: View {
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(provider.snapshotStale ? .orange : .primary)
             }
-            if provider.snapshotStale {
+            if !provider.snapshotStale, provider.snapshot?.weeklyUnavailable == true {
+                // A lone account without a weekly limit: say so, never a 0% bar.
+                Text("Weekly limit not reported").font(.system(size: 10)).foregroundStyle(.secondary)
+            } else if provider.snapshotStale {
                 Label(provider.staleSummary, systemImage: provider.signedOut ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
@@ -226,7 +265,7 @@ struct StatusPopoverView: View {
                     .tint(progressColor(provider.weeklyPercent))
             }
             HStack {
-                Text(provider.snapshotStale ? "Scheduling paused" : "Weekly").foregroundStyle(.secondary)
+                Text(provider.snapshotStale ? "Scheduling paused" : provider.accountWindowLabel).foregroundStyle(.secondary)
                 Spacer()
                 if !provider.snapshotStale, let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }

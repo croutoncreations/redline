@@ -33,7 +33,7 @@ func (s scriptedUsageSource) Fetch(context.Context, config.Provider) (decision.U
 func TestStaleUsageSaysWhyCollectionIsFailing(t *testing.T) {
 	now := time.Date(2026, 10, 2, 4, 0, 0, 0, time.UTC)
 	frozen := decision.UsageSnapshot{
-		Provider: "claude", ObservedAt: now.Add(-8 * time.Hour), Source: "openusage", Confidence: "high",
+		Provider: "claude", Account: "claude-main", ObservedAt: now.Add(-8 * time.Hour), Source: "openusage", Confidence: "high",
 		Weekly: decision.UsageWindow{Remaining: .22, ResetsAt: now.Add(13 * time.Hour)},
 	}
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
@@ -93,7 +93,7 @@ func TestStaleUsageSaysWhyCollectionIsFailing(t *testing.T) {
 // sample and the native fallback is what recovers.
 func TestSignedOutReasonClearsOnRecovery(t *testing.T) {
 	now := time.Date(2026, 10, 2, 4, 0, 0, 0, time.UTC)
-	frozen := decision.UsageSnapshot{Provider: "claude", ObservedAt: now.Add(-8 * time.Hour), Source: "openusage",
+	frozen := decision.UsageSnapshot{Provider: "claude", Account: "claude-main", ObservedAt: now.Add(-8 * time.Hour), Source: "openusage",
 		Weekly: decision.UsageWindow{Remaining: .22, ResetsAt: now.Add(time.Hour)}}
 	for _, mode := range []string{"native", "auto"} {
 		t.Run(mode, func(t *testing.T) {
@@ -105,7 +105,7 @@ func TestSignedOutReasonClearsOnRecovery(t *testing.T) {
 				t.Fatalf("reason after sign-out = %q", got)
 			}
 			native.err = nil
-			native.snapshot = decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native",
+			native.snapshot = decision.UsageSnapshot{Provider: "claude", Account: "claude-main", ObservedAt: now, Source: "native",
 				Weekly: decision.UsageWindow{Remaining: .5, ResetsAt: now.Add(time.Hour)}}
 			if _, _, err := manager.Fetch(context.Background(), "claude-main", provider); err != nil {
 				t.Fatal(err)

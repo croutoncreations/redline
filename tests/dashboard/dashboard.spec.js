@@ -1056,3 +1056,26 @@ test('renders form dropdowns at the same height as text fields', async ({ page }
   const profile = await heights('#profiles-dialog', ['profile-id', 'profile-provider', 'profile-harness', 'profile-workspace', 'profile-base-branch', 'profile-cleanup', 'profile-repository-recent', 'profile-repository']);
   expect(new Set(Object.values(profile)).size, JSON.stringify(profile)).toBe(1);
 });
+
+test('a Team seat with no weekly limit renders "not reported" instead of failing', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // OpenUsage Team seats report no account-wide weekly window.
+  delete claude.snapshot.weekly;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'weekly');
+  claude.snapshot.weekly_unavailable = true;
+  await loadDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(card.locator('[data-testid="weekly-not-reported"]')).toContainText('not reported');
+  await expect(card).not.toContainText('NaN');
+  // The compact row: no weekly bar or weekly percent. The number it has is
+  // the 5-hour window, shown and labelled as such, and it says why dispatch holds.
+  await expect(card).not.toContainText(/\d+% weekly/);
+  await expect(card.getByRole('progressbar', { name: /weekly remaining/ })).toHaveCount(0);
+  await expect(card.locator('.provider-copy-line b')).toHaveText('62% 5h');
+  await expect(card.getByRole('progressbar', { name: '62% 5-hour remaining' })).toHaveCount(1);
+  await expect(card.locator('.provider-trigger')).toContainText('5h 62% · resets');
+  await expect(card.locator('.provider-trigger')).toContainText('Weekly not reported');
+  await expect(card.locator('.provider-pressure')).toHaveText('Dispatch held · weekly not reported');
+});

@@ -228,6 +228,49 @@ The session cookie lasts 30 days and is renewed on every authenticated request. 
 left unused past that window, or one whose cookie was cleared, shows a "Session expired"
 prompt on `/m` and needs a fresh scan.
 
+## Cursor and Grok Bot usage
+
+The Usage tab, in the Android app and on the `/m` web page, can show a Cursor card with Cursor's
+monthly **Cursor Models** and **Other Models** pools, the weekly **Grok Bot** allowance,
+**On-demand** spend and **Credits**, each with its reset date in the phone's own time zone. The
+card has no controls. To queue jobs on Cursor, add a `provider: cursor` account (see
+[Cursor](profiles-and-tasks.md#cursor)); that account gets its own card with a **Monthly
+allowance** and is scheduled from the two monthly pools only. Without such an account the Cursor
+card says it is not used for scheduling; with one, it says the monthly pools schedule Cursor jobs
+and that Grok Bot, on-demand spend and credits never do. Grok Bot has no CLI or API for jobs and
+stays usage-only.
+
+The Android app needs a build from this version to show the card. It asks the Mac for the card
+alongside the provider accounts, and falls back to the accounts alone when paired with an older
+Mac that does not know it.
+
+Tracking is off by default. Turn it on in the Redline configuration:
+
+```yaml
+cursor_usage:
+  # off (default), openusage, native, or auto
+  source: openusage
+  # optional; defaults to the first provider's openusage_url, then 127.0.0.1:6736
+  # openusage_url: http://127.0.0.1:6736
+  poll_interval: 5m   # at least 1m
+```
+
+- `openusage` reads OpenUsage's cached Cursor card (`GET /v1/limits/cursor`). It never asks
+  OpenUsage to refresh and never reads the separate Grok card, which tracks the Grok Build CLI,
+  not Grok Bot.
+- `native` is Redline's built-in collector. It reads the access token of the Cursor app already
+  signed in on this Mac (Cursor's state database, then its keychain item) without refreshing,
+  rewriting or storing it, and calls Cursor's dashboard usage, Grok Bot, plan and credit-grant
+  endpoints. When the token is about to expire it waits for Cursor to renew its own sign-in.
+  Prepaid balance and spend history are not collected.
+- `auto` uses OpenUsage while its data is current and falls back to the built-in collector.
+
+Values are shown as Cursor reports them. A missing meter is listed as not reported instead of
+being shown as zero, an unreported reset is shown as unknown, and on-demand spend without a limit is
+shown as spend with no bar. When a refresh partly fails, the meters that were read stay visible
+and the card is marked **Partial**; once the data passes its expiry on the phone's clock it is
+marked **Out of date** and each value is labelled "Last known".
+
 ## Revoking access
 
 Redline does not track individual devices, so revocation is all-or-nothing: rotating the

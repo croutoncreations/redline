@@ -54,3 +54,6 @@ mobile/android/local.properties
 # The relay's dev dependencies include the ~135MB workerd runtime binary.
 relay/node_modules/
 relay/.wrangler/
+
+# DeviceBroker run artifacts
+.devicebroker/

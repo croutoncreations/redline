@@ -24,9 +24,9 @@ func (d *DB) SaveTokenObservations(ctx context.Context, observations []capacity.
 			return 0, fmt.Errorf("token observation counts cannot be negative")
 		}
 		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO token_observations (
-provider, source, source_id, observed_at, model, input_tokens, output_tokens,
+provider_account_id, provider, source, source_id, observed_at, model, input_tokens, output_tokens,
 cache_read_tokens, cache_creation_tokens, confidence
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.Provider, observation.Source, observation.SourceID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.Account, observation.Provider, observation.Source, observation.SourceID,
 			formatTokenTime(observation.ObservedAt), observation.Model, observation.InputTokens,
 			observation.OutputTokens, observation.CacheReadTokens, observation.CacheCreationTokens, observation.Confidence)
 		if err != nil {
@@ -44,10 +44,11 @@ cache_read_tokens, cache_creation_tokens, confidence
 	return inserted, nil
 }
 
-func (d *DB) ListTokenObservations(ctx context.Context, provider string, after, through time.Time) ([]capacity.TokenObservation, error) {
-	query := `SELECT provider, source, source_id, observed_at, model, input_tokens, output_tokens,
-cache_read_tokens, cache_creation_tokens, confidence FROM token_observations WHERE provider = ?`
-	args := []any{provider}
+// ListTokenObservations returns one provider account's token observations.
+func (d *DB) ListTokenObservations(ctx context.Context, account, provider string, after, through time.Time) ([]capacity.TokenObservation, error) {
+	query := `SELECT provider_account_id, provider, source, source_id, observed_at, model, input_tokens, output_tokens,
+cache_read_tokens, cache_creation_tokens, confidence FROM token_observations WHERE provider_account_id = ? AND provider = ?`
+	args := []any{account, provider}
 	if !after.IsZero() {
 		query += ` AND observed_at > ?`
 		args = append(args, formatTokenTime(after))
@@ -77,16 +78,16 @@ cache_read_tokens, cache_creation_tokens, confidence FROM token_observations WHE
 }
 
 func (d *DB) ListTokenObservationsBySource(
-	ctx context.Context, provider, source string, since, until time.Time,
+	ctx context.Context, account, provider, source string, since, until time.Time,
 ) ([]capacity.TokenObservation, error) {
 	if strings.TrimSpace(provider) == "" || strings.TrimSpace(source) == "" ||
 		since.IsZero() || until.IsZero() || !until.After(since) {
 		return nil, fmt.Errorf("token observation provider, source, and valid time range are required")
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT provider, source, source_id, observed_at, model,
+	rows, err := d.db.QueryContext(ctx, `SELECT provider_account_id, provider, source, source_id, observed_at, model,
 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, confidence
-FROM token_observations WHERE provider = ? AND source = ? AND observed_at >= ? AND observed_at < ?
-ORDER BY observed_at, id`, provider, source, formatTokenTime(since), formatTokenTime(until))
+FROM token_observations WHERE provider_account_id = ? AND provider = ? AND source = ? AND observed_at >= ? AND observed_at < ?
+ORDER BY observed_at, id`, account, provider, source, formatTokenTime(since), formatTokenTime(until))
 	if err != nil {
 		return nil, fmt.Errorf("list token observations by source: %w", err)
 	}
@@ -105,7 +106,7 @@ ORDER BY observed_at, id`, provider, source, formatTokenTime(since), formatToken
 func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 	var observation capacity.TokenObservation
 	var observedAt string
-	if err := row.Scan(&observation.Provider, &observation.Source, &observation.SourceID, &observedAt,
+	if err := row.Scan(&observation.Account, &observation.Provider, &observation.Source, &observation.SourceID, &observedAt,
 		&observation.Model, &observation.InputTokens, &observation.OutputTokens, &observation.CacheReadTokens,
 		&observation.CacheCreationTokens, &observation.Confidence); err != nil {
 		return capacity.TokenObservation{}, fmt.Errorf("scan token observation: %w", err)
@@ -123,9 +124,9 @@ func scanTokenObservation(row scanner) (capacity.TokenObservation, error) {
 // is ordered and range-filtered on observed_at just like the other tables.
 func formatTokenTime(value time.Time) string { return formatTime(value) }
 
-func (d *DB) LatestTokenObservationTime(ctx context.Context, provider, source string) (time.Time, error) {
+func (d *DB) LatestTokenObservationTime(ctx context.Context, account, provider, source string) (time.Time, error) {
 	var value string
-	err := d.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(observed_at), '') FROM token_observations WHERE provider = ? AND source = ?`, provider, source).Scan(&value)
+	err := d.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(observed_at), '') FROM token_observations WHERE provider_account_id = ? AND provider = ? AND source = ?`, account, provider, source).Scan(&value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read latest token observation time: %w", err)
 	}

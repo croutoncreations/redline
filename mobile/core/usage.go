@@ -66,9 +66,25 @@ type Pool struct {
 type ProviderUsage struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
-	Paused   bool   `json:"paused"`
-	Stale    bool   `json:"stale"`
-	Error    string `json:"error,omitempty"`
+	// Label is the owner's name for the account, falling back to the ID, so
+	// the screen always has something to call it. Never an email.
+	Label string `json:"label"`
+	// Plan is the plan name the source reported ("Max 20x", "Team"), or
+	// empty when it reported none. Plans are not comparable capacity: a
+	// percentage on one is not a percentage on another.
+	Plan string `json:"plan,omitempty"`
+	// AccountStatus is ok, stale, no_data, signed_out or error, as the
+	// desktop derived it; "unknown" from a desktop that predates it.
+	AccountStatus string `json:"account_status"`
+	// AccountIndex and AccountCount place this account among the accounts of
+	// the same provider, in display order (1-based index). A provider with
+	// one account has AccountCount 1, and the screen shows it as it always
+	// has; two or more get the accounts carousel.
+	AccountIndex int    `json:"account_index"`
+	AccountCount int    `json:"account_count"`
+	Paused       bool   `json:"paused"`
+	Stale        bool   `json:"stale"`
+	Error        string `json:"error,omitempty"`
 	// StaleReason is one short line saying why a stale provider is stale,
 	// when the desktop knows a cause a person can fix (its CLI is signed
 	// out). Empty otherwise, and the screen falls back to "Stale".
@@ -85,16 +101,40 @@ type ProviderUsage struct {
 	// both looks like the limit does not exist, which is the wrong thing to
 	// tell someone deciding whether to start a run.
 	SessionUnknown bool `json:"session_unknown,omitempty"`
+	// WeeklyNotReported marks an account whose source reports no
+	// account-wide weekly limit (OpenUsage Team seats). Weekly is nil then;
+	// the screen says "not reported" and never draws a bar or a number.
+	WeeklyNotReported bool `json:"weekly_not_reported,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand.
 	// Absent when the provider does not report them, which is not the same as
 	// having none.
-	BankedResets *int    `json:"banked_resets,omitempty"`
-	Weekly       *Window `json:"weekly,omitempty"`
-	Pools        []Pool  `json:"pools,omitempty"`
+	BankedResets *int `json:"banked_resets,omitempty"`
+	// ResetCredits is the same count with each credit's own deadline, which
+	// is not the allowance's reset time and must never be shown as one. Nil
+	// exactly when BankedResets is.
+	ResetCredits *ResetCredits `json:"reset_credits,omitempty"`
+	Weekly       *Window       `json:"weekly,omitempty"`
+	// WeeklyLabel names the account window: "Weekly allowance" for Claude
+	// and Codex, "Monthly allowance" for Cursor, whose subscription resets
+	// monthly. Named here so the screen never calls a month a week.
+	WeeklyLabel string `json:"weekly_label,omitempty"`
+	Pools       []Pool `json:"pools,omitempty"`
 	// Scheduling is where Redline will act, drawn on the meters. Nil from a
 	// desktop that does not send its policy, in which case no zones are drawn
 	// rather than guessed.
 	Scheduling *SchedulingView `json:"scheduling,omitempty"`
+}
+
+// ResetCredits is an account's balance of one-off limit resets.
+type ResetCredits struct {
+	Available int `json:"available"`
+	// Expiries are each credit's deadline, soonest first, already past ones
+	// removed. Fewer entries than Available means the rest were reported
+	// without one; none means no deadline was reported at all.
+	Expiries []time.Time `json:"expiries,omitempty"`
+	// NextExpiresInSeconds counts down to the soonest deadline; zero when
+	// none is known.
+	NextExpiresInSeconds int64 `json:"next_expires_in_seconds,omitempty"`
 }
 
 // SchedulingView is the scheduler's policy for one provider, interpreted for
@@ -133,6 +173,9 @@ type UsageView struct {
 	// header shows a health pill; fetching it separately would ask the desktop
 	// twice for something it already sent.
 	Health *HealthView `json:"health,omitempty"`
+	// Cursor is Cursor's usage card, when the desktop tracks it. Nil from a
+	// desktop with Cursor usage off or from before it existed.
+	Cursor *CursorUsageView `json:"cursor,omitempty"`
 	// SampledAgeSeconds is how old the oldest provider's numbers are.
 	//
 	// The stream pushes every five seconds while the collector polls the
@@ -207,9 +250,13 @@ func isCanonicalPool(allowance decision.AllowanceWindow) bool {
 type dashboardPayload struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Health      *healthPayload `json:"health,omitempty"`
+	CursorUsage *cursorReport  `json:"cursor_usage,omitempty"`
 	Providers   []struct {
 		ID            string `json:"id"`
 		Provider      string `json:"provider"`
+		Label         string `json:"label"`
+		OpenUsageCard string `json:"openusage_card"`
+		AccountStatus string `json:"account_status"`
 		Paused        bool   `json:"paused"`
 		SnapshotStale bool   `json:"snapshot_stale"`
 		Error         string `json:"error,omitempty"`
@@ -253,16 +300,38 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 		health := payload.Health.render()
 		view.Health = &health
 	}
+	cursorScheduled := false
+	for _, item := range payload.Providers {
+		if strings.EqualFold(item.Provider, "cursor") {
+			cursorScheduled = true
+		}
+	}
+	view.Cursor = renderCursorUsage(payload.CursorUsage, cursorScheduled, now)
 	for _, item := range payload.Providers {
 		provider := ProviderUsage{
-			ID:       item.ID,
-			Provider: item.Provider,
-			Paused:   item.Paused,
-			Stale:    item.SnapshotStale,
-			Error:    item.Error,
+			ID:            item.ID,
+			Provider:      item.Provider,
+			Label:         item.Label,
+			AccountStatus: item.AccountStatus,
+			Paused:        item.Paused,
+			Stale:         item.SnapshotStale,
+			Error:         item.Error,
 		}
+		if provider.Label == "" {
+			provider.Label = item.ID
+		}
+		if provider.AccountStatus == "" {
+			provider.AccountStatus = "unknown"
+		}
+		readsCard := item.OpenUsageCard != "" && !strings.EqualFold(item.OpenUsageCard, item.Provider)
 		if item.SnapshotStale {
 			provider.StaleReason = staleReason(item.Provider, item.UsageSource.Reason)
+			if readsCard && item.UsageSource.Reason == "signed_out" {
+				provider.StaleReason = "Signed out in OpenUsage · sign this account in to OpenUsage on your Mac"
+			}
+			if provider.StaleReason == "" && item.Snapshot != nil && item.Snapshot.SourceStale {
+				provider.StaleReason = "OpenUsage says these numbers are out of date"
+			}
 		}
 		if item.Snapshot != nil {
 			// The oldest sample across providers, so the header can say how
@@ -285,7 +354,14 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 			provider.SessionUnknown = provider.Session == nil &&
 				providesShortWindow(item.Snapshot)
 			provider.BankedResets = item.Snapshot.BankedResets
+			provider.ResetCredits = resetCredits(item.Snapshot, now)
+			provider.Plan = strings.TrimSpace(item.Snapshot.Plan)
 			provider.Weekly = weeklyWindow(item.Snapshot, now)
+			provider.WeeklyNotReported = item.Snapshot.WeeklyUnavailable
+			provider.WeeklyLabel = "Weekly allowance"
+			if isMonthlyWindow(item.Snapshot.Weekly.Period()) {
+				provider.WeeklyLabel = "Monthly allowance"
+			}
 			reservePercent := 0
 			if item.Scheduling != nil {
 				reservePercent = percent(item.Scheduling.RollingReserve)
@@ -327,7 +403,51 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 		}
 		view.Providers = append(view.Providers, provider)
 	}
+	numberAccounts(view.Providers)
 	return view
+}
+
+// numberAccounts sets each account's position among its provider's accounts.
+// The desktop sends accounts sorted by ID; that order is kept, so the
+// carousel pages do not reshuffle between refreshes.
+func numberAccounts(providers []ProviderUsage) {
+	counts := map[string]int{}
+	for _, provider := range providers {
+		counts[strings.ToLower(provider.Provider)]++
+	}
+	seen := map[string]int{}
+	for index := range providers {
+		key := strings.ToLower(providers[index].Provider)
+		seen[key]++
+		providers[index].AccountIndex, providers[index].AccountCount = seen[key], counts[key]
+	}
+}
+
+// resetCredits renders the reset-credit balance with its deadlines. A
+// deadline already past is dropped; the count is kept as reported, because
+// the desktop's collector, not the phone, decides when it is untrustworthy.
+func resetCredits(snapshot *decision.UsageSnapshot, now time.Time) *ResetCredits {
+	if snapshot.BankedResets == nil {
+		return nil
+	}
+	credits := &ResetCredits{Available: *snapshot.BankedResets}
+	expiries := snapshot.BankedResetsExpiries
+	if len(expiries) == 0 && snapshot.BankedResetsExpireAt != nil {
+		expiries = []time.Time{*snapshot.BankedResetsExpireAt}
+	}
+	for _, expiry := range expiries {
+		if expiry.After(now) {
+			credits.Expiries = append(credits.Expiries, expiry.UTC())
+		}
+	}
+	sort.Slice(credits.Expiries, func(i, j int) bool { return credits.Expiries[i].Before(credits.Expiries[j]) })
+	if len(credits.Expiries) > credits.Available {
+		credits.Expiries = credits.Expiries[:credits.Available]
+	}
+	if len(credits.Expiries) > 0 {
+		credits.NextExpiresInSeconds = secondsUntil(credits.Expiries[0], now)
+	}
+	return credits
 }
 
 // FetchUsage returns the capacity screen as JSON.
@@ -345,7 +465,15 @@ func (c *Client) FetchUsage() (string, error) {
 	// is roughly 97% of its weight and none of what this screen renders. Asking
 	// for the two members it uses keeps a refresh to a few kilobytes, which
 	// matters on mobile data and matters more through a relay.
-	if err := c.get(ctx, "/v1/dashboard?fields=providers,health", &payload); err != nil {
+	err := c.get(ctx, "/v1/dashboard?fields="+usageFields, &payload)
+	if isUnknownFieldError(err) {
+		// A desktop from before Cursor usage rejects the unknown member, and
+		// failing the whole screen over an optional card would be worse
+		// than showing it without one.
+		payload = dashboardPayload{}
+		err = c.get(ctx, "/v1/dashboard?fields="+legacyUsageFields, &payload)
+	}
+	if err != nil {
 		return "", err
 	}
 
@@ -356,6 +484,21 @@ func (c *Client) FetchUsage() (string, error) {
 		return "", fmt.Errorf("encode usage view: %w", err)
 	}
 	return string(encoded), nil
+}
+
+// usageFields are the dashboard members the capacity screen renders. Cursor's
+// usage card rides along; it is a few hundred bytes.
+const usageFields = "providers,health,cursor_usage"
+
+// legacyUsageFields is what a desktop from before Cursor usage accepts.
+const legacyUsageFields = "providers,health"
+
+// isUnknownFieldError reports the 400 a desktop gives for a fields member it
+// does not know.
+func isUnknownFieldError(err error) bool {
+	var problem *apiError
+	return errors.As(err, &problem) && problem.StatusCode == http.StatusBadRequest &&
+		strings.Contains(problem.Message, "unknown dashboard field")
 }
 
 // shortWindow prefers the snapshot's short window and falls back to the
@@ -375,8 +518,14 @@ func shortWindow(snapshot *decision.UsageSnapshot, now time.Time) *Window {
 }
 
 func weeklyWindow(snapshot *decision.UsageSnapshot, now time.Time) *Window {
+	if snapshot.WeeklyUnavailable {
+		return nil
+	}
 	if !snapshot.Weekly.ResetsAt.IsZero() {
-		return newWindow(snapshot.Weekly.Remaining, snapshot.Weekly.ResetsAt, weeklyPeriod, false, now)
+		// The window states its own period: a week for Claude and Codex, a
+		// month for Cursor. Pace against a week would put Cursor's mark in
+		// the wrong place for three weeks of every month.
+		return newWindow(snapshot.Weekly.Remaining, snapshot.Weekly.ResetsAt, snapshot.Weekly.Period(), false, now)
 	}
 	return allowanceWindow(snapshot, "weekly", now)
 }
@@ -433,6 +582,9 @@ func allowancePeriod(allowance decision.AllowanceWindow) time.Duration {
 	}
 	if allowance.Role == "weekly" {
 		return weeklyPeriod
+	}
+	if allowance.Role == "monthly" {
+		return 30 * 24 * time.Hour
 	}
 	return decision.ShortWindowDuration
 }
@@ -550,6 +702,9 @@ func providesShortWindow(snapshot *decision.UsageSnapshot) bool {
 // when the desktop gave no cause a person can act on. The fix happens on the
 // Mac, so the line says so: the phone itself has nothing to sign in to.
 func staleReason(provider, reason string) string {
+	if reason == "account_mismatch" {
+		return "Cursor CLI and app are on different accounts · sign both in to the same one on your Mac"
+	}
 	if reason != "signed_out" {
 		return ""
 	}
@@ -558,6 +713,8 @@ func staleReason(provider, reason string) string {
 		return "Claude Code is signed out · run claude auth login on your Mac"
 	case "codex":
 		return "Codex is signed out · run codex login on your Mac"
+	case "cursor":
+		return "Cursor is signed out · run agent login on your Mac"
 	default:
 		return "Signed out on your Mac · sign in again to resume"
 	}

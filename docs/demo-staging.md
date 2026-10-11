@@ -34,6 +34,7 @@ Available scenes:
 - `decision-run-near-expiry`: the same task with substantial capacity remaining
   six hours before the weekly reset.
 - `decision-unknown`: the same task held because its synthetic sample is stale.
+- `multi-account`: three synthetic Claude accounts (Personal on Max 20x with two reset credits, a Team client account, a stale Pro side project) plus Codex, for the accounts carousel.
 
 Decision scenes default to Claude. Use `--provider codex-main` to stage the
 same condition without a five-hour window:
