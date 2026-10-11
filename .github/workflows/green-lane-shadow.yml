@@ -326,8 +326,22 @@ jobs:
           go-version-file: go.mod
           cache: true
       
+      # For pull_request events the evaluator is built from the base checkout
+      # above, not the PR head (this job holds checks: write; the workflow_run
+      # path checks out the run's head branch, a known pre-existing gap). A
+      # base branch that predates
+      # cmd/green-lane-check, e.g. a stacked PR's parent, cannot evaluate;
+      # the check then completes neutral instead of failing.
       - name: Build evaluator
-        run: go build -o green-lane-check ./cmd/green-lane-check
+        id: build
+        run: |
+          if [ -d cmd/green-lane-check ]; then
+            go build -o green-lane-check ./cmd/green-lane-check
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::cmd/green-lane-check is not on the base branch; the shadow evaluation is skipped"
+          fi
       
       - name: Get PR number and info
         id: pr
@@ -369,9 +383,11 @@ jobs:
       - name: Create check run
         id: check
         uses: actions/github-script@v7
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         with:
           script: |
-            const head_sha = '${{ steps.pr.outputs.head_sha }}';
+            const head_sha = process.env.HEAD_SHA;
             if (!head_sha) {
               core.setFailed('No PR found to evaluate');
               return;
@@ -437,6 +453,7 @@ jobs:
       
       - name: Run evaluation
         id: eval
+        if: steps.build.outputs.available == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -449,9 +466,36 @@ jobs:
       - name: Parse result and update check
         if: always()
         uses: actions/github-script@v7
+        env:
+          CHECK_ID: ${{ steps.check.outputs.check_id }}
+          EVALUATOR_AVAILABLE: ${{ steps.build.outputs.available }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
         with:
           script: |
             const fs = require('fs');
+            
+            // Without a check run there is nothing to complete; say so
+            // instead of failing on an empty id.
+            const checkId = Number(process.env.CHECK_ID);
+            if (!checkId) {
+              core.warning('No green-lane-shadow check run was created; nothing to update.');
+              return;
+            }
+            
+            if (process.env.EVALUATOR_AVAILABLE !== 'true') {
+              await github.rest.checks.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                check_run_id: checkId,
+                status: 'completed',
+                conclusion: 'neutral',
+                output: {
+                  title: 'Green Lane Shadow: evaluator not on base branch',
+                  summary: `The base branch (${process.env.BASE_REF || 'unknown'}) does not contain cmd/green-lane-check, so this PR was not evaluated. Shadow mode only; no action taken.`
+                }
+              });
+              return;
+            }
             
             let result;
             try {
@@ -461,7 +505,7 @@ jobs:
               await github.rest.checks.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                check_run_id: ${{ steps.check.outputs.check_id }},
+                check_run_id: checkId,
                 status: 'completed',
                 conclusion: 'failure',
                 output: {
@@ -507,7 +551,7 @@ jobs:
             await github.rest.checks.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              check_run_id: ${{ steps.check.outputs.check_id }},
+              check_run_id: checkId,
               status: 'completed',
               conclusion: conclusion,
               output: {

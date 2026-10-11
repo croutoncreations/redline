@@ -18,7 +18,10 @@ type workflowFile struct {
 		Needs   any               `yaml:"needs"`
 		Outputs map[string]string `yaml:"outputs"`
 		Steps   []struct {
-			ID string `yaml:"id"`
+			ID   string            `yaml:"id"`
+			Name string            `yaml:"name"`
+			Uses string            `yaml:"uses"`
+			With map[string]string `yaml:"with"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
@@ -76,5 +79,36 @@ func TestShadowWorkflowExportsEveryJobOutputItReads(t *testing.T) {
 		if !found {
 			t.Errorf("jobs.%s.outputs.%s maps from step %q, which job %q does not have", job, output, step[1], job)
 		}
+	}
+}
+
+// A ${{ }} expression inside an actions/github-script body is pasted into the
+// JavaScript source before it runs. When the value is empty (a skipped or
+// failed earlier step) the script stops being valid JavaScript, e.g.
+// "check_run_id: ," — and an if: always() step meant to report the failure
+// crashes instead. Values must reach scripts through env and process.env.
+func TestShadowWorkflowScriptsReadValuesFromEnvNotInlineExpressions(t *testing.T) {
+	raw, err := os.ReadFile(filepath.FromSlash(shadowWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow workflowFile
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatalf("workflow is not valid YAML: %v", err)
+	}
+	scripts := 0
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/github-script@") {
+				continue
+			}
+			scripts++
+			if strings.Contains(step.With["script"], "${{") {
+				t.Errorf("jobs.%s step %q interpolates ${{ }} into its script; pass the value via env and read process.env", jobName, step.Name)
+			}
+		}
+	}
+	if scripts == 0 {
+		t.Fatal("expected github-script steps in the shadow workflow; found none")
 	}
 }
