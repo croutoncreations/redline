@@ -320,6 +320,10 @@ func RedactEmails(text string) string {
 	})
 }
 
-// No dot allowed: "claude@example.com" is an address, not a card. Upstream
-// card suffixes are hex hashes, optionally salted with "-n".
-var cardIDPattern = regexp.MustCompile(`^(claude|codex|cursor)@[a-z0-9][a-z0-9_-]{0,63}$`)
+// cardIDPattern is OpenUsage's card-id shape and nothing broader: upstream
+// (ProviderAccountID.make) mints "<family>@" plus the first 8 lowercase hex
+// digits of a SHA-256 of the account identity, and a hash-prefix collision is
+// resolved by re-hashing a salted identity, so salted ids have the same
+// shape. Anything else after a family name ("claude@localhost",
+// "claude@example.com", "claude@mailhost-2") is treated as an address.
+var cardIDPattern = regexp.MustCompile(`^(claude|codex|cursor)@[0-9a-f]{8}$`)

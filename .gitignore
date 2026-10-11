@@ -57,3 +57,6 @@ relay/.wrangler/
 
 # DeviceBroker run artifacts
 .devicebroker/
+
+# actionlint binary downloaded by CI
+actionlint

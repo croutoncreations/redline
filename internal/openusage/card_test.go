@@ -198,9 +198,38 @@ func TestRedactEmailsKeepsCardIDs(t *testing.T) {
 	}
 	// A transport error naming the card URL keeps the port and card; an
 	// address on a provider-like name is still an address.
-	wrapped := `fetch OpenUsage limits: Get "http://127.0.0.1:6736/v1/limits/claude@ab12cd34-2": dial tcp 127.0.0.1:6736: connect: connection refused; claude@example.com`
+	wrapped := `fetch OpenUsage limits: Get "http://127.0.0.1:6736/v1/limits/claude@ab12cd34": dial tcp 127.0.0.1:6736: connect: connection refused; claude@example.com`
 	got = openusage.RedactEmails(wrapped)
-	if !strings.Contains(got, "127.0.0.1:6736/v1/limits/claude@ab12cd34-2") || strings.Contains(got, "example.com") {
+	if !strings.Contains(got, "127.0.0.1:6736/v1/limits/claude@ab12cd34") || strings.Contains(got, "example.com") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// Only OpenUsage's real card-id shape is exempt: a family name, "@", and the
+// first 8 lowercase hex digits of a SHA-256 (a salted id on a collision is
+// re-hashed, so it has the same shape). A dotless address whose local part
+// happens to be a provider family is still an address and must be redacted.
+func TestRedactEmailsRedactsDotlessAddressesOnProviderNames(t *testing.T) {
+	for _, address := range []string{
+		"claude@localhost",
+		"codex@intranet",
+		"cursor@buildhost",
+		"claude@mailhost-2",
+		"claude@ab12cd34-2",    // not a card id: card ids carry no suffix
+		"claude@ab12cd345",     // 9 hex digits
+		"claude@ab12cd3",       // 7 hex digits
+		"claude@AB12CD34",      // upstream mints lowercase hex only
+		"claude@a_b2cd34",      // not hex
+		"claude@d3m0c11e-team", // hex-looking prefix is not enough
+	} {
+		got := openusage.RedactEmails("upstream rejected " + address + " today")
+		if got != "upstream rejected [account] today" {
+			t.Errorf("RedactEmails(%q) = %q, want the address redacted", address, got)
+		}
+	}
+	for _, card := range []string{"claude@ab12cd34", "codex@0123abcd", "cursor@ffffffff", "claude@00000000"} {
+		if got := openusage.RedactEmails("card " + card + " failed"); got != "card "+card+" failed" {
+			t.Errorf("RedactEmails(%q) = %q, want the card id kept", card, got)
+		}
 	}
 }

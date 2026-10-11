@@ -239,9 +239,9 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 		providers["claude-main"] = config.Provider{Provider: "claude", UsageSource: "native", Label: "Personal",
 			WindowWeeklyCost: .10, Policy: "standard"}
 		providers["claude-client"] = config.Provider{Provider: "claude", UsageSource: "openusage", OpenUsageURL: "http://127.0.0.1:1",
-			OpenUsageCard: "claude@d3m0c11e", Label: "Client — Northwind long-running engagement", WindowWeeklyCost: .10, Policy: "standard"}
+			OpenUsageCard: "claude@d3a0c11e", Label: "Client — Northwind long-running engagement", WindowWeeklyCost: .10, Policy: "standard"}
 		providers["claude-side"] = config.Provider{Provider: "claude", UsageSource: "openusage", OpenUsageURL: "http://127.0.0.1:1",
-			OpenUsageCard: "claude@d3m05de0", Label: "Side project", WindowWeeklyCost: .10, Policy: "standard"}
+			OpenUsageCard: "claude@d3a05de0", Label: "Side project", WindowWeeklyCost: .10, Policy: "standard"}
 	}
 	return config.Config{
 		Database: filepath.Join(root, "redline-demo.db"), RunArtifactsDir: filepath.Join(root, "runs"),
