@@ -10,6 +10,7 @@ import (
 )
 
 func TestOperationalHealthSummarizesRecentFailuresAndActiveRuns(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := db.RecordDispatchAttempt(context.Background(), domain.DispatchAttempt{
@@ -53,6 +54,7 @@ func TestOperationalHealthSummarizesRecentFailuresAndActiveRuns(t *testing.T) {
 }
 
 func TestOperationalHealthRecoversAfterFailuresAgeOut(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-25 * time.Hour)
@@ -98,6 +100,7 @@ func TestOperationalHealthRecoversAfterFailuresAgeOut(t *testing.T) {
 }
 
 func TestOperationalHealthTreatsJobFailureAsWorkloadHistory(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 27, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{

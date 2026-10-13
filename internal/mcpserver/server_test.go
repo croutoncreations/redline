@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,7 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 		"redline_task_create",
 		"redline_task_update",
 		"redline_task_control",
+		"redline_task_delete",
 		"redline_profile_create",
 		"redline_profile_update",
 		"redline_profile_delete",
@@ -132,6 +134,14 @@ func TestServerExposesAgentToolsWithSafetyAnnotations(t *testing.T) {
 	}
 	if tools["redline_profile_delete"].Annotations.IdempotentHint {
 		t.Fatal("profile delete should not be annotated idempotent because a repeated delete returns not found")
+	}
+	if tools["redline_task_delete"].Annotations == nil || tools["redline_task_delete"].Annotations.ReadOnlyHint ||
+		tools["redline_task_delete"].Annotations.DestructiveHint == nil ||
+		!*tools["redline_task_delete"].Annotations.DestructiveHint {
+		t.Fatal("task delete should be annotated as mutating and destructive")
+	}
+	if tools["redline_task_delete"].Annotations.IdempotentHint {
+		t.Fatal("task delete should not be annotated idempotent because a repeated delete returns not found")
 	}
 	if tools["redline_runtime_connection_delete"].Annotations == nil ||
 		tools["redline_runtime_connection_delete"].Annotations.DestructiveHint == nil ||
@@ -294,6 +304,132 @@ func TestRunEventsBoundLargePayloads(t *testing.T) {
 	}
 }
 
+// store.ListRunEvents selects the newest `limit` rows (ORDER BY id DESC) and
+// re-sorts them ascending, so the terminal event is last. Trimming the tail
+// dropped exactly the event an agent polling for completion waits on.
+func TestRunEventsKeepsMostRecentWhenTruncated(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs/run-1/events", func(w http.ResponseWriter, r *http.Request) {
+		// Mirror the real endpoint: honor `limit`, return oldest-first.
+		all := []map[string]any{
+			{"id": 1, "run_id": "run-1", "type": "run.started", "occurred_at": "2026-07-24T12:00:00Z", "payload": map[string]any{}},
+			{"id": 2, "run_id": "run-1", "type": "workspace.prepared", "occurred_at": "2026-07-24T12:00:01Z", "payload": map[string]any{}},
+			{"id": 3, "run_id": "run-1", "type": "run.completed", "occurred_at": "2026-07-24T12:00:02Z", "payload": map[string]any{}},
+		}
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			limit, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Errorf("limit = %q, want an integer", raw)
+			} else if limit < len(all) {
+				all = all[len(all)-limit:]
+			}
+		}
+		_ = json.NewEncoder(w).Encode(all)
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_run_events", map[string]any{
+		"run_id": "run-1", "limit": 2,
+	})
+	if result.IsError {
+		t.Fatalf("events error: %s", contentText(result))
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"type":"run.completed"`) {
+		t.Fatalf("truncation dropped the newest event: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"type":"run.started"`) {
+		t.Fatalf("truncation should drop the oldest event, got: %s", encoded)
+	}
+}
+
+// /v1/runs defaults to 50 rows when no limit is sent, so a request for more
+// silently returned 50 and reported them as untruncated.
+func TestRunsListForwardsRequestedLimit(t *testing.T) {
+	const available = 200
+	var sawQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		sawQuery = r.URL.RawQuery
+		// Mirror internal/api.listRuns -> store.ListRuns: absent or
+		// non-positive limit falls back to 50.
+		limit := 50
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Errorf("limit = %q, want an integer", raw)
+			} else if parsed > 0 {
+				limit = parsed
+			}
+		}
+		limit = min(limit, available)
+		runs := make([]map[string]any, 0, limit)
+		for i := range limit {
+			runs = append(runs, map[string]any{
+				"id": fmt.Sprintf("run-%d", i), "task_id": "task-1",
+				"state": "completed", "started_at": "2026-07-24T12:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	})
+	session := connect(t, mux)
+
+	result := callTool(t, session, "redline_runs_list", map[string]any{"limit": 100})
+	if result.IsError {
+		t.Fatalf("runs error: %s", contentText(result))
+	}
+	if sawQuery == "" {
+		t.Fatal("runs_list did not forward a limit to /v1/runs")
+	}
+	var output struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Count != 100 {
+		t.Fatalf("count = %d, want the 100 requested runs (query was %q)", output.Count, sawQuery)
+	}
+	if !output.Truncated {
+		t.Fatal("truncated = false, want true since more runs remain available")
+	}
+}
+
+// The default limit must still be respected when the caller omits one.
+func TestRunsListUsesDefaultLimitWhenUnspecified(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil {
+			t.Errorf("limit = %q, want an integer", r.URL.Query().Get("limit"))
+			limit = 1
+		}
+		runs := make([]map[string]any, 0, limit)
+		for i := range limit {
+			runs = append(runs, map[string]any{
+				"id": fmt.Sprintf("run-%d", i), "task_id": "task-1",
+				"state": "completed", "started_at": "2026-07-24T12:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	})
+	session := connect(t, mux)
+
+	result := callTool(t, session, "redline_runs_list", map[string]any{})
+	if result.IsError {
+		t.Fatalf("runs error: %s", contentText(result))
+	}
+	var output struct {
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Count != 20 {
+		t.Fatalf("count = %d, want the default list limit of 20", output.Count)
+	}
+}
+
 func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	var created map[string]any
 	var dispatched map[string]any
@@ -336,6 +472,21 @@ func TestMutationToolsUseExistingAPIValidation(t *testing.T) {
 	}
 	if created["min_interval"] != "1h" || created["execution_profile_id"] != "codex-devx" {
 		t.Fatalf("created body = %#v", created)
+	}
+	if _, present := created["enabled"]; present {
+		t.Fatalf("enabled should be omitted when not requested so the API default applies: %#v", created)
+	}
+
+	draftResult := callTool(t, session, "redline_task_create", map[string]any{
+		"id": "draft-task", "name": "Draft task", "prompt": "Later.", "priority": 50,
+		"execution_profile_id": "codex-devx", "type": "one_off", "dispatch_tier": "behind",
+		"enabled": false,
+	})
+	if draftResult.IsError {
+		t.Fatalf("draft create error: %s", contentText(draftResult))
+	}
+	if enabled, ok := created["enabled"].(bool); !ok || enabled {
+		t.Fatalf("draft create should forward enabled=false, body = %#v", created)
 	}
 
 	dispatchResult := callTool(t, session, "redline_scheduler_dispatch", map[string]any{
@@ -435,6 +586,49 @@ func TestProfileCRUDToolsUseExistingAPIValidation(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("profile delete endpoint was not called")
+	}
+}
+
+func TestTaskDeleteToolCallsDeleteEndpoint(t *testing.T) {
+	var deletedPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /v1/tasks/{task}", func(w http.ResponseWriter, r *http.Request) {
+		deletedPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	session := connect(t, mux)
+	result := callTool(t, session, "redline_task_delete", map[string]any{"id": "later/parser"})
+	if result.IsError {
+		t.Fatalf("delete error: %s", contentText(result))
+	}
+	if deletedPath != "/v1/tasks/later%2Fparser" {
+		t.Fatalf("delete path = %q", deletedPath)
+	}
+	var output struct {
+		Data struct {
+			ID      string `json:"id"`
+			Deleted bool   `json:"deleted"`
+		} `json:"data"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Data.ID != "later/parser" || !output.Data.Deleted {
+		t.Fatalf("structured output = %#v", output)
+	}
+
+	empty := callTool(t, session, "redline_task_delete", map[string]any{"id": ""})
+	if !empty.IsError {
+		t.Fatal("empty id should be rejected before calling the API")
+	}
+}
+
+func TestTaskDeleteConflictBecomesVisibleToolError(t *testing.T) {
+	session := connect(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":"conflict: task \"ran\" has run or scheduler history; disable it instead"}`)
+	}))
+	result := callTool(t, session, "redline_task_delete", map[string]any{"id": "ran"})
+	if !result.IsError || !strings.Contains(contentText(result), "disable it instead") {
+		t.Fatalf("expected visible conflict, got error=%v content=%s", result.IsError, contentText(result))
 	}
 }
 

@@ -76,6 +76,18 @@ test('ring shows stale state when snapshot is stale', async ({ page }) => {
   await expect(svgs.last()).toHaveAttribute('aria-label', 'stale');
 });
 
+test('relative() rounds up to the next unit instead of overflowing the current one', async ({ page }) => {
+  await loadMobileDashboard(page);
+  const oneHourFromNow = await page.evaluate(() => relative(new Date(Date.now() + 3599 * 1000).toISOString()));
+  const oneDayFromNow = await page.evaluate(() => relative(new Date(Date.now() + 86399 * 1000).toISOString()));
+  const oneHourAgo = await page.evaluate(() => relative(new Date(Date.now() - 3599 * 1000).toISOString()));
+  const oneDayAgo = await page.evaluate(() => relative(new Date(Date.now() - 86399 * 1000).toISOString()));
+  expect(oneHourFromNow).toBe('in 1 hr');
+  expect(oneDayFromNow).toBe('in 1 day');
+  expect(oneHourAgo).toBe('1 hr ago');
+  expect(oneDayAgo).toBe('1 day ago');
+});
+
 test('shows error-state card when provider has no snapshot', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot = undefined;
@@ -117,6 +129,21 @@ test('collapses provider usage details independently', async ({ page }) => {
   await expect(page.locator('[data-testid="provider-detail-codex-main"]')).toBeVisible();
   await page.locator('[data-provider-toggle="claude-main"]').click();
   await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeVisible();
+});
+
+test('banked resets row shows count and expiry, and is absent when unreported', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude, codex] = dashboard.providers;
+  claude.snapshot.banked_resets = 2;
+  // Two days after the fixture clock: close enough to be flagged.
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  await loadMobileDashboard(page, { dashboard });
+  const claudeResets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  await expect(claudeResets).toContainText('2 available');
+  await expect(claudeResets).toContainText('Next expires in 2 days');
+  await expect(claudeResets).toHaveClass(/soon/);
+  expect(codex.snapshot.banked_resets).toBeUndefined();
+  await expect(page.locator('[data-testid="provider-detail-codex-main"] [data-testid="banked-resets"]')).toHaveCount(0);
 });
 
 test('account pools displayed before model pools in detail', async ({ page }) => {
@@ -420,6 +447,30 @@ test('opening a run marks it read and shows run detail', async ({ page }) => {
   await expect(page.locator('#m-run-detail-title')).toContainText('Audit authentication');
   // Mark read endpoint called
   await expect.poll(() => state.requests.some(r => r.path === '/v1/runs/run-1/read')).toBe(true);
+});
+
+test('opening an already-read run does not decrement the badge for other unread runs', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.runs.push({
+    id: 'run-2', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'completed',
+    started_at: '2026-07-20T19:00:00Z', completed_at: '2026-07-20T19:00:00Z',
+    activity_read_at: '2026-07-20T18:00:00Z', summary: 'Already seen.',
+  });
+  // Only run-1 is unread; run-2 was already read before this session started.
+  dashboard.unread_runs = 1;
+  const state = await loadMobileDashboard(page, { dashboard });
+  await page.locator('#m-tab-runs').click();
+  const badge = page.locator('#m-runs-badge');
+  await expect(badge).toContainText('1');
+  await Promise.all([
+    page.waitForResponse(resp => resp.url().includes('/v1/runs/run-2/events')),
+    page.locator('[data-testid="run-item-run-2"]').click(),
+  ]);
+  await expect(page.locator('#m-run-detail')).toHaveClass(/visible/);
+  // run-2 was already read, so opening it must not call /read or touch the badge.
+  expect(state.requests.some(r => r.path === '/v1/runs/run-2/read')).toBe(false);
+  // run-1 is still unread, so the badge must still read 1.
+  await expect(badge).toContainText('1');
 });
 
 test('run detail shows summary, route, artifacts, and events', async ({ page }) => {

@@ -6,6 +6,7 @@ import (
 )
 
 func TestProviderPauseStatePersists(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -25,6 +26,7 @@ func TestProviderPauseStatePersists(t *testing.T) {
 }
 
 func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -51,6 +53,7 @@ func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
 }
 
 func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {

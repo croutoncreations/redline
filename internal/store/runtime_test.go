@@ -10,6 +10,7 @@ import (
 )
 
 func TestRuntimeConnectionAndAgentContextRoundTrip(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
@@ -42,6 +43,7 @@ func TestRuntimeConnectionAndAgentContextRoundTrip(t *testing.T) {
 }
 
 func TestRuntimeConnectionValidationRejectsUnreachableGatewayDefinition(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +64,7 @@ func TestRuntimeConnectionValidationRejectsUnreachableGatewayDefinition(t *testi
 // sources.  All of these would produce a silent misconfiguration that only
 // surfaces at dispatch time.
 func TestRuntimeConnectionValidationRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +131,7 @@ func TestRuntimeConnectionValidationRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestRuntimeConnectionAndAgentContextUpdateAndDelete(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)

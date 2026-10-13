@@ -1,7 +1,15 @@
 *.db
 *.db-*
+*.db.bak*
 bin/
 /redline
+
+# A local service config and its API token. `redline serve` writes the token
+# next to whichever --config it is given, and the quickstart puts both in the
+# repo root, so they land here for anyone following the README. The token is a
+# bearer credential for the dashboard and HTTP API.
+/redline.yaml
+/api-token
 .artifacts/
 .devx/*
 !.devx/README.md
@@ -17,10 +25,17 @@ test-results/
 macos/.build/
 dist/
 
+# Runtime state written beside the database, which the quickstart puts in the
+# repo root: the relay identity keypair and managed relay state (session,
+# lock), and the usage-endpoint rate-limit lockouts.
 relay-identity.json
+relay-state.json
+.relay-state.json.lock
+usage-lockouts.json
 
 # Per-worktree developer scaffolding. These are generated per branch and
 # hardcode absolute worktree paths, local ports, and personal hostnames, so
 # they are never portable between machines.
 .envrc
 .tmuxp.yaml
+actionlint

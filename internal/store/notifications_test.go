@@ -10,6 +10,7 @@ import (
 )
 
 func TestNotificationDeliveryLifecycleAndHistory(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	payload := json.RawMessage(`{"version":1,"type":"run.failed"}`)
@@ -31,6 +32,7 @@ func TestNotificationDeliveryLifecycleAndHistory(t *testing.T) {
 }
 
 func TestRecoverPendingNotificationMarksUnknownDeliveryFailed(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := db.CreateNotificationDelivery(context.Background(), domain.EventRunCompleted, json.RawMessage(`{}`), now); err != nil {
