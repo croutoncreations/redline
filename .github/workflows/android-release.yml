@@ -1,0 +1,117 @@
+name: Android release
+
+# Builds a signed Android App Bundle and uploads it to the Play internal
+# track. Android binaries are distributed through Google Play only: this
+# workflow never publishes a GitHub APK or any other binary artifact
+# (docs/mobile-distribution-plan.md, docs/handoff-relay-launch-prompt.md).
+#
+# Triggered by pushing a tag of the form mobile-v<version>, e.g. mobile-v0.2.0.
+# The tag's version becomes the AAB's versionName; versionCode is derived
+# separately by scripts/android-release-version.sh so it strictly increases
+# and stays within Play's numeric ceiling regardless of how versionName is
+# chosen.
+on:
+  push:
+    tags:
+      - "mobile-v*"
+
+# Read-only checkout; nothing here needs to write to the repository. The Play
+# upload and signing credentials are consumed as secrets, not permissions.
+permissions:
+  contents: read
+
+# One release at a time for this application id. Each run derives its
+# versionCode when it starts, so two overlapping runs could finish in the
+# wrong order: the newer code uploads first and Play then rejects the older
+# one. A running release is never cancelled. GitHub holds only one pending
+# run per group, though: a third tag pushed while one runs and one waits
+# replaces the waiting one, which then shows as cancelled. Do not rerun it --
+# the version step refuses any tag but the newest, since a rerun would get a
+# newer versionCode than the release after it. Push a new tag instead.
+concurrency:
+  group: android-release-com.croutoncreations.redline
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: android-release
+    # Bounds how long the runner -- and the release-signing secrets loaded
+    # into its environment (keystore password, key password, Play
+    # service-account JSON) -- can remain live if a step hangs, rather than
+    # relying on GitHub's 360-minute default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Every tag, so the version step can refuse anything but the newest.
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      # Strict semver name and a strictly increasing versionCode; the rules
+      # and why live in the script, and tests/android/release-version.sh
+      # (run by CI) exercises them.
+      - name: Derive versionName and versionCode from the tag
+        id: version
+        run: git tag -l 'mobile-v*' | ./scripts/android-release-version.sh "${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+
+      # The same silent-skip and stale-AAR failure modes the ci.yml android
+      # job guards against apply here too: this is a separate workflow with
+      # its own gomobile build, not a reuse of that job's artifacts.
+      - name: Install gomobile at the version go.mod pins
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build the Go core for Android
+        run: |
+          gomobile init
+          ./scripts/build-mobile-core.sh android
+          mkdir -p mobile/android/app/libs
+          cp mobile/build/redlinecore.aar mobile/android/app/libs/redlinecore.aar
+
+      - name: Build the signed release App Bundle
+        working-directory: mobile/android
+        env:
+          REDLINE_ANDROID_KEYSTORE_B64: ${{ secrets.REDLINE_ANDROID_KEYSTORE_B64 }}
+          REDLINE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.REDLINE_ANDROID_KEYSTORE_PASSWORD }}
+          REDLINE_ANDROID_KEY_ALIAS: ${{ secrets.REDLINE_ANDROID_KEY_ALIAS }}
+          REDLINE_ANDROID_KEY_PASSWORD: ${{ secrets.REDLINE_ANDROID_KEY_PASSWORD }}
+          REDLINE_ANDROID_VERSION_CODE: ${{ steps.version.outputs.code }}
+          REDLINE_VERSION: ${{ steps.version.outputs.name }}
+        run: |
+          ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest bundleRelease
+
+      # A missing or misnamed secret makes build.gradle.kts silently skip
+      # signingConfigs.release entirely (deliberate, so a local/PR build
+      # without credentials still assembles unsigned) rather than failing
+      # the Gradle build. In this one context -- CI, about to upload to Play
+      # -- an unsigned AAB must never reach the upload step, so verify
+      # signing actually happened before it can.
+      - name: Verify the App Bundle was actually signed
+        run: |
+          aab="mobile/android/app/build/outputs/bundle/release/app-release.aab"
+          # jarsigner -verify always exits 0, signed or not (verified live: an
+          # unsigned jar prints "jar is unsigned" and still exits 0) -- its
+          # stdout text is the only signal, so that is what is checked.
+          if ! jarsigner -verify "${aab}" | grep -q "^jar verified\.$"; then
+            printf 'release App Bundle at %s is not signed -- refusing to upload an unsigned build. Check the REDLINE_ANDROID_KEYSTORE_* secrets are all set in the android-release environment.\n' "${aab}" >&2
+            exit 1
+          fi
+
+      # r0adkll/upload-google-play, pinned to the v1.1.5 tag's exact commit.
+      - name: Upload to the Play internal track
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.croutoncreations.redline
+          releaseFiles: mobile/android/app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed

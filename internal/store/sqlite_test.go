@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -430,6 +432,62 @@ func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
 	}
 }
 
+// A row written before UsageSnapshot.Validate forbade it can say a short window
+// is both not started and timed or unavailable. Loaded as-is, the decision
+// engine rejects it and dispatch pauses until a new sample arrives. Both read
+// paths drop the weaker "not started" claim instead, so the row still loads
+// as a valid snapshot.
+func TestContradictoryStoredShortWindowLoadsAsAValidSnapshot(t *testing.T) {
+	for name, contradiction := range map[string]string{
+		"not started and unavailable": `UPDATE usage_snapshots SET short_window_not_started = 1, short_window_unavailable = 1`,
+		"not started and timed":       `UPDATE usage_snapshots SET short_window_not_started = 1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "redline.db")
+			db, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			observed := time.Date(2026, 9, 27, 17, 0, 0, 0, time.UTC)
+			snapshot := usageSnapshot(observed, .52)
+			if name == "not started and unavailable" {
+				snapshot.Short = nil
+			} else if snapshot.Short == nil {
+				t.Fatal("fixture must carry a timed short window")
+			}
+			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			if _, err := raw.Exec(contradiction); err != nil {
+				t.Fatal(err)
+			}
+
+			latest, _, err := db.LatestSnapshot(t.Context(), snapshot.Provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed, err := db.ListSnapshots(t.Context(), snapshot.Provider, 10)
+			if err != nil || len(listed) != 1 {
+				t.Fatalf("ListSnapshots = %d, %v", len(listed), err)
+			}
+			for path, got := range map[string]decision.UsageSnapshot{"LatestSnapshot": latest, "ListSnapshots": listed[0]} {
+				if got.ShortWindowNotStarted {
+					t.Errorf("%s kept the contradictory not-started flag", path)
+				}
+				if err := got.Validate(); err != nil {
+					t.Errorf("%s returned a snapshot the decision engine rejects: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")
@@ -641,5 +699,252 @@ func usageSnapshot(observed time.Time, weekly float64) decision.UsageSnapshot {
 		},
 		Source:     "openusage",
 		Confidence: "high",
+	}
+}
+
+// Banked resets must survive being stored and read back.
+//
+// The snapshot table has explicit columns rather than a JSON blob, so a new
+// field is silently dropped on write unless a column is added for it. The
+// symptom is subtle: the API's refresh endpoint returns the value, the
+// dashboard does not, and the two disagree for no visible reason.
+func TestSQLiteRoundTripsBankedResets(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	resets := 2
+	snapshot := decision.UsageSnapshot{
+		Provider:     "codex",
+		ObservedAt:   time.Now().UTC().Truncate(time.Second),
+		Weekly:       decision.UsageWindow{Remaining: 0.5, ResetsAt: time.Now().UTC().Add(48 * time.Hour)},
+		Source:       "openusage",
+		Confidence:   "high",
+		BankedResets: &resets,
+	}
+	if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil {
+		t.Fatal("banked resets were dropped on the way through the store")
+	}
+	if *got.BankedResets != 2 {
+		t.Fatalf("banked resets = %d, want 2", *got.BankedResets)
+	}
+}
+
+// Zero and absent are different answers and must stay different across a
+// round trip: none banked versus not reported.
+func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	zero := 0
+	base := time.Now().UTC().Truncate(time.Second)
+
+	withZero := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: base,
+		Weekly: decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source: "openusage", Confidence: "high", BankedResets: &zero,
+	}
+	if err := db.SaveSnapshot(context.Background(), withZero, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets == nil || *got.BankedResets != 0 {
+		t.Fatalf("zero must round trip as zero, got %v", got.BankedResets)
+	}
+
+	absent := decision.UsageSnapshot{
+		Provider: "claude", ObservedAt: base,
+		Weekly: decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source: "openusage", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(context.Background(), absent, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = db.LatestSnapshot(context.Background(), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BankedResets != nil {
+		t.Fatalf("absent must stay absent, got %d", *got.BankedResets)
+	}
+}
+
+// ListSnapshots must carry banked resets too.
+//
+// The value was written, read by LatestSnapshot, and silently dropped by this
+// one query. Nothing failed, because no current caller renders it -- which is
+// exactly how the same field went missing end to end earlier in this work.
+func TestListSnapshotsCarriesBankedResets(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	resets := 3
+	base := time.Now().UTC().Truncate(time.Second)
+	snapshot := decision.UsageSnapshot{
+		Provider:     "codex",
+		ObservedAt:   base,
+		Weekly:       decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Source:       "openusage",
+		Confidence:   "high",
+		BankedResets: &resets,
+	}
+	if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := db.ListSnapshots(context.Background(), "codex", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected one snapshot, got %d", len(listed))
+	}
+	if listed[0].BankedResets == nil {
+		t.Fatal("banked resets were dropped by ListSnapshots")
+	}
+	if *listed[0].BankedResets != 3 {
+		t.Fatalf("banked resets = %d, want 3", *listed[0].BankedResets)
+	}
+}
+
+// Every field of a snapshot must survive the store.
+//
+// Three fields have now been added to UsageSnapshot and two of them were
+// silently dropped on write, because the table has hand-maintained columns
+// rather than a blob: banked_resets was lost until it was noticed on a phone,
+// and short_window_unavailable was still being lost after that.
+//
+// Reflection rather than a hand-written list, so the next field added fails
+// here instead of on someone's screen. If this test fails after you add a
+// field, the fix is a column, a migration, and a scan -- in SaveSnapshot,
+// latestSnapshot, AND ListSnapshots.
+func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Now().UTC().Truncate(time.Second)
+	resets := 7
+	resetsExpire := base.Add(10 * 24 * time.Hour)
+	// Every field set to something distinguishable from its zero value.
+	full := decision.UsageSnapshot{
+		Provider:   "codex",
+		ObservedAt: base,
+		Short:      &decision.UsageWindow{Remaining: 0.25, ResetsAt: base.Add(3 * time.Hour)},
+		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
+		Allowances: []decision.AllowanceWindow{{
+			Key: "weekly", SourceLabel: "Weekly", Scope: "account", Role: "weekly",
+			Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour), PeriodDurationSeconds: 604800,
+		}},
+		Source:                 "openusage",
+		Confidence:             "medium",
+		ShortWindowUnavailable: true,
+		BankedResets:           &resets,
+		BankedResetsExpireAt:   &resetsExpire,
+	}
+	// ShortWindowNotStarted cannot be valid beside a timed or unavailable
+	// window (UsageSnapshot.Validate), so it rides a second snapshot. Between
+	// the two, every field is set; each is checked on the snapshot that sets it.
+	notStarted := full
+	notStarted.ObservedAt = base.Add(-time.Minute)
+	notStarted.Short, notStarted.ShortWindowUnavailable, notStarted.ShortWindowNotStarted = nil, false, true
+	onlyOnNotStarted := map[string]bool{"ShortWindowNotStarted": true}
+
+	// Fail loudly if a new field is added and this fixture was not updated,
+	// rather than quietly testing a zero value.
+	value, other := reflect.ValueOf(full), reflect.ValueOf(notStarted)
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if value.Field(i).IsZero() && other.Field(i).IsZero() {
+			t.Fatalf("fixture leaves %s at its zero value; set it so the round trip is actually tested", field.Name)
+		}
+		if value.Field(i).IsZero() != onlyOnNotStarted[field.Name] {
+			t.Fatalf("%s: set it on the main fixture, or list it in onlyOnNotStarted", field.Name)
+		}
+	}
+
+	for _, snapshot := range []decision.UsageSnapshot{notStarted, full} {
+		if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// ListSnapshots is oldest first: notStarted, observed a minute earlier,
+	// then full. LatestSnapshot returns full.
+	all, err := db.ListSnapshots(context.Background(), "codex", 10)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("ListSnapshots = %d snapshots, %v; want 2", len(all), err)
+	}
+	if !all[0].ObservedAt.Equal(notStarted.ObservedAt) || !all[0].ShortWindowNotStarted {
+		t.Error("ListSnapshots dropped ShortWindowNotStarted: it was set on write and came back false")
+	}
+	// LatestSnapshot scans separately; give it a not-started row to return.
+	notStartedOnly, err := store.Open(filepath.Join(t.TempDir(), "not-started.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notStartedOnly.Close()
+	if err := notStartedOnly.SaveSnapshot(context.Background(), notStarted, nil); err != nil {
+		t.Fatal(err)
+	}
+	if latest, _, err := notStartedOnly.LatestSnapshot(context.Background(), "codex"); err != nil || !latest.ShortWindowNotStarted {
+		t.Errorf("LatestSnapshot dropped ShortWindowNotStarted: got %v, err %v", latest.ShortWindowNotStarted, err)
+	}
+	for _, read := range []struct {
+		name string
+		get  func() (decision.UsageSnapshot, error)
+	}{
+		{"LatestSnapshot", func() (decision.UsageSnapshot, error) {
+			got, _, err := db.LatestSnapshot(context.Background(), "codex")
+			return got, err
+		}},
+		{"ListSnapshots", func() (decision.UsageSnapshot, error) {
+			all, err := db.ListSnapshots(context.Background(), "codex", 10)
+			if err != nil {
+				return decision.UsageSnapshot{}, err
+			}
+			if len(all) == 0 {
+				return decision.UsageSnapshot{}, fmt.Errorf("no snapshots returned")
+			}
+			return all[len(all)-1], nil
+		}},
+	} {
+		got, err := read.get()
+		if err != nil {
+			t.Fatalf("%s: %v", read.name, err)
+		}
+		gotValue := reflect.ValueOf(got)
+		for i := 0; i < gotValue.NumField(); i++ {
+			field := gotValue.Type().Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			if gotValue.Field(i).IsZero() && !onlyOnNotStarted[field.Name] {
+				t.Errorf("%s dropped %s: it was set on write and came back as its zero value",
+					read.name, field.Name)
+			}
+		}
 	}
 }

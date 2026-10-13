@@ -311,6 +311,30 @@ func TestUsageSnapshotValidateRejectsFractionsOutsideUnitInterval(t *testing.T) 
 	}
 }
 
+// Not started means untouched and full. A snapshot that also carries a timed
+// short window, or says the window is unreadable, contradicts itself, and
+// every surface would draw a full bar over whichever of those is true.
+func TestUsageSnapshotValidateRejectsAContradictoryNotStartedWindow(t *testing.T) {
+	timed := limitedSnapshot()
+	timed.ShortWindowNotStarted = true
+	if timed.Short == nil {
+		t.Fatal("fixture must carry a timed short window")
+	}
+	unavailable := limitedSnapshot()
+	unavailable.Short = nil
+	unavailable.ShortWindowNotStarted, unavailable.ShortWindowUnavailable = true, true
+	for name, s := range map[string]decision.UsageSnapshot{"timed": timed, "unavailable": unavailable} {
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+	valid := limitedSnapshot()
+	valid.Short, valid.ShortWindowNotStarted = nil, true
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("a lone not-started window is valid: %v", err)
+	}
+}
+
 func TestProjectTriggerAtAcrossShortWindowReset(t *testing.T) {
 	start := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	in := decision.Input{

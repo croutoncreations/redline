@@ -50,6 +50,26 @@ test('shows banked resets with their expiry, and nothing when the provider does 
   await expect(page.locator('[data-provider-id="claude-main"] .banked-resets')).toHaveCount(0);
 });
 
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // The provider starts the window's clock on first use, so an unused one has
+  // no reset time. It is full -- not missing -- and no reset is invented.
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).not.toContainText('No 5h limit');
+  await expect(card).toContainText('5h 100% · starts on first use');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const window = card.locator('[data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.demo = { scenario: 'overview', synthetic: true };
@@ -110,6 +130,20 @@ test('uses surplus-first wording for pace waits', async ({ page }) => {
   const codex = page.getByRole('button', { name: 'Show Codex usage details' });
   await expect(codex).toContainText('6% capacity surplus');
   await expect(codex).not.toContainText('behind pace');
+});
+
+// "Stale" alone sent people looking in the wrong place. A provider that is
+// stale because its CLI signed out says so, with the fix, without expanding.
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Signed out');
+  await expect(claude).toContainText('claude auth login');
+  await expect(claude).not.toContainText('53% weekly');
 });
 
 test('does not present a stale usage percentage as current', async ({ page }) => {

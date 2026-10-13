@@ -70,14 +70,14 @@ git_commit="$(git -C "${repository_root}" rev-parse --short HEAD 2>/dev/null || 
 build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 go_ldflags="-s -w -X ${version_package}.Version=${version} -X ${version_package}.Commit=${git_commit} -X ${version_package}.Date=${build_date}"
 if [[ "${build_arch}" == "universal" ]]; then
-  GOARCH=arm64 go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-arm64" "${repository_root}/cmd/redline"
-  GOARCH=amd64 go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-x86_64" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="clang -arch arm64" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-arm64" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="clang -arch x86_64" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline-x86_64" "${repository_root}/cmd/redline"
   lipo -create \
     "${temporary_root}/redline-arm64" \
     "${temporary_root}/redline-x86_64" \
     -output "${temporary_root}/redline"
 else
-  GOARCH="${go_arch}" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
+  CGO_ENABLED=1 GOOS=darwin GOARCH="${go_arch}" CC="clang -arch ${build_arch}" go build -trimpath -ldflags "${go_ldflags}" -o "${temporary_root}/redline" "${repository_root}/cmd/redline"
 fi
 
 if [[ -e "${app_path}" ]]; then
@@ -125,6 +125,12 @@ if ! architecture_matches "${swift_arch}" || ! architecture_matches "${service_a
   printf 'Architecture mismatch: app=%s service=%s expected=%s\n' "${swift_arch}" "${service_arch}" "${build_arch}" >&2
   exit 1
 fi
+for required_arch in ${service_arch}; do
+  if ! otool -arch "${required_arch}" -L "${app_path}/Contents/Resources/bin/redline" | grep -F '/System/Library/Frameworks/Security.framework/' >/dev/null; then
+    printf 'Embedded service slice %s is missing Security.framework linkage.\n' "${required_arch}" >&2
+    exit 1
+  fi
+done
 while IFS= read -r -d '' candidate; do
   if file "${candidate}" | grep -q 'Mach-O'; then
     candidate_arch="$(lipo -archs "${candidate}")"

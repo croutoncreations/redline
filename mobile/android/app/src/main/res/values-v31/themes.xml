@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 12 replaced the old "window background as splash" behaviour with a
+      dedicated splash screen that does not inherit windowBackground, so the
+      launch flashed white before the dark app drew. These attributes only exist
+      from API 31, hence the separate qualifier.
+    -->
+    <style name="Theme.Redline" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#0D0F12</item>
+        <item name="android:navigationBarColor">#0D0F12</item>
+        <item name="android:windowBackground">#0D0F12</item>
+        <item name="android:windowSplashScreenBackground">#0D0F12</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+</resources>

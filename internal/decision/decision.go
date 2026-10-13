@@ -48,6 +48,27 @@ type UsageSnapshot struct {
 	Allowances []AllowanceWindow `json:"allowances,omitempty"`
 	Source     string            `json:"source"`
 	Confidence string            `json:"confidence,omitempty"`
+	// ShortWindowUnavailable marks a five hour window that the provider
+	// reported but that had to be dropped, which happens when it arrives with
+	// no reset time while upstream state is refreshing.
+	//
+	// Without this, a client cannot tell "this provider has no five hour
+	// limit" from "it has one and the number is missing right now", and those
+	// render very differently: the first is an absent row, the second is a row
+	// that says it does not know. Confidence cannot carry the distinction
+	// because it also drops to medium for an inferred model weekly reset.
+	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
+	// ShortWindowNotStarted marks a five hour window that exists and is
+	// entirely unused. The provider starts the window's clock on first use,
+	// so until then there is no reset time -- which is not the same as the
+	// number being unreadable. The whole window is available.
+	//
+	// Short stays nil in this state on purpose: there is no reset to put in
+	// it, and inventing one (observation time plus five hours) would be a
+	// time the provider never said. The scheduler already treats a nil Short
+	// as "no short window to slot", which is correct for a window that has
+	// not begun.
+	ShortWindowNotStarted bool `json:"short_window_not_started,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand to
 	// refill an exhausted window. Nil means the provider did not report it,
 	// which is different from zero: none banked versus not known.
@@ -139,6 +160,12 @@ func (s UsageSnapshot) Validate() error {
 	}
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
+	}
+	if s.ShortWindowNotStarted && (s.Short != nil || s.ShortWindowUnavailable) {
+		// Not started means untouched and full; it cannot coexist with a
+		// timed window or an unreadable one, and every surface would draw a
+		// full bar over whichever of those was true.
+		return fmt.Errorf("a not-started short window cannot also be timed or unavailable")
 	}
 	if s.Short != nil {
 		if s.Short.ResetsAt.IsZero() {
