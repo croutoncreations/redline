@@ -1004,3 +1004,21 @@ test('shows profile load failures when starting a new job', async ({ page }) => 
 
   await expect(page.locator('#error-banner')).toContainText('Could not open job: profiles unavailable');
 });
+
+test('renders form dropdowns at the same height as text fields', async ({ page }) => {
+  await loadDashboard(page);
+  const heights = async (dialogSelector, ids) => page.evaluate(([dialog, list]) => Object.fromEntries(
+    list.map(id => [id, Math.round(document.querySelector(`${dialog} #${id}`).getBoundingClientRect().height)])
+  ), [dialogSelector, ids]);
+
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
+  const task = await heights('#task-dialog', ['task-name', 'task-priority', 'task-profile', 'task-tier', 'task-type']);
+  expect(new Set(Object.values(task)).size, JSON.stringify(task)).toBe(1);
+  await page.locator('#cancel-task').click();
+
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await expect(page.getByRole('dialog', { name: 'Harness & workspace setup' })).toBeVisible();
+  const profile = await heights('#profiles-dialog', ['profile-id', 'profile-provider', 'profile-harness', 'profile-workspace', 'profile-base-branch', 'profile-cleanup', 'profile-repository-recent', 'profile-repository']);
+  expect(new Set(Object.values(profile)).size, JSON.stringify(profile)).toBe(1);
+});

@@ -6,6 +6,7 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,10 @@ type Executor struct {
 	Root  string
 	Now   func() time.Time
 	Delay time.Duration
+	// Shutdown, when closed, ends the running delay early. The API starts
+	// executors with context.Background(), so without it a long recording
+	// delay would hold `demo serve` open after Ctrl-C.
+	Shutdown <-chan struct{}
 }
 
 func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile) error {
@@ -59,18 +64,24 @@ func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task,
 	if delay <= 0 {
 		delay = 1200 * time.Millisecond
 	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(delay):
+		return e.interrupt(run, ctx.Err())
+	case <-e.Shutdown:
+		return e.interrupt(run, errors.New("demo service shutting down"))
+	case <-timer.C:
 	}
 	outputDir := filepath.Join(e.Root, "runs", run.ID)
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return err
 	}
-	output := filepath.Join(outputDir, "stdout.log")
-	body := "Synthetic demo run\n\nCompleted: " + task.Name + "\nNo provider, repository, or network was accessed.\n"
-	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+	// The output is synthetic but shaped like a real harness transcript so the
+	// run-detail view renders exactly as it would for recorded work.
+	out := syntheticOutput(task)
+	output, err := writeRunTranscript(outputDir, task.ID, out)
+	if err != nil {
 		return err
 	}
 	model := profile.Model
@@ -79,10 +90,63 @@ func (e Executor) Execute(ctx context.Context, run domain.Run, task domain.Task,
 	}
 	return e.Store.CompleteRun(ctx, run.ID, domain.RunCompletion{
 		State: domain.RunCompleted, ExitCode: 0, OutputFile: output,
-		Summary: "Demo job completed without invoking an external agent.", Outcome: "completed",
-		Artifacts:      []domain.RunArtifact{{Type: "report", Label: "Synthetic demo report", URL: "https://example.com/redline/demo-report"}},
+		Summary: out.summary, Outcome: "completed", Artifacts: out.artifacts,
 		ActualProvider: providerName(profile.ProviderAccountID), ActualModel: model,
 	}, e.Now().UTC())
+}
+
+// interrupt records the run as failed so a kept --state-dir never shows a job
+// stuck in "running" after the demo process exits.
+func (e Executor) interrupt(run domain.Run, cause error) error {
+	completion := domain.RunCompletion{State: domain.RunFailed, ExitCode: -1, Error: "Demo run interrupted: " + cause.Error(), Outcome: "interrupted"}
+	if err := e.Store.CompleteRun(context.Background(), run.ID, completion, e.Now().UTC()); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+type demoOutput struct {
+	summary, message, result string
+	artifacts                []domain.RunArtifact
+}
+
+// syntheticOutput is the canned result for a demo job. Bug-hunt style jobs get
+// the same believable fix used by the seeded history; anything else gets a
+// generic report. Nothing here was produced by an agent.
+func syntheticOutput(task domain.Task) demoOutput {
+	if task.ID == "bug-hunt" || task.ID == "demo-decision-task" {
+		return demoOutput{
+			summary:   "Fixed a race in cache refresh and opened a draft pull request.",
+			message:   "Reproduced a concurrent cache refresh race, added a focused regression test, and opened draft PR #142.",
+			result:    "Tests passed: go test ./internal/cache\nDraft PR: https://example.com/pull/142",
+			artifacts: []domain.RunArtifact{{Type: "pull_request", Label: "Draft pull request", URL: "https://example.com/pull/142"}},
+		}
+	}
+	return demoOutput{
+		summary:   "Completed " + task.Name + ".",
+		message:   "Completed " + task.Name + ".",
+		result:    "Verified the requested outcome and left one reviewable change.",
+		artifacts: []domain.RunArtifact{{Type: "report", Label: "Synthetic demo report", URL: "https://example.com/redline/demo-report"}},
+	}
+}
+
+func writeRunTranscript(dir, taskID string, out demoOutput) (string, error) {
+	events := []map[string]any{
+		{"type": "thread.started", "thread_id": "demo-" + taskID},
+		{"type": "item.completed", "item": map[string]any{"type": "agent_message", "text": out.message}},
+		{"type": "result", "subtype": "success", "result": out.result},
+	}
+	var output strings.Builder
+	for _, event := range events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return "", err
+		}
+		output.Write(encoded)
+		output.WriteByte('\n')
+	}
+	path := filepath.Join(dir, "stdout.jsonl")
+	return path, os.WriteFile(path, []byte(output.String()), 0o600)
 }
 
 func Scenarios() []Scenario {
@@ -357,28 +421,12 @@ func completedRun(ctx context.Context, env *Environment, id, task, provider stri
 	if err := os.MkdirAll(outputDirectory, 0o700); err != nil {
 		return err
 	}
-	message := summary
-	result := "Verified the requested outcome and left one reviewable change."
+	out := demoOutput{summary: summary, message: summary, result: "Verified the requested outcome and left one reviewable change."}
 	if task == "bug-hunt" {
-		message = "Reproduced a concurrent cache refresh race, added a focused regression test, and opened draft PR #142."
-		result = "Tests passed: go test ./internal/cache\nDraft PR: https://example.com/pull/142"
+		out = syntheticOutput(domain.Task{ID: task})
 	}
-	events := []map[string]any{
-		{"type": "thread.started", "thread_id": "demo-" + task},
-		{"type": "item.completed", "item": map[string]any{"type": "agent_message", "text": message}},
-		{"type": "result", "subtype": "success", "result": result},
-	}
-	var output strings.Builder
-	for _, event := range events {
-		encoded, err := json.Marshal(event)
-		if err != nil {
-			return err
-		}
-		output.Write(encoded)
-		output.WriteByte('\n')
-	}
-	outputFile := filepath.Join(outputDirectory, "stdout.jsonl")
-	if err := os.WriteFile(outputFile, []byte(output.String()), 0o600); err != nil {
+	outputFile, err := writeRunTranscript(outputDirectory, task, out)
+	if err != nil {
 		return err
 	}
 	return env.Database.CompleteRun(ctx, run.ID, domain.RunCompletion{State: domain.RunCompleted, ExitCode: 0, OutputFile: outputFile, Summary: summary, Outcome: "completed", Artifacts: artifacts, ActualProvider: providerName(provider), ActualModel: demoModel(provider)}, completed)

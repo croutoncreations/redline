@@ -15,7 +15,13 @@ capacity to spare - with an explanation for every decision.
 </p>
 
 <p align="center">
-  <img src="docs/assets/launch/redline-overview-near-expiry-dark.png" width="900" alt="Redline dashboard showing allowance near expiry, an explained RUN decision, and queued work">
+  <img src="docs/assets/promo/redline-loop.gif" width="900" alt="Redline's weekly allowance bar: 71% of the week has elapsed but only 28% of the allowance is used, so 43% spare capacity triggers RUN and dispatches a queued job">
+</p>
+
+<p align="center">
+  <a href="https://croutoncreations.com/brand/redline/redline-promo-1080p.mp4"><strong>▶ Watch the 1-minute video</strong></a>
+  ·
+  <a href="https://croutoncreations.com/blog/introducing-redline?utm_source=redline&utm_medium=github&utm_campaign=redline"><strong>Read why I built it</strong></a>
 </p>
 
 You're paying for a Codex or Claude subscription. Every five hours or every week, your quota
@@ -223,6 +229,18 @@ repositories, paths, credentials, or live allowance data.
 
 </details>
 
+## Green Lane Shadow Check
+
+The `green-lane-shadow` check runs on every PR to simulate auto-merge decisions **without actually merging anything**. It evaluates six rules (size, test repro, CI status, cross-vendor review, duplicate detection, denied paths) and posts a clear "would merge" or "would not merge" verdict as a GitHub check run.
+
+**This is shadow mode only.** The check is report-only and will never merge, approve, or modify settings. It helps validate the auto-merge design before the full infrastructure (trusted dispatcher, reviewer Apps, gate App, provenance verification) is built.
+
+See [docs/green-lane-shadow.md](docs/green-lane-shadow.md) for:
+- Complete rule descriptions
+- How to read the output
+- Pre-enable checklist
+- Current limitations
+
 ## Documentation
 
 | Using Redline | Reference |
@@ -234,11 +252,13 @@ repositories, paths, credentials, or live allowance data.
 | [MCP and agent access](docs/mcp.md) | [Native macOS app](docs/native-macos.md) |
 | [Mobile dashboard](docs/mobile.md) · [launchd](docs/launchd.md) | [Outcome metrics](docs/launch-metrics.md) |
 | [Troubleshooting](docs/troubleshooting.md) | [Changelog](CHANGELOG.md) · [Releasing](docs/releasing.md) |
+| [Agent-assisted install](docs/agent-install.md) | [LLM and coding-agent index](llms.txt) |
 
 ## Contributing
 
 Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building
 from source, running the Go, Playwright, and Swift test suites, and packaging the macOS app.
+Please report security vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
