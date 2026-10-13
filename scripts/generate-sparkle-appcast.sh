@@ -73,4 +73,44 @@ if ! grep -Fq "url=\"${download_url_prefix}" "${appcast_path}"; then
   exit 1
 fi
 
+# generate_appcast applies --download-url-prefix to every archive it indexes,
+# including older DMGs kept in the directory for delta generation. When the
+# prefix is a per-release GitHub download path (".../download/vX.Y.Z/"), that
+# points each older full-archive enclosure at this release, where the file
+# was never uploaded. Repoint each older "Redline-A.B.C-*.dmg" at its own
+# vA.B.C release.
+#
+# The DMG being released keeps the configured prefix. Its version is the tag
+# without any pre-release suffix: docs/releasing.md builds an rc as
+# REDLINE_VERSION=0.2.0 under ".../download/v0.2.0-rc.1/", and that DMG exists
+# only on the rc release. Deltas are uploaded with the new release too, so
+# they keep the prefix. Enclosure URLs are not covered by the Ed25519
+# signatures, which sign the file bytes only.
+#
+# An older DMG whose version only ever shipped as a pre-release has no vA.B.C
+# release to point at; remove it from the directory before packaging.
+if [[ "${download_url_prefix}" =~ ^(.*/download/)v([^/]+)/$ ]]; then
+  release_download_root="${BASH_REMATCH[1]}"
+  release_tag_version="${BASH_REMATCH[2]}"
+  release_version="${release_tag_version%%-*}"
+  RELEASE_PREFIX="${download_url_prefix}" RELEASE_DOWNLOAD_ROOT="${release_download_root}" \
+  RELEASE_VERSION="${release_version}" \
+    perl -0pi -e '
+      my ($prefix, $root, $current) = @ENV{qw(RELEASE_PREFIX RELEASE_DOWNLOAD_ROOT RELEASE_VERSION)};
+      s{url="\Q$prefix\E(Redline-(\d+(?:\.\d+){1,2})-[^"/]*\.dmg)"}{
+        $2 eq $current ? qq{url="$prefix$1"} : qq{url="${root}v$2/$1"}
+      }ge;
+    ' "${appcast_path}"
+  # Every DMG enclosure must now sit under a tag for its own version: the
+  # configured (possibly pre-release) tag for this release, vA.B.C otherwise.
+  mismatched="$(grep -oE 'url="[^"]*/download/v[^/"]+/Redline-[^"/]+\.dmg"' "${appcast_path}" |
+    sed -E 's#.*/download/v([^/]+)/Redline-([0-9.]+)-.*#\1 \2#' |
+    awk -v current_tag="${release_tag_version}" -v current="${release_version}" '
+      ($2 == current && $1 != current_tag) || ($2 != current && $1 != $2)' || true)"
+  if [[ -n "${mismatched}" ]]; then
+    printf 'Appcast DMG enclosures point at the wrong release tag (tag version, DMG version):\n%s\n' "${mismatched}" >&2
+    exit 1
+  fi
+fi
+
 printf 'Generated signed Sparkle appcast %s\n' "${appcast_path}"

@@ -72,6 +72,7 @@ func TestCodexRateCardCoversAllModelTiers(t *testing.T) {
 		// gpt-5.6-sol family — highest 5.6 tier
 		{model: "gpt-5.6-sol", wantInput: 125, wantCached: 12.5, wantOutput: 750},
 		{model: "gpt-5.6-sol-20260601", wantInput: 125, wantCached: 12.5, wantOutput: 750},
+		{model: "openai-codex/gpt-5.6-sol", wantInput: 125, wantCached: 12.5, wantOutput: 750},
 
 		// gpt-5.6-terra
 		{model: "gpt-5.6-terra", wantInput: 62.5, wantCached: 6.25, wantOutput: 375},
@@ -143,5 +144,14 @@ func TestCodexUnknownModelIsUnpriced(t *testing.T) {
 	got := accounting.Quote(accounting.Usage{Provider: "codex", Model: "gpt-4o", InputTokens: 100}, time.Now())
 	if got.Priced || got.Reason != "unknown model" {
 		t.Fatalf("quote = %#v", got)
+	}
+}
+
+func TestCodexLookalikeModelIsUnpriced(t *testing.T) {
+	got := accounting.Quote(accounting.Usage{
+		Provider: "codex", Model: "gpt-5.6-solarium", InputTokens: 1_000_000,
+	}, time.Now())
+	if got.Priced || got.Reason != "unknown model" {
+		t.Fatalf("quote = %#v, want unknown model to remain unpriced", got)
 	}
 }

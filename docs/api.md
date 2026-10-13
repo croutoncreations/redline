@@ -84,6 +84,8 @@ GET  /v1/usage-monitor/status
 GET  /v1/scheduler/attempts?provider={account}
 GET  /v1/metrics/launch?days={n}&provider={account}
 GET  /v1/runs
+GET  /v1/runs/completions?baseline=true
+GET  /v1/runs/completions?after={cursor}&limit={n}
 GET  /v1/runs/{id}
 GET  /v1/runs/{id}/events?limit={n}
 GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
@@ -91,6 +93,13 @@ POST /v1/runs/{id}/read
 POST /v1/runs/read-all
 GET  /v1/notifications
 ```
+
+`/v1/runs/completions?baseline=true` returns `{"cursor": n, "runs": []}` to start watching
+only future completions. Then request `?after=n&limit=100`, process the returned `runs` in
+completion order, and use the returned `cursor` for the next page. `limit` defaults to 100 and is
+capped at 100. The cursor is a durable, transactionally allocated completion sequence, not a wall
+clock; it covers tied timestamps, delayed commits, and service-recovered failed runs. A client
+that restarts without saving its cursor should request a new baseline; it won't replay old runs.
 
 Run log responses are tail-bounded to 64 KiB and may only resolve regular files beneath the
 configured `run_artifacts_dir`; paths and symlinks that escape that root are rejected.

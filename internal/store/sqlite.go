@@ -461,6 +461,53 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 			return fmt.Errorf("record fixed-width timestamp migration: %w", err)
 		}
 	}
+	if version < 26 {
+		// Version 26 rather than 25: builds of the unmerged mobile branch
+		// (PR #86) stamped 24 and 25 for different migrations (banked_resets
+		// and short_window_unavailable), so the banked columns are added
+		// only when missing and the version sits above both histories. That
+		// branch will need its own guarded v27+ for short_window_unavailable
+		// when it merges. Nullable on purpose: "not reported" is not zero.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets", "INTEGER"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets_expire_at", "TEXT"); err != nil {
+			return err
+		}
+		// Those mobile-branch databases skipped main's v24 timestamp rewrite
+		// because their MAX(version) was already 24 or 25. The rewrite is
+		// idempotent, so rerun it; on a database that did run it, it
+		// rewrites nothing.
+		if version >= 24 {
+			if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (26)`); err != nil {
+			return fmt.Errorf("record banked resets migration: %w", err)
+		}
+	}
+	if version < 27 {
+		if err := addColumnIfMissing(ctx, tx, "runs", "completion_sequence", "INTEGER"); err != nil {
+			return fmt.Errorf("add run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `WITH ordered AS MATERIALIZED (
+    SELECT id, (SELECT COALESCE(MAX(completion_sequence), 0) FROM runs) +
+        ROW_NUMBER() OVER (ORDER BY completed_at, id) AS seq
+    FROM runs WHERE completed_at IS NOT NULL AND completion_sequence IS NULL
+)
+UPDATE runs SET completion_sequence = (SELECT seq FROM ordered WHERE ordered.id = runs.id)
+WHERE completed_at IS NOT NULL AND completion_sequence IS NULL;`); err != nil {
+			return fmt.Errorf("backfill run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_completion_sequence
+ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != nil {
+			return fmt.Errorf("index run completion sequence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (27)`); err != nil {
+			return fmt.Errorf("record run completion sequence migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -543,23 +590,36 @@ func migrateFixedWidthTimestampsV24(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// rewriteTimestampColumn re-encodes one column's RFC3339 values in place,
-// keyed by the existing value so no assumption is made about the table having
-// a usable primary key.
+// rewriteTimestampColumn re-encodes one column's RFC3339 values in place.
+//
+// Updates are keyed by rowid (every Redline table is a rowid table). Keying by
+// the old value instead meant one full scan of an unindexed column per
+// distinct timestamp -- quadratic, which hung startup for hours on a database
+// with tens of thousands of snapshots and dispatch attempts. Values already in
+// the fixed-width layout are filtered out in SQL so a rerun reads almost
+// nothing.
 func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column string) error {
+	// Already fixed-width UTC ("…T15:04:05.000000000Z": 30 chars, '.' at 20,
+	// 'Z' at 30) is skipped here; everything else goes through Go parsing.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-		`SELECT DISTINCT %[2]s FROM %[1]s WHERE %[2]s IS NOT NULL AND %[2]s <> ''`, table, column))
+		`SELECT rowid, %[2]s FROM %[1]s
+		 WHERE %[2]s IS NOT NULL AND %[2]s <> ''
+		   AND NOT (length(%[2]s) = 30 AND substr(%[2]s, 20, 1) = '.' AND substr(%[2]s, 30, 1) = 'Z')`, table, column))
 	if err != nil {
 		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
 	}
-	var stored []string
+	type storedValue struct {
+		rowID int64
+		value string
+	}
+	var stored []storedValue
 	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
+		var row storedValue
+		if err := rows.Scan(&row.rowID, &row.value); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan %s.%s timestamp: %w", table, column, err)
 		}
-		stored = append(stored, value)
+		stored = append(stored, row)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -569,19 +629,26 @@ func rewriteTimestampColumn(ctx context.Context, tx *sql.Tx, table, column strin
 		return fmt.Errorf("read %s.%s timestamps: %w", table, column, err)
 	}
 
-	for _, value := range stored {
-		parsed, err := time.Parse(time.RFC3339Nano, value)
+	if len(stored) == 0 {
+		return nil
+	}
+	update, err := tx.PrepareContext(ctx, fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, column))
+	if err != nil {
+		return fmt.Errorf("prepare %s.%s normalization: %w", table, column, err)
+	}
+	defer update.Close()
+	for _, row := range stored {
+		parsed, err := time.Parse(time.RFC3339Nano, row.value)
 		if err != nil {
 			// Not an RFC3339 timestamp (e.g. a CURRENT_TIMESTAMP default).
 			// Leave it alone rather than guessing at its format.
 			continue
 		}
 		normalized := formatTime(parsed)
-		if normalized == value {
+		if normalized == row.value {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-			`UPDATE %[1]s SET %[2]s = ? WHERE %[2]s = ?`, table, column), normalized, value); err != nil {
+		if _, err := update.ExecContext(ctx, normalized, row.rowID); err != nil {
 			return fmt.Errorf("normalize %s.%s timestamps: %w", table, column, err)
 		}
 	}
@@ -711,6 +778,64 @@ func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	return count > 0, nil
 }
 
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
+	hasTable, err := tableExists(ctx, tx, table)
+	if err != nil || !hasTable {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s column: %w", table, err)
+		}
+		found = found || name == column
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// bankedResetColumns converts a snapshot's optional reset report for storage.
+func bankedResetColumns(s decision.UsageSnapshot) (count, expires any) {
+	if s.BankedResets != nil {
+		count = *s.BankedResets
+	}
+	if s.BankedResetsExpireAt != nil {
+		expires = formatTime(*s.BankedResetsExpireAt)
+	}
+	return count, expires
+}
+
+// scanBankedResets restores the optional reset report, keeping zero distinct
+// from absent.
+func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires sql.NullString) error {
+	if count.Valid {
+		value := int(count.Int64)
+		s.BankedResets = &value
+	}
+	if expires.Valid && expires.String != "" {
+		parsed, err := parseStoredTimeField("stored banked reset expiry", expires.String)
+		if err != nil {
+			return err
+		}
+		s.BankedResetsExpireAt = &parsed
+	}
+	return nil
+}
+
 func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []byte) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("validate snapshot: %w", err)
@@ -726,10 +851,12 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 		return fmt.Errorf("begin snapshot save: %w", err)
 	}
 	defer tx.Rollback()
+	bankedResets, bankedResetsExpireAt := bankedResetColumns(s)
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
+banked_resets, banked_resets_expire_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -742,6 +869,8 @@ weekly_remaining, weekly_resets_at, source, confidence, raw_payload
 		s.Source,
 		s.Confidence,
 		raw,
+		bankedResets,
+		bankedResetsExpireAt,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -792,7 +921,8 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
-weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
+banked_resets, banked_resets_expire_at
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -806,6 +936,8 @@ FROM usage_snapshots WHERE provider = ?`
 	var shortRemaining sql.NullFloat64
 	var shortReset sql.NullString
 	var raw []byte
+	var bankedResets sql.NullInt64
+	var bankedResetsExpireAt sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Provider,
@@ -817,6 +949,8 @@ FROM usage_snapshots WHERE provider = ?`
 		&s.Source,
 		&s.Confidence,
 		&raw,
+		&bankedResets,
+		&bankedResetsExpireAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)
@@ -839,6 +973,9 @@ FROM usage_snapshots WHERE provider = ?`
 			return decision.UsageSnapshot{}, nil, err
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
+	}
+	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt); err != nil {
+		return decision.UsageSnapshot{}, nil, err
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
 	if err != nil {

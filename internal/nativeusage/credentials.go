@@ -83,6 +83,32 @@ type claudeCredentialsFile struct {
 	} `json:"claudeAiOauth"`
 }
 
+// AccessWithoutRefresh returns the current credential but never refreshes or
+// rewrites it. Used for supplementary lookups that must not rotate Claude
+// Code's shared refresh token behind its back: a token near expiry is simply
+// reported as unavailable, and the next Claude Code session will refresh it.
+func (d *DefaultCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (Credential, error) {
+	if !strings.EqualFold(provider, "claude") {
+		return d.Access(ctx, provider)
+	}
+	store := d.ClaudeStore
+	if store == nil {
+		return Credential{}, fmt.Errorf("claude credential store is unavailable")
+	}
+	raw, err := store.Read(ctx)
+	if err != nil {
+		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
+	}
+	var file claudeCredentialsFile
+	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
+		return Credential{}, fmt.Errorf("claude credentials are invalid")
+	}
+	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		return Credential{}, fmt.Errorf("claude token is near expiry; skipping lookup rather than refreshing Claude Code's credential")
+	}
+	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
+}
+
 func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	store := d.ClaudeStore
 	if store == nil {

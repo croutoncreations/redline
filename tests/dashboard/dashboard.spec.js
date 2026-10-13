@@ -24,6 +24,32 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('shows banked resets with their expiry, and nothing when the provider does not report them', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude, codex] = dashboard.providers;
+  claude.snapshot.banked_resets = 1;
+  claude.snapshot.banked_resets_expire_at = '2026-10-22T23:59:59Z';
+  codex.snapshot.banked_resets = 0;
+  await loadDashboard(page, { dashboard });
+
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const claudeResets = page.locator('[data-provider-id="claude-main"] .banked-resets');
+  await expect(claudeResets).toContainText('Banked resets');
+  await expect(claudeResets).toContainText('1 available');
+  await expect(claudeResets).toContainText(/Expires in \d+ days · Oct 2[23]/);
+  await expect(claudeResets).not.toHaveClass(/soon/);
+
+  await page.getByRole('button', { name: 'Show Codex usage details' }).click();
+  await expect(page.locator('[data-provider-id="codex-main"] .banked-resets')).toContainText('None available right now');
+
+  delete claude.snapshot.banked_resets;
+  delete claude.snapshot.banked_resets_expire_at;
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Fable');
+  await expect(page.locator('[data-provider-id="claude-main"] .banked-resets')).toHaveCount(0);
+});
+
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.demo = { scenario: 'overview', synthetic: true };
@@ -613,6 +639,7 @@ test('locks a persisted onboarding profile name when revisiting workspace setup'
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.locator('#onboarding-repository').fill('/repo/redline');
   await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
   await expect(page.locator('#onboarding-profile-id')).toBeDisabled();
@@ -976,4 +1003,22 @@ test('shows profile load failures when starting a new job', async ({ page }) => 
   await page.getByRole('button', { name: '+ New job' }).click();
 
   await expect(page.locator('#error-banner')).toContainText('Could not open job: profiles unavailable');
+});
+
+test('renders form dropdowns at the same height as text fields', async ({ page }) => {
+  await loadDashboard(page);
+  const heights = async (dialogSelector, ids) => page.evaluate(([dialog, list]) => Object.fromEntries(
+    list.map(id => [id, Math.round(document.querySelector(`${dialog} #${id}`).getBoundingClientRect().height)])
+  ), [dialogSelector, ids]);
+
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeVisible();
+  const task = await heights('#task-dialog', ['task-name', 'task-priority', 'task-profile', 'task-tier', 'task-type']);
+  expect(new Set(Object.values(task)).size, JSON.stringify(task)).toBe(1);
+  await page.locator('#cancel-task').click();
+
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  await expect(page.getByRole('dialog', { name: 'Harness & workspace setup' })).toBeVisible();
+  const profile = await heights('#profiles-dialog', ['profile-id', 'profile-provider', 'profile-harness', 'profile-workspace', 'profile-base-branch', 'profile-cleanup', 'profile-repository-recent', 'profile-repository']);
+  expect(new Set(Object.values(profile)).size, JSON.stringify(profile)).toBe(1);
 });

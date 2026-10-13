@@ -6,28 +6,44 @@ running the test suites, and packaging the macOS app. End-user installation is c
 
 ## Prerequisites
 
-- Go (version pinned in `go.mod`)
-- Node.js and npm (dashboard tests only)
+- Go with automatic toolchain downloads enabled (the exact version is pinned in `go.mod`)
+- Node.js 18 or later and npm (dashboard tests only)
 - Xcode command-line tools with a recent Swift toolchain (macOS app only)
+- Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
+
+Building the service and running its tests do not require provider credentials or spend provider
+quota. A signed-in Codex or Claude CLI is needed for live subscription usage and to run jobs
+through that CLI's harness; a job run with a signed-out CLI fails with login instructions.
 
 ## Run the service from source
 
-Copy and adjust the example config. Redline reuses OpenUsage when it is running, but can collect
-Codex and Claude subscription windows natively when it is unavailable:
+Copy the example config. It is safe to use unchanged for a local smoke test: automatic dispatch is
+off. Edit its providers and policies only when you want to exercise your own accounts. Redline
+reuses OpenUsage when it is running, but can collect Codex and Claude subscription windows natively
+when it is unavailable:
 
 ```bash
 cp config.example.yaml redline.yaml
 go run ./cmd/redline --config redline.yaml serve
 ```
 
+The copy creates `redline.yaml`; starting the service adds `redline.db` and `api-token`, and task
+runs place their artifacts under `.redline/runs`. These local files are ignored by Git. Treat
+`api-token` as a secret even though the API listens only on loopback.
+
 If you already have the native app or another Redline instance running, port `7436` is taken and
-`serve` exits with `bind: address already in use`. Point the source build at a different port with
-`--listen`, then use a matching `--api` value for CLI commands:
+`serve` exits with `bind: address already in use`. Point the source build at any unused loopback
+port with `--listen`, then use the same port in the matching `--api` value for CLI commands (replace
+`17436` below if it is also in use):
 
 ```bash
 go run ./cmd/redline --config redline.yaml serve --listen 127.0.0.1:17436
 go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
 ```
+
+The status command reports live usage only when that provider's CLI is installed and signed in.
+Without provider credentials, the service and dashboard still start and explain the unavailable
+account state.
 
 Only `redline serve` reads configuration and opens SQLite. Every other CLI command is a client of
 the local HTTP API. See [Architecture](docs/architecture.md) for the full picture and
@@ -46,7 +62,7 @@ CI also checks formatting with `test -z "$(gofmt -l .)"`.
 ### Dashboard (Playwright)
 
 ```bash
-npm install
+npm ci
 npx playwright install chromium # first run only
 npm run test:dashboard
 ```

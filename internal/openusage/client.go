@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,7 @@ type providerPayload struct {
 type usageLine struct {
 	Type             string  `json:"type"`
 	Label            string  `json:"label"`
+	Value            string  `json:"value"`
 	Used             float64 `json:"used"`
 	Limit            float64 `json:"limit"`
 	ResetsAt         string  `json:"resetsAt"`
@@ -139,6 +141,17 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 	}
 	weeklyFound := false
 	for _, line := range selected.Lines {
+		if strings.EqualFold(line.Type, "text") {
+			if resets, ok := bankedResets(line); ok {
+				if resets.NextExpiresAt != nil && !resets.NextExpiresAt.After(observedAt) {
+					// Already lapsed when observed; the count may be stale
+					// too, but the expiry is certainly wrong. Keep the count.
+					resets.NextExpiresAt = nil
+				}
+				snapshot.ApplyBankedResets(&resets)
+			}
+			continue
+		}
 		if !strings.EqualFold(line.Type, "progress") {
 			continue
 		}
@@ -228,4 +241,39 @@ func parseTime(name, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return parsed, nil
+}
+
+// bankedResets reads on-demand quota resets from OpenUsage's "Rate Limit
+// Resets" text line ("2 available", resetsAt = soonest expiry).
+//
+// The count arrives as prose, so only a leading integer (or "none") is
+// trusted; anything else is reported as absent rather than guessed at, since
+// a wrong count would send someone looking for a reset they do not have. An
+// unparseable expiry drops only the expiry, not the count.
+func bankedResets(line usageLine) (decision.BankedResets, bool) {
+	if !strings.EqualFold(strings.TrimSpace(line.Label), "rate limit resets") {
+		return decision.BankedResets{}, false
+	}
+	value := strings.TrimSpace(line.Value)
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return decision.BankedResets{}, false
+	}
+	var count int
+	switch {
+	case strings.EqualFold(fields[0], "none"), strings.EqualFold(fields[0], "no"),
+		strings.Contains(strings.ToLower(value), "no rate limit resets"):
+		count = 0
+	default:
+		parsed, err := strconv.Atoi(fields[0])
+		if err != nil || parsed < 0 {
+			return decision.BankedResets{}, false
+		}
+		count = parsed
+	}
+	resets := decision.BankedResets{Available: count}
+	if expires, err := parseTime("resetsAt", strings.TrimSpace(line.ResetsAt)); err == nil {
+		resets.NextExpiresAt = &expires
+	}
+	return resets, true
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,13 @@ import (
 const (
 	defaultClaudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
 	defaultCodexUsageURL  = "https://chatgpt.com/backend-api/wham/usage"
+
+	// Anthropic only includes banked limit resets (the "cedar_ember" program,
+	// Claude Code's /limit-reset) when asked with these query parameters and a
+	// Claude Code CLI user agent; any other agent is told it is ineligible
+	// with reason "surface". skip_spend drops the spend block we do not read.
+	claudeBankedResetsQuery = "cedar_ember=1&skip_spend=1"
+	claudeUserAgent         = "claude-cli/2.1.280 (external, cli)"
 )
 
 type Credential struct {
@@ -26,6 +34,11 @@ type Credential struct {
 
 type Credentials interface {
 	Access(context.Context, string) (Credential, error)
+}
+
+// ReadOnlyCredentials can hand out a credential without refreshing it.
+type ReadOnlyCredentials interface {
+	AccessWithoutRefresh(context.Context, string) (Credential, error)
 }
 
 type Client struct {
@@ -39,16 +52,74 @@ type Client struct {
 func (c Client) Name() string { return "native" }
 
 func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
-	if c.Credentials == nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("native credentials are unavailable")
-	}
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	credential, err := c.Credentials.Access(ctx, name)
+	body, err := c.fetchBody(ctx, name, false)
 	if err != nil {
-		return decision.UsageSnapshot{}, nil, err
+		return decision.UsageSnapshot{}, body, err
+	}
+	now := c.now()
+	var snapshot decision.UsageSnapshot
+	if name == "claude" {
+		snapshot, err = parseClaude(body, now)
+	} else {
+		snapshot, err = parseCodex(body, now)
+	}
+	if err != nil {
+		return decision.UsageSnapshot{}, body, err
+	}
+	return snapshot, body, nil
+}
+
+// BankedResets reads only the banked reset report, for supplementing a
+// snapshot that came from a source which does not carry resets. A nil report
+// with a nil error means the provider answered but reported no resets data
+// (for example, the account is not in Anthropic's program).
+func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*decision.BankedResets, error) {
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if name != "claude" {
+		return nil, fmt.Errorf("native banked resets for %q are unsupported", name)
+	}
+	// Supplementary: never refresh Claude Code's shared token for this.
+	body, err := c.fetchBody(ctx, name, true)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		CedarEmber *claudeResetStatus `json:"cedar_ember"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode native claude banked resets: %w", err)
+	}
+	return claudeBankedResets(payload.CedarEmber, c.now()), nil
+}
+
+func (c Client) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c Client) fetchBody(ctx context.Context, name string, readOnly bool) ([]byte, error) {
+	if c.Credentials == nil {
+		return nil, fmt.Errorf("native credentials are unavailable")
+	}
+	var credential Credential
+	var err error
+	if readOnly {
+		reader, ok := c.Credentials.(ReadOnlyCredentials)
+		if !ok {
+			return nil, fmt.Errorf("native %s credentials cannot be read without refreshing", name)
+		}
+		credential, err = reader.AccessWithoutRefresh(ctx, name)
+	} else {
+		credential, err = c.Credentials.Access(ctx, name)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if credential.AccessToken == "" {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("%s access token is unavailable", name)
+		return nil, fmt.Errorf("%s access token is unavailable", name)
 	}
 	url := c.CodexUsageURL
 	if url == "" {
@@ -59,19 +130,20 @@ func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.U
 		if url == "" {
 			url = defaultClaudeUsageURL
 		}
+		url = withQuery(url, claudeBankedResetsQuery)
 	} else if name != "codex" {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("native provider %q is unsupported", name)
+		return nil, fmt.Errorf("native provider %q is unsupported", name)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("build native %s usage request: %w", name, err)
+		return nil, fmt.Errorf("build native %s usage request: %w", name, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+credential.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	if name == "claude" {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-		req.Header.Set("User-Agent", "claude-code/2.1.69")
+		req.Header.Set("User-Agent", claudeUserAgent)
 	} else {
 		req.Header.Set("User-Agent", "Redline")
 		if credential.AccountID != "" {
@@ -84,30 +156,57 @@ func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.U
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("fetch native %s usage: %w", name, err)
+		return nil, fmt.Errorf("fetch native %s usage: %w", name, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("read native %s usage: %w", name, err)
+		return nil, fmt.Errorf("read native %s usage: %w", name, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decision.UsageSnapshot{}, body, fmt.Errorf("native %s usage returned HTTP %d", name, resp.StatusCode)
+		return body, &HTTPError{Provider: name, StatusCode: resp.StatusCode,
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), c.now())}
 	}
-	now := time.Now().UTC()
-	if c.Now != nil {
-		now = c.Now().UTC()
+	return body, nil
+}
+
+// HTTPError is a non-2xx answer from a provider usage endpoint.
+type HTTPError struct {
+	Provider   string
+	StatusCode int
+	retryAfter time.Duration
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("native %s usage returned HTTP %d", e.Provider, e.StatusCode)
+}
+
+// RetryAfter is how long the provider asked us to wait, or zero if it did not
+// say. Asking again sooner only extends a rate limit.
+func (e *HTTPError) RetryAfter() time.Duration { return e.retryAfter }
+
+// RateLimited reports whether the provider refused the request for rate.
+func (e *HTTPError) RateLimited() bool { return e.StatusCode == http.StatusTooManyRequests }
+
+// parseRetryAfter accepts both forms RFC 9110 allows: delay-seconds and an
+// HTTP-date. Anthropic's usage endpoint is known to answer "retry-after: 0"
+// while still limiting; zero is returned as-is and callers apply their own
+// backoff floor.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
 	}
-	var snapshot decision.UsageSnapshot
-	if name == "claude" {
-		snapshot, err = parseClaude(body, now)
-	} else {
-		snapshot, err = parseCodex(body, now)
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
 	}
-	if err != nil {
-		return decision.UsageSnapshot{}, body, err
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
 	}
-	return snapshot, body, nil
+	return 0
 }
 
 type claudeWindow struct {
@@ -125,9 +224,68 @@ type claudeLimit struct {
 	} `json:"scope"`
 }
 type claudePayload struct {
-	FiveHour *claudeWindow `json:"five_hour"`
-	SevenDay *claudeWindow `json:"seven_day"`
-	Limits   []claudeLimit `json:"limits"`
+	FiveHour   *claudeWindow      `json:"five_hour"`
+	SevenDay   *claudeWindow      `json:"seven_day"`
+	Limits     []claudeLimit      `json:"limits"`
+	CedarEmber *claudeResetStatus `json:"cedar_ember"`
+}
+
+// claudeResetStatus is the banked limit reset block. Field names follow
+// Claude Code 2.1.280's own schema for this undocumented response.
+type claudeResetStatus struct {
+	Eligible bool               `json:"eligible"`
+	Grants   []claudeResetGrant `json:"grants"`
+}
+
+type claudeResetGrant struct {
+	ID         string `json:"id"`
+	ResetsLeft *int   `json:"resets_left"`
+	EndsAt     string `json:"ends_at"`
+}
+
+// claudeBankedResets totals the resets left across grants the way Claude
+// Code does, and reports the soonest expiry among grants that still hold one.
+//
+// Absent block, ineligible account, or a malformed grant set all report
+// nothing rather than a guess: the account may not be in the program, or the
+// shape may have changed, and neither means "zero".
+func claudeBankedResets(status *claudeResetStatus, now time.Time) *decision.BankedResets {
+	if status == nil || !status.Eligible {
+		return nil
+	}
+	resets := decision.BankedResets{}
+	for _, grant := range status.Grants {
+		if grant.ResetsLeft == nil || *grant.ResetsLeft < 0 {
+			return nil
+		}
+		if *grant.ResetsLeft == 0 {
+			continue
+		}
+		var expires time.Time
+		if text := strings.TrimSpace(grant.EndsAt); text != "" {
+			parsed, err := time.Parse(time.RFC3339Nano, text)
+			if err != nil {
+				return nil
+			}
+			if !parsed.After(now) {
+				// Expired grants can linger briefly; they are not spendable.
+				continue
+			}
+			expires = parsed
+		}
+		resets.Available += *grant.ResetsLeft
+		if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
+			resets.NextExpiresAt = &expires
+		}
+	}
+	return &resets
+}
+
+func withQuery(rawURL, query string) string {
+	if strings.Contains(rawURL, "?") {
+		return rawURL + "&" + query
+	}
+	return rawURL + "?" + query
 }
 
 func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
@@ -173,6 +331,7 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		snapshot.Allowances = append(snapshot.Allowances, fable)
 		break
 	}
+	snapshot.ApplyBankedResets(claudeBankedResets(payload.CedarEmber, now))
 	if err := snapshot.Validate(); err != nil {
 		return decision.UsageSnapshot{}, fmt.Errorf("normalize native claude snapshot: %w", err)
 	}
@@ -190,6 +349,9 @@ type codexPayload struct {
 		Primary   *codexWindow `json:"primary_window"`
 		Secondary *codexWindow `json:"secondary_window"`
 	} `json:"rate_limit"`
+	ResetCredits *struct {
+		AvailableCount *int `json:"available_count"`
+	} `json:"rate_limit_reset_credits"`
 }
 
 func parseCodex(body []byte, now time.Time) (decision.UsageSnapshot, error) {
@@ -224,6 +386,11 @@ func parseCodex(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 	}
 	if snapshot.Weekly.ResetsAt.IsZero() {
 		return decision.UsageSnapshot{}, fmt.Errorf("native codex usage is missing weekly window")
+	}
+	// The usage endpoint carries the count but not the expiry; that lives on a
+	// separate credits endpoint we do not call on every refresh.
+	if credits := payload.ResetCredits; credits != nil && credits.AvailableCount != nil && *credits.AvailableCount >= 0 {
+		snapshot.ApplyBankedResets(&decision.BankedResets{Available: *credits.AvailableCount})
 	}
 	if err := snapshot.Validate(); err != nil {
 		return decision.UsageSnapshot{}, fmt.Errorf("normalize native codex snapshot: %w", err)

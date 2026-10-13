@@ -91,6 +91,7 @@ State-changing tools:
 | `redline_task_create` | Queue a one-off or recurring task; `runtime_job_id` selects an existing Hermes job |
 | `redline_task_update` | Change task instructions, eligibility, or the selected Hermes job |
 | `redline_task_control` | Enable, disable, or retry a task |
+| `redline_task_delete` | Permanently delete a task that has never run; tasks with run history must be disabled instead |
 | `redline_profile_create` | Create a harness/model/workspace execution profile |
 | `redline_profile_update` | Change profile routing, commands, or lifecycle hooks |
 | `redline_profile_delete` | Delete an unreferenced execution profile |
@@ -107,6 +108,10 @@ State-changing tools:
 `redline_scheduler_dispatch` is intentionally separate and annotated as potentially destructive:
 once a task is admitted, its harness is trusted to run to completion. Tool annotations are hints,
 not an authorization boundary; use the approval controls of the MCP host.
+
+`redline_task_create` accepts `enabled: false` to save a task as a disabled draft that the
+scheduler ignores until it is enabled. `redline_task_delete` is annotated destructive; the service
+rejects deleting a running task or one with run or scheduler history, so audit trails stay intact.
 
 Profile updates and deletion are also annotated as potentially destructive. Deletion is rejected
 while any task references the profile. Profile commands and lifecycle hooks are trusted local code

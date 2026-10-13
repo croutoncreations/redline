@@ -131,6 +131,21 @@ test('collapses provider usage details independently', async ({ page }) => {
   await expect(page.locator('[data-testid="provider-detail-claude-main"]')).toBeVisible();
 });
 
+test('banked resets row shows count and expiry, and is absent when unreported', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude, codex] = dashboard.providers;
+  claude.snapshot.banked_resets = 2;
+  // Two days after the fixture clock: close enough to be flagged.
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  await loadMobileDashboard(page, { dashboard });
+  const claudeResets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  await expect(claudeResets).toContainText('2 available');
+  await expect(claudeResets).toContainText('Next expires in 2 days');
+  await expect(claudeResets).toHaveClass(/soon/);
+  expect(codex.snapshot.banked_resets).toBeUndefined();
+  await expect(page.locator('[data-testid="provider-detail-codex-main"] [data-testid="banked-resets"]')).toHaveCount(0);
+});
+
 test('account pools displayed before model pools in detail', async ({ page }) => {
   const dashboard = dashboardFixture();
   // Add an account-scope allowance
