@@ -78,7 +78,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|primer|run|notification|candidates|pause|resume|pair|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -119,6 +119,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runResource(client, "profiles", remaining[1:], stdout, stderr)
 	case "scheduler":
 		return runScheduler(client, remaining[1:], stdout, stderr)
+	case "primer":
+		return runPrimer(client, remaining[1:], stdout, stderr)
 	case "run":
 		if len(remaining) > 1 && remaining[1] == "watch" {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -146,11 +148,12 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, version")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, primer, run, notification, candidates, pause,")
+	fmt.Fprintln(output, "          resume, pair, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
+	fmt.Fprintln(output, "primer set ...       start Claude's 5-hour window at chosen times or after every reset")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")

@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/primer"
 	"github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/usage"
@@ -60,6 +63,8 @@ type dashboardProvider struct {
 	ActivePoolClaims         map[string]int          `json:"active_pool_claims,omitempty"`
 	LatestDecision           *dashboardDecision      `json:"latest_decision,omitempty"`
 	LatestDecisionAt         *time.Time              `json:"latest_decision_at,omitempty"`
+	Primer                   *primer.Status          `json:"primer,omitempty"`
+	PrimerError              string                  `json:"primer_error,omitempty"`
 }
 
 type dashboardDecision struct {
@@ -287,6 +292,16 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			if age > maxSnapshotAge || age < 0 {
 				item.SnapshotStale = true
 				item.Error = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+			}
+		}
+		if primer.Supported(strings.ToLower(configured.Provider)) {
+			// The primer is optional; a problem reading it must not blank
+			// the whole dashboard.
+			if status, primerErr := s.primer.Status(ctx, id); primerErr != nil {
+				log.Printf("dashboard: window primer status for %s: %v", id, primerErr)
+				item.PrimerError = primerErr.Error()
+			} else {
+				item.Primer = &status
 			}
 		}
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)

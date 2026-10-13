@@ -33,8 +33,17 @@ func (ExecRunner) Run(ctx context.Context, command Command) (int, error) {
 	cmd.Stdin = command.Stdin
 	cmd.Stdout = command.Stdout
 	cmd.Stderr = command.Stderr
+	cmd.WaitDelay = command.WaitDelay
+	if command.KillGroup {
+		configureKillGroup(cmd)
+	}
 	err := cmd.Run()
 	if err == nil {
+		return 0, nil
+	}
+	// The command itself succeeded; only a lingering grandchild kept the
+	// output pipes open past WaitDelay.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
 		return 0, nil
 	}
 	var exitError *exec.ExitError

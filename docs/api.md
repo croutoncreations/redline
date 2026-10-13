@@ -60,6 +60,9 @@ POST /v1/providers/{account}/decision
 PATCH /v1/providers/{account}/policy
 PATCH /v1/providers/{account}/concurrency
 POST /v1/providers/{account}/pause|resume
+GET|PATCH /v1/providers/{account}/primer
+POST /v1/providers/{account}/primer/run?force={true|false}
+GET  /v1/providers/{account}/primer/history?limit={n}
 GET|POST /v1/profiles
 GET  /v1/profile-options?refresh={true|false}
 GET|PATCH|DELETE /v1/profiles/{id}
@@ -100,6 +103,13 @@ completion order, and use the returned `cursor` for the next page. `limit` defau
 capped at 100. The cursor is a durable, transactionally allocated completion sequence, not a wall
 clock; it covers tied timestamps, delayed commits, and service-recovered failed runs. A client
 that restarts without saving its cursor should request a new baseline; it won't replay old runs.
+
+`PATCH /v1/providers/{account}/primer` is a partial update of the window primer: send only the
+fields to change (`enabled`, `mode` = `schedule`|`reset`, `times` as `HH:MM`, `days`,
+`timezone` as an IANA name or `""` for the service's zone, `prompt`, `model`,
+`catch_up_seconds`). It returns the same status document as `GET`; invalid settings and
+unsupported accounts (`supported: false` with `unsupported_reason`) return 400, and a ping already
+in progress returns 409 from `run`. See [Window primer](scheduling.md#window-primer).
 
 Run log responses are tail-bounded to 64 KiB and may only resolve regular files beneath the
 configured `run_artifacts_dir`; paths and symlinks that escape that root are rejected.

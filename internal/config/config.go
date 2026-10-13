@@ -44,6 +44,7 @@ type Notifications struct {
 
 var knownNotificationEvents = map[string]bool{
 	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
+	"primer.failed": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -57,7 +58,7 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "primer.failed"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {
@@ -364,7 +365,7 @@ func (cfg *Config) validate() error {
 	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error)", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, primer.failed)", event)
 		}
 	}
 	return nil

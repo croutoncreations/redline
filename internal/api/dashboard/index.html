@@ -38,7 +38,7 @@
     </section>
 
     <section id="scheduler-banner" class="scheduler-banner" aria-live="polite" hidden>
-      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until <code>scheduler.enabled</code> is set to <code>true</code> in Redline’s configuration and the app is restarted.</span>
+      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until <code>scheduler.enabled</code> is set to <code>true</code> in Redline’s configuration and the app is restarted.<span id="scheduler-banner-primer" hidden> The window primer is on and runs independently, so its pings still go out.</span></span>
     </section>
 
     <section class="summary-rail" aria-label="Current capacity">
@@ -209,6 +209,36 @@
         <div class="form-footer"><button id="delete-profile" class="danger-button" type="button" hidden>Delete</button><div><button id="reset-profile" class="quiet-button" type="button">Reset</button><button id="save-profile" class="primary-button" type="submit">Save profile</button></div></div>
       </form>
     </div>
+  </dialog>
+
+  <dialog id="primer-dialog" class="task-dialog primer-dialog" aria-labelledby="primer-dialog-title">
+    <form id="primer-form" novalidate>
+      <div class="dialog-head"><div><p class="eyebrow">5-HOUR WINDOW</p><h2 id="primer-dialog-title">Window primer</h2></div><button id="close-primer" type="button" aria-label="Close">×</button></div>
+      <div class="form-body">
+        <div id="primer-form-error" class="form-error" hidden></div>
+        <p class="field-wide primer-intro">Claude's 5-hour window starts with your first message. The primer sends one tiny message at a time you choose, so the window resets when it suits you. It never pings while a window is already open or a Redline job is running on this account.</p>
+        <label class="check-field field-wide"><input id="primer-enabled" type="checkbox"><span>Enable the window primer</span></label>
+        <fieldset class="field field-wide primer-modes"><legend>When to ping</legend>
+          <label class="check-field"><input id="primer-mode-schedule" type="radio" name="primer-mode" value="schedule" checked><span>At scheduled times</span></label>
+          <label class="check-field"><input id="primer-mode-reset" type="radio" name="primer-mode" value="reset"><span>After every reset (24/7)</span></label>
+          <small id="primer-mode-note" class="field-note"></small>
+        </fieldset>
+        <div id="primer-schedule-fields" class="field-wide primer-schedule">
+          <div class="field"><span>Times <i class="help" tabindex="0" data-help="Each time is when you want a window to start. Redline pings one minute later so the ping cannot land inside the previous window.">?</i></span><div id="primer-times" class="primer-times"></div><button id="add-primer-time" class="inline-button" type="button">+ Add time</button></div>
+          <fieldset class="field primer-days"><legend>Days</legend><div>
+            <label><input type="checkbox" data-primer-day value="mon"><span>Mon</span></label><label><input type="checkbox" data-primer-day value="tue"><span>Tue</span></label><label><input type="checkbox" data-primer-day value="wed"><span>Wed</span></label><label><input type="checkbox" data-primer-day value="thu"><span>Thu</span></label><label><input type="checkbox" data-primer-day value="fri"><span>Fri</span></label><label><input type="checkbox" data-primer-day value="sat"><span>Sat</span></label><label><input type="checkbox" data-primer-day value="sun"><span>Sun</span></label>
+          </div></fieldset>
+          <label class="field primer-catch-up"><span>Catch up after sleep <i class="help" tabindex="0" data-help="If this Mac was asleep at a scheduled time, Redline still pings on wake within this many minutes. Later than that, the slot is skipped so the window does not start at the wrong time.">?</i></span><input id="primer-catch-up" type="number" min="0" max="360" step="5" value="45"><small class="field-note">minutes</small></label>
+        </div>
+        <label class="field"><span>Time zone</span><select id="primer-timezone"></select></label>
+        <details class="advanced-fields field-wide"><summary>Message and model</summary><div class="advanced-grid">
+          <label class="field field-wide"><span>Prompt</span><input id="primer-prompt" maxlength="500" autocomplete="off" placeholder="Reply with only: ok"></label>
+          <label class="field"><span>Model <i class="help" tabindex="0" data-help="The smallest model is enough: any message starts the window. Runs through your Claude Code login with API keys removed, so it uses your subscription.">?</i></span><input id="primer-model" autocomplete="off" placeholder="haiku"></label>
+        </div></details>
+        <div class="field field-wide"><span>Recent pings</span><ul id="primer-history" class="primer-history"></ul></div>
+      </div>
+      <div class="form-footer"><div><button id="run-primer" class="quiet-button" type="button">Ping now</button></div><div><button id="cancel-primer" class="quiet-button" type="button">Cancel</button><button id="save-primer" class="primary-button" type="submit">Save</button></div></div>
+    </form>
   </dialog>
 
   <dialog id="runtime-dialog" class="task-dialog" aria-labelledby="runtime-dialog-title">

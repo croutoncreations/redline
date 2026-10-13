@@ -22,7 +22,7 @@ Agent safety contract:
 
 - [README](https://github.com/croutoncreations/redline/blob/main/README.md): Purpose, installation, how scheduling works, MCP setup, and screenshots.
 - [Getting started](https://github.com/croutoncreations/redline/blob/main/docs/getting-started.md): Install the app, confirm usage monitoring, create a profile, and queue a first job.
-- [Scheduling and the allowance model](https://github.com/croutoncreations/redline/blob/main/docs/scheduling.md): Policies, pace gap, reserve, dispatch tiers, near-expiry release, and calibration.
+- [Scheduling and the allowance model](https://github.com/croutoncreations/redline/blob/main/docs/scheduling.md): Policies, pace gap, reserve, dispatch tiers, near-expiry release, calibration, and the window primer that starts Claude's 5-hour window at chosen times.
 - [Execution profiles and tasks](https://github.com/croutoncreations/redline/blob/main/docs/profiles-and-tasks.md): Harness, model, and workspace configuration and the task lifecycle.
 - [Troubleshooting](https://github.com/croutoncreations/redline/blob/main/docs/troubleshooting.md): Common failures and corrective checks.
 
