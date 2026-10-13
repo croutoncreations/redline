@@ -271,12 +271,16 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 	}
 	if payload.LatestAlert != nil {
 		alert := payload.LatestAlert
-		signal.Corrected = alert.Corrected
-		signal.Withdrawn = !strings.EqualFold(alert.State, "active")
 		if signal.AnnouncementID == "" {
 			signal.AnnouncementID = alert.ID
 			signal.Quote = alert.Summary
 			signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(alert.URL)
+		}
+		if alert.ID == signal.AnnouncementID {
+			signal.Corrected = alert.Corrected
+			signal.Withdrawn = !strings.EqualFold(alert.State, "active")
+		} else {
+			signal.Warnings = append(signal.Warnings, "latest alert belongs to a different announcement and did not modify this signal")
 		}
 	}
 	validateSignal(&signal, now)

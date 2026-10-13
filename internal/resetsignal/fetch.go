@@ -43,9 +43,13 @@ func (f Fetcher) get(ctx context.Context, feed, endpoint string) (fetchedDocumen
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !(f.AllowHTTP && parsed.Scheme == "http")) || parsed.User != nil {
 		return fetchedDocument{}, sourceError(feed, "invalid_url", "source endpoint must be an absolute HTTPS URL", FetchMetadata{})
 	}
-	if f.HTTP == nil {
-		f.HTTP = http.DefaultClient
+	baseClient := f.HTTP
+	if baseClient == nil {
+		baseClient = http.DefaultClient
 	}
+	client := *baseClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	f.HTTP = &client
 	if f.Timeout <= 0 {
 		f.Timeout = defaultTimeout
 	}

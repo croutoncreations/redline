@@ -25,7 +25,8 @@ The preview uses documented, unauthenticated GET endpoints only:
 - [Will Codex Reset developer reference](https://willreset.com/developers): `GET /api/notify`
 - [codex-reset.com developer reference](https://codex-reset.com/developers): `GET /api/forecast`
 
-Requests identify Redline with a fixed user agent, accept JSON, time out, cap response size, and
+Requests identify Redline with a fixed user agent, accept JSON, do not follow redirects away from
+the validated tracker endpoint, time out, cap response size, and
 make at most one bounded retry while preserving `Retry-After`/backoff metadata. A server's valid
 retry delay is never shortened: if it will not fit inside the command timeout, the request is
 reported as deferred or rate-limited without sleeping or sending an early retry. Reads from

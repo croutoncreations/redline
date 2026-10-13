@@ -211,6 +211,44 @@ func TestFetchAllContainsDecodeErrors(t *testing.T) {
 	}
 }
 
+func TestFetcherDoesNotFollowRedirects(t *testing.T) {
+	calls := 0
+	fetcher := Fetcher{
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			if calls > 1 {
+				t.Fatal("followed redirect")
+			}
+			return response(http.StatusFound, "application/json", `{}`, http.Header{"Location": {"https://untrusted.example/feed"}}), nil
+		})},
+		Timeout: time.Second,
+	}
+	_, fetchErr := fetcher.get(context.Background(), "resetbeacon", "https://example.test/feed")
+	if fetchErr == nil || fetchErr.Code != "http_status" || calls != 1 {
+		t.Fatalf("err=%+v calls=%d", fetchErr, calls)
+	}
+}
+
+func TestLatestAlertOnlyCorrectsMatchingAnnouncement(t *testing.T) {
+	for name, alertID := range map[string]string{"matching": "one", "unrelated": "two"} {
+		t.Run(name, func(t *testing.T) {
+			body := `{
+				"mode":"announced","updated_at":"2026-10-13T04:14:42Z",
+				"official_signal":{"tweet_id":"one","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"promise","window":null},
+				"latest_alert":{"id":"` + alertID + `","state":"withdrawn","corrected":true,"url":"https://x.com/a/status/` + alertID + `"}
+			}`
+			signal, err := normalizeCodexReset([]byte(body), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCorrected := name == "matching"
+			if signal.Corrected != wantCorrected || signal.Withdrawn != wantCorrected {
+				t.Fatalf("signal = %+v", signal)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
