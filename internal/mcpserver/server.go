@@ -85,6 +85,7 @@ type taskCreateInput struct {
 	DispatchTier       string `json:"dispatch_tier" jsonschema:"behind, well_behind, or expiring"`
 	MinInterval        string `json:"min_interval,omitempty" jsonschema:"minimum interval between recurring runs, such as 6h or 7d"`
 	RequireRepoChange  bool   `json:"require_repo_change,omitempty" jsonschema:"only rerun after the source revision changes"`
+	Enabled            *bool  `json:"enabled,omitempty" jsonschema:"set false to create the task disabled as a draft; defaults to true"`
 }
 
 type taskUpdateInput struct {
@@ -302,6 +303,8 @@ func New(client apiclient.Client) *mcp.Server {
 		"Update scheduling or instruction fields on an existing task.", true, true, false), s.taskUpdate)
 	mcp.AddTool(result, mutationTool("redline_task_control", "Control task",
 		"Enable, disable, or retry an existing task.", false, false, false), s.taskControl)
+	mcp.AddTool(result, mutationTool("redline_task_delete", "Delete task",
+		"Permanently delete a task that has never run. The service rejects deletion of a running task or one with run history; disable it instead.", true, false, false), s.taskDelete)
 	mcp.AddTool(result, mutationTool("redline_profile_create", "Create execution profile",
 		"Create a harness, model, workspace, and lifecycle-hook execution profile.", false, false, false), s.profileCreate)
 	mcp.AddTool(result, mutationTool("redline_profile_update", "Update execution profile",
@@ -437,8 +440,14 @@ func (s *server) profileGet(ctx context.Context, _ *mcp.CallToolRequest, input i
 }
 
 func (s *server) runsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
+	// Forward the bound limit: /v1/runs defaults to 50 rows when the query
+	// parameter is absent, so a request for more silently returned 50 and
+	// reported them as untruncated. Ask for one extra so listOutput can tell
+	// "exactly limit rows exist" from "more are available".
+	limit := boundedLimit(input.Limit)
+	path := "/v1/runs?limit=" + strconv.Itoa(limit+1)
 	var items []domain.Run
-	if err := s.client.Do(ctx, http.MethodGet, "/v1/runs", nil, &items); err != nil {
+	if err := s.client.Do(ctx, http.MethodGet, path, nil, &items); err != nil {
 		return nil, Output{}, err
 	}
 	return listOutput("run", items, input.Limit)
@@ -460,7 +469,7 @@ func (s *server) runEvents(ctx context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, Output{}, err
 	}
 	total := len(items)
-	items = truncate(items, limit)
+	items = truncateOldest(items, limit)
 	views := make([]runEventView, 0, len(items))
 	for _, item := range items {
 		views = append(views, viewRunEvent(item))
@@ -531,6 +540,17 @@ func (s *server) taskControl(ctx context.Context, _ *mcp.CallToolRequest, input 
 		return nil, Output{}, err
 	}
 	return nil, Output{Summary: fmt.Sprintf("%s applied to task %s.", input.Control, item.ID), Data: viewTask(item, false)}, nil
+}
+
+func (s *server) taskDelete(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
+	if input.ID == "" {
+		return nil, Output{}, fmt.Errorf("id is required")
+	}
+	if err := s.client.Do(ctx, http.MethodDelete, "/v1/tasks/"+url.PathEscape(input.ID), nil, nil); err != nil {
+		return nil, Output{}, err
+	}
+	return nil, Output{Summary: fmt.Sprintf("Deleted task %s.", input.ID),
+		Data: map[string]any{"id": input.ID, "deleted": true}}, nil
 }
 
 func (s *server) profileCreate(ctx context.Context, _ *mcp.CallToolRequest, input profileCreateInput) (*mcp.CallToolResult, Output, error) {
@@ -757,6 +777,20 @@ func truncate[T any](items []T, limit int) []T {
 		return items
 	}
 	return items[:limit]
+}
+
+// truncateOldest keeps the most recent `limit` items from a slice ordered
+// oldest-first, dropping from the front rather than the back.
+//
+// Run events arrive that way: store.ListRunEvents selects the newest rows
+// with ORDER BY id DESC and re-sorts them ascending, so the terminal event is
+// last. Trimming the tail would drop exactly the event an agent polling for
+// completion is waiting on.
+func truncateOldest[T any](items []T, limit int) []T {
+	if len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
 }
 
 func listOutput[T any](kind string, items []T, requested int) (*mcp.CallToolResult, Output, error) {

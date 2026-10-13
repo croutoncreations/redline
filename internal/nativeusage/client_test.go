@@ -90,3 +90,7 @@ type staticCredentials struct{ token, account string }
 func (s staticCredentials) Access(context.Context, string) (nativeusage.Credential, error) {
 	return nativeusage.Credential{AccessToken: s.token, AccountID: s.account}, nil
 }
+
+func (s staticCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (nativeusage.Credential, error) {
+	return s.Access(ctx, provider)
+}

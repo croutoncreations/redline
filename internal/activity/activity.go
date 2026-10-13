@@ -3,6 +3,7 @@ package activity
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -236,7 +237,7 @@ func readTail(path string, limit int64) ([]byte, error) {
 	offset := max(int64(0), info.Size()-limit)
 	data := make([]byte, info.Size()-offset)
 	_, err = file.ReadAt(data, offset)
-	if err != nil && len(data) == 0 {
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 	return data, nil

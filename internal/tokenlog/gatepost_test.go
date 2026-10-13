@@ -75,6 +75,76 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784332800000, 1784332810000);`, 
 	}
 }
 
+// Pi's JSONL schema spells the same two cache counters several ways across
+// versions: flat cacheRead/cacheWrite, a cacheCreation alias for cache
+// writes, and a nested cache:{read,write} object. A record carrying more
+// than one spelling of a counter (as can happen across a schema migration)
+// must not have them summed — that would double-count cache tokens, inflate
+// usage, and make the scheduler under-dispatch, stranding paid capacity.
+//
+// Mirrors the alias reconciliation already applied to Hermes records in
+// run.go (TestLoadRunArtifactHermesCacheReadPrefersLargestFieldValue).
+func TestLoadGatepostPiDoesNotDoubleCountAliasedCacheFields(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "viewer.db")
+	sessionPath := filepath.Join(directory, "pi.jsonl")
+	// Every alias reports the same underlying usage: 30 read, 4 written.
+	data := `{"type":"message","id":"a1","timestamp":"2026-07-18T00:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":30,"cacheWrite":4,"cacheCreation":4,"cache":{"read":30,"write":4}}}}
+`
+	if err := os.WriteFile(sessionPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := sql.Open("sqlite", databasePath)
+	_, err := db.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784332800000, 1784332810000);`, sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	claude, err := tokenlog.LoadGatepostPi(context.Background(), databasePath, "claude", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude) != 1 {
+		t.Fatalf("observations = %#v, want 1", claude)
+	}
+	if claude[0].CacheReadTokens != 30 {
+		t.Errorf("CacheReadTokens = %d, want 30 (largest alias, not the sum)", claude[0].CacheReadTokens)
+	}
+	if claude[0].CacheCreationTokens != 4 {
+		t.Errorf("CacheCreationTokens = %d, want 4 (largest alias, not the sum)", claude[0].CacheCreationTokens)
+	}
+}
+
+// Aliases need not agree: a partially-migrated record can carry a populated
+// new field and a zeroed legacy one. The larger value is the real count.
+func TestLoadGatepostPiPrefersLargestAliasWhenSpellingsDisagree(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "viewer.db")
+	sessionPath := filepath.Join(directory, "pi.jsonl")
+	data := `{"type":"message","id":"a1","timestamp":"2026-07-18T00:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"cache":{"read":77,"write":9}}}}
+`
+	if err := os.WriteFile(sessionPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := sql.Open("sqlite", databasePath)
+	_, err := db.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784332800000, 1784332810000);`, sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	claude, err := tokenlog.LoadGatepostPi(context.Background(), databasePath, "claude", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude) != 1 || claude[0].CacheReadTokens != 77 || claude[0].CacheCreationTokens != 9 {
+		t.Fatalf("observations = %#v, want CacheReadTokens=77 CacheCreationTokens=9 from the nested alias", claude)
+	}
+}
+
 func TestLoadGatepostPiAppliesTimestampCursor(t *testing.T) {
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "viewer.db")

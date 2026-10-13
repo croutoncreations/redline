@@ -10,6 +10,7 @@ import (
 )
 
 func TestRunEventsRoundTripInTimelineOrder(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{
@@ -53,6 +54,7 @@ func TestRunEventsRoundTripInTimelineOrder(t *testing.T) {
 }
 
 func TestRunEventValidation(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	if _, err := db.RecordRunEvent(context.Background(), domain.RunEvent{}); err == nil {
 		t.Fatal("expected validation error")
@@ -60,6 +62,7 @@ func TestRunEventValidation(t *testing.T) {
 }
 
 func TestListRunEventsReturnsMostRecentWhenTruncated(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 )
 
 func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +43,352 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 	}
 }
 
+// LatestSnapshot drives scheduler dispatch decisions via ORDER BY observed_at
+// DESC on a TEXT column. Under RFC3339Nano a whole-second snapshot encodes to
+// "…:00Z" and a later one in the same second to "…:00.5Z"; '.' < 'Z' so the
+// stale whole-second row would win and the scheduler would act on old usage.
+func TestSQLiteLatestSnapshotOrdersChronologicallyNotLexicographically(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	earlier := usageSnapshot(time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC), 0.50)
+	later := usageSnapshot(earlier.ObservedAt.Add(500*time.Millisecond), 0.40)
+	if err := db.SaveSnapshot(t.Context(), earlier, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(t.Context(), later, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, raw, err := db.LatestSnapshot(t.Context(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(later.ObservedAt) || got.Weekly.Remaining != 0.40 {
+		t.Fatalf("latest = %#v, want the chronologically later snapshot", got)
+	}
+	if string(raw) != `{"sequence":2}` {
+		t.Fatalf("raw = %s, want the later snapshot's payload", raw)
+	}
+}
+
+// Variable-width fractions are the second failure mode: 120ms encodes to
+// ".12Z" and 123ms to ".123Z", and ".12Z" > ".123Z" byte-wise.
+func TestSQLiteLatestSnapshotOrdersAcrossVariableWidthFractions(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	older := usageSnapshot(base.Add(120*time.Millisecond), 0.47)
+	newer := usageSnapshot(base.Add(123*time.Millisecond), 0.46)
+	if err := db.SaveSnapshot(t.Context(), older, []byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSnapshot(t.Context(), newer, []byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(newer.ObservedAt) || got.Weekly.Remaining != 0.46 {
+		t.Fatalf("latest = %#v, want the 123ms snapshot", got)
+	}
+}
+
+// Migration 24 rewrites timestamps written by earlier versions into the
+// fixed-width layout. Without it the formatTime change only helps new rows:
+// a legacy "…T18:00:00Z" still sorts above a new "…T18:00:00.000000000Z",
+// so every deployed database would stay mis-ordered after upgrading.
+func TestMigrationNormalizesLegacyVariableWidthTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rewind past migration 24 and plant legacy-format rows, mimicking a
+	// database written by a version that used time.RFC3339Nano directly.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+DELETE FROM schema_migrations WHERE version >= 24;
+INSERT INTO usage_snapshots (
+    provider, observed_at, short_remaining, short_resets_at,
+    weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+) VALUES
+    ('codex', '2026-07-16T18:00:00Z',   0.3, '2026-07-16T22:00:00Z',
+     0.50, '2026-07-17T05:00:00Z', 'openusage', 'high', '{"sequence":1}'),
+    ('codex', '2026-07-16T18:00:00.5Z', 0.3, '2026-07-16T22:00:00.5Z',
+     0.40, '2026-07-17T05:00:00.5Z', 'openusage', 'high', '{"sequence":2}');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening runs migration 24.
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 7, 16, 18, 0, 0, 500_000_000, time.UTC)
+	if !got.ObservedAt.Equal(want) || got.Weekly.Remaining != 0.40 {
+		t.Fatalf("latest = %#v, want the legacy .5Z snapshot (weekly 0.40) after migration", got)
+	}
+
+	// Values must be rewritten in place, not merely parsed correctly on read.
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	rows, err := raw.Query(`SELECT observed_at FROM usage_snapshots ORDER BY observed_at`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var stored []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"2026-07-16T18:00:00.000000000Z", "2026-07-16T18:00:00.500000000Z"}
+	if !slices.Equal(stored, expected) {
+		t.Fatalf("stored observed_at = %q, want %q", stored, expected)
+	}
+}
+
+// The rewrite used to issue one UPDATE ... WHERE column = old per distinct
+// value, a full scan of an unindexed column each time. A real database with
+// ~30k snapshots and ~37k dispatch attempts hung startup for many minutes.
+//
+// Asserted as a growth ratio rather than a wall-clock bound, so runner speed
+// and the race detector cancel out: quadrupling the rows should roughly
+// quadruple the time (linear) rather than multiply it by ~16 (quadratic).
+func TestMigrationTimestampRewriteScalesLinearly(t *testing.T) {
+	const small, large = 1500, 6000
+	// Best of a few runs each, to keep one scheduler hiccup from deciding it.
+	best := func(rows int) time.Duration {
+		fastest := time.Duration(1<<63 - 1)
+		for range 3 {
+			if elapsed := timeLegacyTimestampMigration(t, rows); elapsed < fastest {
+				fastest = elapsed
+			}
+		}
+		return fastest
+	}
+	smallTime, largeTime := best(small), best(large)
+	ratio := float64(largeTime) / float64(smallTime)
+	t.Logf("%d rows: %s, %d rows: %s, ratio %.1f", small, smallTime, large, largeTime, ratio)
+	if ratio > 8 {
+		t.Fatalf("4x the legacy rows took %.1fx as long (%s vs %s); the rewrite is not linear",
+			ratio, largeTime, smallTime)
+	}
+}
+
+// timeLegacyTimestampMigration plants rows distinct legacy timestamps, then
+// times the reopen that migrates them and checks none were left behind.
+func timeLegacyTimestampMigration(t *testing.T, rows int) time.Duration {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version >= 24`); err != nil {
+		t.Fatal(err)
+	}
+	// Distinct legacy values on every row, so a per-value rewrite does one
+	// full scan per row.
+	if _, err := raw.Exec(`
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?)
+INSERT INTO usage_snapshots (provider, observed_at, weekly_remaining, weekly_resets_at, source, confidence)
+SELECT 'codex', strftime('%Y-%m-%dT%H:%M:%SZ', '2026-01-01', '+' || n || ' seconds'),
+       0.5, '2026-07-17T05:00:00Z', 'openusage', 'high' FROM seq`, rows); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	db, err = store.Open(path)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var legacy int
+	if err := raw.QueryRow(`SELECT count(*) FROM usage_snapshots WHERE length(observed_at) <> 30`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != 0 {
+		t.Fatalf("%d of %d rows still carry legacy timestamps", legacy, rows)
+	}
+	return elapsed
+}
+
+// Before this change SaveSnapshot called Format(time.RFC3339Nano) directly,
+// without formatTime's .UTC() normalization, so a provider reporting a
+// numeric offset (openusage.parseTime preserves the parsed zone) was stored
+// as e.g. "2026-07-16T20:00:00+05:00". Digits sort below 'Z', so such a row
+// outranks every "…Z" value under ORDER BY observed_at DESC and keeps winning
+// LatestSnapshot even after newer rows arrive. The migration must normalize
+// offset forms to UTC, not just pad Z-form fractions.
+func TestMigrationNormalizesLegacyOffsetFormTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 20:00 at +05:00 is 15:00Z — earlier than the 16:00Z row added below.
+	plusFive := time.FixedZone("plus-five", 5*60*60)
+	legacy := time.Date(2026, 7, 16, 20, 0, 0, 0, plusFive).Format(time.RFC3339Nano)
+	if legacy != "2026-07-16T20:00:00+05:00" {
+		t.Fatalf("fixture encoding = %q, want an offset form", legacy)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+DELETE FROM schema_migrations WHERE version >= 24;
+INSERT INTO usage_snapshots (
+    provider, observed_at, short_remaining, short_resets_at,
+    weekly_remaining, weekly_resets_at, source, confidence, raw_payload
+) VALUES ('codex', ?, 0.3, ?, 0.99, ?, 'openusage', 'high', '{"sequence":"legacy"}');`,
+		legacy, legacy, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// A genuinely newer snapshot, written after the upgrade.
+	newer := usageSnapshot(time.Date(2026, 7, 16, 16, 0, 0, 0, time.UTC), 0.11)
+	if err := db.SaveSnapshot(t.Context(), newer, []byte(`{"sequence":"new"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ObservedAt.Equal(newer.ObservedAt) || got.Weekly.Remaining != 0.11 {
+		t.Fatalf("latest = %#v, want the newer 16:00Z snapshot; a legacy offset row is still winning",
+			got)
+	}
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var stored string
+	if err := raw.QueryRow(
+		`SELECT observed_at FROM usage_snapshots WHERE raw_payload = '{"sequence":"legacy"}'`,
+	).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "2026-07-16T15:00:00.000000000Z" {
+		t.Fatalf("legacy observed_at = %q, want it normalized to UTC fixed width", stored)
+	}
+}
+
+// CURRENT_TIMESTAMP columns hold "YYYY-MM-DD HH:MM:SS", not RFC3339. The
+// migration must leave values it cannot parse alone rather than corrupt them.
+func TestMigrationLeavesNonRFC3339TimestampsUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+DELETE FROM schema_migrations WHERE version >= 24;
+INSERT INTO provider_controls (provider_account_id, paused, updated_at)
+VALUES ('codex-main', 0, '2026-09-18 13:45:01');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var updatedAt string
+	if err := raw.QueryRow(
+		`SELECT updated_at FROM provider_controls WHERE provider_account_id = 'codex-main'`,
+	).Scan(&updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAt != "2026-09-18 13:45:01" {
+		t.Fatalf("provider_controls.updated_at = %q, want it left untouched", updatedAt)
+	}
+}
+
 func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +408,7 @@ func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 }
 
 func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +431,7 @@ func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
 }
 
 func TestSnapshotIdentityMigrationRemovesExistingDuplicates(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")
 	db, err := store.Open(path)
 	if err != nil {
@@ -157,6 +506,7 @@ FROM usage_snapshots LIMIT 1;`); err != nil {
 }
 
 func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +541,7 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 }
 
 func TestOpenMigratesExistingVersionTwoDatabase(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "redline.db")
 	legacy, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -213,6 +564,7 @@ INSERT INTO schema_migrations(version) VALUES (2);`); err != nil {
 }
 
 func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -235,6 +587,7 @@ func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
 }
 
 func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +615,7 @@ func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
 }
 
 func TestSQLiteReportsMissingProvider(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)

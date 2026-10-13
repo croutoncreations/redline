@@ -2,6 +2,22 @@ import Foundation
 import Testing
 @testable import RedlineKit
 
+@Test func usageSnapshotDecodesBankedResetsKeepingAbsentDistinctFromZero() throws {
+    let decoder = JSONDecoder()
+    let banked = try decoder.decode(UsageSnapshot.self, from: Data(#"""
+    {"weekly":{"remaining":0.4},"banked_resets":1,"banked_resets_expire_at":"2026-10-22T23:59:59Z"}
+    """#.utf8))
+    #expect(banked.bankedResets == 1)
+    #expect(banked.bankedResetsExpireAt == "2026-10-22T23:59:59Z")
+
+    let zero = try decoder.decode(UsageSnapshot.self, from: Data(#"{"banked_resets":0}"#.utf8))
+    #expect(zero.bankedResets == 0)
+
+    let absent = try decoder.decode(UsageSnapshot.self, from: Data(#"{"weekly":{"remaining":0.4}}"#.utf8))
+    #expect(absent.bankedResets == nil)
+    #expect(absent.bankedResetsExpireAt == nil)
+}
+
 @Test func dashboardSnapshotDecodesProviderWindowsAndOperationalState() throws {
     let data = Data(#"""
     {

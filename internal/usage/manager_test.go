@@ -125,6 +125,29 @@ func TestExplicitNativeFailureNeverCallsOpenUsage(t *testing.T) {
 	}
 }
 
+// mapSource is a value type holding a map, like the demo server's static
+// source. Comparing two interfaces holding it panics at runtime.
+type mapSource struct {
+	snapshots map[string]decision.UsageSnapshot
+}
+
+func (mapSource) Name() string { return "demo" }
+func (s mapSource) Fetch(context.Context, config.Provider) (decision.UsageSnapshot, []byte, error) {
+	return s.snapshots["codex"], nil, nil
+}
+
+func TestPinnedSourceWithUncomparableTypeDoesNotPanic(t *testing.T) {
+	now := time.Now()
+	source := mapSource{snapshots: map[string]decision.UsageSnapshot{"codex": snapshot("demo", now)}}
+	manager := usage.NewManager(source, source, func() time.Time { return now })
+	for _, mode := range []string{"native", "openusage"} {
+		got, _, err := manager.Fetch(context.Background(), "codex-main", config.Provider{Provider: "codex", UsageSource: mode})
+		if err != nil || got.Source != "demo" {
+			t.Fatalf("mode=%s snapshot=%#v err=%v", mode, got, err)
+		}
+	}
+}
+
 type sourceResult struct {
 	snapshot decision.UsageSnapshot
 	raw      []byte

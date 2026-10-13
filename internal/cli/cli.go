@@ -54,6 +54,12 @@ type schedulerResponse struct {
 }
 
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	return RunWithInput(args, os.Stdin, stdout, stderr, now)
+}
+
+// RunWithInput is Run with an explicit stdin, used by commands that accept a
+// prompt on standard input ("-").
+func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now func() time.Time) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		writeHelp(stdout)
 		return 0
@@ -72,7 +78,7 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -103,12 +109,22 @@ func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	case "usage":
 		return runUsage(client, remaining[1:], stdout, stderr)
 	case "task":
+		if len(remaining) > 1 && remaining[1] == "add" {
+			return runTaskAddFlags(client, remaining[2:], stdin, stdout, stderr)
+		}
 		return runResource(client, "tasks", remaining[1:], stdout, stderr)
+	case "later":
+		return runLater(client, remaining[1:], stdin, stdout, stderr)
 	case "profile":
 		return runResource(client, "profiles", remaining[1:], stdout, stderr)
 	case "scheduler":
 		return runScheduler(client, remaining[1:], stdout, stderr)
 	case "run":
+		if len(remaining) > 1 && remaining[1] == "watch" {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runWatch(ctx, client, remaining[2:], stdout, stderr)
+		}
 		return runRuns(client, remaining[1:], stdout, stderr)
 	case "notification":
 		return runNotifications(client, remaining[1:], stdout, stderr)
@@ -130,9 +146,11 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, profile, scheduler, run, notification, candidates, pause, resume, pair,")
-	fmt.Fprintln(output, "          version")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
+	fmt.Fprintln(output, "          pair, version")
 	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
+	fmt.Fprintln(output, "                     is behind pace and above your reserve")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
@@ -148,7 +166,7 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 0
 	}
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--provider claude-main|codex-main] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open]")
+		fmt.Fprintln(stderr, "usage: redline demo <list|serve> [--scenario NAME] [--provider claude-main|codex-main] [--listen 127.0.0.1:7446] [--state-dir DIR] [--keep] [--open] [--run-duration 1.2s]")
 		return 1
 	}
 	flags := flag.NewFlagSet("demo serve", flag.ContinueOnError)
@@ -159,7 +177,12 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	stateDir := flags.String("state-dir", "", "new or empty isolated state directory")
 	keep := flags.Bool("keep", false, "preserve temporary demo state after exit")
 	openDashboard := flags.Bool("open", false, "open the demo dashboard in the default browser")
+	runDuration := flags.Duration("run-duration", 0, "how long an admitted demo job stays running (default 1.2s); lengthen for recordings")
 	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if *runDuration < 0 || *runDuration > 10*time.Minute {
+		fmt.Fprintln(stderr, "--run-duration must be between 0 and 10m")
 		return 1
 	}
 	if err := validateDemoListen(*listen); err != nil {
@@ -186,10 +209,10 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 		return 1
 	}
 	defer env.Close()
-	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
-		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	apiServer := api.NewDemoServer(env.Config, env.Database, now, env.Snapshots,
+		demo.Discoverer{Now: now}, demo.Executor{Store: env.Database, Root: root, Now: now, Delay: *runDuration, Shutdown: ctx.Done()})
 	server := &http.Server{Addr: *listen, Handler: apiServer, ReadHeaderTimeout: 5 * time.Second}
 	address := "http://" + listener.Addr().String()
 	fmt.Fprintf(stdout, "Redline demo (%s) listening on %s\n", *scenario, address)
@@ -647,6 +670,7 @@ func runResource(
 		writeJSON(stdout, output)
 		return 0
 	case "add":
+		resourceName := strings.TrimSuffix(resource, "s")
 		flags := flag.NewFlagSet(resource+" add", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		file := flags.String("file", "", "YAML definition")
@@ -659,7 +683,7 @@ func runResource(
 		}
 		request, err := readYAML(*file)
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "load %s definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		var output any
@@ -669,7 +693,7 @@ func runResource(
 			output = &domain.ExecutionProfile{}
 		}
 		if err := client.Do(context.Background(), http.MethodPost, "/v1/"+resource, request, output); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "create %s from definition %q: %v\n", resourceName, *file, err)
 			return 1
 		}
 		if *jsonOutput {
@@ -704,13 +728,24 @@ func runResource(
 		if *jsonOutput || args[0] == "dispatch" {
 			writeJSON(stdout, output)
 		} else {
-			fmt.Fprintf(stdout, "%sd task %s\n", args[0], task.ID)
+			fmt.Fprintf(stdout, "%s task %s\n", taskControlPastTense(args[0]), task.ID)
 		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown %s command %q\n", strings.TrimSuffix(resource, "s"), args[0])
 		return 1
 	}
+}
+
+// taskControlPastTense renders a task control verb in the past tense for the
+// confirmation line. Appending "d" suits enable and disable but produces
+// "retryd" for retry. The remaining control, dispatch, takes the JSON branch
+// above and never reaches here.
+func taskControlPastTense(action string) string {
+	if action == "retry" {
+		return "retried"
+	}
+	return action + "d"
 }
 
 func runCandidates(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
@@ -858,8 +893,12 @@ func renderTerminalQR(output io.Writer, bitmap [][]bool) {
 	}
 	for y := -margin; y < len(bitmap)+margin; y += 2 {
 		for x := -margin; x < width+margin; x++ {
-			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && !bitmap[y][x]
-			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && !bitmap[y+1][x]
+			// go-qrcode sets bitmap[y][x] true for DARK modules ("bitmap[y][x]
+			// is true if the pixel at (x, y) is set"), so the cell value is
+			// used directly. Negating it inverted the code — rendering the
+			// quiet zone as solid ink — which scanners cannot read.
+			top := y >= 0 && y < len(bitmap) && x >= 0 && x < len(bitmap[y]) && bitmap[y][x]
+			bottom := y+1 >= 0 && y+1 < len(bitmap) && x >= 0 && x < len(bitmap[y+1]) && bitmap[y+1][x]
 			switch {
 			case top && bottom:
 				fmt.Fprint(output, "█")
@@ -978,7 +1017,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 
 func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs>")
+		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs|watch>")
 		return 1
 	}
 	switch args[0] {
@@ -1089,11 +1128,11 @@ func providerFlags(name string, args []string, stderr io.Writer) (string, bool, 
 func readYAML(path string) (any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read definition: %w", err)
+		return nil, fmt.Errorf("read file: %w; check the --file path and permissions", err)
 	}
 	var value any
 	if err := yaml.Unmarshal(data, &value); err != nil {
-		return nil, fmt.Errorf("decode YAML definition: %w", err)
+		return nil, fmt.Errorf("decode YAML: %w; fix the YAML syntax in the file", err)
 	}
 	return value, nil
 }
@@ -1102,6 +1141,11 @@ func writeJSON(writer io.Writer, value any) {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(value)
+}
+
+// writeJSONLine writes one compact JSON object followed by a newline.
+func writeJSONLine(writer io.Writer, value any) {
+	_ = json.NewEncoder(writer).Encode(value)
 }
 
 func writeDecisionText(w io.Writer, response decisionResponse) {

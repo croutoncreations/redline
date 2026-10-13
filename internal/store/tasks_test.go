@@ -15,6 +15,7 @@ import (
 )
 
 func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -45,6 +46,7 @@ func TestTaskQueueSelectsHighestPriorityThenOldestEligible(t *testing.T) {
 }
 
 func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -71,6 +73,7 @@ func TestTaskCanBeUpdatedAndDeletedBeforeItRuns(t *testing.T) {
 }
 
 func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -106,6 +109,7 @@ func TestRunningOrReferencedTaskCannotBeDeleted(t *testing.T) {
 }
 
 func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	want := domain.ExecutionProfile{
@@ -133,6 +137,7 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 }
 
 func TestExecutionProfileCanBeUpdatedAndDeletedWhenUnused(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "editable", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -159,6 +164,7 @@ func TestExecutionProfileCanBeUpdatedAndDeletedWhenUnused(t *testing.T) {
 }
 
 func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{ID: "in-use", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}
@@ -174,6 +180,7 @@ func TestReferencedExecutionProfileCannotBeDeleted(t *testing.T) {
 }
 
 func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -207,6 +214,7 @@ func TestTaskQueueHonorsIntervalAndRepositoryChange(t *testing.T) {
 }
 
 func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx"}, now); err != nil {
@@ -222,6 +230,7 @@ func TestTaskQueueRoundTripsDispatchTier(t *testing.T) {
 }
 
 func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
@@ -246,6 +255,7 @@ func TestEligibleTasksLeavesRepositoryChangeEvaluationToDispatcher(t *testing.T)
 }
 
 func TestSchedulerDecisionIsPersistedWithoutMutatingTask(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -275,6 +285,7 @@ func TestSchedulerDecisionIsPersistedWithoutMutatingTask(t *testing.T) {
 }
 
 func TestTaskControlTransitionsAndRequeuesRetryAtBottom(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -305,6 +316,7 @@ func TestTaskControlTransitionsAndRequeuesRetryAtBottom(t *testing.T) {
 }
 
 func TestProviderPauseStatePersists(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -324,6 +336,7 @@ func TestProviderPauseStatePersists(t *testing.T) {
 }
 
 func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -350,6 +363,7 @@ func TestProviderPolicyOverridePersistsWithoutChangingPause(t *testing.T) {
 }
 
 func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	if err := db.SetProviderPaused(ctx, "codex-main", true); err != nil {
@@ -380,6 +394,7 @@ func TestProviderConcurrencyOverridePersistsWithoutChangingOtherControls(t *test
 }
 
 func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -409,6 +424,7 @@ func TestRunAdmissionIsAtomicAndOnlyOneRunPerProvider(t *testing.T) {
 }
 
 func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
@@ -458,6 +474,7 @@ func TestConcurrentAdmissionCannotDuplicateProviderRun(t *testing.T) {
 }
 
 func TestRunAdmissionEnforcesRuntimeConnectionAndAgentContextLimits(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	connection := domain.RuntimeConnection{
@@ -519,6 +536,7 @@ func TestRunAdmissionEnforcesRuntimeConnectionAndAgentContextLimits(t *testing.T
 }
 
 func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profiles := []domain.ExecutionProfile{
@@ -563,6 +581,7 @@ func TestConcurrentAdmissionAllowsIndependentProviders(t *testing.T) {
 }
 
 func TestAdmissionAllowsConfiguredProviderConcurrency(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "first", "second", "third")
@@ -581,6 +600,7 @@ func TestAdmissionAllowsConfiguredProviderConcurrency(t *testing.T) {
 }
 
 func TestAdmissionEnforcesOnlyConfiguredPoolLimits(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
@@ -601,6 +621,7 @@ func TestAdmissionEnforcesOnlyConfiguredPoolLimits(t *testing.T) {
 }
 
 func TestConcurrentAdmissionHonorsConfiguredProviderLimit(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "first", "second", "third")
@@ -636,6 +657,7 @@ func TestConcurrentAdmissionHonorsConfiguredProviderLimit(t *testing.T) {
 }
 
 func TestConcurrentAdmissionHonorsConfiguredPoolLimit(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	createAdmissionTasks(t, db, now, "fable-one", "fable-two", "opus")
@@ -711,6 +733,7 @@ func createAdmissionTasks(t *testing.T, db *store.DB, now time.Time, taskIDs ...
 }
 
 func TestHasActiveRun(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	if err := db.CreateProfile(context.Background(), domain.ExecutionProfile{
@@ -738,6 +761,7 @@ func TestHasActiveRun(t *testing.T) {
 }
 
 func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -790,6 +814,7 @@ func TestSuccessfulRecurringRunRequeuesAtBottom(t *testing.T) {
 }
 
 func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
+	t.Parallel()
 	db := openTaskDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
@@ -817,6 +842,7 @@ func TestRecoverInterruptedRunsMarksRunAndTaskFailed(t *testing.T) {
 }
 
 func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "redline.db")
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	db, err := store.Open(databasePath)
@@ -884,6 +910,186 @@ func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
 			!strings.Contains(string(events[0].Payload), `"recovery":"service_restart"`) {
 			t.Fatalf("recovery events for %s = %#v err=%v", run.ID, events, err)
 		}
+	}
+}
+
+// TestRetryControlRequeuesFailedTaskAtQueueBottom verifies the "retry" action in
+// SetTaskControl.  It covers three previously untested branches:
+//   - retry on a failed task succeeds and re-enters it behind all queued tasks
+//     (queue_sequence > every other task's sequence, so it won't jump the queue)
+//   - retry on a non-failed task returns ErrNotFound (state guard prevents misuse)
+//   - an unknown action string returns an error immediately
+func TestRetryControlRequeuesFailedTaskAtQueueBottom(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+
+	profile := domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}
+	if err := db.CreateProfile(ctx, profile, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two queued tasks so we can verify the failed one lands below them.
+	for _, id := range []string{"ahead-1", "ahead-2"} {
+		if err := db.CreateTask(ctx, domain.Task{
+			ID: id, Name: id, Priority: 50, ExecutionProfileID: profile.ID, Type: domain.OneOff,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create and fail the target task.
+	if err := db.CreateTask(ctx, domain.Task{
+		ID: "failed-task", Name: "Flaky", Priority: 50,
+		ExecutionProfileID: profile.ID, Type: domain.OneOff,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(ctx, "run-1", "failed-task", "codex-main", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(ctx, "run-1", domain.RunCompletion{
+		State: domain.RunFailed, Error: "transient error",
+	}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: task must be in failed state before retry.
+	before, err := db.GetTask(ctx, "failed-task")
+	if err != nil || before.State != domain.Failed {
+		t.Fatalf("pre-retry task state = %q, err = %v; want failed", before.State, err)
+	}
+
+	// --- retry happy path ---
+	if err := db.SetTaskControl(ctx, "failed-task", "retry", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("retry failed task: %v", err)
+	}
+	after, err := db.GetTask(ctx, "failed-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != domain.Queued || !after.Enabled {
+		t.Fatalf("after retry: state=%q enabled=%v; want queued+enabled", after.State, after.Enabled)
+	}
+
+	// The retried task must sort behind the two tasks that were already in the queue.
+	// EligibleTasks returns tasks in priority-then-queue_sequence order.
+	eligible, err := db.EligibleTasks(ctx, "codex-main", now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, len(eligible))
+	for i, task := range eligible {
+		ids[i] = task.ID
+	}
+	last := ids[len(ids)-1]
+	if last != "failed-task" {
+		t.Fatalf("eligible order = %v; want failed-task last (retried tasks go to queue bottom)", ids)
+	}
+
+	// --- retry on a non-failed (queued) task must return ErrNotFound ---
+	if err := db.SetTaskControl(ctx, "ahead-1", "retry", now.Add(3*time.Minute)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("retry queued task: got %v, want ErrNotFound", err)
+	}
+
+	// --- unknown action must return an error ---
+	if err := db.SetTaskControl(ctx, "failed-task", "frobnicate", now); err == nil {
+		t.Fatal("unknown action: want error, got nil")
+	}
+}
+
+// TestCreateTaskRejectsInvalidDefinitions verifies the validation enforced by
+// validateTaskDefinition, which guards both CreateTask and UpdateTask.  The
+// branches for missing required fields, invalid DispatchTier, and negative
+// MinInterval were previously uncovered and would silently insert corrupt
+// records if the caller omitted them.
+func TestCreateTaskRejectsInvalidDefinitions(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+
+	profile := domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}
+	if err := db.CreateProfile(ctx, profile, now); err != nil {
+		t.Fatal(err)
+	}
+
+	validBase := domain.Task{
+		ID: "task", Name: "Task", Priority: 50,
+		ExecutionProfileID: profile.ID, Type: domain.OneOff,
+	}
+
+	cases := []struct {
+		name    string
+		mutate  func(domain.Task) domain.Task
+		wantErr string
+	}{
+		{
+			name: "missing ID",
+			mutate: func(t domain.Task) domain.Task {
+				t.ID = ""
+				return t
+			},
+			wantErr: "required",
+		},
+		{
+			name: "missing Name",
+			mutate: func(t domain.Task) domain.Task {
+				t.Name = ""
+				return t
+			},
+			wantErr: "required",
+		},
+		{
+			name: "missing ExecutionProfileID",
+			mutate: func(t domain.Task) domain.Task {
+				t.ExecutionProfileID = ""
+				return t
+			},
+			wantErr: "required",
+		},
+		{
+			name: "invalid Type",
+			mutate: func(t domain.Task) domain.Task {
+				t.Type = "weekly"
+				return t
+			},
+			wantErr: "one_off or recurring",
+		},
+		{
+			name: "negative MinInterval",
+			mutate: func(t domain.Task) domain.Task {
+				t.MinInterval = -time.Hour
+				return t
+			},
+			wantErr: "negative",
+		},
+		{
+			name: "invalid DispatchTier",
+			mutate: func(t domain.Task) domain.Task {
+				t.DispatchTier = "immediately"
+				return t
+			},
+			wantErr: "dispatch tier",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := tc.mutate(validBase)
+			err := db.CreateTask(ctx, task, now)
+			if err == nil {
+				t.Fatalf("CreateTask(%q): want error containing %q, got nil", tc.name, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("CreateTask(%q): error %q does not contain %q", tc.name, err.Error(), tc.wantErr)
+			}
+		})
 	}
 }
 

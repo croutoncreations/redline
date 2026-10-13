@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,6 +202,26 @@ func newServer(
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
 	}
+	// Persist rate-limit lockouts beside the on-disk database, which the
+	// store has already opened (and so created) by now. A path with no file
+	// behind it is in-memory or a test placeholder; persisting there would
+	// scatter the lockout file into the working tree.
+	if databasePath, err := filepath.Abs(cfg.Database); err == nil {
+		if info, statErr := os.Stat(databasePath); statErr == nil && info.Mode().IsRegular() {
+			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
+		}
+	}
+	// The banked-reset lookup reads the one local Claude Code login. With
+	// several Claude accounts configured it cannot tell which account that
+	// login belongs to, and a count shown on the wrong account is worse
+	// than none.
+	claudeAccounts := 0
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Provider, "claude") {
+			claudeAccounts++
+		}
+	}
+	server.usageSources.SkipBankedResets = claudeAccounts > 1
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -261,6 +283,7 @@ func newServer(
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/metrics/launch", server.launchMetrics)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/completions", server.listRunCompletions)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
@@ -1987,6 +2010,43 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 	return err
 }
 
+func (s *Server) listRunCompletions(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("baseline") == "true" {
+		cursor, err := s.store.LatestCompletedRunCursor(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cursor": cursor, "runs": []domain.Run{}})
+		return
+	}
+	limit := 100
+	if raw := query.Get("limit"); raw != "" {
+		var err error
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "limit must be between 1 and 100"})
+			return
+		}
+	}
+	cursor := int64(0)
+	if raw := query.Get("after"); raw != "" {
+		var err error
+		cursor, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cursor < 0 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after must be a nonnegative completion cursor"})
+			return
+		}
+	}
+	runs, next, err := s.store.ListCompletedRuns(r.Context(), cursor, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "cursor": next})
+}
+
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	runs, err := s.store.ListRuns(r.Context(), limit)
@@ -2398,7 +2458,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func parseDuration(value string) (time.Duration, error) {
 	if strings.HasSuffix(value, "d") {
 		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
-		if err != nil || days <= 0 {
+		if err != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 ||
+			days > float64(math.MaxInt64)/float64(24*time.Hour) {
 			return 0, fmt.Errorf("invalid duration")
 		}
 		return time.Duration(days * float64(24*time.Hour)), nil
