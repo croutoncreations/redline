@@ -159,6 +159,7 @@ func Scenarios() []Scenario {
 		{"decision-run", "The same task admitted because capacity surplus exceeds the pace trigger"},
 		{"decision-run-near-expiry", "The same task admitted shortly before a weekly reset with capacity still unused"},
 		{"decision-unknown", "The same task held because its synthetic usage sample is stale"},
+		{"multi-account", "Three synthetic Claude accounts (one stale) and Codex, for the accounts carousel"},
 	}
 }
 
@@ -200,6 +201,9 @@ func CreateForProvider(ctx context.Context, scenario, provider, root string, now
 	if isDecisionScenario(scenario) {
 		snapshots = decisionFixtureSnapshots(scenario, provider, now)
 	}
+	if scenario == "multi-account" {
+		snapshots = multiAccountSnapshots(now)
+	}
 	env := &Environment{Root: root, Config: cfg, Database: database, Snapshots: snapshots}
 	if err := seed(ctx, env, scenario, provider, now); err != nil {
 		database.Close()
@@ -226,19 +230,40 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 		pace = 0.30
 		label += " · " + strings.TrimSuffix(provider, "-main")
 	}
+	providers := map[string]config.Provider{
+		"claude-main": {Provider: "claude", UsageSource: "native", WindowWeeklyCost: .10, Policy: "standard"},
+		"codex-main":  {Provider: "codex", UsageSource: "native", WindowWeeklyCost: .10, Policy: "standard"},
+	}
+	if scenario == "multi-account" {
+		// Synthetic accounts. The cards are made-up ids; nothing is fetched.
+		providers["claude-main"] = config.Provider{Provider: "claude", UsageSource: "native", Label: "Personal",
+			WindowWeeklyCost: .10, Policy: "standard"}
+		providers["claude-client"] = config.Provider{Provider: "claude", UsageSource: "openusage", OpenUsageURL: "http://127.0.0.1:1",
+			OpenUsageCard: "claude@d3a0c11e", Label: "Client — Northwind long-running engagement", WindowWeeklyCost: .10, Policy: "standard"}
+		providers["claude-side"] = config.Provider{Provider: "claude", UsageSource: "openusage", OpenUsageURL: "http://127.0.0.1:1",
+			OpenUsageCard: "claude@d3a05de0", Label: "Side project", WindowWeeklyCost: .10, Policy: "standard"}
+	}
 	return config.Config{
 		Database: filepath.Join(root, "redline-demo.db"), RunArtifactsDir: filepath.Join(root, "runs"),
 		ActivePolicy: "standard", MaxSnapshotAge: "15m", DemoScenario: label,
 		Scheduler:    config.Scheduler{Enabled: true, PollInterval: "5m"},
 		UsageMonitor: config.UsageMonitor{Enabled: false},
-		Providers: map[string]config.Provider{
-			"claude-main": {Provider: "claude", UsageSource: "native", WindowWeeklyCost: .10, Policy: "standard"},
-			"codex-main":  {Provider: "codex", UsageSource: "native", WindowWeeklyCost: .10, Policy: "standard"},
-		},
+		Providers:    providers,
 		Policies: map[string]config.Policy{
-			"standard": {TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: &pace},
+			"standard": standardPolicy(scenario, &pace),
 		},
 	}
+}
+
+// standardPolicy is the demo's policy. The multi-account scenario adds the
+// 72h/50% and 24h/20% weekly floors so the account pages draw floor ticks;
+// every other scenario keeps the policy its screenshots were taken with.
+func standardPolicy(scenario string, pace *float64) config.Policy {
+	policy := config.Policy{TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: pace}
+	if scenario == "multi-account" {
+		policy.PaceThresholds = []config.PaceThreshold{{TimeRemaining: "72h", MinWeeklyRemaining: .5}, {TimeRemaining: "24h", MinWeeklyRemaining: .2}}
+	}
+	return policy
 }
 
 func decisionFixtureSnapshots(scenario, provider string, now time.Time) map[string]decision.UsageSnapshot {
@@ -268,6 +293,34 @@ func decisionFixtureSnapshots(scenario, provider string, now time.Time) map[stri
 	return result
 }
 
+// multiAccountSnapshots: three synthetic Claude accounts with different plans,
+// windows and reset credits (one marked stale by its source), plus Codex.
+// Plans are labels only.
+func multiAccountSnapshots(now time.Time) map[string]decision.UsageSnapshot {
+	result := fixtureSnapshots(now)
+	two, expiresSoon, expiresLater := 2, now.Add(4*24*time.Hour), now.Add(10*24*time.Hour)
+	personal := result["claude-main"]
+	personal.Plan, personal.Source = "Max 20x", "demo"
+	personal.Weekly = decision.UsageWindow{Remaining: .41, ResetsAt: now.Add(76 * time.Hour)}
+	personal.Allowances[0].ResetsAt = personal.Weekly.ResetsAt
+	personal.BankedResets, personal.BankedResetsExpireAt = &two, &expiresSoon
+	personal.BankedResetsExpiries = []time.Time{expiresSoon, expiresLater}
+	result["claude-main"] = personal
+	result["claude-client"] = decision.UsageSnapshot{
+		Provider: "claude", ObservedAt: now, Source: "demo", Confidence: "synthetic", Plan: "Team",
+		Short:  &decision.UsageWindow{Remaining: 0, ResetsAt: now.Add(57 * time.Minute)},
+		Weekly: decision.UsageWindow{Remaining: .58, ResetsAt: now.Add(4*24*time.Hour + 8*time.Hour)},
+	}
+	result["claude-side"] = decision.UsageSnapshot{
+		// Fresh, but the source itself says the numbers are out of date --
+		// how an OpenUsage card whose updates are blocked arrives.
+		Provider: "claude", ObservedAt: now, Source: "demo", Confidence: "synthetic", Plan: "Pro",
+		ShortWindowNotStarted: true, SourceStale: true,
+		Weekly: decision.UsageWindow{Remaining: 0, ResetsAt: now.Add(30 * time.Hour)},
+	}
+	return result
+}
+
 func fixtureSnapshots(now time.Time) map[string]decision.UsageSnapshot {
 	shortReset := now.Add(2*time.Hour + 12*time.Minute)
 	weeklyReset := now.Add(3*24*time.Hour + 8*time.Hour)
@@ -286,7 +339,9 @@ func fixtureSnapshots(now time.Time) map[string]decision.UsageSnapshot {
 }
 
 func seed(ctx context.Context, env *Environment, scenario, provider string, now time.Time) error {
-	for _, snapshot := range env.Snapshots {
+	for account, snapshot := range env.Snapshots {
+		// Usage is stored per account; the map key is the account id.
+		snapshot.Account = account
 		raw, _ := json.Marshal(snapshot)
 		if err := env.Database.SaveSnapshot(ctx, snapshot, raw); err != nil {
 			return err

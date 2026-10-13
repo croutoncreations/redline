@@ -42,7 +42,23 @@ notifications:
   timeout: 30s
   events: [run.started, run.completed, run.failed, scheduler.error]
 
+# Display-only Cursor and Grok Bot usage for the dashboards. Never affects
+# scheduling. off (default), openusage (OpenUsage's cached Cursor card),
+# native (read the signed-in Cursor app's token without refreshing it), or auto.
+cursor_usage:
+  source: off
+  poll_interval: 5m
+
 providers:
+  # To queue jobs on Cursor, add a provider: cursor account (see
+  # docs/profiles-and-tasks.md#cursor). It runs the Cursor CLI (`cursor-agent`, sandboxed) with its
+  # own login and is scheduled only from the monthly subscription pools, never
+  # on-demand spend:
+  #   cursor-main:
+  #     provider: cursor
+  #     usage_source: openusage
+  #     openusage_url: http://127.0.0.1:6736
+  #     window_weekly_cost: 0.10
   codex-main:
     provider: codex
     # Optional provider default. If omitted, active_policy is used. A dashboard
@@ -74,6 +90,16 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Optional name shown in the apps instead of the ID (never an email).
+    # label: Personal
+    # More Claude accounts: sign in to each in OpenUsage on this Mac, list the
+    # cards with `redline account discover claude`, and add one account per
+    # card (`redline account add claude-client --provider claude --card
+    # claude@ab12cd34 --label Client`). Each account reads only its own card
+    # and is scheduled only by tasks whose profile names it; Redline never
+    # moves work between accounts. Without a card an account reads the
+    # default login, and only one Claude account may do that.
+    # openusage_card: claude
     # Example: allow two Claude runs, but never overlap two Fable runs.
     # max_concurrent_runs: 2
     # pool_concurrency:

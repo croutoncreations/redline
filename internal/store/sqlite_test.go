@@ -33,7 +33,7 @@ func TestSQLiteSavesAndReturnsLatestSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, raw, err := db.LatestSnapshot(ctx, "codex")
+	got, raw, err := db.LatestSnapshot(ctx, "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestSQLiteLatestSnapshotOrdersChronologicallyNotLexicographically(t *testin
 		t.Fatal(err)
 	}
 
-	got, raw, err := db.LatestSnapshot(t.Context(), "codex")
+	got, raw, err := db.LatestSnapshot(t.Context(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSQLiteLatestSnapshotOrdersAcrossVariableWidthFractions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	got, _, err := db.LatestSnapshot(t.Context(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ INSERT INTO usage_snapshots (
 	}
 	defer db.Close()
 
-	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	got, _, err := db.LatestSnapshot(t.Context(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ INSERT INTO usage_snapshots (
 		t.Fatal(err)
 	}
 
-	got, _, err := db.LatestSnapshot(t.Context(), "codex")
+	got, _, err := db.LatestSnapshot(t.Context(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestSQLiteDeduplicatesSnapshotIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := db.ListSnapshots(t.Context(), "claude", 10)
+	got, err := db.ListSnapshots(t.Context(), "", "claude", 10)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("snapshots=%#v err=%v", got, err)
 	}
@@ -426,7 +426,7 @@ func TestSQLiteReturnsLatestSnapshotForSelectedSource(t *testing.T) {
 	if err := db.SaveSnapshot(t.Context(), newer, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := db.LatestSnapshotFromSource(t.Context(), older.Provider, "openusage")
+	got, _, err := db.LatestSnapshotFromSource(t.Context(), "", older.Provider, "openusage")
 	if err != nil || got.Source != "openusage" || got.Weekly.Remaining != .52 {
 		t.Fatalf("snapshot=%#v err=%v", got, err)
 	}
@@ -468,11 +468,11 @@ func TestContradictoryStoredShortWindowLoadsAsAValidSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			latest, _, err := db.LatestSnapshot(t.Context(), snapshot.Provider)
+			latest, _, err := db.LatestSnapshot(t.Context(), "", snapshot.Provider)
 			if err != nil {
 				t.Fatal(err)
 			}
-			listed, err := db.ListSnapshots(t.Context(), snapshot.Provider, 10)
+			listed, err := db.ListSnapshots(t.Context(), "", snapshot.Provider, 10)
 			if err != nil || len(listed) != 1 {
 				t.Fatalf("ListSnapshots = %d, %v", len(listed), err)
 			}
@@ -553,7 +553,7 @@ FROM usage_snapshots LIMIT 1;`); err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	got, err := db.ListSnapshots(t.Context(), "codex", 10)
+	got, err := db.ListSnapshots(t.Context(), "", "codex", 10)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("snapshots=%#v err=%v", got, err)
 	}
@@ -582,7 +582,7 @@ func TestSQLiteRoundTripsSupplementalAllowancePools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := db.LatestSnapshot(t.Context(), "claude")
+	got, _, err := db.LatestSnapshot(t.Context(), "", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestSQLitePreservesSnapshotWithoutShortWindow(t *testing.T) {
 	if err := db.SaveSnapshot(context.Background(), snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	got, _, err := db.LatestSnapshot(context.Background(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestListSnapshotsReturnsRecentHistoryChronologically(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := db.ListSnapshots(context.Background(), "claude", 2)
+	got, err := db.ListSnapshots(context.Background(), "", "claude", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestSQLiteReportsMissingProvider(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, _, err := db.LatestSnapshot(context.Background(), "claude"); err == nil {
+	if _, _, err := db.LatestSnapshot(context.Background(), "", "claude"); err == nil {
 		t.Fatal("expected not-found error")
 	}
 }
@@ -727,7 +727,7 @@ func TestSQLiteRoundTripsBankedResets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	got, _, err := db.LatestSnapshot(context.Background(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +758,7 @@ func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
 	if err := db.SaveSnapshot(context.Background(), withZero, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	got, _, err := db.LatestSnapshot(context.Background(), "", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +774,7 @@ func TestSQLiteKeepsZeroAndAbsentBankedResetsDistinct(t *testing.T) {
 	if err := db.SaveSnapshot(context.Background(), absent, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err = db.LatestSnapshot(context.Background(), "claude")
+	got, _, err = db.LatestSnapshot(context.Background(), "", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestListSnapshotsCarriesBankedResets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	listed, err := db.ListSnapshots(context.Background(), "codex", 10)
+	listed, err := db.ListSnapshots(context.Background(), "", "codex", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,6 +848,7 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 	// Every field set to something distinguishable from its zero value.
 	full := decision.UsageSnapshot{
 		Provider:   "codex",
+		Account:    "codex-main",
 		ObservedAt: base,
 		Short:      &decision.UsageWindow{Remaining: 0.25, ResetsAt: base.Add(3 * time.Hour)},
 		Weekly:     decision.UsageWindow{Remaining: 0.5, ResetsAt: base.Add(48 * time.Hour)},
@@ -860,6 +861,9 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		ShortWindowUnavailable: true,
 		BankedResets:           &resets,
 		BankedResetsExpireAt:   &resetsExpire,
+		BankedResetsExpiries:   []time.Time{resetsExpire, resetsExpire.Add(24 * time.Hour)},
+		Plan:                   "Pro",
+		SourceStale:            true,
 	}
 	// ShortWindowNotStarted cannot be valid beside a timed or unavailable
 	// window (UsageSnapshot.Validate), so it rides a second snapshot. Between
@@ -867,7 +871,14 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 	notStarted := full
 	notStarted.ObservedAt = base.Add(-time.Minute)
 	notStarted.Short, notStarted.ShortWindowUnavailable, notStarted.ShortWindowNotStarted = nil, false, true
-	onlyOnNotStarted := map[string]bool{"ShortWindowNotStarted": true}
+	// WeeklyUnavailable forbids a weekly value and a weekly allowance, so it
+	// rides the second snapshot too.
+	notStarted.WeeklyUnavailable, notStarted.Weekly = true, decision.UsageWindow{}
+	notStarted.Allowances = []decision.AllowanceWindow{{
+		Key: "model:fable:weekly", SourceLabel: "Fable", Scope: "model", Role: "weekly",
+		Remaining: 0.9, ResetsAt: base.Add(40 * time.Hour), PeriodDurationSeconds: 604800,
+	}}
+	onlyOnNotStarted := map[string]bool{"ShortWindowNotStarted": true, "WeeklyUnavailable": true}
 
 	// Fail loudly if a new field is added and this fixture was not updated,
 	// rather than quietly testing a zero value.
@@ -893,12 +904,12 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 
 	// ListSnapshots is oldest first: notStarted, observed a minute earlier,
 	// then full. LatestSnapshot returns full.
-	all, err := db.ListSnapshots(context.Background(), "codex", 10)
+	all, err := db.ListSnapshots(context.Background(), "codex-main", "codex", 10)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("ListSnapshots = %d snapshots, %v; want 2", len(all), err)
 	}
-	if !all[0].ObservedAt.Equal(notStarted.ObservedAt) || !all[0].ShortWindowNotStarted {
-		t.Error("ListSnapshots dropped ShortWindowNotStarted: it was set on write and came back false")
+	if !all[0].ObservedAt.Equal(notStarted.ObservedAt) || !all[0].ShortWindowNotStarted || !all[0].WeeklyUnavailable {
+		t.Error("ListSnapshots dropped ShortWindowNotStarted or WeeklyUnavailable: set on write, came back false")
 	}
 	// LatestSnapshot scans separately; give it a not-started row to return.
 	notStartedOnly, err := store.Open(filepath.Join(t.TempDir(), "not-started.db"))
@@ -909,19 +920,21 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 	if err := notStartedOnly.SaveSnapshot(context.Background(), notStarted, nil); err != nil {
 		t.Fatal(err)
 	}
-	if latest, _, err := notStartedOnly.LatestSnapshot(context.Background(), "codex"); err != nil || !latest.ShortWindowNotStarted {
-		t.Errorf("LatestSnapshot dropped ShortWindowNotStarted: got %v, err %v", latest.ShortWindowNotStarted, err)
+	if latest, _, err := notStartedOnly.LatestSnapshot(context.Background(), "codex-main", "codex"); err != nil ||
+		!latest.ShortWindowNotStarted || !latest.WeeklyUnavailable {
+		t.Errorf("LatestSnapshot dropped ShortWindowNotStarted/WeeklyUnavailable: got %v/%v, err %v",
+			latest.ShortWindowNotStarted, latest.WeeklyUnavailable, err)
 	}
 	for _, read := range []struct {
 		name string
 		get  func() (decision.UsageSnapshot, error)
 	}{
 		{"LatestSnapshot", func() (decision.UsageSnapshot, error) {
-			got, _, err := db.LatestSnapshot(context.Background(), "codex")
+			got, _, err := db.LatestSnapshot(context.Background(), "codex-main", "codex")
 			return got, err
 		}},
 		{"ListSnapshots", func() (decision.UsageSnapshot, error) {
-			all, err := db.ListSnapshots(context.Background(), "codex", 10)
+			all, err := db.ListSnapshots(context.Background(), "codex-main", "codex", 10)
 			if err != nil {
 				return decision.UsageSnapshot{}, err
 			}

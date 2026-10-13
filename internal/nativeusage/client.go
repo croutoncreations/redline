@@ -53,7 +53,7 @@ func (c Client) Name() string { return "native" }
 
 func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	body, err := c.fetchBody(ctx, name, false)
+	body, err := c.fetchBody(ctx, name, profileDir(name, provider), false)
 	if err != nil {
 		return decision.UsageSnapshot{}, body, err
 	}
@@ -80,7 +80,7 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 		return nil, fmt.Errorf("native banked resets for %q are unsupported", name)
 	}
 	// Supplementary: never refresh Claude Code's shared token for this.
-	body, err := c.fetchBody(ctx, name, true)
+	body, err := c.fetchBody(ctx, name, profileDir(name, provider), true)
 	if err != nil {
 		return nil, err
 	}
@@ -100,13 +100,30 @@ func (c Client) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (c Client) fetchBody(ctx context.Context, name string, readOnly bool) ([]byte, error) {
+// profileDir is the Claude Code profile directory an account reads, or ""
+// for the default login.
+func profileDir(name string, provider config.Provider) string {
+	if name != "claude" {
+		return ""
+	}
+	return config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir)
+}
+
+func (c Client) fetchBody(ctx context.Context, name, profile string, readOnly bool) ([]byte, error) {
 	if c.Credentials == nil {
 		return nil, fmt.Errorf("native credentials are unavailable")
 	}
 	var credential Credential
 	var err error
-	if readOnly {
+	if profile != "" {
+		// A profile's login is always read without refreshing, for the
+		// usage fetch too: it is never the default login's to rotate.
+		reader, ok := c.Credentials.(ProfileCredentials)
+		if !ok {
+			return nil, fmt.Errorf("claude profile credentials are unavailable")
+		}
+		credential, err = reader.AccessClaudeProfile(ctx, profile)
+	} else if readOnly {
 		reader, ok := c.Credentials.(ReadOnlyCredentials)
 		if !ok {
 			return nil, fmt.Errorf("native %s credentials cannot be read without refreshing", name)

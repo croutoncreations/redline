@@ -57,8 +57,12 @@ derived from allowance pace.
 
 ## Harness and model discovery
 
-The dashboard discovers installed Codex CLI, Claude Code, Pi, and Hermes harnesses, shows each CLI
-version, and builds model choices from local, refreshable catalogs rather than hardcoded presets.
+The dashboard discovers installed Codex CLI, Claude Code, Cursor CLI, Pi, and Hermes harnesses,
+shows each CLI version, and builds model choices from local, refreshable catalogs rather than
+hardcoded presets. The Cursor CLI's choices come from `agent models`, the signed-in account's own
+list, so they follow what Cursor offers without a Redline update; the catalog is refreshed every
+five minutes and on demand with the refresh button. A signed-out Cursor CLI is shown as such and is
+not asked for models.
 Codex uses its own model cache. Pi uses its offline model listing; those subscription-backed Pi
 models also supply Claude Code's versioned choices because Claude Code accepts full model names but
 does not provide a model-list command. Pi profiles retain provider-qualified model IDs such as
@@ -78,6 +82,63 @@ Sonnet, and Opus use shared pools only.
 Fable profiles may set `budget_model_group: fable`; Redline also recognizes `fable`,
 `claude-fable-5`, and `claude-fable-latest` model aliases. Provider-qualified Pi Fable IDs are
 inferred automatically.
+
+### Cursor
+
+A `provider: cursor` account is scheduled from Cursor's two monthly subscription pools, which
+OpenUsage (or Redline's read-only native collector) reports. Every Cursor model draws from one:
+
+| Model | Pool |
+| --- | --- |
+| `auto`, `default`, `composer-*` | Cursor Models (`cursor_models`) |
+| anything else (Claude, GPT, Gemini, Grok, …) | Other Models (`other_models`) |
+
+A job runs only when the pool its model uses is itself on pace against the month (not a week),
+and still holds more than a reserve: the larger of the policy's `rolling_reserve` and the
+account's `window_weekly_cost`. The account's overall monthly figure admitting work does not
+override a pool that says wait. On-demand spend, credits and Grok Bot's weekly allowance are never
+counted: when both pools are used up, Cursor jobs wait for the monthly reset rather than spend
+money. Redline decides before a run starts and cannot stop one partway, so a long run started
+near a pool's reserve can still go past it. Set Cursor's on-demand limit to $0 if you need that to
+be impossible.
+
+Jobs run through the Cursor CLI's headless mode, sandboxed:
+
+```text
+cursor-agent --print --output-format stream-json --trust --sandbox enabled \
+  --workspace <dir> --model <id>
+```
+
+The prompt goes in on standard input. In the sandbox the agent edits files and runs commands in
+its workspace, while writes elsewhere and network access are refused. `--force` is not passed: it
+overrides the sandbox and approves every command, so add it to `harness_args` only if a job needs
+that. `harness_args` may not set `--workspace`, `--add-dir`, `--api-key` or `--endpoint`. A
+`default` model runs as `auto`, so the run draws on the pool it was scheduled against.
+
+The CLI uses its own login (`agent login`). Redline stores no Cursor key, and removes
+`CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN` and `CURSOR_API_ENDPOINT` from the CLI's environment, so a
+key elsewhere on the machine cannot bill runs to another account.
+
+Usage is read from the Cursor app's session (directly, or through OpenUsage, which reads the same
+session), while jobs run as the CLI's login. Before each usage read Redline confirms the two are
+the same account: it compares the Cursor app's signed-in email with the one `cursor-agent status`
+reports, as SHA-256 digests, and never logs or stores either address. If they differ, or either
+cannot be confirmed, no usage is read, the account shows **Accounts differ**, and nothing is
+scheduled on it until both are signed in to the same account. A confirmed match is reused for five
+minutes; a mismatch is checked again on every read, so signing in again takes effect at the next
+usage poll.
+
+When the CLI is signed out the run fails with "Cursor CLI is signed out. Run `agent login`", and
+the account is paused until you sign in and resume it.
+
+```yaml
+providers:
+  cursor-main:
+    provider: cursor
+    usage_source: openusage
+    openusage_url: http://127.0.0.1:6736
+    window_weekly_cost: 0.10   # one run's share of a pool; also the pool reserve if larger
+```
 
 The advanced **Allowance routing override** in the dashboard corresponds to `budget_model_group`;
 leave it automatic unless a provider exposes a separate model-specific pool that model-name

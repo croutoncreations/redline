@@ -55,4 +55,8 @@ mobile/android/local.properties
 relay/node_modules/
 relay/.wrangler/
 
+# DeviceBroker run artifacts
+.devicebroker/
+
+# actionlint binary downloaded by CI
 actionlint

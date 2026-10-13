@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Display-only Cursor usage on the mobile dashboard: monthly Cursor Models and Other Models
+  pools, the weekly Grok Bot allowance, on-demand spend and credits, with reset dates in the
+  viewer's time zone and fresh, out-of-date, partial and not-reported states. Enable it with
+  `cursor_usage.source`: `openusage` reads OpenUsage's `openusage.limits.v1` Cursor card, `native`
+  is a built-in collector that reads the signed-in Cursor app's token without refreshing or
+  rewriting it, and `auto` prefers fresh OpenUsage data. Also available at `GET /v1/cursor-usage`.
+  The same card on the desktop dashboard (labelled usage only) and in the menu-bar dropdown, and in
+  the Android app's Usage tab. Once a `provider: cursor` account exists the card is labelled usage
+  detail and says the monthly pools schedule Cursor jobs, rather than claiming nothing does. The
+  `/v1/dashboard` `fields` selector accepts `cursor_usage`.
+- Cursor as a scheduled provider. A `provider: cursor` account runs jobs through the Cursor CLI's
+  headless mode (`cursor-agent` harness) using the CLI's own login, and is scheduled only from
+  Cursor's monthly subscription pools: Auto and Composer from Cursor Models, every other model from
+  Other Models. Pace is measured against the month. On-demand spend, credits and Grok Bot never
+  count as headroom. Models come from `cursor-agent models`, so the list follows the account. A
+  signed-out CLI fails the run with `agent login` guidance and pauses the account. Runs use the
+  CLI's sandbox (workspace writes only, no network) and never `--force` unless a profile adds it;
+  Cursor credential variables are removed from the CLI's environment. Before reading a Cursor
+  account's usage, Redline confirms the Cursor CLI and the Cursor app are signed in to the same
+  account (comparing digests, never storing either address); if not, the account shows "Accounts
+  differ" and is not scheduled.
+
+### Changed
+
+- Allowance windows may now be monthly (schema migration 29 rebuilds `usage_allowance_windows` to
+  allow the role; existing rows are copied unchanged, and allowance rows left without a snapshot by
+  a hand-run prune are dropped rather than stopping Redline from opening the database), and a window
+  can carry its own period so pace is no longer hard-coded to seven days. A Cursor pool keeps a
+  reserve and must itself be on pace, so a run never starts on the last of a pool and spills into
+  on-demand spend.
+  **Downgrading:** older versions reject `provider: cursor`. Remove those accounts from
+  `redline.yaml` before running an older binary; the migrated database needs no change.
+
 ## [0.1.10] - 2026-10-01
 
 ### Added

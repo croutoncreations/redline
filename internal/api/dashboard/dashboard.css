@@ -149,3 +149,50 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 .onboarding-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:13px}.onboarding-error{margin:16px 25px 0}.onboarding-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:15px 25px}.onboarding-footer>div{display:flex;gap:8px}.onboarding-review{display:grid;gap:8px}.onboarding-review div{display:flex;justify-content:space-between;gap:20px;padding-bottom:8px;border-bottom:1px solid var(--line)}.onboarding-review div:last-child{border:0;padding:0}.onboarding-review span{color:var(--muted);font-size:10px}.onboarding-review strong{font-size:10px;text-align:right}
 @media(max-width:820px){.getting-started{grid-template-columns:1fr}.getting-started ol{flex-wrap:wrap}.onboarding-accounts,.safety-grid{grid-template-columns:1fr}.onboarding-fields{grid-template-columns:1fr}}
 .banked-resets{border-top:1px dashed var(--line);padding-top:10px}.banked-resets.soon .reset{color:var(--amber)}
+/* Cursor usage (display only; never a queue) */
+.provider-logo.cursor{color:var(--text);font:700 13px ui-monospace,monospace}
+.cursor-plan{margin-left:5px;padding:1px 5px;border:1px solid var(--line);border-radius:99px;color:var(--muted);font:600 8px ui-monospace,monospace;vertical-align:1px}
+.usage-only-badge{padding:1px 6px;border:1px dashed var(--line);border-radius:99px;color:var(--muted);font:600 8px ui-monospace,monospace!important;white-space:nowrap}
+.cursor-compact .provider-detail{max-height:min(70vh,560px);overflow:auto}
+.cursor-group{display:block;margin-top:14px}
+.cursor-group-label{display:block;margin-bottom:8px;color:var(--muted);font:600 8px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
+.cursor-meter.exhausted .meter-head b{color:#ff7b72}
+.cursor-note{color:var(--muted);font-size:9px;margin:8px 0 0}
+.cursor-compact .source-error{margin:0 0 8px}
+
+/* Several provider accounts: every tile stays visible. The strip wraps into
+   rows of equal-width tiles instead of squeezing one row, and the policy /
+   next-check / running counters drop to their own row beneath the tiles, so
+   a fourth (or ninth) tile never slides under them. */
+.summary-rail{flex-wrap:wrap}
+.usage-strip{display:grid;flex:1 1 100%;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));min-width:0}
+.usage-strip .provider-compact{min-width:0;border-right:0;box-shadow:inset -1px -1px 0 var(--line)}
+.rail-meta{flex:1 1 100%;justify-content:flex-end;min-height:38px}
+.rail-meta div:first-child{border-left:0}
+.provider-copy-line strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.provider-copy-line b{flex:none;white-space:nowrap}
+.provider-account{color:var(--text);font-weight:600}
+.provider-plan{margin-left:5px;flex:none}
+/* The label truncates; the plan pill beside it stays whole. */
+.provider-copy-line strong.provider-name{display:flex;align-items:center;min-width:0;overflow:visible}
+.provider-name-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.provider-window-line{display:flex;flex-wrap:wrap;row-gap:1px;column-gap:9px;white-space:normal}
+.provider-window-line span{white-space:nowrap}
+.provider-pressure{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* A single row of two or three tiles keeps the counters beside them. */
+@media(min-width:981px){
+  .summary-rail:not(:has(.usage-strip .provider-compact:nth-child(4))){flex-wrap:nowrap}
+  .summary-rail:not(:has(.usage-strip .provider-compact:nth-child(4))) .usage-strip{flex:1 1 auto;grid-template-columns:repeat(auto-fit,minmax(270px,1fr))}
+  .summary-rail:not(:has(.usage-strip .provider-compact:nth-child(4))) .rail-meta{flex:none;min-height:0}
+  .summary-rail:not(:has(.usage-strip .provider-compact:nth-child(4))) .rail-meta div:first-child{border-left:1px solid var(--line)}
+}
+@media(max-width:720px){
+  .usage-strip{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+  .rail-meta{display:none}
+}
+/* A tile near the right edge opens its details leftwards, inside the page.
+   Narrow windows keep their fixed full-width panel. */
+@media(min-width:721px){
+  .provider-compact.detail-left .provider-detail{left:auto;right:8px}
+  .provider-compact.detail-left .provider-detail:before{left:auto;right:28px}
+}

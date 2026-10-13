@@ -64,10 +64,12 @@ fun UsageScreen(
     onUnpair: (() -> Unit)? = null,
     onControlProvider: (String, String) -> Unit = { _, _ -> },
     onViewQueue: (String) -> Unit = {},
+    onOpenAccounts: (() -> Unit)? = null,
+    accountSelection: AccountSelection? = null,
 ) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Header(state, onUnpair)
+            Header(state, onUnpair, onOpenAccounts)
             when {
                 // Only show a spinner with nothing behind it on a cold start;
                 // a refresh over existing data should not blank the screen.
@@ -78,6 +80,7 @@ fun UsageScreen(
                     onRetry,
                     onControlProvider,
                     onViewQueue,
+                    accountSelection ?: rememberAccountSelection(),
                 )
                 else -> CenteredProgress()
             }
@@ -104,18 +107,19 @@ private fun RefreshableProviderList(
     onRefresh: () -> Unit,
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
+    accountSelection: AccountSelection,
 ) {
     PullToRefreshBox(
         isRefreshing = state.loading,
         onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
     ) {
-        ProviderList(state, onControlProvider, onViewQueue)
+        ProviderList(state, onControlProvider, onViewQueue, accountSelection)
     }
 }
 
 @Composable
-private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
+private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null, onOpenAccounts: (() -> Unit)? = null) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -148,9 +152,9 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
             ConnectionPill(state.connection, state.view?.sampledAgeSeconds ?: 0)
             // Unpairing lives behind the overflow rather than on the surface:
             // it is rare, destructive, and next to controls people press often.
-            onUnpair?.let {
+            if (onUnpair != null || onOpenAccounts != null) {
                 Spacer(Modifier.width(4.dp))
-                UnpairMenu(onUnpair = it)
+                UnpairMenu(onUnpair = onUnpair, onOpenAccounts = onOpenAccounts)
             }
         }
         Spacer(Modifier.height(2.dp))
@@ -187,7 +191,7 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null) {
  * they can weigh.
  */
 @Composable
-private fun UnpairMenu(onUnpair: () -> Unit) {
+private fun UnpairMenu(onUnpair: (() -> Unit)?, onOpenAccounts: (() -> Unit)? = null) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf(false) }
 
@@ -205,13 +209,24 @@ private fun UnpairMenu(onUnpair: () -> Unit) {
             onDismissRequest = { menuOpen = false },
             modifier = Modifier.background(PanelRaised),
         ) {
-            DropdownMenuItem(
-                text = { Text("Unpair this device", color = TextPrimary, fontSize = 14.sp) },
-                onClick = {
-                    menuOpen = false
-                    confirming = true
-                },
-            )
+            onOpenAccounts?.let { open ->
+                DropdownMenuItem(
+                    text = { Text("Accounts", color = TextPrimary, fontSize = 14.sp) },
+                    onClick = {
+                        menuOpen = false
+                        open()
+                    },
+                )
+            }
+            if (onUnpair != null) {
+                DropdownMenuItem(
+                    text = { Text("Unpair this device", color = TextPrimary, fontSize = 14.sp) },
+                    onClick = {
+                        menuOpen = false
+                        confirming = true
+                    },
+                )
+            }
         }
     }
 
@@ -232,7 +247,7 @@ private fun UnpairMenu(onUnpair: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     confirming = false
-                    onUnpair()
+                    onUnpair?.invoke()
                 }) {
                     Text("Unpair", color = Danger)
                 }
@@ -359,15 +374,141 @@ private fun ProviderList(
     state: UsageUiState,
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
+    accountSelection: AccountSelection,
 ) {
     val providers = state.view?.providers ?: emptyList()
     LazyColumn(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(providers, key = { it.id }) { provider ->
-            ProviderCard(provider, onControlProvider, onViewQueue)
+        // A provider with several accounts becomes one carousel at its first
+        // account's position; a lone account keeps the card it always had.
+        items(usageItems(providers), key = { it.key }) { item ->
+            when (item) {
+                is UsageItem.Single -> ProviderCard(item.provider, onControlProvider, onViewQueue)
+                is UsageItem.AccountGroup -> AccountsCarousel(item, onControlProvider, onViewQueue, accountSelection)
+            }
         }
+        // Cursor's usage card follows the accounts. It has no controls:
+        // nothing on it can be paused or queued from here.
+        state.view?.cursor?.let { cursor ->
+            item(key = "cursor-usage") { CursorUsageCard(cursor) }
+        }
+    }
+}
+
+/**
+ * Cursor's monthly pools, Grok Bot's weekly allowance, on-demand spend and
+ * credits, each in its own group. Bars show what is used, matching the web
+ * and Mac cards, and are drawn only where Cursor gave a limit.
+ */
+@Composable
+internal fun CursorUsageCard(cursor: CursorUsage) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .semantics { contentDescription = "Cursor usage, ${cursor.state}. ${cursor.note}" },
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Cursor", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                if (cursor.plan.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(cursor.plan, color = TextMuted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    cursor.state,
+                    color = when (cursor.tone) {
+                        "healthy" -> Good
+                        "near" -> Warn
+                        else -> TextMuted
+                    },
+                    fontSize = 12.sp,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(cursor.updatedLabel, color = TextMuted, fontSize = 11.sp)
+            Text(cursor.note, color = TextMuted, fontSize = 11.sp)
+            cursor.errors.forEach { error ->
+                Spacer(Modifier.height(4.dp))
+                Text(error, color = Danger, fontSize = 11.sp)
+            }
+            if (cursor.groups.isEmpty() && cursor.balances.isEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text("Cursor reported no usage meters.", color = TextMuted, fontSize = 12.sp)
+            }
+            cursor.groups.forEach { group ->
+                Spacer(Modifier.height(12.dp))
+                Text(group.heading.uppercase(), color = TextMuted, fontSize = 10.sp, letterSpacing = 1.sp)
+                group.meters.forEach { meter ->
+                    Spacer(Modifier.height(8.dp))
+                    CursorMeterRow(meter, lastKnown = cursor.stale)
+                }
+            }
+            if (cursor.balances.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("CREDITS", color = TextMuted, fontSize = 10.sp, letterSpacing = 1.sp)
+                cursor.balances.forEach { balance ->
+                    Spacer(Modifier.height(8.dp))
+                    Row {
+                        Text(
+                            (if (cursor.stale) "Last known " else "") + balance.label,
+                            color = TextPrimary, fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            balance.valueLabel, color = TextPrimary, fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    val expires = formatResetAt(balance.nextExpiresAt)
+                    if (expires.isNotEmpty()) {
+                        Text("Next expires $expires", color = TextMuted, fontSize = 11.sp)
+                    }
+                }
+            }
+            if (cursor.notReported.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text("Not reported: ${cursor.notReported.joinToString(", ")}", color = TextMuted, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CursorMeterRow(meter: CursorMeter, lastKnown: Boolean) {
+    val label = (if (lastKnown) "Last known " else "") + meter.label
+    Column(modifier = Modifier.semantics {
+        contentDescription = "$label: ${meter.valueLabel}. ${cursorMeterDetail(meter)}"
+    }) {
+        Row {
+            Text(label, color = TextPrimary, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Text(
+                meter.valueLabel,
+                color = if (meter.exhausted) Danger else TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        if (meter.hasLimit) {
+            Spacer(Modifier.height(6.dp))
+            // What is left, the same direction and colours as the provider
+            // meters above it.
+            LinearProgressIndicator(
+                progress = { meter.remainingPercent / 100f },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                color = toneFor(meter.remainingPercent),
+                trackColor = Line,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(cursorMeterDetail(meter), color = TextMuted, fontSize = 11.sp)
     }
 }
 
@@ -385,11 +526,17 @@ private fun ProviderCard(
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    provider.provider.replaceFirstChar { it.uppercase() },
+                    providerDisplayName(provider.provider),
                     color = TextPrimary,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
                 )
+                // The plan as reported, when the source gives one. Shown
+                // as a label, never as a capacity: plans are not comparable.
+                if (provider.plan.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    PlanChip(provider.plan)
+                }
                 Spacer(Modifier.weight(1f))
                 Text(
                     providerStatus(provider),
@@ -397,6 +544,43 @@ private fun ProviderCard(
                     fontSize = 12.sp,
                 )
             }
+            ProviderDetails(provider, onControlProvider, onViewQueue, accountPage = false)
+        }
+    }
+}
+
+/** A small outlined label for a reported plan name. */
+@Composable
+internal fun PlanChip(plan: String) {
+    Text(
+        plan,
+        color = TextMuted,
+        fontSize = 11.sp,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Line)
+            .padding(horizontal = 6.dp, vertical = 1.dp),
+    )
+}
+
+/**
+ * Everything under a provider's heading: source, problem, meters, the
+ * scheduler's line, reset credits, pools and actions. Shared by the single
+ * card and each account page of the carousel, so an account reads the same
+ * either way.
+ *
+ * @param accountPage on a carousel page, reset credits always get a row
+ *   ("Not reported" when absent), since a missing row there reads as none.
+ */
+@Composable
+internal fun ProviderDetails(
+    provider: ProviderUsage,
+    onControlProvider: (String, String) -> Unit,
+    onViewQueue: (String) -> Unit,
+    accountPage: Boolean,
+) {
+        Column {
 
             // Where the numbers came from and how fresh they are: the first
             // thing to check when this and the desktop disagree.
@@ -410,14 +594,23 @@ private fun ProviderCard(
                 Spacer(Modifier.height(8.dp))
                 Text(problem, color = Danger, fontSize = 12.sp)
             }
+            // On a carousel page, out-of-date numbers read as last known: "was"
+            // values and a fixed last-reported reset, never a live countdown.
+            // The single-account card keeps its existing presentation.
+            val staleNumbers = accountPage && provider.isOutOfDate
+            // Stale wording is fixed times judged against the clock ("was due",
+            // "today"); without fresh data nothing else recomposes the page,
+            // so a minute tick keeps those judgements true while it sits open.
+            if (staleNumbers) MinuteTick()
 
             provider.session?.let {
                 Spacer(Modifier.height(12.dp))
                 Meter(
                     "5-hour window", it.remainingPercent, it.resetsInSeconds,
                     it.resetInferred, it.resetsAt, it.elapsedPercent,
-                    zones = MeterZones(reservePercent = provider.scheduling?.reservePercent ?: 0),
+                    zones = if (staleNumbers) MeterZones() else MeterZones(reservePercent = provider.scheduling?.reservePercent ?: 0),
                     notStarted = it.notStarted,
+                    outOfDate = staleNumbers,
                 )
             }
             // The window exists but the number could not be read. Showing
@@ -427,17 +620,34 @@ private fun ProviderCard(
                 Spacer(Modifier.height(12.dp))
                 UnknownMeter("5-hour window")
             }
+            if (provider.weekly == null && provider.weeklyNotReported) {
+                Spacer(Modifier.height(12.dp))
+                UnknownMeter(
+                    "Weekly allowance", "not reported",
+                    spoken = "Weekly allowance: not reported for this account",
+                    note = "Weekly limit not reported for this account · dispatch holds",
+                )
+            }
             provider.weekly?.let {
                 Spacer(Modifier.height(12.dp))
                 Meter(
-                    "Weekly allowance", it.remainingPercent, it.resetsInSeconds,
+                    provider.weeklyLabel.ifEmpty { "Weekly allowance" }, it.remainingPercent, it.resetsInSeconds,
                     it.resetInferred, it.resetsAt, it.elapsedPercent,
-                    zones = MeterZones(floors = provider.scheduling?.weeklyFloors ?: emptyList()),
+                    zones = if (staleNumbers) MeterZones() else MeterZones(floors = provider.scheduling?.weeklyFloors ?: emptyList()),
+                    outOfDate = staleNumbers,
                 )
             }
             // What the scheduler is doing with this provider, under the bars
             // that show where its lines are.
-            provider.scheduling?.let { scheduling ->
+            // A stale account's scheduler state comes from the same old read:
+            // a floor "arming in 2d" would be a live-looking countdown.
+            if (staleNumbers) {
+                Spacer(Modifier.height(8.dp))
+                Text(OUT_OF_DATE_DISPATCH_LINE, color = TextMuted, fontSize = 11.sp)
+            }
+            // A seat with no weekly limit already says dispatch holds, just
+            // above; a red "Waiting" line would only repeat it as alarm.
+            provider.scheduling?.takeIf { !staleNumbers && !(provider.weeklyNotReported && !it.admits) }?.let { scheduling ->
                 val line = schedulingLine(scheduling)
                 if (line.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
@@ -446,7 +656,7 @@ private fun ProviderCard(
                             Modifier
                                 .size(6.dp)
                                 .clip(CircleShape)
-                                .background(if (scheduling.decision == "ADMIT") Good else Accent),
+                                .background(if (scheduling.admits) Good else Accent),
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(line, color = TextMuted, fontSize = 11.sp)
@@ -455,18 +665,54 @@ private fun ProviderCard(
             }
             // Worth showing beside an exhausted window, because spending one is
             // what gets work moving again. Labelled in full: a bare number here
-            // would read as yet another usage meter.
-            provider.bankedResets?.let { resets ->
+            // would read as yet another usage meter. A credit's own deadline
+            // is "expires", never "resets", so it cannot be mistaken for the
+            // allowance's reset above.
+            // Out of date, the count and deadlines are the last read too:
+            // labelled so, with passed deadlines said to have expired.
+            val deadline: (String) -> String = if (staleNumbers) {
+                { lastKnownCreditDeadline(it) }
+            } else {
+                { formatResetAt(it) }
+            }
+            val all = resetCreditExpiries(provider, formatTime = deadline)
+            // On an account page with the full deadline list below, the count
+            // stands alone rather than repeating the first deadline.
+            val creditsReported = (provider.resetCredits?.available ?: provider.bankedResets) != null
+            val expired = if (staleNumbers) expiredCreditCount(provider) else 0
+            val credits = (if (staleNumbers && creditsReported) "Last known: " else "") +
+                (
+                    if (accountPage && all.isNotEmpty()) {
+                        resetCreditsLine(provider, reportedOnly = false, formatTime = { "" })
+                    } else {
+                        resetCreditsLine(provider, reportedOnly = !accountPage, formatTime = deadline)
+                    }
+                    ) +
+                (if (expired > 0) " · $expired since expired" else "")
+            if (credits.isNotEmpty()) {
+                val count = provider.resetCredits?.available ?: provider.bankedResets
                 Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        if (resets == 1) "1 available" else "$resets available",
-                        color = if (resets > 0) TextPrimary else TextMuted,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                val creditsColor = if ((count ?: 0) > 0 && !staleNumbers) TextPrimary else TextMuted
+                if (accountPage) {
+                    // Stacked: the line with its deadline is long, and side by
+                    // side with the label it squeezes at large font sizes.
+                    Column(Modifier.semantics(mergeDescendants = true) {}) {
+                        Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
+                        Text(credits, color = creditsColor, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.semantics(mergeDescendants = true) {},
+                    ) {
+                        Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.weight(1f))
+                        Text(credits, color = creditsColor, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+                if (accountPage && all.isNotEmpty()) {
+                    Text(all, color = TextMuted, fontSize = 11.sp)
                 }
             }
             provider.pools.forEach { pool ->
@@ -478,7 +724,8 @@ private fun ProviderCard(
                     // weekly budget, but a Spark task consumes it. The core
                     // attaches the reserve only when the scheduler protects
                     // this pool, keeping the line and enforcement together.
-                    zones = MeterZones(reservePercent = pool.reservePercent),
+                    zones = if (staleNumbers) MeterZones() else MeterZones(reservePercent = pool.reservePercent),
+                    outOfDate = staleNumbers,
                 )
             }
 
@@ -506,7 +753,6 @@ private fun ProviderCard(
                 )
             }
         }
-    }
 }
 
 @Composable
@@ -532,15 +778,20 @@ private fun CardAction(label: String, emphasised: Boolean = false, onClick: () -
  * misreading of the two.
  */
 @Composable
-private fun UnknownMeter(label: String) {
+private fun UnknownMeter(
+    label: String,
+    value: String = "not available",
+    spoken: String = "$label: not available right now",
+    note: String = "Provider did not report this window",
+) {
     Column(modifier = Modifier.semantics {
-        contentDescription = "$label: not available right now"
+        contentDescription = spoken
     }) {
         Row {
             Text(label, color = TextPrimary, fontSize = 13.sp)
             Spacer(Modifier.weight(1f))
             Text(
-                "not available",
+                value,
                 color = TextMuted,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -558,7 +809,7 @@ private fun UnknownMeter(label: String) {
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Provider did not report this window",
+            note,
             color = TextMuted,
             fontSize = 11.sp,
         )
@@ -597,22 +848,33 @@ private fun Meter(
     elapsedPercent: Int = 0,
     zones: MeterZones = MeterZones(),
     notStarted: Boolean = false,
+    outOfDate: Boolean = false,
 ) {
+    val window = Window(resetsInSeconds = resetsInSeconds, resetsAt = resetsAt, resetInferred = resetInferred, notStarted = notStarted)
     // A window that has not started has no reset yet: say how its clock runs
-    // instead of counting down to a time the provider has not set.
-    val resetSentence = windowResetSentence(
-        Window(resetsInSeconds = resetsInSeconds, resetInferred = resetInferred, notStarted = notStarted),
-    )
+    // instead of counting down to a time the provider has not set. Numbers
+    // that are out of date get the last reported reset as a fixed time, with
+    // no countdown, since a ticking line reads as live.
+    val resetSentence = if (outOfDate) outOfDateResetSentence(window) else windowResetSentence(window)
     // Only computed for display; an unparseable or absent timestamp yields "".
-    val absolute = if (notStarted) "" else formatResetAt(resetsAt)
+    // Out of date, the time is already in the sentence.
+    val absolute = if (notStarted || outOfDate) "" else formatResetAt(resetsAt)
     val pace = paceOf(percent, elapsedPercent)
+    // The pace mark compares the old numbers with the present clock, which
+    // says nothing true; it is not drawn or spoken for stale numbers.
+    val showPace = elapsedPercent > 0 && !outOfDate
+    val valueText = (if (outOfDate) "was " else "") + "$percent% left"
     Column(modifier = Modifier.semantics {
         contentDescription = buildString {
             // Same sentence a sighted reader gets, so the two cannot drift.
-            append("$label: $percent percent remaining. $resetSentence")
+            if (outOfDate) {
+                append("$label, last known and out of date: was $percent percent remaining. $resetSentence")
+            } else {
+                append("$label: $percent percent remaining. $resetSentence")
+            }
             if (absolute.isNotEmpty()) append(", at $absolute")
             // The pace mark is visual; this is its sentence.
-            if (elapsedPercent > 0) {
+            if (showPace) {
                 append(
                     when (pace) {
                         Pace.AHEAD -> ". Ahead of pace"
@@ -627,8 +889,8 @@ private fun Meter(
             Text(label, color = TextPrimary, fontSize = 13.sp)
             Spacer(Modifier.weight(1f))
             Text(
-                "$percent% left",
-                color = TextPrimary,
+                valueText,
+                color = if (outOfDate) TextMuted else TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 fontFamily = FontFamily.Monospace,
@@ -649,7 +911,7 @@ private fun Meter(
                     .height(6.dp)
                     .align(Alignment.Center)
                     .clip(RoundedCornerShape(3.dp)),
-                color = toneFor(percent),
+                color = if (outOfDate) TextMuted.copy(alpha = 0.5f) else toneFor(percent),
                 trackColor = Line,
             )
             // Redline's own lines. Every one is a line at a percent, drawn over
@@ -695,7 +957,7 @@ private fun Meter(
             // that is about the clock rather than the policy. Pace remains in
             // the accessibility sentence; the visual mark is always white so
             // every meter has the same easily scanned landmark.
-            if (elapsedPercent > 0) {
+            if (showPace) {
                 val mark = paceMarkPercent(elapsedPercent)
                 Box(
                     Modifier
@@ -769,4 +1031,20 @@ private fun UsageScreenPreview() {
         ),
         onRetry = {},
     )
+}
+
+/**
+ * Recomposes its caller once a minute while composed. Used where the words
+ * depend on the clock but no new data will arrive to refresh them.
+ */
+@Composable
+private fun MinuteTick() {
+    var minute by remember { mutableStateOf(0L) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000L - System.currentTimeMillis() % 60_000L)
+            minute = System.currentTimeMillis() / 60_000L
+        }
+    }
+    @Suppress("UNUSED_EXPRESSION") minute
 }

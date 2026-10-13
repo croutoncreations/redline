@@ -17,6 +17,14 @@ type TestEvent struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "added-tests" {
+		if err := runAddedTests(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "added-tests: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Parse both result files
 	baseTests, baseOutput, err := parseResults("base_results.json")
 	if err != nil {

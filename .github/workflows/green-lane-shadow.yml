@@ -26,6 +26,7 @@ jobs:
     
     outputs:
       has_tests: ${{ steps.tests.outputs.has_tests }}
+      no_tests_reason: ${{ steps.tests.outputs.no_tests_reason }}
       pass: ${{ steps.analyze.outputs.pass }}
       inconclusive: ${{ steps.analyze.outputs.inconclusive }}
       message: ${{ steps.analyze.outputs.message }}
@@ -80,41 +81,62 @@ jobs:
           BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
           HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
           
-          # Find changed test files
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
+          # Find test files this PR changed, measured from the merge-base like
+          # the added-test extraction below, so a test file main changed after
+          # the branch point is not overlaid onto base.
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
           
           if [ ! -s changed_tests.txt ]; then
             echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "no_tests_reason=No test files changed in PR" >> "$GITHUB_OUTPUT"
             echo "No test files changed"
+            exit 0
+          fi
+          
+          # Only test functions the PR *adds* are repro candidates. Taking every
+          # test in a changed file would require unchanged tests, which pass
+          # on base, to fail there too. Read them from added diff lines.
+          # Diff from the merge-base (three dots) so tests main removed after
+          # the branch point are not mistaken for tests this PR added, and pin
+          # the prefixes and path quoting the extractor parses.
+          if ! git -c core.quotePath=false diff --no-color --no-ext-diff --unified=0 \
+              --src-prefix=a/ --dst-prefix=b/ "$BASE_SHA...$HEAD_SHA" -- '*_test.go' \
+              | go run ./cmd/green-lane-repro-analyze added-tests > added_tests.tsv; then
+            # The extractor runs from the PR head; a branch that predates it
+            # cannot name its added tests, so the rule is inconclusive.
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "no_tests_reason=Could not extract the tests this PR adds (the PR head may predate the added-tests extractor)" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not extract added tests (the PR head may predate cmd/green-lane-repro-analyze added-tests)"
+            exit 0
+          fi
+          
+          # Every line must be "path_test.go<TAB>TestName". Anything else (for
+          # example an older analyzer that ignored the subcommand and printed
+          # its own key=value output) is not a list of tests.
+          if grep -qvE $'^[^\t]+_test\\.go\tTest[A-Za-z0-9_]*$' added_tests.tsv; then
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "no_tests_reason=Added-test extraction produced unexpected output" >> "$GITHUB_OUTPUT"
+            echo "::warning::Added-test extraction produced unexpected output; treating the repro rule as inconclusive"
+            exit 0
+          fi
+          
+          if [ ! -s added_tests.tsv ]; then
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "no_tests_reason=Test files changed but no test functions were added" >> "$GITHUB_OUTPUT"
+            echo "No test functions added in changed test files"
             exit 0
           fi
           
           echo "has_tests=true" >> "$GITHUB_OUTPUT"
           
-          # Extract test function names from changed test files
-          # Look for func TestXxx patterns in the diff
-          : > test_ids.txt
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              # Extract Test function names
-              grep -E '^func (Test[A-Z][a-zA-Z0-9_]*)\(' "$file" | \
-                sed -E 's/^func (Test[A-Z][a-zA-Z0-9_]*)\(.*/\1/' >> test_ids.txt || true
-            fi
-          done < changed_tests.txt
-          
-          if [ ! -s test_ids.txt ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "No test functions found in changed files"
-            exit 0
-          fi
-          
-          # Get unique test IDs and package directories
-          sort -u test_ids.txt > test_ids_unique.txt
+          # Get unique test IDs and the packages that declare them
+          cut -f2 added_tests.tsv | sort -u > test_ids_unique.txt
           TEST_IDS=$(tr '\n' '|' < test_ids_unique.txt | sed 's/|$//')
           echo "test_pattern=^($TEST_IDS)$" >> "$GITHUB_OUTPUT"
           
-          # Get unique package directories
-          xargs -I {} dirname {} < changed_tests.txt | sort -u > test_dirs.txt
+          # Get unique package directories (relative paths need a ./ prefix
+          # so go test treats them as directories, not import paths)
+          cut -f1 added_tests.tsv | xargs -I {} dirname {} | sed 's#^#./#' | sort -u > test_dirs.txt
           TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
           # shellcheck disable=SC2086
           echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
@@ -308,8 +330,20 @@ jobs:
           go-version-file: go.mod
           cache: true
       
+      # The evaluator is built from the trusted checkout above, never the PR
+      # head (this job holds checks: write). A base branch that predates
+      # cmd/green-lane-check, e.g. a stacked PR's parent, cannot evaluate;
+      # the check then completes neutral instead of failing.
       - name: Build evaluator
-        run: go build -o green-lane-check ./cmd/green-lane-check
+        id: build
+        run: |
+          if [ -d cmd/green-lane-check ]; then
+            go build -o green-lane-check ./cmd/green-lane-check
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::cmd/green-lane-check is not on the base branch; the shadow evaluation is skipped"
+          fi
       
       - name: Get PR number and info
         id: pr
@@ -383,6 +417,7 @@ jobs:
           REPRO_PASS_OUT: ${{ needs.repro.outputs.pass }}
           REPRO_MESSAGE_OUT: ${{ needs.repro.outputs.message }}
           REPRO_TEST_IDS_OUT: ${{ needs.repro.outputs.test_ids }}
+          NO_TESTS_REASON: ${{ needs.repro.outputs.no_tests_reason }}
         run: |
           if [ "$HAS_TESTS" = "true" ]; then
             if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
@@ -409,11 +444,18 @@ jobs:
             fi
           else
             echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-            echo "REPRO_MESSAGE=No test files changed in PR" >> "$GITHUB_ENV"
+            # The repro job says why it found nothing to check; fall back to the
+            # old wording only if it did not run far enough to say.
+            {
+              echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
+              printf '%s\n' "${NO_TESTS_REASON:-No test files changed in PR}"
+              echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
+            } >> "$GITHUB_ENV"
           fi
       
       - name: Run evaluation
         id: eval
+        if: steps.build.outputs.available == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -428,15 +470,32 @@ jobs:
         uses: actions/github-script@v7
         env:
           CHECK_ID: ${{ steps.check.outputs.check_id }}
+          EVALUATOR_AVAILABLE: ${{ steps.build.outputs.available }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
         with:
           script: |
             const fs = require('fs');
             
-            // Values reach the script through env: an inline expression for a
-            // skipped step renders as nothing and breaks the JavaScript.
+            // Without a check run there is nothing to complete; say so
+            // instead of failing on an empty id.
             const checkId = Number(process.env.CHECK_ID);
             if (!checkId) {
-              core.warning('No green-lane-shadow check run was created (an earlier step failed or found no PR); nothing to update.');
+              core.warning('No green-lane-shadow check run was created; nothing to update.');
+              return;
+            }
+            
+            if (process.env.EVALUATOR_AVAILABLE !== 'true') {
+              await github.rest.checks.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                check_run_id: checkId,
+                status: 'completed',
+                conclusion: 'neutral',
+                output: {
+                  title: 'Green Lane Shadow: evaluator not on base branch',
+                  summary: `The base branch (${process.env.BASE_REF || 'unknown'}) does not contain cmd/green-lane-check, so this PR was not evaluated. Shadow mode only; no action taken.`
+                }
+              });
               return;
             }
             

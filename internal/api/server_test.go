@@ -656,7 +656,7 @@ func seedCooldownTask(t *testing.T, db *store.DB) {
 	// Candidates are only evaluated once a snapshot exists; without one the
 	// handler short-circuits and never reaches the cooldown check.
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow, Source: "native",
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow, Source: "native",
 		Weekly: decision.UsageWindow{Remaining: 0.8, ResetsAt: apiNow.Add(48 * time.Hour)},
 	}, []byte(codexPayload)); err != nil {
 		t.Fatal(err)
@@ -827,7 +827,7 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -910,7 +910,7 @@ func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T
 	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
-		Provider:   "claude",
+		Provider: "claude", Account: "claude-main",
 		ObservedAt: apiNow.Add(-time.Hour),
 		Short: &decision.UsageWindow{
 			Remaining: .75, ResetsAt: apiNow.Add(4 * time.Hour),
@@ -1023,7 +1023,7 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	defer db.Close()
 	shortReset, weeklyReset := apiNow.Add(5*time.Hour), apiNow.Add(5*24*time.Hour)
 	for index, remaining := range []float64{1, .98, .95} {
-		snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: apiNow.Add(time.Duration(index) * time.Minute),
+		snapshot := decision.UsageSnapshot{Provider: "claude", Account: "claude-main", ObservedAt: apiNow.Add(time.Duration(index) * time.Minute),
 			Short:  &decision.UsageWindow{Remaining: remaining, ResetsAt: shortReset},
 			Weekly: decision.UsageWindow{Remaining: .80 - float64(index)*.01, ResetsAt: weeklyReset}, Source: "test"}
 		if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
@@ -1031,8 +1031,8 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 		}
 	}
 	_, err = db.SaveTokenObservations(t.Context(), []capacity.TokenObservation{
-		{Provider: "claude", Source: "gatepost", SourceID: "s:1", ObservedAt: apiNow.Add(30 * time.Second), InputTokens: 1000},
-		{Provider: "claude", Source: "gatepost", SourceID: "s:2", ObservedAt: apiNow.Add(90 * time.Second), InputTokens: 4000},
+		{Provider: "claude", Account: "claude-main", Source: "gatepost", SourceID: "s:1", ObservedAt: apiNow.Add(30 * time.Second), InputTokens: 1000},
+		{Provider: "claude", Account: "claude-main", Source: "gatepost", SourceID: "s:2", ObservedAt: apiNow.Add(90 * time.Second), InputTokens: 4000},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1087,7 +1087,7 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
 	defer server.Close()
 	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
-	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].Source != "gatepost-pi" || observations[0].CacheReadTokens != 30 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
 	}
@@ -1190,7 +1190,7 @@ CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, 
 		t.Fatalf("owned_runs_inserted = %d", result.OwnedRunsInserted)
 	}
 	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
-	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].Source != "redline-run" || observations[0].CacheReadTokens != 4 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
 	}
@@ -2152,7 +2152,7 @@ func TestAutomaticSchedulerCompletesHermesRemoteRunAndRecordsUsage(t *testing.T)
 	if err != nil || task.State != domain.Completed {
 		t.Fatalf("task=%#v err=%v", task, err)
 	}
-	observations, err := db.ListTokenObservations(t.Context(), "codex", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "codex-main", "codex", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].SourceID != run.ID ||
 		observations[0].InputTokens != 12 || observations[0].OutputTokens != 2 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
@@ -2652,7 +2652,7 @@ func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
 
 func calibrationSnapshot(observed time.Time, shortRemaining, weeklyRemaining float64, shortReset, weeklyReset time.Time) decision.UsageSnapshot {
 	return decision.UsageSnapshot{
-		Provider: "claude", ObservedAt: observed,
+		Provider: "claude", Account: "claude-main", ObservedAt: observed,
 		Short:  &decision.UsageWindow{Remaining: shortRemaining, ResetsAt: shortReset},
 		Weekly: decision.UsageWindow{Remaining: weeklyRemaining, ResetsAt: weeklyReset},
 		Source: "test", Confidence: "high",
@@ -2747,7 +2747,7 @@ func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
 	}
 
 	stale := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow.Add(-time.Hour),
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow.Add(-time.Hour),
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -2782,7 +2782,7 @@ func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 	defer db.Close()
 	cfg := testConfig("http://usage.invalid")
 	snapshot := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow,
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow,
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -2823,7 +2823,7 @@ func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *
 	defer db.Close()
 	cfg := testConfig("http://usage.invalid")
 	snapshot := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow,
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow,
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -3779,8 +3779,8 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 // wantFingerprint below.
 func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
 	t.Parallel()
-	const wantCacheName = "redline-mobile-v7"
-	const wantFingerprint = "6087ab50cfc86e4d"
+	const wantCacheName = "redline-mobile-v16"
+	const wantFingerprint = "7a55dc6271fe253a"
 
 	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
 	if err != nil {

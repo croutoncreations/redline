@@ -42,6 +42,10 @@ type ExecutionProfile struct {
 	PrepareCommand    string    `json:"prepare_command,omitempty"`
 	FinalizeCommand   string    `json:"finalize_command,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
+	// ClaudeConfigDir is not part of the stored profile. The service fills
+	// it in for one run from the run's account, so a claude-code run on an
+	// account bound to a Claude Code profile directory uses that login.
+	ClaudeConfigDir string `json:"-"`
 }
 
 type RuntimeConnection struct {

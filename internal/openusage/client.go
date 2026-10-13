@@ -32,7 +32,14 @@ func (s Source) Fetch(ctx context.Context, provider config.Provider) (decision.U
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:6736"
 	}
-	return (Client{BaseURL: baseURL, HTTPClient: s.HTTPClient}).Fetch(ctx, provider.Provider)
+	client := Client{BaseURL: baseURL, HTTPClient: s.HTTPClient}
+	// An account bound to an OpenUsage card reads exactly that card from the
+	// limits API. Without one, the historical single-account route is kept
+	// unchanged so existing installs behave exactly as before.
+	if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
+		return client.FetchCard(ctx, provider.Provider, card)
+	}
+	return client.Fetch(ctx, provider.Provider)
 }
 
 func (c Client) Fetch(ctx context.Context, provider string) (decision.UsageSnapshot, []byte, error) {

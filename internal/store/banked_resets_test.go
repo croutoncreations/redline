@@ -36,7 +36,7 @@ func TestBankedResetsSurviveEveryReadPath(t *testing.T) {
 		}
 	}
 
-	listed, err := db.ListSnapshots(ctx, "codex", 10)
+	listed, err := db.ListSnapshots(ctx, "", "codex", 10)
 	if err != nil || len(listed) != 3 {
 		t.Fatalf("listed=%d err=%v", len(listed), err)
 	}
@@ -50,14 +50,14 @@ func TestBankedResetsSurviveEveryReadPath(t *testing.T) {
 		t.Fatalf("absent must stay absent, got %v", *listed[2].BankedResets)
 	}
 
-	latest, _, err := db.LatestSnapshot(ctx, "codex")
+	latest, _, err := db.LatestSnapshot(ctx, "", "codex")
 	if err != nil || latest.BankedResets != nil {
 		t.Fatalf("latest absent: %v %v", latest.BankedResets, err)
 	}
 	if err := db.SaveSnapshot(ctx, func() decision.UsageSnapshot { s := with; s.ObservedAt = base.Add(time.Hour); return s }(), nil); err != nil {
 		t.Fatal(err)
 	}
-	latest, _, err = db.LatestSnapshot(ctx, "codex")
+	latest, _, err = db.LatestSnapshot(ctx, "", "codex")
 	if err != nil || latest.BankedResets == nil || *latest.BankedResets != 1 || latest.BankedResetsExpireAt == nil {
 		t.Fatalf("latest with resets: %v %v %v", latest.BankedResets, latest.BankedResetsExpireAt, err)
 	}
@@ -104,7 +104,7 @@ func TestBankedResetsMigrationToleratesMobileBranchSchema(t *testing.T) {
 	if err := db.SaveSnapshot(context.Background(), s, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := db.LatestSnapshot(context.Background(), "codex")
+	got, _, err := db.LatestSnapshot(context.Background(), "", "codex")
 	if err != nil || got.BankedResetsExpireAt == nil {
 		t.Fatalf("expiry lost after migration: %v %v", got.BankedResetsExpireAt, err)
 	}

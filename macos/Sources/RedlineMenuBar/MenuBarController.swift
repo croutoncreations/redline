@@ -193,7 +193,7 @@ final class MenuBarController: NSObject {
                 range: NSRange(location: 0, length: artwork.length)
             )
             result.append(artwork)
-            let value = badge.percent.map { " \($0)%" } ?? " —"
+            let value = " " + badge.compact
             result.append(NSAttributedString(
                 string: value,
                 attributes: [.font: font]

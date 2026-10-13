@@ -30,7 +30,7 @@ func TestTokenObservationsAreIdempotentAndQueryableByProvider(t *testing.T) {
 	if err != nil || inserted != 0 {
 		t.Fatalf("second save inserted=%d err=%v", inserted, err)
 	}
-	got, err := db.ListTokenObservations(context.Background(), "claude", time.Time{}, time.Time{})
+	got, err := db.ListTokenObservations(context.Background(), "", "claude", time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestListTokenObservationsBySourceExcludesAmbientUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.ListTokenObservationsBySource(context.Background(), "claude", "redline-run", at.Add(-time.Minute), at.Add(time.Minute))
+	got, err := db.ListTokenObservationsBySource(context.Background(), "", "claude", "redline-run", at.Add(-time.Minute), at.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestLatestTokenObservationTime(t *testing.T) {
 	ctx := context.Background()
 
 	// No observations yet — must return zero time, not an error.
-	got, err := db.LatestTokenObservationTime(ctx, "claude", "gatepost-pi")
+	got, err := db.LatestTokenObservationTime(ctx, "", "claude", "gatepost-pi")
 	if err != nil {
 		t.Fatalf("empty table: unexpected error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestLatestTokenObservationTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err = db.LatestTokenObservationTime(ctx, "claude", "gatepost-pi")
+	got, err = db.LatestTokenObservationTime(ctx, "", "claude", "gatepost-pi")
 	if err != nil {
 		t.Fatalf("after save: unexpected error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestLatestTokenObservationTime(t *testing.T) {
 	}
 
 	// Querying a different source must still return zero (no rows for that key).
-	got, err = db.LatestTokenObservationTime(ctx, "claude", "nonexistent-source")
+	got, err = db.LatestTokenObservationTime(ctx, "", "claude", "nonexistent-source")
 	if err != nil {
 		t.Fatalf("missing source: unexpected error: %v", err)
 	}

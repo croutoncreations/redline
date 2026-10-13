@@ -26,6 +26,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -108,6 +110,23 @@ class MainActivity : ComponentActivity() {
                 },
             )
 
+            val accountsModel: AccountsViewModel = viewModel(
+                factory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                        AccountsViewModel(CoreAccountsSource(holder)) as T
+                },
+            )
+            val accountsState by accountsModel.state.collectAsState()
+            // The accounts screen sits over the tabs; Back closes it.
+            var accountsOpen by rememberSaveable { mutableStateOf(false) }
+            // Which account each carousel shows, kept above the tabs so it
+            // survives switching away and back for the rest of the session.
+            val accountSelection = rememberAccountSelection()
+            // Keeps each tab's own saved state (scroll position) while it is
+            // off screen.
+            val tabStates = rememberSaveableStateHolder()
+
             var tab by remember { mutableStateOf(Tab.CAPACITY) }
             val usageState by usageModel.state.collectAsState()
             val runsState by runsModel.state.collectAsState()
@@ -126,7 +145,17 @@ class MainActivity : ComponentActivity() {
             // user is actually looking at them. Only the visible screen
             // refreshes, so the background one does not spend the desktop's
             // time on data nobody is reading.
+            // Restored after the process was killed with Accounts open, the
+            // new view model has nothing to show; load it rather than spin.
+            LaunchedEffect(accountsOpen) {
+                if (accountsOpen && accountsState.view == null && !accountsState.loading) accountsModel.refresh()
+            }
+
             OnResume {
+                if (accountsOpen) {
+                    accountsModel.refresh()
+                    return@OnResume
+                }
                 when (tab) {
                     Tab.CAPACITY -> usageModel.refresh()
                     Tab.QUEUE -> queueModel.refresh()
@@ -139,13 +168,33 @@ class MainActivity : ComponentActivity() {
             // is backgrounded, would keep the radio awake for data nobody is
             // reading. Refresh-on-resume remains the floor underneath it.
             OnStartStop(
-                active = tab == Tab.CAPACITY,
+                active = tab == Tab.CAPACITY && !accountsOpen,
                 onStart = usageModel::startLive,
                 onStop = usageModel::stopLive,
             )
 
+            if (accountsOpen) {
+                AccountsScreen(
+                    state = accountsState,
+                    onClose = {
+                        accountsOpen = false
+                        usageModel.refresh()
+                    },
+                    onRetry = accountsModel::refresh,
+                    onDiscover = accountsModel::discover,
+                    onCloseDiscover = accountsModel::closeDiscover,
+                    onAdd = accountsModel::add,
+                    onRename = accountsModel::rename,
+                    onSetDisabled = accountsModel::setDisabled,
+                    onRemove = accountsModel::remove,
+                    onDismissMessage = accountsModel::dismissMessage,
+                )
+                return
+            }
+
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f)) {
+                    tabStates.SaveableStateProvider(tab.name) {
                     when (tab) {
                         Tab.CAPACITY -> UsageScreen(
                             state = usageState,
@@ -157,6 +206,11 @@ class MainActivity : ComponentActivity() {
                                 queueModel.selectProvider(id)
                                 tab = Tab.QUEUE
                             },
+                            onOpenAccounts = {
+                                accountsModel.refresh()
+                                accountsOpen = true
+                            },
+                            accountSelection = accountSelection,
                             onUnpair = {
                                 // Drop the relayed session too: it was
                                 // authenticated with the credential being
@@ -190,6 +244,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onControlTask = runsModel::controlTask,
                         )
+                    }
                     }
                 }
                 TabBar(

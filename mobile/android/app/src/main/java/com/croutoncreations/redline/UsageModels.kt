@@ -34,12 +34,96 @@ data class UsageView(
      * and another screen's refresh could change what this one reports.
      */
     val relayed: Boolean = false,
+    /** Cursor's usage card, when the Mac tracks it. Null otherwise. */
+    val cursor: CursorUsage? = null,
 )
+
+/**
+ * Cursor's usage card, interpreted by the core: monthly model pools, Grok
+ * Bot's weekly allowance, on-demand spend and credits, kept apart. Every
+ * label is already worded; this layer only lays it out.
+ */
+@Serializable
+data class CursorUsage(
+    val plan: String = "",
+    val state: String = "",
+    /** healthy, near or paused. */
+    val tone: String = "",
+    /** Past the source's refresh: every value is the last known one. */
+    val stale: Boolean = false,
+    @SerialName("updated_label") val updatedLabel: String = "",
+    /** Whether the Mac also schedules Cursor jobs from these pools. */
+    val scheduled: Boolean = false,
+    /** What this card is and is not used for. */
+    val note: String = "",
+    val errors: List<String> = emptyList(),
+    @SerialName("not_reported") val notReported: List<String> = emptyList(),
+    val groups: List<CursorGroup> = emptyList(),
+    val balances: List<CursorBalance> = emptyList(),
+)
+
+@Serializable
+data class CursorGroup(
+    val key: String = "",
+    val heading: String = "",
+    val meters: List<CursorMeter> = emptyList(),
+)
+
+@Serializable
+data class CursorMeter(
+    val key: String = "",
+    val label: String = "",
+    @SerialName("value_label") val valueLabel: String = "",
+    /** False when Cursor gave no limit: show the spend, never a bar. */
+    @SerialName("has_limit") val hasLimit: Boolean = false,
+    /** What is left, 0-100, like every provider meter. */
+    @SerialName("remaining_percent") val remainingPercent: Int = 0,
+    val exhausted: Boolean = false,
+    /** Empty when the reset was not reported; never made up. */
+    @SerialName("resets_at") val resetsAt: String = "",
+    @SerialName("resets_in_seconds") val resetsInSeconds: Long = 0,
+)
+
+@Serializable
+data class CursorBalance(
+    val key: String = "",
+    val label: String = "",
+    @SerialName("value_label") val valueLabel: String = "",
+    @SerialName("next_expires_at") val nextExpiresAt: String = "",
+)
+
+/**
+ * The line under a Cursor meter. A used-up pool says when it is available
+ * again; one with no reported reset says so rather than inventing a date.
+ */
+fun cursorMeterDetail(
+    meter: CursorMeter,
+    formatTime: (String) -> String = { formatResetAt(it) },
+): String {
+    if (meter.resetsAt.isEmpty()) {
+        return if (meter.hasLimit) "Reset date not reported" else "No limit reported"
+    }
+    val countdown = formatCountdown(meter.resetsInSeconds)
+    val at = formatTime(meter.resetsAt)
+    val lead = if (meter.exhausted) "Available again" else "Resets"
+    val timing = if (meter.resetsInSeconds <= 0) "$lead now" else "$lead in $countdown"
+    return if (at.isEmpty()) timing else "$timing · $at"
+}
 
 @Serializable
 data class ProviderUsage(
     val id: String = "",
     val provider: String = "",
+    /** The owner's name for the account; the core falls back to the id. Never an email. */
+    val label: String = "",
+    /** The plan as the source reported it ("Max 20x", "Team"); empty when not reported. */
+    val plan: String = "",
+    /** ok, stale, no_data, signed_out, error, or unknown from an older desktop. */
+    @SerialName("account_status") val accountStatus: String = "",
+    /** 1-based position among this provider's accounts, in the desktop's order. */
+    @SerialName("account_index") val accountIndex: Int = 1,
+    /** How many accounts this provider has. Two or more get the accounts carousel. */
+    @SerialName("account_count") val accountCount: Int = 1,
     val paused: Boolean = false,
     val stale: Boolean = false,
     val error: String = "",
@@ -64,11 +148,152 @@ data class ProviderUsage(
      * same as having none.
      */
     @SerialName("banked_resets") val bankedResets: Int? = null,
+    /**
+     * The same balance with each credit's own deadline. A credit's deadline is
+     * not the allowance's reset and is never worded as one. Null exactly when
+     * [bankedResets] is.
+     */
+    @SerialName("reset_credits") val resetCredits: ResetCredits? = null,
     val weekly: Window? = null,
+    /**
+     * The source reports no account-wide weekly limit for this account
+     * (OpenUsage Team seats). [weekly] is null then; the screen says "not
+     * reported" and shows nothing in its place.
+     */
+    @SerialName("weekly_not_reported") val weeklyNotReported: Boolean = false,
+    /**
+     * "Weekly allowance", or "Monthly allowance" for Cursor. Empty from an
+     * older desktop, where every account window was weekly.
+     */
+    @SerialName("weekly_label") val weeklyLabel: String = "",
     val pools: List<Pool> = emptyList(),
     /** Where Redline will act on the meters. Null from a desktop that sends no policy. */
     val scheduling: Scheduling? = null,
 )
+
+@Serializable
+data class ResetCredits(
+    val available: Int = 0,
+    /** Each credit's deadline, soonest first; fewer than [available] when some had none. */
+    val expiries: List<String> = emptyList(),
+    @SerialName("next_expires_in_seconds") val nextExpiresInSeconds: Long = 0,
+)
+
+/** The display name for one account: its label, or its id from an older desktop. */
+val ProviderUsage.accountName: String get() = label.ifBlank { id }
+
+/** A used-up account: no weekly allowance left, so nothing can run on it until it resets. */
+val ProviderUsage.exhausted: Boolean get() = weekly?.remainingPercent == 0
+
+val ProviderUsage.dispatching: Boolean get() = scheduling?.admits == true
+
+/**
+ * One entry on the capacity screen: a lone account keeps today's card, and a
+ * provider with several accounts becomes one carousel, at the position its
+ * first account had, so the cards around it do not reorder.
+ */
+sealed interface UsageItem {
+    val key: String
+    data class Single(val provider: ProviderUsage) : UsageItem {
+        override val key: String get() = provider.id
+    }
+    data class AccountGroup(val provider: String, val accounts: List<ProviderUsage>) : UsageItem {
+        override val key: String get() = "accounts:$provider"
+    }
+}
+
+fun usageItems(providers: List<ProviderUsage>): List<UsageItem> {
+    val byType = providers.groupBy { it.provider.lowercase() }
+    val emitted = mutableSetOf<String>()
+    val items = mutableListOf<UsageItem>()
+    for (provider in providers) {
+        val type = provider.provider.lowercase()
+        val accounts = byType.getValue(type)
+        if (accounts.size < 2) {
+            items += UsageItem.Single(provider)
+        } else if (emitted.add(type)) {
+            items += UsageItem.AccountGroup(type, accounts)
+        }
+    }
+    return items
+}
+
+/**
+ * The carousel's position label. Says the position in words, so it is never
+ * conveyed by the dots' colour alone.
+ */
+fun carouselPositionLabel(page: Int, accounts: Int): String =
+    if (page <= 0) "Overview · swipe left for each account" else "Account $page of $accounts"
+
+/** The header line: how many accounts, and how many Redline is dispatching on. */
+fun accountGroupSummary(provider: String, accounts: List<ProviderUsage>): String {
+    // The same rule as each account's own badge, so the header never counts
+    // an account as dispatching that says it is paused or out of date.
+    val dispatching = accounts.count { accountDispatchState(it) == "dispatching" }
+    return "${providerDisplayName(provider)} · ${accounts.size} accounts · $dispatching of ${accounts.size} dispatching"
+}
+
+/** What TalkBack announces when an account page comes into view. */
+fun accountAnnouncement(provider: String, account: ProviderUsage, page: Int, accounts: Int): String = buildString {
+    append("${providerDisplayName(provider)} account $page of $accounts, ")
+    append(account.accountName)
+    if (account.plan.isNotBlank()) append(", ${account.plan} plan")
+}
+
+/** Numbers that should not be read as current. */
+val ProviderUsage.isOutOfDate: Boolean get() = stale || accountStatus == "stale"
+
+/** Dispatch state in a few words, kept apart from usage. */
+fun accountDispatchState(account: ProviderUsage): String = when {
+    account.accountStatus == "signed_out" -> "needs sign-in"
+    account.paused -> "paused"
+    account.stale || account.accountStatus == "stale" -> "out of date, dispatch held"
+    account.accountStatus == "error" -> "usage unavailable, dispatch held"
+    account.weeklyNotReported && !account.dispatching -> "dispatch held, weekly not reported"
+    account.accountStatus == "no_data" || account.weekly == null -> "no usage yet"
+    account.dispatching -> "dispatching"
+    account.scheduling?.decision.isNullOrEmpty() -> "no scheduler decision yet"
+    else -> "dispatch held"
+}
+
+/**
+ * The reset-credit line: how many one-off limit resets the account holds and
+ * when the soonest lapses. Worded as "expires", never "resets", so it cannot
+ * be read as the allowance's own reset time.
+ *
+ * @param reportedOnly when true (the single-account card), returns "" for an
+ *   account that does not report credits, as that card always has; account
+ *   pages pass false and say "Not reported" instead, since a blank there
+ *   reads as "none".
+ */
+fun resetCreditsLine(
+    provider: ProviderUsage,
+    reportedOnly: Boolean = false,
+    formatTime: (String) -> String = { formatResetAt(it) },
+): String {
+    val credits = provider.resetCredits
+    val count = credits?.available ?: provider.bankedResets ?: return if (reportedOnly) "" else "Not reported"
+    val base = if (count == 1) "1 available" else "$count available"
+    if (credits == null || count == 0 || credits.expiries.isEmpty()) return base
+    val next = formatTime(credits.expiries.first())
+    return if (next.isEmpty()) base else "$base · next expires $next"
+}
+
+/**
+ * Every credit's deadline, for the account page, or "" when there is at most
+ * one deadline (the line above already says it).
+ */
+fun resetCreditExpiries(
+    provider: ProviderUsage,
+    formatTime: (String) -> String = { formatResetAt(it) },
+): String {
+    val credits = provider.resetCredits ?: return ""
+    if (credits.expiries.size < 2 && credits.expiries.size >= credits.available) return ""
+    val parts = credits.expiries.map(formatTime).filter { it.isNotEmpty() }.toMutableList()
+    val undated = credits.available - credits.expiries.size
+    if (undated > 0 && credits.expiries.isNotEmpty()) parts += "$undated with no expiry reported"
+    return if (parts.isEmpty()) "" else "Credit deadlines: " + parts.joinToString(" · ")
+}
 
 /**
  * The scheduler's lines on the bars, interpreted by the core so both platforms
@@ -84,6 +309,13 @@ data class Scheduling(
     val reason: String = "",
     @SerialName("projected_trigger_at") val projectedTriggerAt: String = "",
 ) {
+    /**
+     * Whether the last decision let work run. The desktop's value is "RUN"
+     * (decision.Admit); "ADMIT" is accepted too, as earlier builds of this
+     * screen expected it.
+     */
+    val admits: Boolean get() = decision == "RUN" || decision == "ADMIT"
+
     /** The floor that is live now, if any: the one the scheduler is actually holding to. */
     val armedFloor: WeeklyFloor? get() = weeklyFloors.lastOrNull { it.armed }
 
@@ -196,6 +428,14 @@ fun formatCountdown(seconds: Long): String {
     }
 }
 
+/** The provider's name as people know it. */
+fun providerDisplayName(provider: String): String = when (provider.lowercase()) {
+    "claude" -> "Claude"
+    "codex" -> "Codex"
+    "cursor" -> "Cursor"
+    else -> provider.replaceFirstChar { it.uppercase() }
+}
+
 /**
  * The one-line status shown under a provider's name.
  *
@@ -203,6 +443,7 @@ fun formatCountdown(seconds: Long): String {
  * both mean the numbers should not be read as current.
  */
 fun providerStatus(provider: ProviderUsage): String = when {
+    provider.stale && provider.staleReason.startsWith("Cursor CLI and app") -> "Accounts differ"
     provider.stale && provider.staleReason.isNotEmpty() -> "Signed out"
     provider.error.isNotEmpty() -> "No data"
     provider.paused -> "Paused"
@@ -275,7 +516,7 @@ fun schedulingLine(
     formatTime: (String) -> String = { formatResetAt(it) },
 ): String {
     if (scheduling.decision.isEmpty()) return ""
-    if (scheduling.decision == "ADMIT") return "Dispatching · ${scheduling.reason}"
+    if (scheduling.admits) return "Dispatching · ${scheduling.reason}"
 
     if (scheduling.projectedTriggerAt.isNotEmpty()) {
         val at = formatTime(scheduling.projectedTriggerAt)
@@ -310,6 +551,94 @@ fun windowResetSentence(window: Window): String =
     } else {
         resetLabel(window.resetsInSeconds, window.resetInferred)
     }
+
+/**
+ * The reset line for numbers that are out of date.
+ *
+ * A countdown ticks, and a ticking line reads as live even beside "was 41%".
+ * So stale numbers never get one: they name the reset time the source last
+ * reported, fixed. Once that time has passed they say the reset was due and
+ * fresh numbers are awaited -- never "Resets now" or a new countdown, which
+ * would claim a refresh nobody has seen. Due-ness is decided from the reset
+ * instant against the present clock, not from `resetsInSeconds`, which is a
+ * countdown frozen at the last read.
+ *
+ * @param zone the display timezone, injected for tests
+ * @param now the present instant, injected for tests
+ */
+fun outOfDateResetSentence(
+    window: Window,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    if (window.notStarted) return "Not started when last read"
+    val instant = runCatching { java.time.Instant.parse(window.resetsAt) }.getOrNull()
+        ?: return "Reset time unknown while out of date"
+    val at = fixedTimeLabel(instant, zone, now, locale)
+    val approx = if (window.resetInferred) " (estimated)" else ""
+    return if (!instant.isAfter(now)) {
+        "Reset was due $at$approx · awaiting fresh numbers"
+    } else {
+        "Last reported reset $at$approx"
+    }
+}
+
+/**
+ * A banked credit's deadline as last reported, for out-of-date numbers: a
+ * fixed time, and "expired" once it has passed -- never a bare time that
+ * would read as later today.
+ */
+fun lastKnownCreditDeadline(
+    expiresAt: String,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    val instant = runCatching { java.time.Instant.parse(expiresAt) }.getOrNull() ?: return ""
+    val at = fixedTimeLabel(instant, zone, now, locale)
+    return if (instant.isAfter(now)) at else "expired $at"
+}
+
+/** What replaces the scheduler line while an account's numbers are out of date. */
+const val OUT_OF_DATE_DISPATCH_LINE = "Scheduler waits for fresh numbers"
+
+/**
+ * How many of an account's last-known credits have a deadline that has since
+ * passed. Undated credits never count as expired.
+ */
+fun expiredCreditCount(
+    provider: ProviderUsage,
+    now: java.time.Instant = java.time.Instant.now(),
+): Int = provider.resetCredits?.expiries.orEmpty().count { expiry ->
+    runCatching { java.time.Instant.parse(expiry) }.getOrNull()?.let { !it.isAfter(now) } ?: false
+}
+
+/**
+ * A reset instant as a fixed local time, past or future, never ambiguous: a
+ * bare "9:00 AM" is today's only, other days are named.
+ */
+fun fixedTimeLabel(
+    instant: java.time.Instant,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    fun pattern(p: String) = java.time.format.DateTimeFormatter.ofPattern(p, locale)
+    val target = instant.atZone(zone)
+    val days = java.time.temporal.ChronoUnit.DAYS.between(now.atZone(zone).toLocalDate(), target.toLocalDate())
+    val time = target.format(pattern("h:mm a"))
+    return when {
+        days == 0L -> "today $time"
+        days == 1L -> "tomorrow $time"
+        days == -1L -> "yesterday $time"
+        days in 2L..6L -> target.format(pattern("EEE")) + " $time"
+        // Old stale data can be from another year; say so.
+        target.year != now.atZone(zone).year ->
+            target.format(pattern("MMM d yyyy,")) + " $time"
+        else -> target.format(pattern("MMM d,")) + " $time"
+    }
+}
 
 fun resetLabel(seconds: Long, inferred: Boolean): String {
     // Under a minute there is nothing useful left to count, and "in 12s" is a

@@ -281,6 +281,15 @@ func TestEvaluateFailsClosedForStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestEvaluateFailsClosedWhenSourceSaysStale(t *testing.T) {
+	s := limitedSnapshot()
+	s.SourceStale = true
+	got := decision.Evaluate(input(s))
+	if got.Decision != decision.Unknown {
+		t.Fatalf("got %q (%s); a source-stale snapshot must not drive dispatch", got.Decision, got.Reason)
+	}
+}
+
 func TestSnapshotExactlyAtMaximumAgeIsAccepted(t *testing.T) {
 	s := limitedSnapshot()
 	s.ObservedAt = now.Add(-15 * time.Minute)

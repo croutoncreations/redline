@@ -48,6 +48,42 @@ function dashboardFixture() {
   };
 }
 
+// Shape served by GET /v1/dashboard as cursor_usage. Values mirror the
+// sanitized OpenUsage snapshot used by the Go tests; times are shifted so the
+// report is fresh at FIXTURE_NOW. Synthetic, not live quota.
+function cursorUsageFixture() {
+  return {
+    id: 'cursor', label: 'Cursor', plan: 'Pro', source: 'openusage',
+    fetched_at: '2026-07-20T18:58:00Z', expires_at: '2026-07-20T19:03:00Z', stale: false,
+    meters: [
+      { key: 'autoUsage', label: 'Cursor Models', group: 'monthly', unit: 'percent', used: 0, limit: 100, resets_at: '2026-08-02T04:16:45Z', window_seconds: 2592000 },
+      { key: 'apiUsage', label: 'Other Models', group: 'monthly', unit: 'percent', used: 100, limit: 100, resets_at: '2026-08-02T04:16:45Z', window_seconds: 2592000 },
+      { key: 'grokBot', label: 'Grok Bot', group: 'weekly', unit: 'percent', used: 58.008217, limit: 100, resets_at: '2026-07-23T04:22:34.248Z', window_seconds: 604800 },
+    ],
+    balances: [{ key: 'credits', label: 'Credits', unit: 'usd', available: 22.23 }],
+  };
+}
+
+// A provider: cursor account as /v1/dashboard serves it: the account window is
+// the monthly subscription (period_seconds a month) and each pool is a
+// model-scoped monthly allowance. Synthetic values.
+function cursorProviderFixture() {
+  const reset = '2026-08-02T04:16:45Z';
+  return {
+    id: 'cursor-main', provider: 'cursor', policy: 'standard', policy_source: 'global', default_policy: 'standard',
+    max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'openusage' },
+    latest_decision: { decision: 'WAIT', policy: 'standard', mode: 'pace_threshold', reason: 'no pace threshold matched', pace_gap: .04 },
+    snapshot: {
+      provider: 'cursor', observed_at: FIXTURE_NOW, source: 'openusage',
+      weekly: { remaining: 0.95, resets_at: reset, period_seconds: 2592000 },
+      allowances: [
+        { key: 'model:cursor_models:monthly', source_label: 'Cursor Models', scope: 'model', role: 'monthly', remaining: 1, resets_at: reset, period_duration_seconds: 2592000 },
+        { key: 'model:other_models:monthly', source_label: 'Other Models', scope: 'model', role: 'monthly', remaining: 0, resets_at: reset, period_duration_seconds: 2592000 },
+      ],
+    },
+  };
+}
+
 function profileFixture() {
   return [
     { id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', repository: '/repo/redline' },
@@ -61,6 +97,7 @@ function profileOptionsFixture() {
     harnesses: [
       { id: 'codex-cli', label: 'Codex CLI', installed: true, version: '0.144.6', authentication: 'authenticated', models: { codex: [{ id: 'gpt-5.5', label: 'GPT-5.5', source: 'codex_cache' }] } },
       { id: 'claude-code', label: 'Claude Code', installed: true, version: '2.1.211', authentication: 'authenticated', models: { claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }] } },
+      { id: 'cursor-agent', label: 'Cursor CLI', installed: true, version: '2026.10.01-e373342', authentication: 'authenticated', models: { cursor: [{ id: 'auto', label: 'Auto', source: 'cursor_cli' }, { id: 'composer-2.5', label: 'Composer 2.5', source: 'cursor_cli' }, { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 1M High', source: 'cursor_cli' }] } },
       { id: 'pi', label: 'Pi', installed: true, version: '0.80.10', models: {
         codex: [{ id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol', source: 'pi_config', context_window: '1M', max_output: '128K' }],
         claude: [{ id: 'anthropic-cli/claude-fable-5', label: 'Claude Fable 5', source: 'pi_config', context_window: '200K', max_output: '32K' }, { id: 'anthropic-cli/claude-opus-4-8', label: 'Claude Opus 4.8', source: 'pi_config', context_window: '200K', max_output: '32K' }],
@@ -423,4 +460,4 @@ async function loadMobileDashboard(page, options = {}) {
   return state;
 }
 
-module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
+module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture, cursorProviderFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };

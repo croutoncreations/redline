@@ -3,6 +3,7 @@ package demo_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/croutoncreations/redline/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {
-	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown"}
+	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown", "multi-account"}
 	got := demo.Scenarios()
 	if len(got) != len(want) {
 		t.Fatalf("scenarios = %#v", got)
@@ -248,5 +249,23 @@ func TestExecutorDelayEndsOnShutdown(t *testing.T) {
 func TestUnknownScenarioIsRejected(t *testing.T) {
 	if _, err := demo.Create(context.Background(), "surprise", t.TempDir(), time.Now()); err == nil {
 		t.Fatal("expected unknown scenario error")
+	}
+}
+
+func TestMultiAccountScenarioKeepsEachAccountsOwnUsage(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	env, err := demo.Create(context.Background(), "multi-account", t.TempDir(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	if err := config.ValidateAccountIdentities(env.Config.Providers); err != nil {
+		t.Fatal(err)
+	}
+	for account, want := range map[string]string{"claude-main": "Max 20x", "claude-client": "Team", "claude-side": "Pro"} {
+		got, _, err := env.Database.LatestSnapshot(context.Background(), account, "claude")
+		if err != nil || got.Plan != want || got.Account != account {
+			t.Fatalf("%s = %+v, %v", account, got, err)
+		}
 	}
 }

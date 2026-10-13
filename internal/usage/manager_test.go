@@ -179,3 +179,36 @@ func snapshot(source string, now time.Time) decision.UsageSnapshot {
 	return decision.UsageSnapshot{Provider: "codex", ObservedAt: now, Source: source, Confidence: "high",
 		Weekly: decision.UsageWindow{Remaining: .9, ResetsAt: now.Add(6 * 24 * time.Hour)}}
 }
+
+// An account bound to a non-default OpenUsage card must never fall back to
+// the native collector, which reads the default login (another account).
+func TestNonDefaultCardNeverFallsBackToNative(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	open := &fakeSource{name: "openusage", results: []sourceResult{
+		{err: errors.New("offline one")}, {err: errors.New("offline two")}, {err: errors.New("offline three")},
+	}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "claude", UsageSource: "auto", OpenUsageCard: "claude@ab12cd34"}
+	for range 3 {
+		if _, _, err := manager.Fetch(context.Background(), "claude-client", provider); err == nil {
+			t.Fatal("expected the OpenUsage failure to surface")
+		}
+	}
+	if native.calls != 0 {
+		t.Fatalf("native collector called %d times for a non-default card", native.calls)
+	}
+}
+
+// The bare family card is the default login, so auto may still fall back.
+func TestBareCardKeepsAutoFallback(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	open := &fakeSource{name: "openusage", results: []sourceResult{{err: errors.New("one")}, {err: errors.New("two")}}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}, {snapshot: snapshot("native", now)}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageCard: "codex"}
+	_, _, _ = manager.Fetch(context.Background(), "codex-main", provider)
+	if got, _, err := manager.Fetch(context.Background(), "codex-main", provider); err != nil || got.Source != "native" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}

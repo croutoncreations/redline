@@ -9,7 +9,7 @@ module.exports = defineConfig({
   projects: [
     {
       name: 'desktop',
-      testMatch: /dashboard\.spec\.js|screenshots\.spec\.js/,
+      testMatch: /dashboard(?:-cursor(?:-provider)?|-accounts)?\.spec\.js|screenshots\.spec\.js/,
       use: {
         browserName: 'chromium',
         headless: true,
@@ -18,7 +18,7 @@ module.exports = defineConfig({
     },
     {
       name: 'mobile',
-      testMatch: /mobile(?:-screenshots)?\.spec\.js|sw\.spec\.js/,
+      testMatch: /mobile(?:-screenshots|-accounts)?\.spec\.js|sw\.spec\.js|dashboard-cursor-provider\.spec\.js/,
       use: {
         browserName: 'chromium',
         headless: true,

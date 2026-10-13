@@ -21,6 +21,8 @@ public enum ProviderRecovery {
             "claude auth login"
         case "codex", "openai":
             "codex login"
+        case "cursor":
+            "agent login"
         default:
             nil
         }

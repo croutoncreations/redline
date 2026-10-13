@@ -34,8 +34,17 @@ type claudeModelUsage struct {
 	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
 }
 
+// cursorUsage is the usage block on cursor-agent's terminal result record.
+type cursorUsage struct {
+	InputTokens      int64 `json:"inputTokens"`
+	OutputTokens     int64 `json:"outputTokens"`
+	CacheReadTokens  int64 `json:"cacheReadTokens"`
+	CacheWriteTokens int64 `json:"cacheWriteTokens"`
+}
+
 type runRecord struct {
 	Type       string                      `json:"type"`
+	Subtype    string                      `json:"subtype"`
 	Usage      runUsage                    `json:"usage"`
 	ModelUsage map[string]claudeModelUsage `json:"modelUsage"`
 	Model      string                      `json:"model"`
@@ -60,6 +69,25 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			continue
 		}
 		switch harnessType {
+		case "cursor-agent":
+			if record.Type != "result" {
+				continue
+			}
+			var terminal struct {
+				Usage cursorUsage `json:"usage"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &terminal) != nil {
+				continue
+			}
+			// The terminal record carries run totals. Cursor reports cache
+			// reads separately from inputTokens.
+			result = []capacity.TokenObservation{{
+				Provider: "cursor", Source: "redline-run", SourceID: runID,
+				ObservedAt: observedAt.UTC(), Model: configuredModel,
+				InputTokens: terminal.Usage.InputTokens, OutputTokens: terminal.Usage.OutputTokens,
+				CacheReadTokens: terminal.Usage.CacheReadTokens, CacheCreationTokens: terminal.Usage.CacheWriteTokens,
+				Confidence: "high",
+			}}
 		case "claude-code":
 			if record.Type != "result" {
 				continue
@@ -199,12 +227,18 @@ func (r RunUsageRecorder) RecordRunUsage(
 	observedAt time.Time,
 ) (int, error) {
 	if r.Store == nil || outputFile == "" ||
-		(profile.HarnessType != "claude-code" && profile.HarnessType != "codex-cli" && profile.HarnessType != "hermes") {
+		(profile.HarnessType != "claude-code" && profile.HarnessType != "codex-cli" &&
+			profile.HarnessType != "cursor-agent" && profile.HarnessType != "hermes") {
 		return 0, nil
 	}
 	observations, err := LoadRunArtifact(outputFile, profile.HarnessType, run.ID, profile.Model, observedAt)
 	if err != nil {
 		return 0, err
+	}
+	// A run belongs to exactly one provider account; its tokens are that
+	// account's, never pooled with another account of the same provider.
+	for index := range observations {
+		observations[index].Account = run.ProviderAccountID
 	}
 	return r.Store.SaveTokenObservations(ctx, observations)
 }

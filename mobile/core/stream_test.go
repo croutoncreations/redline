@@ -90,8 +90,8 @@ func TestStreamUsageDeliversRenderedViews(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The stream re-sends the whole read model repeatedly, so trimming is
 		// where the saving compounds.
-		if got := r.URL.Query().Get("fields"); got != "providers,health" {
-			t.Errorf("fields = %q, want providers,health", got)
+		if got := r.URL.Query().Get("fields"); got != "providers,health,cursor_usage" {
+			t.Errorf("fields = %q, want providers,health,cursor_usage", got)
 		}
 		flusher := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")

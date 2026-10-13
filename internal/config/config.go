@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,21 @@ type Config struct {
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	Relay           RelayBootstrap      `yaml:"relay"`
-	APIToken        string              `yaml:"-"`
+	CursorUsage     CursorUsage         `yaml:"cursor_usage"`
+	// AccountsFile holds accounts managed from Redline itself (CLI and API).
+	// Empty means accounts.yaml beside the config file. The file holds no
+	// credentials: only which account Redline meters and how to label it.
+	AccountsFile string `yaml:"accounts_file"`
+	APIToken     string `yaml:"-"`
+	// ConfigPath is the file this configuration was loaded from, so the
+	// managed accounts file can be resolved and rewritten beside it.
+	ConfigPath string `yaml:"-"`
+	// ManagedAccounts lists the provider IDs that came from the accounts file
+	// rather than the config file; only those can be edited from Redline.
+	ManagedAccounts map[string]bool `yaml:"-"`
+	// DisabledAccounts lists managed accounts kept on file but switched off.
+	// They are not scheduled, monitored, or shown as live accounts.
+	DisabledAccounts map[string]ManagedAccount `yaml:"-"`
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
 	DemoScenario string `yaml:"-"`
@@ -67,6 +82,60 @@ func (c Config) NotificationEvents() map[string]bool {
 		result[event] = true
 	}
 	return result
+}
+
+// CursorUsage configures display-only tracking of Cursor's model pools and
+// Grok Bot allowance. It never affects scheduling.
+type CursorUsage struct {
+	// Source is off (the default), openusage, native or auto. openusage reads
+	// OpenUsage's cached Cursor card; native reads the signed-in Cursor app's
+	// session without refreshing it; auto prefers fresh OpenUsage data and
+	// falls back to native.
+	Source       string `yaml:"source"`
+	OpenUsageURL string `yaml:"openusage_url"`
+	PollInterval string `yaml:"poll_interval"`
+}
+
+// EffectiveSource returns the Cursor tracking mode and whether the operator
+// chose it.
+func (c CursorUsage) EffectiveSource() (string, bool) {
+	if source := strings.ToLower(strings.TrimSpace(c.Source)); source != "" {
+		return source, true
+	}
+	return "off", false
+}
+
+func (c CursorUsage) Interval() (time.Duration, error) {
+	if strings.TrimSpace(c.PollInterval) == "" {
+		return 5 * time.Minute, nil
+	}
+	interval, err := positiveDuration("cursor_usage poll_interval", c.PollInterval)
+	if err != nil {
+		return 0, err
+	}
+	if interval < time.Minute {
+		return 0, fmt.Errorf("cursor_usage poll_interval %q must be at least 1m", c.PollInterval)
+	}
+	return interval, nil
+}
+
+// CursorOpenUsageURL falls back to the first provider's OpenUsage URL and
+// then to OpenUsage's conventional loopback address.
+func (c Config) CursorOpenUsageURL() string {
+	if url := strings.TrimSpace(c.CursorUsage.OpenUsageURL); url != "" {
+		return url
+	}
+	ids := make([]string, 0, len(c.Providers))
+	for id := range c.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if url := strings.TrimSpace(c.Providers[id].OpenUsageURL); url != "" {
+			return url
+		}
+	}
+	return "http://127.0.0.1:6736"
 }
 
 type API struct {
@@ -122,9 +191,23 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	Provider          string                `yaml:"provider"`
-	UsageSource       string                `yaml:"usage_source"`
-	OpenUsageURL      string                `yaml:"openusage_url"`
+	Provider     string `yaml:"provider"`
+	UsageSource  string `yaml:"usage_source"`
+	OpenUsageURL string `yaml:"openusage_url"`
+	// OpenUsageCard selects one account card from OpenUsage's limits API,
+	// for example "claude" or "claude@ab12cd34". OpenUsage gives each signed
+	// in account and organization its own card; empty keeps the historical
+	// behaviour of reading the bare provider card from /v1/usage.
+	OpenUsageCard string `yaml:"openusage_card"`
+	// ClaudeConfigDir names a Claude Code profile directory (what Claude
+	// Code calls CLAUDE_CONFIG_DIR), for example ~/.claude-cc-work. The
+	// account reads that profile's own login, read-only, and runs dispatched
+	// on it start Claude Code with that directory. Empty is the default
+	// login. Only for claude accounts, and only with the native source.
+	ClaudeConfigDir string `yaml:"claude_config_dir"`
+	// Label is a person-chosen name shown instead of the provider ID. It is
+	// display text only and never an email or credential.
+	Label             string                `yaml:"label"`
 	WindowWeeklyCost  float64               `yaml:"window_weekly_cost"`
 	Policy            string                `yaml:"policy"`
 	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
@@ -142,6 +225,11 @@ func (p Provider) EffectiveMaxConcurrentRuns() int {
 func (p Provider) EffectiveUsageSource() string {
 	if source := strings.ToLower(strings.TrimSpace(p.UsageSource)); source != "" {
 		return source
+	}
+	// A Claude Code profile is read only from its own login: "auto" would
+	// try OpenUsage's default card first, which is a different account.
+	if strings.TrimSpace(p.ClaudeConfigDir) != "" {
+		return "native"
 	}
 	return "auto"
 }
@@ -170,6 +258,18 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	// allowances. Recognise the provider's model name without requiring every
 	// installation to duplicate this stable mapping in YAML; an explicit
 	// model_groups.spark still wins above, just as it does for Fable.
+	// Cursor meters its subscription as two monthly pools: Cursor's own
+	// models (Auto and Composer) and everything else ("Other Models", the API
+	// pool). A task draws from exactly one, so each is a model group with a
+	// monthly allowance. On-demand spend is never a group: it is not quota.
+	if strings.EqualFold(p.Provider, "cursor") {
+		if _, ok := groups[CursorModelsGroup]; !ok {
+			groups[CursorModelsGroup] = ModelGroup{Aliases: []string{"auto"}, RequiredAllowanceRoles: []string{"monthly"}}
+		}
+		if _, ok := groups[CursorOtherModelsGroup]; !ok {
+			groups[CursorOtherModelsGroup] = ModelGroup{RequiredAllowanceRoles: []string{"monthly"}}
+		}
+	}
 	if strings.EqualFold(p.Provider, "codex") {
 		if _, ok := groups["spark"]; !ok {
 			groups["spark"] = ModelGroup{
@@ -211,8 +311,23 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 			}
 		}
 	}
+	if strings.EqualFold(p.Provider, "cursor") {
+		// Every Cursor model draws from one of the two pools; there is no
+		// account-only route. Auto and Composer use Cursor's own pool, and
+		// any other model (Claude, GPT, Gemini, Grok...) the API pool.
+		if normalizedModel == "" || normalizedModel == "default" || strings.HasPrefix(normalizedModel, "composer") {
+			return CursorModelsGroup, "cursor_pool", nil
+		}
+		return CursorOtherModelsGroup, "cursor_pool", nil
+	}
 	return "", "account_only_unmatched", nil
 }
+
+// Cursor's two monthly subscription pools, as model groups.
+const (
+	CursorModelsGroup      = "cursor_models"
+	CursorOtherModelsGroup = "other_models"
+)
 
 type Policy struct {
 	TriggerMargin  float64         `yaml:"trigger_margin" json:"trigger_margin"`
@@ -306,6 +421,10 @@ func load(path string, validateBootstrapRelay bool) (Config, error) {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 	cfg.Warnings = warnings
+	cfg.ConfigPath = path
+	if err := cfg.mergeManagedAccounts(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
 	if err := cfg.validate(validateBootstrapRelay); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
@@ -448,12 +567,29 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 		if provider.Provider == "" {
 			return fmt.Errorf("provider %q requires provider", name)
 		}
+		// Checked first: a profile directory explains its own source rules
+		// better than the generic source errors below.
+		if err := validateClaudeConfigDir(provider); err != nil {
+			return fmt.Errorf("provider %q: %w", name, err)
+		}
 		source := provider.EffectiveUsageSource()
 		if source != "auto" && source != "openusage" && source != "native" {
 			return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
 		}
 		if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
 			return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
+		}
+		if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
+			if !validOpenUsageCard(provider.Provider, card) {
+				return fmt.Errorf("provider %q: openusage_card %q must be %q or %q followed by an OpenUsage account suffix",
+					name, card, strings.ToLower(provider.Provider), strings.ToLower(provider.Provider)+"@…")
+			}
+			if source == "native" {
+				return fmt.Errorf("provider %q: openusage_card needs usage_source openusage or auto, not native", name)
+			}
+		}
+		if err := validateLabel(provider.Label); err != nil {
+			return fmt.Errorf("provider %q: %w", name, err)
 		}
 		if err := fraction("window_weekly_cost", provider.WindowWeeklyCost); err != nil {
 			return fmt.Errorf("provider %q: %w", name, err)
@@ -485,7 +621,7 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 			roles := make(map[string]bool, len(group.RequiredAllowanceRoles))
 			for _, role := range group.RequiredAllowanceRoles {
 				role = strings.ToLower(strings.TrimSpace(role))
-				if role != "short" && role != "weekly" {
+				if role != "short" && role != "weekly" && role != "monthly" {
 					return fmt.Errorf("provider %q model group %q: unknown required allowance role %q", name, groupName, role)
 				}
 				if roles[role] {
@@ -505,6 +641,15 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 			}
 		}
 	}
+	managed := cfg.ManagedAccounts
+	if managed == nil {
+		managed = map[string]bool{}
+	}
+	identityWarnings, err := accountIdentityConflicts(cfg.Providers, managed)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, identityWarnings...)
 	for name, policy := range cfg.Policies {
 		if err := fraction("trigger_margin", policy.TriggerMargin); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)
@@ -528,6 +673,14 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 		return err
 	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
+		return err
+	}
+	switch source, _ := cfg.CursorUsage.EffectiveSource(); source {
+	case "off", "openusage", "native", "auto":
+	default:
+		return fmt.Errorf("cursor_usage source %q must be off, openusage, native, or auto", cfg.CursorUsage.Source)
+	}
+	if _, err := cfg.CursorUsage.Interval(); err != nil {
 		return err
 	}
 	if cfg.Notifications.Timeout != "" {

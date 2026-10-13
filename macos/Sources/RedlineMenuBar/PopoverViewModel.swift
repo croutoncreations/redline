@@ -20,6 +20,10 @@ final class PopoverViewModel: ObservableObject {
     /// come up. Distinct from `errorMessage` (a transient fetch failure): this
     /// carries the service's own diagnostic so a bad config is visible here.
     @Published private(set) var startupFailure: ServiceStartupFailure?
+    /// The account row expanded in the multi-account tray. View state only:
+    /// choosing a row never refreshes usage or touches any login. Kept here
+    /// so a refresh, or closing and reopening the popover, keeps it.
+    @Published var expandedAccountID: String?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 

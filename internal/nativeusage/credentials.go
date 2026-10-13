@@ -64,6 +64,90 @@ type DefaultCredentials struct {
 	CodexStore       secretStore
 	ClaudeRefreshURL string
 	CodexRefreshURL  string
+	// ClaudeProfileStore opens the credential store of one Claude Code
+	// profile directory (CLAUDE_CONFIG_DIR). Nil uses the platform's own.
+	ClaudeProfileStore func(dir string) secretStore
+}
+
+// ProfileCredentials reads the login of one Claude Code profile directory,
+// strictly read-only: Redline never refreshes or rewrites a profile's
+// credential (its refresh token belongs to that profile's Claude Code), so a
+// token near expiry is reported as needing a Claude Code session there.
+type ProfileCredentials interface {
+	AccessClaudeProfile(ctx context.Context, dir string) (Credential, error)
+}
+
+// ErrProfileSignedOut is ErrSignedOut for a Claude Code profile directory:
+// the fix is signing in with that profile, not the default one.
+type profileSignedOutError struct{ dir string }
+
+func (e profileSignedOutError) Error() string {
+	return "Claude Code profile " + e.dir + " is signed out on this Mac; run `CLAUDE_CONFIG_DIR=" + e.dir + " claude auth login` to sign in again"
+}
+func (profileSignedOutError) Reason() string { return "signed_out" }
+func (profileSignedOutError) Is(target error) bool {
+	return target == ErrSignedOut
+}
+
+// profileNeedsSessionError: the profile's token has expired and only Claude
+// Code may refresh it. Its own reason, so every surface can say what to do
+// rather than show a generic error.
+type profileNeedsSessionError struct{ dir string }
+
+func (e profileNeedsSessionError) Error() string {
+	return "Claude Code profile " + e.dir + " needs its login refreshed; Redline will not modify that profile's credential. " +
+		"Start Claude Code once with this profile (CLAUDE_CONFIG_DIR=" + e.dir + " claude) and it refreshes itself"
+}
+func (profileNeedsSessionError) Reason() string { return "needs_session" }
+
+// AccessClaudeProfile returns the access token of the Claude Code profile at
+// dir (an absolute, cleaned path) without refreshing or writing anything.
+func (d *DefaultCredentials) AccessClaudeProfile(ctx context.Context, dir string) (Credential, error) {
+	if !filepath.IsAbs(dir) {
+		return Credential{}, fmt.Errorf("claude profile directory must be absolute")
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		// No directory, no profile: nothing was ever signed in there.
+		return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+	}
+	open := d.ClaudeProfileStore
+	if open == nil {
+		open = newClaudeProfileStore
+	}
+	store := open(dir)
+	if store == nil {
+		return Credential{}, fmt.Errorf("claude profile credentials are unavailable on this platform")
+	}
+	file, err := readClaudeCredentials(ctx, store)
+	if errors.Is(err, ErrSignedOut) {
+		return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+	}
+	if err != nil {
+		// The store's own error may carry the full credential path (a
+		// file store's PathError), which would reach phones as last_error.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return Credential{}, fmt.Errorf("read Claude Code profile %s login: %v", displayDir(dir), pathErr.Err)
+		}
+		return Credential{}, err
+	}
+	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+		}
+		return Credential{}, profileNeedsSessionError{dir: displayDir(dir)}
+	}
+	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
+}
+
+// displayDir shows a path under the home folder as "~/…" in messages.
+func displayDir(dir string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if rest, ok := strings.CutPrefix(dir, filepath.Clean(home)+string(filepath.Separator)); ok {
+			return "~/" + rest
+		}
+	}
+	return dir
 }
 
 func NewDefaultCredentials() *DefaultCredentials {
@@ -355,6 +439,12 @@ func jwtExpiry(token string) (time.Time, bool) {
 type firstFileStore struct {
 	Paths []string
 }
+
+// readOnlyStore exposes only Read, so a credential behind it can never be
+// rewritten: the writableSecretStore assertion fails.
+type readOnlyStore struct{ store secretStore }
+
+func (s readOnlyStore) Read(ctx context.Context) ([]byte, error) { return s.store.Read(ctx) }
 
 // locate returns the first credential file that exists. A path that cannot
 // be checked for a reason other than not existing -- a directory without

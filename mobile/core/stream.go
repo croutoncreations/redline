@@ -111,6 +111,7 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 			maxDelay = baseDelay
 		}
 		delay := baseDelay
+		fields := usageFields
 
 		for {
 			if ctx.Err() != nil {
@@ -121,7 +122,12 @@ func (c *Client) StreamUsageWithBackoff(sink UsageStreamSink, reconnectDelayMill
 			sink.OnState(StreamStateConnecting)
 			// A connection that delivers resets the backoff, so a desktop that
 			// flaps briefly is not punished with an ever-growing delay.
-			err := c.consumeUsageStream(ctx, sink, func() { delay = baseDelay })
+			err := c.consumeUsageStream(ctx, sink, fields, func() { delay = baseDelay })
+			if isUnknownFieldError(err) && fields != legacyUsageFields {
+				// An older desktop: ask again at once for what it knows.
+				fields = legacyUsageFields
+				continue
+			}
 
 			switch {
 			case ctx.Err() != nil:
@@ -180,13 +186,13 @@ var errStreamRelayed = errors.New("stream unavailable over the relay")
 // onLive runs once the connection is established and delivering, so the caller
 // can treat a working connection as a fresh start.
 func (c *Client) consumeUsageStream(
-	ctx context.Context, sink UsageStreamSink, onLive func(),
+	ctx context.Context, sink UsageStreamSink, fields string, onLive func(),
 ) error {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodGet,
 		// The stream re-sends the whole read model every few seconds, so
 		// trimming it to what the screen renders is where the saving compounds.
-		c.baseURL+"/v1/dashboard/events?fields=providers,health", nil,
+		c.baseURL+"/v1/dashboard/events?fields="+fields, nil,
 	)
 	if err != nil {
 		return err

@@ -28,6 +28,7 @@ import (
 	"github.com/croutoncreations/redline/internal/calibration"
 	"github.com/croutoncreations/redline/internal/capacity"
 	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/cursorusage"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/discovery"
 	"github.com/croutoncreations/redline/internal/domain"
@@ -87,18 +88,24 @@ type Server struct {
 	scheduler    *autoscheduler.Loop
 	usageMonitor *autoscheduler.Loop
 	discovery    HarnessDiscoverer
-	hermes       HermesDiscoverer
-	usageSources *usage.Manager
-	catalogMu    sync.Mutex
-	catalog      discovery.Catalog
-	catalogAt    time.Time
-	mux          *http.ServeMux
-	workers      sync.WaitGroup
-	loopWorkers  sync.WaitGroup
-	startMu      sync.Mutex
-	started      bool
-	pairingMu    sync.Mutex
-	pairing      map[string]time.Time
+	// cursorAccounts confirms the Cursor CLI and app share one account
+	// before a Cursor account's usage is read.
+	cursorAccounts cursorusage.AccountCheck
+	hermes         HermesDiscoverer
+	usageSources   *usage.Manager
+	// cursorUsage is display-only Cursor and Grok Bot tracking. It is kept
+	// apart from usageSources so it can never reach scheduling decisions.
+	cursorUsage *cursorusage.Tracker
+	catalogMu   sync.Mutex
+	catalog     discovery.Catalog
+	catalogAt   time.Time
+	mux         *http.ServeMux
+	workers     sync.WaitGroup
+	loopWorkers sync.WaitGroup
+	startMu     sync.Mutex
+	started     bool
+	pairingMu   sync.Mutex
+	pairing     map[string]time.Time
 	// redeemed remembers a spent token for a short while after the fact, so
 	// the surface that showed the code can learn the phone got in. Without
 	// this a redeem was a deletion and nothing more: the sheet kept showing
@@ -160,6 +167,21 @@ func NewServerWithRelayManager(cfg config.Config, database *store.DB, now func()
 	return server
 }
 
+// cursorAccountCheck defers to the server's current Cursor account check.
+type cursorAccountCheck struct{ server *Server }
+
+func (c cursorAccountCheck) Verify(ctx context.Context) error {
+	if c.server.cursorAccounts == nil {
+		return nil
+	}
+	return c.server.cursorAccounts.Verify(ctx)
+}
+
+// SetCursorAccountCheck replaces the check that the Cursor CLI and the
+// Cursor app are signed in to the same account. Tests use it to avoid
+// depending on this machine's Cursor sign-ins.
+func (s *Server) SetCursorAccountCheck(check cursorusage.AccountCheck) { s.cursorAccounts = check }
+
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
 	server := NewServer(cfg, database, now)
 	server.discovery = discoverer
@@ -178,8 +200,10 @@ func NewDemoServer(
 	executor Executor,
 ) *Server {
 	server := newServer(cfg, database, now, executor, demoRevisionResolver{}, nil)
-	source := staticUsageSource{snapshots: snapshots}
+	source := staticUsageSource{snapshots: snapshots, accounts: cfg.Providers}
 	server.usageSources = usage.NewManager(source, source, now)
+	// Demo mode never reads real Cursor data.
+	server.cursorUsage = nil
 	server.discovery = discoverer
 	server.hermes = disabledDemoHermes{}
 	for accountID, provider := range cfg.Providers {
@@ -190,6 +214,10 @@ func NewDemoServer(
 
 type staticUsageSource struct {
 	snapshots map[string]decision.UsageSnapshot
+	// accounts identifies which account a Fetch is for: the Source contract
+	// passes the provider configuration, not the account id, and two demo
+	// accounts of one provider differ by their metering identity.
+	accounts map[string]config.Provider
 }
 
 type demoRevisionResolver struct{}
@@ -212,6 +240,21 @@ func (disabledDemoHermes) TriggerJob(context.Context, domain.RuntimeConnection, 
 
 func (staticUsageSource) Name() string { return "demo" }
 func (s staticUsageSource) Fetch(_ context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	identity := config.MeteringIdentity(provider)
+	for id, configured := range s.accounts {
+		if !strings.EqualFold(configured.Provider, provider.Provider) || config.MeteringIdentity(configured) != identity {
+			continue
+		}
+		if snapshot, ok := s.snapshots[id]; ok {
+			raw, _ := json.Marshal(snapshot)
+			return snapshot, raw, nil
+		}
+	}
+	if len(s.accounts) > 0 {
+		// Never another account's numbers: an account without a fixture
+		// has no data.
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("demo snapshot for this account is unavailable")
+	}
 	for _, snapshot := range s.snapshots {
 		if strings.EqualFold(snapshot.Provider, provider.Provider) {
 			raw, _ := json.Marshal(snapshot)
@@ -261,11 +304,18 @@ func newServer(
 		discovery:        discovery.Service{Now: now},
 		hermes:           hermes.Client{},
 	}
-	server.usageSources = usage.NewManager(
-		openusage.Source{},
-		nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now},
-		now,
-	)
+	nativeSource := nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now}
+	// provider: cursor accounts read Cursor's monthly subscription pools
+	// through these wrappers; every other provider passes straight through.
+	// The account check reads through server.cursorAccounts so tests can
+	// replace it after construction; production compares the Cursor app's
+	// and the Cursor CLI's signed-in accounts.
+	server.cursorAccounts = cursorusage.NewLocalAccountCheck(now)
+	openUsageWithCursor, nativeWithCursor := cursorusage.NewUsageSources(openusage.Source{}, nativeSource, now,
+		cursorAccountCheck{server})
+	server.usageSources = usage.NewManager(openUsageWithCursor, nativeWithCursor, now)
+	// Wrapping hides the native source's banked-reset lookup; keep it.
+	server.usageSources.BankedResets = nativeSource
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
 	}
@@ -282,13 +332,17 @@ func newServer(
 	// several Claude accounts configured it cannot tell which account that
 	// login belongs to, and a count shown on the wrong account is worse
 	// than none.
+	// Accounts bound to a Claude Code profile directory are not counted:
+	// they never use this lookup (their own native fetch reports their
+	// resets), so they do not make the default login ambiguous.
 	claudeAccounts := 0
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(provider.Provider, "claude") {
+		if strings.EqualFold(provider.Provider, "claude") && strings.TrimSpace(provider.ClaudeConfigDir) == "" {
 			claudeAccounts++
 		}
 	}
 	server.usageSources.SkipBankedResets = claudeAccounts > 1
+	server.cursorUsage = newCursorTracker(cfg, now)
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -301,7 +355,13 @@ func newServer(
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
+	mux.HandleFunc("GET /v1/accounts", server.listAccounts)
+	mux.HandleFunc("POST /v1/accounts", server.createAccount)
+	mux.HandleFunc("PATCH /v1/accounts/{account}", server.updateAccount)
+	mux.HandleFunc("DELETE /v1/accounts/{account}", server.deleteAccount)
+	mux.HandleFunc("GET /v1/accounts/discover/{provider}", server.discoverAccounts)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
+	mux.HandleFunc("GET /v1/cursor-usage", server.cursorUsageReport)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
@@ -954,6 +1014,13 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		defer s.loopWorkers.Done()
 		s.usageMonitor.Run(ctx)
 	}()
+	if s.cursorUsage != nil {
+		s.loopWorkers.Add(1)
+		go func() {
+			defer s.loopWorkers.Done()
+			s.cursorUsage.Run(ctx)
+		}()
+	}
 }
 
 func (s *Server) Wait() {
@@ -1016,7 +1083,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
 		return
 	}
-	snapshot, _, err := s.store.LatestSnapshotFromSource(r.Context(), configured.Provider, s.usageSources.Status(r.PathValue("provider")).Active)
+	snapshot, _, err := s.store.LatestSnapshotFromSource(r.Context(), r.PathValue("provider"), configured.Provider, s.usageSources.Status(r.PathValue("provider")).Active)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1052,7 +1119,7 @@ func (s *Server) capacityEstimate(ctx context.Context, providerID string) (capac
 	if !ok {
 		return capacity.EstimateResult{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 5000)
+	snapshots, err := s.store.ListSnapshots(ctx, providerID, configured.Provider, 5000)
 	if err != nil {
 		return capacity.EstimateResult{}, err
 	}
@@ -1060,7 +1127,7 @@ func (s *Server) capacityEstimate(ctx context.Context, providerID string) (capac
 	if len(snapshots) > 0 {
 		after = snapshots[0].ObservedAt.Add(-time.Nanosecond)
 	}
-	observations, err := s.store.ListTokenObservations(ctx, configured.Provider, after, time.Time{})
+	observations, err := s.store.ListTokenObservations(ctx, providerID, configured.Provider, after, time.Time{})
 	if err != nil {
 		return capacity.EstimateResult{}, err
 	}
@@ -1101,6 +1168,12 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if gatepostPath == "" {
 		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	}
+	// Gatepost records which provider spent tokens, not which account. With
+	// several accounts of one provider its sessions cannot be attributed, and
+	// importing them into one account would skew that account's calibration.
+	if s.accountsOfProvider(configured.Provider) > 1 {
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
+	}
 	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
 	if err != nil {
 		return tokenSyncResult{}, err
@@ -1114,7 +1187,7 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	} else if statErr != nil {
 		return tokenSyncResult{}, fmt.Errorf("inspect Gatepost database %q: %w", resolvedGatepostPath, statErr)
 	}
-	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
+	directCursor, err := s.store.LatestTokenObservationTime(ctx, providerID, configured.Provider, "gatepost")
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
@@ -1129,7 +1202,7 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
-	piCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost-pi")
+	piCursor, err := s.store.LatestTokenObservationTime(ctx, providerID, configured.Provider, "gatepost-pi")
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
@@ -1142,6 +1215,9 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 		return tokenSyncResult{}, err
 	}
 	observations = append(observations, piObservations...)
+	for index := range observations {
+		observations[index].Account = providerID
+	}
 	inserted, err := s.store.SaveTokenObservations(ctx, observations)
 	if err != nil {
 		return tokenSyncResult{}, err
@@ -1197,6 +1273,17 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 		inserted += count
 	}
 	return inserted, nil
+}
+
+// accountsOfProvider counts configured accounts of one provider type.
+func (s *Server) accountsOfProvider(provider string) int {
+	count := 0
+	for _, configured := range s.config.Providers {
+		if strings.EqualFold(configured.Provider, provider) {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
@@ -1372,6 +1459,14 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	// Held through the write so an account removal cannot pass its "no
+	// profile uses this" check between this one and the insert.
+	accountsMu.Lock()
+	defer accountsMu.Unlock()
+	if reason := s.accountLeaving(profile.ProviderAccountID); reason != "" {
+		writeJSON(w, http.StatusConflict, problem{Code: "account_conflict", Error: reason})
+		return
+	}
 	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
 		writeError(w, err)
 		return
@@ -1471,6 +1566,14 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	// Held through the write so an account removal cannot pass its "no
+	// profile uses this" check between this one and the insert.
+	accountsMu.Lock()
+	defer accountsMu.Unlock()
+	if reason := s.accountLeaving(profile.ProviderAccountID); reason != "" {
+		writeJSON(w, http.StatusConflict, problem{Code: "account_conflict", Error: reason})
+		return
+	}
 	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
 		writeError(w, err)
 		return
@@ -1488,6 +1591,12 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if err := harness.ValidateHarnessArgs(profile.HarnessType, profile.HarnessArgs); err != nil {
+		return err
+	}
+	if err := profileHarnessFitsAccount(profile, s.config.Providers[profile.ProviderAccountID]); err != nil {
+		return err
+	}
 	if profile.HarnessType == "hermes" && profile.AgentContextID == "" {
 		return fmt.Errorf("agent_context_id is required for a Hermes execution profile")
 	}
@@ -1780,7 +1889,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 	response := candidatesResponse{GeneratedAt: s.now().UTC(), ProviderAccountID: providerID,
 		Candidates: make([]candidateView, 0, len(tasks))}
-	snapshot, _, err := s.store.LatestSnapshot(r.Context(), configured.Provider)
+	snapshot, _, err := s.store.LatestSnapshot(r.Context(), providerID, configured.Provider)
 	if errors.Is(err, store.ErrNotFound) {
 		response.ProviderReason = "no usage snapshot has been collected yet"
 		for _, task := range tasks {
@@ -1803,7 +1912,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	response.SnapshotObservedAt = &snapshot.ObservedAt
 	maxAge, _ := s.config.SnapshotAge()
 	age := s.now().Sub(snapshot.ObservedAt)
-	response.SnapshotStale = age > maxAge || age < 0
+	response.SnapshotStale = age > maxAge || age < 0 || snapshot.SourceStale
 	response.DispatchAvailable = base.Decision != decision.Unknown && !response.SnapshotStale
 	if !response.DispatchAvailable {
 		response.ProviderReason = base.Reason
@@ -2038,6 +2147,11 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
+	// Checked again before admission: a profile saved before the account
+	// was bound to a directory must not spend another login's allowance.
+	if err := profileHarnessFitsAccount(profile, configuredProvider); err != nil {
+		return response, false, err
+	}
 	response.SelectedTask = &task
 	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
 	if profile.AgentContextID != "" {
@@ -2072,6 +2186,10 @@ func (s *Server) dispatchCore(
 	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
 		log.Printf("redline run %s decision history failed: %v", run.ID, err)
 	}
+	// A run on an account bound to a Claude Code profile directory must use
+	// that login, or it would spend the default account's allowance while
+	// being scheduled against this one's.
+	profile = profileForAccount(profile, s.config.Providers[request.ProviderAccountID])
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -2080,6 +2198,30 @@ func (s *Server) dispatchCore(
 		}
 	}()
 	return response, true, nil
+}
+
+// profileHarnessFitsAccount refuses running anything but Claude Code on an
+// account bound to a Claude Code profile directory: only Claude Code is
+// started with that profile's login, so any other harness would spend the
+// default login (or whichever one the service inherited) while being
+// scheduled against this account.
+func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.Provider) error {
+	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
+		return nil
+	}
+	return fmt.Errorf("account %q reads Claude Code profile %s, so its execution profiles must use the claude-code harness, not %q",
+		profile.ProviderAccountID, config.DisplayClaudeConfigDir(account.ClaudeConfigDir), profile.HarnessType)
+}
+
+// profileForAccount is the profile a run starts with: the stored profile
+// plus the run's account login. Only claude-code runs read the profile
+// directory; the field is ignored by every other harness.
+func profileForAccount(profile domain.ExecutionProfile, account config.Provider) domain.ExecutionProfile {
+	profile.ClaudeConfigDir = ""
+	if strings.EqualFold(strings.TrimSpace(account.Provider), "claude") {
+		profile.ClaudeConfigDir = config.NormalizeClaudeConfigDir(account.ClaudeConfigDir)
+	}
+	return profile
 }
 
 func (s *Server) selectTask(
@@ -2248,6 +2390,17 @@ func (s *Server) evaluateCandidateBudget(
 	if snapshot.Short != nil {
 		required = append([]string{"session"}, required...)
 	}
+	if snapshot.WeeklyUnavailable {
+		// No weekly number exists, so none is reported -- a weekly pool row
+		// with Remaining 0 would read as exhausted. Held, whatever base says.
+		held := base
+		if held.Decision != decision.Unknown {
+			held.Decision = decision.Unknown
+			held.Reason = "weekly limit not reported"
+		}
+		return decorateBudgetResult(held, profile.Model, routing, required, nil, nil), false,
+			"weekly limit not reported; dispatch holds until a policy exists for this account type"
+	}
 	poolResults := []decision.PoolResult{{
 		Pool: "weekly", Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
 		Remaining: snapshot.Weekly.Remaining, UnlockedTier: base.UnlockedTier,
@@ -2305,8 +2458,11 @@ func (s *Server) evaluateCandidateBudget(
 			}
 		}
 
-		if slices.Contains(groupDefinition.RequiredAllowanceRoles, "weekly") {
-			poolKey := "model:" + group + ":weekly"
+		for _, role := range []string{"weekly", "monthly"} {
+			if !slices.Contains(groupDefinition.RequiredAllowanceRoles, role) {
+				continue
+			}
+			poolKey := "model:" + group + ":" + role
 			required = append(required, poolKey)
 			allowance, found := snapshot.Allowance(poolKey)
 			if !found {
@@ -2316,6 +2472,22 @@ func (s *Server) evaluateCandidateBudget(
 			if allowance.Remaining <= 0 {
 				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 					poolKey + " allowance is exhausted"
+			}
+			// A monthly pool is a subscription allowance whose overflow is
+			// billed as on-demand spend. Starting a run on its last scrap
+			// spends past the subscription, so the pool keeps a floor: the
+			// policy's reserve for the person, or one run's estimated cost,
+			// whichever is larger.
+			if role == "monthly" {
+				floor := max(policy.RollingReserve, configured.WindowWeeklyCost)
+				if allowance.Remaining <= floor {
+					poolResults = append(poolResults, decision.PoolResult{
+						Pool: poolKey, Decision: decision.Wait, Mode: decision.ModeSlots,
+						Reason: "monthly pool reserve is protected", Remaining: allowance.Remaining,
+					})
+					return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+						poolKey + " reserve is protected"
+				}
 			}
 			if !allowance.ResetsAt.After(s.now()) {
 				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
@@ -2328,7 +2500,8 @@ func (s *Server) evaluateCandidateBudget(
 			}
 			poolSnapshot := decision.UsageSnapshot{
 				Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
-				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
+				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt,
+					PeriodSeconds: allowance.PeriodDurationSeconds},
 				Source: snapshot.Source, Confidence: snapshot.Confidence,
 			}
 			poolDecision := decision.Evaluate(decision.Input{
@@ -2347,6 +2520,14 @@ func (s *Server) evaluateCandidateBudget(
 			}
 			if poolDecision.Decision == decision.Admit {
 				triggering = append(triggering, poolKey)
+			} else if role == "monthly" {
+				// A weekly model pool (Fable) is extra headroom on top of the
+				// account window, so either may admit. A monthly pool is the
+				// allowance the run actually draws from: when it says wait, the
+				// account window admitting must not override it, or the run
+				// spends a pool that is ahead of pace.
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " is waiting: " + poolDecision.Reason
 			}
 		}
 	}
@@ -2711,7 +2892,7 @@ func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, providerID := range providerIDs {
 		configured := s.config.Providers[providerID]
 		observations, err := s.store.ListTokenObservationsBySource(
-			r.Context(), configured.Provider, "redline-run", since, until,
+			r.Context(), providerID, configured.Provider, "redline-run", since, until,
 		)
 		if err != nil {
 			writeError(w, err)
@@ -2792,7 +2973,7 @@ func (s *Server) calibration(ctx context.Context, providerID string) (calibratio
 	if !ok {
 		return calibration.Estimate{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 500)
+	snapshots, err := s.store.ListSnapshots(ctx, providerID, configured.Provider, 500)
 	if err != nil {
 		return calibration.Estimate{}, err
 	}
@@ -2813,6 +2994,9 @@ func (s *Server) fetchAndStore(
 	if err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}
+	// Every snapshot is recorded against the account it was collected for,
+	// so two accounts of one provider never read each other's numbers.
+	snapshot.Account = providerID
 	if err := s.store.SaveSnapshot(ctx, snapshot, raw); err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}

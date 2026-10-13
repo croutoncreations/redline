@@ -512,8 +512,8 @@ func TestLoadRejectsUnknownRequiredAllowanceRole(t *testing.T) {
     model_groups:
       spark:
         aliases: [spark]
-        required_allowance_roles: [short, monthly]`, 1)
-	if _, err := config.Load(writeConfig(t, configured)); err == nil || !strings.Contains(err.Error(), "monthly") {
+        required_allowance_roles: [short, yearly]`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil || !strings.Contains(err.Error(), "yearly") {
 		t.Fatalf("expected unknown allowance role error, got %v", err)
 	}
 }
@@ -639,4 +639,82 @@ func writeConfig(t *testing.T, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestCursorUsageDefaultsOffAndInheritsOpenUsageURL(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, explicit := cfg.CursorUsage.EffectiveSource(); source != "off" || explicit {
+		t.Fatalf("source=%q explicit=%v", source, explicit)
+	}
+	if got := cfg.CursorOpenUsageURL(); got != "http://127.0.0.1:6736" {
+		t.Fatalf("openusage url = %q", got)
+	}
+	configured, err := config.Load(writeConfig(t, validConfig+`cursor_usage:
+  source: Auto
+  openusage_url: http://127.0.0.1:7000
+  poll_interval: 10m
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, _ := configured.CursorUsage.Interval()
+	if source, explicit := configured.CursorUsage.EffectiveSource(); source != "auto" || !explicit ||
+		configured.CursorOpenUsageURL() != "http://127.0.0.1:7000" || interval != 10*time.Minute {
+		t.Fatalf("cursor usage = %#v", configured.CursorUsage)
+	}
+}
+
+func TestCursorUsageRejectsInvalidSettings(t *testing.T) {
+	for name, extra := range map[string]string{
+		"unknown source":   "cursor_usage:\n  source: scrape\n",
+		"too frequent":     "cursor_usage:\n  source: native\n  poll_interval: 10s\n",
+		"invalid interval": "cursor_usage:\n  poll_interval: soon\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := config.Load(writeConfig(t, validConfig+extra)); err == nil {
+				t.Fatal("expected rejection")
+			}
+		})
+	}
+}
+
+// A Cursor account is scheduled from its two monthly subscription pools.
+// Every model draws from one: Auto and Composer from Cursor's own pool,
+// anything else from Other Models. There is no account-only route.
+func TestCursorProviderRoutesEveryModelToAMonthlyPool(t *testing.T) {
+	configured := strings.Replace(validConfig, "providers:\n", "providers:\n  cursor-main:\n    provider: cursor\n    window_weekly_cost: 0.10\n", 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := cfg.Providers["cursor-main"]
+	for model, want := range map[string]string{
+		"": config.CursorModelsGroup, "auto": config.CursorModelsGroup, "default": config.CursorModelsGroup,
+		"composer-2.5": config.CursorModelsGroup, "composer-2.5-fast": config.CursorModelsGroup,
+		"claude-opus-5-5-high": config.CursorOtherModelsGroup, "gpt-5.6-sol-high": config.CursorOtherModelsGroup,
+		"grok-4.7-high": config.CursorOtherModelsGroup,
+	} {
+		group, _, err := cursor.ResolveModelGroup(model, "")
+		if err != nil || group != want {
+			t.Errorf("model %q -> %q, %v; want %q", model, group, err, want)
+		}
+	}
+	for _, group := range []string{config.CursorModelsGroup, config.CursorOtherModelsGroup} {
+		if roles := cursor.EffectiveModelGroups()[group].RequiredAllowanceRoles; len(roles) != 1 || roles[0] != "monthly" {
+			t.Errorf("%s roles = %v, want [monthly]", group, roles)
+		}
+	}
+}
+
+func TestExampleConfigKeepsCursorTrackingOff(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, _ := cfg.CursorUsage.EffectiveSource(); source != "off" {
+		t.Fatalf("example config must not read Cursor by default, source=%q", source)
+	}
 }

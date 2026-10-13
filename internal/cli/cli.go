@@ -80,7 +80,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|account|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -138,6 +138,15 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runPair(client, remaining[1:], *configPath, stdout, stderr)
 	case "relay":
 		return runRelay(client, remaining[1:], stdout, stderr)
+	case "account":
+		// Profile commands work on this Mac's files, not through the API.
+		if len(remaining) > 1 && remaining[1] == "profiles" {
+			return runAccountProfiles(remaining[2:], *configPath, stdout, stderr)
+		}
+		if len(remaining) > 1 && remaining[1] == "add-profile" {
+			return runAccountAddProfile(remaining[2:], *configPath, stdout, stderr)
+		}
+		return runAccount(client, remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -151,7 +160,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, relay, version")
+	fmt.Fprintln(output, "          pair, relay, account, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
@@ -530,6 +539,12 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		return 1
 	}
 	defer database.Close()
+	// Usage recorded before accounts were tracked belongs to the provider's
+	// only account, when there is exactly one; otherwise it stays unowned.
+	if _, err := database.AdoptLegacyUsage(context.Background(), cfg.LegacyUsageOwners()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	if err := database.RecoverInterruptedRuns(context.Background(), now()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -725,8 +740,12 @@ func runStatus(client apiclient.Client, args []string, stdout, stderr io.Writer)
 			// Full: the provider starts the clock on first use.
 			short = "100% remaining (starts on first use)"
 		}
-		fmt.Fprintf(stdout, "%s: 5-hour %s, %s weekly remaining (observed %s)\n",
-			snapshot.Provider, short, percent(snapshot.Weekly.Remaining), snapshot.ObservedAt.Format(time.RFC3339))
+		weekly := percent(snapshot.Weekly.Remaining) + " weekly remaining"
+		if snapshot.WeeklyUnavailable {
+			weekly = "weekly limit not reported"
+		}
+		fmt.Fprintf(stdout, "%s: 5-hour %s, %s (observed %s)\n",
+			snapshot.Provider, short, weekly, snapshot.ObservedAt.Format(time.RFC3339))
 		for _, allowance := range snapshot.Allowances {
 			if allowance.Key == "session" || allowance.Key == "weekly" {
 				continue
@@ -1341,6 +1360,9 @@ func writeDecisionText(w io.Writer, response decisionResponse) {
 		{"Weekly remaining", percent(s.Weekly.Remaining)},
 		{"Weekly reset", s.Weekly.ResetsAt.Format(time.RFC3339)},
 		{"Decision mode", string(r.Mode)},
+	}
+	if s.WeeklyUnavailable {
+		rows[2], rows[3] = [2]string{"Weekly remaining", "not reported"}, [2]string{"Weekly reset", "not reported"}
 	}
 	if s.Short == nil && s.ShortWindowNotStarted {
 		rows = append(rows, [2]string{"5-hour window", "100% remaining (starts on first use)"})

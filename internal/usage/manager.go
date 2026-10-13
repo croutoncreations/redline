@@ -11,6 +11,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/openusage"
 )
 
 type Source interface {
@@ -135,6 +136,18 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 		snapshot.Source == "native" || provider.EffectiveUsageSource() == "openusage" {
 		return
 	}
+	// The native lookup reads the default login on this Mac. An account bound
+	// to another OpenUsage card is a different login, and showing the default
+	// login's resets on it would be wrong; OpenUsage reports that card's own
+	// resets instead.
+	if card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard)); card != "" && card != providerKey(provider.Provider) {
+		return
+	}
+	// A Claude Code profile is its own login; the native fetch already read
+	// its resets, and the default login's would be another account's.
+	if strings.TrimSpace(provider.ClaudeConfigDir) != "" {
+		return
+	}
 	// The native lookup reads the single local Claude login no matter which
 	// account asked, so the answer is cached per provider credential rather
 	// than per account: one request serves every account, and none of them
@@ -184,7 +197,7 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	state := m.resetStates[key]
 	state.inFlight = false
 	if err != nil {
-		state.lastError = err.Error()
+		state.lastError = redact(err.Error())
 		backoff := max(m.bankedResetInterval(), bankedResetFailureBackoff)
 		var limited interface{ RetryAfter() time.Duration }
 		if errors.As(err, &limited) && limited.RetryAfter() > backoff {
@@ -219,7 +232,11 @@ func (m *Manager) bankedResetInterval() time.Duration {
 
 func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
 	mode := provider.EffectiveUsageSource()
-	if mode == "openusage" {
+	if mode == "openusage" || readsNonDefaultCard(provider) {
+		// An account bound to a non-default OpenUsage card never falls back
+		// to the native collector: that reads the default login on this Mac,
+		// which is a different account, and its numbers would be shown and
+		// scheduled against under this account's name.
 		return m.fetch(ctx, accountID, provider, m.OpenUsage, false)
 	}
 	if mode == "native" {
@@ -291,7 +308,7 @@ func (m *Manager) Status(accountID string) Status {
 // fetchNative calls the native source unless the provider is still inside a
 // rate-limit penalty, in which case it fails without sending anything.
 func (m *Manager) fetchNative(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
-	key := providerKey(provider.Provider)
+	key := nativeLoginKey(provider)
 	now := m.Now().UTC()
 	m.mu.Lock()
 	until := m.nativeBlockedUntil[key]
@@ -328,10 +345,30 @@ func rateLimitWait(err error) (time.Duration, bool) {
 
 const rateLimitFloor = 15 * time.Minute
 
+// readsNonDefaultCard reports an account bound to an OpenUsage card other
+// than the provider's default one.
+func readsNonDefaultCard(provider config.Provider) bool {
+	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
+	return card != "" && card != providerKey(provider.Provider)
+}
+
 // providerKey is the one spelling of a provider used for every lockout, so a
 // rate limit seen by the native fetch and by the reset lookup is shared even
 // when the config writes the provider as "Claude".
 func providerKey(provider string) string { return strings.ToLower(strings.TrimSpace(provider)) }
+
+// nativeLoginKey names the login a native fetch uses, for its lockout. The
+// default login keeps the provider key, so it still shares one lockout with
+// the reset lookup (which only reads the default login); each Claude Code
+// profile directory is a separate login with its own token, and one
+// profile being rate limited must not silence the others.
+func nativeLoginKey(provider config.Provider) string {
+	key := providerKey(provider.Provider)
+	if dir := config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir); dir != "" && key == "claude" {
+		return key + "@profile:" + dir
+	}
+	return key
+}
 
 // fetch reads one pinned source. native is passed explicitly rather than
 // derived from source == m.Native: comparing interfaces panics when the
@@ -391,7 +428,7 @@ func (m *Manager) failure(accountID string, err error) int {
 	defer m.mu.Unlock()
 	state := m.states[accountID]
 	state.Failures++
-	state.LastError, state.Reason = err.Error(), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	if state.Active == "" {
 		state.Active = "openusage"
 	}
@@ -403,7 +440,7 @@ func (m *Manager) probeFailure(accountID string, err error, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError, state.Reason = err.Error(), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	state.nextProbe = now.Add(m.reprobeInterval())
 	m.states[accountID] = state
 }
@@ -412,7 +449,7 @@ func (m *Manager) nativeFailure(accountID string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError, state.Reason = err.Error(), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	m.states[accountID] = state
 }
 
@@ -436,3 +473,8 @@ func (m *Manager) maxSnapshotAge() time.Duration {
 	}
 	return m.MaxSnapshotAge
 }
+
+// redact keeps account identities out of collection errors, which reach the
+// dashboard, the phone and the relay. Collectors should never put an email
+// in an error, but upstream text (OpenUsage card errors) can.
+func redact(text string) string { return openusage.RedactEmails(text) }
