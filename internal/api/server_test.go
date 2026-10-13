@@ -276,6 +276,33 @@ func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *tes
 	}
 }
 
+func TestServerAcceptsCaseInsensitiveBearerScheme(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "bearer "+cfg.APIToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("lowercase bearer scheme status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
 func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
 	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
