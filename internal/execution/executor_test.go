@@ -405,3 +405,33 @@ func steppedClock(start time.Time) func() time.Time {
 		return current
 	}
 }
+
+type failingCompleteStore struct{ failingMarkStore }
+
+func (f *failingCompleteStore) MarkRunRunning(context.Context, string, domain.Workspace) error {
+	return nil
+}
+
+func (f *failingCompleteStore) CompleteRun(context.Context, string, domain.RunCompletion, time.Time) error {
+	return errors.New("database is locked")
+}
+
+func TestLostRunOutcomeNamesRunStateAndExitCode(t *testing.T) {
+	executor := execution.Executor{
+		Store:           &failingCompleteStore{},
+		Workspaces:      &fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 3}},
+		OutputDirectory: t.TempDir(), Now: time.Now,
+	}
+	run := domain.Run{ID: "run-42", TaskID: "task", ProviderAccountID: "codex-main", StartedAt: time.Now()}
+	task := domain.Task{ID: "task", Name: "Task", Type: domain.OneOff}
+
+	err := executor.Execute(context.Background(), run, task, domain.ExecutionProfile{CleanupPolicy: "always"})
+	if err == nil {
+		t.Fatal("error = nil, want the failed CompleteRun to be reported")
+	}
+	want := "record failed outcome (exit code 3) for run run-42: database is locked"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}

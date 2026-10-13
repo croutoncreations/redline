@@ -86,6 +86,9 @@ type Server struct {
 	started      bool
 	pairingMu    sync.Mutex
 	pairing      map[string]time.Time
+	// gatepostMissing records providers already warned about an absent
+	// Gatepost database, so the monitor does not repeat it every cycle.
+	gatepostMissing sync.Map
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -227,9 +230,9 @@ func newServer(
 	for provider := range cfg.Providers {
 		providers = append(providers, provider)
 	}
-	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
+	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic).Named("scheduler")
 	monitorInterval, _ := cfg.UsageMonitorInterval()
-	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider)
+	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider).Named("usage_monitor")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
@@ -310,6 +313,9 @@ func configuredNotifier(cfg config.Config, database *store.DB, now func() time.T
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	failures := &failureRecorder{ResponseWriter: w}
+	w = failures
+	defer failures.logFailure(r)
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -740,7 +746,7 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	}
 	ownedInserted, err := s.syncOwnedRunTokens(ctx, providerID)
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("recover token usage from completed runs: %w", err)
 	}
 	gatepostPath := strings.TrimSpace(s.config.UsageMonitor.GatepostDatabase)
 	if gatepostPath == "" {
@@ -748,20 +754,22 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	}
 	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("resolve usage_monitor.gatepost_database %q: %w", gatepostPath, err)
 	}
 	if _, statErr := os.Stat(resolvedGatepostPath); os.IsNotExist(statErr) {
 		// Gatepost is an optional, unreleased companion tool. A configured but
 		// missing database is not an error on every monitor cycle: log and
 		// report zero Gatepost insertions instead of failing.
-		log.Printf("redline %s usage_monitor: gatepost_database %q not found, skipping Gatepost import", providerID, gatepostPath)
+		if _, warned := s.gatepostMissing.LoadOrStore(providerID, true); !warned {
+			log.Printf("redline usage_monitor: provider %q: usage_monitor.gatepost_database %q does not exist, skipping Gatepost import (logged once)", providerID, gatepostPath)
+		}
 		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	} else if statErr != nil {
 		return tokenSyncResult{}, fmt.Errorf("inspect Gatepost database %q: %w", resolvedGatepostPath, statErr)
 	}
 	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("read Gatepost sync cursor for %q: %w", configured.Provider, err)
 	}
 	// Re-read a small overlap so records sharing a timestamp with the cursor are
 	// not missed when Gatepost appends to an active session. Stable source IDs
@@ -772,11 +780,11 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	}
 	observations, err := tokenlog.LoadGatepost(ctx, s.config.UsageMonitor.GatepostDatabase, configured.Provider, queryAfter)
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("load Gatepost observations from %q: %w", resolvedGatepostPath, err)
 	}
 	piCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost-pi")
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("read Gatepost Pi sync cursor for %q: %w", configured.Provider, err)
 	}
 	piAfter := piCursor
 	if !piAfter.IsZero() {
@@ -784,12 +792,12 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	}
 	piObservations, err := tokenlog.LoadGatepostPi(ctx, s.config.UsageMonitor.GatepostDatabase, configured.Provider, piAfter)
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("load Gatepost Pi observations from %q: %w", resolvedGatepostPath, err)
 	}
 	observations = append(observations, piObservations...)
 	inserted, err := s.store.SaveTokenObservations(ctx, observations)
 	if err != nil {
-		return tokenSyncResult{}, err
+		return tokenSyncResult{}, fmt.Errorf("save %d Gatepost token observation(s): %w", len(observations), err)
 	}
 	latest := directCursor
 	if piCursor.After(latest) {
@@ -847,6 +855,9 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 	_, _, usageErr := s.fetchAndStore(ctx, providerID)
 	_, tokenErr := s.syncTokens(ctx, providerID)
+	if tokenErr != nil {
+		tokenErr = fmt.Errorf("sync token usage for provider %q: %w", providerID, tokenErr)
+	}
 	return errors.Join(usageErr, tokenErr)
 }
 
@@ -1543,7 +1554,7 @@ func (s *Server) dispatchTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
 	concurrency, err := s.effectiveProviderConcurrency(ctx, provider)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve concurrency limit for provider %q: %w", provider, err)
 	}
 	for range concurrency.MaxConcurrentRuns {
 		_, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
@@ -1639,7 +1650,7 @@ func (s *Server) dispatchCore(
 	response := schedulerResponse{Trigger: trigger}
 	paused, err := s.store.ProviderPaused(ctx, request.ProviderAccountID)
 	if err != nil {
-		return response, false, err
+		return response, false, fmt.Errorf("read paused state of provider %q: %w", request.ProviderAccountID, err)
 	}
 	if paused {
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused"}
@@ -1651,11 +1662,11 @@ func (s *Server) dispatchCore(
 	}
 	active, err := s.store.ActiveRunCount(ctx, request.ProviderAccountID)
 	if err != nil {
-		return response, false, err
+		return response, false, fmt.Errorf("count active runs for provider %q: %w", request.ProviderAccountID, err)
 	}
 	concurrency, err := s.effectiveProviderConcurrency(ctx, request.ProviderAccountID)
 	if err != nil {
-		return response, false, err
+		return response, false, fmt.Errorf("resolve concurrency limit for provider %q: %w", request.ProviderAccountID, err)
 	}
 	maxConcurrent := concurrency.MaxConcurrentRuns
 	if active >= maxConcurrent {
@@ -1676,18 +1687,19 @@ func (s *Server) dispatchCore(
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	if err != nil {
-		return response, false, err
+		return response, false, fmt.Errorf("select task for provider %q: %w", request.ProviderAccountID, err)
 	}
 	response.SelectedTask = &task
 	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
 		if contextErr != nil {
-			return response, false, contextErr
+			return response, false, fmt.Errorf("load agent context %q for task %q: %w", profile.AgentContextID, task.ID, contextErr)
 		}
 		connection, connectionErr := s.store.GetRuntimeConnection(ctx, agentContext.RuntimeConnectionID)
 		if connectionErr != nil {
-			return response, false, connectionErr
+			return response, false, fmt.Errorf("load runtime connection %q for agent context %q: %w",
+				agentContext.RuntimeConnectionID, agentContext.ID, connectionErr)
 		}
 		limits.AgentContextID = agentContext.ID
 		limits.AgentContext = agentContext.MaxConcurrentRuns
@@ -1706,7 +1718,7 @@ func (s *Server) dispatchCore(
 			response.Result.TaskSelectionReason = "another scheduler request consumed concurrency first"
 			return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 		}
-		return response, false, err
+		return response, false, fmt.Errorf("admit task %q on provider %q: %w", task.ID, request.ProviderAccountID, err)
 	}
 	response.Run = &run
 	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
@@ -1716,7 +1728,8 @@ func (s *Server) dispatchCore(
 	go func() {
 		defer s.workers.Done()
 		if err := s.executor.Execute(context.Background(), run, task, profile); err != nil {
-			log.Printf("redline run %s execution bookkeeping failed: %v", run.ID, err)
+			log.Printf("redline run %s: the harness finished but its outcome could not be saved; the run stays %q until the service restarts, which marks it failed: %v",
+				run.ID, domain.RunRunning, err)
 		}
 	}()
 	return response, true, nil
@@ -2410,10 +2423,11 @@ func (s *Server) fetchAndStore(
 	}
 	snapshot, raw, err := s.usageSources.Fetch(ctx, providerID, configured)
 	if err != nil {
-		return decision.UsageSnapshot{}, config.Provider{}, err
+		return decision.UsageSnapshot{}, config.Provider{}, fmt.Errorf(
+			"fetch usage for provider %q (usage_source %q): %w", providerID, configured.EffectiveUsageSource(), err)
 	}
 	if err := s.store.SaveSnapshot(ctx, snapshot, raw); err != nil {
-		return decision.UsageSnapshot{}, config.Provider{}, err
+		return decision.UsageSnapshot{}, config.Provider{}, fmt.Errorf("save usage snapshot for provider %q: %w", providerID, err)
 	}
 	return snapshot, configured, nil
 }
@@ -2434,7 +2448,75 @@ func decodeJSON(r *http.Request, target any) error {
 	return nil
 }
 
+// failureRecorder lets the service log server-side failures. A 500 response
+// carries its error text to the caller, but without this the daemon's own log
+// stays silent, so whoever reads the log after the fact cannot tell that a
+// request failed or why.
+type failureRecorder struct {
+	http.ResponseWriter
+	status int
+	err    error
+}
+
+func (w *failureRecorder) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *failureRecorder) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+// Flush keeps Server-Sent Events streaming through this wrapper.
+func (w *failureRecorder) Flush() {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *failureRecorder) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// logFailure reports 5xx responses with the method and path that produced
+// them. The query string is left out because it can carry credentials.
+func (w *failureRecorder) logFailure(r *http.Request) {
+	if w.status < http.StatusInternalServerError {
+		return
+	}
+	if w.err == nil {
+		log.Printf("redline api %s %s: responded %d", r.Method, r.URL.Path, w.status)
+		return
+	}
+	log.Printf("redline api %s %s: responded %d: %v", r.Method, r.URL.Path, w.status, w.err)
+}
+
+// recordFailure attaches err to the request's failureRecorder, looking through
+// any wrappers layered on top of it.
+func recordFailure(w http.ResponseWriter, err error) {
+	for w != nil {
+		if recorder, ok := w.(*failureRecorder); ok {
+			recorder.err = err
+			return
+		}
+		wrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = wrapper.Unwrap()
+	}
+}
+
 func writeError(w http.ResponseWriter, err error) {
+	recordFailure(w, err)
 	status := http.StatusInternalServerError
 	if errors.Is(err, store.ErrNotFound) {
 		status = http.StatusNotFound

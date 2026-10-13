@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -468,36 +469,38 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		hint := ""
+		if errors.Is(err, fs.ErrNotExist) {
+			hint = "pass --config FILE, or run from the directory holding redline.yaml (config.example.yaml is a starting point)"
+		}
+		return serveFailure(stderr, err, hint)
 	}
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "config %s: %s\n", configPath, warning)
 	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return serveFailure(stderr, err, "")
 	}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		hint := ""
+		if errors.Is(err, syscall.EADDRINUSE) {
+			hint = "another process, possibly an earlier `redline serve`, already holds that port; stop it or choose another with --listen"
+		}
+		return serveFailure(stderr, fmt.Errorf("cannot listen on %q: %w", *listen, err), hint)
 	}
 	defer listener.Close()
 	database, err := store.Open(cfg.Database)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return serveFailure(stderr, err, "")
 	}
 	defer database.Close()
 	if err := database.RecoverInterruptedRuns(context.Background(), now()); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return serveFailure(stderr, fmt.Errorf("recover interrupted runs in database %q: %w", cfg.Database, err), "")
 	}
 	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return serveFailure(stderr, fmt.Errorf("recover pending notification deliveries in database %q: %w", cfg.Database, err), "")
 	}
 	apiServer := api.NewServer(cfg, database, now)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -516,19 +519,28 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		stop()
 		apiServer.Wait()
 		if err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(stderr, err)
-			return 1
+			return serveFailure(stderr, fmt.Errorf("API server on %s stopped: %w", listener.Addr(), err), "")
 		}
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
+			return serveFailure(stderr, fmt.Errorf("shut down API server within 10s: %w", err),
+				"in-flight requests were cut off; runs still active are marked failed on the next start")
 		}
 		apiServer.Wait()
 	}
 	return 0
+}
+
+// serveFailure prints a startup or shutdown failure of `redline serve` with an
+// optional next step, and returns the process exit code.
+func serveFailure(stderr io.Writer, err error, hint string) int {
+	fmt.Fprintf(stderr, "redline serve: %v\n", err)
+	if hint != "" {
+		fmt.Fprintf(stderr, "redline serve: %s\n", hint)
+	}
+	return 1
 }
 
 // resolveTokenConfigPath returns the config path whose API token the running

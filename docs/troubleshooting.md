@@ -54,6 +54,19 @@ error detail. Authentication failures receive a dedicated reconnect action.
 
 If the same operational error repeats, pause that provider before changing configuration.
 
+## Read the service log
+
+`redline serve` writes operational failures to its log (stderr, or the LaunchAgent log paths in
+[launchd](launchd.md)). Look for lines starting `redline`:
+
+- `redline api POST /v1/...: responded 500: ...` is a request that failed server-side. Query
+  strings are omitted on purpose.
+- `redline scheduler: provider "..." failed ...` and `redline usage_monitor: provider "..." failed ...`
+  appear once per distinct error, then `recovered after N failed cycle(s)` when it clears. The
+  latest error stays available at `GET /v1/scheduler/status` and `GET /v1/usage-monitor/status`.
+- `redline run ID: the harness finished but its outcome could not be saved ...` means the run is
+  still marked running; restarting the service marks it failed.
+
 ## Notifications are not appearing
 
 Choose **Notifications…** in the menu-bar app. If macOS previously denied access, Redline links to

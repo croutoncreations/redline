@@ -37,8 +37,31 @@ func TestReadTokenRejectsBroadPermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apiauth.ReadToken(configPath); err == nil {
+	_, err := apiauth.ReadToken(configPath)
+	if err == nil {
 		t.Fatal("expected insecure permission error")
+	}
+	for _, want := range []string{path, "mode 0644", "chmod 600"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestReadTokenRejectsWrongLengthAndSaysHowToRegenerate(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "redline.yaml")
+	path := apiauth.TokenPath(configPath)
+	if err := os.WriteFile(path, []byte("short\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := apiauth.ReadToken(configPath)
+	if err == nil {
+		t.Fatal("expected invalid length error")
+	}
+	for _, want := range []string{path, "5 characters", "want 32 to 256", "delete the file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
 	}
 }
 

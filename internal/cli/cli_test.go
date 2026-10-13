@@ -248,6 +248,14 @@ policies:
 	if exit != 1 || !strings.Contains(stderr.String(), "address already in use") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
+	for _, want := range []string{
+		"redline serve: cannot listen on \"" + occupied.Addr().String() + "\"",
+		"already holds that port", "--listen",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
 	if _, err := os.Stat(database); !os.IsNotExist(err) {
 		t.Fatalf("database was touched before listener ownership was established: %v", err)
 	}
@@ -815,5 +823,60 @@ func TestTokenUsageMentionsRotate(t *testing.T) {
 	exit := cli.Run([]string{"token"}, &stdout, &stderr, time.Now)
 	if exit != 1 || !strings.Contains(stderr.String(), "rotate") {
 		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
+func TestServeFailuresNameTheFileAndSuggestAFix(t *testing.T) {
+	root := t.TempDir()
+	validConfig := func(database string) string {
+		return fmt.Sprintf(`
+database: %s
+active_policy: standard
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.10
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+`, database)
+	}
+	corrupt := filepath.Join(root, "corrupt.db")
+	if err := os.WriteFile(corrupt, []byte("this is not a sqlite database, just text padding\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corruptConfig := filepath.Join(root, "corrupt.yaml")
+	if err := os.WriteFile(corruptConfig, []byte(validConfig(corrupt)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingConfig := filepath.Join(root, "missing.yaml")
+
+	cases := []struct {
+		name   string
+		config string
+		want   []string
+	}{
+		{"missing config", missingConfig, []string{
+			"redline serve: read config: open " + missingConfig, "pass --config FILE", "config.example.yaml",
+		}},
+		{"corrupt database", corruptConfig, []string{
+			"redline serve: configure SQLite database \"" + corrupt + "\"", "file is not a database",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run([]string{"--config", tc.config, "serve", "--listen", "127.0.0.1:0"}, &stdout, &stderr, time.Now)
+			if exit != 1 {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
 	}
 }
