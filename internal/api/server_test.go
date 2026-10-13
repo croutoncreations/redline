@@ -806,7 +806,7 @@ func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
 		"id": "run-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "run-task", "name": "Run task", "execution_profile_id": "run-profile", "type": "one_off",
+		"id": "run-task", "name": "Run task", "prompt": "test", "execution_profile_id": "run-profile", "type": "one_off",
 	})
 	if _, err := db.AdmitTask(t.Context(), "run-detail", "run-task", "codex-main", "revision", apiNow); err != nil {
 		t.Fatal(err)
@@ -826,7 +826,7 @@ func TestRunActivityCanBeMarkedRead(t *testing.T) {
 		"id": "activity-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "activity-task", "name": "Activity task", "execution_profile_id": "activity-profile", "type": "one_off",
+		"id": "activity-task", "name": "Activity task", "prompt": "test", "execution_profile_id": "activity-profile", "type": "one_off",
 	})
 	run, err := db.AdmitTask(t.Context(), "activity-run", "activity-task", "codex-main", "revision", apiNow)
 	if err != nil {
@@ -1049,7 +1049,7 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 		t.Fatalf("profile = %#v", profile)
 	}
 	task := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "review", "name": "Review auth", "priority": 80,
+		"id": "review", "name": "Review auth", "prompt": "test", "priority": 80,
 		"execution_profile_id": "codex-devx", "type": "one_off",
 	})
 	if task.State != domain.Queued {
@@ -1097,7 +1097,7 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "editable", "name": "Before", "priority": 10, "execution_profile_id": "codex-devx", "type": "one_off",
+		"id": "editable", "name": "Before", "prompt": "test", "priority": 10, "execution_profile_id": "codex-devx", "type": "one_off",
 	})
 
 	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/tasks/editable", strings.NewReader(`{
@@ -1160,17 +1160,36 @@ func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	defaultOn := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "default-on", "name": "Default on", "execution_profile_id": "codex-devx", "type": "one_off",
+		"id": "default-on", "name": "Default on", "prompt": "test", "execution_profile_id": "codex-devx", "type": "one_off",
 	})
 	if !defaultOn.Enabled || defaultOn.State != domain.Queued {
 		t.Fatalf("default task = %#v", defaultOn)
 	}
 	explicitlyOff := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "explicitly-off", "name": "Explicitly off", "execution_profile_id": "codex-devx", "type": "one_off", "enabled": false,
+		"id": "explicitly-off", "name": "Explicitly off", "prompt": "test", "execution_profile_id": "codex-devx", "type": "one_off", "enabled": false,
 	})
 	if explicitlyOff.Enabled || explicitlyOff.State != domain.Disabled {
 		t.Fatalf("explicitly disabled task = %#v", explicitlyOff)
 	}
+}
+
+func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
+	t.Parallel()
+	server, _ := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "codex-devx", "provider_account_id": "codex-main",
+		"harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{
+		"id":"missing-prompt", "name":"Missing prompt",
+		"execution_profile_id":"codex-devx", "type":"one_off"
+	}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodGet, server.URL+"/v1/tasks/missing-prompt", ``, http.StatusNotFound)
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "valid", "name": "Valid", "prompt": "Do work",
+		"execution_profile_id": "codex-devx", "type": "one_off",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid", `{"prompt":""}`, http.StatusBadRequest)
 }
 
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
@@ -1224,7 +1243,7 @@ func TestListAndTaskControlEndpoints(t *testing.T) {
 		"id": "listed-profile", "provider_account_id": "codex-main", "harness_type": "pi", "model": "openai-codex/gpt-5.6-sol", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "controlled-task", "name": "Controlled", "priority": 42, "execution_profile_id": "listed-profile", "type": "one_off",
+		"id": "controlled-task", "name": "Controlled", "prompt": "test", "priority": 42, "execution_profile_id": "listed-profile", "type": "one_off",
 	})
 
 	var profiles []domain.ExecutionProfile
@@ -1263,7 +1282,7 @@ func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"bad-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"never"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"overflow-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"1e100d"}`, http.StatusBadRequest)
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "valid-task", "name": "Valid", "execution_profile_id": "valid", "type": "one_off",
+		"id": "valid-task", "name": "Valid", "prompt": "test", "execution_profile_id": "valid", "type": "one_off",
 	})
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"min_interval":"never"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"execution_profile_id":"missing"}`, http.StatusBadRequest)
@@ -1277,7 +1296,7 @@ func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
 		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	task := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "filler", "name": "Filler", "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+		"id": "filler", "name": "Filler", "prompt": "test", "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
 	})
 	if task.DispatchTier != domain.DispatchExpiring {
 		t.Fatalf("task = %#v", task)
@@ -1292,10 +1311,10 @@ func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) 
 		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "deep-filler", "name": "Deep filler", "priority": 100, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+		"id": "deep-filler", "name": "Deep filler", "prompt": "test", "priority": 100, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "useful-work", "name": "Useful work", "priority": 20, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "behind",
+		"id": "useful-work", "name": "Useful work", "prompt": "test", "priority": 20, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "behind",
 	})
 	response := postJSON[struct {
 		Result       decision.Result `json:"result"`
@@ -2158,7 +2177,7 @@ func TestMissingOptionalLifecycleLogIsAnEmptySuccessfulTail(t *testing.T) {
 		"id": "logs-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "logs-task", "name": "Logs task", "execution_profile_id": "logs-profile", "type": "one_off",
+		"id": "logs-task", "name": "Logs task", "prompt": "test", "execution_profile_id": "logs-profile", "type": "one_off",
 	})
 	if _, err := db.AdmitTask(t.Context(), "logs-run", "logs-task", "codex-main", "revision", apiNow); err != nil {
 		t.Fatal(err)
@@ -2768,7 +2787,7 @@ func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 	})
 	for _, id := range []string{"first", "second"} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-			"id": id, "name": id, "priority": 50,
+			"id": id, "name": id, "prompt": "test", "priority": 50,
 			"execution_profile_id": "profile", "type": "one_off",
 		})
 	}
@@ -2848,9 +2867,9 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 		postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", profile)
 	}
 	for _, task := range []map[string]any{
-		{"id": "fable-one", "name": "Fable one", "priority": 100, "execution_profile_id": "fable-profile", "type": "one_off"},
-		{"id": "fable-two", "name": "Fable two", "priority": 90, "execution_profile_id": "fable-profile", "type": "one_off"},
-		{"id": "opus", "name": "Opus", "priority": 50, "execution_profile_id": "opus-profile", "type": "one_off"},
+		{"id": "fable-one", "name": "Fable one", "prompt": "test", "priority": 100, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "fable-two", "name": "Fable two", "prompt": "test", "priority": 90, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "opus", "name": "Opus", "prompt": "test", "priority": 50, "execution_profile_id": "opus-profile", "type": "one_off"},
 	} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", task)
 	}
@@ -2956,7 +2975,7 @@ func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
 	})
 	for _, taskID := range []string{"hermes-one", "hermes-two"} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-			"id": taskID, "name": taskID, "priority": 50,
+			"id": taskID, "name": taskID, "prompt": "test", "priority": 50,
 			"execution_profile_id": profile.ID, "type": "one_off",
 		})
 	}
