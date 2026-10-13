@@ -316,9 +316,13 @@ jobs:
       )
     
     steps:
+      # Check out an exact, trusted commit. A workflow_run can start after the
+      # PR was merged and its branch deleted, so a branch name may no longer
+      # exist; github.sha is the default-branch commit this workflow runs at.
+      # For pull_request events the evaluator comes from the base commit.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.event.pull_request.base.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       
       - uses: actions/setup-go@v6
@@ -326,10 +330,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       
-      # For pull_request events the evaluator is built from the base checkout
-      # above, not the PR head (this job holds checks: write; the workflow_run
-      # path checks out the run's head branch, a known pre-existing gap). A
-      # base branch that predates
+      # The evaluator is built from the trusted checkout above, never the PR
+      # head (this job holds checks: write). A base branch that predates
       # cmd/green-lane-check, e.g. a stacked PR's parent, cannot evaluate;
       # the check then completes neutral instead of failing.
       - name: Build evaluator
