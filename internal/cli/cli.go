@@ -35,6 +35,7 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/mcpserver"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/version"
@@ -78,8 +79,13 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|version>")
 		return 1
+	}
+	// The public reset preview is standalone and unauthenticated. Handle it
+	// before constructing the service client so it never reads a local token.
+	if remaining[0] == "reset" {
+		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
@@ -146,7 +152,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
 	fmt.Fprintln(output, "          pair, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
@@ -155,6 +161,35 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
+}
+
+func runResetPreview(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	if len(args) == 0 || args[0] != "preview" {
+		fmt.Fprintln(stderr, "usage: redline reset preview [--timeout 5s]")
+		return 1
+	}
+	flags := flag.NewFlagSet("reset preview", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	timeout := flags.Duration("timeout", 5*time.Second, "total timeout for each bounded source request")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 30*time.Second {
+		fmt.Fprintln(stderr, "invalid reset preview arguments; timeout must be between 0 and 30s")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+time.Second)
+	defer cancel()
+	fetcher := resetsignal.Fetcher{
+		Timeout:   *timeout,
+		MaxBody:   256 << 10,
+		UserAgent: "redline-reset-preview/" + version.Version + " (+https://github.com/croutoncreations/redline)",
+		Now:       now,
+	}
+	sources := resetsignal.FetchAll(ctx, fetcher, nil)
+	report := resetsignal.BuildReport(now(), sources)
+	writeJSON(stdout, report)
+	return 0
 }
 
 func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int {

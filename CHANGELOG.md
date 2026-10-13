@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
+  trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
+  scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
+  The preview cannot notify, select jobs, alter scheduling, or start work.
+
 ## [0.1.10] - 2026-10-01
 
 ### Added
