@@ -38,3 +38,4 @@ usage-lockouts.json
 # they are never portable between machines.
 .envrc
 .tmuxp.yaml
+actionlint

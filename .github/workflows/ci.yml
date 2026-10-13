@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download actionlint
+        run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "$PWD" >> "$GITHUB_PATH"
+      - name: Run actionlint
+        run: actionlint
+
   go:
     runs-on: ubuntu-latest
     steps:
@@ -81,7 +94,7 @@ jobs:
           echo $! > serve.pid
       - name: Wait for health
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if ./redline --config smoke-config.yaml --api http://127.0.0.1:7436 health; then
               exit 0
             fi
