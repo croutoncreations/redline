@@ -1,0 +1,17 @@
+{
+  "mode": "model",
+  "updated_at": "2026-10-15T06:30:00.000Z",
+  "banked_state": null,
+  "probabilities": {"rounded_24h": 18, "rounded_48h": 33},
+  "official_signal": null,
+  "latest_alert": {
+    "id": "2110595554036400151",
+    "kind": "reset",
+    "state": "confirmed",
+    "source_at": "2026-10-15T06:13:01.000Z",
+    "summary": "Reset observed by operator; awaiting confirmation.",
+    "url": "https://x.com/thsottiaux/status/2110595554036400151",
+    "window": null,
+    "corrected": true
+  }
+}

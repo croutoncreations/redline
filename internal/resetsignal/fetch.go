@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -181,11 +182,19 @@ func retryDelay(value string, now time.Time) (time.Duration, bool) {
 	if value == "" {
 		return 0, false
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if seconds < 0 {
 			return 0, false
 		}
+		// A delay too large to represent is still a valid instruction to
+		// wait: saturate rather than overflow into a negative duration that
+		// the caller would replace with a short floor and retry early.
+		if seconds > int64(math.MaxInt64/time.Second) {
+			return time.Duration(math.MaxInt64), true
+		}
 		return time.Duration(seconds) * time.Second, true
+	} else if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(value, "-") {
+		return time.Duration(math.MaxInt64), true
 	}
 	if date, err := http.ParseTime(value); err == nil && date.After(now) {
 		return date.Sub(now), true

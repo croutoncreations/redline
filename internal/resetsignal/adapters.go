@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -262,8 +263,15 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 		}
 		expires = &parsed
 	}
+	kind := kindFromState(payload.Mode)
+	// The forecast's ordinary mode ("model") is undocumented; only the
+	// probability fields are. A snapshot that carries them and nothing more
+	// specific is a tracker prediction.
+	if kind == KindUnknown && (payload.Probabilities.Rounded24 != nil || payload.Probabilities.Rounded48 != nil) {
+		kind = KindPrediction
+	}
 	signal := Signal{
-		Kind:                kindFromState(payload.Mode),
+		Kind:                kind,
 		CheckedAt:           &checked,
 		ExpiresAt:           expires,
 		Freshness:           freshness(now, &checked, expires, nil, false),
@@ -295,20 +303,67 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 	}
 	if payload.LatestAlert != nil {
 		alert := payload.LatestAlert
-		if signal.AnnouncementID == "" {
+		fallback := signal.AnnouncementID == ""
+		if fallback {
 			signal.AnnouncementID = alert.ID
 			signal.Quote = alert.Summary
 			signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(alert.URL)
+			// Age the alert by its own source time, so a retained alert
+			// crosses the 72-hour current-report horizon like any other.
+			if strings.TrimSpace(alert.SourceAt) != "" {
+				published, parseErr := requiredTime(alert.SourceAt, "latest_alert.source_at")
+				if parseErr != nil {
+					return Signal{}, parseErr
+				}
+				signal.PublishedAt = &published
+			}
 		}
 		if alert.ID == signal.AnnouncementID {
-			signal.Corrected = alert.Corrected
-			signal.Withdrawn = !strings.EqualFold(alert.State, "active")
+			state := strings.ToLower(strings.TrimSpace(alert.State))
+			switch {
+			case state == "active":
+				signal.Corrected = alert.Corrected
+			case alertConfirmed(state):
+				// A confirmed reset alert is a completion. Its "corrected"
+				// flag marks an edited alert message, not a retraction.
+				if strings.EqualFold(strings.TrimSpace(alert.Kind), "reset") {
+					signal.Kind = KindCompleted
+				}
+			default:
+				// Withdrawn, superseded, expired, and any state Redline does
+				// not recognize retract the claim: fail closed.
+				signal.Withdrawn = true
+				signal.Corrected = alert.Corrected
+				if !alertRetracted(state) {
+					signal.Warnings = append(signal.Warnings, "unrecognized latest alert state "+strconv.Quote(state)+" treated as a retraction")
+				}
+			}
 		} else {
 			signal.Warnings = append(signal.Warnings, "latest alert belongs to a different announcement and did not modify this signal")
 		}
 	}
 	validateSignal(&signal, now)
 	return signal, nil
+}
+
+// alertRetracted reports alert states that withdraw the alert's claim.
+func alertRetracted(state string) bool {
+	switch state {
+	case "withdrawn", "retracted", "superseded", "cancelled", "canceled", "expired", "dismissed", "false_alarm":
+		return true
+	default:
+		return false
+	}
+}
+
+// alertConfirmed reports alert states that confirm the event happened.
+func alertConfirmed(state string) bool {
+	switch state {
+	case "confirmed", "completed", "fulfilled":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseWindow(startText, endText, description string) (Window, error) {

@@ -251,6 +251,101 @@ func TestLatestAlertOnlyCorrectsMatchingAnnouncement(t *testing.T) {
 	}
 }
 
+// codex-reset's live forecast carries no official signal and a confirmed
+// reset alert. That is a completion aged by the alert's source time, not a
+// withdrawn record.
+func TestCodexResetConfirmedAlertIsACompletion(t *testing.T) {
+	now := time.Date(2026, 10, 15, 6, 31, 0, 0, time.UTC)
+	header := http.Header{"X-Published-Expires-At": {"2026-10-15T06:32:00Z"}}
+	signal, err := normalizeCodexReset(fixture(t, "codex-reset-confirmed-alert.json"), header, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceAt := time.Date(2026, 10, 15, 6, 13, 1, 0, time.UTC)
+	if signal.Kind != KindCompleted || signal.Withdrawn || signal.Corrected || signal.PublishedAt == nil || !signal.PublishedAt.Equal(sourceAt) {
+		t.Fatalf("signal = %+v", signal)
+	}
+	signal.Feed = "codex-reset"
+	report := BuildReport(now, []SourceResult{{Signal: &signal}})
+	if report.State != KindCompleted {
+		t.Fatalf("report = %+v", report)
+	}
+	// Past the 72-hour horizon the retained alert is historical.
+	later := sourceAt.Add(73 * time.Hour)
+	if isCurrent(signal, later) {
+		t.Fatal("a 73-hour-old alert is still current")
+	}
+}
+
+// The forecast's ordinary snapshot is a model prediction with probabilities.
+func TestCodexResetModelOnlySnapshotIsAPrediction(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	signal, err := normalizeCodexReset(fixture(t, "codex-reset-model-only.json"), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Kind != KindPrediction || value(signal.Prediction24Percent) != 18 {
+		t.Fatalf("signal = %+v", signal)
+	}
+	signal.Feed = "codex-reset"
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindPrediction {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+// Alert states: active leaves the claim alone, confirmed completes a reset,
+// explicit retractions and unrecognized states withdraw it (fail closed).
+func TestCodexResetAlertStates(t *testing.T) {
+	for state, want := range map[string]struct {
+		kind      Kind
+		withdrawn bool
+	}{
+		"active":     {KindPromised, false},
+		"confirmed":  {KindCompleted, false},
+		"withdrawn":  {KindPromised, true},
+		"superseded": {KindPromised, true},
+		"mystery":    {KindPromised, true},
+	} {
+		t.Run(state, func(t *testing.T) {
+			body := `{
+				"mode":"announced","updated_at":"2026-10-13T04:14:42Z",
+				"official_signal":{"tweet_id":"one","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"promise","window":null},
+				"latest_alert":{"id":"one","kind":"reset","state":"` + state + `","url":"https://x.com/a/status/one"}
+			}`
+			signal, err := normalizeCodexReset([]byte(body), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != want.kind || signal.Withdrawn != want.withdrawn {
+				t.Fatalf("signal = %+v", signal)
+			}
+		})
+	}
+}
+
+// A Retry-After too large for a Duration must not overflow into a negative
+// delay that the floor would shorten into an early retry.
+func TestRetryAfterOverflowSaturates(t *testing.T) {
+	for _, header := range []string{"10000000000", "99999999999999999999"} {
+		delay, ok := retryDelay(header, fixtureNow)
+		if !ok || delay <= 0 || delay < time.Hour {
+			t.Fatalf("Retry-After %s = %s, %v", header, delay, ok)
+		}
+	}
+	calls, sleeps := 0, 0
+	fetcher := Fetcher{
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return response(http.StatusTooManyRequests, "application/json", `{}`, http.Header{"Retry-After": {"10000000000"}}), nil
+		})},
+		Timeout: time.Second, Now: func() time.Time { return fixtureNow },
+		Sleep: func(context.Context, time.Duration) error { sleeps++; return nil },
+	}
+	if _, fetchErr := fetcher.get(context.Background(), "resetbeacon", "https://example.test/feed"); fetchErr == nil || fetchErr.Code != "rate_limited" || calls != 1 || sleeps != 0 {
+		t.Fatalf("err=%+v calls=%d sleeps=%d", fetchErr, calls, sleeps)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
