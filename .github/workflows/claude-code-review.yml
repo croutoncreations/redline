@@ -10,6 +10,13 @@ on:
     #   - "src/**/*.js"
     #   - "src/**/*.jsx"
 
+# Cancel superseded runs for the same pull request only. Every other event
+# (push to main, tags, workflow_dispatch, schedule) gets a run-unique group and
+# is never cancelled. The pr-/run- prefixes keep PR 123 and run ID 123 apart.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   claude-review:
     # Optional: Filter by PR author
