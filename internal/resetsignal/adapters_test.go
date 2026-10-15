@@ -26,7 +26,9 @@ func TestNormalizeCurrentSchemasAndAmbiguousWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resetBeacon.Kind != KindScheduled || resetBeacon.Freshness != Fresh || resetBeacon.Window.End != nil || resetBeacon.Window.Certainty != WindowMirrorInterpretation {
+	deadline := time.Date(2026, 10, 13, 7, 0, 0, 0, time.UTC)
+	if resetBeacon.Kind != KindScheduled || resetBeacon.Freshness != Fresh || resetBeacon.Window.End == nil ||
+		!resetBeacon.Window.End.Equal(deadline) || resetBeacon.Window.Certainty != WindowMirrorInterpretation {
 		t.Fatalf("reset beacon = %+v", resetBeacon)
 	}
 

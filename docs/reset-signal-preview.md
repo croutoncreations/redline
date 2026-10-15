@@ -3,8 +3,11 @@
 `redline reset preview` is a first-pass, read-only report about the likelihood of a broad Codex
 reset. It fetches three separate tracker services, but it does not assume their evidence is
 independent: when all three reference the same public post, the report shows three mirrors of one
-unique original-announcement reference. `direct_source_verified` remains false because the
-original post is not fetched by this command.
+unique original-announcement reference. Trackers may name the post by its URL, its ID, or both;
+records that share either identity (directly or through another record) count as one
+announcement. A record whose URL and ID name different posts is identified by its URL alone, so
+it cannot join two announcements. `direct_source_verified` remains false because the original
+post is not fetched by this command.
 
 ```bash
 redline reset preview
@@ -53,7 +56,14 @@ verified for this spike; the claimed source URL, quote, and `2026-10-13T01:03:59
 are retained as mirror-provided fields from the public tracker payloads. Because the source phrase
 uses an ambiguous timezone label and
 two tracker schemas expose a null or absent window, Redline does not promote a tracker's inferred
-deadline into an independently verified source deadline.
+deadline into an independently verified source deadline. For a promised, scheduled, or intended
+record, Reset Beacon's interpreted deadline is kept as a tracker-attributed window end only to
+expire the record: once that deadline has passed, the record is historical even if the tracker
+keeps serving it as fresh. Completed, withdrawn, and corrected records are not expired by the
+deadline, so a completion stays visible and a retraction keeps retracting. A deadline never
+upgrades the report from an attributed promise to `SCHEDULED`. Because the source's "EOD PST" is
+ambiguous, expiry follows the tracker's reading (for example midnight Pacific daylight time), so a
+promise may be treated as historical up to an hour before a literal-PST reading would expire it.
 
 ## Deliberate non-goals
 

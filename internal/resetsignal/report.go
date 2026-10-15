@@ -177,39 +177,132 @@ func signalTimestamp(signal Signal) time.Time {
 	return time.Time{}
 }
 
+// groupEvidence deduplicates records that reference one original
+// announcement. A record can name it by canonical URL, by announcement ID, or
+// both, and trackers differ in which they supply (one may omit or fail to
+// validate the URL that another provides). Records sharing either identity,
+// directly or through a third record, are one announcement; keying on only
+// one of them would count a single post twice. Records with neither stay
+// separate per feed.
 func groupEvidence(results []SourceResult) ([]EvidenceGroup, map[string][]Signal) {
-	grouped := make(map[string][]Signal)
+	var signals []Signal
 	for _, result := range results {
-		if result.Signal == nil {
-			continue
+		if result.Signal != nil {
+			signals = append(signals, *result.Signal)
 		}
-		signal := *result.Signal
-		key := signal.ClaimedOriginalURL
-		if key == "" && signal.AnnouncementID != "" {
-			key = "announcement:" + signal.AnnouncementID
+	}
+	parent := make([]int, len(signals))
+	for index := range parent {
+		parent[index] = index
+	}
+	var find func(int) int
+	find = func(index int) int {
+		if parent[index] != index {
+			parent[index] = find(parent[index])
+		}
+		return parent[index]
+	}
+	union := func(a, b int) {
+		if rootA, rootB := find(a), find(b); rootA != rootB {
+			if rootB < rootA {
+				rootA, rootB = rootB, rootA
+			}
+			parent[rootB] = rootA
+		}
+	}
+	firstByIdentity := make(map[string]int)
+	for index, signal := range signals {
+		for _, identity := range announcementIdentities(signal) {
+			if first, seen := firstByIdentity[identity]; seen {
+				union(first, index)
+			} else {
+				firstByIdentity[identity] = index
+			}
+		}
+	}
+
+	members := make(map[int][]Signal)
+	for index, signal := range signals {
+		root := find(index)
+		members[root] = append(members[root], signal)
+	}
+	grouped := make(map[string][]Signal, len(members))
+	groups := make([]EvidenceGroup, 0, len(members))
+	for _, group := range members {
+		url, id := groupIdentity(group)
+		key := url
+		if key == "" && id != "" {
+			key = "announcement:" + id
 		}
 		if key == "" {
-			key = "feed:" + signal.Feed
+			key = "feed:" + group[0].Feed
 		}
-		grouped[key] = append(grouped[key], signal)
-	}
-	groups := make([]EvidenceGroup, 0, len(grouped))
-	for _, signals := range grouped {
-		feeds := make([]string, 0, len(signals))
-		for _, signal := range signals {
+		grouped[key] = group
+		feeds := make([]string, 0, len(group))
+		for _, signal := range group {
 			feeds = append(feeds, signal.Feed)
 		}
 		sort.Strings(feeds)
 		groups = append(groups, EvidenceGroup{
-			AnnouncementID: signals[0].AnnouncementID, ClaimedOriginalURL: signals[0].ClaimedOriginalURL,
+			AnnouncementID: id, ClaimedOriginalURL: url,
 			MirrorFeeds: feeds, DirectSourceVerified: false,
-			VerificationStatus: "mirror_reference_not_directly_fetched", Kinds: uniqueKinds(signals),
+			VerificationStatus: "mirror_reference_not_directly_fetched", Kinds: uniqueKinds(group),
 		})
 	}
 	sort.Slice(groups, func(i, j int) bool {
-		return firstNonEmpty(groups[i].ClaimedOriginalURL, groups[i].AnnouncementID) < firstNonEmpty(groups[j].ClaimedOriginalURL, groups[j].AnnouncementID)
+		left := firstNonEmpty(groups[i].ClaimedOriginalURL, groups[i].AnnouncementID)
+		right := firstNonEmpty(groups[j].ClaimedOriginalURL, groups[j].AnnouncementID)
+		if left != right {
+			return left < right
+		}
+		// Groups with no identity sort by feed so output order is stable.
+		return strings.Join(groups[i].MirrorFeeds, ",") < strings.Join(groups[j].MirrorFeeds, ",")
 	})
 	return groups, grouped
+}
+
+// announcementIdentities lists the identities a record names its original
+// announcement by. URL and ID live in separate namespaces so an ID can never
+// collide with a URL string.
+//
+// The ID is joined to the URL only when they agree (the canonical status URL
+// ends in that ID). A record whose URL and ID name different posts would
+// otherwise bridge two real announcements, letting one's correction retract
+// the other; such a record is identified by its URL alone.
+func announcementIdentities(signal Signal) []string {
+	url := strings.TrimSpace(signal.ClaimedOriginalURL)
+	id := strings.TrimSpace(signal.AnnouncementID)
+	var identities []string
+	if url != "" {
+		identities = append(identities, "url:"+url)
+	}
+	if id != "" && (url == "" || statusID(url) == id) {
+		identities = append(identities, "id:"+id)
+	}
+	return identities
+}
+
+// statusID is the final path segment of a canonical x.com status URL.
+func statusID(canonicalURL string) string {
+	return canonicalURL[strings.LastIndex(canonicalURL, "/")+1:]
+}
+
+// groupIdentity picks the URL and ID shown for a deduplicated group: the
+// first non-empty value of each in feed order, so the choice does not
+// depend on fetch completion order.
+func groupIdentity(group []Signal) (string, string) {
+	ordered := append([]Signal(nil), group...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Feed < ordered[j].Feed })
+	var url, id string
+	for _, signal := range ordered {
+		if url == "" {
+			url = strings.TrimSpace(signal.ClaimedOriginalURL)
+		}
+		if id == "" {
+			id = strings.TrimSpace(signal.AnnouncementID)
+		}
+	}
+	return url, id
 }
 
 func countUniqueOriginalAnnouncements(groups []EvidenceGroup) int {

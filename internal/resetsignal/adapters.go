@@ -130,13 +130,37 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 		if parseErr != nil {
 			return Signal{}, parseErr
 		}
-		_ = deadline
+		// The deadline is Reset Beacon's reading of the source phrase, not a
+		// verified source window, so it stays a mirror interpretation and can
+		// never satisfy hasExplicitPrimaryWindow.
 		signal.Window.Certainty = WindowMirrorInterpretation
-		signal.Window.Basis = "Reset Beacon supplied an interpreted deadline; omitted because the primary quote does not clarify the PST timezone phrase"
+		signal.Window.Basis = "Reset Beacon supplied an interpreted deadline; not reported as a primary-source deadline because the source phrase leaves the PST timezone ambiguous"
 		signal.Warnings = append(signal.Warnings, "tracker-interpreted deadline is not reported as a primary-source deadline")
+		// The deadline only bounds a forward-looking claim: once it has
+		// passed, a promise the tracker keeps serving as fresh is history.
+		// It must not expire facts that outlive it: a completion, or a
+		// withdrawal/correction that has to keep retracting the promise.
+		if expiresWithDeadline(signal) {
+			signal.Window.End = &deadline
+			signal.Window.Basis = "Reset Beacon's interpreted deadline; attributed to the tracker and used only to expire the forward-looking record, not as a primary-source deadline because the source phrase leaves the PST timezone ambiguous"
+		}
 	}
 	validateSignal(&signal, now)
 	return signal, nil
+}
+
+// expiresWithDeadline reports whether a tracker deadline bounds the record's
+// claim: true only for forward-looking states that have not been retracted.
+func expiresWithDeadline(signal Signal) bool {
+	if signal.Withdrawn || signal.Corrected {
+		return false
+	}
+	switch signal.Kind {
+	case KindPromised, KindScheduled, KindIntent:
+		return true
+	default:
+		return false
+	}
 }
 
 type willResetPayload struct {
