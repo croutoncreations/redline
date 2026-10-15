@@ -360,9 +360,11 @@ func TestCodexResetStaleAlertDoesNotHideLivePrediction(t *testing.T) {
 	}
 }
 
-// A confirmed reset alert never overwrites a banked-reset record, and a
-// confirmed alert of another kind changes nothing but says so.
-func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
+// A confirmed reset alert completes the record even beside banked_state,
+// which stays visible as a supplemental fact (codex-reset: "Banked resets are
+// a separate fact ... Treat it as supplemental"), and a confirmed alert of
+// another kind changes nothing but says so.
+func TestCodexResetConfirmedAlertCompletesBesideBankedAndIgnoresOtherKinds(t *testing.T) {
 	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
 	recent := `"2026-10-13T03:00:00Z"`
 	banked, err := normalizeCodexReset([]byte(codexForecast("null", `"available"`,
@@ -370,7 +372,7 @@ func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if banked.Kind != KindBanked || banked.Withdrawn || !contains(banked.Warnings, "did not replace the banked-reset record") {
+	if banked.Kind != KindCompleted || banked.Withdrawn || banked.BankedState != "available" || !contains(banked.Warnings, "supplemental fact kept in banked_state") {
 		t.Fatalf("banked = %+v", banked)
 	}
 	boost, err := normalizeCodexReset([]byte(codexForecast("null", "null",
@@ -384,7 +386,9 @@ func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
 }
 
 // A banked reset is a separate fact from the announcement a latest alert
-// names: no alert state removes it. A retracting (or unrecognized) alert state
+// names: no alert state removes it (a confirmed reset alert completes the
+// record and keeps banked_state; see the confirmed-alert test). A retracting
+// (or unrecognized) alert state
 // leaves the banked record unlinked and carries the retraction separately.
 // Without banked_state the retraction still withdraws the fallback record,
 // and an official signal's claim is still retracted even with banked_state.
@@ -398,7 +402,6 @@ func TestCodexResetBankedSurvivesLatestAlertStates(t *testing.T) {
 		warning  string
 	}{
 		"active":     {false, ""},
-		"confirmed":  {false, "did not replace the banked-reset record"},
 		"withdrawn":  {true, "banked-reset record is a separate fact and is kept"},
 		"superseded": {true, "banked-reset record is a separate fact and is kept"},
 		"expired":    {true, "banked-reset record is a separate fact and is kept"},
@@ -409,7 +412,7 @@ func TestCodexResetBankedSurvivesLatestAlertStates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if signal.Kind != KindBanked || signal.Withdrawn || signal.Corrected || (want.warning != "" && !contains(signal.Warnings, want.warning)) {
+			if signal.Kind != KindBanked || signal.BankedState != "available" || signal.Withdrawn || signal.Corrected || (want.warning != "" && !contains(signal.Warnings, want.warning)) {
 				t.Fatalf("signal = %+v", signal)
 			}
 			if want.retracts != (signal.RetractedAnnouncement != nil) || (want.retracts && (signal.AnnouncementID != "" || signal.PublishedAt != nil ||
@@ -755,8 +758,9 @@ func TestCodexResetFreshLastResetAtIsACompletion(t *testing.T) {
 }
 
 // last_reset_at names no announcement, so it never relabels an official
-// signal, replaces a banked record, overrides an alert's retraction, or
-// relabels any alert-named announcement. A stale
+// signal or any alert-named announcement. It outranks banked_state (kept as a
+// supplemental fact) and the undocumented latest_alert: the record completes
+// unlinked, and a retracting alert retracts only its own announcement. A stale
 // snapshot's completion stays historical.
 func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
@@ -769,13 +773,13 @@ func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 		warning                 string
 	}{
 		"official promise": {official, "null", "null", KindPromised, false, "not linked to the official signal"},
-		"banked":           {"null", `"available"`, "null", KindBanked, false, "did not replace the banked-reset record"},
+		"banked":           {"null", `"available"`, "null", KindCompleted, false, "supplemental fact kept in banked_state"},
 		"withdrawn alert": {"null", "null", `{"id":"9","kind":"reset","state":"withdrawn","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
-			KindPrediction, true, "retraction still applies"},
+			KindCompleted, false, "retraction is newer than last_reset_at"},
 		"newer active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
-			KindPrediction, false, "not linked to the latest alert's announcement"},
+			KindCompleted, false, "the documented last_reset_at decides the record"},
 		"older active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T02:30:00Z","url":"https://x.com/a/status/9"}`,
-			KindPrediction, false, "not linked to the latest alert's announcement"},
+			KindCompleted, false, "the documented last_reset_at decides the record"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset(test.official, test.banked, test.alert, fresh)), header, fixtureNow)
@@ -784,6 +788,9 @@ func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 			}
 			if signal.Kind != test.kind || signal.Withdrawn != test.withdrawn || (test.warning != "" && !contains(signal.Warnings, test.warning)) {
 				t.Fatalf("signal = %+v", signal)
+			}
+			if test.official == "null" && (signal.AnnouncementID != "" || signal.ClaimedOriginalURL != "") {
+				t.Fatalf("last_reset_at completion was linked to an announcement: %+v", signal)
 			}
 		})
 	}

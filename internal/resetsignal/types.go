@@ -71,7 +71,11 @@ type Signal struct {
 	// the retraction does not apply to this record itself (a banked-reset
 	// record is a separate fact). The report still retracts that announcement.
 	RetractedAnnouncement *AnnouncementRef `json:"retracted_announcement,omitempty"`
-	Warnings              []string         `json:"warnings,omitempty"`
+	// BankedState is codex-reset's documented banked_state, kept as a
+	// separate, supplemental fact even when the record's Kind is decided by
+	// something else (for example a completion from last_reset_at).
+	BankedState string   `json:"banked_state,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
 }
 
 // AnnouncementRef identifies an original announcement by tracker ID and

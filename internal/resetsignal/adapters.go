@@ -321,13 +321,36 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 			}
 			signal.Window = window
 		}
-	} else if strings.TrimSpace(payload.BankedState) != "" && !strings.EqualFold(payload.BankedState, "unknown") {
-		signal.Kind = KindBanked
+	}
+	if banked := strings.TrimSpace(payload.BankedState); banked != "" && !strings.EqualFold(banked, "unknown") {
+		// banked_state is supplemental: it is always kept visible, and it
+		// is the record's Kind only while nothing documented decides it.
+		signal.BankedState = banked
+		if payload.OfficialSignal == nil {
+			signal.Kind = KindBanked
+		}
+	}
+	// The documented last_reset_at decides a fallback (no official signal)
+	// completion before the undocumented latest_alert is read.
+	var documentedReset *time.Time
+	if payload.OfficialSignal == nil {
+		documentedReset = codexFreshLastReset(&signal, payload.LastResetAt, now)
 	}
 	if payload.LatestAlert != nil {
-		applyCodexLatestAlert(&signal, payload.LatestAlert, now)
+		applyCodexLatestAlert(&signal, payload.LatestAlert, documentedReset, now)
 	}
-	applyCodexLastReset(&signal, payload.LastResetAt, payload.OfficialSignal != nil, now)
+	if payload.OfficialSignal != nil {
+		if codexFreshLastReset(&signal, payload.LastResetAt, now) != nil {
+			signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; it is not linked to the official signal and did not change its claim")
+		}
+	} else if documentedReset != nil && signal.Kind != KindCompleted {
+		signal.Kind = KindCompleted
+		signal.PublishedAt = documentedReset
+		signal.Warnings = append(signal.Warnings, "completion derived from the documented last_reset_at; no original-source post is linked")
+	}
+	if signal.BankedState != "" && signal.Kind == KindCompleted {
+		signal.Warnings = append(signal.Warnings, "banked_state "+strconv.Quote(signal.BankedState)+" is a separate, supplemental fact kept in banked_state; it did not decide the completion")
+	}
 	validateSignal(&signal, now)
 	return signal, nil
 }
@@ -349,8 +372,12 @@ type codexLatestAlert struct {
 	} `json:"window"`
 }
 
-func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Time) {
+// applyCodexLatestAlert applies the undocumented latest alert. documentedReset
+// is a fresh last_reset_at on a record with no official signal; it outranks
+// the alert, so then only a confirmed reset alert may name the announcement.
+func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, documentedReset *time.Time, now time.Time) {
 	state := strings.ToLower(strings.TrimSpace(alert.State))
+	confirmedReset := alertConfirmed(state) && strings.EqualFold(strings.TrimSpace(alert.Kind), "reset")
 	if signal.AnnouncementID == "" {
 		// Without an official signal the snapshot is the tracker's live
 		// prediction. A retained alert may name the announcement only
@@ -368,13 +395,28 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 			signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: "+reason)
 			return
 		}
-		if signal.Kind == KindBanked && state != "active" && !alertConfirmed(state) {
+		if documentedReset != nil && (state == "active" || (alertConfirmed(state) && !confirmedReset)) {
+			// The documented reset decides the record; an alert that
+			// neither confirms that reset nor retracts anything is not linked,
+			// so its announcement is never relabeled as completed.
+			signal.Warnings = append(signal.Warnings, "latest alert "+strconv.Quote(strings.TrimSpace(alert.ID))+" is not linked: the documented last_reset_at decides the record")
+			return
+		}
+		if (documentedReset != nil || signal.Kind == KindBanked) && state != "active" && !alertConfirmed(state) {
 			// A retraction withdraws only the announcement the alert named,
-			// not the banked reset, a separate fact. The banked record stays
-			// unlinked and carries the retraction for the report to apply.
+			// not a documented reset or a banked reset, which are separate
+			// facts. The record stays unlinked and carries the retraction for
+			// the report to apply.
 			url, _ := canonicalOriginal(alert.URL)
 			signal.RetractedAnnouncement = &AnnouncementRef{ID: strings.TrimSpace(alert.ID), URL: url}
-			signal.Warnings = append(signal.Warnings, "latest alert retracts announcement "+strconv.Quote(strings.TrimSpace(alert.ID))+"; the banked-reset record is a separate fact and is kept")
+			kept := "the banked-reset record is a separate fact and is kept"
+			if documentedReset != nil {
+				kept = "the completion from the documented last_reset_at is a separate fact and is kept"
+			}
+			signal.Warnings = append(signal.Warnings, "latest alert retracts announcement "+strconv.Quote(strings.TrimSpace(alert.ID))+"; "+kept)
+			if documentedReset != nil && published.After(*documentedReset) {
+				signal.Warnings = append(signal.Warnings, "latest alert retraction is newer than last_reset_at; the documented reset still stands, and the trackers' fields disagree")
+			}
 			if !alertRetracted(state) {
 				signal.Warnings = append(signal.Warnings, "unrecognized latest alert state "+strconv.Quote(state)+" treated as a retraction")
 			}
@@ -397,11 +439,9 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 		case alertConfirmed(state):
 			// A confirmed reset alert is a completion. Its "corrected"
 			// flag marks an edited alert message, not a retraction. A
-			// banked reset is a separate fact and is never replaced.
+			// banked state stays visible as a supplemental fact.
 			switch {
-			case signal.Kind == KindBanked:
-				signal.Warnings = append(signal.Warnings, "confirmed alert did not replace the banked-reset record")
-			case strings.EqualFold(strings.TrimSpace(alert.Kind), "reset"):
+			case confirmedReset:
 				signal.Kind = KindCompleted
 			default:
 				signal.Warnings = append(signal.Warnings, "confirmed alert of kind "+strconv.Quote(strings.TrimSpace(alert.Kind))+" did not change the claim")
@@ -420,50 +460,28 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 	}
 }
 
-// applyCodexLastReset applies codex-reset's documented reset signal: a
-// last_reset_at that moved forward confirms a global reset. It completes the
-// snapshot only when it is inside the 72-hour current-report horizon, not
-// future-dated, and nothing more specific or more cautious applies. It is
-// not linked to any announcement, so it never relabels an official signal,
-// never replaces a banked-reset record (a separate fact), never overrides a
-// retraction, and never relabels an alert-named announcement.
-func applyCodexLastReset(signal *Signal, lastResetAt string, hasOfficialSignal bool, now time.Time) {
+// codexFreshLastReset parses codex-reset's documented reset signal (a
+// last_reset_at that moved forward confirms a global reset) and returns it
+// only when it is inside the 72-hour current-report horizon and not
+// future-dated. An older value is history; an invalid or future-dated one is
+// ignored with a warning.
+func codexFreshLastReset(signal *Signal, lastResetAt string, now time.Time) *time.Time {
 	if strings.TrimSpace(lastResetAt) == "" {
-		return
+		return nil
 	}
 	resetAt, err := requiredTime(lastResetAt, "last_reset_at")
 	if err != nil {
 		signal.Warnings = append(signal.Warnings, "invalid last_reset_at ignored")
-		return
+		return nil
 	}
 	if resetAt.After(now.Add(5 * time.Minute)) {
 		signal.Warnings = append(signal.Warnings, "last_reset_at is in the future and was ignored")
-		return
+		return nil
 	}
 	if now.Sub(resetAt) > maxCurrentAnnouncementAge {
-		// An older reset is history; the snapshot's live state stands.
-		return
+		return nil
 	}
-	switch {
-	case hasOfficialSignal:
-		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; it is not linked to the official signal and did not change its claim")
-	case signal.Kind == KindBanked:
-		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; it did not replace the banked-reset record")
-	case signal.Withdrawn || signal.Corrected:
-		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; the latest alert's retraction still applies")
-	case signal.Kind == KindCompleted:
-		// A confirmed reset alert already completed the snapshot.
-	case signal.AnnouncementID != "":
-		// last_reset_at names no post, so it never relabels the announcement a
-		// latest alert named; only a confirmed reset alert completes that.
-		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; it is not linked to the latest alert's announcement and did not change its claim")
-	default:
-		signal.Kind = KindCompleted
-		if signal.PublishedAt == nil {
-			signal.PublishedAt = &resetAt
-		}
-		signal.Warnings = append(signal.Warnings, "completion derived from the documented last_reset_at; no original-source post is linked")
-	}
+	return &resetAt
 }
 
 // fallbackAlertTime parses a latest alert's source time and reports whether
