@@ -212,9 +212,16 @@ func (d *DB) MarkRunRunning(ctx context.Context, runID string, workspace domain.
 	if err != nil {
 		return fmt.Errorf("encode workspace: %w", err)
 	}
+	// A git-worktree or DevX workspace records the commit it was created
+	// from. That commit, not the revision read when the run was selected
+	// (which may be older, or absent), is what the run actually worked on,
+	// so it becomes the run's source revision and, on success, the task's
+	// last_successful_source_revision.
 	result, err := d.db.ExecContext(ctx, `UPDATE runs SET state = 'running',
-workspace_directory = ?, workspace_metadata = ? WHERE id = ? AND state = 'preparing'`,
-		workspace.Directory, string(metadata), runID)
+workspace_directory = ?, workspace_metadata = ?,
+source_revision = CASE WHEN ? != '' THEN ? ELSE source_revision END
+WHERE id = ? AND state = 'preparing'`,
+		workspace.Directory, string(metadata), workspace.Metadata["base_sha"], workspace.Metadata["base_sha"], runID)
 	if err != nil {
 		return fmt.Errorf("mark run running: %w", err)
 	}

@@ -405,3 +405,26 @@ func steppedClock(start time.Time) func() time.Time {
 		return current
 	}
 }
+
+// Origin can advance between selection (which read "abc") and Prepare (which
+// fetched and started from "def"); the task must record the commit the run
+// actually used.
+func TestCompletedRunRecordsPreparedBaseAsSourceRevision(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.Recurring)
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{
+			Directory: t.TempDir(), Branch: "redline/" + run.ID,
+			Metadata: map[string]string{"base_ref": "origin/main", "base_sha": "def", "base_sync": "origin"},
+		}},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 0}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	storedRun, _ := db.GetRun(context.Background(), run.ID)
+	storedTask, _ := db.GetTask(context.Background(), task.ID)
+	if storedRun.SourceRevision != "def" || storedTask.LastSuccessfulSourceRevision != "def" {
+		t.Fatalf("run source=%q task last=%q, want prepared base def", storedRun.SourceRevision, storedTask.LastSuccessfulSourceRevision)
+	}
+}
