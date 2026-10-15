@@ -303,20 +303,22 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 	}
 	if payload.LatestAlert != nil {
 		alert := payload.LatestAlert
-		fallback := signal.AnnouncementID == ""
-		if fallback {
+		if signal.AnnouncementID == "" {
+			// Without an official signal the snapshot is the tracker's live
+			// prediction. A retained alert may name the announcement only
+			// while its own source time is inside the current-report horizon;
+			// an old, future-dated, or undated alert must not age or replace
+			// the live probabilities, so it is noted and otherwise ignored.
+			published, usable, reason := fallbackAlertTime(alert.SourceAt, now)
+			if !usable {
+				signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: "+reason)
+				validateSignal(&signal, now)
+				return signal, nil
+			}
 			signal.AnnouncementID = alert.ID
 			signal.Quote = alert.Summary
 			signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(alert.URL)
-			// Age the alert by its own source time, so a retained alert
-			// crosses the 72-hour current-report horizon like any other.
-			if strings.TrimSpace(alert.SourceAt) != "" {
-				published, parseErr := requiredTime(alert.SourceAt, "latest_alert.source_at")
-				if parseErr != nil {
-					return Signal{}, parseErr
-				}
-				signal.PublishedAt = &published
-			}
+			signal.PublishedAt = &published
 		}
 		if alert.ID == signal.AnnouncementID {
 			state := strings.ToLower(strings.TrimSpace(alert.State))
@@ -325,9 +327,15 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 				signal.Corrected = alert.Corrected
 			case alertConfirmed(state):
 				// A confirmed reset alert is a completion. Its "corrected"
-				// flag marks an edited alert message, not a retraction.
-				if strings.EqualFold(strings.TrimSpace(alert.Kind), "reset") {
+				// flag marks an edited alert message, not a retraction. A
+				// banked reset is a separate fact and is never replaced.
+				switch {
+				case signal.Kind == KindBanked:
+					signal.Warnings = append(signal.Warnings, "confirmed alert did not replace the banked-reset record")
+				case strings.EqualFold(strings.TrimSpace(alert.Kind), "reset"):
 					signal.Kind = KindCompleted
+				default:
+					signal.Warnings = append(signal.Warnings, "confirmed alert of kind "+strconv.Quote(strings.TrimSpace(alert.Kind))+" did not change the claim")
 				}
 			default:
 				// Withdrawn, superseded, expired, and any state Redline does
@@ -344,6 +352,25 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 	}
 	validateSignal(&signal, now)
 	return signal, nil
+}
+
+// fallbackAlertTime parses a latest alert's source time and reports whether
+// the alert is recent enough to stand in for an official signal.
+func fallbackAlertTime(sourceAt string, now time.Time) (time.Time, bool, string) {
+	if strings.TrimSpace(sourceAt) == "" {
+		return time.Time{}, false, "no source_at"
+	}
+	published, err := requiredTime(sourceAt, "latest_alert.source_at")
+	if err != nil {
+		return time.Time{}, false, "invalid source_at"
+	}
+	if published.After(now.Add(5 * time.Minute)) {
+		return time.Time{}, false, "source_at is in the future"
+	}
+	if now.Sub(published) > maxCurrentAnnouncementAge {
+		return time.Time{}, false, "older than the 72-hour current-report horizon"
+	}
+	return published, true, ""
 }
 
 // alertRetracted reports alert states that withdraw the alert's claim.

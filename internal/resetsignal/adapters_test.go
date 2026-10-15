@@ -3,6 +3,7 @@ package resetsignal
 import (
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -319,7 +320,66 @@ func TestCodexResetAlertStates(t *testing.T) {
 			if signal.Kind != want.kind || signal.Withdrawn != want.withdrawn {
 				t.Fatalf("signal = %+v", signal)
 			}
+			if unknown := contains(signal.Warnings, "unrecognized latest alert state"); unknown != (state == "mystery") {
+				t.Fatalf("unrecognized-state warning = %v, warnings %v", unknown, signal.Warnings)
+			}
 		})
+	}
+}
+
+func codexForecast(official, banked, alert string) string {
+	return `{"mode":"model","updated_at":"2026-10-13T04:14:42Z","banked_state":` + banked + `,
+		"probabilities":{"rounded_24h":18,"rounded_48h":33},"official_signal":` + official + `,"latest_alert":` + alert + `}`
+}
+
+// An alert older than the 72-hour horizon, future-dated, or undated must not
+// age or replace the snapshot's live probabilities.
+func TestCodexResetStaleAlertDoesNotHideLivePrediction(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	for name, sourceAt := range map[string]string{
+		"four days old": `"2026-10-09T04:00:00Z"`,
+		"future":        `"2026-10-14T04:00:00Z"`,
+		"undated":       `""`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			alert := `{"id":"9","kind":"reset","state":"active","source_at":` + sourceAt + `,"url":"https://x.com/a/status/9"}`
+			signal, err := normalizeCodexReset([]byte(codexForecast("null", "null", alert)), header, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindPrediction || signal.AnnouncementID != "" || signal.PublishedAt != nil || signal.Freshness != Fresh ||
+				!contains(signal.Warnings, "latest alert not used as the announcement") {
+				t.Fatalf("signal = %+v", signal)
+			}
+			signal.Feed = "codex-reset"
+			report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+			if report.State != KindPrediction || len(report.CurrentPredictions) != 1 {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
+
+// A confirmed reset alert never overwrites a banked-reset record, and a
+// confirmed alert of another kind changes nothing but says so.
+func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	recent := `"2026-10-13T03:00:00Z"`
+	banked, err := normalizeCodexReset([]byte(codexForecast("null", `"available"`,
+		`{"id":"9","kind":"reset","state":"confirmed","source_at":`+recent+`,"url":"https://x.com/a/status/9"}`)), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if banked.Kind != KindBanked || banked.Withdrawn || !contains(banked.Warnings, "did not replace the banked-reset record") {
+		t.Fatalf("banked = %+v", banked)
+	}
+	boost, err := normalizeCodexReset([]byte(codexForecast("null", "null",
+		`{"id":"9","kind":"boost","state":"confirmed","source_at":`+recent+`,"url":"https://x.com/a/status/9"}`)), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boost.Kind != KindPrediction || boost.Withdrawn || !contains(boost.Warnings, `kind "boost" did not change the claim`) {
+		t.Fatalf("boost = %+v", boost)
 	}
 }
 
@@ -328,7 +388,7 @@ func TestCodexResetAlertStates(t *testing.T) {
 func TestRetryAfterOverflowSaturates(t *testing.T) {
 	for _, header := range []string{"10000000000", "99999999999999999999"} {
 		delay, ok := retryDelay(header, fixtureNow)
-		if !ok || delay <= 0 || delay < time.Hour {
+		if !ok || delay != time.Duration(math.MaxInt64) {
 			t.Fatalf("Retry-After %s = %s, %v", header, delay, ok)
 		}
 	}
@@ -341,7 +401,8 @@ func TestRetryAfterOverflowSaturates(t *testing.T) {
 		Timeout: time.Second, Now: func() time.Time { return fixtureNow },
 		Sleep: func(context.Context, time.Duration) error { sleeps++; return nil },
 	}
-	if _, fetchErr := fetcher.get(context.Background(), "resetbeacon", "https://example.test/feed"); fetchErr == nil || fetchErr.Code != "rate_limited" || calls != 1 || sleeps != 0 {
+	_, fetchErr := fetcher.get(context.Background(), "resetbeacon", "https://example.test/feed")
+	if fetchErr == nil || fetchErr.Code != "rate_limited" || calls != 1 || sleeps != 0 || fetchErr.Metadata.RetryAfter != time.Duration(math.MaxInt64) {
 		t.Fatalf("err=%+v calls=%d sleeps=%d", fetchErr, calls, sleeps)
 	}
 }
