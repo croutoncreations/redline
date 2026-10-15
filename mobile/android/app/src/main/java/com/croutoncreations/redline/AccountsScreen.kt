@@ -96,6 +96,9 @@ fun AccountsScreen(
                             },
                             color = TextMuted, fontSize = 14.sp,
                         )
+                        if (state.failure != UsageUiState.Failure.UNAUTHORIZED && state.message.isNotEmpty()) {
+                            Text(state.message, color = TextMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+                        }
                         TextButton(onClick = onRetry) { Text("Retry", color = Accent) }
                     }
                 }
