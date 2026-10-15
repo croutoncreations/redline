@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
+  from Redline: `net/http` HTTP/1 and HTTP/2 client/server issues (request desync, memory and CPU
+  exhaustion, an HPACK race crash), `net/textproto`/`mime/multipart` header limits, and
+  `crypto/tls` ECH parsing. Source builds download the new toolchain automatically.
+
 ### Added
 
 - `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
