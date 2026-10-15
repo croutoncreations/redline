@@ -1,6 +1,7 @@
 package resetsignal
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -270,6 +271,62 @@ func TestOldCompletedDoesNotOverrideFreshPromise(t *testing.T) {
 	})
 	if report.State != KindPromised {
 		t.Fatalf("report = %+v", report)
+	}
+}
+
+// A codex-reset completion derived from last_reset_at names no post, so its
+// group is unlinked. A dated completion newer than the linked announcement
+// is the latest event and must not be hidden by an older promise.
+func TestNewerUnlinkedCompletionOutranksOlderLinkedPromise(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	codex, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", "null", `"2026-10-13T03:20:00Z"`)), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex.Feed = "codex-reset"
+	twoDaysAgo := fixtureNow.Add(-48 * time.Hour)
+	promise := Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &twoDaysAgo}
+	for _, results := range [][]SourceResult{{{Signal: &promise}, {Signal: &codex}}, {{Signal: &codex}, {Signal: &promise}}} {
+		if report := BuildReport(fixtureNow, results); report.State != KindCompleted {
+			t.Fatalf("report = %+v", report)
+		}
+	}
+}
+
+// A promise announced after the reset is a new promise: the older unlinked
+// completion does not outrank it.
+func TestOlderUnlinkedCompletionDoesNotOutrankNewerLinkedPromise(t *testing.T) {
+	resetAt := fixtureNow.Add(-48 * time.Hour)
+	promisedAt := fixtureNow.Add(-time.Hour)
+	report := BuildReport(fixtureNow, []SourceResult{
+		{Signal: &Signal{Feed: "codex-reset", Kind: KindCompleted, Freshness: Fresh, PublishedAt: &resetAt}},
+		{Signal: &Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &promisedAt}},
+	})
+	if report.State != KindPromised {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+// Only a dated event (a completion or retraction with a source time) can
+// outrank a linked announcement. A freshly polled prediction, or a record
+// dated only by its snapshot time, still ranks below a linked promise.
+func TestUnlinkedRecordWithoutDatedEventDoesNotOutrankLinkedPromise(t *testing.T) {
+	twoDaysAgo := fixtureNow.Add(-48 * time.Hour)
+	checked := fixtureNow.Add(-time.Minute)
+	p80 := 80.0
+	for name, unlinked := range map[string]Signal{
+		"fresh prediction":        {Feed: "codex-reset", Kind: KindPrediction, Freshness: Fresh, CheckedAt: &checked, Prediction24Percent: &p80},
+		"completion without date": {Feed: "codex-reset", Kind: KindCompleted, Freshness: Fresh, CheckedAt: &checked},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := BuildReport(fixtureNow, []SourceResult{
+				{Signal: &unlinked},
+				{Signal: &Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &twoDaysAgo}},
+			})
+			if report.State != KindPromised {
+				t.Fatalf("report = %+v", report)
+			}
+		})
 	}
 }
 

@@ -45,6 +45,14 @@ remain visible as historical evidence but are excluded from the current assessme
 correction or withdrawal retracts only its matching deduplicated announcement; an unrelated stale
 correction cannot erase a newer event.
 
+When several current records disagree, a record linked to an original announcement outranks one
+that names no post. The one exception is a dated event: an unlinked completion or retraction whose
+source time (`published_at`, for example a codex-reset completion dated by `last_reset_at`) is
+newer than the linked announcement's publication time. That event happened after the announcement,
+so it decides the state; a promise published after the event still wins as a new promise.
+Predictions and records dated only by their snapshot (`checked_at`) time never qualify, so a freshly
+polled forecast cannot hide a source-backed announcement.
+
 Reset Beacon now publishes event status without numerical forecasts. Its compatibility
 `answer.state: "forecast"` means "no new source-backed announcement" and its numerical fields stay
 empty, so Redline reports it as `UNKNOWN` (no current evidence), never as a prediction. Any post
