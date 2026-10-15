@@ -1,14 +1,19 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
@@ -202,4 +207,65 @@ func TestPRMaintenanceProfileValidationReturnsBadRequest(t *testing.T) {
 		`{"id":"m2","name":"M2","execution_profile_id":"norepo","kind":"pr_maintenance","type":"recurring","min_interval":"1h"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/worktree", `{"harness_type":"hermes","agent_context_id":"hermes-context"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/worktree", `{"repository":""}`, http.StatusBadRequest)
+}
+
+// racingResolver admits a competing maintenance run while the scheduler is
+// between its "already active" check and admission.
+type racingResolver struct{ race func() }
+
+func (r racingResolver) Resolve(context.Context, domain.ExecutionProfile) (string, error) {
+	r.race()
+	return "new", nil
+}
+
+func TestSchedulerExplainsMaintenanceAdmissionConflict(t *testing.T) {
+	t.Parallel()
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, codexPayload)
+	}))
+	defer usage.Close()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := t.Context()
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "maint-a", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "/repo"},
+		{ID: "maint-b", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "devx", Repository: "/repo"},
+	} {
+		if err := db.CreateProfile(ctx, profile, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gated := domain.Task{ID: "gated", Name: "Gated", Kind: domain.KindPRMaintenance, ExecutionProfileID: "maint-a",
+		Type: domain.Recurring, MinInterval: 1e9, Priority: 90, RequireRepoChange: true}
+	rival := domain.Task{ID: "rival", Name: "Rival", Kind: domain.KindPRMaintenance, ExecutionProfileID: "maint-b",
+		Type: domain.Recurring, MinInterval: 1e9}
+	for _, task := range []domain.Task{gated, rival} {
+		if err := db.CreateTask(ctx, task, apiNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := api.NewServerWithDependencies(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, racingResolver{race: func() {
+		if _, err := db.AdmitTaskWithLimits(context.Background(), "rival-run", "rival", "claude-main", "", nil,
+			store.AdmissionLimits{Provider: 5}, apiNow); err != nil {
+			t.Error(err)
+		}
+	}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	response := postJSON[struct {
+		Result decision.Result `json:"result"`
+		Run    *domain.Run     `json:"run,omitempty"`
+	}](t, server.URL+"/v1/scheduler/execute", map[string]any{"provider_account_id": "codex-main"})
+	if response.Run != nil {
+		t.Fatalf("admitted %#v despite active rival", response.Run)
+	}
+	if response.Result.TaskSelectionReason != "another pr_maintenance run became active for this repository first" ||
+		!strings.Contains(response.Result.Reason, "rival-run") {
+		t.Fatalf("result = %#v", response.Result)
+	}
 }
