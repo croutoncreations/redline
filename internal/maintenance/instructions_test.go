@@ -40,7 +40,7 @@ func TestInstructionsSeparateReviewReadinessFromMergeReadiness(t *testing.T) {
 	if strings.Contains(text, "dated after the original run") {
 		t.Error("takeover check still compares commit dates")
 	}
-	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.3" {
+	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.4" {
 		t.Errorf("version = %q", maintenance.Version)
 	}
 	// The old merge-gated readiness rule waited on every required check,
@@ -80,5 +80,32 @@ func TestInstructionsForbidInstallingDependencies(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Errorf("instructions missing no-install rule %q", required)
 		}
+	}
+}
+
+// A pull request is reconciled with its own baseRefName, never with the
+// profile base that the throwaway worktree was prepared from.
+func TestInstructionsReconcileEachPRWithItsOwnBase(t *testing.T) {
+	text := maintenance.Instructions("")
+	for _, required := range []string{
+		"<pr-base> is that PR's baseRefName", `git check-ref-format --branch "<pr-base>"`,
+		"git fetch origin refs/heads/<pr-base>:refs/remotes/origin/<pr-base>",
+		"merge\n     origin/<pr-base>", "Conflicts: merge origin/<pr-base>",
+		"defined on the PR's own base\n     branch origin/<pr-base>",
+		"it is NEVER what a pull request is reconciled with",
+		"Never merge <base>, the project default branch, or any branch other\nthan origin/<pr-base>",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("instructions missing own-base rule %q", required)
+		}
+	}
+	for _, forbidden := range []string{"merge origin/<base>", "merge\n     origin/<base>", "defined on the BASE branch"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("instructions still reconcile with the profile base: %q", forbidden)
+		}
+	}
+	// The PR base is fetched before it is merged.
+	if strings.Index(text, "git fetch origin refs/heads/<pr-base>") > strings.Index(text, "Conflicts: merge origin/<pr-base>") {
+		t.Error("the PR base must be fetched before it is merged")
 	}
 }

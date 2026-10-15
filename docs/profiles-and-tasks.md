@@ -73,6 +73,13 @@ prompt: Run `make lint` before pushing.   # optional project notes
   human. It does not wait for review bots, which only run after a pull request is ready. It
   revisits a pull request it already handled when a review thread, CHANGES_REQUESTED review, or
   failing check arrives after its last comment, even if the head commit is unchanged.
+- A pull request is brought up to date with its own base (its `baseRefName`), which is validated
+  as a branch name, fetched, and merged as `origin/<baseRefName>`. The profile's `base_branch`
+  only sets where the run's throwaway worktree starts. Redline never merges the default branch,
+  or any other branch, into a pull request that targets a different branch.
+- The agent uses only dependencies and tools that are already installed. It never installs
+  packages, dependencies, or system tools. A test that cannot run without an install is reported
+  as a blocker for a human.
 - A `pr_maintenance` profile must have a `repository`. An incompatible profile is rejected with
   HTTP 400.
 - Only one maintenance run per repository is active at a time. The scheduler skips a second one
