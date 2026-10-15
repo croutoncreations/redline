@@ -461,3 +461,24 @@ func TestUngatedGitWorktreeRunRecordsPreparedBase(t *testing.T) {
 		t.Fatalf("task last=%q, want prepared base def", storedTask.LastSuccessfulSourceRevision)
 	}
 }
+
+// Only workspaces Redline prepares itself may replace the admitted revision:
+// a command workspace's base_sha metadata is not trusted.
+func TestCommandWorkspaceBaseSHAKeepsAdmittedRevision(t *testing.T) {
+	db, run, task, profile := admittedRunWith(t, domain.Recurring, "command", "abc")
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{
+			Directory: t.TempDir(), Metadata: map[string]string{"base_sha": "from-command"},
+		}},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 0}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	storedRun, _ := db.GetRun(context.Background(), run.ID)
+	storedTask, _ := db.GetTask(context.Background(), task.ID)
+	if storedRun.SourceRevision != "abc" || storedTask.LastSuccessfulSourceRevision != "abc" {
+		t.Fatalf("run source=%q task last=%q, want admitted abc", storedRun.SourceRevision, storedTask.LastSuccessfulSourceRevision)
+	}
+}

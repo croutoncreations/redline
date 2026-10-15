@@ -216,12 +216,17 @@ func (d *DB) MarkRunRunning(ctx context.Context, runID string, workspace domain.
 	// from. That commit, not the revision read when the run was selected
 	// (which may be older, or absent), is what the run actually worked on,
 	// so it becomes the run's source revision and, on success, the task's
-	// last_successful_source_revision.
+	// last_successful_source_revision. Only those providers, which Redline
+	// prepares itself, are trusted with it: a command workspace may emit any
+	// base_sha, and its run keeps the revision it was admitted with.
+	baseSHA := workspace.Metadata["base_sha"]
 	result, err := d.db.ExecContext(ctx, `UPDATE runs SET state = 'running',
 workspace_directory = ?, workspace_metadata = ?,
-source_revision = CASE WHEN ? != '' THEN ? ELSE source_revision END
+source_revision = CASE WHEN ? != '' AND (SELECT p.workspace_provider FROM tasks t
+  JOIN execution_profiles p ON p.id = t.execution_profile_id WHERE t.id = runs.task_id) IN ('git-worktree', 'devx')
+  THEN ? ELSE source_revision END
 WHERE id = ? AND state = 'preparing'`,
-		workspace.Directory, string(metadata), workspace.Metadata["base_sha"], workspace.Metadata["base_sha"], runID)
+		workspace.Directory, string(metadata), baseSHA, baseSHA, runID)
 	if err != nil {
 		return fmt.Errorf("mark run running: %w", err)
 	}
