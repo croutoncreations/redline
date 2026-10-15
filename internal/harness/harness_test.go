@@ -567,3 +567,58 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestPRMaintenanceTaskRunsBuiltInInstructionsWithProjectAdditions(t *testing.T) {
+	for _, test := range []struct {
+		name, prompt string
+	}{
+		{name: "empty prompt"},
+		{name: "additional instructions", prompt: "Run make lint before pushing."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &captureRunner{}
+			_, err := (harness.Adapter{Runner: runner}).Run(t.Context(), harness.Request{
+				RunID: "run-maint", OutputDirectory: t.TempDir(),
+				Task: domain.Task{ID: "maint", Name: "Maintain PRs", Kind: domain.KindPRMaintenance,
+					Type: domain.Recurring, Prompt: test.prompt},
+				Profile: domain.ExecutionProfile{HarnessType: "codex-cli", Repository: "/repo",
+					BaseBranch: "origin/main", WorkspaceProvider: "git-worktree"},
+				Workspace: domain.Workspace{Directory: "/tmp/work"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(runner.stdin, "Redline PR maintenance (built-in instructions") ||
+				!strings.Contains(runner.stdin, "redline run attribute") ||
+				!strings.Contains(runner.stdin, "redline lease acquire") {
+				t.Fatalf("stdin is missing built-in instructions: %q", runner.stdin[:min(200, len(runner.stdin))])
+			}
+			hasExtra := strings.Contains(runner.stdin, "Additional project instructions")
+			if hasExtra != (test.prompt != "") || (test.prompt != "" && !strings.HasSuffix(strings.TrimSpace(runner.stdin), test.prompt)) {
+				t.Fatalf("additional instructions handling wrong: extra=%v", hasExtra)
+			}
+			environment := strings.Join(runner.command.Env, "\n")
+			for _, want := range []string{"REDLINE_TASK_KIND=pr_maintenance", "REDLINE_REPO=/repo", "REDLINE_BASE_BRANCH=main", "REDLINE_RUN_ID=run-maint"} {
+				if !strings.Contains(environment, want) {
+					t.Errorf("environment missing %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestStandardTaskEnvironmentReportsStandardKind(t *testing.T) {
+	runner := &captureRunner{}
+	_, err := (harness.Adapter{Runner: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-std", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "add tests"},
+		Profile:   domain.ExecutionProfile{HarnessType: "codex-cli", Repository: "/repo", BaseBranch: "main"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.stdin != "add tests" || !strings.Contains(strings.Join(runner.command.Env, "\n"), "REDLINE_TASK_KIND=standard") {
+		t.Fatalf("stdin=%q env=%v", runner.stdin, runner.command.Env)
+	}
+}

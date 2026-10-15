@@ -11,6 +11,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/maintenance"
 	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
@@ -86,13 +87,13 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		if request.Task.RuntimeJobID != "" {
 			return a.runHermesJob(ctx, request, stdout, result)
 		}
-		prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
+		prompt, err := taskPrompt(request.Task, request.Workspace.Directory)
 		if err != nil {
 			return Result{}, err
 		}
 		return a.runHermes(ctx, request, prompt, stdout, result)
 	}
-	prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
+	prompt, err := taskPrompt(request.Task, request.Workspace.Directory)
 	if err != nil {
 		return Result{}, err
 	}
@@ -287,6 +288,9 @@ func buildCommand(
 			"REDLINE_RUN_ID="+request.RunID,
 			"REDLINE_TASK_ID="+request.Task.ID,
 			"REDLINE_TASK_NAME="+request.Task.Name,
+			"REDLINE_TASK_KIND="+string(taskKind(request.Task)),
+			"REDLINE_REPO="+request.Profile.Repository,
+			"REDLINE_BASE_BRANCH="+domain.BaseBranchName(request.Profile.BaseBranch),
 			"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
 			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
 			"REDLINE_RESULT_FILE="+ResultFilePath(request.OutputDirectory, request.RunID),
@@ -338,6 +342,30 @@ func claudeWorkspaceBoundary(directory string) string {
 			`Do not read or modify a parent checkout or another worktree.`,
 		directory,
 	)
+}
+
+func taskKind(task domain.Task) domain.TaskKind {
+	if task.Kind == "" {
+		return domain.KindStandard
+	}
+	return task.Kind
+}
+
+// taskPrompt is the text sent to the agent. A pr_maintenance task runs the
+// built-in maintenance procedure; its own prompt, if any, is appended as
+// additional project instructions.
+func taskPrompt(task domain.Task, workspaceDirectory string) (string, error) {
+	if taskKind(task) != domain.KindPRMaintenance {
+		return loadPrompt(task, workspaceDirectory)
+	}
+	extra := ""
+	if task.Prompt != "" || task.PromptFile != "" {
+		var err error
+		if extra, err = loadPrompt(task, workspaceDirectory); err != nil {
+			return "", err
+		}
+	}
+	return maintenance.Instructions(extra), nil
 }
 
 func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
