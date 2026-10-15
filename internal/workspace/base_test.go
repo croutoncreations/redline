@@ -125,6 +125,16 @@ func TestSyncBaseKeepsConfiguredSSHCommand(t *testing.T) {
 		{name: "core.sshCommand wins over GIT_SSH", gitSSH: "/usr/local/bin/deploy-ssh", coreCommand: "ssh -i /keys/core",
 			want: "ssh -o BatchMode=yes -i /keys/core", wantSet: true},
 		{name: "GIT_SSH left alone", gitSSH: "/usr/local/bin/deploy-ssh", wantSet: false},
+		{name: "absolute OpenSSH path", coreCommand: "/usr/bin/ssh -i /keys/deploy",
+			want: "/usr/bin/ssh -o BatchMode=yes -i /keys/deploy", wantSet: true},
+		// git picks the SSH variant from the program name; injecting an ssh
+		// option would break plink, shell wrappers, and VAR=value prefixes.
+		{name: "plink left as configured", coreCommand: "plink -batch -i key.ppk",
+			want: "plink -batch -i key.ppk", wantSet: true},
+		{name: "shell wrapper left as configured", coreCommand: "sh -c 'ssh -i /keys/deploy \"$@\"' ssh",
+			want: "sh -c 'ssh -i /keys/deploy \"$@\"' ssh", wantSet: true},
+		{name: "env prefix left as configured", coreCommand: "SSH_AUTH_SOCK=/tmp/agent ssh -i /keys/deploy",
+			want: "SSH_AUTH_SOCK=/tmp/agent ssh -i /keys/deploy", wantSet: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("GIT_SSH_COMMAND", test.envCommand)

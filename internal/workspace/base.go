@@ -237,12 +237,25 @@ func gitNetworkEnvironment(coreSSHCommand string) []string {
 // off. A command beginning with a quote (a program path containing spaces)
 // cannot be split safely, so the option is appended instead, where an earlier
 // explicit BatchMode=no would still win.
+//
+// The option is injected only when the program is OpenSSH ("ssh" or a path
+// ending in "/ssh"). A configured plink/putty command, a shell wrapper such as
+// "sh -c ...", or a leading VAR=value prefix is left exactly as configured:
+// git picks the SSH variant from the program name, and an injected option
+// would break those commands. GIT_TERMINAL_PROMPT=0 still applies to them.
 func batchModeSSHCommand(command string) string {
 	const option = "-o BatchMode=yes"
 	if strings.ContainsAny(command[:1], `"'`) {
 		return command + " " + option
 	}
 	end := strings.IndexAny(command, " \t")
+	program := command
+	if end >= 0 {
+		program = command[:end]
+	}
+	if program != "ssh" && !strings.HasSuffix(program, "/ssh") {
+		return command
+	}
 	if end < 0 {
 		return command + " " + option
 	}
