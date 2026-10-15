@@ -419,6 +419,27 @@ func TestResetBeaconPastDeadlinePredictionIsNotCurrent(t *testing.T) {
 	}
 }
 
+// The other side of prediction expiry: before its window ends, a Reset Beacon
+// likely/possible record stays a current attributed PREDICTION.
+func TestResetBeaconPredictionBeforeDeadlineStaysCurrent(t *testing.T) {
+	for _, state := range []string{"likely", "possible"} {
+		t.Run(state, func(t *testing.T) {
+			body := strings.Replace(string(resetBeaconBody(state, state)), `"deadline":"2026-10-13T02:20:00Z"`, `"deadline":"2026-10-13T08:00:00Z"`, 1)
+			signal, err := normalizeResetBeacon([]byte(body), nil, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindPrediction || signal.Window.End == nil || !signal.Window.End.After(fixtureNow) || !isCurrent(signal, fixtureNow) {
+				t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
+			}
+			signal.Feed = "resetbeacon"
+			if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindPrediction {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
+
 func TestStaleOnlyScheduledIsHistoricalAndStaleProbabilityIsNotCurrent(t *testing.T) {
 	prediction := 80.0
 	report := BuildReport(fixtureNow, []SourceResult{{Signal: &Signal{

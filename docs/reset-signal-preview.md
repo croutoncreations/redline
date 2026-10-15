@@ -96,7 +96,8 @@ predicted record (for example a Reset Beacon "likely" post, or a codex-reset off
 prediction type with a window), the tracker's deadline or window end expires the record, and the
 "reported window expired" note is shown only for such records. A codex-reset model-only snapshot
 has no window and is never expired this way. Reset Beacon's interpreted deadline is kept as a
-tracker-attributed window end only to expire the record: once that deadline has passed, the record is historical even if the tracker
+tracker-attributed window end only to expire the record: once that deadline has passed, the record
+is historical even if the tracker
 keeps serving it as fresh. Completed, withdrawn, and corrected records are not expired by the
 deadline, so a completion stays visible and a retraction keeps retracting. A deadline never
 upgrades the report from an attributed promise to `SCHEDULED`. Because the source's "EOD PST" is
