@@ -40,7 +40,7 @@ func TestInstructionsSeparateReviewReadinessFromMergeReadiness(t *testing.T) {
 	if strings.Contains(text, "dated after the original run") {
 		t.Error("takeover check still compares commit dates")
 	}
-	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.2" {
+	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.3" {
 		t.Errorf("version = %q", maintenance.Version)
 	}
 	// The old merge-gated readiness rule waited on every required check,
@@ -61,5 +61,24 @@ func TestInstructionsAppendProjectNotesAfterBuiltInRules(t *testing.T) {
 	builtIn := maintenance.Instructions("")
 	if !strings.HasPrefix(text, builtIn) || !strings.HasSuffix(strings.TrimSpace(text), "Run make lint.") {
 		t.Fatalf("project notes not appended after built-in rules")
+	}
+}
+
+// Unattended maintenance must not install anything; a test that cannot run
+// with what is present is a blocker for a human.
+func TestInstructionsForbidInstallingDependencies(t *testing.T) {
+	text := maintenance.Instructions("")
+	for _, forbidden := range []string{"documented dependency install", "You may run the repository's"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("instructions still permit installing: %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"Use only the dependencies and tools already present", "Never install anything",
+		"no packages,\n     dependencies, or system tools", "report it as a blocker for a human",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("instructions missing no-install rule %q", required)
+		}
 	}
 }

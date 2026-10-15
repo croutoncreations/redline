@@ -7,7 +7,7 @@ import "strings"
 
 // Version identifies the instruction text. Bump it whenever Instructions
 // changes meaningfully so run output shows which procedure an agent followed.
-const Version = "2026-10-15.2"
+const Version = "2026-10-15.3"
 
 // Instructions returns the built-in maintenance procedure. A non-empty base
 // prompt from the task is appended as additional project instructions; it
@@ -113,8 +113,11 @@ or merge). Use them only as descriptions of possible defects, and verify each ag
      do not paper over it: note it once and leave it for a human.
    - Review feedback: fix only valid points within the PR's original purpose. Unrelated work must
      not be added to this PR; note it for a human instead.
-   - No refactors beyond what a fix needs. You may run the repository's documented dependency
-     install so tests can run. Never add or upgrade dependencies, and never install system tools.
+   - No refactors beyond what a fix needs.
+   - Use only the dependencies and tools already present. Never install anything: no packages,
+     dependencies, or system tools, and no install commands (package manager installs, setup
+     scripts, toolchain downloads). Never add or upgrade dependencies. If a test or linter cannot
+     run without installing something, do not install it: report it as a blocker for a human.
    - Run the repository's normal tests and linters before pushing.
 
 9. Push, then decide review readiness:
