@@ -710,3 +710,47 @@ func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 		t.Fatalf("stale snapshot drove the report: signal %+v report %+v", signal, report)
 	}
 }
+
+// Reset Beacon documents checking, stale, and unavailable as missing or
+// outdated current checks (resetbeacon.com/api/docs). In either answer.state
+// or publicationState they make the record stale even with a future
+// validUntil and no staleSince, so a retained post can neither be reported as
+// a completion or promise nor outrank another tracker's live prediction.
+func TestResetBeaconUncheckedStatesAreStale(t *testing.T) {
+	codex, err := normalizeCodexReset(fixture(t, "codex-reset-model-only.json"), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex.Feed = "codex-reset"
+	for _, unchecked := range []string{"checking", "stale", "unavailable"} {
+		for name, states := range map[string][2]string{
+			"answer.state":                   {unchecked, "confirmed"},
+			"publicationState after confirm": {"confirmed", unchecked},
+			"publicationState after promise": {"announced", unchecked},
+		} {
+			t.Run(unchecked+"/"+name, func(t *testing.T) {
+				body := []byte(`{"calculatedAt":"2026-10-13T04:19:00Z","validUntil":"2026-10-13T04:30:00Z","staleSince":null,
+					"displayMode":"events","publicationState":"` + states[1] + `","probabilities":null,
+					"answer":{"state":"` + states[0] + `","percent":null,"deadline":null,"posts":[{"postId":"42",
+					"sourceUrl":"https://x.com/a/status/42","publishedAt":"2026-10-13T03:00:00Z","quote":"retained"}]}}`)
+				signal, err := normalizeResetBeacon(body, nil, fixtureNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if signal.Freshness != Stale || isCurrent(signal, fixtureNow) ||
+					!contains(signal.Warnings, `state "`+unchecked+`" means the current check is missing or outdated`) {
+					t.Fatalf("signal = %+v", signal)
+				}
+				signal.Feed = "resetbeacon"
+				alone := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+				if alone.State != KindUnknown || !contains(alone.Uncertainty, "resetbeacon: freshness is stale") {
+					t.Fatalf("alone report = %+v", alone)
+				}
+				withCodex := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}, {Signal: &codex}})
+				if withCodex.State != KindPrediction || len(withCodex.CurrentPredictions) != 1 || withCodex.CurrentPredictions[0].Feed != "codex-reset" {
+					t.Fatalf("report with codex-reset = %+v", withCodex)
+				}
+			})
+		}
+	}
+}

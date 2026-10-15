@@ -58,7 +58,12 @@ Reset Beacon now publishes event status without numerical forecasts. Its compati
 `answer.state: "forecast"` means "no new source-backed announcement" and its numerical fields stay
 empty, so Redline reports it as `UNKNOWN` (no current evidence), never as a prediction. Any post
 it still lists is treated as history, so the record names no announcement and cannot outrank
-another tracker's fresh evidence or live probabilities.
+another tracker's fresh evidence or live probabilities. Reset Beacon documents `checking`, `stale`
+and `unavailable` as "missing or outdated current checks". When either `answer.state` or
+`publicationState` has one of these values, Redline marks the record `stale`, even if `validUntil`
+is in the future and `staleSince` is empty, and adds a freshness warning. Any post the record keeps
+is then historical and cannot outrank another tracker's live evidence. It is never reported as a
+completion or promise.
 
 codex-reset.com's ordinary `mode: "model"` snapshot carries only tracker probabilities and is
 reported as an attributed `PREDICTION`. Its documented, stable `last_reset_at` is the tracker's

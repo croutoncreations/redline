@@ -110,13 +110,20 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 		// is no current evidence, not a prediction.
 		kind = KindUnknown
 	}
+	uncheckedState := resetBeaconUncheckedState(payload.Answer.State, payload.PublicationState)
 	signal := Signal{
 		Kind:               kind,
 		CheckedAt:          &checked,
 		ExpiresAt:          &expires,
-		Freshness:          freshness(now, &checked, &expires, nil, payload.StaleSince != nil),
+		Freshness:          freshness(now, &checked, &expires, nil, payload.StaleSince != nil || uncheckedState != ""),
 		Window:             Window{Text: payload.Answer.Window, Certainty: WindowMissing},
 		GlobalAnnouncement: true,
+	}
+	if uncheckedState != "" {
+		// Reset Beacon documents checking, stale, and unavailable as a
+		// missing or outdated current check, whatever validUntil says, so the
+		// record and any post it retains are not current evidence.
+		signal.Warnings = append(signal.Warnings, "state "+strconv.Quote(uncheckedState)+" means the current check is missing or outdated; the record is stale")
 	}
 	signal.Withdrawn = strings.EqualFold(payload.PublicationState, "withdrawn") || strings.EqualFold(payload.PublicationState, "superseded")
 	signal.Corrected = strings.EqualFold(payload.PublicationState, "corrected")
@@ -162,6 +169,18 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 	}
 	validateSignal(&signal, now)
 	return signal, nil
+}
+
+// resetBeaconUncheckedState returns the first of Reset Beacon's answer.state
+// or publicationState that is checking, stale, or unavailable, or "".
+func resetBeaconUncheckedState(states ...string) string {
+	for _, state := range states {
+		switch normalized := strings.ToLower(strings.TrimSpace(state)); normalized {
+		case "checking", "stale", "unavailable":
+			return normalized
+		}
+	}
+	return ""
 }
 
 // expiresWithDeadline reports whether a tracker deadline or window end bounds
