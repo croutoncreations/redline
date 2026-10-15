@@ -429,8 +429,64 @@ func TestCodexResetCompletedPastOfficialWindowStaysCompleted(t *testing.T) {
 		t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
 	}
 	signal.Feed = "codex-reset"
-	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindCompleted {
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindCompleted ||
+		contains(report.Uncertainty, "reported window expired") {
 		t.Fatalf("report = %+v", report)
+	}
+}
+
+// A fallback latest_alert with an empty id names no announcement, so it
+// cannot stand in for one: like a stale or undated alert it is noted and
+// ignored, and the live prediction stands.
+func TestCodexResetFallbackAlertWithoutIDIsIgnored(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	for _, state := range []string{"withdrawn", "confirmed", "active"} {
+		t.Run(state, func(t *testing.T) {
+			alert := `{"id":" ","kind":"reset","state":"` + state + `","source_at":"2026-10-13T03:00:00Z","url":""}`
+			signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", alert, "null")), header, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindPrediction || signal.Withdrawn || signal.Corrected || signal.PublishedAt != nil ||
+				!contains(signal.Warnings, "latest alert not used as the announcement: no id") {
+				t.Fatalf("signal = %+v", signal)
+			}
+		})
+	}
+}
+
+// A codex-reset official signal of prediction type is forward-looking: once
+// its window has ended it is no longer a current PREDICTION. The model-only
+// snapshot has no window, so it is never expired this way.
+func TestCodexResetPredictionPastOfficialWindowIsNotCurrent(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	body := []byte(`{
+		"mode":"model","updated_at":"2026-10-13T04:14:42Z","probabilities":{"rounded_24h":18,"rounded_48h":33},
+		"official_signal":{"tweet_id":"one","summary":"maybe","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"prediction",
+			"window":{"start":"2026-10-13T01:30:00Z","end":"2026-10-13T03:00:00Z","text":"within two hours"}},
+		"latest_alert":null
+	}`)
+	signal, err := normalizeCodexReset(body, header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Kind != KindPrediction || signal.Freshness != Fresh || isCurrent(signal, fixtureNow) ||
+		!contains(signal.Warnings, "announcement window has expired") {
+		t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
+	}
+	signal.Feed = "codex-reset"
+	report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+	if report.State != KindUnknown || len(report.CurrentPredictions) != 0 || len(report.HistoricalPredictions) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+
+	model, err := normalizeCodexReset(fixture(t, "codex-reset-model-only.json"), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No window: only the snapshot's own TTL ends the model prediction.
+	if model.Kind != KindPrediction || model.Window.End != nil || !isCurrent(model, fixtureNow) {
+		t.Fatalf("model = %+v", model)
 	}
 }
 

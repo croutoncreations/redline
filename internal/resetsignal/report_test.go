@@ -307,7 +307,7 @@ func TestOlderUnlinkedCompletionDoesNotOutrankNewerLinkedPromise(t *testing.T) {
 	}
 }
 
-// Only a dated event (a completion or retraction with a source time) can
+// Only a dated completion (one with a source time) can
 // outrank a linked announcement. A freshly polled prediction, or a record
 // dated only by its snapshot time, still ranks below a linked promise.
 func TestUnlinkedRecordWithoutDatedEventDoesNotOutrankLinkedPromise(t *testing.T) {
@@ -324,6 +324,95 @@ func TestUnlinkedRecordWithoutDatedEventDoesNotOutrankLinkedPromise(t *testing.T
 				{Signal: &Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &twoDaysAgo}},
 			})
 			if report.State != KindPromised {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
+
+// A retraction that names no announcement cannot retract one: only an
+// unlinked completion outranks a linked announcement. The codex-reset case is
+// a fallback latest_alert with an empty id, which must not match the empty
+// announcement ID of a model snapshot.
+func TestUnlinkedRetractionDoesNotEraseLinkedPromise(t *testing.T) {
+	twoDaysAgo := fixtureNow.Add(-48 * time.Hour)
+	promise := Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &twoDaysAgo}
+
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	alert := `{"id":"","kind":"reset","state":"withdrawn","source_at":"2026-10-13T03:00:00Z","url":""}`
+	codex, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", alert, "null")), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex.Feed = "codex-reset"
+
+	retractedAt := fixtureNow.Add(-time.Hour)
+	unlinked := map[string]Signal{
+		"codex-reset empty-id withdrawn alert": codex,
+		"unlinked withdrawal":                  {Feed: "codex-reset", Kind: KindPrediction, Withdrawn: true, Freshness: Fresh, PublishedAt: &retractedAt},
+		"unlinked correction":                  {Feed: "willreset", Kind: KindUnknown, Corrected: true, Freshness: Fresh, PublishedAt: &retractedAt},
+	}
+	for name, other := range unlinked {
+		t.Run(name, func(t *testing.T) {
+			for _, results := range [][]SourceResult{{{Signal: &promise}, {Signal: &other}}, {{Signal: &other}, {Signal: &promise}}} {
+				if report := BuildReport(fixtureNow, results); report.State != KindPromised {
+					t.Fatalf("report = %+v", report)
+				}
+			}
+		})
+	}
+}
+
+// The unlinked completion is compared against the newest publication of any
+// current linked announcement, not only the top-ranked group's: a promise
+// published after the reset is a new promise even when another linked group
+// was checked more recently.
+func TestUnlinkedCompletionComparesAgainstNewestLinkedAnnouncement(t *testing.T) {
+	twoDaysAgo := fixtureNow.Add(-48 * time.Hour)
+	checked := fixtureNow.Add(-time.Minute)
+	resetAt := fixtureNow.Add(-time.Hour)
+	promisedAt := fixtureNow.Add(-30 * time.Minute)
+	report := BuildReport(fixtureNow, []SourceResult{
+		{Signal: &Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &twoDaysAgo}},
+		{Signal: &Signal{Feed: "willreset", Kind: KindPromised, AnnouncementID: "7", Freshness: Fresh, CheckedAt: &checked}},
+		{Signal: &Signal{Feed: "codex-reset", Kind: KindCompleted, Freshness: Fresh, PublishedAt: &resetAt}},
+		{Signal: &Signal{Feed: "other", Kind: KindPromised, ClaimedOriginalURL: "https://x.com/a/status/8", Freshness: Fresh, PublishedAt: &promisedAt}},
+	})
+	if report.State != KindPromised {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+// An unlinked completion dated exactly at the linked announcement's
+// publication is not newer than it, so the linked record keeps precedence.
+func TestUnlinkedCompletionAtAnnouncementTimeKeepsLinkedPromise(t *testing.T) {
+	at := fixtureNow.Add(-time.Hour)
+	completion := Signal{Feed: "codex-reset", Kind: KindCompleted, Freshness: Fresh, PublishedAt: &at}
+	promise := Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: "7", ClaimedOriginalURL: "https://x.com/a/status/7", Freshness: Fresh, PublishedAt: &at}
+	for _, results := range [][]SourceResult{{{Signal: &promise}, {Signal: &completion}}, {{Signal: &completion}, {Signal: &promise}}} {
+		if report := BuildReport(fixtureNow, results); report.State != KindPromised {
+			t.Fatalf("report = %+v", report)
+		}
+	}
+}
+
+// A tracker prediction is forward-looking: once Reset Beacon's interpreted
+// deadline has passed, a "likely" record is historical, not a current
+// PREDICTION.
+func TestResetBeaconPastDeadlinePredictionIsNotCurrent(t *testing.T) {
+	for _, state := range []string{"likely", "possible"} {
+		t.Run(state, func(t *testing.T) {
+			signal, err := normalizeResetBeacon(resetBeaconBody(state, state), nil, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindPrediction || signal.Freshness != Fresh || signal.Window.End == nil || isCurrent(signal, fixtureNow) {
+				t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
+			}
+			signal.Feed = "resetbeacon"
+			report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+			if report.State != KindUnknown || !strings.Contains(report.Summary, "historical") ||
+				!contains(report.Uncertainty, "reported window expired") {
 				t.Fatalf("report = %+v", report)
 			}
 		})

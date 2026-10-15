@@ -165,14 +165,15 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 }
 
 // expiresWithDeadline reports whether a tracker deadline or window end bounds
-// the record's claim: true only for forward-looking states that have not been
-// retracted.
+// the record's claim: true only for forward-looking states (including a
+// tracker prediction) that have not been retracted. A record with no window
+// end, such as codex-reset's model-only snapshot, is never expired by it.
 func expiresWithDeadline(signal Signal) bool {
 	if signal.Withdrawn || signal.Corrected {
 		return false
 	}
 	switch signal.Kind {
-	case KindPromised, KindScheduled, KindIntent:
+	case KindPromised, KindScheduled, KindIntent, KindPrediction:
 		return true
 	default:
 		return false
@@ -335,7 +336,13 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 		// prediction. A retained alert may name the announcement only
 		// while its own source time is inside the current-report horizon;
 		// an old, future-dated, or undated alert must not age or replace
-		// the live probabilities, so it is noted and otherwise ignored.
+		// the live probabilities, so it is noted and otherwise ignored. An
+		// alert with no id names no announcement and is ignored the same
+		// way: its empty id would otherwise match the snapshot's empty one.
+		if strings.TrimSpace(alert.ID) == "" {
+			signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: no id")
+			return
+		}
 		published, usable, reason := fallbackAlertTime(alert.SourceAt, now)
 		if !usable {
 			signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: "+reason)

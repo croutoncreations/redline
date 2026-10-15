@@ -46,12 +46,13 @@ correction or withdrawal retracts only its matching deduplicated announcement; a
 correction cannot erase a newer event.
 
 When several current records disagree, a record linked to an original announcement outranks one
-that names no post. The one exception is a dated event: an unlinked completion or retraction whose
-source time (`published_at`, for example a codex-reset completion dated by `last_reset_at`) is
-newer than the linked announcement's publication time. That event happened after the announcement,
-so it decides the state; a promise published after the event still wins as a new promise.
-Predictions and records dated only by their snapshot (`checked_at`) time never qualify, so a freshly
-polled forecast cannot hide a source-backed announcement.
+that names no post. The one exception is a dated completion: an unlinked completion whose source
+time (`published_at`, for example a codex-reset completion dated by `last_reset_at`) is strictly
+newer than the publication time of every current linked announcement. That reset happened after
+those announcements, so it decides the state; a promise published at or after the reset still wins
+as a new promise. An unlinked withdrawal or correction names no announcement, so it never retracts
+one. Predictions and records dated only by their snapshot (`checked_at`) time never qualify, so a
+freshly polled forecast cannot hide a source-backed announcement.
 
 Reset Beacon now publishes event status without numerical forecasts. Its compatibility
 `answer.state: "forecast"` means "no new source-backed announcement" and its numerical fields stay
@@ -69,8 +70,9 @@ conservatively: it never relabels an official signal (for example a promise), ne
 banked-reset record, never overrides a latest-alert retraction, and never relabels an alert-named
 announcement (only a confirmed reset alert completes that); each of those cases is noted as a warning.
 The undocumented `latest_alert` remains supplementary. When it has no official signal, its latest alert supplies
-the announcement only while the alert's own `source_at` is within the 72-hour horizon; an older,
-future-dated, or undated alert is noted and does not replace the live prediction. A `confirmed`
+the announcement only while it has an `id` and the alert's own `source_at` is within the 72-hour
+horizon; an alert with no `id`, or an older, future-dated, or undated alert, is noted and does not
+replace or retract the live prediction. A `confirmed`
 reset alert is a completed global event (its `corrected` flag marks an edited alert message, not a
 retraction), but it never replaces a banked-reset record.
 An `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an
@@ -89,9 +91,12 @@ verified for this spike; the claimed source URL, quote, and `2026-10-13T01:03:59
 are retained as mirror-provided fields from the public tracker payloads. Because the source phrase
 uses an ambiguous timezone label and
 two tracker schemas expose a null or absent window, Redline does not promote a tracker's inferred
-deadline into an independently verified source deadline. For a promised, scheduled, or intended
-record, Reset Beacon's interpreted deadline is kept as a tracker-attributed window end only to
-expire the record: once that deadline has passed, the record is historical even if the tracker
+deadline into an independently verified source deadline. For a promised, scheduled, intended, or
+predicted record (for example a Reset Beacon "likely" post, or a codex-reset official signal of
+prediction type with a window), the tracker's deadline or window end expires the record, and the
+"reported window expired" note is shown only for such records. A codex-reset model-only snapshot
+has no window and is never expired this way. Reset Beacon's interpreted deadline is kept as a
+tracker-attributed window end only to expire the record: once that deadline has passed, the record is historical even if the tracker
 keeps serving it as fresh. Completed, withdrawn, and corrected records are not expired by the
 deadline, so a completion stays visible and a retraction keeps retracting. A deadline never
 upgrades the report from an attributed promise to `SCHEDULED`. Because the source's "EOD PST" is

@@ -49,7 +49,7 @@ func BuildReport(now time.Time, sources []SourceResult) Report {
 		if signal.PublishedAt != nil && now.Sub(*signal.PublishedAt) > maxCurrentAnnouncementAge {
 			report.Uncertainty = append(report.Uncertainty, signal.Feed+": source announcement is older than the 72-hour current-report horizon")
 		}
-		if signal.Window.End != nil && !signal.Window.End.After(now) {
+		if signal.Window.End != nil && expiresWithDeadline(signal) && !signal.Window.End.After(now) {
 			report.Uncertainty = append(report.Uncertainty, signal.Feed+": reported window expired; expiry does not prove completion")
 		}
 		if signal.Window.Certainty != WindowExplicitPrimary {
@@ -77,9 +77,9 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		key     string
 		signals []Signal
 		at      time.Time
-		// eventAt is the latest source time of a dated event (a completion
-		// or retraction); zero when the group has none.
-		eventAt time.Time
+		// completedAt is the latest source time of a completion; zero when
+		// the group has none.
+		completedAt time.Time
 		// announcedAt is the latest source publication time; zero when
 		// only snapshot times are known.
 		announcedAt time.Time
@@ -88,7 +88,7 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 	emptyFresh := false
 	for key, signals := range grouped {
 		var current []Signal
-		var latest, eventAt, announcedAt time.Time
+		var latest, completedAt, announcedAt time.Time
 		for _, signal := range signals {
 			if !isCurrent(signal, now) {
 				continue
@@ -105,13 +105,13 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 				if signal.PublishedAt.After(announcedAt) {
 					announcedAt = *signal.PublishedAt
 				}
-				if isDatedEvent(signal) && signal.PublishedAt.After(eventAt) {
-					eventAt = *signal.PublishedAt
+				if isCompletion(signal) && signal.PublishedAt.After(completedAt) {
+					completedAt = *signal.PublishedAt
 				}
 			}
 		}
 		if len(current) > 0 {
-			candidates = append(candidates, candidate{key: key, signals: current, at: latest, eventAt: eventAt, announcedAt: announcedAt})
+			candidates = append(candidates, candidate{key: key, signals: current, at: latest, completedAt: completedAt, announcedAt: announcedAt})
 		}
 	}
 	if len(candidates) == 0 && emptyFresh {
@@ -133,16 +133,23 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 	})
 	selected := candidates[0].signals
 	// Linked announcements outrank unlinked records, except that an unlinked
-	// dated event (for example codex-reset's completion from last_reset_at)
-	// newer than the selected announcement's publication is the latest event.
-	// Predictions and records dated only by snapshot time never qualify, and
-	// a linked group with no publication time keeps its precedence.
+	// completion (for example codex-reset's completion from last_reset_at)
+	// newer than every current linked announcement's publication is the
+	// latest event. An unlinked retraction names no announcement, so it never
+	// retracts one. Predictions and records dated only by snapshot time never
+	// qualify, and a top linked group with no publication time keeps its
+	// precedence.
 	if top := candidates[0]; !strings.HasPrefix(top.key, "feed:") && !top.announcedAt.IsZero() {
-		newest := top.announcedAt
+		var newest time.Time
+		for _, linked := range candidates {
+			if !strings.HasPrefix(linked.key, "feed:") && linked.announcedAt.After(newest) {
+				newest = linked.announcedAt
+			}
+		}
 		for _, other := range candidates[1:] {
-			// Candidates are sorted, so equal event times keep key order.
-			if strings.HasPrefix(other.key, "feed:") && other.eventAt.After(newest) {
-				newest = other.eventAt
+			// Candidates are sorted, so equal completion times keep key order.
+			if strings.HasPrefix(other.key, "feed:") && other.completedAt.After(newest) {
+				newest = other.completedAt
 				selected = other.signals
 			}
 		}
@@ -188,11 +195,11 @@ func carriesNoEvidence(groupKey string, signal Signal) bool {
 		signal.Prediction24Percent == nil && signal.Prediction48Percent == nil
 }
 
-// isDatedEvent reports a record that states an event rather than a claim
-// about the future: a completion or a retraction. Only its source time
+// isCompletion reports an unretracted completion: the only unlinked record
+// that can outrank an older linked announcement. Only its source time
 // (PublishedAt) dates the event; a snapshot time does not.
-func isDatedEvent(signal Signal) bool {
-	return signal.Kind == KindCompleted || signal.Withdrawn || signal.Corrected
+func isCompletion(signal Signal) bool {
+	return signal.Kind == KindCompleted && !signal.Withdrawn && !signal.Corrected
 }
 
 func hasExplicitPrimaryWindow(signals []Signal) bool {
