@@ -15,6 +15,14 @@ type RevisionResolver interface {
 	Resolve(context.Context, domain.ExecutionProfile) (string, error)
 }
 
+// PreparesFromOrigin reports whether a workspace provider is one Redline
+// prepares itself from the freshly synced base (see SyncBase): git-worktree
+// and devx. Their workspaces record that base as metadata base_sha, and
+// reading their revision fetches origin.
+func PreparesFromOrigin(workspaceProvider string) bool {
+	return workspaceProvider == "git-worktree" || workspaceProvider == "devx"
+}
+
 type GitRevisionResolver struct{ Runner redprocess.Runner }
 
 // Resolve reports the revision a new run of this profile would start from.
@@ -33,7 +41,7 @@ func (r GitRevisionResolver) Resolve(ctx context.Context, profile domain.Executi
 	if profile.Repository == "" {
 		return "", fmt.Errorf("repository is required to resolve source revision")
 	}
-	if profile.WorkspaceProvider == "git-worktree" || profile.WorkspaceProvider == "devx" {
+	if PreparesFromOrigin(profile.WorkspaceProvider) {
 		synced, err := CachedSyncBase(ctx, r.runner(), profile.Repository, profile.BaseBranch)
 		if err != nil {
 			return "", fmt.Errorf("resolve repository revision: %w", err)

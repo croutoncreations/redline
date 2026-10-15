@@ -3593,6 +3593,57 @@ func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
 	}
 }
 
+// Profiles Redline does not prepare from origin keep recording the cheap local
+// revision at selection for every task, so a task not gated on a repository
+// change still gets a last_successful_source_revision. Git-worktree and DevX
+// tasks not gated on a change are admitted without one and record the
+// prepared base instead.
+func TestTaskWithoutRequireRepoChangeRecordsLocalRevisionForUnpreparedProfiles(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		provider, want string
+	}{
+		{"existing-directory", "local-head"},
+		{"runtime-owned", "local-head"},
+		{"command", "local-head"},
+		{"git-worktree", ""},
+		{"devx", ""},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			t.Parallel()
+			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(w, codexPayload)
+			}))
+			defer usage.Close()
+			profile := domain.ExecutionProfile{ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+				WorkspaceProvider: test.provider, Repository: "/repo"}
+			if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.CreateTask(t.Context(), domain.Task{ID: "plain", Name: "plain", Priority: 10,
+				ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+				t.Fatal(err)
+			}
+			handler := api.NewServerWithDependencies(testConfig(usage.URL), db, func() time.Time { return apiNow }, fakeExecutor{
+				execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+			}, fakeRevisionResolver{revisions: map[string]string{"profile": "local-head"}})
+			server := httptest.NewServer(handler)
+			defer server.Close()
+			result := postJSON[struct {
+				Run *domain.Run `json:"run,omitempty"`
+			}](t, server.URL+"/v1/scheduler/execute", map[string]any{"provider_account_id": "codex-main"})
+			if result.Run == nil || result.Run.SourceRevision != test.want {
+				t.Fatalf("run = %#v, want source revision %q", result.Run, test.want)
+			}
+		})
+	}
+}
+
 // Reading a git-worktree or DevX profile's revision fetches origin, so a
 // candidate that is not gated on a repository change must not trigger it.
 func TestCandidateWithoutRequireRepoChangeDoesNotResolveRevision(t *testing.T) {

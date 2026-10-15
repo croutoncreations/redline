@@ -305,6 +305,17 @@ func admittedRun(
 	taskType domain.TaskType,
 ) (*store.DB, domain.Run, domain.Task, domain.ExecutionProfile) {
 	t.Helper()
+	return admittedRunWith(t, taskType, "devx", "abc")
+}
+
+// admittedRunWith admits a task on a profile using workspaceProvider, with
+// the given selection-time source revision.
+func admittedRunWith(
+	t *testing.T,
+	taskType domain.TaskType,
+	workspaceProvider, revision string,
+) (*store.DB, domain.Run, domain.Task, domain.ExecutionProfile) {
+	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +323,7 @@ func admittedRun(
 	t.Cleanup(func() { _ = db.Close() })
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	profile := domain.ExecutionProfile{
-		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: workspaceProvider,
 	}
 	task := domain.Task{
 		ID: "task", Name: "Task", Prompt: "work", Priority: 50,
@@ -324,7 +335,7 @@ func admittedRun(
 	if err := db.CreateTask(context.Background(), task, now); err != nil {
 		t.Fatal(err)
 	}
-	run, err := db.AdmitTask(context.Background(), "run", task.ID, "codex-main", "abc", now)
+	run, err := db.AdmitTask(context.Background(), "run", task.ID, "codex-main", revision, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,5 +437,27 @@ func TestCompletedRunRecordsPreparedBaseAsSourceRevision(t *testing.T) {
 	storedTask, _ := db.GetTask(context.Background(), task.ID)
 	if storedRun.SourceRevision != "def" || storedTask.LastSuccessfulSourceRevision != "def" {
 		t.Fatalf("run source=%q task last=%q, want prepared base def", storedRun.SourceRevision, storedTask.LastSuccessfulSourceRevision)
+	}
+}
+
+// A git-worktree task not gated on a repository change is admitted without a
+// source revision (reading it would fetch); it records the base its workspace
+// was prepared from.
+func TestUngatedGitWorktreeRunRecordsPreparedBase(t *testing.T) {
+	db, run, task, profile := admittedRunWith(t, domain.Recurring, "git-worktree", "")
+	executor := execution.Executor{
+		Store: db, Workspaces: &fakeWorkspaces{workspace: domain.Workspace{
+			Directory: t.TempDir(), Branch: "redline/" + run.ID,
+			Metadata: map[string]string{"base_ref": "origin/main", "base_sha": "def", "base_sync": "origin"},
+		}},
+		Harness:         &fakeHarness{result: harness.Result{ExitCode: 0}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(context.Background(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	storedTask, _ := db.GetTask(context.Background(), task.ID)
+	if storedTask.LastSuccessfulSourceRevision != "def" {
+		t.Fatalf("task last=%q, want prepared base def", storedTask.LastSuccessfulSourceRevision)
 	}
 }
