@@ -57,14 +57,11 @@ func (b BaseSync) metadata() map[string]string {
 // is now, so it never uses the cache. Its result does refresh the cache that
 // CachedSyncBase reads.
 func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
-	synced, err := syncBase(ctx, runner, repository, configuredBase)
-	// A failure caused by the caller's own context ending (cancellation or
-	// deadline) says nothing about the repository, so it is not cached.
-	if err != nil && ctx.Err() != nil {
-		return synced, err
-	}
-	syncBaseResults.store(repository, configuredBase, synced, err)
-	return synced, err
+	// Overlapping fetches of one repository can collide on git's ref locks
+	// and fail, so access to a repository is serialized process-wide.
+	unlock := lockRepository(repository)
+	defer unlock()
+	return syncBaseAndStore(ctx, runner, repository, configuredBase)
 }
 
 // CachedSyncBase is SyncBase for scheduling decisions. It reuses a result for
@@ -72,11 +69,31 @@ func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configu
 // syncBaseCacheTTL, including a failure, so repeated candidate evaluation
 // cannot turn into a fetch per candidate per cycle. The revision it reports
 // can therefore be up to the TTL old; preparation fetches fresh regardless.
+// Concurrent misses fetch once: the cache is checked again after taking the
+// repository lock, so callers that waited behind a fetch reuse its result.
 func CachedSyncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
 	if synced, err, ok := syncBaseResults.load(repository, configuredBase); ok {
 		return synced, err
 	}
-	return SyncBase(ctx, runner, repository, configuredBase)
+	unlock := lockRepository(repository)
+	defer unlock()
+	if synced, err, ok := syncBaseResults.load(repository, configuredBase); ok {
+		return synced, err
+	}
+	return syncBaseAndStore(ctx, runner, repository, configuredBase)
+}
+
+// syncBaseAndStore runs syncBase and caches its result. The caller holds the
+// repository lock. A failure caused by the caller's own context ending
+// (cancellation or deadline) says nothing about the repository, so it is not
+// cached.
+func syncBaseAndStore(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
+	synced, err := syncBase(ctx, runner, repository, configuredBase)
+	if err != nil && ctx.Err() != nil {
+		return synced, err
+	}
+	syncBaseResults.store(repository, configuredBase, synced, err)
+	return synced, err
 }
 
 func syncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
@@ -102,10 +119,6 @@ func syncBase(ctx context.Context, runner redprocess.Runner, repository, configu
 		}
 		return BaseSync{Ref: ref, SHA: sha, Sync: BaseSyncNoOrigin}, nil
 	}
-	// Overlapping fetches of one repository can collide on git's ref locks
-	// and fail, so network access to a repository is serialized process-wide.
-	unlock := lockRepository(repository)
-	defer unlock()
 	if name == "" {
 		resolved, err := git.originDefaultBranch(ctx)
 		if err != nil {

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
 	redprocess "github.com/croutoncreations/redline/internal/process"
@@ -252,6 +253,40 @@ func TestCachedSyncBaseDoesNotCacheCancelledFetch(t *testing.T) {
 	synced, err := workspace.CachedSyncBase(t.Context(), runner, repo, "main")
 	if err != nil || synced.SHA != "abc123" || fetches.Load() != 2 {
 		t.Fatalf("after cancellation sha=%s fetches=%d err=%v", synced.SHA, fetches.Load(), err)
+	}
+}
+
+// Concurrent scheduler reads that all miss the cache fetch once: the ones that
+// waited behind the repository lock reuse the first fetch's result.
+func TestConcurrentCachedSyncBaseMissesFetchOnce(t *testing.T) {
+	repo := t.TempDir()
+	var fetches atomic.Int32
+	runner := originRunner(func() (int, error) {
+		fetches.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		return 0, nil
+	})
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = workspace.CachedSyncBase(context.Background(), runner, repo, "main")
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("fetches = %d, want 1", got)
+	}
+	// Prepare's SyncBase still fetches fresh despite the cached result.
+	if _, err := workspace.SyncBase(t.Context(), runner, repo, "main"); err != nil || fetches.Load() != 2 {
+		t.Fatalf("SyncBase fetches=%d err=%v", fetches.Load(), err)
 	}
 }
 
