@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -28,7 +29,12 @@ class AccountsViewModelTest {
     private class Fake(val list: String) : AccountsSource {
         val calls = mutableListOf<String>()
         var refuse: String? = null
-        override fun fetchAccountsJson() = list.also { calls += "list" }
+        var listFailure: String? = null
+        override fun fetchAccountsJson(): String {
+            calls += "list"
+            listFailure?.let { throw RuntimeException(it) }
+            return list
+        }
         override fun discoverJson(provider: String) =
             """{"provider":"claude","cards":[{"id":"claude@ab12cd34","plan":"Team","has_weekly":true}],"hint":"h"}"""
         override fun addAccount(id: String, provider: String, label: String, card: String): String {
@@ -78,6 +84,60 @@ class AccountsViewModelTest {
         assertTrue(state.message, state.message.startsWith("Account \"claude-x\" is used by execution profiles nightly"))
         model.dismissMessage()
         assertEquals("", model.state.value.message)
+    }
+
+    @Test
+    fun olderDesktopWithoutAccountsApiShowsRetryInsteadOfSpinningForever() = runTest(dispatcher) {
+        val source = Fake(listJson)
+        // A desktop without /v1/accounts answers 404 through mobile/core's apiError.
+        source.listFailure = "redline api: 404 404 Not Found"
+        val model = AccountsViewModel(source, dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        val failed = model.state.value
+        assertNull(failed.view)
+        assertFalse(failed.loading)
+        assertEquals(UsageUiState.Failure.UNREACHABLE, failed.failure)
+        assertEquals(OLDER_DESKTOP_MESSAGE, failed.message)
+
+        // Retry after the Mac is updated loads the list and drops the old reason.
+        source.listFailure = null
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        val loaded = model.state.value
+        assertNull(loaded.failure)
+        assertEquals("", loaded.message)
+        assertEquals("Personal", loaded.view?.accounts?.single()?.label)
+    }
+
+    @Test
+    fun anyDesktopRefusalOnFirstLoadShowsTheFailurePanel() = runTest(dispatcher) {
+        val source = Fake(listJson)
+        source.listFailure = "redline api: 500 accounts file: cannot read accounts.yaml"
+        val model = AccountsViewModel(source, dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        val state = model.state.value
+        assertNull(state.view)
+        assertEquals(UsageUiState.Failure.UNREACHABLE, state.failure)
+        assertEquals("Accounts file: cannot read accounts.yaml", state.message)
+    }
+
+    @Test
+    fun transportFailureOnFirstLoadStillShowsTheFailurePanel() = runTest(dispatcher) {
+        val source = Fake(listJson)
+        source.listFailure = "dial tcp: connection refused"
+        val model = AccountsViewModel(source, dispatcher)
+        model.refresh()
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+        assertEquals("", model.state.value.message)
+    }
+
+    @Test
+    fun refusalStatusReadsTheHttpCode() {
+        assertEquals(404, refusalStatus("redline api: 404 404 Not Found"))
+        assertNull(refusalStatus("dial tcp: connection refused"))
     }
 
     @Test

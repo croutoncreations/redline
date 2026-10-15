@@ -127,7 +127,14 @@ class AccountsViewModel(
             }
             coroutineContext.ensureActive()
             result.fold(
-                onSuccess = { view -> _state.update { it.copy(loading = false, view = view, failure = null) } },
+                onSuccess = { view ->
+                    _state.update {
+                        // A first-load failure's reason belongs to the Retry panel,
+                        // not to the list that has now loaded.
+                        val message = if (it.failure != null && it.view == null) "" else it.message
+                        it.copy(loading = false, view = view, failure = null, message = message)
+                    }
+                },
                 onFailure = { error -> fail(error) },
             )
         }
@@ -140,16 +147,29 @@ class AccountsViewModel(
             return
         }
         // A refused change (conflict, in use) keeps the list and says why.
-        val message = refusalMessage(error.message.orEmpty())
+        val raw = error.message.orEmpty()
+        val message = refusalMessage(raw)
         _state.update {
-            if (it.view == null && message.isEmpty()) {
-                it.copy(loading = false, failure = UsageUiState.Failure.UNREACHABLE)
+            if (it.view == null) {
+                // Nothing to keep on screen yet: every error, including a
+                // desktop refusal, must leave the spinner for the Retry panel.
+                // An older desktop has no /v1/accounts at all and answers 404.
+                val reason = if (refusalStatus(raw) == 404) OLDER_DESKTOP_MESSAGE else message
+                it.copy(loading = false, failure = UsageUiState.Failure.UNREACHABLE, message = reason)
             } else {
                 it.copy(loading = false, message = message.ifEmpty { "Could not reach Redline. Try again." })
             }
         }
     }
 }
+
+/** Shown when the paired desktop predates account management. */
+const val OLDER_DESKTOP_MESSAGE =
+    "The Redline on this Mac does not support account management yet. Update Redline on the Mac, then retry."
+
+/** The HTTP status of a "redline api: NNN …" error, or null for a transport failure. */
+fun refusalStatus(raw: String): Int? =
+    Regex("""redline api: (\d{3})""").find(raw)?.groupValues?.get(1)?.toIntOrNull()
 
 /**
  * The desktop's reason from a "redline api: 409 …" error, or "" for a
