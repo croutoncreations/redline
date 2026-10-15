@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -211,6 +212,46 @@ func TestRevisionResolverCachesFetchButPrepareFetchesFresh(t *testing.T) {
 	}
 	if fetches != 1 || prepared.Metadata["base_sha"] != second {
 		t.Fatalf("prepare fetches=%d base_sha=%s, want fresh %s", fetches, prepared.Metadata["base_sha"], second)
+	}
+}
+
+// originRunner fakes a repository with an origin; onFetch handles the fetch.
+func originRunner(onFetch func() (int, error)) *fakeRunner {
+	return &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		args := strings.Join(command.Args, " ")
+		switch {
+		case strings.HasSuffix(args, "remote get-url origin"):
+			_, _ = io.WriteString(command.Stdout, "git@example.com:o/r.git\n")
+		case strings.HasSuffix(args, "config --get core.sshCommand"):
+			return 1, nil
+		case strings.Contains(args, " fetch "):
+			return onFetch()
+		case strings.Contains(args, "rev-parse"):
+			_, _ = io.WriteString(command.Stdout, "abc123\n")
+		}
+		return 0, nil
+	}}
+}
+
+// A fetch that failed because the caller's context ended says nothing about
+// the repository, so the next scheduling read must fetch again.
+func TestCachedSyncBaseDoesNotCacheCancelledFetch(t *testing.T) {
+	repo := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	var fetches atomic.Int32
+	runner := originRunner(func() (int, error) {
+		if fetches.Add(1) == 1 {
+			cancel()
+			return 0, context.Canceled
+		}
+		return 0, nil
+	})
+	if _, err := workspace.CachedSyncBase(ctx, runner, repo, "main"); err == nil {
+		t.Fatal("cancelled fetch succeeded")
+	}
+	synced, err := workspace.CachedSyncBase(t.Context(), runner, repo, "main")
+	if err != nil || synced.SHA != "abc123" || fetches.Load() != 2 {
+		t.Fatalf("after cancellation sha=%s fetches=%d err=%v", synced.SHA, fetches.Load(), err)
 	}
 }
 

@@ -58,6 +58,11 @@ func (b BaseSync) metadata() map[string]string {
 // CachedSyncBase reads.
 func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
 	synced, err := syncBase(ctx, runner, repository, configuredBase)
+	// A failure caused by the caller's own context ending (cancellation or
+	// deadline) says nothing about the repository, so it is not cached.
+	if err != nil && ctx.Err() != nil {
+		return synced, err
+	}
 	syncBaseResults.store(repository, configuredBase, synced, err)
 	return synced, err
 }
