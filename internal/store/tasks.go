@@ -59,6 +59,16 @@ func (d *DB) UpdateProfile(ctx context.Context, p domain.ExecutionProfile) error
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE execution_profile_id = ? AND state = 'running'`, p.ID).Scan(&running); err != nil {
 		return fmt.Errorf("check execution profile use: %w", err)
 	}
+	var maintenance int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE execution_profile_id = ? AND task_kind = ?`,
+		p.ID, domain.KindPRMaintenance).Scan(&maintenance); err != nil {
+		return fmt.Errorf("check execution profile maintenance use: %w", err)
+	}
+	if maintenance > 0 {
+		if err := checkPRMaintenanceProfile(p.ID, p.HarnessType, p.WorkspaceProvider); err != nil {
+			return err
+		}
+	}
 	if running > 0 {
 		return fmt.Errorf("%w: execution profile %q is used by a running task", ErrConflict, p.ID)
 	}
@@ -171,6 +181,9 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 	if task.DispatchTier == "" {
 		task.DispatchTier = domain.DispatchBehind
 	}
+	if task.Kind == "" {
+		task.Kind = domain.KindStandard
+	}
 	if err := validateTaskDefinition(task); err != nil {
 		return err
 	}
@@ -179,6 +192,9 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("begin task creation: %w", err)
 	}
 	defer tx.Rollback()
+	if err := validateTaskProfile(ctx, tx, task); err != nil {
+		return err
+	}
 	var sequence int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(queue_sequence), 0) + 1 FROM tasks`).Scan(&sequence); err != nil {
 		return fmt.Errorf("allocate queue sequence: %w", err)
@@ -190,11 +206,11 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 	enabled := state != domain.Disabled
 	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (
 id, name, prompt, prompt_file, priority, queue_sequence, execution_profile_id,
-runtime_job_id, task_type, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
+runtime_job_id, task_type, task_kind, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
 last_started_at, last_completed_at, last_successful_source_revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Prompt, task.PromptFile, task.Priority, sequence,
-		task.ExecutionProfileID, task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
+		task.ExecutionProfileID, task.RuntimeJobID, task.Type, task.Kind, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
 		enabled, state, nullableTime(task.LastStartedAt), nullableTime(task.LastCompletedAt),
 		task.LastSuccessfulSourceRevision, formatTime(now), formatTime(now),
 	)
@@ -211,6 +227,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 	if task.DispatchTier == "" {
 		task.DispatchTier = domain.DispatchBehind
 	}
+	if task.Kind == "" {
+		task.Kind = domain.KindStandard
+	}
 	if err := validateTaskDefinition(task); err != nil {
 		return err
 	}
@@ -219,6 +238,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("begin task update: %w", err)
 	}
 	defer tx.Rollback()
+	if err := validateTaskProfile(ctx, tx, task); err != nil {
+		return err
+	}
 	var state domain.TaskState
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id = ?`, task.ID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
@@ -229,9 +251,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("%w: running task %q cannot be edited", ErrConflict, task.ID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET name = ?, prompt = ?, prompt_file = ?, priority = ?,
-execution_profile_id = ?, runtime_job_id = ?, task_type = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
+execution_profile_id = ?, runtime_job_id = ?, task_type = ?, task_kind = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
 WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.ExecutionProfileID,
-		task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
+		task.RuntimeJobID, task.Type, task.Kind, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -296,6 +318,48 @@ func validateTaskDefinition(task domain.Task) error {
 	}
 	if task.DispatchTier != domain.DispatchBehind && task.DispatchTier != domain.DispatchWellBehind && task.DispatchTier != domain.DispatchExpiring {
 		return fmt.Errorf("dispatch tier must be behind, well_behind, or expiring")
+	}
+	switch task.Kind {
+	case "", domain.KindStandard:
+	case domain.KindPRMaintenance:
+		if task.Type != domain.Recurring {
+			return fmt.Errorf("pr_maintenance tasks must be recurring")
+		}
+		if task.MinInterval <= 0 {
+			return fmt.Errorf("a positive min_interval is required for pr_maintenance tasks")
+		}
+	default:
+		return fmt.Errorf("task kind must be standard or pr_maintenance")
+	}
+	return nil
+}
+
+// validateTaskProfile checks that a pr_maintenance task's profile can run it:
+// the built-in instructions need a local agent working in an isolated git
+// checkout of the profile repository.
+func validateTaskProfile(ctx context.Context, tx *sql.Tx, task domain.Task) error {
+	if task.Kind != domain.KindPRMaintenance {
+		return nil
+	}
+	var harnessType, workspaceProvider string
+	err := tx.QueryRowContext(ctx, `SELECT harness_type, workspace_provider FROM execution_profiles WHERE id = ?`,
+		task.ExecutionProfileID).Scan(&harnessType, &workspaceProvider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("execution profile %q is not configured", task.ExecutionProfileID)
+	}
+	if err != nil {
+		return fmt.Errorf("read task execution profile: %w", err)
+	}
+	return checkPRMaintenanceProfile(task.ExecutionProfileID, harnessType, workspaceProvider)
+}
+
+func checkPRMaintenanceProfile(profileID, harnessType, workspaceProvider string) error {
+	if workspaceProvider != "git-worktree" && workspaceProvider != "devx" {
+		return fmt.Errorf("pr_maintenance tasks must use a git-worktree or devx workspace profile; profile %q uses %q",
+			profileID, workspaceProvider)
+	}
+	if harnessType == "hermes" {
+		return fmt.Errorf("pr_maintenance tasks must use a local agent harness; profile %q uses hermes", profileID)
 	}
 	return nil
 }
@@ -562,7 +626,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 }
 
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
-t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.dispatch_tier,
+t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.task_kind, t.min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
 t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
 
@@ -576,7 +640,7 @@ func scanTask(row scanner) (domain.Task, error) {
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
-		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &task.DispatchTier,
+		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &task.Kind, &minInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
 		&task.LastSuccessfulSourceRevision, &created, &updated,
 	)
@@ -587,6 +651,9 @@ func scanTask(row scanner) (domain.Task, error) {
 		return domain.Task{}, fmt.Errorf("scan task: %w", err)
 	}
 	task.MinInterval = time.Duration(minInterval)
+	if task.Kind == "" {
+		task.Kind = domain.KindStandard
+	}
 	task.RequireRepoChange = requireChange
 	task.Enabled = enabled
 	var parseErr error

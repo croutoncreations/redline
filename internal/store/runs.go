@@ -146,6 +146,16 @@ WHERE t.id = ? AND p.provider_account_id = ?`, taskID, providerAccountID)
 		(sourceRevision == "" || sourceRevision == task.LastSuccessfulSourceRevision) {
 		return domain.Run{}, fmt.Errorf("task %q requires a changed repository revision", taskID)
 	}
+	if task.Kind == domain.KindPRMaintenance {
+		activeRun, err := activePRMaintenanceRun(ctx, tx, task.ExecutionProfileID)
+		if err != nil {
+			return domain.Run{}, err
+		}
+		if activeRun != "" {
+			return domain.Run{}, fmt.Errorf("%w: pr_maintenance run %s is already active for this repository",
+				ErrConflict, activeRun)
+		}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'running', last_started_at = ?, updated_at = ?
 WHERE id = ? AND state = 'queued' AND enabled = 1`, formatTime(now), formatTime(now), taskID)
 	if err != nil {
@@ -298,6 +308,9 @@ last_completed_at = ?, last_successful_source_revision = ?, updated_at = ? WHERE
 	}
 	if err != nil {
 		return fmt.Errorf("complete run task: %w", err)
+	}
+	if err := releaseRunBranchLeases(ctx, tx, runID); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit run completion: %w", err)
@@ -465,6 +478,9 @@ WHERE id = ?`, formatTime(now), item.runID); err != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
 			formatTime(now), item.taskID); err != nil {
 			return fmt.Errorf("recover interrupted task: %w", err)
+		}
+		if err := releaseRunBranchLeases(ctx, tx, item.runID); err != nil {
+			return err
 		}
 		payload, err := json.Marshal(map[string]any{
 			"state":               domain.RunFailed,

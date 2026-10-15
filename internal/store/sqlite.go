@@ -508,6 +508,30 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
+	if version < 32 {
+		// Version 32 rather than 28: unmerged branches (jf-multi-account-*
+		// and jf-mobile-app) already stamp 28-31 for their own migrations.
+		// Skipping ahead keeps this one from colliding with any of them, and
+		// every step here is guarded (addColumnIfMissing, IF NOT EXISTS) so a
+		// database that ran one of those builds first still converges. Those
+		// branches will need their own guarded steps above 32 when they merge.
+		if err := addColumnIfMissing(ctx, tx, "tasks", "task_kind", "TEXT NOT NULL DEFAULT 'standard'"); err != nil {
+			return fmt.Errorf("add task kind: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS branch_leases (
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    acquired_at TEXT NOT NULL,
+    PRIMARY KEY(repository, branch)
+);
+CREATE INDEX IF NOT EXISTS idx_branch_leases_run ON branch_leases(run_id);`); err != nil {
+			return fmt.Errorf("create branch leases: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (32)`); err != nil {
+			return fmt.Errorf("record task kind migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

@@ -2,16 +2,23 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
 type TaskType string
+type TaskKind string
 type TaskState string
 type DispatchTier string
 
 const (
 	OneOff    TaskType = "one_off"
 	Recurring TaskType = "recurring"
+
+	// TaskKind is what a task does; TaskType is only how it recurs. An empty
+	// kind reads as KindStandard so existing rows and clients stay valid.
+	KindStandard      TaskKind = "standard"
+	KindPRMaintenance TaskKind = "pr_maintenance"
 
 	Queued    TaskState = "queued"
 	Running   TaskState = "running"
@@ -81,9 +88,23 @@ type Workspace struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+// BaseBranchName strips a remote-tracking prefix from a configured base
+// branch, so "origin/main" and "refs/remotes/origin/main" both become "main"
+// and callers can form "origin/<name>" without producing "origin/origin/main".
+func BaseBranchName(base string) string {
+	base = strings.TrimSpace(base)
+	for _, prefix := range []string{"refs/remotes/origin/", "refs/heads/", "origin/"} {
+		if trimmed, ok := strings.CutPrefix(base, prefix); ok {
+			return trimmed
+		}
+	}
+	return base
+}
+
 type Task struct {
 	ID                           string        `json:"id"`
 	Name                         string        `json:"name"`
+	Kind                         TaskKind      `json:"kind"`
 	Prompt                       string        `json:"prompt,omitempty"`
 	PromptFile                   string        `json:"prompt_file,omitempty"`
 	Priority                     int           `json:"priority"`
@@ -211,6 +232,29 @@ type Run struct {
 	ActualProvider      string        `json:"actual_provider,omitempty"`
 	ActualModel         string        `json:"actual_model,omitempty"`
 	ActivityReadAt      *time.Time    `json:"activity_read_at,omitempty"`
+}
+
+// RunAttribution reports whether a pull-request head branch was produced by a
+// finished, standard Redline run in a given repository. Attributable is true
+// only when every check passes; Reason explains the first failed check.
+type RunAttribution struct {
+	Attributable    bool     `json:"attributable"`
+	Reason          string   `json:"reason"`
+	RunID           string   `json:"run_id,omitempty"`
+	TaskID          string   `json:"task_id,omitempty"`
+	TaskName        string   `json:"task_name,omitempty"`
+	TaskKind        TaskKind `json:"task_kind,omitempty"`
+	RunState        RunState `json:"run_state,omitempty"`
+	Repository      string   `json:"repository,omitempty"`
+	WorkspaceBranch string   `json:"workspace_branch,omitempty"`
+}
+
+// BranchLease grants one run exclusive permission to mutate a branch.
+type BranchLease struct {
+	Repository string    `json:"repository"`
+	Branch     string    `json:"branch"`
+	RunID      string    `json:"run_id"`
+	AcquiredAt time.Time `json:"acquired_at"`
 }
 
 type RunArtifact struct {
