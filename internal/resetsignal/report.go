@@ -284,6 +284,7 @@ func announcementIdentities(signal Signal) []string {
 
 // statusID is the final path segment of a canonical x.com status URL.
 func statusID(canonicalURL string) string {
+	canonicalURL = strings.TrimSuffix(canonicalURL, "/")
 	return canonicalURL[strings.LastIndex(canonicalURL, "/")+1:]
 }
 
@@ -298,9 +299,20 @@ func groupIdentity(group []Signal) (string, string) {
 		if url == "" {
 			url = strings.TrimSpace(signal.ClaimedOriginalURL)
 		}
-		if id == "" {
-			id = strings.TrimSpace(signal.AnnouncementID)
+	}
+	// Show only an ID that took part in grouping and agrees with the URL.
+	for _, signal := range ordered {
+		candidate := strings.TrimSpace(signal.AnnouncementID)
+		if candidate == "" || id != "" {
+			continue
 		}
+		if own := strings.TrimSpace(signal.ClaimedOriginalURL); own != "" && statusID(own) != candidate {
+			continue
+		}
+		if url != "" && statusID(url) != candidate {
+			continue
+		}
+		id = candidate
 	}
 	return url, id
 }

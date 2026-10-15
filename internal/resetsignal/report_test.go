@@ -191,6 +191,29 @@ func TestMismatchedURLAndIDDoNotBridgeAnnouncements(t *testing.T) {
 	}
 }
 
+// A trailing slash on the post URL must not hide the matching ID, and a
+// group never displays an ID that disagrees with its URL.
+func TestTrailingSlashURLStillMatchesIDAndGroupLabelAgrees(t *testing.T) {
+	url, _ := canonicalOriginal("https://x.com/a/status/42/")
+	if url != "https://x.com/a/status/42" {
+		t.Fatalf("canonical = %q", url)
+	}
+	report := BuildReport(fixtureNow, []SourceResult{
+		{Signal: &Signal{Feed: "a", Kind: KindPromised, AnnouncementID: "42", ClaimedOriginalURL: url, Freshness: Fresh}},
+		{Signal: &Signal{Feed: "b", Kind: KindPromised, AnnouncementID: "42", Freshness: Fresh}},
+	})
+	if len(report.Evidence) != 1 {
+		t.Fatalf("evidence = %+v", report.Evidence)
+	}
+	mixed := BuildReport(fixtureNow, []SourceResult{
+		{Signal: &Signal{Feed: "a", Kind: KindPromised, AnnouncementID: "2", ClaimedOriginalURL: "https://x.com/a/status/1", Freshness: Fresh}},
+		{Signal: &Signal{Feed: "b", Kind: KindPromised, ClaimedOriginalURL: "https://x.com/a/status/1", Freshness: Fresh}},
+	})
+	if len(mixed.Evidence) != 1 || mixed.Evidence[0].AnnouncementID == "2" {
+		t.Fatalf("evidence = %+v", mixed.Evidence)
+	}
+}
+
 // Groups with no identity are ordered by feed, not by map iteration.
 func TestEvidenceOrderIsDeterministicWithoutIdentities(t *testing.T) {
 	for range 20 {

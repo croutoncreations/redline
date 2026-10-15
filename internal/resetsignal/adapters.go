@@ -399,10 +399,9 @@ func canonicalOriginal(raw string) (string, string) {
 	if len(parts) != 3 || parts[0] == "" || parts[1] != "status" || parts[2] == "" {
 		return "", ""
 	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.Host = "x.com"
-	return parsed.String(), parts[0]
+	// One spelling per post: no query, fragment, or trailing slash, so the
+	// same status cannot appear as two identities.
+	return "https://x.com/" + parts[0] + "/status/" + parts[2], parts[0]
 }
 
 func kindFromState(value string) Kind {
