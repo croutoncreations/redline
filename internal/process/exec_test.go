@@ -3,7 +3,9 @@ package process_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,17 +44,35 @@ func TestExecRunnerHonorsExplicitEmptyEnvironment(t *testing.T) {
 	}
 }
 
+// lockedBuffer is written by exec's copy goroutine and read by the test.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
 // A cancelled command whose background child still holds the output pipe
 // must not block Run until that child exits.
 func TestExecRunnerReturnsAfterCancelWhenChildHoldsPipes(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	var output bytes.Buffer
+	output := &lockedBuffer{}
 	started := time.Now()
-	_, _ = (redprocess.ExecRunner{}).Run(ctx, redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-c", "sleep 60 & sleep 60"}, Stdout: &output,
+	_, _ = (redprocess.ExecRunner{WaitDelay: 200 * time.Millisecond}).Run(ctx, redprocess.Command{
+		Name: "/bin/sh", Args: []string{"-c", "sleep 3 & sleep 3"}, Stdout: output,
 	})
-	if elapsed := time.Since(started); elapsed > redprocess.ExecWaitDelay+5*time.Second {
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("Run blocked for %s after cancellation", elapsed)
 	}
 }
@@ -60,11 +80,23 @@ func TestExecRunnerReturnsAfterCancelWhenChildHoldsPipes(t *testing.T) {
 // A command that exits normally but leaves a child holding stdout reports
 // its own exit code once the wait delay closes the pipes.
 func TestExecRunnerReportsExitCodeWhenChildOutlivesCommand(t *testing.T) {
-	var output bytes.Buffer
-	exitCode, err := (redprocess.ExecRunner{}).Run(context.Background(), redprocess.Command{
-		Name: "/bin/sh", Args: []string{"-c", "sleep 60 & echo done"}, Stdout: &output,
-	})
-	if err != nil || exitCode != 0 || !strings.Contains(output.String(), "done") {
-		t.Fatalf("exit_code=%d err=%v output=%q", exitCode, err, output.String())
+	for _, want := range []int{0, 7} {
+		output := &lockedBuffer{}
+		started := time.Now()
+		exitCode, err := (redprocess.ExecRunner{WaitDelay: 200 * time.Millisecond}).Run(context.Background(), redprocess.Command{
+			Name: "/bin/sh", Args: []string{"-c", fmt.Sprintf("sleep 3 & echo done; exit %d", want)}, Stdout: output,
+		})
+		if err != nil || exitCode != want || !strings.Contains(output.String(), "done") {
+			t.Fatalf("want %d: exit_code=%d err=%v output=%q", want, exitCode, err, output.String())
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("Run blocked for %s waiting on the child", elapsed)
+		}
+	}
+}
+
+func TestExecRunnerDefaultsWaitDelay(t *testing.T) {
+	if redprocess.ExecWaitDelay != 5*time.Second {
+		t.Fatalf("ExecWaitDelay = %s", redprocess.ExecWaitDelay)
 	}
 }

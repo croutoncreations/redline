@@ -16,12 +16,18 @@ import (
 // that child exits.
 const ExecWaitDelay = 5 * time.Second
 
-type ExecRunner struct{}
+type ExecRunner struct {
+	// WaitDelay overrides ExecWaitDelay when positive.
+	WaitDelay time.Duration
+}
 
-func (ExecRunner) Run(ctx context.Context, command Command) (int, error) {
+func (r ExecRunner) Run(ctx context.Context, command Command) (int, error) {
 	cmd := exec.CommandContext(ctx, command.Name, command.Args...)
 	cmd.Dir = command.Dir
 	cmd.WaitDelay = ExecWaitDelay
+	if r.WaitDelay > 0 {
+		cmd.WaitDelay = r.WaitDelay
+	}
 	var environment []string
 	if command.Env != nil {
 		environment = append(make([]string, 0, len(command.Env)), command.Env...)
