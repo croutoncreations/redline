@@ -53,7 +53,13 @@ redline candidates --provider codex-main
 level of the current directory (`--cwd` overrides the directory and `--harness` the harness type).
 A non-matching `--default-profile` requires `--allow-default-profile`. Other flags: `--prompt-file`, `--type`
 (`one_off` default), `--tier` (`behind` default), `--priority` (50 default), `--min-interval`, and
-`--disabled` to save a draft.
+`--disabled` to save a draft. `--kind pr_maintenance` creates a
+[PR maintenance job](profiles-and-tasks.md#pr-maintenance-jobs): `--prompt` becomes optional
+(project notes only), `--type` defaults to `recurring`, and `--min-interval` is required.
+
+```bash
+redline task add --name "Maintain PRs" --kind pr_maintenance --min-interval 12h --profile auto
+```
 
 ### Queue work for later
 
@@ -101,6 +107,20 @@ redline run logs <run-id> --json
 redline run watch --jsonl
 redline run watch --jsonl --interval 30s --count 1
 ```
+
+### Provenance and branch leases
+
+```bash
+redline run attribute --branch redline/<run-id> [--repo DIR]
+redline lease acquire --branch redline/<run-id> [--repo DIR] [--run RUN_ID]
+redline lease release --branch redline/<run-id> [--repo DIR] [--run RUN_ID]
+```
+
+`run attribute` prints the attribution JSON and exits 0 if the branch came from a finished
+standard run in the repository, 3 if not, and 1 on error. `--repo` defaults to the git top level
+of the current directory; `--run` defaults to `$REDLINE_RUN_ID`, which Redline sets for every
+harness. The harness also receives `REDLINE_TASK_KIND`, `REDLINE_REPO`, and
+`REDLINE_BASE_BRANCH`.
 
 `run watch --jsonl` prints one JSON line per run that finishes after the watch starts:
 `{"task_id", "task", "run_id", "status", "summary", "pr_url", "completed_at"}`. It polls the

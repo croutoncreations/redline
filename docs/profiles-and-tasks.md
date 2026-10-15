@@ -44,6 +44,44 @@ Because the file is read when the task runs rather than when it is created, edit
 what the next run receives — useful for prompts kept under version control alongside the code they
 operate on.
 
+## PR maintenance jobs
+
+A task's `kind` says what it does; `type` still says only whether it recurs. `kind` defaults to
+`standard`. Set `kind: pr_maintenance` to create a recurring job that keeps the pull requests
+Redline jobs opened in that project mergeable:
+
+```yaml
+name: Maintain Redline pull requests
+kind: pr_maintenance
+type: recurring          # required for pr_maintenance
+min_interval: 12h        # required and positive
+execution_profile_id: claude-worktree
+priority: 65
+prompt: Run `make lint` before pushing.   # optional project notes
+```
+
+- The procedure is built into Redline and versioned with it, so a fix reaches every project at
+  once. Any `prompt` or `prompt_file` is appended as "Additional project instructions"; it never
+  replaces the built-in safety rules.
+- The profile must use the `git-worktree` or `devx` workspace provider and a local harness (not
+  `hermes`). A profile used by a maintenance task cannot be changed to an incompatible one.
+- Each run works on at most one pull request and never merges. It considers only pull requests
+  that `redline run attribute` proves came from a finished standard run in the same repository
+  (see [Runs](runs-and-notifications.md)). It leases a branch with `redline lease acquire` before
+  changing anything, and marks a draft ready for review once conflicts are resolved, local tests
+  pass, and non-review CI checks are not failing. It does not wait for review bots, which only run
+  after a pull request is ready.
+- Only one maintenance run per repository is active at a time. The scheduler skips a second one
+  with the reason "pr_maintenance run … is already active for this repository".
+- The `pr-maintenance` template in the dashboard sets this up with a 12-hour interval.
+
+Attribution trusts what Redline recorded when the run started: the run's workspace directory must
+lie inside the repository's `.redline/worktrees/` or `.worktrees/` (DevX) directory, and its
+recorded branch must equal the pull request's head branch. Runs do not snapshot their profile, so
+the profile's repository is also checked as it is now. Reassigning a profile to another repository
+cannot make old runs attributable there, because their recorded workspaces still point at the
+original repository.
+
 ## Dispatch tier and priority
 
 ```yaml
@@ -100,6 +138,20 @@ Redline supports these workspace providers:
 - **Existing directory** - runs directly in a checkout. Only use this when you explicitly accept
   direct edits to that directory.
 - **Generic command** - a custom command that prepares the workspace.
+
+Git worktree and DevX workspaces start from the current remote base. When the repository has an
+`origin` remote, Redline fetches the profile's base branch and creates the run from
+`origin/<base>` (an `origin/` or `refs/...` prefix in `base_branch` is accepted). An empty
+`base_branch` means origin's default branch. The fetch only updates remote-tracking refs: the main
+checkout's branch and working tree are never touched. If `origin` exists but cannot be fetched,
+or `origin/<base>` cannot be verified, preparation fails rather than running from a stale local
+branch. Only a repository with no `origin` at all uses the local base. Each run records
+`base_ref`, `base_sha`, and `base_sync` (`origin` or `no-origin`) in its workspace metadata.
+DevX creates its session from the main checkout's HEAD, so Redline fast-forwards the new session
+onto `origin/<base>`. It refuses if the session has uncommitted changes or commits of its own.
+The revision used by `require_repo_change` is read the same way, from the fetched
+`origin/<base>`. If the fetch fails, the task is skipped with a reason instead of being treated
+as unchanged.
 
 Optional prepare/finalize hooks run before and after the harness. Cleanup defaults to `never`;
 `on_success` and `always` are also supported. Execution-profile fields, including lifecycle

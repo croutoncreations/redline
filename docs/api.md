@@ -86,6 +86,9 @@ GET  /v1/metrics/launch?days={n}&provider={account}
 GET  /v1/runs
 GET  /v1/runs/completions?baseline=true
 GET  /v1/runs/completions?after={cursor}&limit={n}
+GET  /v1/runs/attribution?branch={head}&repository={abs path}
+POST /v1/branch-leases
+DELETE /v1/branch-leases?repository={abs path}&branch={branch}&run_id={run}
 GET  /v1/runs/{id}
 GET  /v1/runs/{id}/events?limit={n}
 GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
@@ -100,6 +103,26 @@ completion order, and use the returned `cursor` for the next page. `limit` defau
 capped at 100. The cursor is a durable, transactionally allocated completion sequence, not a wall
 clock; it covers tied timestamps, delayed commits, and service-recovered failed runs. A client
 that restarts without saving its cursor should request a new baseline; it won't replay old runs.
+
+Tasks accept `kind` (`standard`, the default, or `pr_maintenance`) on create and update, and
+return it from task, dashboard, and MCP views. A `pr_maintenance` task must be `recurring`, must
+have a positive `min_interval`, and may omit `prompt`. See
+[PR maintenance jobs](profiles-and-tasks.md#pr-maintenance-jobs).
+
+`GET /v1/runs/attribution` returns `{attributable, reason, run_id, task_id, task_name,
+task_kind, run_state, repository, workspace_branch}`, always with status 200 when the query is
+valid. `attributable` is true only when a run recorded exactly this workspace branch, that run's
+recorded workspace lies inside the repository's managed worktree directories, its profile's
+repository is this repository, the run has finished, and its task is `standard`. Otherwise
+`reason` names the first check that failed.
+
+`POST /v1/branch-leases` with `{repository, branch, run_id}` grants that run exclusive permission
+to change the branch. The run must exist, be preparing or running, and belong to the repository:
+its profile repository must match, and its recorded workspace must be inside it. The request
+returns 409 if another active run holds the lease or the run that created the branch is still
+active. A lease held by a finished run is stale and is taken over; re-acquiring by the holder is
+idempotent. `DELETE` releases a lease (holder only; 409 for anyone else). Leases are also released
+when their run completes or is recovered after a restart.
 
 Run log responses are tail-bounded to 64 KiB and may only resolve regular files beneath the
 configured `run_artifacts_dir`; paths and symlinks that escape that root are rejected.

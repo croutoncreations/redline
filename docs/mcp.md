@@ -88,7 +88,7 @@ State-changing tools:
 
 | Tool | Effect |
 |---|---|
-| `redline_task_create` | Queue a one-off or recurring task; `runtime_job_id` selects an existing Hermes job |
+| `redline_task_create` | Queue a one-off or recurring task; `runtime_job_id` selects an existing Hermes job; `kind: pr_maintenance` creates a recurring PR maintenance job |
 | `redline_task_update` | Change task instructions, eligibility, or the selected Hermes job |
 | `redline_task_control` | Enable, disable, or retry a task |
 | `redline_task_delete` | Permanently delete a task that has never run; tasks with run history must be disabled instead |

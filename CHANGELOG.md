@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- PR maintenance as a recurring job type per project: tasks gain `kind` (`standard` or
+  `pr_maintenance`) across the API, CLI (`task add --kind`), MCP, and dashboard, plus a
+  `pr-maintenance` template. Maintenance runs use versioned, built-in instructions; only one runs
+  per repository at a time; and they require a git-worktree or DevX profile with a local harness.
+- `redline run attribute` and `GET /v1/runs/attribution` prove that a pull-request branch came
+  from a finished standard run in a repository, using the run's recorded workspace and branch.
+- Branch leases (`redline lease acquire|release`, `/v1/branch-leases`) give one active run in the
+  same project exclusive write access to a branch. They are released on completion and on restart
+  recovery.
+
+### Changed
+
+- Git worktree and DevX workspaces start from a freshly fetched `origin/<base>` and record
+  `base_ref`, `base_sha`, and `base_sync`. If `origin` exists but cannot be fetched, the run fails
+  instead of starting from a stale local branch. `require_repo_change` compares against the fetched
+  remote base.
+- Every code-changing template now starts by verifying it is on current origin. If its own rules
+  lead to a pull request, it opens the PR ready for review with a `Redline-Run` commit trailer.
+
 ## [0.1.10] - 2026-10-01
 
 ### Added
