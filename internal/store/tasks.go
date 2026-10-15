@@ -437,46 +437,6 @@ func (d *DB) ListTasks(ctx context.Context) ([]domain.Task, error) {
 	return tasks, rows.Err()
 }
 
-func (d *DB) NextEligibleTask(
-	ctx context.Context,
-	providerAccountID string,
-	now time.Time,
-	currentRevision string,
-) (domain.Task, error) {
-	tasks, err := d.EligibleTasks(ctx, providerAccountID, now)
-	if err != nil {
-		return domain.Task{}, err
-	}
-	for _, task := range tasks {
-		if task.RequireRepoChange &&
-			(currentRevision == "" || currentRevision == task.LastSuccessfulSourceRevision) {
-			continue
-		}
-		return task, nil
-	}
-	return domain.Task{}, fmt.Errorf("%w: no eligible task for provider %q", ErrNotFound, providerAccountID)
-}
-
-func (d *DB) EligibleTasks(
-	ctx context.Context,
-	providerAccountID string,
-	now time.Time,
-) ([]domain.Task, error) {
-	tasks, err := d.DispatchCandidates(ctx, providerAccountID)
-	if err != nil {
-		return nil, err
-	}
-	eligible := make([]domain.Task, 0, len(tasks))
-	for _, task := range tasks {
-		if task.LastCompletedAt != nil && task.MinInterval > 0 &&
-			now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
-			continue
-		}
-		eligible = append(eligible, task)
-	}
-	return eligible, nil
-}
-
 // DispatchCandidates returns queued tasks in selection order before dynamic
 // eligibility gates such as cooldowns and repository revisions are applied.
 // Keeping those candidates visible lets the scheduler explain every skip.
