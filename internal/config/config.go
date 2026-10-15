@@ -538,6 +538,41 @@ func validateEffectiveTrustedHosts(hosts []string, remoteAccess bool) error {
 	return nil
 }
 
+// validateAccountFields checks the fields an account carries that describe
+// where its usage is read and how it is shown: its provider, profile
+// directory, usage source, OpenUsage card and label. It applies to enabled
+// and disabled accounts alike.
+func validateAccountFields(name string, provider Provider) error {
+	if provider.Provider == "" {
+		return fmt.Errorf("provider %q requires provider", name)
+	}
+	// Checked first: a profile directory explains its own source rules
+	// better than the generic source errors below.
+	if err := validateClaudeConfigDir(provider); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	source := provider.EffectiveUsageSource()
+	if source != "auto" && source != "openusage" && source != "native" {
+		return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
+	}
+	if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
+		return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
+	}
+	if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
+		if !validOpenUsageCard(provider.Provider, card) {
+			return fmt.Errorf("provider %q: openusage_card %q must be %q or %q followed by an OpenUsage account suffix",
+				name, card, strings.ToLower(provider.Provider), strings.ToLower(provider.Provider)+"@…")
+		}
+		if source == "native" {
+			return fmt.Errorf("provider %q: openusage_card needs usage_source openusage or auto, not native", name)
+		}
+	}
+	if err := validateLabel(provider.Label); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	return nil
+}
+
 func (cfg *Config) validate(validateBootstrapRelay bool) error {
 	if cfg.Database == "" {
 		return fmt.Errorf("database is required")
@@ -563,33 +598,23 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 	for index, host := range cfg.API.TrustedHosts {
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
+	// A disabled account is kept on file and still listed, labelled, to
+	// paired phones, so it must meet the same field rules as an enabled one
+	// (no email as a label, a valid source and card). Otherwise disabling
+	// an account would be a way to store what the rules refuse.
+	disabled := make([]string, 0, len(cfg.DisabledAccounts))
+	for name := range cfg.DisabledAccounts {
+		disabled = append(disabled, name)
+	}
+	sort.Strings(disabled)
+	for _, name := range disabled {
+		if err := validateAccountFields(name, cfg.DisabledAccounts[name].ProviderConfig()); err != nil {
+			return err
+		}
+	}
 	for name, provider := range cfg.Providers {
-		if provider.Provider == "" {
-			return fmt.Errorf("provider %q requires provider", name)
-		}
-		// Checked first: a profile directory explains its own source rules
-		// better than the generic source errors below.
-		if err := validateClaudeConfigDir(provider); err != nil {
-			return fmt.Errorf("provider %q: %w", name, err)
-		}
-		source := provider.EffectiveUsageSource()
-		if source != "auto" && source != "openusage" && source != "native" {
-			return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
-		}
-		if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
-			return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
-		}
-		if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
-			if !validOpenUsageCard(provider.Provider, card) {
-				return fmt.Errorf("provider %q: openusage_card %q must be %q or %q followed by an OpenUsage account suffix",
-					name, card, strings.ToLower(provider.Provider), strings.ToLower(provider.Provider)+"@…")
-			}
-			if source == "native" {
-				return fmt.Errorf("provider %q: openusage_card needs usage_source openusage or auto, not native", name)
-			}
-		}
-		if err := validateLabel(provider.Label); err != nil {
-			return fmt.Errorf("provider %q: %w", name, err)
+		if err := validateAccountFields(name, provider); err != nil {
+			return err
 		}
 		if err := fraction("window_weekly_cost", provider.WindowWeeklyCost); err != nil {
 			return fmt.Errorf("provider %q: %w", name, err)

@@ -112,6 +112,15 @@ func TestAccountLifecycleWritesOnlyTheAccountsFile(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(raw, `"disabled":true`) {
 		t.Fatalf("disable = %d %s", status, raw)
 	}
+	// A disabled account's label is still checked, and a refused edit
+	// leaves the saved label alone.
+	status, _, raw = accountRequest(t, http.MethodPatch, server.URL+"/v1/accounts/claude-client", map[string]any{"label": "me@example.invalid"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("email label on a disabled account = %d %s", status, raw)
+	}
+	if data, _ := os.ReadFile(accountsPath); strings.Contains(string(data), "@example.invalid") || !strings.Contains(string(data), "Northwind") {
+		t.Fatalf("refused edit changed the accounts file: %s", data)
+	}
 	status, body, raw = accountRequest(t, http.MethodDelete, server.URL+"/v1/accounts/claude-client", nil)
 	if status != http.StatusOK {
 		t.Fatalf("delete = %d %s", status, raw)
@@ -143,6 +152,18 @@ func TestAccountConflictsAreRefusedAndNothingIsWritten(t *testing.T) {
 		"bad id":          {"id": "Claude X", "provider": "claude", "openusage_card": "claude@ab12cd34"},
 		"card and native": {"id": "claude-x", "provider": "claude", "usage_source": "native", "openusage_card": "claude@ab12cd34"},
 		"unknown field":   {"id": "claude-x", "provider": "claude", "api_key": "x"},
+	} {
+		if status, _, raw := accountRequest(t, http.MethodPost, server.URL+"/v1/accounts", request); status != http.StatusBadRequest {
+			t.Errorf("%s: status %d %s", name, status, raw)
+		}
+	}
+	// Disabling an account must not switch the field rules off: a disabled
+	// account is still listed, with its label, to every paired phone.
+	for name, request := range map[string]map[string]any{
+		"disabled email label": {"id": "claude-x", "provider": "claude", "label": "me@example.invalid",
+			"openusage_card": "claude@ab12cd34", "disabled": true},
+		"disabled bad source": {"id": "claude-x", "provider": "claude", "usage_source": "bogus", "disabled": true},
+		"disabled bad card":   {"id": "claude-x", "provider": "claude", "openusage_card": "codex@ab12cd34", "disabled": true},
 	} {
 		if status, _, raw := accountRequest(t, http.MethodPost, server.URL+"/v1/accounts", request); status != http.StatusBadRequest {
 			t.Errorf("%s: status %d %s", name, status, raw)

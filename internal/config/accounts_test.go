@@ -249,6 +249,47 @@ func TestAccountFieldValidation(t *testing.T) {
 	}
 }
 
+// A disabled account stays on file and is still listed, with its label, to
+// paired phones, so it must not be a way around the field rules.
+func TestDisabledManagedAccountFieldsAreValidated(t *testing.T) {
+	cases := map[string]config.ManagedAccount{
+		"email as label":             {Label: "someone@example.com"},
+		"overlong label":             {Label: strings.Repeat("x", 61)},
+		"unknown usage source":       {UsageSource: "bogus"},
+		"card from another provider": {OpenUsageCard: "codex@ab12cd34"},
+		"card with native source":    {OpenUsageCard: "claude@ab12cd34", UsageSource: "native"},
+		"relative profile directory": {ClaudeConfigDir: "relative/dir", UsageSource: "native"},
+	}
+	for name, account := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, claudeConfig)
+			account.ID, account.Provider, account.Disabled = "claude-old", "claude", true
+			if err := config.WriteManagedAccounts(filepath.Join(filepath.Dir(path), "accounts.yaml"), []config.ManagedAccount{account}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.Load(path); err == nil || !strings.Contains(err.Error(), `"claude-old"`) {
+				t.Fatalf("disabled account with %s loaded: err = %v", name, err)
+			}
+		})
+	}
+	// A valid disabled account still loads and stays out of the providers.
+	path := writeConfig(t, claudeConfig)
+	valid := config.ManagedAccount{ID: "claude-old", Provider: "claude", Label: "Old seat", OpenUsageCard: "claude@00ff00ff", Disabled: true}
+	if err := config.WriteManagedAccounts(filepath.Join(filepath.Dir(path), "accounts.yaml"), []config.ManagedAccount{valid}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, live := cfg.Providers["claude-old"]; live {
+		t.Fatal("a disabled account must not become a live provider")
+	}
+	if _, kept := cfg.DisabledAccounts["claude-old"]; !kept {
+		t.Fatal("a valid disabled account must stay listed")
+	}
+}
+
 func TestManagedAccountMayNotShadowConfigAccount(t *testing.T) {
 	path := writeConfig(t, claudeConfig)
 	if err := config.WriteManagedAccounts(filepath.Join(filepath.Dir(path), "accounts.yaml"),

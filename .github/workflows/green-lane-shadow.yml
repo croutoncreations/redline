@@ -418,39 +418,56 @@ jobs:
           REPRO_MESSAGE_OUT: ${{ needs.repro.outputs.message }}
           REPRO_TEST_IDS_OUT: ${{ needs.repro.outputs.test_ids }}
           NO_TESTS_REASON: ${{ needs.repro.outputs.no_tests_reason }}
+        # The repro outputs come from code on the PR head, so they are
+        # untrusted text bound for $GITHUB_ENV in a job that holds checks:
+        # write. A newline in a value, or a heredoc delimiter the PR can
+        # predict (the run ID is visible to it), would let it set other
+        # variables such as NODE_OPTIONS for every later step. So: flags are
+        # written only as the literals true/false (or empty), and free text goes through
+        # a delimiter drawn at random here, after the PR code has finished,
+        # and the step fails if a value contains it.
         run: |
-          if [ "$HAS_TESTS" = "true" ]; then
-            if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
-              echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
+          set -euo pipefail
+          delimiter="__REPRO_EOF_$(openssl rand -hex 16)__"
+          put_text() {
+            local name="$1" value="$2"
+            case "$value" in
+              *"$delimiter"*)
+                echo "::error::$name contains the env-file delimiter; refusing to write it"
+                exit 1
+                ;;
+            esac
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+          }
+          # Only the literals true and false pass; anything else (including
+          # empty, which green-lane-check reads as "no repro result") is
+          # written as empty, never verbatim.
+          put_flag() {
+            case "$2" in
+              true|false) echo "$1=$2" >> "$GITHUB_ENV" ;;
+              *) echo "$1=" >> "$GITHUB_ENV" ;;
+            esac
+          }
+          if [ "${HAS_TESTS:-}" = "true" ]; then
+            if [ "${REPRO_INCONCLUSIVE_OUT:-}" = "true" ]; then
+              put_flag REPRO_INCONCLUSIVE true
+              put_text REPRO_MESSAGE "${REPRO_MESSAGE_OUT:-}"
             else
-              echo "REPRO_PASS=$REPRO_PASS_OUT" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
-              if [ -n "$REPRO_TEST_IDS_OUT" ]; then
-                {
-                  echo "REPRO_TEST_IDS<<__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                  printf '%s\n' "$REPRO_TEST_IDS_OUT"
-                  echo "__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                } >> "$GITHUB_ENV"
+              put_flag REPRO_PASS "${REPRO_PASS_OUT:-}"
+              put_text REPRO_MESSAGE "${REPRO_MESSAGE_OUT:-}"
+              if [ -n "${REPRO_TEST_IDS_OUT:-}" ]; then
+                put_text REPRO_TEST_IDS "$REPRO_TEST_IDS_OUT"
               fi
             fi
           else
-            echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
+            put_flag REPRO_INCONCLUSIVE true
             # The repro job says why it found nothing to check; fall back to the
             # old wording only if it did not run far enough to say.
-            {
-              echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-              printf '%s\n' "${NO_TESTS_REASON:-No test files changed in PR}"
-              echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-            } >> "$GITHUB_ENV"
+            put_text REPRO_MESSAGE "${NO_TESTS_REASON:-No test files changed in PR}"
           fi
       
       - name: Run evaluation
