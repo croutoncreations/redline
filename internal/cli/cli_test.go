@@ -160,6 +160,16 @@ func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
 	}
 }
 
+func TestResetPreviewRejectsInvalidArgumentsWithoutFetching(t *testing.T) {
+	for _, args := range [][]string{{"reset"}, {"reset", "preview", "--timeout=0"}, {"reset", "preview", "unexpected"}} {
+		var stdout, stderr bytes.Buffer
+		exit := cli.Run(args, &stdout, &stderr, time.Now)
+		if exit != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "reset preview") {
+			t.Fatalf("args=%v exit=%d stdout=%s stderr=%s", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestVersionCommandAndFlagPrintBuildVersion(t *testing.T) {
 	for _, args := range [][]string{{"version"}, {"--version"}} {
 		var stdout, stderr bytes.Buffer
