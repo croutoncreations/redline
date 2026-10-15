@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -100,6 +101,27 @@ func BaseBranchName(base string) string {
 	}
 	return base
 }
+
+var unsafeRunNameCharacters = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+
+// SafeRunName turns a run ID into the path- and ref-safe name Redline uses
+// for that run's managed workspace, branch, and artifact files.
+func SafeRunName(runID string) string {
+	clean := strings.Trim(unsafeRunNameCharacters.ReplaceAllString(runID, "-"), "-")
+	if clean == "" {
+		return "run"
+	}
+	return clean
+}
+
+// GitWorktreeRunBranch is the branch the git-worktree provider creates for a
+// run, in a worktree at <repository>/.redline/worktrees/<SafeRunName>.
+func GitWorktreeRunBranch(runID string) string { return "redline/" + SafeRunName(runID) }
+
+// DevXRunSession is the DevX session the devx provider creates for a run. DevX
+// names the session's branch and its <repository>/.worktrees/ directory after
+// the session.
+func DevXRunSession(runID string) string { return "redline-" + SafeRunName(runID) }
 
 type Task struct {
 	ID                           string        `json:"id"`

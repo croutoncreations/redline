@@ -445,3 +445,139 @@ func TestAttributeBranchRefusalReasons(t *testing.T) {
 		t.Fatal("relative repository accepted")
 	}
 }
+
+// startRunWithWorkspace admits a task and records an arbitrary workspace, as a
+// command or runtime-owned provider may report.
+func startRunWithWorkspace(t *testing.T, db *store.DB, runID, taskID, provider string, workspace domain.Workspace) {
+	t.Helper()
+	if _, err := db.AdmitTaskWithLimits(t.Context(), runID, taskID, provider, "", nil,
+		store.AdmissionLimits{Provider: 10}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkRunRunning(t.Context(), runID, workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttributeBranchIgnoresBranchesRecordedByUnmanagedWorkspaces(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := t.Context()
+	repo := maintenanceRepo(t, "project")
+	createProfile(t, db, "cmd", "p1", "codex-cli", "command", repo)
+	for _, task := range []domain.Task{
+		{ID: "cmd-a", Name: "a", ExecutionProfileID: "cmd", Type: domain.OneOff},
+		{ID: "cmd-b", Name: "b", ExecutionProfileID: "cmd", Type: domain.OneOff},
+	} {
+		if err := db.CreateTask(ctx, task, maintenanceNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A command workspace that reports a human branch, inside the managed root.
+	startRunWithWorkspace(t, db, "run-cmd", "cmd-a", "p1", domain.Workspace{
+		Directory: filepath.Join(repo, ".redline", "worktrees", "run-cmd"), Branch: "feature/human",
+	})
+	// A command workspace whose branch even follows the redline/<id> naming.
+	startRunWithWorkspace(t, db, "run-named", "cmd-b", "p1", domain.Workspace{
+		Directory: filepath.Join(repo, ".redline", "worktrees", "run-named"), Branch: "redline/run-named",
+	})
+	for _, runID := range []string{"run-cmd", "run-named"} {
+		if err := db.CompleteRun(ctx, runID, domain.RunCompletion{State: domain.RunCompleted}, maintenanceNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct{ branch, reason string }{
+		{"feature/human", "no Redline run created this branch"},
+		{"redline/run-named", "command"},
+	} {
+		got, err := db.AttributeBranch(ctx, test.branch, repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Attributable || !strings.Contains(got.Reason, test.reason) {
+			t.Errorf("%s: attribution = %#v", test.branch, got)
+		}
+	}
+}
+
+func TestAttributeBranchAcceptsManagedDevXRun(t *testing.T) {
+	db := openTaskDB(t)
+	ctx := t.Context()
+	repo := maintenanceRepo(t, "project")
+	createProfile(t, db, "devx", "p1", "claude-code", "devx", repo)
+	if err := db.CreateTask(ctx, domain.Task{ID: "fix", Name: "Fix", ExecutionProfileID: "devx", Type: domain.OneOff}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	session := domain.DevXRunSession("run-devx")
+	startRunWithWorkspace(t, db, "run-devx", "fix", "p1", domain.Workspace{
+		Directory: filepath.Join(repo, ".worktrees", session), Branch: session, SessionID: session,
+	})
+	if err := db.CompleteRun(ctx, "run-devx", domain.RunCompletion{State: domain.RunCompleted}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.AttributeBranch(ctx, "redline-run-devx", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Attributable || got.RunID != "run-devx" {
+		t.Fatalf("devx attribution = %#v", got)
+	}
+	// A git-worktree style name cannot claim a DevX run.
+	if got, _ := db.AttributeBranch(ctx, "redline/run-devx", repo); got.Attributable {
+		t.Fatalf("wrong convention attributed: %#v", got)
+	}
+}
+
+func TestAttributionAndLeaseRefusedWhileAnyRunRecordingTheBranchIsActive(t *testing.T) {
+	f := newLeaseFixture(t)
+	ctx := t.Context()
+	createProfile(t, f.db, "cmd", "provider", "codex-cli", "command", f.repo)
+	if err := f.db.CreateTask(ctx, domain.Task{ID: "cmd", Name: "cmd", ExecutionProfileID: "cmd", Type: domain.OneOff}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.db.AttributeBranch(ctx, f.branch, f.repo); !got.Attributable {
+		t.Fatalf("baseline attribution = %#v", got)
+	}
+	// Another run is still writing the same branch.
+	startRunWithWorkspace(t, f.db, "writer-run", "cmd", "provider", domain.Workspace{
+		Directory: filepath.Join(f.repo, ".redline", "worktrees", "writer-run"), Branch: f.branch,
+	})
+	got, err := f.db.AttributeBranch(ctx, f.branch, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Attributable || !strings.Contains(got.Reason, "original run still active") || !strings.Contains(got.Reason, "writer-run") {
+		t.Fatalf("attribution with active writer = %#v", got)
+	}
+	_, err = f.db.AcquireBranchLease(ctx, f.repo, f.branch, f.holder, maintenanceNow)
+	if !errors.Is(err, store.ErrConflict) || !strings.Contains(err.Error(), "original run still active") {
+		t.Fatalf("lease with active writer err = %v", err)
+	}
+}
+
+func TestBranchLeaseNormalizesBranchRefsAndRequiresRunningRequester(t *testing.T) {
+	f := newLeaseFixture(t)
+	ctx := t.Context()
+	lease, err := f.db.AcquireBranchLease(ctx, f.repo, "refs/heads/"+f.branch, f.holder, maintenanceNow)
+	if err != nil || lease.Branch != f.branch {
+		t.Fatalf("refs/heads lease = %#v err=%v", lease, err)
+	}
+	for _, ref := range []string{"refs/remotes/origin/" + f.branch, "refs/tags/v1", "refs/heads/"} {
+		if _, err := f.db.AcquireBranchLease(ctx, f.repo, ref, f.holder, maintenanceNow); err == nil {
+			t.Errorf("%s accepted", ref)
+		}
+	}
+	if got, _ := f.db.AttributeBranch(ctx, "refs/heads/"+f.branch, f.repo); !got.Attributable {
+		t.Fatalf("refs/heads attribution = %#v", got)
+	}
+	// A preparing run has no recorded workspace yet and cannot lease.
+	if err := f.db.CreateTask(ctx, domain.Task{ID: "prep", Name: "prep", ExecutionProfileID: "std", Type: domain.OneOff}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AdmitTaskWithLimits(ctx, "prep-run", "prep", "provider", "", nil, store.AdmissionLimits{Provider: 10}, maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AcquireBranchLease(ctx, f.repo, "redline/other", "prep-run", maintenanceNow); !errors.Is(err, store.ErrConflict) ||
+		!strings.Contains(err.Error(), "only running runs") {
+		t.Fatalf("preparing lease err = %v", err)
+	}
+}

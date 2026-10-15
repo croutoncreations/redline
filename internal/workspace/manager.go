@@ -8,15 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/croutoncreations/redline/internal/domain"
 	redprocess "github.com/croutoncreations/redline/internal/process"
 )
-
-var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
 type Manager struct {
 	Runner          redprocess.Runner
@@ -201,12 +198,11 @@ func (m Manager) prepareGitWorktree(
 	runID string,
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
-	name := safeName(runID)
-	directory := filepath.Join(profile.Repository, ".redline", "worktrees", name)
+	directory := filepath.Join(profile.Repository, ".redline", "worktrees", domain.SafeRunName(runID))
 	if err := os.MkdirAll(filepath.Dir(directory), 0o755); err != nil {
 		return domain.Workspace{}, fmt.Errorf("create worktree parent: %w", err)
 	}
-	branch := "redline/" + name
+	branch := domain.GitWorktreeRunBranch(runID)
 	synced, err := SyncBase(ctx, m.runner(), profile.Repository, profile.BaseBranch)
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("prepare git worktree base: %w", err)
@@ -237,7 +233,7 @@ func (m Manager) prepareDevX(
 	runID string,
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
-	session := "redline-" + safeName(runID)
+	session := domain.DevXRunSession(runID)
 	// Fetch before creating the session so an unreachable origin fails
 	// before anything exists to clean up.
 	synced, err := SyncBase(ctx, m.runner(), profile.Repository, profile.BaseBranch)
@@ -431,10 +427,4 @@ func requireDirectory(path string) error {
 	return nil
 }
 
-func safeName(value string) string {
-	clean := strings.Trim(unsafeName.ReplaceAllString(value, "-"), "-")
-	if clean == "" {
-		return "run"
-	}
-	return clean
-}
+func safeName(value string) string { return domain.SafeRunName(value) }

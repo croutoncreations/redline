@@ -133,104 +133,151 @@ type branchRun struct {
 	workspaceDirectory      string
 	workspace               domain.Workspace
 	profileRepository       string
+	workspaceProvider       string
 }
 
 type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-// runForBranch finds the run that created a head branch. Redline names its
-// branches after the run ID ("redline/<id>" for git worktrees, "redline-<id>"
-// for DevX sessions), so the ID is read from the branch and every candidate is
-// then checked against the branch recorded in its workspace metadata.
-func runForBranch(ctx context.Context, q queryer, branch string) (branchRun, bool, error) {
-	var candidates []string
+// branchRuns holds every run that has a claim on a head branch.
+type branchRuns struct {
+	// creator is the run whose ID the branch is named after under Redline's
+	// managed naming conventions, if such a run exists.
+	creator      branchRun
+	foundCreator bool
+	// active is an active run (by ID order) that is the creator or that
+	// recorded this branch in its workspace, if any. While one exists the
+	// branch may still be written by it, so it is neither attributable nor
+	// leasable.
+	active      branchRun
+	foundActive bool
+}
+
+// runsForBranch finds the runs with a claim on a head branch. Only Redline's
+// own naming conventions identify the creator: the git-worktree provider
+// creates "redline/<SafeRunName(id)>" and the devx provider creates a session
+// (and branch) named "redline-<SafeRunName(id)>". A branch merely recorded in
+// some run's workspace metadata, as a command or runtime-owned workspace may
+// report any branch, never makes that run the creator; it only counts toward
+// the "still active" refusal. Rows are read in run ID order so the outcome is
+// deterministic.
+func runsForBranch(ctx context.Context, q queryer, branch string) (branchRuns, error) {
+	creatorID := ""
 	for _, prefix := range []string{"redline/", "redline-"} {
 		if id, ok := strings.CutPrefix(branch, prefix); ok && id != "" {
-			candidates = append(candidates, id)
+			creatorID = id
 		}
 	}
-	if len(candidates) == 0 {
-		return branchRun{}, false, nil
-	}
 	rows, err := q.QueryContext(ctx, `SELECT r.id, r.task_id, t.name, t.task_kind, r.state,
-r.workspace_directory, r.workspace_metadata, p.repository
+r.workspace_directory, r.workspace_metadata, p.repository, p.workspace_provider
 FROM runs r JOIN tasks t ON t.id = r.task_id
 JOIN execution_profiles p ON p.id = t.execution_profile_id
-WHERE r.id IN (?, ?) OR json_extract(r.workspace_metadata, '$.branch') = ?`,
-		candidates[0], candidates[len(candidates)-1], branch)
+WHERE r.id = ? OR json_extract(r.workspace_metadata, '$.branch') = ?
+ORDER BY r.id`, creatorID, branch)
 	if err != nil {
-		return branchRun{}, false, fmt.Errorf("find run for branch: %w", err)
+		return branchRuns{}, fmt.Errorf("find runs for branch: %w", err)
 	}
 	defer rows.Close()
-	var found []branchRun
+	var result branchRuns
 	for rows.Next() {
 		var item branchRun
 		var metadata string
 		if err := rows.Scan(&item.runID, &item.taskID, &item.taskName, &item.taskKind, &item.state,
-			&item.workspaceDirectory, &metadata, &item.profileRepository); err != nil {
-			return branchRun{}, false, fmt.Errorf("scan run for branch: %w", err)
+			&item.workspaceDirectory, &metadata, &item.profileRepository, &item.workspaceProvider); err != nil {
+			return branchRuns{}, fmt.Errorf("scan run for branch: %w", err)
 		}
 		if metadata != "" && metadata != "{}" {
 			if err := json.Unmarshal([]byte(metadata), &item.workspace); err != nil {
-				return branchRun{}, false, fmt.Errorf("decode run workspace: %w", err)
+				return branchRuns{}, fmt.Errorf("decode run workspace: %w", err)
 			}
 		}
 		if item.taskKind == "" {
 			item.taskKind = domain.KindStandard
 		}
-		found = append(found, item)
-	}
-	if err := rows.Err(); err != nil {
-		return branchRun{}, false, err
-	}
-	for _, item := range found {
-		if item.workspace.Branch == branch {
-			return item, true, nil
+		if creatorID != "" && item.runID == creatorID {
+			result.creator, result.foundCreator = item, true
+		}
+		if isActiveRunState(item.state) && !result.foundActive {
+			result.active, result.foundActive = item, true
 		}
 	}
-	if len(found) > 0 {
-		// The ID matched but the recorded branch did not; report the run so
-		// the caller can explain the refusal.
-		return found[0], true, nil
+	return result, rows.Err()
+}
+
+// managedWorkspaceMismatch explains why a run's recorded workspace is not the
+// one its managed provider would have created for branch in repository, or
+// returns "" when it is.
+func managedWorkspaceMismatch(item branchRun, branch, repository string) string {
+	var wantBranch, wantDirectory string
+	switch item.workspaceProvider {
+	case "git-worktree":
+		wantBranch = domain.GitWorktreeRunBranch(item.runID)
+		wantDirectory = filepath.Join(repository, ".redline", "worktrees", domain.SafeRunName(item.runID))
+	case "devx":
+		session := domain.DevXRunSession(item.runID)
+		if item.workspace.SessionID != session {
+			return fmt.Sprintf("run %s recorded DevX session %q, not %q", item.runID, item.workspace.SessionID, session)
+		}
+		wantBranch = session
+		wantDirectory = filepath.Join(repository, ".worktrees", session)
+	default:
+		return fmt.Sprintf("run %s uses the %q workspace provider; only git-worktree and devx runs create attributable branches",
+			item.runID, item.workspaceProvider)
 	}
-	return branchRun{}, false, nil
+	if branch != wantBranch || item.workspace.Branch != branch {
+		return fmt.Sprintf("run %s recorded workspace branch %q, not %q", item.runID, item.workspace.Branch, branch)
+	}
+	if canonicalRepositoryPath(item.workspaceDirectory) != canonicalRepositoryPath(wantDirectory) {
+		return fmt.Sprintf("run %s workspace %q is not inside this repository's managed worktrees",
+			item.runID, item.workspaceDirectory)
+	}
+	return ""
 }
 
 // AttributeBranch decides whether a pull-request head branch belongs to a
 // finished standard Redline run in the given repository. It never infers from
 // authorship or text: only stored run records are consulted.
 func (d *DB) AttributeBranch(ctx context.Context, branch, repository string) (domain.RunAttribution, error) {
-	branch = strings.TrimSpace(branch)
-	if branch == "" || strings.TrimSpace(repository) == "" {
+	if strings.TrimSpace(branch) == "" || strings.TrimSpace(repository) == "" {
 		return domain.RunAttribution{}, fmt.Errorf("branch and repository are required")
+	}
+	branch, err := normalizeBranch(branch)
+	if err != nil {
+		return domain.RunAttribution{}, err
 	}
 	if !filepath.IsAbs(repository) {
 		return domain.RunAttribution{}, fmt.Errorf("repository must be an absolute path")
 	}
 	repository = canonicalRepositoryPath(repository)
 	result := domain.RunAttribution{Repository: repository}
-	item, ok, err := runForBranch(ctx, d.db, branch)
+	runs, err := runsForBranch(ctx, d.db, branch)
 	if err != nil {
 		return domain.RunAttribution{}, err
 	}
-	if !ok {
+	if !runs.foundCreator {
 		result.Reason = "no Redline run created this branch"
+		if runs.foundActive {
+			result.Reason = fmt.Sprintf("no Redline run created this branch, and run %s that recorded it is still %s",
+				runs.active.runID, runs.active.state)
+		}
 		return result, nil
 	}
+	item := runs.creator
 	result.RunID, result.TaskID, result.TaskName = item.runID, item.taskID, item.taskName
 	result.TaskKind, result.RunState = item.taskKind, item.state
 	result.WorkspaceBranch = item.workspace.Branch
+	mismatch := managedWorkspaceMismatch(item, branch, repository)
 	switch {
-	case item.workspace.Branch != branch:
-		result.Reason = fmt.Sprintf("run %s recorded workspace branch %q, not %q", item.runID, item.workspace.Branch, branch)
-	case !workspaceInsideRepository(item.workspaceDirectory, repository):
-		result.Reason = fmt.Sprintf("run %s workspace %q is not inside this repository's managed worktrees",
-			item.runID, item.workspaceDirectory)
+	case mismatch != "":
+		result.Reason = mismatch
 	case canonicalRepositoryPath(item.profileRepository) != repository:
 		result.Reason = fmt.Sprintf("run %s profile repository %q is not this repository", item.runID, item.profileRepository)
 	case isActiveRunState(item.state):
 		result.Reason = fmt.Sprintf("run %s is still %s", item.runID, item.state)
+	case runs.foundActive:
+		result.Reason = fmt.Sprintf("original run still active: run %s that recorded this branch is still %s",
+			runs.active.runID, runs.active.state)
 	case item.taskKind != domain.KindStandard:
 		result.Reason = fmt.Sprintf("run %s is a %s task, not a standard job", item.runID, item.taskKind)
 	default:
@@ -266,24 +313,27 @@ WHERE r.id = ?`, runID).Scan(&state, &workspaceDirectory, &profileRepository)
 	if err != nil {
 		return domain.BranchLease{}, fmt.Errorf("read leasing run: %w", err)
 	}
-	if !isActiveRunState(state) {
-		return domain.BranchLease{}, fmt.Errorf("%w: run %s is %s; only active runs can lease branches", ErrConflict, runID, state)
+	// Only a running run can lease: a preparing run has no recorded
+	// workspace yet, so its repository could not be checked below, and no
+	// agent is running to use the lease.
+	if state != domain.RunRunning {
+		return domain.BranchLease{}, fmt.Errorf("%w: run %s is %s; only running runs can lease branches", ErrConflict, runID, state)
 	}
 	if canonicalRepositoryPath(profileRepository) != repository {
 		return domain.BranchLease{}, fmt.Errorf("%w: run %s belongs to repository %q, not %q",
 			ErrConflict, runID, profileRepository, repository)
 	}
-	if workspaceDirectory != "" && !workspaceInsideRepository(workspaceDirectory, repository) {
+	if !workspaceInsideRepository(workspaceDirectory, repository) {
 		return domain.BranchLease{}, fmt.Errorf("%w: run %s workspace %q is outside repository %q",
 			ErrConflict, runID, workspaceDirectory, repository)
 	}
-	original, found, err := runForBranch(ctx, tx, branch)
+	runs, err := runsForBranch(ctx, tx, branch)
 	if err != nil {
 		return domain.BranchLease{}, err
 	}
-	if found && original.runID != runID && original.workspace.Branch == branch && isActiveRunState(original.state) {
-		return domain.BranchLease{}, fmt.Errorf("%w: branch %s is still being written by its original run %s",
-			ErrConflict, branch, original.runID)
+	if runs.foundActive && runs.active.runID != runID {
+		return domain.BranchLease{}, fmt.Errorf("%w: original run still active: branch %s is still being written by its original run %s",
+			ErrConflict, branch, runs.active.runID)
 	}
 
 	var holder, acquired string
@@ -384,5 +434,25 @@ func normalizeLeaseKey(repository, branch, runID string) (string, string, error)
 	if !filepath.IsAbs(repository) {
 		return "", "", fmt.Errorf("repository must be an absolute path")
 	}
+	branch, err := normalizeBranch(branch)
+	if err != nil {
+		return "", "", err
+	}
 	return canonicalRepositoryPath(repository), branch, nil
+}
+
+// normalizeBranch accepts a short branch name or a full refs/heads/ ref and
+// returns the short name. Any other ref (refs/remotes/, refs/tags/, ...) is
+// not a pull-request head branch and is rejected.
+func normalizeBranch(branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if short, ok := strings.CutPrefix(branch, "refs/heads/"); ok {
+		branch = short
+	} else if strings.HasPrefix(branch, "refs/") {
+		return "", fmt.Errorf("branch must be a branch name or refs/heads/ ref, not %q", branch)
+	}
+	if branch == "" {
+		return "", fmt.Errorf("branch is required")
+	}
+	return branch, nil
 }
