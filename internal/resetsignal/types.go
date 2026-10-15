@@ -67,7 +67,18 @@ type Signal struct {
 	ObservedAccountReset bool       `json:"observed_account_reset"`
 	Prediction24Percent  *float64   `json:"prediction_24h_percent,omitempty"`
 	Prediction48Percent  *float64   `json:"prediction_48h_percent,omitempty"`
-	Warnings             []string   `json:"warnings,omitempty"`
+	// RetractedAnnouncement names an announcement a tracker retracted when
+	// the retraction does not apply to this record itself (a banked-reset
+	// record is a separate fact). The report still retracts that announcement.
+	RetractedAnnouncement *AnnouncementRef `json:"retracted_announcement,omitempty"`
+	Warnings              []string         `json:"warnings,omitempty"`
+}
+
+// AnnouncementRef identifies an original announcement by tracker ID and
+// canonical original-source URL.
+type AnnouncementRef struct {
+	ID  string `json:"id,omitempty"`
+	URL string `json:"claimed_original_source_url,omitempty"`
 }
 
 type FetchMetadata struct {

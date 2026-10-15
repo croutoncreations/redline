@@ -82,7 +82,13 @@ reset alert is a completed global event (its `corrected` flag marks an edited al
 retraction), but it never replaces a banked-reset record.
 An `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an
 edited message, noted as a warning); explicit withdrawals and any unrecognized alert
-state retract it. A `Retry-After` too large to represent is treated as a very long wait, never as
+state retract it. A retraction withdraws only the announcement the alert named, never a banked
+reset: with `banked_state` set and no official signal, a retracting or unrecognized alert state
+leaves the record `BANKED` and unlinked, with a warning, and the record carries the retraction
+separately (`retracted_announcement`). Another tracker's current record of that same announcement
+(same ID or canonical URL) is still reported as retracted (`UNKNOWN`); an unrelated announcement is
+unaffected. When an official signal is present it names the announcement (the banked state is not
+used), so a matching retracting alert still retracts the official claim. A `Retry-After` too large to represent is treated as a very long wait, never as
 permission to retry early.
 
 Normalized states remain distinct: `PREDICTION`, `INTENT`, `PROMISED`, `SCHEDULED`, `COMPLETED`,

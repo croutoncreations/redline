@@ -350,6 +350,7 @@ type codexLatestAlert struct {
 }
 
 func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Time) {
+	state := strings.ToLower(strings.TrimSpace(alert.State))
 	if signal.AnnouncementID == "" {
 		// Without an official signal the snapshot is the tracker's live
 		// prediction. A retained alert may name the announcement only
@@ -367,13 +368,24 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 			signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: "+reason)
 			return
 		}
+		if signal.Kind == KindBanked && state != "active" && !alertConfirmed(state) {
+			// A retraction withdraws only the announcement the alert named,
+			// not the banked reset, a separate fact. The banked record stays
+			// unlinked and carries the retraction for the report to apply.
+			url, _ := canonicalOriginal(alert.URL)
+			signal.RetractedAnnouncement = &AnnouncementRef{ID: strings.TrimSpace(alert.ID), URL: url}
+			signal.Warnings = append(signal.Warnings, "latest alert retracts announcement "+strconv.Quote(strings.TrimSpace(alert.ID))+"; the banked-reset record is a separate fact and is kept")
+			if !alertRetracted(state) {
+				signal.Warnings = append(signal.Warnings, "unrecognized latest alert state "+strconv.Quote(state)+" treated as a retraction")
+			}
+			return
+		}
 		signal.AnnouncementID = alert.ID
 		signal.Quote = alert.Summary
 		signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(alert.URL)
 		signal.PublishedAt = &published
 	}
 	if alert.ID == signal.AnnouncementID {
-		state := strings.ToLower(strings.TrimSpace(alert.State))
 		switch {
 		case state == "active":
 			// An active alert leaves the claim unchanged. Its "corrected"

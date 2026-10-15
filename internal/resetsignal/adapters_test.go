@@ -383,6 +383,94 @@ func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
 	}
 }
 
+// A banked reset is a separate fact from the announcement a latest alert
+// names: no alert state removes it. A retracting (or unrecognized) alert state
+// leaves the banked record unlinked and carries the retraction separately.
+// Without banked_state the retraction still withdraws the fallback record,
+// and an official signal's claim is still retracted even with banked_state.
+func TestCodexResetBankedSurvivesLatestAlertStates(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	alertWith := func(state string) string {
+		return `{"id":"9","kind":"reset","state":"` + state + `","source_at":"2026-10-13T03:00:00Z","url":"https://x.com/a/status/9"}`
+	}
+	for state, want := range map[string]struct {
+		retracts bool
+		warning  string
+	}{
+		"active":     {false, ""},
+		"confirmed":  {false, "did not replace the banked-reset record"},
+		"withdrawn":  {true, "banked-reset record is a separate fact and is kept"},
+		"superseded": {true, "banked-reset record is a separate fact and is kept"},
+		"expired":    {true, "banked-reset record is a separate fact and is kept"},
+		"mystery":    {true, `unrecognized latest alert state "mystery" treated as a retraction`},
+	} {
+		t.Run("banked/"+state, func(t *testing.T) {
+			signal, err := normalizeCodexReset([]byte(codexForecast("null", `"available"`, alertWith(state))), header, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindBanked || signal.Withdrawn || signal.Corrected || (want.warning != "" && !contains(signal.Warnings, want.warning)) {
+				t.Fatalf("signal = %+v", signal)
+			}
+			if want.retracts != (signal.RetractedAnnouncement != nil) || (want.retracts && (signal.AnnouncementID != "" || signal.PublishedAt != nil ||
+				*signal.RetractedAnnouncement != AnnouncementRef{ID: "9", URL: "https://x.com/a/status/9"})) {
+				t.Fatalf("retraction carried as %+v on %+v", signal.RetractedAnnouncement, signal)
+			}
+			signal.Feed = "codex-reset"
+			if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindBanked {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+
+	fallback, err := normalizeCodexReset([]byte(codexForecast("null", "null", alertWith("withdrawn"))), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback.Kind != KindPrediction || !fallback.Withdrawn || fallback.AnnouncementID != "9" || fallback.RetractedAnnouncement != nil {
+		t.Fatalf("fallback = %+v", fallback)
+	}
+
+	official := `{"tweet_id":"9","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/9","signal_type":"promise","window":null}`
+	claim, err := normalizeCodexReset([]byte(codexForecast(official, `"available"`, alertWith("withdrawn"))), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Kind != KindPromised || !claim.Withdrawn || claim.RetractedAnnouncement != nil {
+		t.Fatalf("official claim = %+v", claim)
+	}
+}
+
+// The retraction a banked record carries still retracts the announcement it
+// names when another tracker reports it, and never an unrelated one.
+func TestCodexResetBankedRetractionAppliesOnlyToNamedAnnouncement(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	banked, err := normalizeCodexReset([]byte(codexForecast("null", `"available"`,
+		`{"id":"9","kind":"reset","state":"withdrawn","source_at":"2026-10-13T03:00:00Z","url":"https://x.com/a/status/9"}`)), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	banked.Feed = "codex-reset"
+	published := time.Date(2026, 10, 13, 2, 0, 0, 0, time.UTC)
+	for name, test := range map[string]struct {
+		id, url string
+		want    Kind
+	}{
+		"same id":       {"9", "", KindUnknown},
+		"same url":      {"", "https://x.com/a/status/9", KindUnknown},
+		"different id":  {"8", "https://x.com/a/status/8", KindPromised},
+		"different url": {"", "https://x.com/b/status/8", KindPromised},
+	} {
+		t.Run(name, func(t *testing.T) {
+			promise := Signal{Feed: "resetbeacon", Kind: KindPromised, AnnouncementID: test.id, ClaimedOriginalURL: test.url, PublishedAt: &published, Freshness: Fresh}
+			report := BuildReport(fixtureNow, []SourceResult{{Signal: &banked}, {Signal: &promise}})
+			if report.State != test.want {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
+
 // An active alert edited by the tracker (corrected: true) does not retract
 // the current announcement; only a retracting state does.
 func TestCodexResetCorrectedActiveAlertLeavesClaimUnchanged(t *testing.T) {

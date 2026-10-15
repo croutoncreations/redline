@@ -155,7 +155,7 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		}
 	}
 	for _, signal := range selected {
-		if signal.Withdrawn || signal.Corrected {
+		if signal.Withdrawn || signal.Corrected || retractedByAnotherRecord(signal, results, now) {
 			return KindUnknown, "The fresh record for the selected announcement is corrected or withdrawn; its optimistic interpretation is retracted."
 		}
 	}
@@ -184,6 +184,28 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		}
 	}
 	return KindUnknown, "The fresh public tracker state is unknown."
+}
+
+// retractedByAnotherRecord reports whether a current record carries a
+// retraction (RetractedAnnouncement) of the announcement this record names,
+// matched by the same URL and ID identities used for grouping.
+func retractedByAnotherRecord(signal Signal, results []SourceResult, now time.Time) bool {
+	named := make(map[string]bool)
+	for _, identity := range announcementIdentities(signal) {
+		named[identity] = true
+	}
+	for _, result := range results {
+		if result.Signal == nil || result.Signal.RetractedAnnouncement == nil || !isCurrent(*result.Signal, now) {
+			continue
+		}
+		ref := result.Signal.RetractedAnnouncement
+		for _, identity := range announcementIdentities(Signal{AnnouncementID: ref.ID, ClaimedOriginalURL: ref.URL}) {
+			if named[identity] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // carriesNoEvidence reports a record that names no announcement and states
