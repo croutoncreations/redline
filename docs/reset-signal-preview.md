@@ -47,9 +47,9 @@ correction cannot erase a newer event.
 
 Reset Beacon now publishes event status without numerical forecasts. Its compatibility
 `answer.state: "forecast"` means "no new source-backed announcement" and its numerical fields stay
-empty, so Redline reports it as `UNKNOWN` (no current evidence), never as a prediction. Such a
-record names no announcement and cannot outrank another tracker's fresh evidence or live
-probabilities.
+empty, so Redline reports it as `UNKNOWN` (no current evidence), never as a prediction. Any post
+it still lists is treated as history, so the record names no announcement and cannot outrank
+another tracker's fresh evidence or live probabilities.
 
 codex-reset.com's ordinary `mode: "model"` snapshot carries only tracker probabilities and is
 reported as an attributed `PREDICTION`. Its documented, stable `last_reset_at` is the tracker's
@@ -58,8 +58,8 @@ the 72-hour horizon makes the snapshot a `COMPLETED` global event dated by that 
 probabilities still shown with attribution. An older value is history and leaves the prediction; a
 future-dated or invalid value is ignored with a warning. Because it names no post, it is applied
 conservatively: it never relabels an official signal (for example a promise), never replaces a
-banked-reset record, never overrides a latest-alert retraction, and never completes an
-alert-named announcement published after the reset; each of those cases is noted as a warning.
+banked-reset record, never overrides a latest-alert retraction, and never relabels an alert-named
+announcement (only a confirmed reset alert completes that); each of those cases is noted as a warning.
 The undocumented `latest_alert` remains supplementary. When it has no official signal, its latest alert supplies
 the announcement only while the alert's own `source_at` is within the 72-hour horizon; an older,
 future-dated, or undated alert is noted and does not replace the live prediction. A `confirmed`

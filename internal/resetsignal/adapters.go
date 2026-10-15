@@ -120,7 +120,13 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 	}
 	signal.Withdrawn = strings.EqualFold(payload.PublicationState, "withdrawn") || strings.EqualFold(payload.PublicationState, "superseded")
 	signal.Corrected = strings.EqualFold(payload.PublicationState, "corrected")
-	if len(payload.Answer.Posts) > 0 {
+	forecast := strings.EqualFold(strings.TrimSpace(state), "forecast")
+	if forecast && len(payload.Answer.Posts) > 0 {
+		// "forecast" means no new source-backed announcement, so any listed
+		// post is history and must not name a current announcement.
+		signal.Warnings = append(signal.Warnings, "forecast state lists posts; they were treated as history, not a current announcement")
+	}
+	if len(payload.Answer.Posts) > 0 && !forecast {
 		post := payload.Answer.Posts[0]
 		signal.AnnouncementID = post.PostID
 		signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(post.SourceURL)
@@ -381,8 +387,7 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, now time.Tim
 // future-dated, and nothing more specific or more cautious applies. It is
 // not linked to any announcement, so it never relabels an official signal,
 // never replaces a banked-reset record (a separate fact), never overrides a
-// retraction, and never completes an alert-named announcement newer than
-// the reset.
+// retraction, and never relabels an alert-named announcement.
 func applyCodexLastReset(signal *Signal, lastResetAt string, hasOfficialSignal bool, now time.Time) {
 	if strings.TrimSpace(lastResetAt) == "" {
 		return
@@ -409,8 +414,10 @@ func applyCodexLastReset(signal *Signal, lastResetAt string, hasOfficialSignal b
 		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; the latest alert's retraction still applies")
 	case signal.Kind == KindCompleted:
 		// A confirmed reset alert already completed the snapshot.
-	case signal.PublishedAt != nil && signal.PublishedAt.After(resetAt):
-		signal.Warnings = append(signal.Warnings, "last_reset_at is older than the latest alert's announcement and did not complete it")
+	case signal.AnnouncementID != "":
+		// last_reset_at names no post, so it never relabels the announcement a
+		// latest alert named; only a confirmed reset alert completes that.
+		signal.Warnings = append(signal.Warnings, "last_reset_at reports a reset within 72 hours; it is not linked to the latest alert's announcement and did not change its claim")
 	default:
 		signal.Kind = KindCompleted
 		if signal.PublishedAt == nil {

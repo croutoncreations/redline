@@ -79,11 +79,16 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		at      time.Time
 	}
 	var candidates []candidate
+	emptyFresh := false
 	for key, signals := range grouped {
 		var current []Signal
 		var latest time.Time
 		for _, signal := range signals {
-			if !isCurrent(signal, now) || carriesNoEvidence(key, signal) {
+			if !isCurrent(signal, now) {
+				continue
+			}
+			if carriesNoEvidence(key, signal) {
+				emptyFresh = true
 				continue
 			}
 			current = append(current, signal)
@@ -94,6 +99,9 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		if len(current) > 0 {
 			candidates = append(candidates, candidate{key: key, signals: current, at: latest})
 		}
+	}
+	if len(candidates) == 0 && emptyFresh {
+		return KindUnknown, "Fresh public trackers report no current source-backed announcement and no live prediction."
 	}
 	if len(candidates) == 0 {
 		return KindUnknown, "No fresh, current public tracker evidence is available; any retained records are historical only."

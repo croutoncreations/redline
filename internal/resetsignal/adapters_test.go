@@ -466,18 +466,45 @@ func TestResetBeaconForecastStateIsNoCurrentEvidence(t *testing.T) {
 	}
 	signal.Feed = "resetbeacon"
 	report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
-	if report.State != KindUnknown || len(report.CurrentPredictions) != 0 {
+	if report.State != KindUnknown || len(report.CurrentPredictions) != 0 ||
+		report.Summary != "Fresh public trackers report no current source-backed announcement and no live prediction." {
 		t.Fatalf("report = %+v", report)
 	}
+
+	// A "forecast" answer that still lists a post does not name a current
+	// announcement, so it cannot outrank another tracker's live prediction.
+	withPost := []byte(`{"calculatedAt":"2026-10-13T04:19:00Z","validUntil":"2026-10-13T04:30:00Z","staleSince":null,
+		"displayMode":"events","publicationState":"forecast","probabilities":null,
+		"answer":{"state":"forecast","percent":null,"deadline":null,"window":null,"posts":[{"postId":"77","sourceUrl":"https://x.com/a/status/77","publishedAt":"2026-10-13T02:00:00Z","quote":"old"}]}}`)
+	listed, err := normalizeResetBeacon(withPost, nil, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.AnnouncementID != "" || listed.ClaimedOriginalURL != "" || !contains(listed.Warnings, "treated as history") {
+		t.Fatalf("listed = %+v", listed)
+	}
+	listed.Feed = "resetbeacon"
 
 	codex, err := normalizeCodexReset(fixture(t, "codex-reset-model-only.json"), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	codex.Feed = "codex-reset"
-	report = BuildReport(fixtureNow, []SourceResult{{Signal: &signal}, {Signal: &codex}})
-	if report.State != KindPrediction || len(report.CurrentPredictions) != 1 || report.CurrentPredictions[0].Feed != "codex-reset" {
-		t.Fatalf("report = %+v", report)
+	for _, beacon := range []Signal{signal, listed} {
+		beacon := beacon
+		report = BuildReport(fixtureNow, []SourceResult{{Signal: &beacon}, {Signal: &codex}})
+		if report.State != KindPrediction || len(report.CurrentPredictions) != 1 || report.CurrentPredictions[0].Feed != "codex-reset" {
+			t.Fatalf("report = %+v", report)
+		}
+	}
+
+	// A fresh, identity-less record that is withdrawn still retracts: the
+	// no-evidence exclusion never hides a retraction.
+	withdrawn := signal
+	withdrawn.Withdrawn = true
+	report = BuildReport(fixtureNow, []SourceResult{{Signal: &withdrawn}, {Signal: &codex}})
+	if report.State != KindUnknown || !strings.Contains(report.Summary, "retracted") {
+		t.Fatalf("withdrawn report = %+v", report)
 	}
 }
 
@@ -532,7 +559,7 @@ func TestCodexResetFreshLastResetAtIsACompletion(t *testing.T) {
 
 // last_reset_at names no announcement, so it never relabels an official
 // signal, replaces a banked record, overrides an alert's retraction, or
-// completes an alert-named announcement newer than the reset. A stale
+// relabels any alert-named announcement. A stale
 // snapshot's completion stays historical.
 func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
@@ -549,9 +576,9 @@ func TestCodexResetLastResetAtIsConservative(t *testing.T) {
 		"withdrawn alert": {"null", "null", `{"id":"9","kind":"reset","state":"withdrawn","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
 			KindPrediction, true, "retraction still applies"},
 		"newer active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
-			KindPrediction, false, "older than the latest alert's announcement"},
+			KindPrediction, false, "not linked to the latest alert's announcement"},
 		"older active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T02:30:00Z","url":"https://x.com/a/status/9"}`,
-			KindCompleted, false, ""},
+			KindPrediction, false, "not linked to the latest alert's announcement"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset(test.official, test.banked, test.alert, fresh)), header, fixtureNow)
