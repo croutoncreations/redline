@@ -179,9 +179,21 @@ func (c *syncBaseCache) store(repository, configuredBase string, synced BaseSync
 // gitNetworkEnvironment is the environment for git commands that contact a
 // remote. Unattended runs have no one to answer a credential or host-key
 // prompt, so every prompt fails fast instead of hanging until the timeout.
-func gitNetworkEnvironment() []string {
+//
+// SSH follows git's own precedence (GIT_SSH_COMMAND, then core.sshCommand,
+// then GIT_SSH) so a configured deploy key keeps working: an existing
+// GIT_SSH_COMMAND or core.sshCommand gains "-o BatchMode=yes", a GIT_SSH
+// program is left alone (it takes no extra options), and only when nothing is
+// configured is plain "ssh -o BatchMode=yes" used. coreSSHCommand is the
+// repository's core.sshCommand value, or "".
+func gitNetworkEnvironment(coreSSHCommand string) []string {
 	ssh := strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND"))
-	if ssh == "" {
+	switch {
+	case ssh != "":
+	case strings.TrimSpace(coreSSHCommand) != "":
+		ssh = strings.TrimSpace(coreSSHCommand)
+	case strings.TrimSpace(os.Getenv("GIT_SSH")) != "":
+	default:
 		ssh = "ssh"
 	}
 	environment := make([]string, 0, len(os.Environ())+3)
@@ -193,11 +205,30 @@ func gitNetworkEnvironment() []string {
 		}
 		environment = append(environment, variable)
 	}
-	return append(environment,
-		"GIT_TERMINAL_PROMPT=0",
-		"GCM_INTERACTIVE=never",
-		"GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes",
-	)
+	environment = append(environment, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never")
+	if ssh != "" {
+		environment = append(environment, "GIT_SSH_COMMAND="+batchModeSSHCommand(ssh))
+	}
+	return environment
+}
+
+// batchModeSSHCommand puts "-o BatchMode=yes" right after the program name:
+// ssh honours the first occurrence of an option, so a later
+// "-o BatchMode=no" in the configured command cannot re-enable prompts. The
+// command is a shell string; only an unquoted leading program name is split
+// off. A command beginning with a quote (a program path containing spaces)
+// cannot be split safely, so the option is appended instead, where an earlier
+// explicit BatchMode=no would still win.
+func batchModeSSHCommand(command string) string {
+	const option = "-o BatchMode=yes"
+	if strings.ContainsAny(command[:1], `"'`) {
+		return command + " " + option
+	}
+	end := strings.IndexAny(command, " \t")
+	if end < 0 {
+		return command + " " + option
+	}
+	return command[:end] + " " + option + " " + strings.TrimSpace(command[end:])
 }
 
 type gitRunner struct {
@@ -227,7 +258,17 @@ func (g gitRunner) output(ctx context.Context, args ...string) (string, string, 
 
 // network runs a git command that contacts a remote, with prompts disabled.
 func (g gitRunner) network(ctx context.Context, args ...string) (string, string, error) {
-	return g.run(ctx, g.repository, gitNetworkEnvironment(), args...)
+	return g.run(ctx, g.repository, gitNetworkEnvironment(g.coreSSHCommand(ctx)), args...)
+}
+
+// coreSSHCommand reads core.sshCommand as git would see it for this
+// repository, locally and without network access; "" when it is unset.
+func (g gitRunner) coreSSHCommand(ctx context.Context) string {
+	value, _, err := g.output(ctx, "config", "--get", "core.sshCommand")
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 func (g gitRunner) outputIn(ctx context.Context, directory string, args ...string) (string, string, error) {

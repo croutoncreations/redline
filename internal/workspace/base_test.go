@@ -3,6 +3,7 @@ package workspace_test
 import (
 	"context"
 	"io"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -58,7 +59,7 @@ func TestSyncBaseDisablesPromptsForNetworkCommands(t *testing.T) {
 		for key, want := range map[string]string{
 			"GIT_TERMINAL_PROMPT": "0",
 			"GCM_INTERACTIVE":     "never",
-			"GIT_SSH_COMMAND":     "ssh -i /keys/deploy -o BatchMode=yes",
+			"GIT_SSH_COMMAND":     "ssh -o BatchMode=yes -i /keys/deploy",
 		} {
 			if got, _ := environmentValue(environment, key); got != want {
 				t.Errorf("%s: %s=%q, want %q", name, key, got, want)
@@ -67,6 +68,94 @@ func TestSyncBaseDisablesPromptsForNetworkCommands(t *testing.T) {
 		if _, ok := environmentValue(environment, "PATH"); !ok {
 			t.Errorf("%s: environment dropped PATH", name)
 		}
+	}
+}
+
+// fetchEnvironment runs SyncBase against a fake origin whose core.sshCommand
+// is coreSSHCommand ("" for unset) and returns the fetch's environment.
+func fetchEnvironment(t *testing.T, coreSSHCommand string) []string {
+	t.Helper()
+	var fetch []string
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		args := strings.Join(command.Args, " ")
+		switch {
+		case strings.HasSuffix(args, "remote get-url origin"):
+			_, _ = io.WriteString(command.Stdout, "git@example.com:o/r.git\n")
+		case strings.HasSuffix(args, "config --get core.sshCommand"):
+			if command.Env != nil {
+				t.Errorf("config read got a network environment")
+			}
+			if coreSSHCommand == "" {
+				return 1, nil
+			}
+			_, _ = io.WriteString(command.Stdout, coreSSHCommand+"\n")
+		case strings.Contains(args, " fetch "):
+			fetch = command.Env
+		case strings.Contains(args, "rev-parse"):
+			_, _ = io.WriteString(command.Stdout, "abc123\n")
+		}
+		return 0, nil
+	}}
+	if _, err := workspace.SyncBase(t.Context(), runner, t.TempDir(), "main"); err != nil {
+		t.Fatal(err)
+	}
+	if fetch == nil {
+		t.Fatal("fetch was not run")
+	}
+	return fetch
+}
+
+// Batch mode is added without overriding a configured deploy key, following
+// git's precedence: GIT_SSH_COMMAND, core.sshCommand, then GIT_SSH.
+func TestSyncBaseKeepsConfiguredSSHCommand(t *testing.T) {
+	for _, test := range []struct {
+		name, envCommand, gitSSH, coreCommand string
+		want                                  string
+		wantSet                               bool
+	}{
+		{name: "nothing configured", want: "ssh -o BatchMode=yes", wantSet: true},
+		{name: "existing GIT_SSH_COMMAND", envCommand: "ssh -o BatchMode=no -i /keys/env",
+			want: "ssh -o BatchMode=yes -o BatchMode=no -i /keys/env", wantSet: true},
+		{name: "GIT_SSH_COMMAND wins over core.sshCommand", envCommand: "ssh -i /keys/env", coreCommand: "ssh -i /keys/core",
+			want: "ssh -o BatchMode=yes -i /keys/env", wantSet: true},
+		{name: "core.sshCommand", coreCommand: "ssh -i /keys/deploy -o BatchMode=no",
+			want: "ssh -o BatchMode=yes -i /keys/deploy -o BatchMode=no", wantSet: true},
+		{name: "core.sshCommand wins over GIT_SSH", gitSSH: "/usr/local/bin/deploy-ssh", coreCommand: "ssh -i /keys/core",
+			want: "ssh -o BatchMode=yes -i /keys/core", wantSet: true},
+		{name: "GIT_SSH left alone", gitSSH: "/usr/local/bin/deploy-ssh", wantSet: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GIT_SSH_COMMAND", test.envCommand)
+			t.Setenv("GIT_SSH", test.gitSSH)
+			environment := fetchEnvironment(t, test.coreCommand)
+			got, ok := environmentValue(environment, "GIT_SSH_COMMAND")
+			if ok != test.wantSet || got != test.want {
+				t.Fatalf("GIT_SSH_COMMAND=%q set=%v, want %q set=%v", got, ok, test.want, test.wantSet)
+			}
+			if test.gitSSH != "" {
+				if got, _ := environmentValue(environment, "GIT_SSH"); got != test.gitSSH {
+					t.Fatalf("GIT_SSH=%q, want %q", got, test.gitSSH)
+				}
+			}
+		})
+	}
+}
+
+// ssh honours the first occurrence of an option, so the BatchMode=yes put
+// right after the program name beats a BatchMode=no in the configured command.
+func TestSyncBaseBatchModeWinsInRealSSH(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh is not installed")
+	}
+	t.Setenv("GIT_SSH_COMMAND", "ssh -o BatchMode=no")
+	t.Setenv("GIT_SSH", "")
+	command, _ := environmentValue(fetchEnvironment(t, ""), "GIT_SSH_COMMAND")
+	out, err := exec.Command("sh", "-c", command+" -G example.invalid").Output()
+	if err != nil {
+		t.Fatalf("%s -G: %v", command, err)
+	}
+	if !strings.Contains(string(out), "\nbatchmode yes\n") {
+		t.Fatalf("%q resolves batchmode to no:\n%s", command, out)
 	}
 }
 
