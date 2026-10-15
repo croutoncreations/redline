@@ -24,7 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `base_ref`, `base_sha`, and `base_sync`. If `origin` exists but cannot be fetched, the run fails
   instead of starting from a stale local branch. `require_repo_change` compares against the fetched
   remote base.
-- Every code-changing template now starts by verifying it is on current origin. If its own rules
+- DevX runs whose main checkout has commits not on `origin/<base>` now fail with "refusing to
+  start from a diverged base" instead of starting from those unpushed commits.
+- Scheduling reads a remote revision only for `require_repo_change` tasks and reuses a fetch for
+  up to two minutes. Fetches of one repository are serialized, and git network commands never
+  prompt for credentials. A run's `source_revision` is the base commit its workspace started from.
+- Every code-changing template now starts by verifying it is on current origin when one exists. If its own rules
   lead to a pull request, it opens the PR ready for review with a `Redline-Run` commit trailer.
 
 ## [0.1.10] - 2026-10-01

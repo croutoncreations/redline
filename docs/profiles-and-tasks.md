@@ -69,15 +69,23 @@ prompt: Run `make lint` before pushing.   # optional project notes
   that `redline run attribute` proves came from a finished standard run in the same repository
   (see [Runs](runs-and-notifications.md)). It leases a branch with `redline lease acquire` before
   changing anything, and marks a draft ready for review once conflicts are resolved, local tests
-  pass, and non-review CI checks are not failing. It does not wait for review bots, which only run
-  after a pull request is ready.
+  pass, non-review CI checks are not failing, and no unresolved actionable thread is left for a
+  human. It does not wait for review bots, which only run after a pull request is ready. It
+  revisits a pull request it already handled when a review thread, CHANGES_REQUESTED review, or
+  failing check arrives after its last comment, even if the head commit is unchanged.
+- A `pr_maintenance` profile must have a `repository`. An incompatible profile is rejected with
+  HTTP 400.
 - Only one maintenance run per repository is active at a time. The scheduler skips a second one
   with the reason "pr_maintenance run … is already active for this repository".
 - The `pr-maintenance` template in the dashboard sets this up with a 12-hour interval.
 
-Attribution trusts what Redline recorded when the run started: the run's workspace directory must
-lie inside the repository's `.redline/worktrees/` or `.worktrees/` (DevX) directory, and its
-recorded branch must equal the pull request's head branch. Runs do not snapshot their profile, so
+Attribution trusts only branches Redline itself created, using what it recorded when the run
+started. The branch must be `redline/<run>` from a `git-worktree` profile, with the workspace at
+`.redline/worktrees/<run>`, or `redline-<run>` from a `devx` profile, with that DevX session at
+`.worktrees/redline-<run>`. The run's recorded branch must equal the pull request's head branch. A
+branch that a `command` or `runtime-owned` workspace merely reported never attributes. While any
+run that created or recorded the branch is still active, attribution and leases are refused
+("original run still active"). Runs do not snapshot their profile, so
 the profile's repository is also checked as it is now. Reassigning a profile to another repository
 cannot make old runs attributable there, because their recorded workspaces still point at the
 original repository.
@@ -149,9 +157,23 @@ branch. Only a repository with no `origin` at all uses the local base. Each run 
 `base_ref`, `base_sha`, and `base_sync` (`origin` or `no-origin`) in its workspace metadata.
 DevX creates its session from the main checkout's HEAD, so Redline fast-forwards the new session
 onto `origin/<base>`. It refuses if the session has uncommitted changes or commits of its own.
+This is a behaviour change: if the main checkout has local commits that are not on
+`origin/<base>`, DevX runs now fail with "refusing to start from a diverged base" instead of
+starting from those unpushed commits. Push them, or move the main checkout back to
+`origin/<base>`.
 The revision used by `require_repo_change` is read the same way, from the fetched
 `origin/<base>`. If the fetch fails, the task is skipped with a reason instead of being treated
-as unchanged.
+as unchanged. Only `require_repo_change` tasks read it during scheduling, and that read reuses a
+fetch of the same repository and base for up to two minutes. Preparing a workspace always fetches
+fresh. Fetches of one repository are serialized, and git network commands run with credential and
+SSH prompts disabled, so a missing credential fails fast instead of hanging. A run's
+`source_revision` (and the task's `last_successful_source_revision`) is the `base_sha` the
+workspace actually started from.
+
+Code-changing templates start by checking for an `origin` remote. With one, they fetch and stop
+if the fetch fails or the workspace does not contain `origin/<base>`. In an `existing-directory`
+profile that fetch happens in place and only updates remote-tracking refs; the agent never resets
+or cleans the checkout. Without an `origin` remote they continue from the local base.
 
 Optional prepare/finalize hooks run before and after the harness. Cleanup defaults to `never`;
 `on_success` and `always` are also supported. Execution-profile fields, including lifecycle

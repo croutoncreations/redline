@@ -111,16 +111,19 @@ have a positive `min_interval`, and may omit `prompt`. See
 
 `GET /v1/runs/attribution` returns `{attributable, reason, run_id, task_id, task_name,
 task_kind, run_state, repository, workspace_branch}`, always with status 200 when the query is
-valid. `attributable` is true only when a run recorded exactly this workspace branch, that run's
-recorded workspace lies inside the repository's managed worktree directories, its profile's
-repository is this repository, the run has finished, and its task is `standard`. Otherwise
-`reason` names the first check that failed.
+valid. `attributable` is true only when the branch is the one Redline's `git-worktree`
+(`redline/<run>`) or `devx` (`redline-<run>`) provider created for a run, that run recorded
+exactly this branch and that managed workspace in this repository, its profile's repository is
+this repository, the run has finished, no run that recorded the branch is still active, and its
+task is `standard`. Otherwise `reason` names the first check that failed. `branch` may be given
+as `refs/heads/<name>`; other `refs/` are rejected.
 
 `POST /v1/branch-leases` with `{repository, branch, run_id}` grants that run exclusive permission
-to change the branch. The run must exist, be preparing or running, and belong to the repository:
-its profile repository must match, and its recorded workspace must be inside it. The request
-returns 409 if another active run holds the lease or the run that created the branch is still
-active. A lease held by a finished run is stale and is taken over; re-acquiring by the holder is
+to change the branch. The run must exist, be `running` (a `preparing` run has no recorded
+workspace yet, so it cannot prove it belongs to the repository), and belong to the repository: its
+profile repository must match, and its recorded workspace must be inside it. The request returns
+409 if another active run holds the lease or any other run that created or recorded the branch is
+still active. A lease held by a finished run is stale and is taken over; re-acquiring by the holder is
 idempotent. `DELETE` releases a lease (holder only; 409 for anyone else). Leases are also released
 when their run completes or is recovered after a restart.
 
