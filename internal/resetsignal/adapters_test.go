@@ -547,8 +547,9 @@ func TestCodexResetFallbackAlertWithoutIDIsIgnored(t *testing.T) {
 }
 
 // A codex-reset official signal of prediction type is forward-looking: once
-// its window has ended it is no longer a current PREDICTION. The model-only
-// snapshot has no window, so it is never expired this way.
+// its window has ended the official claim is no longer current, though the
+// fresh snapshot's probabilities are. The model-only snapshot has no window,
+// so it is never expired this way.
 func TestCodexResetPredictionPastOfficialWindowIsNotCurrent(t *testing.T) {
 	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
 	body := []byte(`{
@@ -567,7 +568,10 @@ func TestCodexResetPredictionPastOfficialWindowIsNotCurrent(t *testing.T) {
 	}
 	signal.Feed = "codex-reset"
 	report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
-	if report.State != KindUnknown || len(report.CurrentPredictions) != 0 || len(report.HistoricalPredictions) != 1 {
+	// The ended window ages only the official claim; the fresh snapshot's
+	// probabilities stay a current, unlinked prediction.
+	if report.State != KindPrediction || len(report.CurrentPredictions) != 1 || len(report.HistoricalPredictions) != 0 ||
+		!contains(report.Uncertainty, "reported window expired") {
 		t.Fatalf("report = %+v", report)
 	}
 

@@ -30,8 +30,8 @@ func BuildReport(now time.Time, sources []SourceResult) Report {
 			continue
 		}
 		signal := *result.Signal
-		current := isCurrent(signal, now)
-		if signal.Prediction24Percent != nil || signal.Prediction48Percent != nil {
+		current := predictionsCurrent(signal)
+		if hasProbabilities(signal) {
 			prediction := AttributedPrediction{
 				Feed: signal.Feed, SourceURL: signal.FeedURL,
 				Percent24: signal.Prediction24Percent, Percent48: signal.Prediction48Percent,
@@ -114,6 +114,16 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 			candidates = append(candidates, candidate{key: key, signals: current, at: latest, completedAt: completedAt, announcedAt: announcedAt})
 		}
 	}
+	// A fresh snapshot whose claim has aged out (an old official signal or
+	// an ended window) still carries live tracker probabilities. They stand
+	// on their own as an unlinked prediction, without the aged claim.
+	for _, result := range results {
+		if result.Signal == nil || isCurrent(*result.Signal, now) || !predictionsCurrent(*result.Signal) || !hasProbabilities(*result.Signal) {
+			continue
+		}
+		live := livePrediction(*result.Signal)
+		candidates = append(candidates, candidate{key: "feed:" + live.Feed, signals: []Signal{live}, at: signalTimestamp(live)})
+	}
 	if len(candidates) == 0 && emptyFresh {
 		return KindUnknown, "Fresh public trackers report no current source-backed announcement and no live prediction."
 	}
@@ -177,7 +187,15 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 			case KindIntent:
 				return preferred, "A fresh public tracker reports intent, not a schedule or completion."
 			case KindPrediction:
-				return preferred, "Only fresh tracker predictions are available; their probabilities are shown with attribution and are not Redline confidence."
+				if selectedPredictionHasProbabilities(selected) {
+					return preferred, "Only fresh tracker predictions are available; their probabilities are shown with attribution and are not Redline confidence."
+				}
+				if signal.ClaimedOriginalURL != "" || signal.AnnouncementID != "" {
+					// Reset Beacon's possible/likely: a possible reset backed by
+					// a public source, with no published percentage.
+					return preferred, "A fresh tracker reports a possible, source-backed event; no probability is published, and this is not Redline confidence."
+				}
+				return preferred, "A fresh tracker reports a possible event with no linked source post; no probability is published, and this is not Redline confidence."
 			case KindBanked:
 				return preferred, "A fresh banked-reset record is a separate fact and is not treated as a completed reset."
 			}
@@ -222,6 +240,40 @@ func carriesNoEvidence(groupKey string, signal Signal) bool {
 // (PublishedAt) dates the event; a snapshot time does not.
 func isCompletion(signal Signal) bool {
 	return signal.Kind == KindCompleted && !signal.Withdrawn && !signal.Corrected
+}
+
+func selectedPredictionHasProbabilities(signals []Signal) bool {
+	for _, signal := range signals {
+		if signal.Kind == KindPrediction && hasProbabilities(signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasProbabilities(signal Signal) bool {
+	return signal.Prediction24Percent != nil || signal.Prediction48Percent != nil
+}
+
+// predictionsCurrent reports whether a record's tracker probabilities are
+// current. They describe the next 24h/48h as of the snapshot, so their
+// currency follows only the snapshot's own freshness (TTL). The age or window
+// of an announcement the record also names ages that claim separately
+// (isCurrent), not the probabilities.
+func predictionsCurrent(signal Signal) bool {
+	return signal.Freshness == Fresh
+}
+
+// livePrediction keeps only a record's snapshot and probabilities: an
+// unlinked tracker prediction with no announcement, window, or retraction.
+func livePrediction(signal Signal) Signal {
+	return Signal{
+		Feed: signal.Feed, FeedURL: signal.FeedURL, Attribution: signal.Attribution, Kind: KindPrediction,
+		CheckedAt: signal.CheckedAt, ExpiresAt: signal.ExpiresAt, Freshness: signal.Freshness,
+		Window:              Window{Certainty: WindowMissing},
+		GlobalAnnouncement:  signal.GlobalAnnouncement,
+		Prediction24Percent: signal.Prediction24Percent, Prediction48Percent: signal.Prediction48Percent,
+	}
 }
 
 func hasExplicitPrimaryWindow(signals []Signal) bool {

@@ -163,3 +163,58 @@ func TestCodexResetLastResetAtOutranksLatestAlert(t *testing.T) {
 		})
 	}
 }
+
+// F3. codex-reset: /api/forecast carries "Reset probability for the next 24h
+// and 48h". The probabilities are current for as long as the snapshot is
+// fresh; an official signal that is old or past its window ages separately
+// and must not file them as historical.
+func TestCodexResetFreshProbabilitiesStayCurrentBesideAgedOfficialSignal(t *testing.T) {
+	for name, official := range map[string]string{
+		"older than 72 hours": `{"tweet_id":"222","summary":"x","at":"` + auditTime(-80*time.Hour) + `","url":"https://x.com/thsottiaux/status/222","signal_type":"promised"}`,
+		"window ended": `{"tweet_id":"222","summary":"x","at":"` + auditTime(-3*time.Hour) + `","url":"https://x.com/thsottiaux/status/222","signal_type":"prediction",
+			"window":{"start":"` + auditTime(-150*time.Minute) + `","end":"` + auditTime(-time.Hour) + `","text":"within two hours"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"mode":"model","updated_at":"` + auditTime(-time.Minute) + `","probabilities":{"rounded_24h":18,"rounded_48h":33},"official_signal":` + official + `}`
+			signal, err := normalizeCodexReset([]byte(body), auditCodexHeader(), fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Freshness != Fresh || isCurrent(signal, fixtureNow) {
+				t.Fatalf("the aged official claim is current: signal = %+v", signal)
+			}
+			report := auditCodexReport(t, signal)
+			if len(report.CurrentPredictions) != 1 || len(report.HistoricalPredictions) != 0 ||
+				value(report.CurrentPredictions[0].Percent24) != 18 || value(report.CurrentPredictions[0].Percent48) != 33 || !report.CurrentPredictions[0].Current {
+				t.Fatalf("predictions current=%+v historical=%+v", report.CurrentPredictions, report.HistoricalPredictions)
+			}
+			if report.State != KindPrediction || len(report.Evidence) != 1 || report.Evidence[0].AnnouncementID != "222" {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
+
+// F4. Reset Beacon: "Possible, announced and confirmed events are distinct",
+// the likely topic is "a possible reset backed by a public source", and "Do
+// not reconstruct a percentage". A source-backed possible record publishes no
+// probability, so the summary must not describe tracker probabilities.
+func TestResetBeaconSourceBackedPossibleIsNotSummarizedAsProbabilities(t *testing.T) {
+	for _, state := range []string{"possible", "likely"} {
+		t.Run(state, func(t *testing.T) {
+			body := `{"calculatedAt":"` + auditTime(-time.Minute) + `","validUntil":"` + auditTime(40*time.Minute) + `","staleSince":null,"publicationState":"` + state + `",
+				"answer":{"state":"` + state + `","deadline":null,"posts":[{"postId":"333","sourceUrl":"https://x.com/thsottiaux/status/333","quote":"q","publishedAt":"` + auditTime(-time.Hour) + `","authorHandle":"thsottiaux"}]}}`
+			signal, err := normalizeResetBeacon([]byte(body), nil, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signal.Feed = "resetbeacon"
+			report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+			if report.State != KindPrediction || len(report.CurrentPredictions) != 0 ||
+				strings.Contains(report.Summary, "probabilities are shown") ||
+				report.Summary != "A fresh tracker reports a possible, source-backed event; no probability is published, and this is not Redline confidence." {
+				t.Fatalf("report = %+v", report)
+			}
+		})
+	}
+}
