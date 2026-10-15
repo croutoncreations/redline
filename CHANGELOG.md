@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-15
+
+### Added
+
+- Window primer: start Claude's 5-hour window at scheduled times, or right after every reset, by
+  sending one tiny Haiku message through the local Claude Code login. It skips when a window is
+  already open or a Redline run is active, catches up after sleep within a configurable allowance,
+  records every attempt, and checks the next usage sample to confirm the window opened. Configure
+  it from the Claude usage card, `redline primer`, or `/v1/providers/{account}/primer`. It runs
+  even when automatic dispatch (`scheduler.enabled`) is off, and is unavailable while more than one
+  Claude account is configured, because the accounts share one local login.
+- `primer.failed` notification event, sent once per run of failed primer pings.
+- `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
+  trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
+  scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
+  The preview cannot notify, select jobs, alter scheduling, or start work.
+
+### Changed
+
+- Built with Go 1.26.9 (was 1.26.6), `modernc.org/sqlite` 1.60.1 and `golang.org/x/sys` 0.49.0.
+  Source builds download the newer toolchain automatically through the `toolchain` directive.
+- The window primer's `primer_settings` and `primer_attempts` tables are created on start without
+  claiming a schema version, so running 0.1.10 against the same database afterwards is safe.
+- Primer pings require a Claude Code version that supports `--safe-mode`; older versions are
+  refused rather than run with user hooks and settings loaded.
+
+### Fixed
+
+- The native Claude usage collector no longer fails the whole snapshot when no 5-hour window is
+  open (Claude reports a null reset between windows); the snapshot simply has no short window.
+
+### Security
+
+- Go 1.26.9 includes the standard-library fixes for advisories in `net/http`, `net/textproto`,
+  `crypto/tls`, and `os` that `govulncheck` reported against 0.1.10 (GO-2026-6603 through
+  GO-2026-6617).
+
 ## [0.1.10] - 2026-10-01
 
 ### Added
