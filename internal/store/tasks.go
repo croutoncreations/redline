@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -364,6 +365,14 @@ func checkPRMaintenanceProfile(profileID, harnessType, workspaceProvider, reposi
 	}
 	if strings.TrimSpace(repository) == "" {
 		return fmt.Errorf("%w: pr_maintenance tasks need a profile with a repository; profile %q has none", ErrInvalid, profileID)
+	}
+	// The agent runs inside a new worktree and passes REDLINE_REPO to
+	// `redline run attribute` and `redline lease`, which require an absolute
+	// path. A relative repository would resolve against the worktree instead
+	// of the daemon's directory, so every PR would be skipped.
+	if !filepath.IsAbs(strings.TrimSpace(repository)) {
+		return fmt.Errorf("%w: pr_maintenance tasks need a profile with an absolute repository path; profile %q has %q",
+			ErrInvalid, profileID, repository)
 	}
 	return nil
 }

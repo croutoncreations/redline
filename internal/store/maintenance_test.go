@@ -637,4 +637,16 @@ func TestPRMaintenanceRequiresProfileRepository(t *testing.T) {
 	if !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "repository") {
 		t.Fatalf("profile update err = %v", err)
 	}
+	// The agent passes REDLINE_REPO to run attribute and lease, which need an
+	// absolute path; a relative one would resolve against the new worktree.
+	err = db.UpdateProfile(t.Context(), domain.ExecutionProfile{ID: "repo", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "projects/repo"})
+	if !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative profile update err = %v", err)
+	}
+	createProfile(t, db, "relative", "codex-main", "codex-cli", "git-worktree", "./repo")
+	if err := db.CreateTask(t.Context(), maintenanceTask("maint-relative", "relative"), maintenanceNow); !errors.Is(err, store.ErrInvalid) ||
+		!strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative create err = %v", err)
+	}
 }

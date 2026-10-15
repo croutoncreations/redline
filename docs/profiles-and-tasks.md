@@ -64,7 +64,8 @@ prompt: Run `make lint` before pushing.   # optional project notes
   once. Any `prompt` or `prompt_file` is appended as "Additional project instructions"; it never
   replaces the built-in safety rules.
 - The profile must use the `git-worktree` or `devx` workspace provider and a local harness (not
-  `hermes`). A profile used by a maintenance task cannot be changed to an incompatible one.
+  `hermes`). Its `repository` must be an absolute path, because the agent passes it to
+  `redline run attribute` and `redline lease` from inside the new worktree. A profile used by a maintenance task cannot be changed to an incompatible one.
 - Each run works on at most one pull request and never merges. It considers only pull requests
   that `redline run attribute` proves came from a finished standard run in the same repository
   (see [Runs](runs-and-notifications.md)). It leases a branch with `redline lease acquire` before
@@ -163,7 +164,8 @@ Redline supports these workspace providers:
 Git worktree and DevX workspaces start from the current remote base. When the repository has an
 `origin` remote, Redline fetches the profile's base branch and creates the run from
 `origin/<base>` (an `origin/` or `refs/...` prefix in `base_branch` is accepted). An empty
-`base_branch` means origin's default branch. The fetch only updates remote-tracking refs: the main
+`base_branch` means origin's current default branch, asked from the remote each time (the clone's
+cached `origin/HEAD` is never trusted, so a renamed default is followed). The fetch only updates remote-tracking refs: the main
 checkout's branch and working tree are never touched. If `origin` exists but cannot be fetched,
 or `origin/<base>` cannot be verified, preparation fails rather than running from a stale local
 branch. Only a repository with no `origin` at all uses the local base. Each run records
