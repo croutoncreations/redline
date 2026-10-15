@@ -120,7 +120,7 @@ func TestBuildPreservesMaximumLengthPlainTextSummary(t *testing.T) {
 
 func TestBuildIgnoresUnreadableOutputFileInsteadOfReturningGarbage(t *testing.T) {
 	// OutputFile points at a directory: os.Open/Stat succeed, but ReadAt fails.
-	// readTail must surface that error so Build falls back to the default
+	// artifacts.ReadFileTail must surface that error so Build falls back to the default
 	// summary instead of treating a zero-filled buffer as real output.
 	dir := t.TempDir()
 
