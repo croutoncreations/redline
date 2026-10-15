@@ -31,11 +31,22 @@ func TestExistingDirectoryWorkspace(t *testing.T) {
 
 func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	repo := t.TempDir()
+	directory := filepath.Join(repo, ".redline", "worktrees", "run-1")
+	var commands []string
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if command.Name != "git" || strings.Join(command.Args, " ") != "-C "+repo+" worktree add -b redline/run-1 "+filepath.Join(repo, ".redline", "worktrees", "run-1")+" main" {
-			t.Fatalf("command = %#v", command)
+		args := strings.Join(command.Args, " ")
+		commands = append(commands, args)
+		switch {
+		case strings.HasSuffix(args, "remote get-url origin"):
+			return 2, nil // no origin remote
+		case strings.HasSuffix(args, "rev-parse --verify --quiet main^{commit}"):
+			_, _ = io.WriteString(command.Stdout, "abc123\n")
+			return 0, nil
+		case args == "-C "+repo+" worktree add --no-track -b redline/run-1 "+directory+" abc123":
+			return 0, os.MkdirAll(directory, 0o755)
 		}
-		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o755)
+		t.Fatalf("unexpected command %q", args)
+		return 1, nil
 	}}
 	manager := workspace.Manager{Runner: runner}
 	got, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
@@ -44,14 +55,25 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Branch != "redline/run-1" || got.Directory != filepath.Join(repo, ".redline", "worktrees", "run-1") {
+	if got.Branch != "redline/run-1" || got.Directory != directory {
 		t.Fatalf("workspace = %#v", got)
+	}
+	if got.Metadata["base_sync"] != workspace.BaseSyncNoOrigin || got.Metadata["base_ref"] != "main" || got.Metadata["base_sha"] != "abc123" {
+		t.Fatalf("metadata = %#v (commands %q)", got.Metadata, commands)
 	}
 }
 
 func TestGitWorktreeWorkspaceFailureIncludesGitStderr(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		args := strings.Join(command.Args, " ")
+		switch {
+		case strings.HasSuffix(args, "remote get-url origin"):
+			return 2, nil
+		case strings.Contains(args, "rev-parse"):
+			_, _ = io.WriteString(command.Stdout, "abc123\n")
+			return 0, nil
+		}
 		_, _ = io.WriteString(command.Stderr, "fatal: branch 'redline/run-1' already exists\n")
 		return 128, nil
 	}}
@@ -72,6 +94,9 @@ func TestGitWorktreeWorkspaceFailureIncludesGitStderr(t *testing.T) {
 func TestDevXWorkspaceCreatesNamedSession(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		if command.Name == "git" {
+			return devxGitNoOrigin(command)
+		}
 		if command.Name != "devx" || strings.Join(command.Args, " ") != "session create redline-run-1 --no-tmux" || command.Dir != repo {
 			t.Fatalf("command = %#v", command)
 		}
@@ -84,7 +109,8 @@ func TestDevXWorkspaceCreatesNamedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SessionID != "redline-run-1" || got.Directory != filepath.Join(repo, ".worktrees", "redline-run-1") {
+	if got.SessionID != "redline-run-1" || got.Directory != filepath.Join(repo, ".worktrees", "redline-run-1") ||
+		got.Branch != "redline-run-1" || got.Metadata["base_sync"] != workspace.BaseSyncNoOrigin {
 		t.Fatalf("workspace = %#v", got)
 	}
 }
@@ -92,6 +118,9 @@ func TestDevXWorkspaceCreatesNamedSession(t *testing.T) {
 func TestDevXWorkspacePassesConfiguredArguments(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		if command.Name == "git" {
+			return devxGitNoOrigin(command)
+		}
 		if got := strings.Join(command.Args, " "); got != "session create redline-run-1 --no-tmux --target host" {
 			t.Fatalf("args = %q", got)
 		}
@@ -109,6 +138,9 @@ func TestDevXWorkspacePassesConfiguredArguments(t *testing.T) {
 func TestDevXWorkspaceFailureIncludesDevXStderr(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		if command.Name == "git" {
+			return devxGitNoOrigin(command)
+		}
 		_, _ = io.WriteString(command.Stderr, "error: authentication expired, run `devx login`\n")
 		return 1, nil
 	}}
@@ -348,6 +380,21 @@ func TestCleanupPoliciesControlWorkspaceRemoval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// devxGitNoOrigin answers the git calls DevX preparation makes for a
+// repository without an origin remote whose session is already at HEAD.
+func devxGitNoOrigin(command redprocess.Command) (int, error) {
+	args := strings.Join(command.Args, " ")
+	switch {
+	case strings.HasSuffix(args, "remote get-url origin"):
+		return 2, nil
+	case strings.HasSuffix(args, "rev-parse --abbrev-ref HEAD"):
+		_, _ = io.WriteString(command.Stdout, "redline-run-1\n")
+	case strings.Contains(args, "rev-parse"):
+		_, _ = io.WriteString(command.Stdout, "abc123\n")
+	}
+	return 0, nil
 }
 
 type fakeRunner struct {

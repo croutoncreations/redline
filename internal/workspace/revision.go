@@ -17,9 +17,26 @@ type RevisionResolver interface {
 
 type GitRevisionResolver struct{ Runner redprocess.Runner }
 
+// Resolve reports the revision a new run of this profile would start from.
+//
+// Git worktree and DevX runs start from the freshly fetched origin/<base>, so
+// their revision comes from SyncBase too: a stale local branch must not read
+// as "unchanged" and keep a repo-change-gated job from ever reaching the
+// fetch. When origin is present but cannot be fetched the revision is unknown
+// and an error is returned, which the scheduler reports as a skip reason.
+//
+// Other providers run in the checkout as it is, so their revision is the
+// local base, which keeps unpushed local commits counting as changes.
 func (r GitRevisionResolver) Resolve(ctx context.Context, profile domain.ExecutionProfile) (string, error) {
 	if profile.Repository == "" {
 		return "", fmt.Errorf("repository is required to resolve source revision")
+	}
+	if profile.WorkspaceProvider == "git-worktree" || profile.WorkspaceProvider == "devx" {
+		synced, err := SyncBase(ctx, r.runner(), profile.Repository, profile.BaseBranch)
+		if err != nil {
+			return "", fmt.Errorf("resolve repository revision: %w", err)
+		}
+		return synced.SHA, nil
 	}
 	ref := profile.BaseBranch
 	if ref == "" {

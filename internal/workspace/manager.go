@@ -81,7 +81,9 @@ func (m Manager) Prepare(
 		return domain.Workspace{}, fmt.Errorf("unsupported workspace provider %q", profile.WorkspaceProvider)
 	}
 	if err != nil {
-		return domain.Workspace{}, err
+		// A provider may have created the workspace before failing; return
+		// it so the executor can record and clean it up.
+		return prepared, err
 	}
 	if profile.PrepareCommand != "" {
 		if err := m.runSetupHook(ctx, runID, taskName, profile, prepared); err != nil {
@@ -205,13 +207,16 @@ func (m Manager) prepareGitWorktree(
 		return domain.Workspace{}, fmt.Errorf("create worktree parent: %w", err)
 	}
 	branch := "redline/" + name
-	base := profile.BaseBranch
-	if base == "" {
-		base = "HEAD"
+	synced, err := SyncBase(ctx, m.runner(), profile.Repository, profile.BaseBranch)
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("prepare git worktree base: %w", err)
 	}
+	base := synced.Ref
 	var stderr bytes.Buffer
+	// --no-track: the run branch must never inherit origin/<base> as its
+	// upstream, or a bare `git push` could target the base branch.
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
-		Name: "git", Args: []string{"-C", profile.Repository, "worktree", "add", "-b", branch, directory, base},
+		Name: "git", Args: []string{"-C", profile.Repository, "worktree", "add", "--no-track", "-b", branch, directory, synced.SHA},
 		Stdout: io.Discard, Stderr: &stderr,
 	})
 	if err != nil {
@@ -224,7 +229,7 @@ func (m Manager) prepareGitWorktree(
 	if err := requireDirectory(directory); err != nil {
 		return domain.Workspace{}, err
 	}
-	return domain.Workspace{Directory: directory, Branch: branch}, nil
+	return domain.Workspace{Directory: directory, Branch: branch, Metadata: synced.metadata()}, nil
 }
 
 func (m Manager) prepareDevX(
@@ -233,6 +238,12 @@ func (m Manager) prepareDevX(
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
 	session := "redline-" + safeName(runID)
+	// Fetch before creating the session so an unreachable origin fails
+	// before anything exists to clean up.
+	synced, err := SyncBase(ctx, m.runner(), profile.Repository, profile.BaseBranch)
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("prepare DevX base: %w", err)
+	}
 	args := []string{"session", "create", session, "--no-tmux"}
 	args = append(args, profile.WorkspaceArgs...)
 	var stderr bytes.Buffer
@@ -251,7 +262,53 @@ func (m Manager) prepareDevX(
 	if err := requireDirectory(directory); err != nil {
 		return domain.Workspace{}, err
 	}
-	return domain.Workspace{Directory: directory, SessionID: session}, nil
+	prepared := domain.Workspace{Directory: directory, SessionID: session, Metadata: synced.metadata()}
+	branch, err := m.alignDevXSession(ctx, directory, synced)
+	if err != nil {
+		// Return the session so the executor records and cleans it up.
+		return prepared, err
+	}
+	prepared.Branch = branch
+	return prepared, nil
+}
+
+// alignDevXSession moves a new DevX session onto the synced base. DevX creates
+// the session branch from the main checkout's HEAD, which can be stale or on
+// another branch, so the session is fast-forwarded onto the fetched base. It
+// only does so when the session is clean and has no commits of its own;
+// anything else is reported instead of being overwritten.
+func (m Manager) alignDevXSession(ctx context.Context, directory string, synced BaseSync) (string, error) {
+	git := gitRunner{runner: m.runner(), repository: directory}
+	branch, _, err := git.output(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil || branch == "" || branch == "HEAD" {
+		return "", fmt.Errorf("DevX session %s is not on a named branch", directory)
+	}
+	head, _, err := git.output(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("read DevX session head in %s: %w", directory, err)
+	}
+	if head == synced.SHA {
+		return branch, nil
+	}
+	dirty, _, err := git.output(ctx, "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("check DevX session %s: %w", directory, err)
+	}
+	if dirty != "" {
+		return "", fmt.Errorf("DevX session %s has uncommitted changes; refusing to move it onto %s", directory, synced.Ref)
+	}
+	ownCommits, _, err := git.output(ctx, "rev-list", "--count", synced.SHA+"..HEAD")
+	if err != nil {
+		return "", fmt.Errorf("compare DevX session %s with %s: %w", directory, synced.Ref, err)
+	}
+	if ownCommits != "0" {
+		return "", fmt.Errorf("DevX session %s branch %s has %s commit(s) not on %s; refusing to start from a diverged base",
+			directory, branch, ownCommits, synced.Ref)
+	}
+	if _, stderr, err := git.output(ctx, "merge", "--ff-only", "--quiet", synced.SHA); err != nil {
+		return "", fmt.Errorf("fast-forward DevX session %s onto %s: %v%s", directory, synced.Ref, err, withDetail(stderr))
+	}
+	return branch, nil
 }
 
 func (m Manager) prepareCommand(
