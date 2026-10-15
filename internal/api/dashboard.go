@@ -81,6 +81,7 @@ type dashboardTask struct {
 	Name               string              `json:"name"`
 	Priority           int                 `json:"priority"`
 	Type               domain.TaskType     `json:"type"`
+	Kind               domain.TaskKind     `json:"kind"`
 	State              domain.TaskState    `json:"state"`
 	Enabled            bool                `json:"enabled"`
 	ExecutionProfileID string              `json:"execution_profile_id"`
@@ -331,7 +332,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			return dashboardResponse{}, profileErr
 		}
 		result.Tasks = append(result.Tasks, dashboardTask{
-			ID: task.ID, Name: task.Name, Priority: task.Priority, Type: task.Type, State: task.State, Enabled: task.Enabled,
+			ID: task.ID, Name: task.Name, Priority: task.Priority, Type: task.Type, Kind: task.Kind, State: task.State, Enabled: task.Enabled,
 			ExecutionProfileID: task.ExecutionProfileID, ProviderAccountID: profile.ProviderAccountID,
 			HarnessType: profile.HarnessType, Model: profile.Model, WorkspaceProvider: profile.WorkspaceProvider,
 			MinInterval: task.MinInterval, RequireRepoChange: task.RequireRepoChange,

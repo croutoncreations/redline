@@ -78,7 +78,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|lease|notification|candidates|pause|resume|pair|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -119,7 +119,12 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runResource(client, "profiles", remaining[1:], stdout, stderr)
 	case "scheduler":
 		return runScheduler(client, remaining[1:], stdout, stderr)
+	case "lease":
+		return runLease(client, remaining[1:], stdout, stderr)
 	case "run":
+		if len(remaining) > 1 && remaining[1] == "attribute" {
+			return runAttribute(client, remaining[2:], stdout, stderr)
+		}
 		if len(remaining) > 1 && remaining[1] == "watch" {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -146,7 +151,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, lease, notification, candidates, pause, resume,")
 	fmt.Fprintln(output, "          pair, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
@@ -1017,7 +1022,7 @@ func runScheduler(client apiclient.Client, args []string, stdout, stderr io.Writ
 
 func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs|watch>")
+		fmt.Fprintln(stderr, "usage: redline run <list|show|events|logs|watch|attribute>")
 		return 1
 	}
 	switch args[0] {

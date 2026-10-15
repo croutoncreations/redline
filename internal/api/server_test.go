@@ -588,11 +588,13 @@ func TestTaskTemplatesAreEditableStarters(t *testing.T) {
 		Prompt      string          `json:"prompt"`
 		MinInterval time.Duration   `json:"min_interval"`
 		Type        domain.TaskType `json:"type"`
+		Kind        domain.TaskKind `json:"kind"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&templates); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || len(templates) != 6 {
+	if resp.StatusCode != http.StatusOK || len(templates) != 7 ||
+		templates[6].ID != "pr-maintenance" || templates[6].Kind != domain.KindPRMaintenance {
 		t.Fatalf("status=%d templates=%#v", resp.StatusCode, templates)
 	}
 	if templates[0].ID != "bug-hunt" || templates[0].Prompt == "" ||

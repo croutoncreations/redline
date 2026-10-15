@@ -777,6 +777,26 @@ test('starts a job from an editable prompt template', async ({ page }) => {
   )).toBe(true);
 });
 
+test('creates a PR maintenance job that is always recurring and needs no prompt', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-template').selectOption('pr-maintenance');
+  await expect(page.locator('#task-kind')).toHaveValue('pr_maintenance');
+  await expect(page.locator('#task-type')).toHaveValue('recurring');
+  await expect(page.locator('#task-type')).toBeDisabled();
+  await expect(page.locator('#task-prompt')).toHaveValue('');
+  await expect(page.locator('#task-prompt-label')).toContainText('Additional project instructions');
+  await page.locator('#task-kind').selectOption('standard');
+  await expect(page.locator('#task-type')).toBeEnabled();
+  await page.locator('#task-kind').selectOption('pr_maintenance');
+  await page.locator('#task-profile').selectOption('codex-devx');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect.poll(() => state.requests.some(item =>
+    item.path === '/v1/tasks' && item.method === 'POST' && item.body.kind === 'pr_maintenance' &&
+    item.body.type === 'recurring' && item.body.prompt === '' && item.body.min_interval === '12h'
+  )).toBe(true);
+});
+
 test('creates a Pi profile and surfaces blocked deletion errors', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: 'Profiles' }).click();

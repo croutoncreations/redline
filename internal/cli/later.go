@@ -36,6 +36,7 @@ type taskFlagValues struct {
 	harness      string
 	cwd          string
 	taskType     string
+	kind         string
 	tier         string
 	priority     int
 	interval     string
@@ -65,7 +66,8 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 	flags.BoolVar(&values.allowDefault, "allow-default-profile", false, "acknowledge routing to a possibly unrelated repository")
 	flags.StringVar(&values.harness, "harness", "claude-code", "harness type matched by --profile auto")
 	flags.StringVar(&values.cwd, "cwd", "", "directory used by --profile auto (default: current directory)")
-	flags.StringVar(&values.taskType, "type", string(domain.OneOff), "one_off or recurring")
+	flags.StringVar(&values.taskType, "type", "", "one_off or recurring (default one_off; recurring for --kind pr_maintenance)")
+	flags.StringVar(&values.kind, "kind", string(domain.KindStandard), "standard or pr_maintenance (built-in PR maintenance; --prompt is optional)")
 	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, or expiring")
 	flags.IntVar(&values.priority, "priority", 50, "priority within the unlocked tier")
 	flags.StringVar(&values.interval, "min-interval", "", "minimum interval between recurring runs, such as 6h or 7d")
@@ -126,7 +128,18 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 		fmt.Fprintf(stderr, "prompt exceeds %d bytes\n", maxInlinePromptBytes)
 		return 1
 	}
-	if strings.TrimSpace(values.prompt) == "" && strings.TrimSpace(values.promptFile) == "" {
+	maintenance := domain.TaskKind(values.kind) == domain.KindPRMaintenance
+	if values.kind != string(domain.KindStandard) && !maintenance {
+		fmt.Fprintln(stderr, "--kind must be standard or pr_maintenance")
+		return 1
+	}
+	if values.taskType == "" {
+		values.taskType = string(domain.OneOff)
+		if maintenance {
+			values.taskType = string(domain.Recurring)
+		}
+	}
+	if !maintenance && strings.TrimSpace(values.prompt) == "" && strings.TrimSpace(values.promptFile) == "" {
 		fmt.Fprintln(stderr, "--prompt or --prompt-file is required")
 		return 1
 	}
@@ -226,6 +239,9 @@ func createTaskFromFlags(ctx context.Context, client apiclient.Client, values ta
 		"execution_profile_id": profileID,
 		"type":                 values.taskType,
 		"dispatch_tier":        values.tier,
+	}
+	if values.kind != "" {
+		body["kind"] = values.kind
 	}
 	if values.prompt != "" {
 		body["prompt"] = values.prompt

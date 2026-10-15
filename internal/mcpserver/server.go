@@ -82,6 +82,7 @@ type taskCreateInput struct {
 	ExecutionProfileID string `json:"execution_profile_id" jsonschema:"existing execution profile ID"`
 	RuntimeJobID       string `json:"runtime_job_id,omitempty" jsonschema:"existing Hermes job ID to trigger instead of starting a new prompt session"`
 	Type               string `json:"type" jsonschema:"one_off or recurring"`
+	Kind               string `json:"kind,omitempty" jsonschema:"standard (default) or pr_maintenance; pr_maintenance must be recurring with a min_interval and may omit the prompt"`
 	DispatchTier       string `json:"dispatch_tier" jsonschema:"behind, well_behind, or expiring"`
 	MinInterval        string `json:"min_interval,omitempty" jsonschema:"minimum interval between recurring runs, such as 6h or 7d"`
 	RequireRepoChange  bool   `json:"require_repo_change,omitempty" jsonschema:"only rerun after the source revision changes"`
@@ -97,6 +98,7 @@ type taskUpdateInput struct {
 	ExecutionProfileID *string `json:"execution_profile_id,omitempty" jsonschema:"new execution profile ID"`
 	RuntimeJobID       *string `json:"runtime_job_id,omitempty" jsonschema:"new existing Hermes job ID; empty clears it"`
 	Type               *string `json:"type,omitempty" jsonschema:"one_off or recurring"`
+	Kind               *string `json:"kind,omitempty" jsonschema:"standard or pr_maintenance"`
 	DispatchTier       *string `json:"dispatch_tier,omitempty" jsonschema:"behind, well_behind, or expiring"`
 	MinInterval        *string `json:"min_interval,omitempty" jsonschema:"new minimum interval; an empty string clears it"`
 	RequireRepoChange  *bool   `json:"require_repo_change,omitempty" jsonschema:"whether source revision must change before rerun"`
@@ -224,6 +226,7 @@ type taskView struct {
 	ExecutionProfileID           string              `json:"execution_profile_id"`
 	RuntimeJobID                 string              `json:"runtime_job_id,omitempty"`
 	Type                         domain.TaskType     `json:"type"`
+	Kind                         domain.TaskKind     `json:"kind"`
 	DispatchTier                 domain.DispatchTier `json:"dispatch_tier"`
 	MinInterval                  string              `json:"min_interval"`
 	RequireRepoChange            bool                `json:"require_repo_change"`
@@ -520,6 +523,7 @@ func (s *server) taskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input t
 	putOptional(body, "execution_profile_id", input.ExecutionProfileID)
 	putOptional(body, "runtime_job_id", input.RuntimeJobID)
 	putOptional(body, "type", input.Type)
+	putOptional(body, "kind", input.Kind)
 	putOptional(body, "dispatch_tier", input.DispatchTier)
 	putOptional(body, "min_interval", input.MinInterval)
 	putOptional(body, "require_repo_change", input.RequireRepoChange)
@@ -831,7 +835,7 @@ func viewTask(item domain.Task, includePrompt bool) taskView {
 		ID: item.ID, Name: item.Name, PromptFile: item.PromptFile, Priority: item.Priority,
 		QueueSequence: item.QueueSequence, ExecutionProfileID: item.ExecutionProfileID,
 		RuntimeJobID: item.RuntimeJobID,
-		Type:         item.Type, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(),
+		Type:         item.Type, Kind: item.Kind, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(),
 		RequireRepoChange: item.RequireRepoChange, Enabled: item.Enabled, State: item.State,
 		LastStartedAt: item.LastStartedAt, LastCompletedAt: item.LastCompletedAt,
 		LastSuccessfulSourceRevision: item.LastSuccessfulSourceRevision,

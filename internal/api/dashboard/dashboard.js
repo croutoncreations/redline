@@ -556,7 +556,7 @@ function renderTasks(tasks) {
     const schedulerOff = !latestDashboard?.scheduler?.enabled && task.enabled && task.state === 'queued';
     const recurrence = schedulerOff ? 'Waiting for global scheduling' : duration(task.min_interval);
     const status = schedulerOff ? 'Ready · scheduler off' : task.state;
-    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}${task.kind === 'pr_maintenance' ? ' · PR maintenance' : ''}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
@@ -944,6 +944,14 @@ async function deleteRuntimeConnection() {
 function showTaskError(message) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
 }
+function syncTaskKind() {
+  const maintenance = $('#task-kind').value === 'pr_maintenance';
+  if (maintenance) $('#task-type').value = 'recurring';
+  $('#task-type').disabled = maintenance;
+  $('#task-prompt-label').textContent = maintenance ? 'Additional project instructions (optional)' : 'Prompt';
+  $('#task-prompt').placeholder = maintenance ? 'Built-in PR maintenance instructions are used. Add project-specific notes here.' : 'Give the agent a bounded, concrete objective.';
+  syncIntervalField();
+}
 function syncIntervalField() {
   const recurring = $('#task-type').value === 'recurring';
   $('#task-interval').disabled = !recurring;
@@ -999,8 +1007,9 @@ async function openTask(id='') {
     $('#task-priority').value = task?.priority ?? 50;
     $('#task-tier').value = task?.dispatch_tier || 'behind';
     $('#task-type').value = task?.type || 'one_off';
+    $('#task-kind').value = task?.kind || 'standard';
     $('#task-interval').value = durationInput(task?.min_interval || 0);
-    syncIntervalField();
+    syncTaskKind();
     $('#task-prompt').value = task?.prompt || '';
     $('#task-prompt-file').value = task?.prompt_file || '';
     $('#task-repo-change').checked = !!task?.require_repo_change;
@@ -1023,8 +1032,9 @@ function applyTaskTemplate() {
   $('#task-priority').value = template.priority ?? 50;
   $('#task-tier').value = template.dispatch_tier || 'behind';
   $('#task-type').value = template.type || 'recurring';
+  $('#task-kind').value = template.kind || 'standard';
   $('#task-interval').value = durationInput(template.min_interval || 0);
-  syncIntervalField();
+  syncTaskKind();
   $('#task-prompt').value = template.prompt || '';
   $('#task-prompt-file').value = '';
   $('#task-repo-change').checked = !!template.require_repo_change;
@@ -1040,7 +1050,7 @@ async function saveTask(event) {
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
-    priority, type:$('#task-type').value,
+    priority, type:$('#task-kind').value === 'pr_maintenance' ? 'recurring' : $('#task-type').value, kind:$('#task-kind').value,
     dispatch_tier:$('#task-tier').value,
     min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
@@ -1273,6 +1283,7 @@ $('#task-form').addEventListener('submit',saveTask);
 $('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#task-type').addEventListener('change',syncIntervalField);
+$('#task-kind').addEventListener('change',syncTaskKind);
 $('#task-enabled').addEventListener('change',syncNewTaskActivation);
 $('#close-task').addEventListener('click',() => $('#task-dialog').close());
 $('#cancel-task').addEventListener('click',() => $('#task-dialog').close());

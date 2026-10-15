@@ -79,6 +79,12 @@ function taskTemplatesFixture() {
     priority: 80, type: 'recurring', dispatch_tier: 'behind',
     min_interval: 259200000000000, require_repo_change: true,
     requirements: ['Repository access', 'Test and static-analysis tools'],
+  }, {
+    id: 'pr-maintenance', name: 'Maintain Redline pull requests', kind: 'pr_maintenance',
+    description: 'Keeps Redline pull requests mergeable. The instructions are built into Redline.',
+    prompt: '', priority: 65, type: 'recurring', dispatch_tier: 'behind',
+    min_interval: 43200000000000, require_repo_change: false,
+    requirements: ['Git worktree or DevX profile with a local agent harness'],
   }];
 }
 

@@ -284,6 +284,9 @@ func newServer(
 	mux.HandleFunc("GET /v1/metrics/launch", server.launchMetrics)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
 	mux.HandleFunc("GET /v1/runs/completions", server.listRunCompletions)
+	mux.HandleFunc("GET /v1/runs/attribution", server.attributeRun)
+	mux.HandleFunc("POST /v1/branch-leases", server.acquireBranchLease)
+	mux.HandleFunc("DELETE /v1/branch-leases", server.releaseBranchLease)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
@@ -1179,6 +1182,7 @@ type taskRequest struct {
 	ExecutionProfileID string              `json:"execution_profile_id"`
 	RuntimeJobID       string              `json:"runtime_job_id"`
 	Type               domain.TaskType     `json:"type"`
+	Kind               domain.TaskKind     `json:"kind"`
 	MinInterval        string              `json:"min_interval"`
 	RequireRepoChange  bool                `json:"require_repo_change"`
 	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
@@ -1193,6 +1197,7 @@ type taskUpdateRequest struct {
 	ExecutionProfileID *string              `json:"execution_profile_id"`
 	RuntimeJobID       *string              `json:"runtime_job_id"`
 	Type               *domain.TaskType     `json:"type"`
+	Kind               *domain.TaskKind     `json:"kind"`
 	MinInterval        *string              `json:"min_interval"`
 	RequireRepoChange  *bool                `json:"require_repo_change"`
 	DispatchTier       *domain.DispatchTier `json:"dispatch_tier"`
@@ -1221,7 +1226,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		ID: id, Name: request.Name, Prompt: request.Prompt, PromptFile: request.PromptFile,
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
 		RuntimeJobID: request.RuntimeJobID,
-		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+		Type:         request.Type, Kind: request.Kind, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
 	if request.Enabled != nil && !*request.Enabled {
 		task.State = domain.Disabled
@@ -1287,6 +1292,9 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Type != nil {
 		task.Type = *request.Type
+	}
+	if request.Kind != nil {
+		task.Kind = *request.Kind
 	}
 	if request.MinInterval != nil {
 		task.MinInterval = 0
@@ -1756,6 +1764,16 @@ func (s *Server) evaluateCandidate(
 		return verdict, err
 	}
 	verdict.Profile = profile
+	if task.Kind == domain.KindPRMaintenance {
+		activeRun, err := s.store.ActivePRMaintenanceRun(ctx, profile.ID)
+		if err != nil {
+			return verdict, err
+		}
+		if activeRun != "" {
+			verdict.Reason = "pr_maintenance run " + activeRun + " is already active for this repository"
+			return verdict, nil
+		}
+	}
 	verdict.Revision = suppliedRevision
 	if verdict.Revision == "" && profile.Repository != "" {
 		cached, ok := revisions[profile.ID]
@@ -2045,6 +2063,48 @@ func (s *Server) listRunCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "cursor": next})
+}
+
+// attributeRun reports whether a pull-request head branch was created by a
+// finished standard Redline run in a repository. "Not attributable" is a
+// normal 200 answer with attributable=false and a reason.
+func (s *Server) attributeRun(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	attribution, err := s.store.AttributeBranch(r.Context(), query.Get("branch"), query.Get("repository"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, attribution)
+}
+
+type branchLeaseRequest struct {
+	Repository string `json:"repository"`
+	Branch     string `json:"branch"`
+	RunID      string `json:"run_id"`
+}
+
+func (s *Server) acquireBranchLease(w http.ResponseWriter, r *http.Request) {
+	var request branchLeaseRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
+	lease, err := s.store.AcquireBranchLease(r.Context(), request.Repository, request.Branch, request.RunID, s.now())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
+func (s *Server) releaseBranchLease(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if err := s.store.ReleaseBranchLease(r.Context(), query.Get("repository"), query.Get("branch"), query.Get("run_id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
