@@ -86,9 +86,12 @@ started. The branch must be `redline/<run>` from a `git-worktree` profile, with 
 branch that a `command` or `runtime-owned` workspace merely reported never attributes. While any
 run that created or recorded the branch is still active, attribution and leases are refused
 ("original run still active"). Runs do not snapshot their profile, so
-the profile's repository is also checked as it is now. Reassigning a profile to another repository
-cannot make old runs attributable there, because their recorded workspaces still point at the
-original repository.
+the profile's repository and `workspace_provider` are also checked as they are now. Reassigning a
+profile to another repository cannot make old runs attributable there, because their recorded
+workspaces still point at the original repository. Changing a profile's `workspace_provider` makes
+its earlier runs unattributable (for example, a `git-worktree` profile switched to `devx` no longer
+attributes its old `redline/<run>` branches). The result can be a false negative but never a false
+attribution.
 
 ## Dispatch tier and priority
 
@@ -164,11 +167,19 @@ starting from those unpushed commits. Push them, or move the main checkout back 
 The revision used by `require_repo_change` is read the same way, from the fetched
 `origin/<base>`. If the fetch fails, the task is skipped with a reason instead of being treated
 as unchanged. Only `require_repo_change` tasks read it during scheduling, and that read reuses a
-fetch of the same repository and base for up to two minutes. Preparing a workspace always fetches
-fresh. Fetches of one repository are serialized, and git network commands run with credential and
-SSH prompts disabled, so a missing credential fails fast instead of hanging. A run's
-`source_revision` (and the task's `last_successful_source_revision`) is the `base_sha` the
-workspace actually started from.
+fetch of the same repository and base for up to two minutes. Concurrent reads that miss share one
+fetch, and a fetch cut short by a cancelled request is not reused. Preparing a workspace always
+fetches fresh. Fetches of one repository are serialized, and git network commands run with
+credential and SSH prompts disabled, so a missing credential fails fast instead of hanging. SSH
+batch mode follows git's own SSH precedence. An existing `GIT_SSH_COMMAND`, or else the
+repository's `core.sshCommand`, keeps its options (such as a deploy key) and gains
+`-o BatchMode=yes` right after the program name, so it wins over a later `-o BatchMode=no`. A
+`GIT_SSH` program is left unchanged. Plain `ssh -o BatchMode=yes` is used only when none of these
+is set. A command beginning with a quoted program path gets the option at the end instead. A
+git-worktree or DevX run's `source_revision` (and the task's `last_successful_source_revision`) is
+the `base_sha` the workspace actually started from. For other workspace providers it is still the
+local `git rev-parse` of the base read at selection, with no fetch. A `base_sha` reported by a
+`command` workspace does not replace it.
 
 Code-changing templates start by checking for an `origin` remote. With one, they fetch and stop
 if the fetch fails or the workspace does not contain `origin/<base>`. In an `existing-directory`
