@@ -83,7 +83,7 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		var current []Signal
 		var latest time.Time
 		for _, signal := range signals {
-			if !isCurrent(signal, now) {
+			if !isCurrent(signal, now) || carriesNoEvidence(key, signal) {
 				continue
 			}
 			current = append(current, signal)
@@ -140,6 +140,15 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 		}
 	}
 	return KindUnknown, "The fresh public tracker state is unknown."
+}
+
+// carriesNoEvidence reports a record that names no announcement and states
+// nothing (for example Reset Beacon's "forecast": no new source-backed
+// announcement). Such a record must not outrank another tracker's live
+// evidence merely because it was checked more recently.
+func carriesNoEvidence(groupKey string, signal Signal) bool {
+	return strings.HasPrefix(groupKey, "feed:") && signal.Kind == KindUnknown && !signal.Withdrawn && !signal.Corrected &&
+		signal.Prediction24Percent == nil && signal.Prediction48Percent == nil
 }
 
 func hasExplicitPrimaryWindow(signals []Signal) bool {

@@ -448,3 +448,129 @@ func value(number *float64) float64 {
 	}
 	return *number
 }
+
+// Reset Beacon's compatibility state "forecast" means no new source-backed
+// announcement and carries no numbers (resetbeacon.com/api/docs). It is no
+// current evidence, not a prediction, and must not hide another tracker's
+// live probabilities.
+func TestResetBeaconForecastStateIsNoCurrentEvidence(t *testing.T) {
+	body := []byte(`{"calculatedAt":"2026-10-13T04:19:00Z","validUntil":"2026-10-13T04:30:00Z","staleSince":null,
+		"displayMode":"events","publicationState":"forecast","probabilities":null,
+		"answer":{"state":"forecast","percent":null,"deadline":null,"window":null,"posts":[]}}`)
+	signal, err := normalizeResetBeacon(body, nil, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Kind != KindUnknown || signal.Prediction24Percent != nil || signal.Prediction48Percent != nil || signal.Freshness != Fresh {
+		t.Fatalf("signal = %+v", signal)
+	}
+	signal.Feed = "resetbeacon"
+	report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}})
+	if report.State != KindUnknown || len(report.CurrentPredictions) != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+
+	codex, err := normalizeCodexReset(fixture(t, "codex-reset-model-only.json"), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex.Feed = "codex-reset"
+	report = BuildReport(fixtureNow, []SourceResult{{Signal: &signal}, {Signal: &codex}})
+	if report.State != KindPrediction || len(report.CurrentPredictions) != 1 || report.CurrentPredictions[0].Feed != "codex-reset" {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func codexForecastWithLastReset(official, banked, alert, lastReset string) string {
+	return `{"mode":"model","updated_at":"2026-10-13T04:14:42Z","banked_state":` + banked + `,"last_reset_at":` + lastReset + `,
+		"probabilities":{"rounded_24h":18,"rounded_48h":33},"official_signal":` + official + `,"latest_alert":` + alert + `}`
+}
+
+// codex-reset documents last_reset_at as stable and says a reset is real when
+// it moves forward (codex-reset.com/developers). A fresh value completes the
+// snapshot; an old, future-dated, or invalid one leaves the live prediction.
+func TestCodexResetFreshLastResetAtIsACompletion(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	resetAt := time.Date(2026, 10, 13, 3, 0, 0, 0, time.UTC)
+	signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", "null", `"2026-10-13T03:00:00Z"`)), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Kind != KindCompleted || signal.PublishedAt == nil || !signal.PublishedAt.Equal(resetAt) || signal.Withdrawn ||
+		value(signal.Prediction24Percent) != 18 || !contains(signal.Warnings, "derived from the documented last_reset_at") {
+		t.Fatalf("signal = %+v", signal)
+	}
+	signal.Feed = "codex-reset"
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindCompleted {
+		t.Fatalf("report = %+v", report)
+	}
+	if isCurrent(signal, resetAt.Add(73*time.Hour)) {
+		t.Fatal("a 73-hour-old reset is still current")
+	}
+
+	for name, test := range map[string]struct {
+		lastReset string
+		warning   string
+	}{
+		"four days old": {`"2026-10-09T04:00:00Z"`, ""},
+		"future":        {`"2026-10-14T04:00:00Z"`, "last_reset_at is in the future"},
+		"invalid":       {`"yesterday"`, "invalid last_reset_at"},
+		"null":          {`null`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", "null", test.lastReset)), header, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != KindPrediction || signal.PublishedAt != nil || signal.Freshness != Fresh ||
+				(test.warning != "" && !contains(signal.Warnings, test.warning)) {
+				t.Fatalf("signal = %+v", signal)
+			}
+		})
+	}
+}
+
+// last_reset_at names no announcement, so it never relabels an official
+// signal, replaces a banked record, overrides an alert's retraction, or
+// completes an alert-named announcement newer than the reset. A stale
+// snapshot's completion stays historical.
+func TestCodexResetLastResetAtIsConservative(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	fresh := `"2026-10-13T03:00:00Z"`
+	official := `{"tweet_id":"one","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"promise","window":null}`
+	for name, test := range map[string]struct {
+		official, banked, alert string
+		kind                    Kind
+		withdrawn               bool
+		warning                 string
+	}{
+		"official promise": {official, "null", "null", KindPromised, false, "not linked to the official signal"},
+		"banked":           {"null", `"available"`, "null", KindBanked, false, "did not replace the banked-reset record"},
+		"withdrawn alert": {"null", "null", `{"id":"9","kind":"reset","state":"withdrawn","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
+			KindPrediction, true, "retraction still applies"},
+		"newer active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T03:30:00Z","url":"https://x.com/a/status/9"}`,
+			KindPrediction, false, "older than the latest alert's announcement"},
+		"older active alert": {"null", "null", `{"id":"9","kind":"watch","state":"active","source_at":"2026-10-13T02:30:00Z","url":"https://x.com/a/status/9"}`,
+			KindCompleted, false, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset(test.official, test.banked, test.alert, fresh)), header, fixtureNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signal.Kind != test.kind || signal.Withdrawn != test.withdrawn || (test.warning != "" && !contains(signal.Warnings, test.warning)) {
+				t.Fatalf("signal = %+v", signal)
+			}
+		})
+	}
+
+	stale := http.Header{"X-Published-Expires-At": {"2026-10-13T04:10:00Z"}}
+	signal, err := normalizeCodexReset([]byte(codexForecastWithLastReset("null", "null", "null", fresh)), stale, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signal.Feed = "codex-reset"
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); signal.Freshness != Stale || report.State != KindUnknown {
+		t.Fatalf("stale snapshot drove the report: signal %+v report %+v", signal, report)
+	}
+}
