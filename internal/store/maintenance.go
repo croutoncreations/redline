@@ -146,12 +146,21 @@ type branchRuns struct {
 	// managed naming conventions, if such a run exists.
 	creator      branchRun
 	foundCreator bool
-	// active is an active run (by ID order) that is the creator or that
-	// recorded this branch in its workspace, if any. While one exists the
-	// branch may still be written by it, so it is neither attributable nor
-	// leasable.
-	active      branchRun
-	foundActive bool
+	// active holds every active run, in ID order, that is the creator or that
+	// recorded this branch in its workspace. While any exists the branch may
+	// still be written by it, so it is not attributable, and it is leasable
+	// only by a run that is the sole active claimant.
+	active []branchRun
+}
+
+// activeOtherThan returns the first active claimant that is not runID.
+func (b branchRuns) activeOtherThan(runID string) (branchRun, bool) {
+	for _, item := range b.active {
+		if item.runID != runID {
+			return item, true
+		}
+	}
+	return branchRun{}, false
 }
 
 // runsForBranch finds the runs with a claim on a head branch. Only Redline's
@@ -198,8 +207,8 @@ ORDER BY r.id`, creatorID, branch)
 		if creatorID != "" && item.runID == creatorID {
 			result.creator, result.foundCreator = item, true
 		}
-		if isActiveRunState(item.state) && !result.foundActive {
-			result.active, result.foundActive = item, true
+		if isActiveRunState(item.state) {
+			result.active = append(result.active, item)
 		}
 	}
 	return result, rows.Err()
@@ -257,9 +266,9 @@ func (d *DB) AttributeBranch(ctx context.Context, branch, repository string) (do
 	}
 	if !runs.foundCreator {
 		result.Reason = "no Redline run created this branch"
-		if runs.foundActive {
+		if len(runs.active) > 0 {
 			result.Reason = fmt.Sprintf("no Redline run created this branch, and run %s that recorded it is still %s",
-				runs.active.runID, runs.active.state)
+				runs.active[0].runID, runs.active[0].state)
 		}
 		return result, nil
 	}
@@ -275,9 +284,9 @@ func (d *DB) AttributeBranch(ctx context.Context, branch, repository string) (do
 		result.Reason = fmt.Sprintf("run %s profile repository %q is not this repository", item.runID, item.profileRepository)
 	case isActiveRunState(item.state):
 		result.Reason = fmt.Sprintf("run %s is still %s", item.runID, item.state)
-	case runs.foundActive:
+	case len(runs.active) > 0:
 		result.Reason = fmt.Sprintf("original run still active: run %s that recorded this branch is still %s",
-			runs.active.runID, runs.active.state)
+			runs.active[0].runID, runs.active[0].state)
 	case item.taskKind != domain.KindStandard:
 		result.Reason = fmt.Sprintf("run %s is a %s task, not a standard job", item.runID, item.taskKind)
 	default:
@@ -331,9 +340,9 @@ WHERE r.id = ?`, runID).Scan(&state, &workspaceDirectory, &profileRepository)
 	if err != nil {
 		return domain.BranchLease{}, err
 	}
-	if runs.foundActive && runs.active.runID != runID {
+	if other, ok := runs.activeOtherThan(runID); ok {
 		return domain.BranchLease{}, fmt.Errorf("%w: original run still active: branch %s is still being written by its original run %s",
-			ErrConflict, branch, runs.active.runID)
+			ErrConflict, branch, other.runID)
 	}
 
 	var holder, acquired string

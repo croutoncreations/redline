@@ -554,6 +554,42 @@ func TestAttributionAndLeaseRefusedWhileAnyRunRecordingTheBranchIsActive(t *test
 	}
 }
 
+// TestBranchLeaseRefusedWhenAnotherActiveRunRecordsTheBranchAfterTheRequester
+// covers a requester that itself recorded the branch and sorts first by run
+// ID: a later active run recording the same branch must still refuse.
+func TestBranchLeaseRefusedWhenAnotherActiveRunRecordsTheBranchAfterTheRequester(t *testing.T) {
+	f := newLeaseFixture(t)
+	ctx := t.Context()
+	createProfile(t, f.db, "cmd", "provider", "codex-cli", "command", f.repo)
+	for _, task := range []domain.Task{
+		{ID: "cmd", Name: "cmd", ExecutionProfileID: "cmd", Type: domain.OneOff},
+		{ID: "requester", Name: "requester", ExecutionProfileID: "std", Type: domain.OneOff},
+	} {
+		if err := f.db.CreateTask(ctx, task, maintenanceNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	startRunWithWorkspace(t, f.db, "a-requester-run", "requester", "provider", domain.Workspace{
+		Directory: filepath.Join(f.repo, ".redline", "worktrees", "a-requester-run"), Branch: f.branch,
+	})
+	if _, err := f.db.AcquireBranchLease(ctx, f.repo, f.branch, "a-requester-run", maintenanceNow); err != nil {
+		t.Fatalf("sole active claimant lease: %v", err)
+	}
+	if err := f.db.ReleaseBranchLease(ctx, f.repo, f.branch, "a-requester-run"); err != nil {
+		t.Fatal(err)
+	}
+	startRunWithWorkspace(t, f.db, "z-writer-run", "cmd", "provider", domain.Workspace{
+		Directory: filepath.Join(f.repo, ".redline", "worktrees", "z-writer-run"), Branch: f.branch,
+	})
+	_, err := f.db.AcquireBranchLease(ctx, f.repo, f.branch, "a-requester-run", maintenanceNow)
+	if !errors.Is(err, store.ErrConflict) || !strings.Contains(err.Error(), "z-writer-run") {
+		t.Fatalf("lease with a later active writer err = %v", err)
+	}
+	if got, _ := f.db.AttributeBranch(ctx, f.branch, f.repo); got.Attributable {
+		t.Fatalf("attribution with active writers = %#v", got)
+	}
+}
+
 func TestBranchLeaseNormalizesBranchRefsAndRequiresRunningRequester(t *testing.T) {
 	f := newLeaseFixture(t)
 	ctx := t.Context()
