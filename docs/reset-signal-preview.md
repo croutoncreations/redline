@@ -41,7 +41,12 @@ into optimistic evidence.
 
 Only fresh snapshots can drive the current qualitative state. Source announcements older than 72
 hours, expired windows, missing-TTL snapshots, future-dated records, and stale tracker probabilities
-remain visible as historical evidence but are excluded from the current assessment. A fresh
+remain visible as historical evidence but are excluded from the current assessment. A tracker's
+24h/48h probabilities describe the period starting at the snapshot, so whether they are current
+depends only on the snapshot's own freshness (its TTL). An announcement the same record names ages
+separately. A fresh codex-reset snapshot whose official signal is older than 72 hours, or whose
+window has ended, keeps its probabilities in `current_predictions` and can stand as an unlinked
+`PREDICTION`. The aged official claim itself is not current. A fresh
 correction or withdrawal retracts only its matching deduplicated announcement; an unrelated stale
 correction cannot erase a newer event.
 
@@ -63,36 +68,53 @@ and `unavailable` as "missing or outdated current checks". When either `answer.s
 `publicationState` has one of these values, Redline marks the record `stale`, even if `validUntil`
 is in the future and `staleSince` is empty, and adds a freshness warning. Any post the record keeps
 is then historical and cannot outrank another tracker's live evidence. It is never reported as a
-completion or promise.
+completion or promise. Reset Beacon's `possible` and `likely` (the compatibility name for "a possible
+reset backed by a public source") are reported as `PREDICTION` but publish no percentage. When the
+selected prediction carries no numbers, the summary says a possible, source-backed event was
+reported and that no probability is published. Redline never reconstructs a percentage.
 
 codex-reset.com's ordinary `mode: "model"` snapshot carries only tracker probabilities and is
 reported as an attributed `PREDICTION`. Its documented, stable `last_reset_at` is the tracker's
-reset signal ("equivalently, /api/forecast last_reset_at moves forward"). A `last_reset_at` within
-the 72-hour horizon makes the snapshot a `COMPLETED` global event dated by that time, with the
-probabilities still shown with attribution. An older value is history and leaves the prediction; a
-future-dated or invalid value is ignored with a warning. Because it names no post, it is applied
-conservatively: it never relabels an official signal (for example a promise), never replaces a
-banked-reset record, never overrides a latest-alert retraction, and never relabels an alert-named
-announcement (only a confirmed reset alert completes that); each of those cases is noted as a warning.
-The undocumented `latest_alert` remains supplementary. When it has no official signal, its latest alert supplies
-the announcement only while it has an `id` and the alert's own `source_at` is within the 72-hour
-horizon; an alert with no `id`, or an older, future-dated, or undated alert, is noted and does not
-replace or retract the live prediction. A `confirmed`
-reset alert is a completed global event (its `corrected` flag marks an edited alert message, not a
-retraction), but it never replaces a banked-reset record.
-An `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an
-edited message, noted as a warning); explicit withdrawals and any unrecognized alert
-state retract it. A retraction withdraws only the announcement the alert named, never a banked
-reset: with `banked_state` set and no official signal, a retracting or unrecognized alert state
-leaves the record `BANKED` and unlinked, with a warning, and the record carries the retraction
-separately (`retracted_announcement`). Another tracker's current record of that same announcement
-(same ID or canonical URL) is still reported as retracted (`UNKNOWN`); an unrelated announcement is
-unaffected. When an official signal is present it names the announcement (the banked state is not
-used), so a matching retracting alert still retracts the official claim. A `Retry-After` too large to represent is treated as a very long wait, never as
+reset signal ("equivalently, /api/forecast last_reset_at moves forward"). When there is no
+official signal, a `last_reset_at` within the 72-hour horizon makes the snapshot a `COMPLETED`
+global event dated by that time, with the probabilities still shown with attribution. An older
+value is history and leaves the prediction. A future-dated or invalid value is ignored with a
+warning. Because it names no post, it never relabels an official signal (for example a promise),
+and the warning says so.
+
+The documented `last_reset_at` also takes precedence over the undocumented fields ("Depend only on
+documented fields"). `banked_state` is a separate, supplemental fact. It is always kept in the
+record's `banked_state` field, and the record is `BANKED` only when nothing documented decides it. A
+fresh `last_reset_at`, or a confirmed reset alert, still completes the record, with a warning that
+the banked state is kept separately. A banked reset is never itself treated as a completed reset.
+
+The undocumented `latest_alert` remains supplementary. When there is no official signal, the alert
+is used only while it has an `id` and its own `source_at` is within the 72-hour horizon. An alert
+with no `id`, or an older, future-dated, or undated alert, is noted and does not replace or retract
+the live prediction. A usable alert is then applied as follows:
+- With a fresh `last_reset_at`, the completion stays unlinked whatever the order of the two times.
+  An `active` alert (or a confirmed alert of another kind) is noted and not linked, so its
+  announcement is never relabeled as completed. A retracting or unrecognized alert state does not
+  withdraw the documented reset. The record carries the retraction separately in
+  `retracted_announcement`, and a warning appears when the retraction is newer than the reset.
+- With `banked_state` set and no fresh `last_reset_at`, a retracting or unrecognized alert state
+  leaves the record `BANKED` and unlinked, and carries the retraction the same way.
+- A `confirmed` reset alert names the announcement and is a completed global event (its `corrected`
+  flag marks an edited alert message, not a retraction).
+- Otherwise (no fresh `last_reset_at`, no banked state), the alert names the announcement. An
+  `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an edited
+  message, noted as a warning). Explicit withdrawals and any unrecognized alert state retract it.
+
+A carried `retracted_announcement` still retracts another tracker's current record of that same
+announcement (same ID or canonical URL), which is then reported as `UNKNOWN`. An unrelated
+announcement is unaffected. When an official signal is present it names the announcement, so a
+matching retracting alert still retracts the official claim, and the banked state is kept only as
+the supplemental field. A `Retry-After` too large to represent is treated as a very long wait, never as
 permission to retry early.
 
 Normalized states remain distinct: `PREDICTION`, `INTENT`, `PROMISED`, `SCHEDULED`, `COMPLETED`,
-`BANKED`, and `UNKNOWN`. A banked reset is not a completed reset. A completed global announcement
+`BANKED`, and `UNKNOWN`. A banked reset is not a completed reset, and it does not hide a documented
+one. A completed global announcement
 does not prove that a particular account reset. Corrections and withdrawals retract an optimistic
 summary. Public feed text is untrusted data and is never treated as an instruction.
 
@@ -104,7 +126,8 @@ uses an ambiguous timezone label and
 two tracker schemas expose a null or absent window, Redline does not promote a tracker's inferred
 deadline into an independently verified source deadline. For a promised, scheduled, intended, or
 predicted record (for example a Reset Beacon "likely" post, or a codex-reset official signal of
-prediction type with a window), the tracker's deadline or window end expires the record, and the
+prediction type with a window), the tracker's deadline or window end expires the record's claim
+(a fresh snapshot's probabilities stay current, as described above), and the
 "reported window expired" note is shown only for such records. A codex-reset model-only snapshot
 has no window and is never expired this way. Reset Beacon's interpreted deadline is kept as a
 tracker-attributed window end only to expire the record: once that deadline has passed, the record
