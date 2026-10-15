@@ -1775,7 +1775,11 @@ func (s *Server) evaluateCandidate(
 		}
 	}
 	verdict.Revision = suppliedRevision
-	if verdict.Revision == "" && profile.Repository != "" {
+	// Reading the revision of a git-worktree or DevX profile fetches origin,
+	// so it is done only for tasks gated on a repository change. Other tasks
+	// get the revision their run actually started from when the workspace is
+	// prepared (see store.MarkRunRunning).
+	if verdict.Revision == "" && task.RequireRepoChange && profile.Repository != "" {
 		cached, ok := revisions[profile.ID]
 		if !ok {
 			cached.revision, cached.err = s.revision.Resolve(ctx, profile)
@@ -1783,7 +1787,7 @@ func (s *Server) evaluateCandidate(
 		}
 		if cached.err == nil {
 			verdict.Revision = cached.revision
-		} else if task.RequireRepoChange {
+		} else {
 			verdict.Reason = "repository revision could not be read: " + cached.err.Error()
 			return verdict, nil
 		}

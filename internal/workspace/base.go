@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -20,6 +23,11 @@ const (
 // fetchTimeout bounds one origin fetch so an unreachable remote cannot stall
 // dispatch or workspace preparation indefinitely.
 const fetchTimeout = 2 * time.Minute
+
+// syncBaseCacheTTL bounds how long a scheduler-side revision read reuses an
+// earlier fetch of the same repository and base, so one scheduling cycle or a
+// burst of dispatches fetches each repository at most once.
+const syncBaseCacheTTL = 2 * time.Minute
 
 // BaseSync describes the commit a fresh workspace starts from.
 type BaseSync struct {
@@ -44,7 +52,29 @@ func (b BaseSync) metadata() map[string]string {
 // no origin at all uses the local base. An empty configured base resolves to
 // origin's default branch. Fetching only updates remote-tracking refs; the
 // main checkout's branch and working tree are never touched.
+//
+// SyncBase always fetches: workspace preparation must start from origin as it
+// is now, so it never uses the cache. Its result does refresh the cache that
+// CachedSyncBase reads.
 func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
+	synced, err := syncBase(ctx, runner, repository, configuredBase)
+	syncBaseResults.store(repository, configuredBase, synced, err)
+	return synced, err
+}
+
+// CachedSyncBase is SyncBase for scheduling decisions. It reuses a result for
+// the same repository and configured base that is younger than
+// syncBaseCacheTTL, including a failure, so repeated candidate evaluation
+// cannot turn into a fetch per candidate per cycle. The revision it reports
+// can therefore be up to the TTL old; preparation fetches fresh regardless.
+func CachedSyncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
+	if synced, err, ok := syncBaseResults.load(repository, configuredBase); ok {
+		return synced, err
+	}
+	return SyncBase(ctx, runner, repository, configuredBase)
+}
+
+func syncBase(ctx context.Context, runner redprocess.Runner, repository, configuredBase string) (BaseSync, error) {
 	if runner == nil {
 		runner = redprocess.ExecRunner{}
 	}
@@ -59,12 +89,18 @@ func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configu
 		if ref == "" {
 			ref = "HEAD"
 		}
-		sha, _, err := git.output(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+		// --end-of-options keeps a base branch beginning with "-" from being
+		// read as an option.
+		sha, _, err := git.output(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
 		if err != nil {
 			return BaseSync{}, fmt.Errorf("no origin remote and local base %q could not be resolved in %s: %w", ref, repository, err)
 		}
 		return BaseSync{Ref: ref, SHA: sha, Sync: BaseSyncNoOrigin}, nil
 	}
+	// Overlapping fetches of one repository can collide on git's ref locks
+	// and fail, so network access to a repository is serialized process-wide.
+	unlock := lockRepository(repository)
+	defer unlock()
 	if name == "" {
 		resolved, err := git.originDefaultBranch(ctx)
 		if err != nil {
@@ -75,7 +111,7 @@ func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configu
 	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	refspec := "+refs/heads/" + name + ":refs/remotes/origin/" + name
-	if _, stderr, err := git.output(fetchCtx, "fetch", "--quiet", "--no-tags", "origin", refspec); err != nil {
+	if _, stderr, err := git.network(fetchCtx, "fetch", "--quiet", "--no-tags", "origin", refspec); err != nil {
 		return BaseSync{}, fmt.Errorf("origin present but fetch failed: git fetch origin %s in %s: %v%s",
 			name, repository, err, withDetail(stderr))
 	}
@@ -86,6 +122,82 @@ func SyncBase(ctx context.Context, runner redprocess.Runner, repository, configu
 			ref, repository, err, withDetail(stderr))
 	}
 	return BaseSync{Ref: ref, SHA: sha, Sync: BaseSyncOrigin}, nil
+}
+
+// canonicalRepository keys per-repository state so that different spellings
+// of one path (a trailing slash, /tmp versus /private/tmp) share it.
+func canonicalRepository(repository string) string {
+	cleaned := filepath.Clean(repository)
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return resolved
+	}
+	return cleaned
+}
+
+var repositoryLocks sync.Map // canonical repository path -> *sync.Mutex
+
+func lockRepository(repository string) func() {
+	value, _ := repositoryLocks.LoadOrStore(canonicalRepository(repository), &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+type syncBaseEntry struct {
+	synced BaseSync
+	err    error
+	at     time.Time
+}
+
+type syncBaseCache struct {
+	mu      sync.Mutex
+	entries map[string]syncBaseEntry
+}
+
+var syncBaseResults = &syncBaseCache{entries: map[string]syncBaseEntry{}}
+
+func syncBaseKey(repository, configuredBase string) string {
+	return canonicalRepository(repository) + "\x00" + domain.BaseBranchName(configuredBase)
+}
+
+func (c *syncBaseCache) load(repository, configuredBase string) (BaseSync, error, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[syncBaseKey(repository, configuredBase)]
+	if !ok || time.Since(entry.at) >= syncBaseCacheTTL {
+		return BaseSync{}, nil, false
+	}
+	return entry.synced, entry.err, true
+}
+
+func (c *syncBaseCache) store(repository, configuredBase string, synced BaseSync, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[syncBaseKey(repository, configuredBase)] = syncBaseEntry{synced: synced, err: err, at: time.Now()}
+}
+
+// gitNetworkEnvironment is the environment for git commands that contact a
+// remote. Unattended runs have no one to answer a credential or host-key
+// prompt, so every prompt fails fast instead of hanging until the timeout.
+func gitNetworkEnvironment() []string {
+	ssh := strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND"))
+	if ssh == "" {
+		ssh = "ssh"
+	}
+	environment := make([]string, 0, len(os.Environ())+3)
+	for _, variable := range os.Environ() {
+		name, _, _ := strings.Cut(variable, "=")
+		switch name {
+		case "GIT_TERMINAL_PROMPT", "GCM_INTERACTIVE", "GIT_SSH_COMMAND":
+			continue
+		}
+		environment = append(environment, variable)
+	}
+	return append(environment,
+		"GIT_TERMINAL_PROMPT=0",
+		"GCM_INTERACTIVE=never",
+		"GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes",
+	)
 }
 
 type gitRunner struct {
@@ -113,10 +225,19 @@ func (g gitRunner) output(ctx context.Context, args ...string) (string, string, 
 	return g.outputIn(ctx, g.repository, args...)
 }
 
+// network runs a git command that contacts a remote, with prompts disabled.
+func (g gitRunner) network(ctx context.Context, args ...string) (string, string, error) {
+	return g.run(ctx, g.repository, gitNetworkEnvironment(), args...)
+}
+
 func (g gitRunner) outputIn(ctx context.Context, directory string, args ...string) (string, string, error) {
+	return g.run(ctx, directory, nil, args...)
+}
+
+func (g gitRunner) run(ctx context.Context, directory string, environment []string, args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	exitCode, err := g.runner.Run(ctx, redprocess.Command{
-		Name: "git", Args: append([]string{"-C", directory}, args...),
+		Name: "git", Args: append([]string{"-C", directory}, args...), Env: environment,
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
@@ -138,7 +259,7 @@ func (g gitRunner) originDefaultBranch(ctx context.Context) (string, error) {
 	}
 	lsCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
-	out, stderr, err := g.output(lsCtx, "ls-remote", "--symref", "origin", "HEAD")
+	out, stderr, err := g.network(lsCtx, "ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("origin present but its default branch could not be read in %s: %v%s",
 			g.repository, err, withDetail(stderr))

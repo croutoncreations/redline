@@ -39,7 +39,7 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 		switch {
 		case strings.HasSuffix(args, "remote get-url origin"):
 			return 2, nil // no origin remote
-		case strings.HasSuffix(args, "rev-parse --verify --quiet main^{commit}"):
+		case strings.HasSuffix(args, "rev-parse --verify --quiet --end-of-options main^{commit}"):
 			_, _ = io.WriteString(command.Stdout, "abc123\n")
 			return 0, nil
 		case args == "-C "+repo+" worktree add --no-track -b redline/run-1 "+directory+" abc123":

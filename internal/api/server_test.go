@@ -2556,7 +2556,7 @@ func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"first", "second"} {
-		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+		if err := db.CreateTask(t.Context(), domain.Task{ID: id, Name: id, Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff, RequireRepoChange: true}, apiNow); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3590,5 +3590,45 @@ func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "event: dashboard") {
 		t.Fatal("event stream produced no events through the wrapper")
+	}
+}
+
+// Reading a git-worktree or DevX profile's revision fetches origin, so a
+// candidate that is not gated on a repository change must not trigger it.
+func TestCandidateWithoutRequireRepoChangeDoesNotResolveRevision(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.ExecutionProfile{ID: "fetching", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "/repo"}
+	if err := db.CreateProfile(t.Context(), profile, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "plain", Name: "plain", Priority: 10, ExecutionProfileID: profile.ID, Type: domain.OneOff}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	handler := api.NewServerWithDependencies(testConfig("http://usage.invalid"), db, func() time.Time { return apiNow }, fakeExecutor{
+		execute: func(context.Context, domain.Run, domain.Task, domain.ExecutionProfile) error { return nil },
+	}, fakeRevisionResolver{revisions: map[string]string{"fetching": "revision"}, calls: &calls})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/providers/codex-main/candidates", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"task_id":"plain"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("revision resolve calls=%d, want 0 for a task without require_repo_change", calls.Load())
 	}
 }
