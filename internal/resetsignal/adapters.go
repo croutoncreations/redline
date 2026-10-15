@@ -395,7 +395,11 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, documentedRe
 			signal.Warnings = append(signal.Warnings, "latest alert not used as the announcement: "+reason)
 			return
 		}
-		if documentedReset != nil && (state == "active" || (alertConfirmed(state) && !confirmedReset)) {
+		// A confirmed reset alert that is OLDER than the documented
+		// last_reset_at describes an earlier reset, so it must not date or
+		// link the record and hide the newer documented one.
+		olderConfirmed := confirmedReset && documentedReset != nil && published.Before(*documentedReset)
+		if documentedReset != nil && (state == "active" || (alertConfirmed(state) && !confirmedReset) || olderConfirmed) {
 			// The documented reset decides the record; an alert that
 			// neither confirms that reset nor retracts anything is not linked,
 			// so its announcement is never relabeled as completed.

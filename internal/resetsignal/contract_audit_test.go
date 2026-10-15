@@ -92,7 +92,7 @@ func TestCodexResetLastResetAtOutranksLatestAlert(t *testing.T) {
 		"active newer":     {"active", -time.Hour, false, ""},
 		"confirmed newer":  {"confirmed", -time.Hour, false, "111"},
 		"confirmed equal":  {"confirmed", lastReset, false, "111"},
-		"confirmed older":  {"confirmed", -30 * time.Hour, false, "111"},
+		"confirmed older":  {"confirmed", -30 * time.Hour, false, ""},
 		"withdrawn banked": {"withdrawn", -time.Hour, true, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -216,5 +216,32 @@ func TestResetBeaconSourceBackedPossibleIsNotSummarizedAsProbabilities(t *testin
 				t.Fatalf("report = %+v", report)
 			}
 		})
+	}
+}
+
+// A confirmed reset alert older than the documented last_reset_at describes an
+// earlier reset. It must not date or link the record: otherwise a current
+// linked promise from another tracker, newer than the alert but older than the
+// documented reset, would outrank it and hide the newer documented reset.
+func TestOlderConfirmedAlertDoesNotHideNewerDocumentedReset(t *testing.T) {
+	body := `{"mode":"model","updated_at":"` + auditTime(-time.Minute) + `","last_reset_at":"` + auditTime(-2*time.Hour) + `",
+		"probabilities":{"rounded_24h":18,"rounded_48h":33},"official_signal":null,
+		"latest_alert":{"id":"111","kind":"reset","state":"confirmed","source_at":"` + auditTime(-30*time.Hour) + `","url":"https://x.com/thsottiaux/status/111"}}`
+	codex, err := normalizeCodexReset([]byte(body), auditCodexHeader(), fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAt := fixtureNow.Add(-2 * time.Hour)
+	if codex.Kind != KindCompleted || codex.AnnouncementID != "" || codex.PublishedAt == nil || !codex.PublishedAt.Equal(wantAt) {
+		t.Fatalf("codex = %+v, want an unlinked completion dated by last_reset_at", codex)
+	}
+	codex.Feed = "codex-reset"
+	promisedAt := fixtureNow.Add(-10 * time.Hour)
+	promise := Signal{Feed: "willreset", Kind: KindPromised, AnnouncementID: "112", ClaimedOriginalURL: "https://x.com/thsottiaux/status/112",
+		Freshness: Fresh, PublishedAt: &promisedAt, GlobalAnnouncement: true}
+	for _, order := range [][]SourceResult{{{Signal: &codex}, {Signal: &promise}}, {{Signal: &promise}, {Signal: &codex}}} {
+		if report := BuildReport(fixtureNow, order); report.State != KindCompleted {
+			t.Fatalf("report = %+v", report)
+		}
 	}
 }

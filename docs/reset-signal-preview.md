@@ -100,7 +100,9 @@ the live prediction. A usable alert is then applied as follows:
 - With `banked_state` set and no fresh `last_reset_at`, a retracting or unrecognized alert state
   leaves the record `BANKED` and unlinked, and carries the retraction the same way.
 - A `confirmed` reset alert names the announcement and is a completed global event (its `corrected`
-  flag marks an edited alert message, not a retraction).
+  flag marks an edited alert message, not a retraction). When a fresh `last_reset_at` is newer than that
+  confirmed alert, the alert describes an earlier reset: it is noted and not linked, and the record
+  is the unlinked completion dated by `last_reset_at`.
 - Otherwise (no fresh `last_reset_at`, no banked state), the alert names the announcement. An
   `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an edited
   message, noted as a warning). Explicit withdrawals and any unrecognized alert state retract it.
