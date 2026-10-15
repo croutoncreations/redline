@@ -141,6 +141,28 @@ func TestSyncBaseResolvesEmptyBaseFromOriginDefaultBranch(t *testing.T) {
 	}
 }
 
+// refs/remotes/origin/HEAD is a clone-time cache that fetch never updates.
+// After the remote renames its default branch (the old one still existing),
+// an empty base must follow the remote, not the stale cached default.
+func TestSyncBaseFollowsRenamedRemoteDefaultDespiteStaleOriginHEAD(t *testing.T) {
+	upstream, local := originFixture(t)
+	gitCmd(t, local, "remote", "set-head", "origin", "main")
+	gitCmd(t, upstream, "checkout", "--quiet", "-b", "trunk")
+	trunk := commitFile(t, upstream, "t.txt", "trunk")
+	gitCmd(t, upstream, "symbolic-ref", "HEAD", "refs/heads/trunk")
+	gitCmd(t, local, "fetch", "--quiet", "origin")
+	if cached := gitCmd(t, local, "symbolic-ref", "refs/remotes/origin/HEAD"); cached != "refs/remotes/origin/main" {
+		t.Fatalf("fixture: cached origin/HEAD = %q, want the stale origin/main", cached)
+	}
+	synced, err := workspace.SyncBase(t.Context(), nil, local, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if synced.Ref != "origin/trunk" || synced.SHA != trunk {
+		t.Fatalf("synced = %#v, want origin/trunk at %s (the remote's current default)", synced, trunk)
+	}
+}
+
 func TestSyncBaseFailsWhenOriginCannotBeFetched(t *testing.T) {
 	_, local := originFixture(t)
 	gitCmd(t, local, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))

@@ -321,14 +321,13 @@ func (g gitRunner) run(ctx context.Context, directory string, environment []stri
 	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), nil
 }
 
-// originDefaultBranch reads origin's default branch from the remote-tracking
-// symbolic ref, then from the remote itself.
+// originDefaultBranch asks the remote for its current default branch. The
+// local refs/remotes/origin/HEAD is only a clone-time cache: it is not
+// updated by fetch, so after the remote renames its default branch it would
+// keep preparing workspaces from the former default. It is never used: if
+// the remote cannot be asked, the error stands, consistent with "origin
+// present but fetch failed" never falling back to stale state.
 func (g gitRunner) originDefaultBranch(ctx context.Context) (string, error) {
-	if ref, _, err := g.output(ctx, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); err == nil {
-		if name := domain.BaseBranchName(ref); name != "" && name != ref {
-			return name, nil
-		}
-	}
 	lsCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	out, stderr, err := g.network(lsCtx, "ls-remote", "--symref", "origin", "HEAD")
