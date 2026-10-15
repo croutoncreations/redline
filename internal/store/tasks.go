@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -65,7 +66,7 @@ func (d *DB) UpdateProfile(ctx context.Context, p domain.ExecutionProfile) error
 		return fmt.Errorf("check execution profile maintenance use: %w", err)
 	}
 	if maintenance > 0 {
-		if err := checkPRMaintenanceProfile(p.ID, p.HarnessType, p.WorkspaceProvider); err != nil {
+		if err := checkPRMaintenanceProfile(p.ID, p.HarnessType, p.WorkspaceProvider, p.Repository); err != nil {
 			return err
 		}
 	}
@@ -341,25 +342,28 @@ func validateTaskProfile(ctx context.Context, tx *sql.Tx, task domain.Task) erro
 	if task.Kind != domain.KindPRMaintenance {
 		return nil
 	}
-	var harnessType, workspaceProvider string
-	err := tx.QueryRowContext(ctx, `SELECT harness_type, workspace_provider FROM execution_profiles WHERE id = ?`,
-		task.ExecutionProfileID).Scan(&harnessType, &workspaceProvider)
+	var harnessType, workspaceProvider, repository string
+	err := tx.QueryRowContext(ctx, `SELECT harness_type, workspace_provider, repository FROM execution_profiles WHERE id = ?`,
+		task.ExecutionProfileID).Scan(&harnessType, &workspaceProvider, &repository)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("execution profile %q is not configured", task.ExecutionProfileID)
 	}
 	if err != nil {
 		return fmt.Errorf("read task execution profile: %w", err)
 	}
-	return checkPRMaintenanceProfile(task.ExecutionProfileID, harnessType, workspaceProvider)
+	return checkPRMaintenanceProfile(task.ExecutionProfileID, harnessType, workspaceProvider, repository)
 }
 
-func checkPRMaintenanceProfile(profileID, harnessType, workspaceProvider string) error {
+func checkPRMaintenanceProfile(profileID, harnessType, workspaceProvider, repository string) error {
 	if workspaceProvider != "git-worktree" && workspaceProvider != "devx" {
-		return fmt.Errorf("pr_maintenance tasks must use a git-worktree or devx workspace profile; profile %q uses %q",
-			profileID, workspaceProvider)
+		return fmt.Errorf("%w: pr_maintenance tasks must use a git-worktree or devx workspace profile; profile %q uses %q",
+			ErrInvalid, profileID, workspaceProvider)
 	}
 	if harnessType == "hermes" {
-		return fmt.Errorf("pr_maintenance tasks must use a local agent harness; profile %q uses hermes", profileID)
+		return fmt.Errorf("%w: pr_maintenance tasks must use a local agent harness; profile %q uses hermes", ErrInvalid, profileID)
+	}
+	if strings.TrimSpace(repository) == "" {
+		return fmt.Errorf("%w: pr_maintenance tasks need a profile with a repository; profile %q has none", ErrInvalid, profileID)
 	}
 	return nil
 }

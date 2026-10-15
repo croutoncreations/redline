@@ -71,7 +71,7 @@ func TestCodeTemplatesShareSafeStartAndConditionalDelivery(t *testing.T) {
 		if !strings.HasSuffix(prompt, tasktemplate.Delivery) {
 			t.Errorf("%s: prompt does not end with the shared delivery rule", template.ID)
 		}
-		for _, required := range []string{"git fetch origin", "origin/<base>", "Never reset", "if, and only if", "ready for review (not as a draft)", "Redline-Run: $REDLINE_RUN_ID", "Never merge"} {
+		for _, required := range []string{"git fetch origin", "origin/<base>", "Never reset", "If there is no origin remote, continue", "If the fetch fails", "if, and only if", "ready for review (not as a draft)", "Redline-Run: $REDLINE_RUN_ID", "Never merge"} {
 			if !strings.Contains(prompt, required) {
 				t.Errorf("%s: prompt is missing %q", template.ID, required)
 			}

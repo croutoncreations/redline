@@ -2504,6 +2504,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	} else if errors.Is(err, store.ErrConflict) {
 		status = http.StatusConflict
+	} else if errors.Is(err, store.ErrInvalid) {
+		status = http.StatusBadRequest
 	} else if strings.Contains(err.Error(), "not configured") {
 		status = http.StatusNotFound
 	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "must be") ||

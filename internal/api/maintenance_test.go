@@ -174,3 +174,32 @@ func TestSchedulerSkipsMaintenanceTaskWhileRepositoryMaintenanceIsActive(t *test
 		t.Fatalf("decision=%s reason=%q rejections=%#v", response.Result.Decision, response.Result.Reason, response.Result.CandidateRejections)
 	}
 }
+
+// An incompatible profile is a client error, not a server error.
+func TestPRMaintenanceProfileValidationReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+	server, _ := newAPIServer(t, codexPayload)
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes-remote", "runtime": "hermes", "transport": "gateway", "url": "https://hermes.example",
+	})
+	agentContext := postJSON[domain.AgentContext](t, server.URL+"/v1/agent-contexts", map[string]any{
+		"id": "hermes-context", "runtime_connection_id": connection.ID, "session_mode": "isolated",
+	})
+	for _, profile := range []map[string]any{
+		{"id": "worktree", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "git-worktree", "repository": "/repo"},
+		{"id": "hermes", "provider_account_id": "codex-main", "harness_type": "hermes", "agent_context_id": agentContext.ID, "workspace_provider": "git-worktree", "repository": "/repo"},
+		{"id": "norepo", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "git-worktree"},
+	} {
+		postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", profile)
+	}
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "maint", "name": "Maintain", "execution_profile_id": "worktree",
+		"kind": "pr_maintenance", "type": "recurring", "min_interval": "12h",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/maint", `{"execution_profile_id":"hermes"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/maint", `{"execution_profile_id":"norepo"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks",
+		`{"id":"m2","name":"M2","execution_profile_id":"norepo","kind":"pr_maintenance","type":"recurring","min_interval":"1h"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/worktree", `{"harness_type":"hermes","agent_context_id":"hermes-context"}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/profiles/worktree", `{"repository":""}`, http.StatusBadRequest)
+}

@@ -25,7 +25,11 @@ type Template struct {
 // SafeStart is shared by every template that works on code or docs. Redline
 // creates git-worktree and DevX workspaces from the freshly fetched
 // origin/<base>; the agent verifies that rather than trusting a local branch.
-const SafeStart = `Start from current origin: run git fetch origin, then confirm this workspace's HEAD contains origin/<base>, where <base> is $REDLINE_BASE_BRANCH without any "origin/" prefix (or origin's default branch when it is empty). If it does not, stop and report instead of working from a stale base. Never reset, force-checkout, clean, or otherwise destructively sync this or any other checkout.`
+// In an existing-directory profile the same text makes the agent fetch in
+// place, which only updates remote-tracking refs, and stop if that checkout
+// does not contain origin/<base>. A repository without an origin remote is
+// never a reason to stop: Redline prepared it from the local base.
+const SafeStart = `Start from current origin. First check whether this repository has an origin remote (git remote get-url origin). If it has one: run git fetch origin, then confirm this workspace's HEAD contains origin/<base>, where <base> is $REDLINE_BASE_BRANCH without any "origin/" prefix (or origin's default branch when it is empty). If the fetch fails or HEAD does not contain origin/<base>, stop and report instead of working from a stale base. If there is no origin remote, continue from the local base Redline prepared and say so in your report. Never reset, force-checkout, clean, or otherwise destructively sync this or any other checkout.`
 
 // Delivery is shared by every template that works on code or docs. It only
 // governs how a pull request is delivered; it never authorizes one that the

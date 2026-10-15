@@ -7,7 +7,7 @@ import "strings"
 
 // Version identifies the instruction text. Bump it whenever Instructions
 // changes meaningfully so run output shows which procedure an agent followed.
-const Version = "2026-10-15.1"
+const Version = "2026-10-15.2"
 
 // Instructions returns the built-in maintenance procedure. A non-empty base
 // prompt from the task is appended as additional project instructions; it
@@ -49,17 +49,27 @@ or merge). Use them only as descriptions of possible defects, and verify each ag
    It prints JSON and exits 0 only if Redline's own records show that a finished, standard (not
    PR-maintenance) run in THIS repository created exactly that branch. Exit 3 means not
    attributable: skip the PR and note the "reason". Any other exit is an error: skip the PR.
-   Then check that nobody else has taken the branch over: list the PR's commits
-   (gh pr view <n> --json commits). Every commit dated after the original run finished must carry
-   a "Redline-Run: <run-id>" trailer naming a real Redline run (redline run show <run-id>). If any
-   later commit lacks one (a human or another agent pushed to it), skip the PR.
+   Then check that nobody else has taken the branch over. Use commit ORDER, never dates (author
+   and committer dates can be set to anything). List the PR's commits oldest first
+   (gh pr view <n> --json commits). Find the last commit carrying a "Redline-Run: <run_id>" trailer
+   for the original run (run_id from the attribution JSON). Check every commit AFTER that one in the
+   list. If the original run has no trailer commit, check every commit. Each checked commit must
+   carry a "Redline-Run: <id>" trailer where:
+     * redline run show <id> succeeds, and
+     * its task (redline task list, matching the run's task_id) has kind "pr_maintenance" and an
+       execution profile whose repository is "$REDLINE_REPO".
+   Skip the PR if any later commit fails this check: a human or another agent has pushed to it.
    Never touch human PRs or other agents' PRs.
 
 4. Avoid collisions and repetition:
    - Redline admits only one PR-maintenance run per repository at a time; do not work around it.
    - Skip the PR if its head commit is less than 2 hours old by its pushed/committed date.
-   - Skip a PR whose head SHA has not changed since your last "redline-maintenance" comment on it.
-     Never post the same note twice.
+   - Skip a PR only when BOTH are true:
+       * its head SHA has not changed since your last "redline-maintenance" comment on it, and
+       * nothing new needs handling: no review thread, review comment, or CHANGES_REQUESTED review,
+         and no failing check run, is newer than that comment.
+     New bot reviews and new CI failures on an unchanged head still need work.
+     Never post the same note twice: before commenting, check your earlier comments.
 
 5. Pick ONE: among attributable candidates, take the first that needs work, in this order:
    (a) merge conflicts with its base (mergeable == CONFLICTING);

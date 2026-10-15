@@ -15,6 +15,9 @@ import (
 var (
 	ErrNotFound = errors.New("record not found")
 	ErrConflict = errors.New("record conflicts with current state")
+	// ErrInvalid marks a request that is well-formed but not allowed, such as
+	// a task whose profile cannot run its kind. The API maps it to 400.
+	ErrInvalid = errors.New("invalid request")
 )
 
 type DB struct{ db *sql.DB }

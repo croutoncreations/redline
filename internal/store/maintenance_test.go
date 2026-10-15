@@ -581,3 +581,24 @@ func TestBranchLeaseNormalizesBranchRefsAndRequiresRunningRequester(t *testing.T
 		t.Fatalf("preparing lease err = %v", err)
 	}
 }
+
+func TestPRMaintenanceRequiresProfileRepository(t *testing.T) {
+	db := openTaskDB(t)
+	createProfile(t, db, "norepo", "codex-main", "codex-cli", "git-worktree", "")
+	createProfile(t, db, "repo", "codex-main", "codex-cli", "git-worktree", "/repo")
+	err := db.CreateTask(t.Context(), maintenanceTask("maint", "norepo"), maintenanceNow)
+	if !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "repository") {
+		t.Fatalf("create err = %v", err)
+	}
+	if err := db.CreateTask(t.Context(), maintenanceTask("maint", "repo"), maintenanceNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTask(t.Context(), maintenanceTask("maint", "norepo"), maintenanceNow); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("update err = %v", err)
+	}
+	err = db.UpdateProfile(t.Context(), domain.ExecutionProfile{ID: "repo", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "git-worktree", Repository: "  "})
+	if !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "repository") {
+		t.Fatalf("profile update err = %v", err)
+	}
+}
