@@ -18,6 +18,10 @@ var (
 	// ErrInvalid marks a request that is well-formed but not allowed, such as
 	// a task whose profile cannot run its kind. The API maps it to 400.
 	ErrInvalid = errors.New("invalid request")
+	// ErrPRMaintenanceActive marks an admission refused because another
+	// pr_maintenance run is active for the same repository. It is also an
+	// ErrConflict.
+	ErrPRMaintenanceActive = fmt.Errorf("%w: pr_maintenance run already active", ErrConflict)
 )
 
 type DB struct{ db *sql.DB }

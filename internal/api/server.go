@@ -1712,7 +1712,7 @@ func (s *Server) dispatchCore(
 			response.Result.Mode = decision.ModeActive
 			response.Result.Reason = err.Error()
 			response.Result.TaskSelectionReason = "another scheduler request consumed concurrency first"
-			if task.Kind == domain.KindPRMaintenance && strings.Contains(err.Error(), "pr_maintenance run") {
+			if errors.Is(err, store.ErrPRMaintenanceActive) {
 				response.Result.TaskSelectionReason = "another pr_maintenance run became active for this repository first"
 			}
 			return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)

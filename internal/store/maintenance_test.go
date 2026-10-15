@@ -196,7 +196,7 @@ func TestPRMaintenanceAdmissionAllowsOneActiveRunPerRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := db.AdmitTaskWithLimits(t.Context(), "run-a2", "maint-a2", "provider", "", nil, limits, maintenanceNow)
-	if !errors.Is(err, store.ErrConflict) || !strings.Contains(err.Error(), "run-a1") {
+	if !errors.Is(err, store.ErrConflict) || !errors.Is(err, store.ErrPRMaintenanceActive) || !strings.Contains(err.Error(), "run-a1") {
 		t.Fatalf("second maintenance run in same repository err = %v", err)
 	}
 	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-b", "maint-b", "provider", "", nil, limits, maintenanceNow); err != nil {

@@ -152,8 +152,8 @@ WHERE t.id = ? AND p.provider_account_id = ?`, taskID, providerAccountID)
 			return domain.Run{}, err
 		}
 		if activeRun != "" {
-			return domain.Run{}, fmt.Errorf("%w: pr_maintenance run %s is already active for this repository",
-				ErrConflict, activeRun)
+			return domain.Run{}, fmt.Errorf("%w: run %s is already active for this repository",
+				ErrPRMaintenanceActive, activeRun)
 		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'running', last_started_at = ?, updated_at = ?
