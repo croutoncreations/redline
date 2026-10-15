@@ -40,7 +40,7 @@ func TestInstructionsSeparateReviewReadinessFromMergeReadiness(t *testing.T) {
 	if strings.Contains(text, "dated after the original run") {
 		t.Error("takeover check still compares commit dates")
 	}
-	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.4" {
+	if !strings.Contains(maintenance.Instructions(""), "version "+maintenance.Version) || maintenance.Version != "2026-10-15.5" {
 		t.Errorf("version = %q", maintenance.Version)
 	}
 	// The old merge-gated readiness rule waited on every required check,
@@ -88,12 +88,12 @@ func TestInstructionsForbidInstallingDependencies(t *testing.T) {
 func TestInstructionsReconcileEachPRWithItsOwnBase(t *testing.T) {
 	text := maintenance.Instructions("")
 	for _, required := range []string{
-		"<pr-base> is that PR's baseRefName", `git check-ref-format --branch "<pr-base>"`,
+		"<pr-base> is that PR's baseRefName", "git check-ref-format --branch '<pr-base>'",
 		"git fetch origin refs/heads/<pr-base>:refs/remotes/origin/<pr-base>",
 		"merge\n     origin/<pr-base>", "Conflicts: merge origin/<pr-base>",
 		"defined on the PR's own base\n     branch origin/<pr-base>",
 		"it is NEVER what a pull request is reconciled with",
-		"Never merge <base>, the project default branch, or any branch other\nthan origin/<pr-base>",
+		"Never merge <base>, the project default branch, or any branch other than\norigin/<pr-base>",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("instructions missing own-base rule %q", required)
@@ -107,5 +107,26 @@ func TestInstructionsReconcileEachPRWithItsOwnBase(t *testing.T) {
 	// The PR base is fetched before it is merged.
 	if strings.Index(text, "git fetch origin refs/heads/<pr-base>") > strings.Index(text, "Conflicts: merge origin/<pr-base>") {
 		t.Error("the PR base must be fetched before it is merged")
+	}
+}
+
+// baseRefName and the head branch are attacker-influenced (anyone who can
+// retarget a PR sets baseRefName), and git check-ref-format accepts shell
+// metacharacters, so the instructions restrict both to a safe character set
+// before either appears in a command, and single-quote them.
+func TestInstructionsRestrictBranchNamesBeforeShellUse(t *testing.T) {
+	text := maintenance.Instructions("")
+	for _, required := range []string{
+		"BEFORE it appears in any command",
+		"only of the characters A-Z a-z 0-9 . _ / -",
+		"The same rule applies to the PR head branch (<head>)",
+		"Single-quote '<pr-base>' and '<head>' in\nevery command",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("instructions missing branch-name safety rule %q", required)
+		}
+	}
+	if strings.Contains(text, `check-ref-format --branch "<pr-base>"`) {
+		t.Error("the validation command double-quotes <pr-base>, which a shell would expand")
 	}
 }

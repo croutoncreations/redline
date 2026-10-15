@@ -74,7 +74,10 @@ prompt: Run `make lint` before pushing.   # optional project notes
   revisits a pull request it already handled when a review thread, CHANGES_REQUESTED review, or
   failing check arrives after its last comment, even if the head commit is unchanged.
 - A pull request is brought up to date with its own base (its `baseRefName`), which is validated
-  as a branch name, fetched, and merged as `origin/<baseRefName>`. The profile's `base_branch`
+  as a branch name, fetched, and merged as `origin/<baseRefName>`. Because anyone who can retarget
+  a pull request controls `baseRefName`, it and the head branch must use only `A-Z a-z 0-9 . _ / -`
+  before they appear in any command, and are single-quoted; otherwise the pull request is
+  skipped. The profile's `base_branch`
   only sets where the run's throwaway worktree starts. Redline never merges the default branch,
   or any other branch, into a pull request that targets a different branch.
 - The agent uses only dependencies and tools that are already installed. It never installs
@@ -182,7 +185,10 @@ batch mode follows git's own SSH precedence. An existing `GIT_SSH_COMMAND`, or e
 repository's `core.sshCommand`, keeps its options (such as a deploy key) and gains
 `-o BatchMode=yes` right after the program name, so it wins over a later `-o BatchMode=no`. A
 `GIT_SSH` program is left unchanged. Plain `ssh -o BatchMode=yes` is used only when none of these
-is set. A command beginning with a quoted program path gets the option at the end instead. A
+is set. A command beginning with a quoted program path gets the option at the end instead. The
+option is added only when the program is OpenSSH (`ssh` or a path ending in `/ssh`); a plink or
+PuTTY command, a shell wrapper such as `sh -c …`, or a leading `VAR=value` prefix is left exactly
+as configured, relying on `GIT_TERMINAL_PROMPT=0`. A
 git-worktree or DevX run's `source_revision` (and the task's `last_successful_source_revision`) is
 the `base_sha` the workspace actually started from. For other workspace providers it is still the
 local `git rev-parse` of the base read at selection, with no fetch. A `base_sha` reported by a
