@@ -178,7 +178,9 @@ func isCurrent(signal Signal, now time.Time) bool {
 			return false
 		}
 	}
-	if signal.Window.End != nil && !signal.Window.End.After(now) {
+	// A window bounds only a forward-looking claim; a completion or a
+	// retraction outlives it.
+	if signal.Window.End != nil && expiresWithDeadline(signal) && !signal.Window.End.After(now) {
 		return false
 	}
 	return true

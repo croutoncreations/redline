@@ -404,6 +404,59 @@ func TestCodexResetCorrectedActiveAlertLeavesClaimUnchanged(t *testing.T) {
 	}
 }
 
+// codexEndedWindowPromise is an official promise whose tracker window ended
+// before fixtureNow, with the given latest alert.
+func codexEndedWindowPromise(alert string) []byte {
+	return []byte(`{
+		"mode":"announced","updated_at":"2026-10-13T04:14:42Z",
+		"official_signal":{"tweet_id":"one","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"promise",
+			"window":{"start":"2026-10-13T01:30:00Z","end":"2026-10-13T03:00:00Z","text":"within two hours"}},
+		"latest_alert":` + alert + `
+	}`)
+}
+
+// A confirmed reset alert outlives the official promise's window: the
+// completion stays current and is not warned about as an expired window.
+func TestCodexResetCompletedPastOfficialWindowStaysCompleted(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	signal, err := normalizeCodexReset(codexEndedWindowPromise(
+		`{"id":"one","kind":"reset","state":"confirmed","url":"https://x.com/a/status/one"}`), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Kind != KindCompleted || signal.Window.End == nil || signal.Window.End.After(fixtureNow) ||
+		!isCurrent(signal, fixtureNow) || contains(signal.Warnings, "announcement window has expired") {
+		t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
+	}
+	signal.Feed = "codex-reset"
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindCompleted {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+// A withdrawn alert served after the official window ended must keep
+// retracting the promise another tracker (naming the post only by ID, with
+// no window) still reports.
+func TestCodexResetWithdrawalPastOfficialWindowStillRetracts(t *testing.T) {
+	header := http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}
+	signal, err := normalizeCodexReset(codexEndedWindowPromise(
+		`{"id":"one","kind":"reset","state":"withdrawn","url":"https://x.com/a/status/one"}`), header, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !signal.Withdrawn || signal.Window.End == nil || !isCurrent(signal, fixtureNow) {
+		t.Fatalf("signal = %+v current=%v", signal, isCurrent(signal, fixtureNow))
+	}
+	signal.Feed = "codex-reset"
+	report := BuildReport(fixtureNow, []SourceResult{
+		{Signal: &signal},
+		{Signal: &Signal{Feed: "willreset", Kind: KindPromised, AnnouncementID: "one", Freshness: Fresh}},
+	})
+	if report.State != KindUnknown || !strings.Contains(report.Summary, "retracted") {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 // A Retry-After too large for a Duration must not overflow into a negative
 // delay that the floor would shorten into an early retry.
 func TestRetryAfterOverflowSaturates(t *testing.T) {

@@ -164,8 +164,9 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 	return signal, nil
 }
 
-// expiresWithDeadline reports whether a tracker deadline bounds the record's
-// claim: true only for forward-looking states that have not been retracted.
+// expiresWithDeadline reports whether a tracker deadline or window end bounds
+// the record's claim: true only for forward-looking states that have not been
+// retracted.
 func expiresWithDeadline(signal Signal) bool {
 	if signal.Withdrawn || signal.Corrected {
 		return false
@@ -496,7 +497,7 @@ func validateSignal(signal *Signal, now time.Time) {
 		signal.Freshness = FutureDated
 		signal.Warnings = append(signal.Warnings, "source publication time is in the future")
 	}
-	if signal.Window.End != nil && !signal.Window.End.After(now) {
+	if signal.Window.End != nil && expiresWithDeadline(*signal) && !signal.Window.End.After(now) {
 		signal.Warnings = append(signal.Warnings, "announcement window has expired; this does not prove completion")
 	}
 }
