@@ -324,7 +324,12 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 			state := strings.ToLower(strings.TrimSpace(alert.State))
 			switch {
 			case state == "active":
-				signal.Corrected = alert.Corrected
+				// An active alert leaves the claim unchanged. Its "corrected"
+				// flag marks an edited alert message, not a retraction; keep
+				// it visible as a warning only.
+				if alert.Corrected {
+					signal.Warnings = append(signal.Warnings, "active latest alert was edited by the tracker; the claim is unchanged")
+				}
 			case alertConfirmed(state):
 				// A confirmed reset alert is a completion. Its "corrected"
 				// flag marks an edited alert message, not a retraction. A

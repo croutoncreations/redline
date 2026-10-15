@@ -383,6 +383,27 @@ func TestCodexResetConfirmedAlertKeepsBankedAndIgnoresOtherKinds(t *testing.T) {
 	}
 }
 
+// An active alert edited by the tracker (corrected: true) does not retract
+// the current announcement; only a retracting state does.
+func TestCodexResetCorrectedActiveAlertLeavesClaimUnchanged(t *testing.T) {
+	body := `{
+		"mode":"announced","updated_at":"2026-10-13T04:14:42Z",
+		"official_signal":{"tweet_id":"one","summary":"promise","at":"2026-10-13T01:03:59Z","url":"https://x.com/a/status/one","signal_type":"promise","window":null},
+		"latest_alert":{"id":"one","kind":"watch","state":"active","corrected":true,"url":"https://x.com/a/status/one"}
+	}`
+	signal, err := normalizeCodexReset([]byte(body), http.Header{"X-Published-Expires-At": {"2026-10-13T04:30:00Z"}}, fixtureNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.Corrected || signal.Withdrawn || signal.Kind != KindPromised || !contains(signal.Warnings, "edited by the tracker") {
+		t.Fatalf("signal = %+v", signal)
+	}
+	signal.Feed = "codex-reset"
+	if report := BuildReport(fixtureNow, []SourceResult{{Signal: &signal}}); report.State != KindPromised {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 // A Retry-After too large for a Duration must not overflow into a negative
 // delay that the floor would shorten into an early retry.
 func TestRetryAfterOverflowSaturates(t *testing.T) {

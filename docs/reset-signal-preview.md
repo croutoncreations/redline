@@ -51,7 +51,8 @@ the announcement only while the alert's own `source_at` is within the 72-hour ho
 future-dated, or undated alert is noted and does not replace the live prediction. A `confirmed`
 reset alert is a completed global event (its `corrected` flag marks an edited alert message, not a
 retraction), but it never replaces a banked-reset record.
-An `active` alert leaves the record unchanged; explicit withdrawals and any unrecognized alert
+An `active` alert leaves the record unchanged, even when the tracker flags it `corrected` (an
+edited message, noted as a warning); explicit withdrawals and any unrecognized alert
 state retract it. A `Retry-After` too large to represent is treated as a very long wait, never as
 permission to retry early.
 
