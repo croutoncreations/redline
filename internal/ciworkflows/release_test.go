@@ -3,6 +3,8 @@ package ciworkflows
 import (
 	"slices"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestReleasePublishWaitsForGates pins the release gate: the job that
@@ -11,16 +13,20 @@ import (
 func TestReleasePublishWaitsForGates(t *testing.T) {
 	wf := load(t, "release.yml")
 	type job struct {
-		Needs       []string          `yaml:"needs"`
-		Permissions map[string]string `yaml:"permissions"`
+		Needs       []string
+		Permissions map[string]string
 	}
 	jobs := map[string]job{}
 	for id, node := range wf.Jobs {
-		var j job
-		if err := node.Decode(&j); err != nil {
-			t.Fatalf("release.yml job %s (write needs as a list): %v", id, err)
+		var raw struct {
+			Needs       yaml.Node         `yaml:"needs"`
+			Permissions map[string]string `yaml:"permissions"`
 		}
-		jobs[id] = j
+		if err := node.Decode(&raw); err != nil {
+			t.Fatalf("release.yml job %s: %v", id, err)
+		}
+		// needs: is either a single job ID or a list of them.
+		jobs[id] = job{Needs: triggerNames(raw.Needs), Permissions: raw.Permissions}
 	}
 	for _, id := range []string{"ci-gate", "homebrew-check", "goreleaser"} {
 		if _, ok := jobs[id]; !ok {
