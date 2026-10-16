@@ -12,6 +12,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
   scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
   The preview cannot notify, select jobs, alter scheduling, or start work.
+- A report-only `green-lane-shadow` check on pull requests that says whether a PR would have
+  qualified for auto-merge (size, test repro, CI, cross-vendor review, duplicates, denied paths).
+  It never merges, approves, or changes settings; see `docs/green-lane-shadow.md`.
+
+### Changed
+
+- CI now cancels superseded pull request runs, and the repository gained Claude Code GitHub
+  workflows for PR review and `@claude` mentions. Neither affects the shipped app or CLI.
 
 ## [0.1.10] - 2026-10-01
 
