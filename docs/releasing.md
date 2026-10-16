@@ -52,7 +52,10 @@ publishes nothing unless the first two pass:
    workflow from the Actions tab.
 2. **homebrew-check** runs `goreleaser release --snapshot --skip=publish` and then
    `scripts/brew-lint.sh` on the generated `Formula/redline.rb`, which runs `brew style` and
-   `brew audit --strict` on it. PR CI runs the same check (the `homebrew` job), together with a
+   `brew audit --strict` on it. Formula audits skip only the `version` check, because
+   GoReleaser always writes an explicit `version` that strict audit calls redundant. Snapshots
+   use the plain release version (`snapshot.version_template`), so the linted formula matches
+   the published one. PR CI runs the same check (the `homebrew` job), together with a
    cask rendered by `scripts/update-homebrew-cask.sh`, so a `.goreleaser.yaml` change that
    breaks the formula fails on its PR rather than at release time.
 3. **goreleaser** runs GoReleaser, which:
@@ -144,7 +147,8 @@ This step is manual and has been missed before, so the scheduled **Homebrew drif
 (`.github/workflows/homebrew-drift.yml`, daily, also runnable with *Run workflow*) runs
 `scripts/check-homebrew-versions.sh`. It fails as soon as the formula lags the latest final
 release, and fails once the cask is still behind 48 hours after the release was published. A
-failed run notifies you by email.
+failed run opens a "Homebrew tap lags the latest release" issue, or comments on the open one;
+close it once the tap catches up.
 
 ## 5. Verify
 

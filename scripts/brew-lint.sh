@@ -45,8 +45,13 @@ for file in "$@"; do
   cp "${file}" "${dest}"
   printf '==> brew style --%s %s\n' "${kind}" "${file}"
   brew style "--${kind}" "${dest}" || status=1
-  printf '==> brew audit --strict --%s %s\n' "${kind}" "${file}"
-  brew audit --strict "--${kind}" "${tap}/${name}" || status=1
+  # GoReleaser's formula template always writes `version "X.Y.Z"`, which
+  # strict audit reports as redundant with the version in the download URL.
+  # We cannot change the template, so skip only that one check for formulae.
+  except=()
+  [[ "${kind}" == formula ]] && except=(--except=version)
+  printf '==> brew audit --strict --%s %s %s\n' "${kind}" "${except[*]:-}" "${file}"
+  brew audit --strict "${except[@]}" "--${kind}" "${tap}/${name}" || status=1
 done
 
 if [[ ${status} -ne 0 ]]; then

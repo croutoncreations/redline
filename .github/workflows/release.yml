@@ -105,7 +105,7 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: release --snapshot --clean --skip=publish,before
-      - uses: Homebrew/actions/setup-homebrew@main
+      - uses: Homebrew/actions/setup-homebrew@f9676f1ffe2e1a720f81b2c54c51cfb99915ec14 # main
       - name: brew style and brew audit --strict on the generated formula
         run: scripts/brew-lint.sh dist/homebrew/Formula/redline.rb
 

@@ -80,7 +80,7 @@ jobs:
           REDLINE_VERSION=0.0.0 REDLINE_CASK_DRY_RUN=1 \
             scripts/update-homebrew-cask.sh dist/cask-check/Redline-0.0.0-universal.dmg \
             > dist/cask-check/Casks/redline.rb
-      - uses: Homebrew/actions/setup-homebrew@main
+      - uses: Homebrew/actions/setup-homebrew@f9676f1ffe2e1a720f81b2c54c51cfb99915ec14 # main
       - name: brew style and brew audit --strict
         run: scripts/brew-lint.sh dist/homebrew/Formula/redline.rb dist/cask-check/Casks/redline.rb
 
