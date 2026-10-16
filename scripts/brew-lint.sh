@@ -50,8 +50,10 @@ for file in "$@"; do
   # We cannot change the template, so skip only that one check for formulae.
   except=()
   [[ "${kind}" == formula ]] && except=(--except=version)
-  printf '==> brew audit --strict --%s %s %s\n' "${kind}" "${except[*]:-}" "${file}"
-  brew audit --strict "${except[@]}" "--${kind}" "${tap}/${name}" || status=1
+  # Without --os/--arch, brew audits only the runner's OS and architecture, so
+  # the formula's on_macos/arm branches would go unchecked on a Linux runner.
+  printf '==> brew audit --strict --os=all --arch=all --%s %s %s\n' "${kind}" "${except[*]:-}" "${file}"
+  brew audit --strict --os=all --arch=all "${except[@]}" "--${kind}" "${tap}/${name}" || status=1
 done
 
 if [[ ${status} -ne 0 ]]; then

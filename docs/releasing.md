@@ -52,7 +52,8 @@ publishes nothing unless the first two pass:
    workflow from the Actions tab.
 2. **homebrew-check** runs `goreleaser release --snapshot --skip=publish` and then
    `scripts/brew-lint.sh` on the generated `Formula/redline.rb`, which runs `brew style` and
-   `brew audit --strict` on it. Formula audits skip only the `version` check, because
+   `brew audit --strict --os=all --arch=all` on it, so the macOS and ARM branches are checked
+   from the Linux runner too. Formula audits skip only the `version` check, because
    GoReleaser always writes an explicit `version` that strict audit calls redundant. Snapshots
    use the plain release version (`snapshot.version_template`), so the linted formula matches
    the published one. PR CI runs the same check (the `homebrew` job), together with a
