@@ -45,7 +45,7 @@ redline task list
 redline task enable add-tests
 redline task disable add-tests
 redline task dispatch add-tests
-redline task retry add-tests
+redline task retry add-tests                               # only for a failed task
 redline candidates --provider codex-main
 ```
 
@@ -125,13 +125,16 @@ redline notification list
 ## Mobile pairing
 
 ```bash
-redline pair --qr
-redline pair --qr --host macbook-pro.example.ts.net --port 8443
+redline --config redline.yaml pair --qr
+redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
 redline token rotate --yes
 ```
 
-`pair` requires `--qr`; `--host` sets the Tailscale MagicDNS hostname when discovery is
-unavailable and `--port` (default 443) the Tailscale Serve HTTPS port. `token rotate` replaces the
+`pair` requires `--qr` and reads the service configuration from `--config`, so point it at the
+file the service uses (for the macOS app,
+`~/Library/Application Support/Redline/redline.yaml`). `--host` sets the Tailscale MagicDNS
+hostname when discovery is unavailable and must already be listed in `api.trusted_hosts`; `--port`
+(default 443) sets the Tailscale Serve HTTPS port. `token rotate` replaces the
 API token and signs out every paired device; restart the service afterward. See
 [Mobile dashboard setup](mobile.md).
 
