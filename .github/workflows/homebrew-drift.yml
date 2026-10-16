@@ -1,0 +1,26 @@
+name: Homebrew drift
+
+# Fails when croutoncreations/homebrew-tap lags the latest GitHub release: the
+# formula immediately, the cask after a 48-hour grace period (it is pushed by
+# hand once the DMG is built). A failed scheduled run notifies the workflow's
+# owner, which is the "you forgot the cask" reminder.
+
+on:
+  schedule:
+    - cron: "17 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare tap versions with the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-homebrew-versions.sh

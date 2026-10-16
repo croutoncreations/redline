@@ -4,6 +4,12 @@ name: Release
 # pushed. The macOS app DMG is built and uploaded separately (see
 # scripts/package-macos-release.sh); it cannot be produced here because signing
 # and notarization need a Developer ID identity that does not live in CI.
+#
+# Nothing is published unless:
+#   1. ci-gate: the tagged commit is on main and the CI workflow's push run for
+#      that commit succeeded (waits for an in-progress run), and
+#   2. homebrew-check: a snapshot build's generated formula passes
+#      `brew style` and `brew audit --strict`.
 
 on:
   push:
@@ -11,11 +17,103 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  goreleaser:
+  ci-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require tagged commit on main
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main. Release only from commits merged to main."
+            exit 1
+          fi
+      - name: Wait for green CI on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Allow time for CI to start and finish when the tag is pushed right
+          # after the merge. CI normally takes about five minutes.
+          WAIT_MINUTES: "45"
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+          while :; do
+            # Do not hide gh's stderr: it is the only signal for API errors.
+            runs="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml \
+              --commit "${GITHUB_SHA}" --branch main --event push --limit 20 \
+              --json databaseId,status,conclusion,url)"
+            latest="$(jq -c 'sort_by(.databaseId) | last // empty' <<<"${runs}")"
+            if [[ -z "${latest}" ]]; then
+              # CI only runs for the head commit of each push to main. A commit
+              # that is no longer the tip and has no run will never get one.
+              git fetch --quiet origin main
+              if [[ "$(git rev-parse origin/main)" != "${GITHUB_SHA}" ]]; then
+                echo "::error::No CI push run on main exists for ${GITHUB_SHA}, and main has moved past it, so one will not appear. Tag a commit that CI ran on (normally the merge commit at the tip of main). Nothing was published."
+                exit 1
+              fi
+              state="no CI run found yet"
+            else
+              status="$(jq -r .status <<<"${latest}")"
+              conclusion="$(jq -r .conclusion <<<"${latest}")"
+              url="$(jq -r .url <<<"${latest}")"
+              if [[ "${status}" == "completed" ]]; then
+                if [[ "${conclusion}" == "success" ]]; then
+                  echo "CI passed for ${GITHUB_SHA}: ${url}"
+                  exit 0
+                fi
+                echo "::error::CI for ${GITHUB_SHA} on main concluded '${conclusion}': ${url}. Fix main (or re-run CI) and re-run this release workflow; nothing was published."
+                exit 1
+              fi
+              state="CI ${status}: ${url}"
+            fi
+            if (( $(date +%s) >= deadline )); then
+              echo "::error::Timed out after ${WAIT_MINUTES} minutes waiting for a successful CI push run on main for ${GITHUB_SHA} (${state}). Nothing was published."
+              exit 1
+            fi
+            echo "Waiting: ${state}"
+            sleep 30
+          done
+
+  homebrew-check:
+    needs: ci-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Snapshot build (no publish)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish,before
+      - uses: Homebrew/actions/setup-homebrew@main
+      - name: brew style and brew audit --strict on the generated formula
+        run: scripts/brew-lint.sh dist/homebrew/Formula/redline.rb
+
+  goreleaser:
+    needs: [ci-gate, homebrew-check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:

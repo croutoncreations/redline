@@ -75,7 +75,7 @@ brews:
   - name: redline
     ids: [redline]
     homepage: https://github.com/croutoncreations/redline
-    description: "Budget-aware dispatcher that spends spare Codex and Claude subscription quota on queued agent jobs"
+    description: "Spend spare Codex and Claude subscription quota on queued agent jobs"
     license: Apache-2.0
     directory: Formula
     commit_author:
