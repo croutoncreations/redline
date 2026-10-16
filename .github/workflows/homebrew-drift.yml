@@ -39,7 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           title="Homebrew tap lags the latest release"
-          body="$(printf '%s\n\n```\n%s\n```\n\nSee docs/releasing.md, step 4.' "${RUN_URL}" "$(cat drift.txt)")"
+          fence='```'
+          body="$(printf '%s\n\n%s\n%s\n%s\n\nSee docs/releasing.md, step 4.' "${RUN_URL}" "${fence}" "$(cat drift.txt)" "${fence}")"
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
