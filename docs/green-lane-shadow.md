@@ -71,7 +71,10 @@ Tests that the same test IDs:
   test's own status is used, not its subtests'. Compile failures on either
   side are inconclusive and report go's first error lines.
 - Evidence artifacts: `repro-raw-<run>` (plan, go test JSON and stderr per
-  side) and `repro-evidence-<PR>-<run>` (trusted plan and per-test statuses).
+  side) and `repro-evidence-<PR>-<run>` (trusted plan, per-test statuses, and
+  `base_failure_output.txt` with the base-side output of every test that
+  failed there, or go's compile error; always written, with an explicit
+  marker when nothing failed on base).
 - The jobs that run PR code have a read-only token and no secrets.
 
 **Trust boundary:** the `repro` job executes PR code, so its raw results are

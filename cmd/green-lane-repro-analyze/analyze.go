@@ -52,7 +52,11 @@ func analyze(plan Plan, resultsDir string) Outcome {
 			return Outcome{Inconclusive: true, Message: fmt.Sprintf("Base results for %s unusable: %v", pkg.Dir, err)}
 		}
 		if base.buildFailed {
-			return Outcome{Inconclusive: true, Message: fmt.Sprintf("Compile failed on base commit for %s: %s", goPackageArg(pkg.Dir), firstLines(base.buildOutput, 3))}
+			return Outcome{
+				Inconclusive: true,
+				Message:      fmt.Sprintf("Compile failed on base commit for %s: %s", goPackageArg(pkg.Dir), firstLines(base.buildOutput, 3)),
+				BaseOutput:   fmt.Sprintf("=== %s (compile failed on base)\n%s", goPackageArg(pkg.Dir), base.buildOutput),
+			}
 		}
 		head, err := parseResultFile(resultFile(resultsDir, "head", i))
 		if err != nil {
@@ -65,6 +69,11 @@ func analyze(plan Plan, resultsDir string) Outcome {
 			id := testID(pkg.Dir, name)
 			ev := TestEvidence{ID: id, Base: base.tests[name], Head: head.tests[name]}
 			out.Tests = append(out.Tests, ev)
+			// Keep the base output of every test that failed there, whatever
+			// the verdict, so reviewers can see why it failed before.
+			if ev.Base == "fail" {
+				fmt.Fprintf(&baseOutput, "=== %s (base: fail)\n%s", id, base.output[name])
+			}
 			switch {
 			case ev.Base == "":
 				problems = append(problems, id+": did not execute on base")
@@ -76,17 +85,16 @@ func analyze(plan Plan, resultsDir string) Outcome {
 				problems = append(problems, fmt.Sprintf("%s: did not pass on head (status: %s)", id, ev.Head))
 			default:
 				out.TestIDs = append(out.TestIDs, id)
-				baseOutput.WriteString(base.output[name])
 			}
 		}
 	}
 
+	out.BaseOutput = baseOutput.String()
 	if len(problems) > 0 {
 		out.Message = strings.Join(problems, "; ")
 		return out
 	}
 	out.Pass = true
-	out.BaseOutput = baseOutput.String()
 	out.Message = fmt.Sprintf("Tests %v failed on base, passed on head", out.TestIDs)
 	return out
 }
@@ -157,6 +165,16 @@ func parseResults(r io.Reader) (runResult, error) {
 		return res, fmt.Errorf("package did not complete")
 	}
 	return res, nil
+}
+
+// baseFailureReport is the content of base_failure_output.txt. It is always
+// written, so a missing artifact never reads as "nothing failed".
+func baseFailureReport(o Outcome) string {
+	header := fmt.Sprintf("green-lane repro: pass=%t inconclusive=%t\n%s\n\n", o.Pass, o.Inconclusive, o.Message)
+	if o.BaseOutput == "" {
+		return header + "(no test failed on the base commit; no base failure output)\n"
+	}
+	return header + o.BaseOutput
 }
 
 // writeOutputs prints GITHUB_OUTPUT lines. Messages are flattened to a single

@@ -11,7 +11,7 @@
 //	        Runs the planned tests on the merge-base (with the PR's test files
 //	        and testdata overlaid) and on the head, in fresh worktrees.
 //	        This executes PR code; its output is evidence, not a verdict.
-//	analyze -plan plan.json -results DIR [-evidence FILE]
+//	analyze -plan plan.json -results DIR [-evidence FILE] [-base-output FILE]
 //	        Scores the results and prints GITHUB_OUTPUT lines
 //	        (pass, inconclusive, message, test_ids).
 package main
@@ -97,6 +97,7 @@ func cmdAnalyze(args []string, stdout, stderr io.Writer) int {
 	planPath := fs.String("plan", "plan.json", "plan computed by trusted code")
 	results := fs.String("results", ".", "directory holding the run subcommand's result files")
 	evidence := fs.String("evidence", "", "optional path for a JSON evidence file")
+	baseOutputPath := fs.String("base-output", "", "optional path for base_failure_output.txt")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -111,6 +112,11 @@ func cmdAnalyze(args []string, stdout, stderr io.Writer) int {
 	if *evidence != "" {
 		if err := writeJSON(*evidence, outcome); err != nil {
 			fmt.Fprintf(stderr, "write evidence: %v\n", err)
+		}
+	}
+	if *baseOutputPath != "" {
+		if err := os.WriteFile(*baseOutputPath, []byte(baseFailureReport(outcome)), 0o644); err != nil {
+			fmt.Fprintf(stderr, "write base failure output: %v\n", err)
 		}
 	}
 	return 0

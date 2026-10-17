@@ -97,9 +97,10 @@ func TestWriteOutputsCannotInjectLines(t *testing.T) {
 // --- end-to-end fixtures --------------------------------------------------
 
 type fixtureRepo struct {
-	t    *testing.T
-	dir  string
-	base string
+	t          *testing.T
+	dir        string
+	base       string
+	baseOutput string
 }
 
 func newFixtureRepo(t *testing.T) *fixtureRepo {
@@ -161,11 +162,27 @@ func (r *fixtureRepo) pipeline(head string) (Plan, Outcome) {
 	if code := run([]string{"run", "-repo", r.dir, "-plan", planFile, "-out", out}, &stdout, &stderr); code != 0 {
 		r.t.Fatalf("run exit %d: %s", code, stderr.String())
 	}
+	// analyze through the CLI, as the workflow does, so the
+	// base_failure_output.txt artifact is exercised too.
+	r.baseOutput = filepath.Join(out, "base_failure_output.txt")
+	stdout.Reset()
+	if code := run([]string{"analyze", "-plan", planFile, "-results", out, "-base-output", r.baseOutput}, &stdout, &stderr); code != 0 {
+		r.t.Fatalf("analyze exit %d: %s", code, stderr.String())
+	}
 	plan, err := readPlan(planFile)
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	return plan, analyze(plan, out)
+}
+
+func (r *fixtureRepo) baseFailureOutput() string {
+	r.t.Helper()
+	data, err := os.ReadFile(r.baseOutput)
+	if err != nil {
+		r.t.Fatalf("base_failure_output.txt not written: %v", err)
+	}
+	return string(data)
 }
 
 const fixtureTest = `package calc
@@ -211,6 +228,10 @@ func TestReproGenuineFailsBeforeFixture(t *testing.T) {
 	if !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
 		t.Errorf("base failed for the wrong reason; output:\n%s", outcome.BaseOutput)
 	}
+	if got := r.baseFailureOutput(); !strings.Contains(got, "internal/calc.TestAddFromFixture (base: fail)") ||
+		!strings.Contains(got, "Add(2, 3) = -1, want 5") || !strings.Contains(got, "pass=true") {
+		t.Errorf("base_failure_output.txt missing the base failure:\n%s", got)
+	}
 }
 
 // A test-only PR adds a fixture-driven test for code that is already
@@ -248,6 +269,9 @@ func TestReproBaseCompileFailureIsInconclusive(t *testing.T) {
 		!strings.Contains(outcome.Message, "undefined: Sub") {
 		t.Fatalf("outcome = %+v", outcome)
 	}
+	if got := r.baseFailureOutput(); !strings.Contains(got, "compile failed on base") || !strings.Contains(got, "undefined: Sub") {
+		t.Errorf("base_failure_output.txt missing the compile error:\n%s", got)
+	}
 }
 
 func TestReproNoChangedTests(t *testing.T) {
@@ -258,5 +282,8 @@ func TestReproNoChangedTests(t *testing.T) {
 	plan, outcome := r.pipeline(head)
 	if len(plan.Packages) != 0 || !outcome.Inconclusive {
 		t.Fatalf("plan=%+v outcome=%+v", plan, outcome)
+	}
+	if got := r.baseFailureOutput(); !strings.Contains(got, "no base failure output") {
+		t.Errorf("base_failure_output.txt should be written with an explicit empty marker:\n%s", got)
 	}
 }

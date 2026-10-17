@@ -176,7 +176,8 @@ jobs:
           mkdir -p repro-results
           # Ignore the plan from the job that ran PR code; recompute it here.
           "$RUNNER_TEMP/green-lane-repro" plan -repo pr -base "$BASE_SHA" -head "$HEAD_SHA" -out trusted-plan.json
-          "$RUNNER_TEMP/green-lane-repro" analyze -plan trusted-plan.json -results repro-results -evidence repro-evidence.json >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/green-lane-repro" analyze -plan trusted-plan.json -results repro-results \
+            -evidence repro-evidence.json -base-output base_failure_output.txt >> "$GITHUB_OUTPUT"
 
       - name: Upload repro evidence
         uses: actions/upload-artifact@v4
@@ -186,6 +187,7 @@ jobs:
           path: |
             trusted-plan.json
             repro-evidence.json
+            base_failure_output.txt
           if-no-files-found: ignore
           retention-days: 30
 
