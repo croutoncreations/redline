@@ -4,6 +4,128 @@ import (
 	"testing"
 )
 
+func TestDetectLane(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []PRFile
+		want  Lane
+	}{
+		{
+			name:  "docs only",
+			files: []PRFile{{Filename: "docs/cli.md", Additions: 11, Deletions: 3}},
+			want:  LaneDocsDeps,
+		},
+		{
+			name:  "changelog only",
+			files: []PRFile{{Filename: "CHANGELOG.md", Additions: 37}},
+			want:  LaneDocsDeps,
+		},
+		{
+			name: "deps with manifests",
+			files: []PRFile{
+				{Filename: "go.mod", Additions: 2, Deletions: 2},
+				{Filename: "go.sum", Additions: 4, Deletions: 4},
+				{Filename: "package.json", Additions: 1, Deletions: 1},
+				{Filename: "package-lock.json", Additions: 15, Deletions: 33},
+				{Filename: "CONTRIBUTING.md", Additions: 1, Deletions: 1},
+			},
+			want: LaneDocsDeps,
+		},
+		{
+			name: "lockfile-only still docs_deps lane (Size must still fail)",
+			files: []PRFile{
+				{Filename: "go.sum", Additions: 14, Deletions: 6},
+			},
+			want: LaneDocsDeps,
+		},
+		{
+			name: "code change is default lane",
+			files: []PRFile{
+				{Filename: "internal/foo/bar.go", Additions: 10},
+				{Filename: "docs/cli.md", Additions: 2},
+			},
+			want: LaneDefault,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DetectLane(PRInfo{Files: tt.files}); got != tt.want {
+				t.Errorf("DetectLane() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDocsDepsLaneSizeAndRepro(t *testing.T) {
+	config := Config{
+		MaxChangedLines:            150,
+		MaxLockfileChanges:         300,
+		MaxFiles:                   6,
+		DocsDepsMaxChangedLines:    80,
+		DocsDepsMaxLockfileChanges: 200,
+		DocsDepsMaxFiles:           5,
+	}
+	eval := NewEvaluator(config)
+
+	t.Run("docs PR skips repro and passes size", func(t *testing.T) {
+		pr := PRInfo{
+			Number:  174,
+			Files:   []PRFile{{Filename: "docs/cli.md", Additions: 11, Deletions: 3}},
+			Body:    "Root-Cause: docs/cli#pair-examples",
+			HeadSHA: "abc",
+		}
+		result := eval.Evaluate(pr, nil, nil)
+		var size, repro RuleResult
+		for _, r := range result.Rules {
+			switch r.Name {
+			case "Size":
+				size = r
+			case "Test Repro":
+				repro = r
+			}
+		}
+		if !size.Pass {
+			t.Fatalf("Size should pass for small docs PR: %s", size.Message)
+		}
+		if !repro.Pass || !contains(repro.Message, "not required for docs/changelog/deps") {
+			t.Fatalf("Test Repro should be waived for docs lane: %+v", repro)
+		}
+	})
+
+	t.Run("lockfile-only security bump fails Size with no exception", func(t *testing.T) {
+		pr := PRInfo{
+			Number: 179,
+			Files: []PRFile{
+				{Filename: "marketing/video/package-lock.json", Additions: 3, Deletions: 3},
+			},
+			Body:    "Root-Cause: deps/lockfile#security",
+			HeadSHA: "abc",
+		}
+		if DetectLane(pr) != LaneDocsDeps {
+			t.Fatal("expected docs_deps lane for lockfile-only PR")
+		}
+		size := eval.checkSize(pr, LaneDocsDeps)
+		if size.Pass {
+			t.Fatalf("lockfile-only must fail Size (no exception), got: %s", size.Message)
+		}
+		if !contains(size.Message, "without matching") {
+			t.Fatalf("expected orphaned lockfile Size failure, got: %s", size.Message)
+		}
+	})
+
+	t.Run("docs lane uses tighter file cap", func(t *testing.T) {
+		files := make([]PRFile, 6)
+		for i := range files {
+			files[i] = PRFile{Filename: "docs/f" + string(rune('a'+i)) + ".md", Additions: 1}
+		}
+		pr := PRInfo{Files: files}
+		size := eval.checkSize(pr, LaneDocsDeps)
+		if size.Pass {
+			t.Fatalf("6 docs files should exceed docs-lane max 5: %s", size.Message)
+		}
+	})
+}
+
 func TestCheckSize(t *testing.T) {
 	config := Config{
 		MaxChangedLines:    150,
@@ -120,7 +242,7 @@ func TestCheckSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pr := PRInfo{Files: tt.files}
-			result := eval.checkSize(pr)
+			result := eval.checkSize(pr, LaneDefault)
 
 			if result.Pass != tt.wantPass {
 				t.Errorf("checkSize() pass = %v, want %v", result.Pass, tt.wantPass)
@@ -140,6 +262,9 @@ func TestCheckDeniedPaths(t *testing.T) {
 			"internal/apiauth/**",
 			"**/.env*",
 			"**/*secret*",
+			"cmd/green-lane-check/**",
+			"cmd/green-lane-repro-analyze/**",
+			"internal/greenlane/**",
 		},
 	}
 	eval := NewEvaluator(config)
@@ -184,6 +309,28 @@ func TestCheckDeniedPaths(t *testing.T) {
 			name: "env file fails",
 			files: []PRFile{
 				{Filename: ".env.local"},
+			},
+			wantPass: false,
+		},
+		{
+			name: "green-lane check tooling fails",
+			files: []PRFile{
+				{Filename: "cmd/green-lane-check/main.go"},
+			},
+			wantPass: false,
+			wantMsg:  "Touches denied paths",
+		},
+		{
+			name: "green-lane analyzer tooling fails",
+			files: []PRFile{
+				{Filename: "cmd/green-lane-repro-analyze/main.go"},
+			},
+			wantPass: false,
+		},
+		{
+			name: "greenlane package fails",
+			files: []PRFile{
+				{Filename: "internal/greenlane/rules.go"},
 			},
 			wantPass: false,
 		},

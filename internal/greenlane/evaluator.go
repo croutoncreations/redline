@@ -25,12 +25,23 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 		Rules:       make([]RuleResult, 0),
 	}
 
-	// Rule 1: Size check
-	sizeResult := e.checkSize(pr)
+	lane := DetectLane(pr)
+
+	// Rule 1: Size check (lane-aware caps; lockfile-only still fails Size)
+	sizeResult := e.checkSize(pr, lane)
 	result.Rules = append(result.Rules, sizeResult)
 
-	// Rule 2: Test repro (fails before, passes after)
-	reproCheckResult := e.checkRepro(reproResult)
+	// Rule 2: Test repro (fails before, passes after) — skipped for docs/deps lane
+	var reproCheckResult RuleResult
+	if lane == LaneDocsDeps {
+		reproCheckResult = RuleResult{
+			Name:    "Test Repro",
+			Pass:    true,
+			Message: "OK: not required for docs/changelog/deps lane",
+		}
+	} else {
+		reproCheckResult = e.checkRepro(reproResult)
+	}
 	result.Rules = append(result.Rules, reproCheckResult)
 
 	// Rule 3: CI status
