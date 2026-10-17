@@ -120,7 +120,7 @@ func TestCheckSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pr := PRInfo{Files: tt.files}
-			result := eval.checkSize(pr)
+			result := eval.checkSize(pr, eval.laneLimits(LaneCode))
 
 			if result.Pass != tt.wantPass {
 				t.Errorf("checkSize() pass = %v, want %v", result.Pass, tt.wantPass)
@@ -290,6 +290,12 @@ func TestMatchPattern(t *testing.T) {
 		{"go.sum", "*.lock", false},
 		{"package.lock", "*.lock", true},
 		{"dist/bundle.js", "dist/**", true},
+		// Patterns with a directory part match the full path; these never
+		// matched when * patterns were compared against the base name only.
+		{".github/release-notes-draft.md", ".github/release-notes-*", true},
+		{"internal/nativeusage/credentials_darwin.go", "internal/nativeusage/credentials*", true},
+		{"docs/release-notes-draft.md", ".github/release-notes-*", false},
+		{"web/playwright.config.ts", "playwright.config.*", true},
 	}
 
 	for _, tt := range tests {

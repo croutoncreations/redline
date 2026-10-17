@@ -21,6 +21,7 @@ type RuleResult struct {
 // EvaluationResult contains the full evaluation outcome
 type EvaluationResult struct {
 	Verdict     Verdict      `json:"verdict"`
+	Lane        Lane         `json:"lane"`
 	Rules       []RuleResult `json:"rules"`
 	Summary     string       `json:"summary"`
 	EvaluatedAt time.Time    `json:"evaluated_at"`
@@ -36,6 +37,7 @@ type PRFile struct {
 	Additions int
 	Deletions int
 	Changes   int
+	Patch     string // unified diff hunk text; GitHub omits it for large files
 }
 
 // CheckRun represents a GitHub check run status
@@ -88,4 +90,13 @@ type Config struct {
 	MaxLockfileChanges int      `yaml:"max_lockfile_changes"`
 	MaxFiles           int      `yaml:"max_files"`
 	RequiredChecks     []string `yaml:"required_checks"`
+	// DocsDeps holds the tighter caps for the docs/changelog/dependency lane.
+	DocsDeps SizeLimits `yaml:"docs_deps"`
+}
+
+// SizeLimits caps a lane's diff size.
+type SizeLimits struct {
+	MaxChangedLines    int `yaml:"max_changed_lines"`
+	MaxLockfileChanges int `yaml:"max_lockfile_changes"`
+	MaxFiles           int `yaml:"max_files"`
 }

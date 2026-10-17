@@ -14,23 +14,34 @@ permissions:
   pull-requests: read
   checks: write
 
+# SHADOW MODE ONLY. Nothing in this workflow merges, approves, labels or
+# enables auto-merge, and it must stay that way until the pre-enable checklist
+# in docs/green-lane-shadow.md is complete.
+#
+# The green-lane-shadow check concludes "success" when a PR WOULD merge. It is
+# a report, not a gate: never make it a required status check or add it to a
+# branch protection rule or ruleset. Its check run is posted by
+# github-actions, not a pinned App, so anyone who can run a workflow could
+# fake it.
+
 jobs:
+  # Runs the planned tests. This job executes PR code (the PR's tests on the
+  # merge-base, and the PR head), so it has a read-only token, no secrets, and
+  # produces evidence only. It never decides the repro verdict.
   repro:
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'pull_request' || 
-      github.event_name == 'pull_request_review' || 
+      github.event_name == 'pull_request' ||
+      github.event_name == 'pull_request_review' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
+    timeout-minutes: 30
     permissions:
       contents: read
-    
     outputs:
-      has_tests: ${{ steps.tests.outputs.has_tests }}
-      pass: ${{ steps.analyze.outputs.pass }}
-      inconclusive: ${{ steps.analyze.outputs.inconclusive }}
-      message: ${{ steps.analyze.outputs.message }}
-      test_ids: ${{ steps.analyze.outputs.test_ids }}
-    
+      head_sha: ${{ steps.pr_info.outputs.head_sha }}
+      base_sha: ${{ steps.pr_info.outputs.base_sha }}
+      number: ${{ steps.pr_info.outputs.number }}
+
     steps:
       - name: Get PR info
         id: pr_info
@@ -38,254 +49,155 @@ jobs:
         with:
           script: |
             let pr_data;
-            
+
             if (context.eventName === 'workflow_run') {
               const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 commit_sha: context.payload.workflow_run.head_sha
               });
-              
+
               if (prs.data.length === 0) {
                 core.setFailed('No PR found for workflow run');
                 return;
               }
-              
+
               pr_data = prs.data[0];
             } else {
               pr_data = context.payload.pull_request;
             }
-            
+
             core.setOutput('head_sha', pr_data.head.sha);
             core.setOutput('base_sha', pr_data.base.sha);
             core.setOutput('number', pr_data.number);
             return pr_data.number;
-      
-      - uses: actions/checkout@v4
+
+      # Trusted code first: the runner binary is built from the base commit
+      # before any PR code is on disk.
+      - name: Check out trusted base code
+        uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr_info.outputs.head_sha }}
-          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.sha || github.event.pull_request.base.sha }}
+          path: trusted
           persist-credentials: false
-      
+
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: trusted/go.mod
           cache: false
-      
-      - name: Identify changed test files and IDs
-        id: tests
+
+      - name: Build repro runner from trusted code
+        working-directory: trusted
+        run: go build -o "$RUNNER_TEMP/green-lane-repro" ./cmd/green-lane-repro-analyze
+
+      - name: Check out PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr_info.outputs.head_sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan and run repro tests
+        env:
+          BASE_SHA: ${{ steps.pr_info.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr_info.outputs.head_sha }}
         run: |
           set -euo pipefail
-          
-          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
-          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
-          
-          # Find changed test files
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
-          
-          if [ ! -s changed_tests.txt ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "No test files changed"
-            exit 0
-          fi
-          
-          echo "has_tests=true" >> "$GITHUB_OUTPUT"
-          
-          # Extract test function names from changed test files
-          # Look for func TestXxx patterns in the diff
-          : > test_ids.txt
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              # Extract Test function names
-              grep -E '^func (Test[A-Z][a-zA-Z0-9_]*)\(' "$file" | \
-                sed -E 's/^func (Test[A-Z][a-zA-Z0-9_]*)\(.*/\1/' >> test_ids.txt || true
-            fi
-          done < changed_tests.txt
-          
-          if [ ! -s test_ids.txt ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "No test functions found in changed files"
-            exit 0
-          fi
-          
-          # Get unique test IDs and package directories
-          sort -u test_ids.txt > test_ids_unique.txt
-          TEST_IDS=$(tr '\n' '|' < test_ids_unique.txt | sed 's/|$//')
-          echo "test_pattern=^($TEST_IDS)$" >> "$GITHUB_OUTPUT"
-          
-          # Get unique package directories
-          xargs -I {} dirname {} < changed_tests.txt | sort -u > test_dirs.txt
-          TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
-          # shellcheck disable=SC2086
-          echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
-          
-          echo "Test pattern: $TEST_IDS"
-          echo "Test directories: $TEST_DIRS"
-      
-      - name: Run tests on base (with PR test files)
-        id: base
-        if: steps.tests.outputs.has_tests == 'true'
-        run: |
-          set -euo pipefail
-          
-          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
-          
-          # Create fresh workspace for base
-          mkdir -p /tmp/base-workspace
-          cd /tmp/base-workspace
-          
-          # Checkout base commit
-          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-          git checkout --quiet "$BASE_SHA"
-          
-          # Overlay PR's test files onto base
-          cd "$GITHUB_WORKSPACE"
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              mkdir -p "/tmp/base-workspace/$(dirname "$file")"
-              cp "$file" "/tmp/base-workspace/$file"
-            fi
-          done < changed_tests.txt
-          
-          cd /tmp/base-workspace
-          
-          # Calculate test file hashes
-          : > "$GITHUB_WORKSPACE/base_test_hashes.txt"
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              HASH=$(git hash-object "$file")
-              echo "$file:$HASH" >> "$GITHUB_WORKSPACE/base_test_hashes.txt"
-            fi
-          done < "$GITHUB_WORKSPACE/changed_tests.txt"
-          
-          # Run tests with -count=1 to disable caching
-          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
-          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
-          
-          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
-          
-          # shellcheck disable=SC2086
-          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/base_results.json" 2> "$GITHUB_WORKSPACE/base_stderr.txt"; then
-            # Test failure is expected
-            echo "result=some_failed" >> "$GITHUB_OUTPUT"
-          else
-            echo "result=all_passed" >> "$GITHUB_OUTPUT"
-          fi
-          
-          # Check for compile failures
-          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/base_results.json" 2>/dev/null; then
-            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-      
-      - name: Run tests on head
-        id: head
-        if: steps.tests.outputs.has_tests == 'true' && steps.base.outputs.compile_ok == 'true'
-        run: |
-          set -euo pipefail
-          
-          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
-          
-          # Create fresh workspace for head
-          mkdir -p /tmp/head-workspace
-          cd /tmp/head-workspace
-          
-          # Checkout head commit
-          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-          git checkout --quiet "$HEAD_SHA"
-          
-          # Calculate test file hashes
-          cd "$GITHUB_WORKSPACE"
-          : > head_test_hashes.txt
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              HASH=$(git hash-object "$file")
-              echo "$file:$HASH" >> head_test_hashes.txt
-            fi
-          done < changed_tests.txt
-          
-          cd /tmp/head-workspace
-          
-          # Run tests
-          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
-          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
-          
-          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
-          
-          # shellcheck disable=SC2086
-          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/head_results.json" 2> "$GITHUB_WORKSPACE/head_stderr.txt"; then
-            echo "result=some_failed" >> "$GITHUB_OUTPUT"
-          else
-            echo "result=all_passed" >> "$GITHUB_OUTPUT"
-          fi
-          
-          # Check for compile failures
-          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/head_results.json" 2>/dev/null; then
-            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-      
+          mkdir -p repro-results
+          "$RUNNER_TEMP/green-lane-repro" plan -repo pr -base "$BASE_SHA" -head "$HEAD_SHA" -out repro-results/plan.json
+          "$RUNNER_TEMP/green-lane-repro" run -repo pr -plan repro-results/plan.json -out repro-results
+
+      - name: Upload raw repro results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repro-raw-${{ github.run_id }}
+          path: repro-results/
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 30
+
+  # Scores the repro. Built and run from trusted base code; it recomputes the
+  # plan from git objects itself and never executes PR code, so a PR cannot
+  # change which tests count or how their results are judged.
+  repro-analyze:
+    runs-on: ubuntu-latest
+    needs: repro
+    if: always() && needs.repro.result != 'skipped' && needs.repro.outputs.head_sha != ''
+    permissions:
+      contents: read
+    outputs:
+      pass: ${{ steps.analyze.outputs.pass }}
+      inconclusive: ${{ steps.analyze.outputs.inconclusive }}
+      message: ${{ steps.analyze.outputs.message }}
+      test_ids: ${{ steps.analyze.outputs.test_ids }}
+
+    steps:
+      - name: Check out trusted base code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.sha || github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: trusted/go.mod
+          cache: false
+
+      - name: Build repro analyzer from trusted code
+        working-directory: trusted
+        run: go build -o "$RUNNER_TEMP/green-lane-repro" ./cmd/green-lane-repro-analyze
+
+      # Git objects only: used to recompute the plan, never built or run.
+      - name: Check out PR history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.repro.outputs.head_sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download raw repro results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: repro-raw-${{ github.run_id }}
+          path: repro-results
+
       - name: Analyze repro results
         id: analyze
-        if: steps.tests.outputs.has_tests == 'true'
         env:
-          BASE_COMPILE_OK: ${{ steps.base.outputs.compile_ok }}
-          HEAD_COMPILE_OK: ${{ steps.head.outputs.compile_ok }}
+          BASE_SHA: ${{ needs.repro.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.repro.outputs.head_sha }}
         run: |
           set -euo pipefail
-          
-          # If base didn't compile, it's inconclusive
-          if [ "$BASE_COMPILE_OK" != "true" ]; then
-            {
-              echo "pass=false"
-              echo "inconclusive=true"
-              echo "message=Compile failed on base commit"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          
-          # If head didn't compile, it's inconclusive
-          if [ "$HEAD_COMPILE_OK" != "true" ]; then
-            {
-              echo "pass=false"
-              echo "inconclusive=true"
-              echo "message=Compile failed on head commit"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          
-          # Run analyzer
-          cd "$GITHUB_WORKSPACE"
-          go run ./cmd/green-lane-repro-analyze >> "$GITHUB_OUTPUT"
-      
-      - name: Complete check run on failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // If we have a check_id from evaluate job, complete it
-            // This step runs in repro job so we can't complete the evaluate check
-            // But we ensure repro job completes cleanly
-            console.log('Repro job failed, but outputs are set');
-      
-      - name: Upload repro artifacts
+          mkdir -p repro-results
+          # Ignore the plan from the job that ran PR code; recompute it here.
+          "$RUNNER_TEMP/green-lane-repro" plan -repo pr -base "$BASE_SHA" -head "$HEAD_SHA" -out trusted-plan.json
+          "$RUNNER_TEMP/green-lane-repro" analyze -plan trusted-plan.json -results repro-results -evidence repro-evidence.json >> "$GITHUB_OUTPUT"
+
+      - name: Upload repro evidence
         uses: actions/upload-artifact@v4
-        if: always() && steps.tests.outputs.has_tests == 'true'
+        if: always()
         with:
-          name: repro-results-${{ steps.pr_info.outputs.number }}-${{ github.run_id }}
+          name: repro-evidence-${{ needs.repro.outputs.number }}-${{ github.run_id }}
           path: |
-            base_results.json
-            head_results.json
-            base_test_hashes.txt
-            head_test_hashes.txt
-            base_failure_output.txt
+            trusted-plan.json
+            repro-evidence.json
+          if-no-files-found: ignore
           retention-days: 30
 
   evaluate:
     runs-on: ubuntu-latest
-    needs: repro
+    needs: [repro, repro-analyze]
+    # checks: write is only for posting the report-only green-lane-shadow
+    # check run. This job builds and runs trusted base-branch code only.
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
     if: |
       always() && (
         github.event_name == 'pull_request' || 
@@ -375,43 +287,32 @@ jobs:
             core.setOutput('check_id', check.data.id);
             return check.data.id;
       
+      # The docs/deps lane ignores these; the code lane requires pass=true.
+      # A missing analyzer result (job failed or skipped) is inconclusive.
       - name: Set repro environment variables
         id: repro_env
         env:
-          HAS_TESTS: ${{ needs.repro.outputs.has_tests }}
-          REPRO_INCONCLUSIVE_OUT: ${{ needs.repro.outputs.inconclusive }}
-          REPRO_PASS_OUT: ${{ needs.repro.outputs.pass }}
-          REPRO_MESSAGE_OUT: ${{ needs.repro.outputs.message }}
-          REPRO_TEST_IDS_OUT: ${{ needs.repro.outputs.test_ids }}
+          REPRO_INCONCLUSIVE_OUT: ${{ needs.repro-analyze.outputs.inconclusive }}
+          REPRO_PASS_OUT: ${{ needs.repro-analyze.outputs.pass }}
+          REPRO_MESSAGE_OUT: ${{ needs.repro-analyze.outputs.message }}
+          REPRO_TEST_IDS_OUT: ${{ needs.repro-analyze.outputs.test_ids }}
         run: |
-          if [ "$HAS_TESTS" = "true" ]; then
-            if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
-              echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
-            else
-              echo "REPRO_PASS=$REPRO_PASS_OUT" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
-              if [ -n "$REPRO_TEST_IDS_OUT" ]; then
-                {
-                  echo "REPRO_TEST_IDS<<__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                  printf '%s\n' "$REPRO_TEST_IDS_OUT"
-                  echo "__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                } >> "$GITHUB_ENV"
-              fi
-            fi
-          else
+          if [ -z "$REPRO_PASS_OUT" ] && [ -z "$REPRO_INCONCLUSIVE_OUT" ]; then
             echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-            echo "REPRO_MESSAGE=No test files changed in PR" >> "$GITHUB_ENV"
+            echo "REPRO_MESSAGE=No repro analyzer result (repro jobs failed or were skipped)" >> "$GITHUB_ENV"
+            exit 0
           fi
-      
+          {
+            echo "REPRO_PASS=$REPRO_PASS_OUT"
+            echo "REPRO_INCONCLUSIVE=$REPRO_INCONCLUSIVE_OUT"
+            echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
+            printf '%s\n' "$REPRO_MESSAGE_OUT"
+            echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
+            echo "REPRO_TEST_IDS<<__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
+            printf '%s\n' "$REPRO_TEST_IDS_OUT"
+            echo "__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
+          } >> "$GITHUB_ENV"
+
       - name: Run evaluation
         id: eval
         env:
