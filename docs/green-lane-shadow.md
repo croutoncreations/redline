@@ -12,14 +12,26 @@ The `green-lane-shadow` check is a **report-only** evaluation that runs on every
 - Change branch protection
 - Touch repository settings
 
+**Do not make `green-lane-shadow` a required check.** When the gate would merge, the check conclusion is `success`, which would auto-satisfy branch protection if it were required—before live merge infrastructure exists.
+
+## Lanes
+
+Two shadow-only lanes share the same check name and denied-path rules:
+
+| Lane | Qualifies when | Repro | Size caps |
+|------|----------------|-------|-----------|
+| **Default** (code) | Any non-docs/deps file changed | Required (fails-before / passes-after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
+| **Docs / changelog / deps** | Every file is docs, root markdown, or a dependency manifest/lockfile | Not required | Tighter: ≤80 lines, ≤200 lockfile, ≤5 files |
+
+Lockfile-only security bumps (orphaned `go.sum` / `package-lock.json` without a matching manifest) still **fail Size**. There is no exception for them.
+
 ## Rules Evaluated
 
 The green-lane-shadow check evaluates six rules:
 
-### 1. Size (≤150 changed lines)
-- Regular files must have ≤150 changed lines (additions + deletions)
-- Lockfiles and generated files have a separate cap of ≤300 lines
-- Maximum 6 files total
+### 1. Size (lane-aware caps)
+- Default lane: ≤150 regular lines, ≤300 lockfile/generated, ≤6 files
+- Docs/deps lane: ≤80 regular lines, ≤200 lockfile, ≤5 files
 - Lockfile changes require a matching manifest change
 - Generated file changes require a matching source change
 
@@ -36,15 +48,17 @@ Tests that the same test IDs:
 
 **Implementation:**
 - Identifies added/changed Go test function names from the diff
-- Runs those specific tests on base (with PR's test files overlaid) using `go test -count=1 -json -run '^(TestA|TestB)$'`
+- Runs those specific tests with `go test -count=1 -json -run '^(TestA|TestB)$' ./pkg/...` (package dirs must be `./`-relative)
+- Overlays the PR's changed `*_test.go` files **and** changed `testdata/` under those packages onto the base commit
 - Runs the same tests on head in a fresh workspace
 - Each test must execute and fail on base, then execute and pass on head
 - Skipped tests count as failures
 - Compile failures on either base or head are inconclusive
+- Analyzer (`green-lane-repro-analyze`) runs from a checkout of the PR **base** commit, not the PR head
 - Preserves evidence: test/fixture blob hashes, results, base failure output
 - Runs with read-only permissions and no secrets
 
-**Status:** Fully implemented. PRs without changed test files are marked inconclusive.
+**Status:** Fully implemented. Default-lane PRs without changed test files are marked inconclusive. Docs/deps-lane PRs skip repro.
 
 ### 3. CI Status
 All required checks must pass on the current head SHA:
@@ -87,10 +101,10 @@ Blocks changes to sensitive paths including:
 - Secrets and credentials: `**/.env*`, `**/*secret*`, `**/*credential*`, `**/*.pem`, etc.
 - Auth and billing code: `internal/apiauth/**`, `internal/nativeusage/credentials*`
 - Release infrastructure: `.goreleaser.yaml`, signing scripts, entitlements
-- Green-lane controls: `.github/green-lane.yml`, test runner config
+- Green-lane controls: `.github/green-lane.yml`, `.github/prompts/**`, `cmd/green-lane-check/**`, `cmd/green-lane-repro-analyze/**`, `internal/greenlane/**`, test runner config
 - Schema migrations: `internal/store/sqlite.go`
 
-See `.github/green-lane.yml` for the complete list (planned).
+Denied paths remain hardcoded in `cmd/green-lane-check` for now (no `.github/green-lane.yml` yet; that file is still planned for live mode and is itself a denied path).
 
 ## Reading the Output
 
@@ -180,9 +194,9 @@ Before switching from shadow to live merges, the following must be built and ver
 
 4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
 
-5. **No policy file yet:** Denied paths and limits are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live.
+5. **No policy file yet:** Denied paths and limits are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live. Do not create it during shadow mode unless the live design is ready.
 
-6. **Check not pinned:** The shadow check is not pinned to an App ID, so it's not a required check. The real `green-lane` check will be required and pinned to prevent spoofing.
+6. **Check not pinned / must not be required:** The shadow check is not pinned to an App ID. Because a "would merge" verdict posts conclusion `success`, **`green-lane-shadow` must never be added as a required status check.** The real `green-lane` check will be required and pinned to prevent spoofing.
 
 ## Owner's Pre-Approval
 

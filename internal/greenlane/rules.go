@@ -6,8 +6,73 @@ import (
 	"strings"
 )
 
-// checkSize implements Rule 1: size ≤ 150 changed lines
-func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
+// DetectLane returns which shadow lane the PR qualifies for.
+// Docs/deps lane: every changed file is a doc/changelog/markdown or a
+// dependency manifest/lockfile. Lockfile-only PRs still qualify for the lane
+// but keep failing Size (no security-bump exception).
+func DetectLane(pr PRInfo) Lane {
+	if len(pr.Files) == 0 {
+		return LaneDefault
+	}
+	for _, f := range pr.Files {
+		if !isDocsDepsAllowedFile(f.Filename) {
+			return LaneDefault
+		}
+	}
+	return LaneDocsDeps
+}
+
+func isDocsDepsAllowedFile(path string) bool {
+	base := filepath.Base(path)
+	switch base {
+	case "CHANGELOG.md", "CONTRIBUTING.md", "README.md", "SECURITY.md",
+		"LICENSE", "NOTICE", "llms.txt",
+		"go.mod", "go.sum",
+		"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+		"Package.resolved", "gradle.lockfile", "Cargo.toml", "Cargo.lock":
+		return true
+	}
+	if strings.HasPrefix(path, "docs/") {
+		return true
+	}
+	if strings.HasSuffix(path, ".md") && !strings.Contains(path, "/") {
+		return true
+	}
+	if strings.HasSuffix(base, ".lock") {
+		return true
+	}
+	return false
+}
+
+func (e *Evaluator) sizeLimits(lane Lane) (maxLines, maxLockfile, maxFiles int) {
+	maxLines = e.config.MaxChangedLines
+	maxLockfile = e.config.MaxLockfileChanges
+	maxFiles = e.config.MaxFiles
+	if lane != LaneDocsDeps {
+		return maxLines, maxLockfile, maxFiles
+	}
+	if e.config.DocsDepsMaxChangedLines > 0 {
+		maxLines = e.config.DocsDepsMaxChangedLines
+	} else {
+		maxLines = 80
+	}
+	if e.config.DocsDepsMaxLockfileChanges > 0 {
+		maxLockfile = e.config.DocsDepsMaxLockfileChanges
+	} else {
+		maxLockfile = 200
+	}
+	if e.config.DocsDepsMaxFiles > 0 {
+		maxFiles = e.config.DocsDepsMaxFiles
+	} else {
+		maxFiles = 5
+	}
+	return maxLines, maxLockfile, maxFiles
+}
+
+// checkSize implements Rule 1: size caps (tighter for docs/deps lane).
+// Lockfile-only security bumps still fail (orphaned lockfile / caps); there is
+// no Size exception for them.
+func (e *Evaluator) checkSize(pr PRInfo, lane Lane) RuleResult {
 	lockfilePatterns := []string{
 		"**/go.sum",
 		"**/package-lock.json",
@@ -24,6 +89,8 @@ func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 		"**/*.generated.*",
 		"dist/**",
 	}
+
+	maxLines, maxLockfile, maxFiles := e.sizeLimits(lane)
 
 	regularLines := 0
 	lockfileLines := 0
@@ -47,29 +114,29 @@ func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 	}
 
 	// Check file count
-	if fileCount > e.config.MaxFiles {
+	if fileCount > maxFiles {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, e.config.MaxFiles),
+			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, maxFiles),
 		}
 	}
 
 	// Check regular lines
-	if regularLines > e.config.MaxChangedLines {
+	if regularLines > maxLines {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, e.config.MaxChangedLines),
+			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, maxLines),
 		}
 	}
 
 	// Check lockfile/generated lines
-	if lockfileLines > e.config.MaxLockfileChanges {
+	if lockfileLines > maxLockfile {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, e.config.MaxLockfileChanges),
+			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, maxLockfile),
 		}
 	}
 

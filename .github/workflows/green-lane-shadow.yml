@@ -113,14 +113,38 @@ jobs:
           TEST_IDS=$(tr '\n' '|' < test_ids_unique.txt | sed 's/|$//')
           echo "test_pattern=^($TEST_IDS)$" >> "$GITHUB_OUTPUT"
           
-          # Get unique package directories
-          xargs -I {} dirname {} < changed_tests.txt | sort -u > test_dirs.txt
-          TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
+          # Package dirs must be ./relative paths. Bare "internal/foo" is treated
+          # by go test as an import path (std/module lookup) and yields
+          # Action:build-fail / [setup failed], which the gate misread as
+          # "Compile failed on base commit" for every PR.
+          : > test_dirs.txt
+          while IFS= read -r file; do
+            dir=$(dirname "$file")
+            case "$dir" in
+              .|./) echo "./" ;;
+              ./*) echo "$dir" ;;
+              *) echo "./$dir" ;;
+            esac
+          done < changed_tests.txt | sort -u > test_dirs.txt
+          TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt | sed 's/[[:space:]]*$//')
           # shellcheck disable=SC2086
           echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
           
+          # Overlay list: changed *_test.go plus any changed testdata/ fixtures
+          # under those package trees (tests often need fixtures on base too).
+          : > overlay_files.txt
+          cat changed_tests.txt >> overlay_files.txt
+          while IFS= read -r dir; do
+            # strip leading ./
+            rel=${dir#./}
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- "$rel/testdata" >> overlay_files.txt || true
+          done < test_dirs.txt
+          sort -u overlay_files.txt -o overlay_files.txt
+          
           echo "Test pattern: $TEST_IDS"
           echo "Test directories: $TEST_DIRS"
+          echo "Overlay files:"
+          cat overlay_files.txt
       
       - name: Run tests on base (with PR test files)
         id: base
@@ -138,25 +162,28 @@ jobs:
           git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
           git checkout --quiet "$BASE_SHA"
           
-          # Overlay PR's test files onto base
+          # Overlay PR's test files and package testdata onto base
           cd "$GITHUB_WORKSPACE"
           while IFS= read -r file; do
             if [ -f "$file" ]; then
               mkdir -p "/tmp/base-workspace/$(dirname "$file")"
               cp "$file" "/tmp/base-workspace/$file"
+            elif [ -d "$file" ]; then
+              mkdir -p "/tmp/base-workspace/$file"
+              cp -R "$file"/. "/tmp/base-workspace/$file/"
             fi
-          done < changed_tests.txt
+          done < overlay_files.txt
           
           cd /tmp/base-workspace
           
-          # Calculate test file hashes
+          # Calculate overlay file hashes (tests + testdata)
           : > "$GITHUB_WORKSPACE/base_test_hashes.txt"
           while IFS= read -r file; do
             if [ -f "$file" ]; then
               HASH=$(git hash-object "$file")
               echo "$file:$HASH" >> "$GITHUB_WORKSPACE/base_test_hashes.txt"
             fi
-          done < "$GITHUB_WORKSPACE/changed_tests.txt"
+          done < "$GITHUB_WORKSPACE/overlay_files.txt"
           
           # Run tests with -count=1 to disable caching
           TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
@@ -195,7 +222,7 @@ jobs:
           git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
           git checkout --quiet "$HEAD_SHA"
           
-          # Calculate test file hashes
+          # Calculate overlay file hashes on head
           cd "$GITHUB_WORKSPACE"
           : > head_test_hashes.txt
           while IFS= read -r file; do
@@ -203,7 +230,7 @@ jobs:
               HASH=$(git hash-object "$file")
               echo "$file:$HASH" >> head_test_hashes.txt
             fi
-          done < changed_tests.txt
+          done < overlay_files.txt
           
           cd /tmp/head-workspace
           
@@ -233,6 +260,7 @@ jobs:
         env:
           BASE_COMPILE_OK: ${{ steps.base.outputs.compile_ok }}
           HEAD_COMPILE_OK: ${{ steps.head.outputs.compile_ok }}
+          BASE_SHA: ${{ steps.pr_info.outputs.base_sha }}
         run: |
           set -euo pipefail
           
@@ -256,9 +284,25 @@ jobs:
             exit 0
           fi
           
-          # Run analyzer
-          cd "$GITHUB_WORKSPACE"
+          # Run analyzer from trusted base-branch code, not the PR checkout,
+          # so a PR cannot change how results are scored. Job token stays
+          # contents:read (clone uses unauthenticated/read access to the public
+          # repo; no write permissions are granted here).
+          mkdir -p /tmp/trusted-analyzer
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" /tmp/trusted-analyzer
+          git -C /tmp/trusted-analyzer checkout --quiet "$BASE_SHA"
+          
+          cp "$GITHUB_WORKSPACE/base_results.json" \
+             "$GITHUB_WORKSPACE/head_results.json" \
+             "$GITHUB_WORKSPACE/test_ids_unique.txt" \
+             /tmp/trusted-analyzer/
+          
+          cd /tmp/trusted-analyzer
           go run ./cmd/green-lane-repro-analyze >> "$GITHUB_OUTPUT"
+          
+          if [ -f base_failure_output.txt ]; then
+            cp base_failure_output.txt "$GITHUB_WORKSPACE/base_failure_output.txt"
+          fi
       
       - name: Complete check run on failure
         if: failure()

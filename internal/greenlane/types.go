@@ -81,6 +81,17 @@ type PRInfo struct {
 	ReviewComments []ReviewComment
 }
 
+// Lane identifies which shadow evaluation lane a PR qualifies for.
+type Lane string
+
+const (
+	// LaneDefault is the fails-before/repro lane for code changes.
+	LaneDefault Lane = "default"
+	// LaneDocsDeps is a shadow-only lane for docs, changelog, and dependency
+	// PRs: no repro required, tighter size/file-type caps, same denied paths.
+	LaneDocsDeps Lane = "docs_deps"
+)
+
 // Config represents the green-lane configuration
 type Config struct {
 	DeniedPaths        []string `yaml:"denied_paths"`
@@ -88,4 +99,9 @@ type Config struct {
 	MaxLockfileChanges int      `yaml:"max_lockfile_changes"`
 	MaxFiles           int      `yaml:"max_files"`
 	RequiredChecks     []string `yaml:"required_checks"`
+
+	// Docs/deps lane caps (tighter than the default lane).
+	DocsDepsMaxChangedLines    int `yaml:"docs_deps_max_changed_lines"`
+	DocsDepsMaxLockfileChanges int `yaml:"docs_deps_max_lockfile_changes"`
+	DocsDepsMaxFiles           int `yaml:"docs_deps_max_files"`
 }

@@ -126,9 +126,12 @@ func loadConfig(path string) (greenlane.Config, error) {
 	if path == "" {
 		// Return default config
 		return greenlane.Config{
-			MaxChangedLines:    150,
-			MaxLockfileChanges: 300,
-			MaxFiles:           6,
+			MaxChangedLines:            150,
+			MaxLockfileChanges:         300,
+			MaxFiles:                   6,
+			DocsDepsMaxChangedLines:    80,
+			DocsDepsMaxLockfileChanges: 200,
+			DocsDepsMaxFiles:           5,
 			RequiredChecks: []string{
 				"go",
 				"dashboard",
@@ -170,10 +173,13 @@ func getDefaultDeniedPaths() []string {
 		"**/*.jks",
 		"CODEOWNERS",
 
-		// Green-lane controls
+		// Green-lane controls (policy + the tooling that evaluates them)
 		".github/green-lane.yml",
 		".github/green-lane/**",
 		".github/prompts/**",
+		"cmd/green-lane-check/**",
+		"cmd/green-lane-repro-analyze/**",
+		"internal/greenlane/**",
 
 		// Test runner config
 		"playwright.config.*",
