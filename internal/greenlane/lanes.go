@@ -131,6 +131,14 @@ func parseManifestEntry(goMod bool, line string) (e manifestEntry, ok bool) {
 func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 	result := RuleResult{Name: "File Types"}
 	for _, f := range pr.Files {
+		// A rename to or from a manifest or lockfile removes or rewrites
+		// that dependency file wholesale (package.json -> deps.md), so it is
+		// never a version bump, even when both paths qualify for the lane.
+		if f.PreviousFilename != "" && f.PreviousFilename != f.Filename &&
+			(isDepFile(f.PreviousFilename) || isDepFile(f.Filename)) {
+			result.Message = fmt.Sprintf("%s: renamed from %s; renaming a dependency file is not a version bump", f.Filename, f.PreviousFilename)
+			return result
+		}
 		base := path.Base(f.Filename)
 		var allowed *regexp.Regexp
 		switch {

@@ -76,7 +76,7 @@ func TestGoPackageArgIsRelative(t *testing.T) {
 }
 
 func TestChangedTestsIgnoresUnchangedFunctions(t *testing.T) {
-	base := "package p\nimport \"testing\"\nfunc TestOld(t *testing.T) {}\nfunc TestEdited(t *testing.T) {}\n"
+	base := "package p\nimport \"testing\"\nfunc TestOld(t *testing.T) {}\nfunc TestEdited(t *testing.T) {}\nfunc TestMain(m *testing.M) {}\n"
 	head := "package p\nimport \"testing\"\nfunc TestOld(t *testing.T) {}\nfunc TestEdited(t *testing.T) { t.Log(1) }\nfunc TestNew(t *testing.T) {}\nfunc helper(t *testing.T) {}\nfunc Testable(t *testing.T) {}\nfunc TestMain(m *testing.M) {}\n"
 	got, err := changedTests("p_test.go", base, head)
 	if err != nil {
@@ -114,6 +114,57 @@ func TestOther(t *testing.T) {}
 	want := []string{"TestMethod", "TestTable", "TestUnrelated", "TestViaHelper"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("changedTests = %v, want %v (TestOther must be excluded)", got, want)
+	}
+}
+
+// #183 review: dependencies are resolved across all of the package's test
+// files, and import changes count as changes.
+func TestChangedPackageTestsAcrossFilesAndImports(t *testing.T) {
+	x := "package p\nimport \"testing\"\nfunc TestX(t *testing.T) { for range cases {} }\nfunc TestY(t *testing.T) {}\n"
+	z := "package p\nimport (\n\t\"testing\"\n\tlib \"example.com/a\"\n)\nfunc TestZ(t *testing.T) { lib.Do() }\n"
+	helpers := "package p\nvar cases = []int{1}\n"
+	base := map[string]string{"p/x_test.go": x, "p/z_test.go": z, "p/helpers_test.go": helpers}
+	cases := []struct {
+		name string
+		edit func(map[string]string)
+		want []string
+	}{
+		{"table case in another file", func(m map[string]string) {
+			m["p/helpers_test.go"] = "package p\nvar cases = []int{1, 2}\n"
+		}, []string{"TestX"}},
+		{"helper removed", func(m map[string]string) {
+			m["p/helpers_test.go"] = "package p\n"
+			m["p/x_test.go"] = x + "var cases = []int{}\n"
+		}, []string{"TestX"}},
+		{"aliased import path switched", func(m map[string]string) {
+			m["p/z_test.go"] = strings.Replace(z, "example.com/a", "example.com/b", 1)
+		}, []string{"TestZ"}},
+		{"blank import added", func(m map[string]string) {
+			m["p/helpers_test.go"] = "package p\nimport _ \"example.com/setup\"\nvar cases = []int{1}\n"
+		}, []string{"TestX", "TestY", "TestZ"}},
+		{"init added", func(m map[string]string) {
+			m["p/helpers_test.go"] = helpers + "func init() {}\n"
+		}, []string{"TestX", "TestY", "TestZ"}},
+		{"TestMain changed", func(m map[string]string) {
+			m["p/helpers_test.go"] = helpers + "func TestMain(m *testing.M) { m.Run() }\n"
+		}, []string{"TestX", "TestY", "TestZ"}},
+		{"nothing relevant", func(m map[string]string) {
+			m["p/helpers_test.go"] = helpers + "// comment\n"
+		}, nil},
+	}
+	for _, tc := range cases {
+		head := map[string]string{}
+		for k, v := range base {
+			head[k] = v
+		}
+		tc.edit(head)
+		got, err := changedPackageTests(base, head)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: changed = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -534,6 +585,27 @@ func TestReproFixtureWithChangedTestKeepsPlanNarrow(t *testing.T) {
 
 	plan, outcome := r.pipeline(head)
 	if want := []string{"internal/calc.TestAddFromFixture"}; !reflect.DeepEqual(plan.Tests(), want) {
+		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	}
+	if !outcome.Pass {
+		t.Fatalf("outcome = %+v, want pass", outcome)
+	}
+}
+
+// #183 review e2e: a table case added in helpers_test.go is planned for the
+// unchanged test in another file that uses it.
+func TestReproTableInOtherFile(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/table_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestAddTable(t *testing.T) {\n\tfor _, c := range addCases {\n\t\tif got := Add(c.a, c.b); got != c.want {\n\t\t\tt.Fatalf(\"Add(%d, %d) = %d, want %d\", c.a, c.b, got, c.want)\n\t\t}\n\t}\n}\n")
+	r.write("internal/calc/cases_test.go", "package calc\n\nvar addCases = []struct{ a, b, want int }{{0, 0, 0}}\n")
+	r.base = r.commit("table")
+	r.git("checkout", "-q", "-b", "case")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/cases_test.go", "package calc\n\nvar addCases = []struct{ a, b, want int }{{0, 0, 0}, {2, 3, 5}}\n")
+	head := r.commit("fix")
+
+	plan, outcome := r.pipeline(head)
+	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(plan.Tests(), want) {
 		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
 	}
 	if !outcome.Pass {

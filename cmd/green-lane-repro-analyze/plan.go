@@ -88,6 +88,7 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	fields := strings.Split(strings.TrimSuffix(diff, "\x00"), "\x00")
 	byDir := map[string][]string{}
 	fixtureDirs := map[string]bool{} // packages whose testdata the PR changes
+	testDirs := map[string]bool{}    // packages with an added, changed or deleted _test.go
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, file := fields[i], fields[i+1]
 		if !isTestSideFile(file) {
@@ -95,6 +96,8 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		}
 		if inTestdata(file) {
 			fixtureDirs[testdataOwner(file)] = true
+		} else {
+			testDirs[path.Dir(file)] = true
 		}
 		if strings.HasPrefix(status, "D") {
 			plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Delete: true})
@@ -108,20 +111,23 @@ func buildPlan(repo, base, head string) (Plan, error) {
 			return plan, fmt.Errorf("resolve %s: %w", file, err)
 		}
 		plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Blob: blob, Mode: mode})
+	}
 
-		if !strings.HasSuffix(file, "_test.go") || inTestdata(file) {
-			continue
-		}
-		headSrc, err := git(repo, "cat-file", "blob", head+":"+file)
-		if err != nil {
-			return plan, fmt.Errorf("read %s: %w", file, err)
-		}
-		baseSrc, _ := git(repo, "cat-file", "blob", plan.MergeBase+":"+file) // absent for new files
-		names, err := changedTests(file, baseSrc, headSrc)
+	// Compare each affected package's test files as a whole: a table or
+	// helper in one _test.go file is often used by a test in another.
+	for dir := range testDirs {
+		baseSrcs, err := packageTestSources(repo, plan.MergeBase, dir)
 		if err != nil {
 			return plan, err
 		}
-		dir := path.Dir(file)
+		headSrcs, err := packageTestSources(repo, head, dir)
+		if err != nil {
+			return plan, err
+		}
+		names, err := changedPackageTests(baseSrcs, headSrcs)
+		if err != nil {
+			return plan, err
+		}
 		byDir[dir] = append(byDir[dir], names...)
 	}
 
@@ -178,36 +184,15 @@ func testdataOwner(file string) string {
 // path may be built in non-test code), every test in the package is
 // returned.
 func fixtureTests(repo, commit, dir string) ([]string, error) {
-	args := []string{"ls-tree", "-z", "--name-only", commit}
-	if dir != "." {
-		args = append(args, "--", dir+"/")
-	}
-	out, err := git(repo, args...)
+	srcs, err := packageTestSources(repo, commit, dir)
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", dir, err)
+		return nil, err
 	}
 	// Merge the package's test files: a test often reads a path declared
 	// in another _test.go file of the same package.
-	pkg := testFile{decls: map[string]string{}, uses: map[string][]string{}, readsTestdata: map[string]bool{}}
-	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
-		if !strings.HasSuffix(file, "_test.go") || path.Dir(file) != path.Clean(dir) {
-			continue
-		}
-		src, err := git(repo, "cat-file", "blob", commit+":"+file)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", file, err)
-		}
-		tf, err := parseTestFile(file, src)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s at head: %w", file, err)
-		}
-		pkg.tests = append(pkg.tests, tf.tests...)
-		for name, uses := range tf.uses {
-			pkg.uses[name] = append(pkg.uses[name], uses...)
-		}
-		for name := range tf.readsTestdata {
-			pkg.readsTestdata[name] = true
-		}
+	pkg, err := parsePackage(srcs)
+	if err != nil {
+		return nil, err
 	}
 	reads := closure(pkg, pkg.readsTestdata)
 	var reading []string
@@ -266,46 +251,127 @@ func inTestdata(file string) bool {
 	return false
 }
 
-// changedTests returns top-level Go test functions in headSrc that are new,
-// whose source differs from baseSrc, or that use a top-level declaration in
-// the same file that is new or changed. The last case covers table-driven
-// tests: adding a regression case to a package-level `var cases = ...`
-// leaves TestX's own text unchanged but changes what it runs. Use is
-// followed through other changed-or-dependent declarations (a helper that
-// reads the table), within the file. Tests that use nothing changed are
-// excluded: they already pass on base and could never "fail before".
-// Including more tests only adds fails-before requirements, so this can
-// never turn a non-repro into a pass.
-func changedTests(file, baseSrc, headSrc string) ([]string, error) {
-	head, err := parseTestFile(file, headSrc)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s at head: %w", file, err)
+// packageTestSources reads the _test.go files directly in dir at commit,
+// keyed by path. A directory missing at commit yields an empty map.
+func packageTestSources(repo, commit, dir string) (map[string]string, error) {
+	args := []string{"ls-tree", "-z", "--name-only", commit}
+	if dir != "." {
+		args = append(args, "--", dir+"/")
 	}
-	base := testFile{decls: map[string]string{}}
-	if baseSrc != "" {
-		if parsed, err := parseTestFile(file, baseSrc); err == nil {
-			base = parsed
+	out, err := git(repo, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", dir, err)
+	}
+	srcs := map[string]string{}
+	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if !strings.HasSuffix(file, "_test.go") || path.Dir(file) != path.Clean(dir) {
+			continue
 		}
+		src, err := git(repo, "cat-file", "blob", commit+":"+file)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", file, err)
+		}
+		srcs[file] = src
+	}
+	return srcs, nil
+}
+
+// changedTests is changedPackageTests for a package with one test file.
+func changedTests(file, baseSrc, headSrc string) ([]string, error) {
+	base := map[string]string{}
+	if baseSrc != "" {
+		base[file] = baseSrc
+	}
+	return changedPackageTests(base, map[string]string{file: headSrc})
+}
+
+// changedPackageTests returns the package's top-level Go test functions at
+// head that are new, whose source changed, or that use (across all of the
+// package's test files, transitively) a top-level declaration that is new,
+// changed or removed. That covers table-driven tests: adding a case to
+// `var cases = ...` in helpers_test.go leaves TestX in x_test.go unchanged
+// but changes what it runs. Import changes count too: a file whose imports
+// changed has all its tests planned, and a changed blank/dot import, init
+// function or TestMain plans every test in the package, since those change
+// the whole test binary. Tests that use nothing changed are excluded: they
+// already pass on base and could never "fail before". Planning more tests
+// only adds fails-before requirements, so this cannot fake a repro.
+func changedPackageTests(baseSrcs, headSrcs map[string]string) ([]string, error) {
+	head, err := parsePackage(headSrcs)
+	if err != nil {
+		return nil, err
+	}
+	base, err := parsePackage(baseSrcs)
+	if err != nil {
+		// An unparsable base only makes everything look changed.
+		base = newTestFile()
 	}
 
-	// dirty: declarations whose source changed, plus, to a fixed point,
-	// declarations that use a dirty one.
 	seed := map[string]bool{}
 	for name, src := range head.decls {
 		if b, ok := base.decls[name]; !ok || b != src {
 			seed[name] = true
 		}
 	}
+	for name := range base.decls {
+		if _, ok := head.decls[name]; !ok {
+			seed[name] = true // removed: anything still using the name changed
+		}
+	}
+	everything := seed["init"] || seed["TestMain"] || head.sideEffectImports != base.sideEffectImports
+	for file, imports := range head.imports {
+		if b, ok := base.imports[file]; !ok || b != imports {
+			for _, name := range head.declaredIn[file] {
+				seed[name] = true
+			}
+		}
+	}
 	dirty := closure(head, seed)
 
 	var names []string
 	for _, name := range head.tests {
-		if dirty[name] {
+		if everything || dirty[name] {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// parsePackage merges the package's test files into one declaration graph.
+// Files are visited in sorted order so equal sources give equal graphs.
+func parsePackage(srcs map[string]string) (testFile, error) {
+	files := make([]string, 0, len(srcs))
+	for f := range srcs {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	pkg := newTestFile()
+	var effects []string
+	for _, file := range files {
+		tf, err := parseTestFile(file, srcs[file])
+		if err != nil {
+			return testFile{}, fmt.Errorf("parse %s: %w", file, err)
+		}
+		pkg.tests = append(pkg.tests, tf.tests...)
+		for name, src := range tf.decls {
+			pkg.decls[name] += src
+		}
+		for name, uses := range tf.uses {
+			pkg.uses[name] = append(pkg.uses[name], uses...)
+		}
+		for name := range tf.readsTestdata {
+			pkg.readsTestdata[name] = true
+		}
+		pkg.imports[file] = tf.imports[file]
+		pkg.declaredIn[file] = tf.declaredIn[file]
+		if tf.sideEffectImports != "" {
+			effects = append(effects, tf.sideEffectImports)
+		}
+	}
+	sort.Strings(effects)
+	pkg.sideEffectImports = strings.Join(effects, "\n")
+	return pkg, nil
 }
 
 // closure returns seed plus every top-level declaration in tf that uses a
@@ -334,12 +400,25 @@ func closure(tf testFile, seed map[string]bool) map[string]bool {
 
 var testNamePattern = regexp.MustCompile(`^Test($|[^a-z])`)
 
-// testFile is the top-level structure of one Go test file.
+// testFile is the top-level structure of one Go test file, or of a whole
+// package's test files after parsePackage.
 type testFile struct {
 	tests         []string            // runnable TestXxx(t *T) functions
 	decls         map[string]string   // top-level name -> its declaration's source
 	uses          map[string][]string // top-level name -> identifiers it references
 	readsTestdata map[string]bool     // top-level name -> has a "testdata" string literal
+	imports       map[string]string   // file -> its import declarations' source
+	declaredIn    map[string][]string // file -> top-level names it declares
+	// sideEffectImports lists blank and dot imports, which change the
+	// whole test binary rather than one file's identifiers.
+	sideEffectImports string
+}
+
+func newTestFile() testFile {
+	return testFile{
+		decls: map[string]string{}, uses: map[string][]string{}, readsTestdata: map[string]bool{},
+		imports: map[string]string{}, declaredIn: map[string][]string{},
+	}
 }
 
 func parseTestFile(file, src string) (testFile, error) {
@@ -348,7 +427,9 @@ func parseTestFile(file, src string) (testFile, error) {
 	if err != nil {
 		return testFile{}, err
 	}
-	out := testFile{decls: map[string]string{}, uses: map[string][]string{}, readsTestdata: map[string]bool{}}
+	out := newTestFile()
+	var imports strings.Builder
+	var effects []string
 	text := func(n ast.Node) string {
 		return src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]
 	}
@@ -376,8 +457,10 @@ func parseTestFile(file, src string) (testFile, error) {
 		if name == "_" || name == "" {
 			return
 		}
-		// Several specs can share a name only in invalid code; keep both.
+		// Several specs can share a name only in invalid code (or init);
+		// keep both.
 		out.decls[name] += decl
+		out.declaredIn[file] = append(out.declaredIn[file], name)
 		out.uses[name] = append(out.uses[name], idents(n)...)
 		if mentionsTestdata(n) {
 			out.readsTestdata[name] = true
@@ -398,6 +481,12 @@ func parseTestFile(file, src string) (testFile, error) {
 			}
 		case *ast.GenDecl:
 			if d.Tok == token.IMPORT {
+				imports.WriteString(text(d) + "\n")
+				for _, spec := range d.Specs {
+					if s, ok := spec.(*ast.ImportSpec); ok && s.Name != nil && (s.Name.Name == "_" || s.Name.Name == ".") {
+						effects = append(effects, s.Name.Name+" "+s.Path.Value)
+					}
+				}
 				continue
 			}
 			for _, spec := range d.Specs {
@@ -412,6 +501,9 @@ func parseTestFile(file, src string) (testFile, error) {
 			}
 		}
 	}
+	out.imports[file] = imports.String()
+	sort.Strings(effects)
+	out.sideEffectImports = strings.Join(effects, "\n")
 	return out, nil
 }
 

@@ -121,6 +121,21 @@ func TestRenamesCountBothPaths(t *testing.T) {
 			t.Errorf("%s: lane = %s, want %s", tc.name, got, tc.lane)
 		}
 	}
+	// #183 review: both paths qualifying is not enough when one is a
+	// dependency file; the rename removes or rewrites the manifest.
+	for _, f := range []PRFile{
+		{Filename: "marketing/video/dependencies.md", PreviousFilename: "marketing/video/package.json", Status: "renamed"},
+		{Filename: "web/package.json", PreviousFilename: "package.json", Status: "renamed", Patch: packageJSONBump},
+		{Filename: "go.sum", PreviousFilename: "docs/go.sum.md", Status: "renamed"},
+	} {
+		res := eval.Evaluate(passingPR(f), nil, nil)
+		if res.Lane != LaneDocsDeps {
+			t.Fatalf("%s: lane = %s", f.Filename, res.Lane)
+		}
+		if r := ruleByName(t, res, "File Types"); r.Pass || !strings.Contains(r.Message, "renaming a dependency file") {
+			t.Errorf("%s <- %s: File Types = %+v", f.Filename, f.PreviousFilename, r)
+		}
+	}
 	moved := PRInfo{Files: []PRFile{{Filename: "docs/workflow.md", PreviousFilename: ".github/workflows/green-lane-shadow.yml", Status: "renamed"}}}
 	if r := eval.checkDeniedPaths(moved); r.Pass || !strings.Contains(r.Message, ".github/workflows/green-lane-shadow.yml") {
 		t.Errorf("renaming a denied file away must be denied: %+v", r)
