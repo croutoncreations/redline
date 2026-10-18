@@ -93,8 +93,11 @@ var (
 	packageJSONBumpLine = regexp.MustCompile(`^\s*"[@A-Za-z0-9._/-]+"\s*:\s*"[~^]?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*"\s*,?\s*$`)
 	// packageJSONEntry extracts the dependency name and version from a bump line.
 	packageJSONEntry = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*"([^"]+)"`)
-	// packageJSONSection matches a line that opens a JSON object: "name": {
-	packageJSONSection = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*\{`)
+	// packageJSONSection matches a line that opens a JSON object and leaves
+	// it open: "name": {   (not "name": {} or "name": { "a": "1.0.0" }).
+	packageJSONSection = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*\{\s*$`)
+	// goModBlock matches a go.mod line that opens a directive block.
+	goModBlock = regexp.MustCompile(`^\s*(require|exclude|replace|retract|tool|godebug|ignore)\s*\(\s*$`)
 )
 
 // npmDependencySections are the package.json objects whose entries are
@@ -177,18 +180,36 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			added, removed = map[string]int{}, map[string]int{}
 			return msg
 		}
-		// section is the package.json object enclosing the current line, as
-		// far as the hunk's context shows; "" when it is not visible.
+		// section is the package.json object or go.mod directive block
+		// enclosing the current line, as far as the hunk shows (its context
+		// lines, or the enclosing line git puts after the @@ header);
+		// "" when it is not visible.
+		goMod := allowed == goModBumpLine
 		section := ""
+		track := func(text string) {
+			t := strings.TrimSpace(text)
+			if goMod {
+				if m := goModBlock.FindStringSubmatch(text); m != nil {
+					section = m[1]
+				} else if t == ")" {
+					section = ""
+				}
+				return
+			}
+			if m := packageJSONSection.FindStringSubmatch(text); m != nil {
+				section = m[1]
+			} else if strings.HasPrefix(t, "}") {
+				section = ""
+			}
+		}
 		for _, line := range strings.Split(f.Patch, "\n") {
 			if strings.HasPrefix(line, "@@") {
 				section = ""
-			} else if len(line) > 0 {
-				if m := packageJSONSection.FindStringSubmatch(line[1:]); m != nil {
-					section = m[1]
-				} else if strings.HasPrefix(strings.TrimSpace(line[1:]), "}") {
-					section = ""
+				if parts := strings.SplitN(line, "@@", 3); len(parts) == 3 {
+					track(parts[2])
 				}
+			} else if len(line) > 0 {
+				track(line[1:])
 			}
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
 				if msg := endBlock(); msg != "" {
@@ -206,9 +227,22 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			if !ok {
 				continue
 			}
+			// go.mod: a bare "module version" line is a dependency only
+			// inside a require block; the same shape in an exclude or
+			// retract block changes resolution, not a version. Fail closed
+			// when the block is not visible. (A single-line require
+			// directive carries its keyword and needs no block.)
+			if goMod && !entry.directive && !strings.HasPrefix(strings.TrimSpace(changed), "require ") && section != "require" {
+				where := "with no require block visible in the diff context"
+				if section != "" {
+					where = fmt.Sprintf("in a %q block, not require", section)
+				}
+				result.Message = fmt.Sprintf("%s: %q changed %s", f.Filename, entry.key, where)
+				return result
+			}
 			// Fail closed: an entry whose section the diff context does not
 			// show cannot be confirmed as a dependency.
-			if allowed == packageJSONBumpLine && !npmDependencySections[section] {
+			if !goMod && !npmDependencySections[section] {
 				where := "outside a dependency section"
 				if section != "" {
 					where = fmt.Sprintf("in %q, not a dependency section", section)

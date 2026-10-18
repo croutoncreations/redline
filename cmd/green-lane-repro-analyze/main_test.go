@@ -744,14 +744,68 @@ func TestReproNonTestdataFixtureIsInconclusive(t *testing.T) {
 	}
 }
 
-func TestReferencedInputs(t *testing.T) {
-	changed := []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json", "internal/calc/README.md", "internal/other/fixtures/b.json", "golden.txt"}
-	got := referencedInputs("internal/calc", changed, []string{"fixtures/a.json", "golden.json"})
-	if want := []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
+// #183 review e2e: the same false repro from a repo-level fixture read via
+// ../.. from a nested package.
+func TestReproRepoLevelFixtureIsInconclusive(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.git("checkout", "-q", "-b", "repo-fixture")
+	r.write("fixtures/case.txt", "2+3=5\n")
+	r.write("internal/calc/fix_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestRepoFixture(t *testing.T) {\n\tif _, err := os.ReadFile(\"../../fixtures/case.txt\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n")
+	head := r.commit("repo-level fixture")
+
+	plan, outcome := r.pipeline(head)
+	if !reflect.DeepEqual(plan.UntrackedInputs, []string{"fixtures/case.txt"}) {
+		t.Fatalf("untracked inputs = %v", plan.UntrackedInputs)
 	}
-	if got := referencedInputs(".", changed, []string{"golden.txt"}); !reflect.DeepEqual(got, []string{"golden.txt"}) {
-		t.Errorf("root: got %v", got)
+	if outcome.Pass || !outcome.Inconclusive {
+		t.Fatalf("outcome = %+v, want inconclusive", outcome)
+	}
+}
+
+func TestReferencedInputs(t *testing.T) {
+	changed := []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json", "internal/calc/README.md", "internal/other/fixtures/b.json", "golden.txt", "fixtures/case.json", "internal/shared/case.json"}
+	cases := []struct {
+		name     string
+		dir      string
+		literals []string
+		want     []string
+	}{
+		{"package-relative", "internal/calc", []string{"fixtures/a.json", "golden.json"}, []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json"}},
+		{"root file", ".", []string{"golden.txt"}, []string{"golden.txt"}},
+		// #183 review: root package reading a nested fixture.
+		{"root nested", ".", []string{"fixtures/case.json"}, []string{"fixtures/case.json"}},
+		// #183 review: inputs outside the package directory.
+		// The literal also mentions "fixtures", so the package's own
+		// fixtures/ file matches too: over-matching is the safe direction.
+		{"repo-level via ../..", "internal/calc", []string{"../../fixtures/case.json"}, []string{"internal/calc/fixtures/a.json", "fixtures/case.json"}},
+		{"repo-level only", "internal/calc", []string{"../../golden.txt"}, []string{"golden.txt"}},
+		{"sibling dir", "internal/calc", []string{"../shared"}, []string{"internal/shared/case.json"}},
+		{"unrelated literal", "internal/calc", []string{"hello"}, nil},
+	}
+	for _, tc := range cases {
+		if got := referencedInputs(tc.dir, changed, tc.literals); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// #183 review: //go: directives on a declaration are part of it.
+func TestChangedPackageTestsSeesDirectives(t *testing.T) {
+	src := func(embed string) map[string]string {
+		return map[string]string{"p/x_test.go": "package p\nimport (\n\t_ \"embed\"\n\t\"testing\"\n)\n//go:embed " + embed + "\nvar data string\nfunc TestData(t *testing.T) { _ = data }\nfunc TestOther(t *testing.T) {}\n"}
+	}
+	got, err := changedPackageTests(src("testdata/a.json"), src("testdata/b.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"TestData"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("changed = %v, want %v", got, want)
+	}
+	// A plain doc comment change plans nothing.
+	base := map[string]string{"p/x_test.go": "package p\nimport \"testing\"\n// old words\nfunc TestA(t *testing.T) {}\n"}
+	head := map[string]string{"p/x_test.go": "package p\nimport \"testing\"\n// new words\nfunc TestA(t *testing.T) {}\n"}
+	if got, _ := changedPackageTests(base, head); len(got) != 0 {
+		t.Errorf("doc comment change planned %v", got)
 	}
 }
 

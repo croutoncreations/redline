@@ -277,7 +277,7 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json new dependency", PRFile{Filename: "package.json", Patch: "@@ -6,6 +6,7 @@\n   \"devDependencies\": {\n+    \"some-pkg\": \"1.0.0\",\n     \"@playwright/test\": \"1.61.1\"\n   }"}, false, `dependency "some-pkg" is added`},
 		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,2 @@\n   \"devDependencies\": {\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
 		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,1 @@\n   \"devDependencies\": {\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
-		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
+		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@ require (\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
 		// #183 review: semver-shaped values outside dependency sections are
 		// not dependency bumps; an entry whose section is not visible fails
 		// closed.
@@ -285,6 +285,12 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json custom nested field", PRFile{Filename: "package.json", Patch: "@@ -8,4 +8,4 @@\n   \"config\": {\n-    \"schemaVersion\": \"1.0.0\"\n+    \"schemaVersion\": \"2.0.0\"\n   },"}, false, `in "config", not a dependency section`},
 		{"package.json engines", PRFile{Filename: "package.json", Patch: "@@ -3,3 +3,3 @@\n   \"engines\": {\n-    \"node\": \"18.0.0\"\n+    \"node\": \"20.0.0\"\n   },"}, false, `in "engines"`},
 		{"package.json after closed section", PRFile{Filename: "package.json", Patch: "@@ -6,6 +6,6 @@\n   \"devDependencies\": {\n     \"a\": \"1.0.0\"\n   },\n-  \"version\": \"1.0.0\"\n+  \"version\": \"1.0.1\""}, false, "no dependency section visible"},
+		{"package.json after empty object", PRFile{Filename: "package.json", Patch: "@@ -2,3 +2,3 @@\n   \"dependencies\": {},\n-  \"version\": \"1.0.0\",\n+  \"version\": \"1.0.1\","}, false, "no dependency section visible"},
+		{"package.json section from hunk header", PRFile{Filename: "package.json", Patch: "@@ -8,3 +8,3 @@   \"devDependencies\": {\n     \"a\": \"1.0.0\",\n-    \"b\": \"1.0.0\"\n+    \"b\": \"1.1.0\""}, true, ""},
+		// #183 review: bare go.mod entries count only in require blocks.
+		{"go.mod exclude block", PRFile{Filename: "go.mod", Patch: "@@ -20,3 +20,3 @@\n exclude (\n-\texample.com/foo v1.0.0\n+\texample.com/foo v1.1.0\n )"}, false, `in a "exclude" block`},
+		{"go.mod no block visible", PRFile{Filename: "go.mod", Patch: "@@ -30 +30 @@\n-\texample.com/foo v1.0.0\n+\texample.com/foo v1.1.0"}, false, "no require block visible"},
+		{"go.mod after require closes", PRFile{Filename: "go.mod", Patch: "@@ -10,5 +10,5 @@\n \tgolang.org/x/sys v0.48.0\n )\n \n-\texample.com/foo v1.0.0\n+\texample.com/foo v1.1.0"}, false, "no require block visible"},
 		{"package.json dependencies bump", PRFile{Filename: "package.json", Patch: "@@ -3,3 +3,3 @@\n   \"dependencies\": {\n-    \"left-pad\": \"1.0.0\"\n+    \"left-pad\": \"1.3.0\"\n   },"}, true, ""},
 		// #183 review: a dependency moved between sections is not a bump,
 		// even with a new version; a bump is in place.
@@ -293,10 +299,10 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"go.mod move between require blocks", PRFile{Filename: "go.mod", Patch: "@@ -5,8 +5,8 @@\n require (\n+\tgolang.org/x/sys v0.49.0\n \tgithub.com/google/uuid v1.6.0\n )\n \n require (\n-\tgolang.org/x/sys v0.48.0 // indirect\n )"}, false, "not version-bumped in place"},
 		// #183 review: formatting and "// indirect" are not version changes.
 		{"package.json reindent only", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,2 @@\n   \"devDependencies\": {\n-    \"@playwright/test\": \"1.61.1\"\n+  \"@playwright/test\": \"1.61.1\""}, false, "changes no version"},
-		{"go.mod indirect toggle", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/sys v0.48.0 // indirect"}, false, "changes no version"},
-		{"go.mod reindent + real bump", PRFile{Filename: "go.mod", Patch: "@@ -11,2 +11,2 @@\n-\tgithub.com/google/uuid v1.6.0\n-\tgolang.org/x/sys v0.48.0\n+    github.com/google/uuid v1.6.0\n+\tgolang.org/x/sys v0.49.0"}, true, ""},
+		{"go.mod indirect toggle", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@ require (\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/sys v0.48.0 // indirect"}, false, "changes no version"},
+		{"go.mod reindent + real bump", PRFile{Filename: "go.mod", Patch: "@@ -11,2 +11,2 @@ require (\n-\tgithub.com/google/uuid v1.6.0\n-\tgolang.org/x/sys v0.48.0\n+    github.com/google/uuid v1.6.0\n+\tgolang.org/x/sys v0.49.0"}, true, ""},
 		{"go.mod single-line require bump", PRFile{Filename: "go.mod", Patch: "@@ -5 +5 @@\n-require golang.org/x/sys v0.48.0\n+require golang.org/x/sys v0.49.0"}, true, ""},
-		{"go.mod swap module", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/syz v0.48.0"}, false, `dependency "golang.org/x/sys" is removed`},
+		{"go.mod swap module", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@ require (\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/syz v0.48.0"}, false, `dependency "golang.org/x/sys" is removed`},
 	}
 	for _, tc := range cases {
 		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{tc.file}})

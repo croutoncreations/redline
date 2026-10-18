@@ -209,34 +209,63 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	return plan, nil
 }
 
-// referencedInputs returns the changed files under dir (directly in it, for
-// the repository root) whose path relative to dir starts with a component
-// that some string literal in the package's tests mentions, such as
-// "fixtures" for fixtures/case.json or "golden.json" for golden.json.
-// Only testdata/ is overlaid onto base; a test reading any other changed
-// file would see the base version there and could fail for that reason
-// alone, which would look like a repro.
+// referencedInputs returns the changed files that the package's tests appear
+// to read. Only testdata/ is overlaid onto base; a test reading any other
+// changed file would see the base version there and could fail for that
+// reason alone, which would look like a repro. A file counts when:
+//   - it is under dir and a string literal mentions the first component of
+//     its path relative to dir ("fixtures" for fixtures/case.json, also when
+//     the test builds the path with filepath.Join), or
+//   - a literal, resolved against dir as go test's working directory
+//     ("../../fixtures/case.json", "../shared"), names the file or one of
+//     its parent directories, wherever it is in the repository.
+//
+// Over-matching only makes the result inconclusive, which is the safe
+// direction.
 func referencedInputs(dir string, changed, literals []string) []string {
-	var out []string
-	for _, file := range changed {
-		rel := file
-		if dir != "." {
-			if !strings.HasPrefix(file, dir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(file, dir+"/")
-		} else if strings.Contains(file, "/") {
+	var resolved []string
+	for _, lit := range literals {
+		if !strings.Contains(lit, "/") && !strings.Contains(lit, ".") {
 			continue
 		}
-		first, _, _ := strings.Cut(rel, "/")
-		for _, lit := range literals {
-			if strings.Contains(lit, first) {
-				out = append(out, file)
-				break
-			}
+		p := path.Clean(path.Join(dir, lit))
+		if p != "." && p != ".." && !strings.HasPrefix(p, "../") && !path.IsAbs(lit) {
+			resolved = append(resolved, p)
+		}
+	}
+	var out []string
+	for _, file := range changed {
+		if referencedUnderDir(dir, file, literals) || referencedByPath(file, resolved) {
+			out = append(out, file)
 		}
 	}
 	return out
+}
+
+func referencedUnderDir(dir, file string, literals []string) bool {
+	rel := file
+	if dir != "." {
+		if !strings.HasPrefix(file, dir+"/") {
+			return false
+		}
+		rel = strings.TrimPrefix(file, dir+"/")
+	}
+	first, _, _ := strings.Cut(rel, "/")
+	for _, lit := range literals {
+		if strings.Contains(lit, first) {
+			return true
+		}
+	}
+	return false
+}
+
+func referencedByPath(file string, resolved []string) bool {
+	for _, p := range resolved {
+		if file == p || strings.HasPrefix(file, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // testdataOwner returns the package directory a testdata path belongs to:
@@ -496,11 +525,29 @@ func newTestFile() testFile {
 
 func parseTestFile(file, src string) (testFile, error) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
+	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
 		return testFile{}, err
 	}
 	out := newTestFile()
+	// directives returns a declaration's //go: directive lines (go:embed,
+	// go:linkname, ...). They change what the declaration does but are
+	// comments, outside its source text. Plain doc comments are ignored so
+	// a reworded comment does not plan a test.
+	directives := func(groups ...*ast.CommentGroup) string {
+		var b strings.Builder
+		for _, g := range groups {
+			if g == nil {
+				continue
+			}
+			for _, c := range g.List {
+				if strings.HasPrefix(c.Text, "//go:") {
+					b.WriteString(c.Text + "\n")
+				}
+			}
+		}
+		return b.String()
+	}
 	// The file header (build constraints and other leading directives, and
 	// the package clause) is compared with the imports: changing
 	// //go:build windows to linux makes an unchanged test runnable on the
@@ -561,10 +608,10 @@ func parseTestFile(file, src string) (testFile, error) {
 				// method (NewCalc().helper(), with the type declared in
 				// non-test code). A collision with another name only plans
 				// more tests, which is the safe direction.
-				add(receiverType(d.Recv.List[0].Type), text(d), d)
-				add(d.Name.Name, text(d), d)
+				add(receiverType(d.Recv.List[0].Type), directives(d.Doc)+text(d), d)
+				add(d.Name.Name, directives(d.Doc)+text(d), d)
 			} else {
-				add(d.Name.Name, text(d), d)
+				add(d.Name.Name, directives(d.Doc)+text(d), d)
 			}
 			if d.Recv == nil && isTestFunc(d) {
 				out.tests = append(out.tests, d.Name.Name)
@@ -583,10 +630,10 @@ func parseTestFile(file, src string) (testFile, error) {
 				switch s := spec.(type) {
 				case *ast.ValueSpec:
 					for _, n := range s.Names {
-						add(n.Name, text(s), s)
+						add(n.Name, directives(d.Doc, s.Doc)+text(s), s)
 					}
 				case *ast.TypeSpec:
-					add(s.Name.Name, text(s), s)
+					add(s.Name.Name, directives(d.Doc, s.Doc)+text(s), s)
 				}
 			}
 		}
