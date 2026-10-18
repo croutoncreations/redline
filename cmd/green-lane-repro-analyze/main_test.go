@@ -466,6 +466,94 @@ func TestRunsFixture(t *testing.T) {
 	}
 }
 
+// #183 review: a regression case can be added to a golden/table test by
+// adding only a fixture. The owning package's testdata-reading tests are
+// planned, and a genuine fix scores as a repro.
+func TestReproFixtureOnlyRegressionCase(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/golden_test.go", `package calc
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestGoldenCases(t *testing.T) {
+	files, _ := filepath.Glob(casesDir + "/*.txt")
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a, b, want int
+		if _, err := fmt.Sscanf(string(raw), "%d+%d=%d", &a, &b, &want); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		if got := Add(a, b); got != want {
+			t.Fatalf("%s: Add(%d, %d) = %d, want %d", f, a, b, got, want)
+		}
+	}
+}
+
+func TestNoFixtures(t *testing.T) {}
+`)
+	// casesDir lives in another declaration, so the planner has to follow
+	// the use, not just look at TestGoldenCases's own body.
+	r.write("internal/calc/dirs_test.go", "package calc\n\nconst casesDir = \"testdata/golden\"\n")
+	src, _ := os.ReadFile(filepath.Join(r.dir, "internal/calc/golden_test.go"))
+	r.write("internal/calc/golden_test.go", strings.Replace(string(src), "import (\n", "import (\n\t\"fmt\"\n", 1))
+	r.write("internal/calc/testdata/golden/zero.txt", "0+0=0\n")
+	r.base = r.commit("golden test")
+	r.git("checkout", "-q", "-b", "fixture-case")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/testdata/golden/two.txt", "2+3=5\n")
+	head := r.commit("fix Add, add golden case")
+
+	plan, outcome := r.pipeline(head)
+	if want := []string{"internal/calc.TestGoldenCases"}; !reflect.DeepEqual(plan.Tests(), want) {
+		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	}
+	if !outcome.Pass || !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
+		t.Fatalf("outcome = %+v, want a genuine pass", outcome)
+	}
+}
+
+// When the PR changes a test as well as a fixture, only the changed tests
+// are planned; unchanged golden tests in that package pass on base and must
+// not turn a genuine repro into a failure.
+func TestReproFixtureWithChangedTestKeepsPlanNarrow(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/golden_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestGoldenUnchanged(t *testing.T) { _, _ = os.ReadDir(\"testdata\") }\n")
+	r.base = r.commit("golden test")
+	r.git("checkout", "-q", "-b", "fix")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/add_test.go", fixtureTest)
+	r.write("internal/calc/testdata/cases.txt", "2+3=5\n")
+	head := r.commit("fix Add")
+
+	plan, outcome := r.pipeline(head)
+	if want := []string{"internal/calc.TestAddFromFixture"}; !reflect.DeepEqual(plan.Tests(), want) {
+		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	}
+	if !outcome.Pass {
+		t.Fatalf("outcome = %+v, want pass", outcome)
+	}
+}
+
+func TestTestdataOwner(t *testing.T) {
+	for file, want := range map[string]string{
+		"internal/calc/testdata/a.txt":      "internal/calc",
+		"internal/calc/testdata/sub/b.json": "internal/calc",
+		"testdata/x":                        ".",
+		"a/testdata/b/testdata/c":           "a",
+	} {
+		if got := testdataOwner(file); got != want {
+			t.Errorf("testdataOwner(%q) = %q, want %q", file, got, want)
+		}
+	}
+}
+
 func TestReproNoChangedTests(t *testing.T) {
 	r := newFixtureRepo(t)
 	r.git("checkout", "-q", "-b", "docs")

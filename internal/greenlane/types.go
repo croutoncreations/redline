@@ -38,6 +38,19 @@ type PRFile struct {
 	Deletions int
 	Changes   int
 	Patch     string // unified diff hunk text; GitHub omits it for large files
+	// PreviousFilename is the source path of a rename (GitHub's
+	// previous_filename). A rename touches both paths, so rules that look
+	// at paths must check both.
+	PreviousFilename string
+}
+
+// Paths returns every path the change touches: the file and, for a rename,
+// its source.
+func (f PRFile) Paths() []string {
+	if f.PreviousFilename != "" && f.PreviousFilename != f.Filename {
+		return []string{f.Filename, f.PreviousFilename}
+	}
+	return []string{f.Filename}
 }
 
 // CheckRun represents a GitHub check run status

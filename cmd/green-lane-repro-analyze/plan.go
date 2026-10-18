@@ -87,10 +87,14 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	}
 	fields := strings.Split(strings.TrimSuffix(diff, "\x00"), "\x00")
 	byDir := map[string][]string{}
+	fixtureDirs := map[string]bool{} // packages whose testdata the PR changes
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, file := fields[i], fields[i+1]
 		if !isTestSideFile(file) {
 			continue
+		}
+		if inTestdata(file) {
+			fixtureDirs[testdataOwner(file)] = true
 		}
 		if strings.HasPrefix(status, "D") {
 			plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Delete: true})
@@ -121,6 +125,25 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		byDir[dir] = append(byDir[dir], names...)
 	}
 
+	// A PR can add a regression case to a golden or table test only by
+	// adding a fixture: no test function changes, but the test that walks
+	// testdata/ now runs the new case. For such fixture-only packages,
+	// schedule the tests that read testdata (or all of them if none
+	// visibly do). Planning more tests only adds fails-before requirements,
+	// so it cannot fake a repro. Packages that already have changed tests
+	// keep exactly those: adding unchanged golden tests there would make a
+	// genuine repro fail because those tests pass on base.
+	for dir := range fixtureDirs {
+		if len(byDir[dir]) > 0 {
+			continue
+		}
+		names, err := fixtureTests(repo, head, dir)
+		if err != nil {
+			return plan, err
+		}
+		byDir[dir] = append(byDir[dir], names...)
+	}
+
 	dirs := make([]string, 0, len(byDir))
 	for dir, names := range byDir {
 		if len(names) > 0 {
@@ -129,11 +152,87 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		names := byDir[dir]
-		sort.Strings(names)
-		plan.Packages = append(plan.Packages, PackagePlan{Dir: dir, Tests: names})
+		plan.Packages = append(plan.Packages, PackagePlan{Dir: dir, Tests: uniqueSorted(byDir[dir])})
 	}
 	return plan, nil
+}
+
+// testdataOwner returns the package directory a testdata path belongs to:
+// everything before its first testdata component ("." at the repo root).
+func testdataOwner(file string) string {
+	parts := strings.Split(file, "/")
+	for i, part := range parts {
+		if part == "testdata" {
+			if i == 0 {
+				return "."
+			}
+			return strings.Join(parts[:i], "/")
+		}
+	}
+	return path.Dir(file)
+}
+
+// fixtureTests lists the tests in dir (at commit) that read testdata: tests
+// whose body, or a declaration in the package's test files that they use,
+// has a string literal mentioning "testdata". If no test visibly does (the
+// path may be built in non-test code), every test in the package is
+// returned.
+func fixtureTests(repo, commit, dir string) ([]string, error) {
+	args := []string{"ls-tree", "-z", "--name-only", commit}
+	if dir != "." {
+		args = append(args, "--", dir+"/")
+	}
+	out, err := git(repo, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", dir, err)
+	}
+	// Merge the package's test files: a test often reads a path declared
+	// in another _test.go file of the same package.
+	pkg := testFile{decls: map[string]string{}, uses: map[string][]string{}, readsTestdata: map[string]bool{}}
+	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if !strings.HasSuffix(file, "_test.go") || path.Dir(file) != path.Clean(dir) {
+			continue
+		}
+		src, err := git(repo, "cat-file", "blob", commit+":"+file)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", file, err)
+		}
+		tf, err := parseTestFile(file, src)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s at head: %w", file, err)
+		}
+		pkg.tests = append(pkg.tests, tf.tests...)
+		for name, uses := range tf.uses {
+			pkg.uses[name] = append(pkg.uses[name], uses...)
+		}
+		for name := range tf.readsTestdata {
+			pkg.readsTestdata[name] = true
+		}
+	}
+	reads := closure(pkg, pkg.readsTestdata)
+	var reading []string
+	for _, name := range pkg.tests {
+		if reads[name] {
+			reading = append(reading, name)
+		}
+	}
+	if len(reading) > 0 {
+		return reading, nil
+	}
+	return pkg.tests, nil
+}
+
+func uniqueSorted(names []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // treeEntry returns the git mode and blob of file at commit.
@@ -191,26 +290,13 @@ func changedTests(file, baseSrc, headSrc string) ([]string, error) {
 
 	// dirty: declarations whose source changed, plus, to a fixed point,
 	// declarations that use a dirty one.
-	dirty := map[string]bool{}
+	seed := map[string]bool{}
 	for name, src := range head.decls {
 		if b, ok := base.decls[name]; !ok || b != src {
-			dirty[name] = true
+			seed[name] = true
 		}
 	}
-	for changed := true; changed; {
-		changed = false
-		for name, uses := range head.uses {
-			if dirty[name] {
-				continue
-			}
-			for _, u := range uses {
-				if dirty[u] {
-					dirty[name], changed = true, true
-					break
-				}
-			}
-		}
-	}
+	dirty := closure(head, seed)
 
 	var names []string
 	for _, name := range head.tests {
@@ -222,13 +308,38 @@ func changedTests(file, baseSrc, headSrc string) ([]string, error) {
 	return names, nil
 }
 
+// closure returns seed plus every top-level declaration in tf that uses a
+// member of the result, computed to a fixed point.
+func closure(tf testFile, seed map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for k, v := range seed {
+		out[k] = v
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, uses := range tf.uses {
+			if out[name] {
+				continue
+			}
+			for _, u := range uses {
+				if out[u] {
+					out[name], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 var testNamePattern = regexp.MustCompile(`^Test($|[^a-z])`)
 
 // testFile is the top-level structure of one Go test file.
 type testFile struct {
-	tests []string            // runnable TestXxx(t *T) functions
-	decls map[string]string   // top-level name -> its declaration's source
-	uses  map[string][]string // top-level name -> identifiers it references
+	tests         []string            // runnable TestXxx(t *T) functions
+	decls         map[string]string   // top-level name -> its declaration's source
+	uses          map[string][]string // top-level name -> identifiers it references
+	readsTestdata map[string]bool     // top-level name -> has a "testdata" string literal
 }
 
 func parseTestFile(file, src string) (testFile, error) {
@@ -237,7 +348,7 @@ func parseTestFile(file, src string) (testFile, error) {
 	if err != nil {
 		return testFile{}, err
 	}
-	out := testFile{decls: map[string]string{}, uses: map[string][]string{}}
+	out := testFile{decls: map[string]string{}, uses: map[string][]string{}, readsTestdata: map[string]bool{}}
 	text := func(n ast.Node) string {
 		return src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]
 	}
@@ -251,6 +362,16 @@ func parseTestFile(file, src string) (testFile, error) {
 		})
 		return ids
 	}
+	mentionsTestdata := func(n ast.Node) bool {
+		found := false
+		ast.Inspect(n, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && strings.Contains(lit.Value, "testdata") {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
 	add := func(name, decl string, n ast.Node) {
 		if name == "_" || name == "" {
 			return
@@ -258,6 +379,9 @@ func parseTestFile(file, src string) (testFile, error) {
 		// Several specs can share a name only in invalid code; keep both.
 		out.decls[name] += decl
 		out.uses[name] = append(out.uses[name], idents(n)...)
+		if mentionsTestdata(n) {
+			out.readsTestdata[name] = true
+		}
 	}
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {

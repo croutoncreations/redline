@@ -245,6 +245,8 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 			Deletions int    `json:"deletions"`
 			Changes   int    `json:"changes"`
 			Patch     string `json:"patch"`
+			// Set for renames; the source path is touched too.
+			PreviousFilename string `json:"previous_filename"`
 		}
 
 		if err := json.Unmarshal(filesData, &filesResp); err != nil {
@@ -263,6 +265,8 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 				Deletions: f.Deletions,
 				Changes:   f.Changes,
 				Patch:     f.Patch,
+
+				PreviousFilename: f.PreviousFilename,
 			})
 		}
 

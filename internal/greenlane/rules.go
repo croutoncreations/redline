@@ -461,11 +461,15 @@ func (e *Evaluator) checkDuplicates(pr PRInfo, openPRs []PRSummary) RuleResult {
 func (e *Evaluator) checkDeniedPaths(pr PRInfo) RuleResult {
 	var denied []string
 
+	// A rename touches both paths: moving a denied file elsewhere edits the
+	// denied path as much as changing it in place.
 	for _, file := range pr.Files {
-		for _, pattern := range e.config.DeniedPaths {
-			if matchPattern(file.Filename, pattern) {
-				denied = append(denied, file.Filename)
-				break
+		for _, p := range file.Paths() {
+			for _, pattern := range e.config.DeniedPaths {
+				if matchPattern(p, pattern) {
+					denied = append(denied, p)
+					break
+				}
 			}
 		}
 	}

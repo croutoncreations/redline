@@ -102,6 +102,31 @@ func TestSelectLane(t *testing.T) {
 	}
 }
 
+// #183 review: GitHub reports a rename by its destination, with the source
+// in previous_filename. A rename qualifies for the lane only if both paths
+// do, and a denied source path is still denied.
+func TestRenamesCountBothPaths(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	cases := []struct {
+		name string
+		file PRFile
+		lane Lane
+	}{
+		{"code renamed to docs", PRFile{Filename: "docs/notes.md", PreviousFilename: "internal/cli/cli.go", Status: "renamed"}, LaneCode},
+		{"fixture renamed to docs", PRFile{Filename: "docs/golden.md", PreviousFilename: "internal/render/testdata/golden.md", Status: "renamed"}, LaneCode},
+		{"docs renamed within docs", PRFile{Filename: "docs/new.md", PreviousFilename: "docs/old.md", Status: "renamed"}, LaneDocsDeps},
+	}
+	for _, tc := range cases {
+		if got := selectLane(PRInfo{Files: []PRFile{tc.file}}); got != tc.lane {
+			t.Errorf("%s: lane = %s, want %s", tc.name, got, tc.lane)
+		}
+	}
+	moved := PRInfo{Files: []PRFile{{Filename: "docs/workflow.md", PreviousFilename: ".github/workflows/green-lane-shadow.yml", Status: "renamed"}}}
+	if r := eval.checkDeniedPaths(moved); r.Pass || !strings.Contains(r.Message, ".github/workflows/green-lane-shadow.yml") {
+		t.Errorf("renaming a denied file away must be denied: %+v", r)
+	}
+}
+
 // Docs/deps PRs no longer fail on "No test files changed": the repro rule is
 // replaced, not marked inconclusive.
 func TestDocsDepsLaneSkipsRepro(t *testing.T) {

@@ -72,8 +72,12 @@ func selectLane(pr PRInfo) Lane {
 		return LaneCode
 	}
 	for _, f := range pr.Files {
-		if !isDocsFile(f.Filename) && !isDepFile(f.Filename) {
-			return LaneCode
+		// A rename qualifies only if its source path does too: renaming
+		// code or a test input to docs/x.md removes code-side content.
+		for _, p := range f.Paths() {
+			if !isDocsFile(p) && !isDepFile(p) {
+				return LaneCode
+			}
 		}
 	}
 	return LaneDocsDeps
