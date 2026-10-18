@@ -25,7 +25,7 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 | Lane | Selected when | Repro rule | Size caps |
 |---|---|---|---|
 | `code` | anything else | required (fails before, passes after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
-| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps), must change at least one version, and must remove and re-add the same dependency names (no added, dropped or renamed dependencies) | ≤100 lines, ≤150 lockfile, ≤5 files |
+| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps), must change at least one version, and must remove and re-add the same dependency names in place (no added, dropped, renamed or section-moved dependencies) | ≤100 lines, ≤150 lockfile, ≤5 files |
 
 What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
@@ -66,8 +66,8 @@ Tests that the same test IDs:
   whose source changed are required, plus tests that use a new, changed or
   removed top-level declaration in any of the package's test files (for
   example a regression case added to `var cases = ...` in `helpers_test.go`,
-  directly or through a helper). A file whose imports changed has all its
-  tests planned, and a changed blank/dot import, `init` or `TestMain` plans
+  directly or through a helper or method). A file whose imports, build
+  constraints or package clause changed has all its tests planned, and a changed blank/dot import, `init` or `TestMain` plans
   every test in the package.
   Unchanged tests that use nothing changed are not required. A package whose
   only test-side change is a `testdata/` fixture (a new golden or table case)
