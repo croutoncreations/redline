@@ -30,6 +30,7 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
 - Markdown, manifests or lockfiles under `cmd/`, `internal/` or any `testdata/` directory. Tests can read them and `go:embed` can ship them, so they are inputs, not documentation or dependencies.
+- Renames whose source path does not qualify (for example `internal/x.go` → `docs/x.md`). Denied Paths also checks both paths of a rename.
 - Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
@@ -65,7 +66,10 @@ Tests that the same test IDs:
   whose source changed are required, plus tests that use a new or changed
   top-level declaration in the same file (for example a regression case added
   to a package-level `var cases = ...` table, directly or through a helper).
-  Unchanged tests that use nothing changed are not required.
+  Unchanged tests that use nothing changed are not required. A package whose
+  only test-side change is a `testdata/` fixture (a new golden or table case)
+  gets its testdata-reading tests planned (all of its tests if none visibly
+  read testdata).
 - `run` creates fresh worktrees for the merge-base and the head, overlays the
   PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base
   (deleting the ones the PR deletes or renames, and keeping each file's git
