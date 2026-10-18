@@ -93,7 +93,16 @@ var (
 	packageJSONBumpLine = regexp.MustCompile(`^\s*"[@A-Za-z0-9._/-]+"\s*:\s*"[~^]?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*"\s*,?\s*$`)
 	// packageJSONEntry extracts the dependency name and version from a bump line.
 	packageJSONEntry = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*"([^"]+)"`)
+	// packageJSONSection matches a line that opens a JSON object: "name": {
+	packageJSONSection = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*\{`)
 )
+
+// npmDependencySections are the package.json objects whose entries are
+// dependencies. A semver-shaped value anywhere else ("version",
+// "engines", a custom "schemaVersion") is not a dependency bump.
+var npmDependencySections = map[string]bool{
+	"dependencies": true, "devDependencies": true, "optionalDependencies": true, "peerDependencies": true,
+}
 
 // manifestEntry is what one matched manifest line says: a dependency (or a
 // go/toolchain directive) and its version.
@@ -168,7 +177,19 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			added, removed = map[string]int{}, map[string]int{}
 			return msg
 		}
+		// section is the package.json object enclosing the current line, as
+		// far as the hunk's context shows; "" when it is not visible.
+		section := ""
 		for _, line := range strings.Split(f.Patch, "\n") {
+			if strings.HasPrefix(line, "@@") {
+				section = ""
+			} else if len(line) > 0 {
+				if m := packageJSONSection.FindStringSubmatch(line[1:]); m != nil {
+					section = m[1]
+				} else if strings.HasPrefix(strings.TrimSpace(line[1:]), "}") {
+					section = ""
+				}
+			}
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
 				if msg := endBlock(); msg != "" {
 					result.Message = fmt.Sprintf("%s: %s, not version-bumped in place", f.Filename, msg)
@@ -184,6 +205,18 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			entry, ok := parseManifestEntry(allowed == goModBumpLine, changed)
 			if !ok {
 				continue
+			}
+			// Fail closed: an entry whose section the diff context does not
+			// show cannot be confirmed as a dependency.
+			if allowed == packageJSONBumpLine && !npmDependencySections[section] {
+				where := "outside a dependency section"
+				if section != "" {
+					where = fmt.Sprintf("in %q, not a dependency section", section)
+				} else {
+					where = "with no dependency section visible in the diff context"
+				}
+				result.Message = fmt.Sprintf("%s: %q changed %s", f.Filename, entry.key, where)
+				return result
 			}
 			names, versions := added, addedVer
 			if line[0] == '-' {

@@ -50,6 +50,11 @@ func analyze(plan Plan, resultsDir string) Outcome {
 	if len(plan.Packages) == 0 {
 		return Outcome{Inconclusive: true, Message: "No new or changed Go test functions in PR"}
 	}
+	if len(plan.UntrackedInputs) > 0 {
+		return Outcome{Inconclusive: true, Message: fmt.Sprintf(
+			"Tests appear to read changed files outside testdata/ that are not overlaid onto base: %s",
+			strings.Join(plan.UntrackedInputs, ", "))}
+	}
 
 	var out Outcome
 	var problems []string

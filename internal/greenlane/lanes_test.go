@@ -275,16 +275,24 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		// name. Adding, dropping or swapping a dependency is not a bump.
 		{"#179 go directive bump drops toolchain", PRFile{Filename: "go.mod", Patch: "@@ -1,8 +1,6 @@\n module x\n \n-go 1.26.0\n-\n-toolchain go1.26.6\n+go 1.26.9\n"}, true, ""},
 		{"package.json new dependency", PRFile{Filename: "package.json", Patch: "@@ -6,6 +6,7 @@\n   \"devDependencies\": {\n+    \"some-pkg\": \"1.0.0\",\n     \"@playwright/test\": \"1.61.1\"\n   }"}, false, `dependency "some-pkg" is added`},
-		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
-		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
+		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,2 @@\n   \"devDependencies\": {\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
+		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,1 @@\n   \"devDependencies\": {\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
 		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
+		// #183 review: semver-shaped values outside dependency sections are
+		// not dependency bumps; an entry whose section is not visible fails
+		// closed.
+		{"package.json own version", PRFile{Filename: "package.json", Patch: "@@ -1,4 +1,4 @@\n {\n   \"name\": \"x\",\n-  \"version\": \"1.0.0\",\n+  \"version\": \"1.0.1\","}, false, "no dependency section visible"},
+		{"package.json custom nested field", PRFile{Filename: "package.json", Patch: "@@ -8,4 +8,4 @@\n   \"config\": {\n-    \"schemaVersion\": \"1.0.0\"\n+    \"schemaVersion\": \"2.0.0\"\n   },"}, false, `in "config", not a dependency section`},
+		{"package.json engines", PRFile{Filename: "package.json", Patch: "@@ -3,3 +3,3 @@\n   \"engines\": {\n-    \"node\": \"18.0.0\"\n+    \"node\": \"20.0.0\"\n   },"}, false, `in "engines"`},
+		{"package.json after closed section", PRFile{Filename: "package.json", Patch: "@@ -6,6 +6,6 @@\n   \"devDependencies\": {\n     \"a\": \"1.0.0\"\n   },\n-  \"version\": \"1.0.0\"\n+  \"version\": \"1.0.1\""}, false, "no dependency section visible"},
+		{"package.json dependencies bump", PRFile{Filename: "package.json", Patch: "@@ -3,3 +3,3 @@\n   \"dependencies\": {\n-    \"left-pad\": \"1.0.0\"\n+    \"left-pad\": \"1.3.0\"\n   },"}, true, ""},
 		// #183 review: a dependency moved between sections is not a bump,
 		// even with a new version; a bump is in place.
 		{"package.json dev -> prod move", PRFile{Filename: "package.json", Patch: "@@ -5,9 +5,9 @@\n   \"dependencies\": {\n-    \"bar\": \"1.0.0\"\n+    \"bar\": \"1.0.0\",\n+    \"foo\": \"2.0.0\"\n   },\n   \"devDependencies\": {\n-    \"foo\": \"1.0.0\"\n+    \"other\": \"1.0.0\""}, false, "not version-bumped in place"},
-		{"package.json move across hunks", PRFile{Filename: "package.json", Patch: "@@ -6 +6 @@\n+    \"foo\": \"2.0.0\",\n@@ -20 +20 @@\n-    \"foo\": \"1.0.0\","}, false, "not version-bumped in place"},
+		{"package.json move across hunks", PRFile{Filename: "package.json", Patch: "@@ -5,1 +5,2 @@\n   \"dependencies\": {\n+    \"foo\": \"2.0.0\",\n@@ -19,2 +20,1 @@\n   \"devDependencies\": {\n-    \"foo\": \"1.0.0\","}, false, "not version-bumped in place"},
 		{"go.mod move between require blocks", PRFile{Filename: "go.mod", Patch: "@@ -5,8 +5,8 @@\n require (\n+\tgolang.org/x/sys v0.49.0\n \tgithub.com/google/uuid v1.6.0\n )\n \n require (\n-\tgolang.org/x/sys v0.48.0 // indirect\n )"}, false, "not version-bumped in place"},
 		// #183 review: formatting and "// indirect" are not version changes.
-		{"package.json reindent only", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"@playwright/test\": \"1.61.1\"\n+  \"@playwright/test\": \"1.61.1\""}, false, "changes no version"},
+		{"package.json reindent only", PRFile{Filename: "package.json", Patch: "@@ -6,2 +6,2 @@\n   \"devDependencies\": {\n-    \"@playwright/test\": \"1.61.1\"\n+  \"@playwright/test\": \"1.61.1\""}, false, "changes no version"},
 		{"go.mod indirect toggle", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/sys v0.48.0 // indirect"}, false, "changes no version"},
 		{"go.mod reindent + real bump", PRFile{Filename: "go.mod", Patch: "@@ -11,2 +11,2 @@\n-\tgithub.com/google/uuid v1.6.0\n-\tgolang.org/x/sys v0.48.0\n+    github.com/google/uuid v1.6.0\n+\tgolang.org/x/sys v0.49.0"}, true, ""},
 		{"go.mod single-line require bump", PRFile{Filename: "go.mod", Patch: "@@ -5 +5 @@\n-require golang.org/x/sys v0.48.0\n+require golang.org/x/sys v0.49.0"}, true, ""},

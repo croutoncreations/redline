@@ -12,6 +12,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,11 @@ type Plan struct {
 	Packages  []PackagePlan `json:"packages"`
 	Overlay   []OverlayFile `json:"overlay"`
 	Error     string        `json:"error,omitempty"`
+	// UntrackedInputs are changed non-Go files outside testdata/ that a
+	// planned package's tests appear to read. They are not overlaid onto
+	// base (they may equally be production inputs), so the base run would
+	// not see the PR's version and the result cannot be trusted.
+	UntrackedInputs []string `json:"untracked_inputs,omitempty"`
 }
 
 // PackagePlan lists the tests to run in one package. Tests are new or
@@ -98,9 +104,13 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	byDir := map[string][]string{}
 	fixtureDirs := map[string]bool{} // packages whose testdata the PR changes
 	testDirs := map[string]bool{}    // packages with an added, changed or deleted _test.go
+	var otherInputs []string         // changed non-Go files outside testdata
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, file := fields[i], fields[i+1]
 		if !isTestSideFile(file) {
+			if !strings.HasSuffix(file, ".go") {
+				otherInputs = append(otherInputs, file)
+			}
 			continue
 		}
 		if inTestdata(file) {
@@ -185,8 +195,48 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		plan.Packages = append(plan.Packages, PackagePlan{
 			Dir: dir, Tests: uniqueSorted(byDir[dir]), Optional: uniqueSorted(optional[dir]),
 		})
+		srcs, err := packageTestSources(repo, head, dir)
+		if err != nil {
+			return plan, err
+		}
+		pkg, err := parsePackage(srcs)
+		if err != nil {
+			return plan, err
+		}
+		plan.UntrackedInputs = append(plan.UntrackedInputs, referencedInputs(dir, otherInputs, pkg.literals)...)
 	}
+	plan.UntrackedInputs = uniqueSorted(plan.UntrackedInputs)
 	return plan, nil
+}
+
+// referencedInputs returns the changed files under dir (directly in it, for
+// the repository root) whose path relative to dir starts with a component
+// that some string literal in the package's tests mentions, such as
+// "fixtures" for fixtures/case.json or "golden.json" for golden.json.
+// Only testdata/ is overlaid onto base; a test reading any other changed
+// file would see the base version there and could fail for that reason
+// alone, which would look like a repro.
+func referencedInputs(dir string, changed, literals []string) []string {
+	var out []string
+	for _, file := range changed {
+		rel := file
+		if dir != "." {
+			if !strings.HasPrefix(file, dir+"/") {
+				continue
+			}
+			rel = strings.TrimPrefix(file, dir+"/")
+		} else if strings.Contains(file, "/") {
+			continue
+		}
+		first, _, _ := strings.Cut(rel, "/")
+		for _, lit := range literals {
+			if strings.Contains(lit, first) {
+				out = append(out, file)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // testdataOwner returns the package directory a testdata path belongs to:
@@ -384,6 +434,7 @@ func parsePackage(srcs map[string]string) (testFile, error) {
 		for name := range tf.readsTestdata {
 			pkg.readsTestdata[name] = true
 		}
+		pkg.literals = append(pkg.literals, tf.literals...)
 		pkg.imports[file] = tf.imports[file]
 		pkg.declaredIn[file] = tf.declaredIn[file]
 		if tf.sideEffectImports != "" {
@@ -428,6 +479,7 @@ type testFile struct {
 	decls         map[string]string   // top-level name -> its declaration's source
 	uses          map[string][]string // top-level name -> identifiers it references
 	readsTestdata map[string]bool     // top-level name -> has a "testdata" string literal
+	literals      []string            // every string literal outside imports
 	imports       map[string]string   // file -> its import declarations' source
 	declaredIn    map[string][]string // file -> top-level names it declares
 	// sideEffectImports lists blank and dot imports, which change the
@@ -488,6 +540,14 @@ func parseTestFile(file, src string) (testFile, error) {
 		out.decls[name] += decl
 		out.declaredIn[file] = append(out.declaredIn[file], name)
 		out.uses[name] = append(out.uses[name], idents(n)...)
+		ast.Inspect(n, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if s, err := strconv.Unquote(lit.Value); err == nil && s != "" {
+					out.literals = append(out.literals, s)
+				}
+			}
+			return true
+		})
 		if mentionsTestdata(n) {
 			out.readsTestdata[name] = true
 		}

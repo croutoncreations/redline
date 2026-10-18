@@ -722,6 +722,39 @@ func TestReproTableInOtherFile(t *testing.T) {
 	}
 }
 
+// #183 review: only testdata/ is overlaid onto base. A test that reads a
+// changed fixture somewhere else (fixtures/, golden.json) would see the base
+// version there and could "fail before" for that reason alone, so the
+// result is inconclusive instead of a repro.
+func TestReproNonTestdataFixtureIsInconclusive(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.base = r.commit("already correct")
+	r.git("checkout", "-q", "-b", "fixtures-dir")
+	r.write("internal/calc/fixtures/case.txt", "2+3=5\n")
+	r.write("internal/calc/fix_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestFixture(t *testing.T) {\n\tif _, err := os.ReadFile(\"fixtures/case.txt\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n")
+	head := r.commit("test with fixtures/ input")
+
+	plan, outcome := r.pipeline(head)
+	if !reflect.DeepEqual(plan.UntrackedInputs, []string{"internal/calc/fixtures/case.txt"}) {
+		t.Fatalf("untracked inputs = %v", plan.UntrackedInputs)
+	}
+	if outcome.Pass || !outcome.Inconclusive || !strings.Contains(outcome.Message, "not overlaid onto base") {
+		t.Fatalf("outcome = %+v, want inconclusive (fixture missing on base is not a repro)", outcome)
+	}
+}
+
+func TestReferencedInputs(t *testing.T) {
+	changed := []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json", "internal/calc/README.md", "internal/other/fixtures/b.json", "golden.txt"}
+	got := referencedInputs("internal/calc", changed, []string{"fixtures/a.json", "golden.json"})
+	if want := []string{"internal/calc/fixtures/a.json", "internal/calc/golden.json"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got := referencedInputs(".", changed, []string{"golden.txt"}); !reflect.DeepEqual(got, []string{"golden.txt"}) {
+		t.Errorf("root: got %v", got)
+	}
+}
+
 func TestTestdataOwner(t *testing.T) {
 	for file, want := range map[string]string{
 		"internal/calc/testdata/a.txt":      "internal/calc",
