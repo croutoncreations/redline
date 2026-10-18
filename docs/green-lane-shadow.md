@@ -69,10 +69,15 @@ Tests that the same test IDs:
   directly or through a helper or method). A file whose imports, build
   constraints or package clause changed has all its tests planned, and a changed blank/dot import, `init` or `TestMain` plans
   every test in the package.
-  Unchanged tests that use nothing changed are not required. A package whose
-  only test-side change is a `testdata/` fixture (a new golden or table case)
-  gets its testdata-reading tests planned (all of its tests if none visibly
-  read testdata).
+  Unchanged tests that use nothing changed are not required. When the PR changes
+  a `testdata/` fixture (a new golden or table case), the package's unchanged
+  tests that read testdata also run as *optional* tests: each must pass on
+  head, and a base failure counts as a repro, but they need not all fail on
+  base. A fixture-only package needs at least one of them to fail on base.
+  If none visibly read testdata, every test in a fixture-only package is
+  optional. A test name defined in both the internal and external test
+  package of a directory is ambiguous in `go test -json` and is scored
+  inconclusive.
 - `run` creates fresh worktrees for the merge-base and the head, overlays the
   PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base
   (deleting the ones the PR deletes or renames, and keeping each file's git
