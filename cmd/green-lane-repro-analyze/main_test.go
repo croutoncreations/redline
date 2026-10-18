@@ -585,11 +585,97 @@ func TestNoFixtures(t *testing.T) {}
 	head := r.commit("fix Add, add golden case")
 
 	plan, outcome := r.pipeline(head)
-	if want := []string{"internal/calc.TestGoldenCases"}; !reflect.DeepEqual(plan.Tests(), want) {
-		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	if len(plan.Packages) != 1 || len(plan.Packages[0].Tests) != 0 ||
+		!reflect.DeepEqual(plan.Packages[0].Optional, []string{"TestGoldenCases"}) {
+		t.Fatalf("plan = %+v, want TestGoldenCases as the optional fixture reader", plan.Packages)
 	}
 	if !outcome.Pass || !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
 		t.Fatalf("outcome = %+v, want a genuine pass", outcome)
+	}
+	if want := []string{"internal/calc.TestGoldenCases"}; !reflect.DeepEqual(outcome.TestIDs, want) {
+		t.Errorf("credited tests = %v, want %v", outcome.TestIDs, want)
+	}
+}
+
+// A fixture-only PR whose fixture readers all pass on base (the fixture
+// does not expose a bug) is a conclusive fail, not a pass.
+func TestReproFixtureOnlyWithoutBaseFailure(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/golden_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestGolden(t *testing.T) {\n\tif _, err := os.ReadDir(\"testdata\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n")
+	r.write("internal/calc/testdata/a.txt", "a\n")
+	r.base = r.commit("golden")
+	r.git("checkout", "-q", "-b", "more")
+	r.write("internal/calc/testdata/b.txt", "b\n")
+	head := r.commit("fixture")
+
+	_, outcome := r.pipeline(head)
+	if outcome.Pass || outcome.Inconclusive || !strings.Contains(outcome.Message, "no test reading the changed testdata failed on base") {
+		t.Fatalf("outcome = %+v, want a conclusive fail", outcome)
+	}
+}
+
+// #183 review: a PR that adds a fixture for an unchanged golden test and
+// also changes another test in the package still runs the golden test, and
+// its base failure is recorded.
+func TestReproFixtureConsumerKeptWhenAnotherTestChanges(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/golden_test.go", `package calc
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestGoldenCases(t *testing.T) {
+	files, _ := filepath.Glob("testdata/golden/*.txt")
+	for _, f := range files {
+		raw, _ := os.ReadFile(f)
+		var a, b, want int
+		fmt.Sscanf(string(raw), "%d+%d=%d", &a, &b, &want)
+		if got := Add(a, b); got != want {
+			t.Fatalf("%s: Add(%d, %d) = %d, want %d", f, a, b, got, want)
+		}
+	}
+}
+`)
+	r.write("internal/calc/testdata/golden/zero.txt", "0+0=0\n")
+	r.write("internal/calc/other_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestOther(t *testing.T) {}\n")
+	r.base = r.commit("golden")
+	r.git("checkout", "-q", "-b", "mixed")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/testdata/golden/two.txt", "2+3=5\n")
+	// An unrelated test edit that passes on base and head.
+	r.write("internal/calc/other_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestOther(t *testing.T) { t.Log(\"edited\") }\n")
+	head := r.commit("fix Add, add golden case, touch TestOther")
+
+	plan, outcome := r.pipeline(head)
+	if len(plan.Packages) != 1 || !reflect.DeepEqual(plan.Packages[0].Tests, []string{"TestOther"}) ||
+		!reflect.DeepEqual(plan.Packages[0].Optional, []string{"TestGoldenCases"}) {
+		t.Fatalf("plan = %+v, want TestOther required and TestGoldenCases optional", plan.Packages)
+	}
+	// TestOther did not fail before, so this is not a repro, but the golden
+	// test ran and its base failure is recorded as evidence.
+	if outcome.Pass || !strings.Contains(outcome.Message, "TestOther: did not fail on base") ||
+		!strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
+// #183 review: a directory's internal and external test packages can both
+// define TestX; go test -json then reports two indistinguishable results.
+func TestReproDuplicateTestNamesAreInconclusive(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.git("checkout", "-q", "-b", "dup")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/dup_test.go", "package calc\n\nimport \"testing\"\n\nfunc TestDup(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal(\"bug\")\n\t}\n}\n")
+	r.write("internal/calc/dup_ext_test.go", "package calc_test\n\nimport \"testing\"\n\nfunc TestDup(t *testing.T) {}\n")
+	head := r.commit("dup")
+
+	_, outcome := r.pipeline(head)
+	if !outcome.Inconclusive || !strings.Contains(outcome.Message, "ambiguous") {
+		t.Fatalf("outcome = %+v, want inconclusive for the duplicate name", outcome)
 	}
 }
 

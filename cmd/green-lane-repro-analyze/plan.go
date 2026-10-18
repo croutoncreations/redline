@@ -28,11 +28,19 @@ type Plan struct {
 	Error     string        `json:"error,omitempty"`
 }
 
-// PackagePlan lists the new or changed top-level tests in one package.
+// PackagePlan lists the tests to run in one package. Tests are new or
+// changed and must each fail on base and pass on head. Optional tests are
+// unchanged tests that read testdata the PR changed: they run too, must pass
+// on head, and count as a repro when they fail on base. A package with no
+// required tests needs at least one optional test to reproduce.
 type PackagePlan struct {
-	Dir   string   `json:"dir"` // slash-separated, relative to the repo root
-	Tests []string `json:"tests"`
+	Dir      string   `json:"dir"` // slash-separated, relative to the repo root
+	Tests    []string `json:"tests"`
+	Optional []string `json:"optional,omitempty"`
 }
+
+// run lists every test the package's go test invocation must select.
+func (p PackagePlan) run() []string { return append(append([]string{}, p.Tests...), p.Optional...) }
 
 // OverlayFile is a test-side file the PR adds, changes or deletes.
 type OverlayFile struct {
@@ -42,7 +50,8 @@ type OverlayFile struct {
 	Delete bool   `json:"delete,omitempty"`
 }
 
-// Tests is the flat list of test IDs the plan requires.
+// Tests is the flat list of test IDs the plan requires (not the optional
+// fixture readers).
 func (p Plan) Tests() []string {
 	var ids []string
 	for _, pkg := range p.Packages {
@@ -131,34 +140,51 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		byDir[dir] = append(byDir[dir], names...)
 	}
 
-	// A PR can add a regression case to a golden or table test only by
-	// adding a fixture: no test function changes, but the test that walks
-	// testdata/ now runs the new case. For such fixture-only packages,
-	// schedule the tests that read testdata (or all of them if none
-	// visibly do). Planning more tests only adds fails-before requirements,
-	// so it cannot fake a repro. Packages that already have changed tests
-	// keep exactly those: adding unchanged golden tests there would make a
-	// genuine repro fail because those tests pass on base.
+	// A PR can add a regression case to a golden or table test by adding a
+	// fixture: no test function changes, but the test that walks testdata/
+	// now runs the new case. The unchanged tests that read testdata are
+	// planned as optional, alongside any changed tests in the package: they
+	// run, must pass on head, and count as a repro if they fail on base.
+	// They are not individually required, because a package can have other
+	// fixture readers the new fixture does not affect, and those pass on
+	// base. When no test visibly reads testdata (the path may be built in
+	// non-test code), every test in a fixture-only package is optional.
+	optional := map[string][]string{}
 	for dir := range fixtureDirs {
-		if len(byDir[dir]) > 0 {
-			continue
-		}
-		names, err := fixtureTests(repo, head, dir)
+		readers, all, err := fixtureTests(repo, head, dir)
 		if err != nil {
 			return plan, err
 		}
-		byDir[dir] = append(byDir[dir], names...)
+		if len(readers) == 0 && len(byDir[dir]) == 0 {
+			readers = all
+		}
+		required := map[string]bool{}
+		for _, n := range byDir[dir] {
+			required[n] = true
+		}
+		for _, n := range readers {
+			if !required[n] {
+				optional[dir] = append(optional[dir], n)
+			}
+		}
 	}
 
-	dirs := make([]string, 0, len(byDir))
-	for dir, names := range byDir {
-		if len(names) > 0 {
+	dirs := make([]string, 0, len(byDir)+len(optional))
+	for dir := range byDir {
+		if len(byDir[dir]) > 0 || len(optional[dir]) > 0 {
+			dirs = append(dirs, dir)
+		}
+	}
+	for dir := range optional {
+		if _, ok := byDir[dir]; !ok && len(optional[dir]) > 0 {
 			dirs = append(dirs, dir)
 		}
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		plan.Packages = append(plan.Packages, PackagePlan{Dir: dir, Tests: uniqueSorted(byDir[dir])})
+		plan.Packages = append(plan.Packages, PackagePlan{
+			Dir: dir, Tests: uniqueSorted(byDir[dir]), Optional: uniqueSorted(optional[dir]),
+		})
 	}
 	return plan, nil
 }
@@ -178,33 +204,28 @@ func testdataOwner(file string) string {
 	return path.Dir(file)
 }
 
-// fixtureTests lists the tests in dir (at commit) that read testdata: tests
+// fixtureTests returns the tests in dir (at commit) that read testdata (tests
 // whose body, or a declaration in the package's test files that they use,
-// has a string literal mentioning "testdata". If no test visibly does (the
-// path may be built in non-test code), every test in the package is
-// returned.
-func fixtureTests(repo, commit, dir string) ([]string, error) {
+// has a string literal mentioning "testdata"), and all of the package's
+// tests.
+func fixtureTests(repo, commit, dir string) (readers, all []string, err error) {
 	srcs, err := packageTestSources(repo, commit, dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Merge the package's test files: a test often reads a path declared
 	// in another _test.go file of the same package.
 	pkg, err := parsePackage(srcs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reads := closure(pkg, pkg.readsTestdata)
-	var reading []string
 	for _, name := range pkg.tests {
 		if reads[name] {
-			reading = append(reading, name)
+			readers = append(readers, name)
 		}
 	}
-	if len(reading) > 0 {
-		return reading, nil
-	}
-	return pkg.tests, nil
+	return readers, pkg.tests, nil
 }
 
 func uniqueSorted(names []string) []string {

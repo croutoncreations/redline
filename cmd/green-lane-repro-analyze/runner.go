@@ -116,7 +116,7 @@ func writeOverlayFile(dst, mode, content string) error {
 // goTestArgs is the exact go test invocation for one package.
 func goTestArgs(pkg PackagePlan) []string {
 	return []string{"test", "-count=1", "-json", "-timeout=5m",
-		"-run", "^(" + strings.Join(pkg.Tests, "|") + ")$",
+		"-run", "^(" + strings.Join(pkg.run(), "|") + ")$",
 		goPackageArg(pkg.Dir)}
 }
 

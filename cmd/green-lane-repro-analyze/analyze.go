@@ -24,11 +24,19 @@ type TestEvidence struct {
 	ID   string `json:"id"`
 	Base string `json:"base"` // pass, fail, skip or "" when it never ran
 	Head string `json:"head"`
+	// Optional marks an unchanged fixture reader: it need not fail on
+	// base, but counts as a repro when it does.
+	Optional bool `json:"optional,omitempty"`
 }
 
 // runResult is what one go test -json stream says about a package.
 type runResult struct {
-	tests       map[string]string // top-level test name -> pass/fail/skip
+	tests map[string]string // top-level test name -> pass/fail/skip
+	// runs counts terminal events per top-level name. A directory's
+	// internal (package p) and external (package p_test) tests share one
+	// test binary and one Package path, so both may define TestX; go test
+	// -json then reports two "TestX" results that cannot be told apart.
+	runs        map[string]int
 	output      map[string]string // top-level test name -> its output
 	buildFailed bool
 	buildOutput string
@@ -65,9 +73,16 @@ func analyze(plan Plan, resultsDir string) Outcome {
 		if head.buildFailed {
 			return Outcome{Inconclusive: true, Message: fmt.Sprintf("Compile failed on head commit for %s: %s", goPackageArg(pkg.Dir), firstLines(head.buildOutput, 3))}
 		}
-		for _, name := range pkg.Tests {
+		optionalRepro := false
+		for _, name := range pkg.run() {
 			id := testID(pkg.Dir, name)
-			ev := TestEvidence{ID: id, Base: base.tests[name], Head: head.tests[name]}
+			required := !contains(pkg.Optional, name)
+			if base.runs[name] > 1 || head.runs[name] > 1 {
+				return Outcome{Inconclusive: true, Message: fmt.Sprintf(
+					"%s: ambiguous, %d results on base and %d on head (same name in the internal and external test packages)",
+					id, base.runs[name], head.runs[name])}
+			}
+			ev := TestEvidence{ID: id, Base: base.tests[name], Head: head.tests[name], Optional: !required}
 			out.Tests = append(out.Tests, ev)
 			// Keep the base output of every test that failed there, whatever
 			// the verdict, so reviewers can see why it failed before.
@@ -75,21 +90,28 @@ func analyze(plan Plan, resultsDir string) Outcome {
 				fmt.Fprintf(&baseOutput, "=== %s (base: fail)\n%s", id, base.output[name])
 			}
 			switch {
-			case ev.Base == "":
+			case ev.Base == "" && required:
 				problems = append(problems, id+": did not execute on base")
 			case ev.Head == "":
 				problems = append(problems, id+": did not execute on head")
-			case ev.Base != "fail":
-				problems = append(problems, fmt.Sprintf("%s: did not fail on base (status: %s)", id, ev.Base))
 			case ev.Head != "pass":
 				problems = append(problems, fmt.Sprintf("%s: did not pass on head (status: %s)", id, ev.Head))
-			default:
+			case ev.Base == "fail":
 				out.TestIDs = append(out.TestIDs, id)
+				optionalRepro = optionalRepro || !required
+			case required:
+				problems = append(problems, fmt.Sprintf("%s: did not fail on base (status: %s)", id, ev.Base))
 			}
+		}
+		if len(pkg.Tests) == 0 && !optionalRepro {
+			problems = append(problems, fmt.Sprintf("%s: no test reading the changed testdata failed on base", goPackageArg(pkg.Dir)))
 		}
 	}
 
 	out.BaseOutput = baseOutput.String()
+	if len(problems) == 0 && len(out.TestIDs) == 0 {
+		problems = append(problems, "no planned test failed on base")
+	}
 	if len(problems) > 0 {
 		out.Message = strings.Join(problems, "; ")
 		return out
@@ -97,6 +119,15 @@ func analyze(plan Plan, resultsDir string) Outcome {
 	out.Pass = true
 	out.Message = fmt.Sprintf("Tests %v failed on base, passed on head", out.TestIDs)
 	return out
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func parseResultFile(file string) (runResult, error) {
@@ -111,7 +142,7 @@ func parseResultFile(file string) (runResult, error) {
 // parseResults reads a go test -json stream for one package. Build failures
 // show up as "build-fail" events or a package failure with FailedBuild set.
 func parseResults(r io.Reader) (runResult, error) {
-	res := runResult{tests: map[string]string{}, output: map[string]string{}}
+	res := runResult{tests: map[string]string{}, runs: map[string]int{}, output: map[string]string{}}
 	var build strings.Builder
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -151,6 +182,7 @@ func parseResults(r io.Reader) (runResult, error) {
 			case "pass", "fail", "skip":
 				if !sub {
 					res.tests[top] = ev.Action
+					res.runs[top]++
 				}
 			case "output":
 				res.output[top] += ev.Output
