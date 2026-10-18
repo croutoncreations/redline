@@ -25,7 +25,7 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 | Lane | Selected when | Repro rule | Size caps |
 |---|---|---|---|
 | `code` | anything else | required (fails before, passes after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
-| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps), must change at least one version, and must remove and re-add the same dependency names in place (no added, dropped, renamed or section-moved dependencies) | ≤100 lines, ≤150 lockfile, ≤5 files |
+| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps), must change at least one version, and must remove and re-add the same dependency names in place (no added, dropped, renamed or section-moved dependencies). `package.json` entries must sit in a dependency section (`dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`) visible in the diff context; the package's own `version` or other semver-shaped fields do not count | ≤100 lines, ≤150 lockfile, ≤5 files |
 
 What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
@@ -77,7 +77,10 @@ Tests that the same test IDs:
   If none visibly read testdata, every test in a fixture-only package is
   optional. A test name defined in both the internal and external test
   package of a directory is ambiguous in `go test -json` and is scored
-  inconclusive.
+  inconclusive. Only `testdata/` is overlaid onto base: if a planned
+  package's tests mention a changed non-Go file outside `testdata/` (for
+  example `fixtures/case.json`), the result is inconclusive, because base
+  would run against the old file.
 - `run` creates fresh worktrees for the merge-base and the head, overlays the
   PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base
   (deleting the ones the PR deletes or renames, and keeping each file's git
