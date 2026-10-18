@@ -30,7 +30,7 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
 - Markdown, manifests or lockfiles under `cmd/`, `internal/` or any `testdata/` directory. Tests can read them and `go:embed` can ship them, so they are inputs, not documentation or dependencies.
-- Renames whose source path does not qualify (for example `internal/x.go` → `docs/x.md`). Denied Paths also checks both paths of a rename.
+- Renames whose source path does not qualify (for example `internal/x.go` → `docs/x.md`). Denied Paths also checks both paths of a rename, and File Types rejects any rename to or from a manifest or lockfile.
 - Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
@@ -63,9 +63,12 @@ Tests that the same test IDs:
 **Implementation** (`cmd/green-lane-repro-analyze`, always built from the base commit):
 - `plan` diffs merge-base..head from git objects and parses changed `_test.go`
   files with `go/parser`. Only top-level `TestXxx` functions that are new or
-  whose source changed are required, plus tests that use a new or changed
-  top-level declaration in the same file (for example a regression case added
-  to a package-level `var cases = ...` table, directly or through a helper).
+  whose source changed are required, plus tests that use a new, changed or
+  removed top-level declaration in any of the package's test files (for
+  example a regression case added to `var cases = ...` in `helpers_test.go`,
+  directly or through a helper). A file whose imports changed has all its
+  tests planned, and a changed blank/dot import, `init` or `TestMain` plans
+  every test in the package.
   Unchanged tests that use nothing changed are not required. A package whose
   only test-side change is a `testdata/` fixture (a new golden or table case)
   gets its testdata-reading tests planned (all of its tests if none visibly
