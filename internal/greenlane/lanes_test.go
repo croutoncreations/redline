@@ -263,6 +263,10 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
 		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
 		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
+		// #183 review: formatting and "// indirect" are not version changes.
+		{"package.json reindent only", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"@playwright/test\": \"1.61.1\"\n+  \"@playwright/test\": \"1.61.1\""}, false, "changes no version"},
+		{"go.mod indirect toggle", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/sys v0.48.0 // indirect"}, false, "changes no version"},
+		{"go.mod reindent + real bump", PRFile{Filename: "go.mod", Patch: "@@ -11,2 +11,2 @@\n-\tgithub.com/google/uuid v1.6.0\n-\tgolang.org/x/sys v0.48.0\n+    github.com/google/uuid v1.6.0\n+\tgolang.org/x/sys v0.49.0"}, true, ""},
 		{"go.mod single-line require bump", PRFile{Filename: "go.mod", Patch: "@@ -5 +5 @@\n-require golang.org/x/sys v0.48.0\n+require golang.org/x/sys v0.49.0"}, true, ""},
 		{"go.mod swap module", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/syz v0.48.0"}, false, `dependency "golang.org/x/sys" is removed`},
 	}

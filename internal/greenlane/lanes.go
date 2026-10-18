@@ -91,31 +91,38 @@ var (
 	// "version" pair whose value looks like a semver range. Script entries
 	// ("test": "rm -rf /") never look like a version, so they fail.
 	packageJSONBumpLine = regexp.MustCompile(`^\s*"[@A-Za-z0-9._/-]+"\s*:\s*"[~^]?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*"\s*,?\s*$`)
-	// packageJSONKey extracts the dependency name from a bump line.
-	packageJSONKey = regexp.MustCompile(`^\s*"([^"]+)"`)
+	// packageJSONEntry extracts the dependency name and version from a bump line.
+	packageJSONEntry = regexp.MustCompile(`^\s*"([^"]+)"\s*:\s*"([^"]+)"`)
 )
 
-// manifestEntryKey names the dependency a matched manifest line refers to,
-// so removed and added lines can be paired. ok is false for lines that are
-// not dependency entries: blank lines, the require block delimiters, and the
-// go/toolchain directives (a Go version change may drop or add toolchain).
-func manifestEntryKey(goMod bool, line string) (key string, ok bool) {
+// manifestEntry is what one matched manifest line says: a dependency (or a
+// go/toolchain directive) and its version.
+type manifestEntry struct {
+	key, version string
+	directive    bool // go or toolchain: may appear or vanish in a Go bump
+}
+
+// parseManifestEntry reads a matched manifest line. ok is false for lines
+// that carry no version: blank lines and the require block delimiters.
+// Formatting and "// indirect" markers are not part of the entry, so
+// re-indenting a line or toggling indirect is not a version change.
+func parseManifestEntry(goMod bool, line string) (e manifestEntry, ok bool) {
 	t := strings.TrimSpace(line)
 	if t == "" || t == "(" || t == ")" {
-		return "", false
+		return e, false
 	}
 	if goMod {
 		fields := strings.Fields(strings.TrimPrefix(t, "require "))
-		if len(fields) == 0 || fields[0] == "(" || fields[0] == "go" || fields[0] == "toolchain" {
-			return "", false
+		if len(fields) < 2 || fields[0] == "(" {
+			return e, false
 		}
-		return fields[0], true
+		return manifestEntry{key: fields[0], version: fields[1], directive: fields[0] == "go" || fields[0] == "toolchain"}, true
 	}
-	m := packageJSONKey.FindStringSubmatch(t)
+	m := packageJSONEntry.FindStringSubmatch(t)
 	if m == nil {
-		return "", false
+		return e, false
 	}
-	return m[1], true
+	return manifestEntry{key: m[1], version: m[2]}, true
 }
 
 // checkDocsDepsFiles enforces the docs/deps lane's file-type rule: manifest
@@ -138,11 +145,12 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			result.Message = fmt.Sprintf("%s: no diff available to confirm it is a version bump", f.Filename)
 			return result
 		}
-		bumped := false
 		// Dependency entries removed and added, by name. A bump removes and
 		// re-adds the same names; anything else adds, drops or renames a
-		// dependency, which can bring in new install scripts.
+		// dependency, which can bring in new install scripts. Versions are
+		// tracked as name@version so a bump must change at least one.
 		added, removed := map[string]int{}, map[string]int{}
+		addedVer, removedVer := map[string]int{}, map[string]int{}
 		for _, line := range strings.Split(f.Patch, "\n") {
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
 				continue
@@ -152,21 +160,26 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 				result.Message = fmt.Sprintf("%s: change is not a version bump: %q", f.Filename, strings.TrimSpace(changed))
 				return result
 			}
-			if t := strings.TrimSpace(changed); t != "" && t != "(" && t != ")" {
-				bumped = true
+			entry, ok := parseManifestEntry(allowed == goModBumpLine, changed)
+			if !ok {
+				continue
 			}
-			if key, ok := manifestEntryKey(allowed == goModBumpLine, changed); ok {
-				if line[0] == '+' {
-					added[key]++
-				} else {
-					removed[key]++
-				}
+			names, versions := added, addedVer
+			if line[0] == '-' {
+				names, versions = removed, removedVer
+			}
+			versions[entry.key+"@"+entry.version]++
+			// go/toolchain directives are not paired: a Go bump may drop
+			// or add the toolchain line (#179).
+			if !entry.directive {
+				names[entry.key]++
 			}
 		}
-		// A whitespace-only manifest edit would satisfy the Size rule's
+		// A manifest edit that changes no version (whitespace, re-indenting,
+		// toggling "// indirect") would satisfy the Size rule's
 		// lockfile-needs-manifest check without bumping anything, which is a
 		// lockfile-only change in disguise. There is no lockfile exception.
-		if !bumped {
+		if !versionsDiffer(addedVer, removedVer) {
 			result.Message = fmt.Sprintf("%s: diff changes no version, so its lockfile change is not a dependency bump", f.Filename)
 			return result
 		}
@@ -178,6 +191,20 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 	result.Pass = true
 	result.Message = "OK: only docs, changelog and dependency version bumps"
 	return result
+}
+
+// versionsDiffer reports whether the added and removed name@version
+// multisets differ, i.e. the diff changes at least one version.
+func versionsDiffer(added, removed map[string]int) bool {
+	if len(added) != len(removed) {
+		return true
+	}
+	for k, n := range added {
+		if removed[k] != n {
+			return true
+		}
+	}
+	return false
 }
 
 // unpairedEntry describes the first dependency that was added or removed
