@@ -25,7 +25,12 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 | Lane | Selected when | Repro rule | Size caps |
 |---|---|---|---|
 | `code` | anything else | required (fails before, passes after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
-| `docs-deps` | every file is Markdown (`*.md`) or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps) | ≤100 lines, ≤150 lockfile, ≤5 files |
+| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps) and must change at least one version | ≤100 lines, ≤150 lockfile, ≤5 files |
+
+What does **not** qualify, and so stays in the `code` lane with the repro rule:
+- Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
+- Markdown under `cmd/`, `internal/` or any `testdata/` directory. Tests can read it and `go:embed` can ship it, so it is not just documentation.
+- Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
 lanes. The lockfile-needs-matching-manifest rule applies in both lanes with
@@ -37,10 +42,9 @@ fails Size by decision.
 
 The green-lane-shadow check evaluates six rules:
 
-### 1. Size (≤150 changed lines)
-- Regular files must have ≤150 changed lines (additions + deletions)
-- Lockfiles and generated files have a separate cap of ≤300 lines
-- Maximum 6 files total
+### 1. Size (lane caps)
+- `code` lane: ≤150 regular changed lines (additions + deletions), ≤300 lockfile/generated lines, ≤6 files
+- `docs-deps` lane: ≤100 regular lines, ≤150 lockfile lines, ≤5 files
 - Lockfile changes require a matching manifest change
 - Generated file changes require a matching source change
 
