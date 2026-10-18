@@ -62,27 +62,33 @@ Tests that the same test IDs:
 
 **Implementation** (`cmd/green-lane-repro-analyze`, always built from the base commit):
 - `plan` diffs merge-base..head from git objects and parses changed `_test.go`
-  files with `go/parser`. Only top-level `TestXxx` functions that are new or
-  whose source changed are required, plus tests that use a new, changed or
-  removed top-level declaration in any of the package's test files (for
-  example a regression case added to `var cases = ...` in `helpers_test.go`,
-  directly or through a helper or method). Declarations include their `//go:`
-  directives (`go:embed`, `go:linkname`). A file whose imports, build
-  constraints or package clause changed has all its tests planned, and a changed blank/dot import, `init` or `TestMain` plans
-  every test in the package.
-  Unchanged tests that use nothing changed are not required. When the PR changes
-  a `testdata/` fixture (a new golden or table case), the package's unchanged
-  tests that read testdata also run as *optional* tests: each must pass on
-  head, and a base failure counts as a repro, but they need not all fail on
-  base. A fixture-only package needs at least one of them to fail on base.
-  If none visibly read testdata, every test in a fixture-only package is
-  optional. A test name defined in both the internal and external test
-  package of a directory is ambiguous in `go test -json` and is scored
-  inconclusive. Only `testdata/` is overlaid onto base: if a planned
-  package's tests mention a changed non-Go file outside `testdata/` (for
-  example `fixtures/case.json`, or `../../fixtures/case.json` resolved from
-  the package directory), the result is inconclusive, because base
-  would run against the old file.
+  files with `go/parser`. Tests come in two kinds:
+  - **Required:** top-level `TestXxx` functions that are new or whose own
+    source (including `//go:` directives such as `go:embed`) changed. Each
+    must fail on base and pass on head.
+  - **Optional:** unchanged tests that are affected indirectly. These are
+    tests that use a new, changed or removed top-level declaration in any of
+    the package's test files (for example a case added to `var cases = ...`
+    in `helpers_test.go`, used directly or through a helper or method),
+    tests in a file whose imports, build constraints or package clause
+    changed, every test when a blank/dot import, `init` or `TestMain`
+    changed, and tests that read a changed `testdata/` fixture (including
+    tests in other packages that reach it through a path like
+    `../testdata/case.json`). Each must pass on head, and a base failure
+    counts as a repro, but they need not all fail on base: a shared helper
+    change touches many tests that keep passing there.
+
+  A repro needs every required test to fail on base. A package with only
+  optional tests needs at least one of them to fail on base. If no test in a
+  fixture-only package visibly reads testdata, all its tests are optional.
+  Tests that use nothing changed are not run. A test name defined in both
+  the internal and external test package of a directory is ambiguous in
+  `go test -json` and is scored inconclusive. Only `testdata/` is overlaid
+  onto base. If a planned package's tests mention a changed file outside
+  `testdata/` (for example `fixtures/case.json`, `../../fixtures/case.json`
+  resolved from the package directory, or a Go source fixture named by its
+  exact path), the result is inconclusive, because base would run against
+  the old file.
 - `run` creates fresh worktrees for the merge-base and the head, overlays the
   PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base
   (deleting the ones the PR deletes or renames, and keeping each file's git
