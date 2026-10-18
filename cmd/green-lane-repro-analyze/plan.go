@@ -428,7 +428,12 @@ func parseTestFile(file, src string) (testFile, error) {
 		return testFile{}, err
 	}
 	out := newTestFile()
+	// The file header (build constraints and other leading directives, and
+	// the package clause) is compared with the imports: changing
+	// //go:build windows to linux makes an unchanged test runnable on the
+	// workflow's runner, and package p vs p_test changes what it can see.
 	var imports strings.Builder
+	imports.WriteString(src[:fset.Position(f.Name.End()).Offset] + "\n")
 	var effects []string
 	text := func(n ast.Node) string {
 		return src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]
@@ -469,13 +474,17 @@ func parseTestFile(file, src string) (testFile, error) {
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			name := d.Name.Name
 			if d.Recv != nil && len(d.Recv.List) == 1 {
-				// Methods are keyed by receiver type, so a changed method
-				// marks its type (and every test using the type) dirty.
-				name = receiverType(d.Recv.List[0].Type)
+				// Methods are keyed by receiver type and by method name: a
+				// test may name only the type (checker{}.ok) or only the
+				// method (NewCalc().helper(), with the type declared in
+				// non-test code). A collision with another name only plans
+				// more tests, which is the safe direction.
+				add(receiverType(d.Recv.List[0].Type), text(d), d)
+				add(d.Name.Name, text(d), d)
+			} else {
+				add(d.Name.Name, text(d), d)
 			}
-			add(name, text(d), d)
 			if d.Recv == nil && isTestFunc(d) {
 				out.tests = append(out.tests, d.Name.Name)
 			}

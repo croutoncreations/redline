@@ -148,6 +148,9 @@ func TestChangedPackageTestsAcrossFilesAndImports(t *testing.T) {
 		{"TestMain changed", func(m map[string]string) {
 			m["p/helpers_test.go"] = helpers + "func TestMain(m *testing.M) { m.Run() }\n"
 		}, []string{"TestX", "TestY", "TestZ"}},
+		{"build constraint changed", func(m map[string]string) {
+			m["p/z_test.go"] = "//go:build linux\n\n" + z
+		}, []string{"TestZ"}},
 		{"nothing relevant", func(m map[string]string) {
 			m["p/helpers_test.go"] = helpers + "// comment\n"
 		}, nil},
@@ -165,6 +168,26 @@ func TestChangedPackageTestsAcrossFilesAndImports(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: changed = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// #183 review: a test-file method on a type declared in non-test code is
+// reached by method name (NewCalc().helper()), not by the type name.
+func TestChangedPackageTestsFollowsMethodNames(t *testing.T) {
+	base := map[string]string{
+		"p/helpers_test.go": "package p\nfunc (c *Calc) helper() int { return 1 }\n",
+		"p/x_test.go":       "package p\nimport \"testing\"\nfunc TestCalc(t *testing.T) { _ = NewCalc().helper() }\nfunc TestOther(t *testing.T) {}\n",
+	}
+	head := map[string]string{
+		"p/helpers_test.go": "package p\nfunc (c *Calc) helper() int { return 2 }\n",
+		"p/x_test.go":       base["p/x_test.go"],
+	}
+	got, err := changedPackageTests(base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"TestCalc"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("changed = %v, want %v", got, want)
 	}
 }
 

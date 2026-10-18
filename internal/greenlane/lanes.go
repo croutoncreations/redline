@@ -153,14 +153,27 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			result.Message = fmt.Sprintf("%s: no diff available to confirm it is a version bump", f.Filename)
 			return result
 		}
-		// Dependency entries removed and added, by name. A bump removes and
-		// re-adds the same names; anything else adds, drops or renames a
-		// dependency, which can bring in new install scripts. Versions are
-		// tracked as name@version so a bump must change at least one.
+		// Dependency entries removed and added, by name, per change block
+		// (a run of -/+ lines with no context line or hunk header between).
+		// A bump removes and re-adds the same names in place; anything else
+		// adds, drops or renames a dependency, which can bring in new
+		// install scripts, or moves it to another section (devDependencies
+		// -> dependencies, or between go.mod require blocks), which needs
+		// context lines or another hunk between the two halves. Versions
+		// are tracked as name@version so a bump must change at least one.
 		added, removed := map[string]int{}, map[string]int{}
 		addedVer, removedVer := map[string]int{}, map[string]int{}
+		endBlock := func() string {
+			msg := unpairedEntry(added, removed)
+			added, removed = map[string]int{}, map[string]int{}
+			return msg
+		}
 		for _, line := range strings.Split(f.Patch, "\n") {
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
+				if msg := endBlock(); msg != "" {
+					result.Message = fmt.Sprintf("%s: %s, not version-bumped in place", f.Filename, msg)
+					return result
+				}
 				continue
 			}
 			changed := line[1:]
@@ -187,12 +200,12 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 		// toggling "// indirect") would satisfy the Size rule's
 		// lockfile-needs-manifest check without bumping anything, which is a
 		// lockfile-only change in disguise. There is no lockfile exception.
-		if !versionsDiffer(addedVer, removedVer) {
-			result.Message = fmt.Sprintf("%s: diff changes no version, so its lockfile change is not a dependency bump", f.Filename)
+		if msg := endBlock(); msg != "" {
+			result.Message = fmt.Sprintf("%s: %s, not version-bumped in place", f.Filename, msg)
 			return result
 		}
-		if msg := unpairedEntry(added, removed); msg != "" {
-			result.Message = fmt.Sprintf("%s: %s, not version-bumped", f.Filename, msg)
+		if !versionsDiffer(addedVer, removedVer) {
+			result.Message = fmt.Sprintf("%s: diff changes no version, so its lockfile change is not a dependency bump", f.Filename)
 			return result
 		}
 	}

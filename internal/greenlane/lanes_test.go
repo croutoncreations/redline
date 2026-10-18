@@ -278,6 +278,11 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
 		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
 		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
+		// #183 review: a dependency moved between sections is not a bump,
+		// even with a new version; a bump is in place.
+		{"package.json dev -> prod move", PRFile{Filename: "package.json", Patch: "@@ -5,9 +5,9 @@\n   \"dependencies\": {\n-    \"bar\": \"1.0.0\"\n+    \"bar\": \"1.0.0\",\n+    \"foo\": \"2.0.0\"\n   },\n   \"devDependencies\": {\n-    \"foo\": \"1.0.0\"\n+    \"other\": \"1.0.0\""}, false, "not version-bumped in place"},
+		{"package.json move across hunks", PRFile{Filename: "package.json", Patch: "@@ -6 +6 @@\n+    \"foo\": \"2.0.0\",\n@@ -20 +20 @@\n-    \"foo\": \"1.0.0\","}, false, "not version-bumped in place"},
+		{"go.mod move between require blocks", PRFile{Filename: "go.mod", Patch: "@@ -5,8 +5,8 @@\n require (\n+\tgolang.org/x/sys v0.49.0\n \tgithub.com/google/uuid v1.6.0\n )\n \n require (\n-\tgolang.org/x/sys v0.48.0 // indirect\n )"}, false, "not version-bumped in place"},
 		// #183 review: formatting and "// indirect" are not version changes.
 		{"package.json reindent only", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"@playwright/test\": \"1.61.1\"\n+  \"@playwright/test\": \"1.61.1\""}, false, "changes no version"},
 		{"go.mod indirect toggle", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/sys v0.48.0 // indirect"}, false, "changes no version"},
