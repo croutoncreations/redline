@@ -30,10 +30,25 @@ var (
 )
 
 // isDocsFile reports whether file is Markdown documentation (README, docs/,
-// CHANGELOG.md, CONTRIBUTING.md, ...). Denied paths such as
+// CHANGELOG.md, CONTRIBUTING.md, ...). Only the .md extension qualifies, so
+// scripts or source files under docs/ stay in the code lane. Markdown inside
+// Go source trees (cmd/, internal/) or any testdata/ directory is not
+// documentation either: tests can read it and go:embed can ship it, so a
+// change there needs the repro rule. Denied paths such as
 // .github/release-notes-*.md are still rejected by the Denied Paths rule.
 func isDocsFile(file string) bool {
-	return strings.EqualFold(path.Ext(file), ".md")
+	if !strings.EqualFold(path.Ext(file), ".md") {
+		return false
+	}
+	if strings.HasPrefix(file, "cmd/") || strings.HasPrefix(file, "internal/") {
+		return false
+	}
+	for _, part := range strings.Split(path.Dir(file), "/") {
+		if part == "testdata" {
+			return false
+		}
+	}
+	return true
 }
 
 func isDepFile(file string) bool {
@@ -85,14 +100,26 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			result.Message = fmt.Sprintf("%s: no diff available to confirm it is a version bump", f.Filename)
 			return result
 		}
+		bumped := false
 		for _, line := range strings.Split(f.Patch, "\n") {
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
 				continue
 			}
-			if changed := line[1:]; !allowed.MatchString(changed) {
+			changed := line[1:]
+			if !allowed.MatchString(changed) {
 				result.Message = fmt.Sprintf("%s: change is not a version bump: %q", f.Filename, strings.TrimSpace(changed))
 				return result
 			}
+			if t := strings.TrimSpace(changed); t != "" && t != "(" && t != ")" {
+				bumped = true
+			}
+		}
+		// A whitespace-only manifest edit would satisfy the Size rule's
+		// lockfile-needs-manifest check without bumping anything, which is a
+		// lockfile-only change in disguise. There is no lockfile exception.
+		if !bumped {
+			result.Message = fmt.Sprintf("%s: diff changes no version, so its lockfile change is not a dependency bump", f.Filename)
+			return result
 		}
 	}
 	result.Pass = true

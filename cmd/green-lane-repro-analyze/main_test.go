@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -271,6 +272,86 @@ func TestReproBaseCompileFailureIsInconclusive(t *testing.T) {
 	}
 	if got := r.baseFailureOutput(); !strings.Contains(got, "compile failed on base") || !strings.Contains(got, "undefined: Sub") {
 		t.Errorf("base_failure_output.txt missing the compile error:\n%s", got)
+	}
+}
+
+// globFixtureTest passes only when testdata holds exactly the expected
+// fixture, so a stale fixture left on base makes it fail there.
+const globFixtureTest = `package %s
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestOnlyCurrentFixture(t *testing.T) {
+	got, err := filepath.Glob("testdata/*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || filepath.Base(got[0]) != "new.txt" {
+		t.Fatalf("fixtures = %%v, want only testdata/new.txt", got)
+	}
+}
+`
+
+// #182 review: a PR that deletes or renames a testdata fixture must have
+// that fixture removed from the base overlay too. Otherwise base keeps the
+// old file, the test fails there only because its inputs differ, and a
+// test-only PR looks like a genuine repro.
+func TestReproRemovesDeletedAndRenamedFixturesFromBase(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/testdata/old.txt", "old\n")
+	r.write("internal/calc/testdata/gone.txt", "gone\n")
+	r.base = r.commit("fixtures")
+	r.git("checkout", "-q", "-b", "rename-fixture")
+	r.git("mv", "internal/calc/testdata/old.txt", "internal/calc/testdata/new.txt")
+	r.git("rm", "-q", "internal/calc/testdata/gone.txt")
+	r.write("internal/calc/glob_test.go", fmt.Sprintf(globFixtureTest, "calc"))
+	head := r.commit("rename fixture, add test")
+
+	plan, outcome := r.pipeline(head)
+	deleted := map[string]bool{}
+	for _, f := range plan.Overlay {
+		if f.Delete {
+			deleted[f.Path] = true
+		}
+	}
+	if !deleted["internal/calc/testdata/old.txt"] || !deleted["internal/calc/testdata/gone.txt"] {
+		t.Fatalf("overlay = %+v, want deletions for the renamed and removed fixtures", plan.Overlay)
+	}
+	if outcome.Pass || outcome.Inconclusive {
+		t.Fatalf("outcome = %+v, want a conclusive fail (test-only PR)", outcome)
+	}
+	if len(outcome.Tests) != 1 || outcome.Tests[0].Base != "pass" {
+		t.Fatalf("base status = %+v, want pass (stale fixtures must be gone on base)", outcome.Tests)
+	}
+}
+
+// #182 review: testdata at the repository root (package ".") must be
+// overlaid too. The shell version built the pathspec "/testdata" there.
+func TestReproOverlaysRootLevelTestdata(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("root.go", "package fixture\n")
+	r.base = r.commit("root package")
+	r.git("checkout", "-q", "-b", "root-fixture")
+	r.write("testdata/new.txt", "new\n")
+	r.write("root_test.go", fmt.Sprintf(globFixtureTest, "fixture"))
+	head := r.commit("root test")
+
+	plan, outcome := r.pipeline(head)
+	if want := []string{"..TestOnlyCurrentFixture"}; !reflect.DeepEqual(plan.Tests(), want) {
+		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	}
+	overlaid := false
+	for _, f := range plan.Overlay {
+		overlaid = overlaid || (f.Path == "testdata/new.txt" && !f.Delete)
+	}
+	if !overlaid {
+		t.Fatalf("overlay = %+v, want testdata/new.txt", plan.Overlay)
+	}
+	if outcome.Pass || outcome.Inconclusive || len(outcome.Tests) != 1 || outcome.Tests[0].Base != "pass" {
+		t.Fatalf("outcome = %+v, want base pass (root fixture present on base) and a conclusive fail", outcome)
 	}
 }
 

