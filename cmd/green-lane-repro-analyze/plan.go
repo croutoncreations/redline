@@ -104,17 +104,17 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	byDir := map[string][]string{}
 	fixtureDirs := map[string]bool{} // packages whose testdata the PR changes
 	testDirs := map[string]bool{}    // packages with an added, changed or deleted _test.go
-	var otherInputs []string         // changed non-Go files outside testdata
+	var otherInputs []string         // changed files outside testdata, other than _test.go
+	var changedFixtures []string     // changed files under testdata
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, file := fields[i], fields[i+1]
 		if !isTestSideFile(file) {
-			if !strings.HasSuffix(file, ".go") {
-				otherInputs = append(otherInputs, file)
-			}
+			otherInputs = append(otherInputs, file)
 			continue
 		}
 		if inTestdata(file) {
 			fixtureDirs[testdataOwner(file)] = true
+			changedFixtures = append(changedFixtures, file)
 		} else {
 			testDirs[path.Dir(file)] = true
 		}
@@ -132,8 +132,24 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Blob: blob, Mode: mode})
 	}
 
+	// Tests outside the owning package can read a changed fixture through a
+	// relative path ("../testdata/case.json" from a subpackage). Those
+	// packages are fixture consumers too.
+	if len(changedFixtures) > 0 {
+		consumers, err := fixtureConsumers(repo, head, changedFixtures)
+		if err != nil {
+			return plan, err
+		}
+		for _, dir := range consumers {
+			fixtureDirs[dir] = true
+		}
+	}
+
 	// Compare each affected package's test files as a whole: a table or
 	// helper in one _test.go file is often used by a test in another.
+	// Directly changed tests are required; indirectly affected ones are
+	// optional (see classifyPackageTests).
+	optional := map[string][]string{}
 	for dir := range testDirs {
 		baseSrcs, err := packageTestSources(repo, plan.MergeBase, dir)
 		if err != nil {
@@ -143,11 +159,12 @@ func buildPlan(repo, base, head string) (Plan, error) {
 		if err != nil {
 			return plan, err
 		}
-		names, err := changedPackageTests(baseSrcs, headSrcs)
+		direct, indirect, err := classifyPackageTests(baseSrcs, headSrcs)
 		if err != nil {
 			return plan, err
 		}
-		byDir[dir] = append(byDir[dir], names...)
+		byDir[dir] = append(byDir[dir], direct...)
+		optional[dir] = append(optional[dir], indirect...)
 	}
 
 	// A PR can add a regression case to a golden or table test by adding a
@@ -159,7 +176,6 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	// fixture readers the new fixture does not affect, and those pass on
 	// base. When no test visibly reads testdata (the path may be built in
 	// non-test code), every test in a fixture-only package is optional.
-	optional := map[string][]string{}
 	for dir := range fixtureDirs {
 		readers, all, err := fixtureTests(repo, head, dir)
 		if err != nil {
@@ -192,9 +208,14 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
-		plan.Packages = append(plan.Packages, PackagePlan{
-			Dir: dir, Tests: uniqueSorted(byDir[dir]), Optional: uniqueSorted(optional[dir]),
-		})
+		required := uniqueSorted(byDir[dir])
+		var opt []string
+		for _, n := range uniqueSorted(optional[dir]) {
+			if !contains(required, n) {
+				opt = append(opt, n)
+			}
+		}
+		plan.Packages = append(plan.Packages, PackagePlan{Dir: dir, Tests: required, Optional: opt})
 		srcs, err := packageTestSources(repo, head, dir)
 		if err != nil {
 			return plan, err
@@ -222,24 +243,92 @@ func buildPlan(repo, base, head string) (Plan, error) {
 //
 // Over-matching only makes the result inconclusive, which is the safe
 // direction.
+//
+// Changed .go files (other than _test.go) are usually the fix under test,
+// so they only count when a literal resolves to exactly that file
+// ("../../fixtures/input.go"); the looser matches would make every repro
+// that edits production code inconclusive.
 func referencedInputs(dir string, changed, literals []string) []string {
+	resolved := resolveLiterals(dir, literals)
+	var out []string
+	for _, file := range changed {
+		if strings.HasSuffix(file, ".go") {
+			if contains(resolved, file) {
+				out = append(out, file)
+			}
+			continue
+		}
+		if referencedUnderDir(dir, file, literals) || referencedByPath(file, resolved) {
+			out = append(out, file)
+		}
+	}
+	return out
+}
+
+// resolveLiterals resolves path-like string literals against dir, the
+// working directory go test uses for the package. Results outside the
+// repository, or the repository root itself, are dropped.
+func resolveLiterals(dir string, literals []string) []string {
 	var resolved []string
 	for _, lit := range literals {
 		if !strings.Contains(lit, "/") && !strings.Contains(lit, ".") {
 			continue
+		}
+		// A glob ("../testdata/shared/*.txt") names the directory before
+		// its first pattern character.
+		if i := strings.IndexAny(lit, "*?["); i >= 0 {
+			lit = path.Dir(lit[:i] + "x")
 		}
 		p := path.Clean(path.Join(dir, lit))
 		if p != "." && p != ".." && !strings.HasPrefix(p, "../") && !path.IsAbs(lit) {
 			resolved = append(resolved, p)
 		}
 	}
-	var out []string
-	for _, file := range changed {
-		if referencedUnderDir(dir, file, literals) || referencedByPath(file, resolved) {
-			out = append(out, file)
+	return resolved
+}
+
+// fixtureConsumers returns the package directories (at commit) whose tests
+// name a changed testdata file, or a testdata directory containing one,
+// through a literal that resolves into testdata, such as
+// "../testdata/case.json" from a subpackage of the fixture's owner. The
+// owner itself is handled separately. Packages whose tests do not parse are
+// skipped: they cannot be planned anyway.
+func fixtureConsumers(repo, commit string, changedFixtures []string) ([]string, error) {
+	out, err := git(repo, "ls-tree", "-r", "-z", "--name-only", commit)
+	if err != nil {
+		return nil, fmt.Errorf("list tree: %w", err)
+	}
+	dirs := map[string]bool{}
+	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if strings.HasSuffix(file, "_test.go") && !inTestdata(file) {
+			dirs[path.Dir(file)] = true
 		}
 	}
-	return out
+	var consumers []string
+	for dir := range dirs {
+		srcs, err := packageTestSources(repo, commit, dir)
+		if err != nil {
+			return nil, err
+		}
+		pkg, err := parsePackage(srcs)
+		if err != nil {
+			continue
+		}
+		var intoTestdata []string
+		for _, p := range resolveLiterals(dir, pkg.literals) {
+			if inTestdata(p+"/x") && testdataOwner(p+"/x") != dir {
+				intoTestdata = append(intoTestdata, p)
+			}
+		}
+		for _, f := range changedFixtures {
+			if referencedByPath(f, intoTestdata) {
+				consumers = append(consumers, dir)
+				break
+			}
+		}
+	}
+	sort.Strings(consumers)
+	return consumers, nil
 }
 
 func referencedUnderDir(dir, file string, literals []string) bool {
@@ -385,21 +474,36 @@ func changedTests(file, baseSrc, headSrc string) ([]string, error) {
 	return changedPackageTests(base, map[string]string{file: headSrc})
 }
 
-// changedPackageTests returns the package's top-level Go test functions at
-// head that are new, whose source changed, or that use (across all of the
-// package's test files, transitively) a top-level declaration that is new,
-// changed or removed. That covers table-driven tests: adding a case to
-// `var cases = ...` in helpers_test.go leaves TestX in x_test.go unchanged
-// but changes what it runs. Import changes count too: a file whose imports
-// changed has all its tests planned, and a changed blank/dot import, init
-// function or TestMain plans every test in the package, since those change
-// the whole test binary. Tests that use nothing changed are excluded: they
-// already pass on base and could never "fail before". Planning more tests
-// only adds fails-before requirements, so this cannot fake a repro.
+// changedPackageTests returns every affected test, direct or indirect (see
+// classifyPackageTests), sorted.
 func changedPackageTests(baseSrcs, headSrcs map[string]string) ([]string, error) {
-	head, err := parsePackage(headSrcs)
+	direct, indirect, err := classifyPackageTests(baseSrcs, headSrcs)
 	if err != nil {
 		return nil, err
+	}
+	return uniqueSorted(append(direct, indirect...)), nil
+}
+
+// classifyPackageTests splits the package's affected top-level tests at head.
+//
+// direct: tests that are new or whose own source (with its //go:
+// directives) changed. These are what the PR wrote, and each must fail on
+// base and pass on head.
+//
+// indirect: unchanged tests that use, across all of the package's test
+// files and transitively, a top-level declaration that is new, changed or
+// removed (adding a case to `var cases = ...` in helpers_test.go changes
+// what an unchanged TestX in x_test.go runs), plus the tests of a file
+// whose imports, build constraints or package clause changed, plus every
+// test when a blank/dot import, init or TestMain changed. They run as
+// optional tests: each must pass on head, and a base failure counts as a
+// repro, but they are not required to fail on base, because a shared
+// helper change (a new field on a fake) touches many tests that keep
+// passing there. Tests that use nothing changed are not run at all.
+func classifyPackageTests(baseSrcs, headSrcs map[string]string) (direct, indirect []string, err error) {
+	head, err := parsePackage(headSrcs)
+	if err != nil {
+		return nil, nil, err
 	}
 	base, err := parsePackage(baseSrcs)
 	if err != nil {
@@ -419,6 +523,10 @@ func changedPackageTests(baseSrcs, headSrcs map[string]string) ([]string, error)
 		}
 	}
 	everything := seed["init"] || seed["TestMain"] || head.sideEffectImports != base.sideEffectImports
+	ownChange := map[string]bool{}
+	for name := range seed {
+		ownChange[name] = true
+	}
 	for file, imports := range head.imports {
 		if b, ok := base.imports[file]; !ok || b != imports {
 			for _, name := range head.declaredIn[file] {
@@ -428,14 +536,17 @@ func changedPackageTests(baseSrcs, headSrcs map[string]string) ([]string, error)
 	}
 	dirty := closure(head, seed)
 
-	var names []string
 	for _, name := range head.tests {
-		if everything || dirty[name] {
-			names = append(names, name)
+		switch {
+		case ownChange[name]:
+			direct = append(direct, name)
+		case everything || dirty[name]:
+			indirect = append(indirect, name)
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Strings(direct)
+	sort.Strings(indirect)
+	return direct, indirect, nil
 }
 
 // parsePackage merges the package's test files into one declaration graph.

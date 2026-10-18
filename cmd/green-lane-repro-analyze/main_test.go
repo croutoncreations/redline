@@ -488,8 +488,14 @@ func TestAddTable(t *testing.T) {
 	head := r.commit("fix Add, add case")
 
 	plan, outcome := r.pipeline(head)
-	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(plan.Tests(), want) {
-		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	// TestAddTable's own text is unchanged, so it is an optional (indirect)
+	// test: it runs, and its base failure is the repro.
+	if len(plan.Packages) != 1 || len(plan.Packages[0].Tests) != 0 ||
+		!reflect.DeepEqual(plan.Packages[0].Optional, []string{"TestAddTable"}) {
+		t.Fatalf("plan = %+v, want TestAddTable as an optional test", plan.Packages)
+	}
+	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(outcome.TestIDs, want) {
+		t.Fatalf("credited = %v, want %v", outcome.TestIDs, want)
 	}
 	if !outcome.Pass || !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
 		t.Fatalf("outcome = %+v, want a genuine pass", outcome)
@@ -714,8 +720,14 @@ func TestReproTableInOtherFile(t *testing.T) {
 	head := r.commit("fix")
 
 	plan, outcome := r.pipeline(head)
-	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(plan.Tests(), want) {
-		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	// TestAddTable's own text is unchanged, so it is an optional (indirect)
+	// test: it runs, and its base failure is the repro.
+	if len(plan.Packages) != 1 || len(plan.Packages[0].Tests) != 0 ||
+		!reflect.DeepEqual(plan.Packages[0].Optional, []string{"TestAddTable"}) {
+		t.Fatalf("plan = %+v, want TestAddTable as an optional test", plan.Packages)
+	}
+	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(outcome.TestIDs, want) {
+		t.Fatalf("credited = %v, want %v", outcome.TestIDs, want)
 	}
 	if !outcome.Pass {
 		t.Fatalf("outcome = %+v, want pass", outcome)
@@ -759,6 +771,76 @@ func TestReproRepoLevelFixtureIsInconclusive(t *testing.T) {
 	}
 	if outcome.Pass || !outcome.Inconclusive {
 		t.Fatalf("outcome = %+v, want inconclusive", outcome)
+	}
+}
+
+// #183 review: a Go source fixture read as data outside testdata/ is an
+// untracked input; a production .go change is not, even when a literal names
+// its directory.
+func TestReproGoSourceFixtureIsInconclusive(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.git("checkout", "-q", "-b", "go-fixture")
+	r.write("fixtures/input.go", "package fixtures\n")
+	r.write("internal/calc/parse_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestParseFixture(t *testing.T) {\n\tif _, err := os.ReadFile(\"../../fixtures/input.go\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n")
+	head := r.commit("go fixture")
+
+	plan, outcome := r.pipeline(head)
+	if !reflect.DeepEqual(plan.UntrackedInputs, []string{"fixtures/input.go"}) {
+		t.Fatalf("untracked inputs = %v", plan.UntrackedInputs)
+	}
+	if outcome.Pass || !outcome.Inconclusive {
+		t.Fatalf("outcome = %+v, want inconclusive", outcome)
+	}
+	if got := referencedInputs("internal/calc", []string{"internal/calc/calc.go"}, []string{".", "./", "calc"}); len(got) != 0 {
+		t.Errorf("production fix flagged as input: %v", got)
+	}
+}
+
+// #183 review: a subpackage test that reads its parent's testdata through
+// "../testdata/..." is a consumer of that fixture.
+func TestReproAncestorTestdataConsumer(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/sub/sub.go", "package sub\n\nimport \"example.com/fixture/internal/calc\"\n\nfunc Add(a, b int) int { return calc.Add(a, b) }\n")
+	r.write("internal/calc/sub/sub_test.go", `package sub
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestSharedCases(t *testing.T) {
+	files, _ := filepath.Glob("../testdata/shared/*.txt")
+	for _, f := range files {
+		raw, _ := os.ReadFile(f)
+		var a, b, want int
+		fmt.Sscanf(string(raw), "%d+%d=%d", &a, &b, &want)
+		if got := Add(a, b); got != want {
+			t.Fatalf("%s: Add(%d, %d) = %d, want %d", f, a, b, got, want)
+		}
+	}
+}
+`)
+	r.write("internal/calc/testdata/shared/zero.txt", "0+0=0\n")
+	r.base = r.commit("shared fixtures")
+	r.git("checkout", "-q", "-b", "shared-case")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	r.write("internal/calc/testdata/shared/two.txt", "2+3=5\n")
+	head := r.commit("fix Add, add shared case")
+
+	plan, outcome := r.pipeline(head)
+	var sub *PackagePlan
+	for i := range plan.Packages {
+		if plan.Packages[i].Dir == "internal/calc/sub" {
+			sub = &plan.Packages[i]
+		}
+	}
+	if sub == nil || !reflect.DeepEqual(sub.Optional, []string{"TestSharedCases"}) {
+		t.Fatalf("plan = %+v, want internal/calc/sub.TestSharedCases as an optional consumer", plan.Packages)
+	}
+	if !contains(outcome.TestIDs, "internal/calc/sub.TestSharedCases") || !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
+		t.Fatalf("outcome = %+v, want the subpackage consumer credited", outcome)
 	}
 }
 
