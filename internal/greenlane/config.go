@@ -38,7 +38,10 @@ func DefaultDeniedPaths() []string {
 		"**/*.p12",
 		"**/*.keystore",
 		"**/*.jks",
+		// GitHub reads CODEOWNERS from the root, .github/ and docs/.
 		"CODEOWNERS",
+		".github/CODEOWNERS",
+		"docs/CODEOWNERS",
 
 		// Green-lane controls: policy, prompts, and the code that scores PRs.
 		".github/green-lane.yml",

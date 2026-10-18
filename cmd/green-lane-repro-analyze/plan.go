@@ -38,6 +38,7 @@ type PackagePlan struct {
 type OverlayFile struct {
 	Path   string `json:"path"`
 	Blob   string `json:"blob,omitempty"` // head blob; empty when deleted
+	Mode   string `json:"mode,omitempty"` // git mode at head: 100644, 100755 or 120000
 	Delete bool   `json:"delete,omitempty"`
 }
 
@@ -95,11 +96,14 @@ func buildPlan(repo, base, head string) (Plan, error) {
 			plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Delete: true})
 			continue
 		}
-		blob, err := git(repo, "rev-parse", head+":"+file)
+		// ls-tree gives the mode with the blob. The overlay must keep it:
+		// a fixture script that loses its executable bit on base fails
+		// there with "permission denied" and looks like a fails-before.
+		mode, blob, err := treeEntry(repo, head, file)
 		if err != nil {
 			return plan, fmt.Errorf("resolve %s: %w", file, err)
 		}
-		plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Blob: strings.TrimSpace(blob)})
+		plan.Overlay = append(plan.Overlay, OverlayFile{Path: file, Blob: blob, Mode: mode})
 
 		if !strings.HasSuffix(file, "_test.go") || inTestdata(file) {
 			continue
@@ -132,6 +136,20 @@ func buildPlan(repo, base, head string) (Plan, error) {
 	return plan, nil
 }
 
+// treeEntry returns the git mode and blob of file at commit.
+func treeEntry(repo, commit, file string) (mode, blob string, err error) {
+	out, err := git(repo, "ls-tree", "-z", commit, "--", file)
+	if err != nil {
+		return "", "", err
+	}
+	meta, name, ok := strings.Cut(strings.TrimSuffix(out, "\x00"), "\t")
+	fields := strings.Fields(meta) // "<mode> <type> <object>"
+	if !ok || name != file || len(fields) != 3 || fields[1] != "blob" {
+		return "", "", fmt.Errorf("unexpected ls-tree output %q", out)
+	}
+	return fields[0], fields[2], nil
+}
+
 // isTestSideFile reports whether a PR change belongs on the base commit for
 // the fails-before run: Go test files and anything under a testdata
 // directory. Copying only *_test.go files left new fixtures missing on base,
@@ -149,23 +167,54 @@ func inTestdata(file string) bool {
 	return false
 }
 
-// changedTests returns top-level Go test functions in headSrc that are new or
-// whose source differs from baseSrc. Unchanged tests in the same file are
+// changedTests returns top-level Go test functions in headSrc that are new,
+// whose source differs from baseSrc, or that use a top-level declaration in
+// the same file that is new or changed. The last case covers table-driven
+// tests: adding a regression case to a package-level `var cases = ...`
+// leaves TestX's own text unchanged but changes what it runs. Use is
+// followed through other changed-or-dependent declarations (a helper that
+// reads the table), within the file. Tests that use nothing changed are
 // excluded: they already pass on base and could never "fail before".
+// Including more tests only adds fails-before requirements, so this can
+// never turn a non-repro into a pass.
 func changedTests(file, baseSrc, headSrc string) ([]string, error) {
-	headTests, err := testFuncs(file, headSrc)
+	head, err := parseTestFile(file, headSrc)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s at head: %w", file, err)
 	}
-	baseTests := map[string]string{}
+	base := testFile{decls: map[string]string{}}
 	if baseSrc != "" {
-		if parsed, err := testFuncs(file, baseSrc); err == nil {
-			baseTests = parsed
+		if parsed, err := parseTestFile(file, baseSrc); err == nil {
+			base = parsed
 		}
 	}
+
+	// dirty: declarations whose source changed, plus, to a fixed point,
+	// declarations that use a dirty one.
+	dirty := map[string]bool{}
+	for name, src := range head.decls {
+		if b, ok := base.decls[name]; !ok || b != src {
+			dirty[name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, uses := range head.uses {
+			if dirty[name] {
+				continue
+			}
+			for _, u := range uses {
+				if dirty[u] {
+					dirty[name], changed = true, true
+					break
+				}
+			}
+		}
+	}
+
 	var names []string
-	for name, src := range headTests {
-		if baseTests[name] != src {
+	for _, name := range head.tests {
+		if dirty[name] {
 			names = append(names, name)
 		}
 	}
@@ -175,29 +224,100 @@ func changedTests(file, baseSrc, headSrc string) ([]string, error) {
 
 var testNamePattern = regexp.MustCompile(`^Test($|[^a-z])`)
 
-func testFuncs(file, src string) (map[string]string, error) {
+// testFile is the top-level structure of one Go test file.
+type testFile struct {
+	tests []string            // runnable TestXxx(t *T) functions
+	decls map[string]string   // top-level name -> its declaration's source
+	uses  map[string][]string // top-level name -> identifiers it references
+}
+
+func parseTestFile(file, src string) (testFile, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
 	if err != nil {
-		return nil, err
+		return testFile{}, err
 	}
-	out := map[string]string{}
+	out := testFile{decls: map[string]string{}, uses: map[string][]string{}}
+	text := func(n ast.Node) string {
+		return src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset]
+	}
+	idents := func(n ast.Node) []string {
+		var ids []string
+		ast.Inspect(n, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				ids = append(ids, id.Name)
+			}
+			return true
+		})
+		return ids
+	}
+	add := func(name, decl string, n ast.Node) {
+		if name == "_" || name == "" {
+			return
+		}
+		// Several specs can share a name only in invalid code; keep both.
+		out.decls[name] += decl
+		out.uses[name] = append(out.uses[name], idents(n)...)
+	}
 	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Recv != nil || fn.Name.Name == "TestMain" || !testNamePattern.MatchString(fn.Name.Name) {
-			continue
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			name := d.Name.Name
+			if d.Recv != nil && len(d.Recv.List) == 1 {
+				// Methods are keyed by receiver type, so a changed method
+				// marks its type (and every test using the type) dirty.
+				name = receiverType(d.Recv.List[0].Type)
+			}
+			add(name, text(d), d)
+			if d.Recv == nil && isTestFunc(d) {
+				out.tests = append(out.tests, d.Name.Name)
+			}
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				continue
+			}
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.ValueSpec:
+					for _, n := range s.Names {
+						add(n.Name, text(s), s)
+					}
+				case *ast.TypeSpec:
+					add(s.Name.Name, text(s), s)
+				}
+			}
 		}
-		params := fn.Type.Params.List
-		if len(params) != 1 || len(params[0].Names) > 1 {
-			continue
-		}
-		if _, ok := params[0].Type.(*ast.StarExpr); !ok {
-			continue
-		}
-		start, end := fset.Position(fn.Pos()).Offset, fset.Position(fn.End()).Offset
-		out[fn.Name.Name] = src[start:end]
 	}
 	return out, nil
+}
+
+func isTestFunc(fn *ast.FuncDecl) bool {
+	if fn.Name.Name == "TestMain" || !testNamePattern.MatchString(fn.Name.Name) {
+		return false
+	}
+	params := fn.Type.Params.List
+	if len(params) != 1 || len(params[0].Names) > 1 {
+		return false
+	}
+	_, ok := params[0].Type.(*ast.StarExpr)
+	return ok
+}
+
+func receiverType(expr ast.Expr) string {
+	for {
+		switch t := expr.(type) {
+		case *ast.StarExpr:
+			expr = t.X
+		case *ast.IndexExpr:
+			expr = t.X
+		case *ast.IndexListExpr:
+			expr = t.X
+		case *ast.Ident:
+			return t.Name
+		default:
+			return ""
+		}
+	}
 }
 
 func git(repo string, args ...string) (string, error) {

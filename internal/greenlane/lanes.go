@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -37,23 +38,31 @@ var (
 // change there needs the repro rule. Denied paths such as
 // .github/release-notes-*.md are still rejected by the Denied Paths rule.
 func isDocsFile(file string) bool {
-	if !strings.EqualFold(path.Ext(file), ".md") {
-		return false
-	}
+	return strings.EqualFold(path.Ext(file), ".md") && !inGoSourceOrTestdata(file)
+}
+
+// isDepFile reports whether file is a Go/npm manifest or lockfile that is a
+// real dependency file. The same Go-source/testdata exclusion as docs
+// applies: a package.json fixture under testdata/, or one under internal/
+// that go:embed ships, is test or program input, not a dependency bump.
+func isDepFile(file string) bool {
+	base := path.Base(file)
+	return (goManifests[base] || nodeManifests[base] || depLockfiles[base]) && !inGoSourceOrTestdata(file)
+}
+
+// inGoSourceOrTestdata reports whether file lives in a Go source tree (cmd/,
+// internal/) or under any testdata/ directory, where tests and go:embed can
+// consume it.
+func inGoSourceOrTestdata(file string) bool {
 	if strings.HasPrefix(file, "cmd/") || strings.HasPrefix(file, "internal/") {
-		return false
+		return true
 	}
 	for _, part := range strings.Split(path.Dir(file), "/") {
 		if part == "testdata" {
-			return false
+			return true
 		}
 	}
-	return true
-}
-
-func isDepFile(file string) bool {
-	base := path.Base(file)
-	return goManifests[base] || nodeManifests[base] || depLockfiles[base]
+	return false
 }
 
 // selectLane picks LaneDocsDeps only when every file in the PR is docs or a
@@ -78,7 +87,32 @@ var (
 	// "version" pair whose value looks like a semver range. Script entries
 	// ("test": "rm -rf /") never look like a version, so they fail.
 	packageJSONBumpLine = regexp.MustCompile(`^\s*"[@A-Za-z0-9._/-]+"\s*:\s*"[~^]?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*"\s*,?\s*$`)
+	// packageJSONKey extracts the dependency name from a bump line.
+	packageJSONKey = regexp.MustCompile(`^\s*"([^"]+)"`)
 )
+
+// manifestEntryKey names the dependency a matched manifest line refers to,
+// so removed and added lines can be paired. ok is false for lines that are
+// not dependency entries: blank lines, the require block delimiters, and the
+// go/toolchain directives (a Go version change may drop or add toolchain).
+func manifestEntryKey(goMod bool, line string) (key string, ok bool) {
+	t := strings.TrimSpace(line)
+	if t == "" || t == "(" || t == ")" {
+		return "", false
+	}
+	if goMod {
+		fields := strings.Fields(strings.TrimPrefix(t, "require "))
+		if len(fields) == 0 || fields[0] == "(" || fields[0] == "go" || fields[0] == "toolchain" {
+			return "", false
+		}
+		return fields[0], true
+	}
+	m := packageJSONKey.FindStringSubmatch(t)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
 
 // checkDocsDepsFiles enforces the docs/deps lane's file-type rule: manifest
 // edits must be version bumps only. A replace directive, a new script or an
@@ -101,6 +135,10 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			return result
 		}
 		bumped := false
+		// Dependency entries removed and added, by name. A bump removes and
+		// re-adds the same names; anything else adds, drops or renames a
+		// dependency, which can bring in new install scripts.
+		added, removed := map[string]int{}, map[string]int{}
 		for _, line := range strings.Split(f.Patch, "\n") {
 			if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
 				continue
@@ -113,6 +151,13 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			if t := strings.TrimSpace(changed); t != "" && t != "(" && t != ")" {
 				bumped = true
 			}
+			if key, ok := manifestEntryKey(allowed == goModBumpLine, changed); ok {
+				if line[0] == '+' {
+					added[key]++
+				} else {
+					removed[key]++
+				}
+			}
 		}
 		// A whitespace-only manifest edit would satisfy the Size rule's
 		// lockfile-needs-manifest check without bumping anything, which is a
@@ -121,10 +166,39 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			result.Message = fmt.Sprintf("%s: diff changes no version, so its lockfile change is not a dependency bump", f.Filename)
 			return result
 		}
+		if msg := unpairedEntry(added, removed); msg != "" {
+			result.Message = fmt.Sprintf("%s: %s, not version-bumped", f.Filename, msg)
+			return result
+		}
 	}
 	result.Pass = true
 	result.Message = "OK: only docs, changelog and dependency version bumps"
 	return result
+}
+
+// unpairedEntry describes the first dependency that was added or removed
+// without a matching entry on the other side, in sorted order so the message
+// is stable. It returns "" when every name is removed and re-added equally.
+func unpairedEntry(added, removed map[string]int) string {
+	names := make([]string, 0, len(added)+len(removed))
+	for k := range added {
+		names = append(names, k)
+	}
+	for k := range removed {
+		if _, ok := added[k]; !ok {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		switch {
+		case added[k] > removed[k]:
+			return fmt.Sprintf("dependency %q is added", k)
+		case removed[k] > added[k]:
+			return fmt.Sprintf("dependency %q is removed", k)
+		}
+	}
+	return ""
 }
 
 func (e *Evaluator) laneLimits(lane Lane) SizeLimits {

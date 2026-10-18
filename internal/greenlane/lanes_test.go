@@ -83,6 +83,13 @@ func TestSelectLane(t *testing.T) {
 		"swift pair":            {[]string{"macos/Package.swift", "macos/Package.resolved"}, LaneCode},
 		"gradle pair":           {[]string{"android/build.gradle", "android/gradle.lockfile"}, LaneCode},
 		"go.sum only (lane ok)": {[]string{"go.sum"}, LaneDocsDeps},
+		// #183 review: manifests that tests or go:embed consume are inputs,
+		// not dependency files.
+		"testdata package.json":  {[]string{"internal/parser/testdata/package.json"}, LaneCode},
+		"root testdata go.mod":   {[]string{"testdata/mod/go.mod"}, LaneCode},
+		"embedded package.json":  {[]string{"internal/api/dashboard/package.json"}, LaneCode},
+		"nested real lock pair":  {[]string{"marketing/video/package.json", "marketing/video/package-lock.json"}, LaneDocsDeps},
+		"testdata go.sum + docs": {[]string{"README.md", "cmd/x/testdata/go.sum"}, LaneCode},
 	}
 	for name, tc := range cases {
 		var pr PRInfo
@@ -224,6 +231,15 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 		{"package.json git dep", PRFile{Filename: "package.json", Patch: "@@ -8 +8 @@\n+    \"x\": \"github:evil/x\""}, false, "not a version bump"},
 		{"manifest without patch", PRFile{Filename: "package.json"}, false, "no diff available"},
 		{"go.mod blank line only", PRFile{Filename: "go.mod", Patch: "@@ -1,2 +1,3 @@\n module x\n+\n go 1.26"}, false, "changes no version"},
+		// #183 review: entries must be removed and re-added under the same
+		// name. Adding, dropping or swapping a dependency is not a bump.
+		{"#179 go directive bump drops toolchain", PRFile{Filename: "go.mod", Patch: "@@ -1,8 +1,6 @@\n module x\n \n-go 1.26.0\n-\n-toolchain go1.26.6\n+go 1.26.9\n"}, true, ""},
+		{"package.json new dependency", PRFile{Filename: "package.json", Patch: "@@ -6,6 +6,7 @@\n   \"devDependencies\": {\n+    \"some-pkg\": \"1.0.0\",\n     \"@playwright/test\": \"1.61.1\"\n   }"}, false, `dependency "some-pkg" is added`},
+		{"package.json swap", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"safe\": \"1.0.0\"\n+    \"evil\": \"1.0.0\""}, false, `dependency "evil" is added`},
+		{"package.json removal", PRFile{Filename: "package.json", Patch: "@@ -7 +7 @@\n-    \"old\": \"1.0.0\""}, false, `dependency "old" is removed`},
+		{"go.mod new require", PRFile{Filename: "go.mod", Patch: "@@ -9,2 +9,3 @@\n \tgithub.com/google/uuid v1.6.0\n+\tevil.example/x v0.1.0\n )"}, false, `dependency "evil.example/x" is added`},
+		{"go.mod single-line require bump", PRFile{Filename: "go.mod", Patch: "@@ -5 +5 @@\n-require golang.org/x/sys v0.48.0\n+require golang.org/x/sys v0.49.0"}, true, ""},
+		{"go.mod swap module", PRFile{Filename: "go.mod", Patch: "@@ -12 +12 @@\n-\tgolang.org/x/sys v0.48.0\n+\tgolang.org/x/syz v0.48.0"}, false, `dependency "golang.org/x/sys" is removed`},
 	}
 	for _, tc := range cases {
 		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{tc.file}})
@@ -243,6 +259,10 @@ func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
 		".github/workflows/green-lane-shadow.yml",
 		".github/green-lane.yml",
 		".github/prompts/review.md",
+		// #183 review: every location GitHub reads CODEOWNERS from.
+		"CODEOWNERS",
+		".github/CODEOWNERS",
+		"docs/CODEOWNERS",
 	} {
 		if r := eval.checkDeniedPaths(PRInfo{Files: []PRFile{{Filename: file}}}); r.Pass {
 			t.Errorf("%s is not denied", file)

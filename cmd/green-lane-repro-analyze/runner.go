@@ -86,11 +86,31 @@ func applyOverlay(repo, tree string, files []OverlayFile) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
-			return err
+		if err := writeOverlayFile(dst, f.Mode, content); err != nil {
+			return fmt.Errorf("%s: %w", f.Path, err)
 		}
 	}
 	return nil
+}
+
+// writeOverlayFile recreates a blob with its git mode, as git worktree add
+// does on the head side: executable files keep their executable bit and
+// symlinks stay symlinks. Without this, a fixture script would fail on base
+// with "permission denied" and pass on head, which looks like a fails-before.
+func writeOverlayFile(dst, mode, content string) error {
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	switch mode {
+	case "120000":
+		return os.Symlink(content, dst)
+	case "100755":
+		return os.WriteFile(dst, []byte(content), 0o755)
+	case "100644", "":
+		return os.WriteFile(dst, []byte(content), 0o644)
+	default:
+		return fmt.Errorf("unsupported git mode %s", mode)
+	}
 }
 
 // goTestArgs is the exact go test invocation for one package.

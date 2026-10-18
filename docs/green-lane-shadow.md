@@ -25,11 +25,11 @@ Every PR is evaluated in one of two lanes. Both are shadow only.
 | Lane | Selected when | Repro rule | Size caps |
 |---|---|---|---|
 | `code` | anything else | required (fails before, passes after) | ≤150 lines, ≤300 lockfile/generated, ≤6 files |
-| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps) and must change at least one version | ≤100 lines, ≤150 lockfile, ≤5 files |
+| `docs-deps` | every file is Markdown (`*.md`) documentation or a Go/npm manifest or lockfile (`go.mod`, `go.sum`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) | replaced by **File Types**: `go.mod`/`package.json` edits must be version bumps only (no `replace`, scripts, git/URL deps), must change at least one version, and must remove and re-add the same dependency names (no added, dropped or renamed dependencies) | ≤100 lines, ≤150 lockfile, ≤5 files |
 
 What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Non-Markdown files anywhere, including under `docs/` (`docs/build.sh`, `docs/example.go`). The lane is chosen by file type, not directory.
-- Markdown under `cmd/`, `internal/` or any `testdata/` directory. Tests can read it and `go:embed` can ship it, so it is not just documentation.
+- Markdown, manifests or lockfiles under `cmd/`, `internal/` or any `testdata/` directory. Tests can read them and `go:embed` can ship them, so they are inputs, not documentation or dependencies.
 - Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
@@ -62,9 +62,14 @@ Tests that the same test IDs:
 **Implementation** (`cmd/green-lane-repro-analyze`, always built from the base commit):
 - `plan` diffs merge-base..head from git objects and parses changed `_test.go`
   files with `go/parser`. Only top-level `TestXxx` functions that are new or
-  whose source changed are required; unchanged tests in the same file are not.
+  whose source changed are required, plus tests that use a new or changed
+  top-level declaration in the same file (for example a regression case added
+  to a package-level `var cases = ...` table, directly or through a helper).
+  Unchanged tests that use nothing changed are not required.
 - `run` creates fresh worktrees for the merge-base and the head, overlays the
-  PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base, and
+  PR's `_test.go` files **and `testdata/` fixtures** onto the merge-base
+  (deleting the ones the PR deletes or renames, and keeping each file's git
+  mode, so executable fixtures and symlinks match the head), and
   runs `go test -count=1 -json -run '^(TestA|TestB)$' ./pkg` per package. The
   `./` matters: `go test internal/foo` resolves inside GOROOT and fails with
   "package internal/foo is not in std", which is what made every earlier

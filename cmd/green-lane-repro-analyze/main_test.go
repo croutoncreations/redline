@@ -87,6 +87,36 @@ func TestChangedTestsIgnoresUnchangedFunctions(t *testing.T) {
 	}
 }
 
+// #183 review: a regression case added to a package-level table changes
+// what TestX runs without changing TestX's text. Tests that use a changed
+// top-level declaration, directly or through a helper, are scheduled.
+func TestChangedTestsFollowsChangedPackageLevelInputs(t *testing.T) {
+	base := `package p
+import "testing"
+var cases = []int{1, 2}
+type checker struct{}
+func (checker) ok(n int) bool { return n > 0 }
+func run(t *testing.T) { for _, c := range cases { _ = c } }
+func TestTable(t *testing.T) { for _, c := range cases { _ = c } }
+func TestViaHelper(t *testing.T) { run(t) }
+func TestMethod(t *testing.T) { _ = checker{}.ok(1) }
+func TestUnrelated(t *testing.T) { cases := 1; _ = cases }
+func TestOther(t *testing.T) {}
+`
+	head := strings.Replace(base, "{1, 2}", "{1, 2, 3}", 1)
+	head = strings.Replace(head, "return n > 0", "return n >= 0", 1)
+	got, err := changedTests("p_test.go", base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TestUnrelated shadows the name locally; matching by identifier is
+	// conservative, and an extra test only adds a fails-before requirement.
+	want := []string{"TestMethod", "TestTable", "TestUnrelated", "TestViaHelper"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("changedTests = %v, want %v (TestOther must be excluded)", got, want)
+	}
+}
+
 func TestWriteOutputsCannotInjectLines(t *testing.T) {
 	var buf bytes.Buffer
 	writeOutputs(&buf, Outcome{Message: "boom\npass=true"})
@@ -352,6 +382,87 @@ func TestReproOverlaysRootLevelTestdata(t *testing.T) {
 	}
 	if outcome.Pass || outcome.Inconclusive || len(outcome.Tests) != 1 || outcome.Tests[0].Base != "pass" {
 		t.Fatalf("outcome = %+v, want base pass (root fixture present on base) and a conclusive fail", outcome)
+	}
+}
+
+// #183 review: a table-driven regression case added to a package-level var
+// is planned and scored end to end.
+func TestReproTableDrivenCaseAddedToPackageVar(t *testing.T) {
+	r := newFixtureRepo(t)
+	r.write("internal/calc/table_test.go", `package calc
+
+import "testing"
+
+var addCases = []struct{ a, b, want int }{{0, 0, 0}}
+
+func TestAddTable(t *testing.T) {
+	for _, c := range addCases {
+		if got := Add(c.a, c.b); got != c.want {
+			t.Fatalf("Add(%d, %d) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+`)
+	r.base = r.commit("table test")
+	r.git("checkout", "-q", "-b", "table-case")
+	r.write("internal/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+	src, err := os.ReadFile(filepath.Join(r.dir, "internal/calc/table_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.write("internal/calc/table_test.go", strings.Replace(string(src), "{{0, 0, 0}}", "{{0, 0, 0}, {2, 3, 5}}", 1))
+	head := r.commit("fix Add, add case")
+
+	plan, outcome := r.pipeline(head)
+	if want := []string{"internal/calc.TestAddTable"}; !reflect.DeepEqual(plan.Tests(), want) {
+		t.Fatalf("planned tests = %v, want %v", plan.Tests(), want)
+	}
+	if !outcome.Pass || !strings.Contains(outcome.BaseOutput, "Add(2, 3) = -1, want 5") {
+		t.Fatalf("outcome = %+v, want a genuine pass", outcome)
+	}
+}
+
+// #183 review: overlay files keep their git mode on base. A test-only PR
+// whose test runs a new executable fixture must not fail on base with
+// "permission denied" and look like a repro.
+func TestReproOverlayKeepsExecutableFixtures(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	r := newFixtureRepo(t)
+	r.git("checkout", "-q", "-b", "exec-fixture")
+	r.write("internal/calc/testdata/run.sh", "#!/bin/sh\necho ok\n")
+	if err := os.Chmod(filepath.Join(r.dir, "internal/calc/testdata/run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.write("internal/calc/exec_test.go", `package calc
+
+import (
+	"os/exec"
+	"testing"
+)
+
+func TestRunsFixture(t *testing.T) {
+	out, err := exec.Command("./testdata/run.sh").CombinedOutput()
+	if err != nil || string(out) != "ok\n" {
+		t.Fatalf("run.sh: %v %q", err, out)
+	}
+}
+`)
+	head := r.commit("exec fixture")
+
+	plan, outcome := r.pipeline(head)
+	var mode string
+	for _, f := range plan.Overlay {
+		if f.Path == "internal/calc/testdata/run.sh" {
+			mode = f.Mode
+		}
+	}
+	if mode != "100755" {
+		t.Fatalf("overlay mode for run.sh = %q, want 100755", mode)
+	}
+	if outcome.Pass || len(outcome.Tests) != 1 || outcome.Tests[0].Base != "pass" {
+		t.Fatalf("outcome = %+v, want base pass (fixture executable on base) and no repro", outcome)
 	}
 }
 
