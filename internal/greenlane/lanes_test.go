@@ -312,6 +312,55 @@ func TestDocsDepsManifestEditsMustBeVersionBumps(t *testing.T) {
 	}
 }
 
+// #183 Codex review: a manifest bump must not carry an arbitrary lockfile
+// edit with it. Added resolved URLs must be the npm registry tarball of the
+// enclosing package, go.sum lines must be go.sum entries, deletions and
+// unvalidated lockfile formats fail closed.
+func TestDocsDepsLockfileContents(t *testing.T) {
+	eval := NewEvaluator(DefaultConfig())
+	manifest := PRFile{Filename: "package.json", Patch: packageJSONBump}
+	lockBump := "@@ -12,9 +12,9 @@\n     \"node_modules/@playwright/test\": {\n-      \"version\": \"1.61.1\",\n-      \"resolved\": \"https://registry.npmjs.org/@playwright/test/-/test-1.61.1.tgz\",\n-      \"integrity\": \"sha512-aaa==\",\n+      \"version\": \"1.64.1\",\n+      \"resolved\": \"https://registry.npmjs.org/@playwright/test/-/test-1.64.1.tgz\",\n+      \"integrity\": \"sha512-bbb==\",\n       \"dev\": true,"
+	cases := []struct {
+		name  string
+		lock  PRFile
+		pass  bool
+		inMsg string
+	}{
+		{"registry bump", PRFile{Filename: "package-lock.json", Patch: lockBump}, true, ""},
+		{"nested registry bump", PRFile{Filename: "package-lock.json", Patch: "@@ -40,3 +40,3 @@\n     \"node_modules/a/node_modules/b\": {\n-      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.0.tgz\",\n+      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.1.tgz\","}, true, ""},
+		{"other host", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "+      \"resolved\": \"https://registry.npmjs.org/", "+      \"resolved\": \"https://evil.example/")}, false, "not its https://registry.npmjs.org/ tarball"},
+		{"registry lookalike", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "+      \"resolved\": \"https://registry.npmjs.org/", "+      \"resolved\": \"https://registry.npmjs.org.evil.example/")}, false, "not its"},
+		{"another package's tarball", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "@playwright/test/-/test-1.64.1.tgz", "evil/-/evil-1.0.0.tgz")}, false, "not its"},
+		{"git url", PRFile{Filename: "package-lock.json", Patch: "@@ -12,2 +12,2 @@\n     \"node_modules/x\": {\n+      \"resolved\": \"git+ssh://git@github.com/evil/x.git#abc\","}, false, "not its"},
+		{"no enclosing entry", PRFile{Filename: "package-lock.json", Patch: "@@ -14 +14 @@\n-      \"resolved\": \"https://registry.npmjs.org/x/-/x-1.0.0.tgz\",\n+      \"resolved\": \"https://registry.npmjs.org/x/-/x-1.0.1.tgz\","}, false, "no enclosing package entry"},
+		{"link entry", PRFile{Filename: "package-lock.json", Patch: "@@ -12,2 +12,3 @@\n     \"node_modules/x\": {\n+      \"link\": true,"}, false, "link"},
+		{"deleted lockfile", PRFile{Filename: "package-lock.json", Status: "removed", Patch: "@@ -1,2 +0,0 @@\n-{\n-}"}, false, "deleting a lockfile"},
+		{"lockfile without patch", PRFile{Filename: "package-lock.json"}, false, "no diff available"},
+		{"yarn.lock", PRFile{Filename: "yarn.lock", Patch: "@@ -1 +1 @@\n-a\n+b"}, false, "cannot be validated"},
+	}
+	for _, tc := range cases {
+		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{manifest, tc.lock}})
+		if r.Pass != tc.pass || !strings.Contains(r.Message, tc.inMsg) {
+			t.Errorf("%s: %+v, want pass=%v containing %q", tc.name, r, tc.pass, tc.inMsg)
+		}
+	}
+
+	goMod := PRFile{Filename: "go.mod", Patch: goModBump}
+	goSum := "@@ -40,2 +40,2 @@\n-golang.org/x/sys v0.48.0 h1:abc+/=\n-golang.org/x/sys v0.48.0/go.mod h1:def=\n+golang.org/x/sys v0.49.0 h1:ghi=\n+golang.org/x/sys v0.49.0/go.mod h1:jkl="
+	for _, tc := range []struct {
+		name, patch string
+		pass        bool
+	}{
+		{"go.sum bump", goSum, true},
+		{"go.sum junk line", goSum + "\n+not a sum line", false},
+	} {
+		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{goMod, {Filename: "go.sum", Patch: tc.patch}}})
+		if r.Pass != tc.pass {
+			t.Errorf("%s: %+v, want pass=%v", tc.name, r, tc.pass)
+		}
+	}
+}
+
 func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	for _, file := range []string{

@@ -158,6 +158,12 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			allowed = goModBumpLine
 		case nodeManifests[base]:
 			allowed = packageJSONBumpLine
+		case depLockfiles[base] && isDepFile(f.Filename):
+			if msg := checkLockfile(f); msg != "" {
+				result.Message = fmt.Sprintf("%s: %s", f.Filename, msg)
+				return result
+			}
+			continue
 		default:
 			continue
 		}
@@ -279,6 +285,90 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 	result.Pass = true
 	result.Message = "OK: only docs, changelog and dependency version bumps"
 	return result
+}
+
+var (
+	// goSumLine is one go.sum entry: module, version (optionally
+	// "/go.mod"), and an h1: hash.
+	goSumLine = regexp.MustCompile(`^[^\s]+ v[^\s]+ h1:[A-Za-z0-9+/]+=*$`)
+	// lockPackageKey opens a package-lock.json v2/v3 "packages" entry:
+	// "node_modules/x": { or "node_modules/a/node_modules/@s/b": {.
+	lockPackageKey = regexp.MustCompile(`^\s*"((?:[^"]*/)?node_modules/[^"]+)"\s*:\s*\{`)
+	// lockResolved is a package-lock.json "resolved" line.
+	lockResolved = regexp.MustCompile(`^\s*"resolved"\s*:\s*"([^"]*)"`)
+	// lockLink is a package-lock.json "link": true line (a local symlink).
+	lockLink = regexp.MustCompile(`^\s*"link"\s*:\s*true`)
+)
+
+// npmRegistry is the only tarball host a docs/deps lockfile may resolve to.
+const npmRegistry = "https://registry.npmjs.org/"
+
+// checkLockfile validates what a docs/deps PR adds to a lockfile, since the
+// manifest bump alone does not constrain it (#183 Codex review). It fails
+// closed: a deleted lockfile, a missing patch, or a lockfile format it cannot
+// read is not a confirmed version bump.
+//
+//   - go.sum: every added or removed line must be a well-formed entry. The go
+//     command checks hashes against the checksum database, so a malformed
+//     line is the only thing to reject.
+//   - package-lock.json: every added "resolved" URL must be the npm registry
+//     tarball for the package whose entry encloses it (no other hosts, git or
+//     file: URLs, or another package's tarball), and no "link": true entry
+//     may be added. npm verifies the tarball against "integrity", so a
+//     registry URL for the right package cannot smuggle in other code.
+//   - pnpm-lock.yaml, yarn.lock: not validated, so never admitted.
+func checkLockfile(f PRFile) string {
+	if f.Status == "removed" {
+		return "deleting a lockfile is not a version bump"
+	}
+	base := path.Base(f.Filename)
+	if base == "pnpm-lock.yaml" || base == "yarn.lock" {
+		return "lockfile contents cannot be validated (only go.sum and package-lock.json are checked)"
+	}
+	if f.Patch == "" {
+		return "no diff available to validate the lockfile change"
+	}
+	if base == "go.sum" {
+		for _, line := range strings.Split(f.Patch, "\n") {
+			if (strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-")) && !goSumLine.MatchString(line[1:]) {
+				return fmt.Sprintf("not a go.sum entry: %q", strings.TrimSpace(line[1:]))
+			}
+		}
+		return ""
+	}
+	// package-lock.json: track the enclosing "node_modules/..." entry as far
+	// as the diff shows it.
+	key := ""
+	for _, line := range strings.Split(f.Patch, "\n") {
+		if strings.HasPrefix(line, "@@") || line == "" {
+			if strings.HasPrefix(line, "@@") {
+				key = ""
+			}
+			continue
+		}
+		text := line[1:]
+		if m := lockPackageKey.FindStringSubmatch(text); m != nil {
+			key = m[1]
+		}
+		if line[0] != '+' {
+			continue
+		}
+		if lockLink.MatchString(text) {
+			return "adds a \"link\": true entry (a local path, not a registry package)"
+		}
+		m := lockResolved.FindStringSubmatch(text)
+		if m == nil {
+			continue
+		}
+		if key == "" {
+			return fmt.Sprintf("resolved URL %q with no enclosing package entry visible in the diff context", m[1])
+		}
+		name := key[strings.LastIndex(key, "node_modules/")+len("node_modules/"):]
+		if strings.Contains(name, "..") || !strings.HasPrefix(m[1], npmRegistry+name+"/-/") {
+			return fmt.Sprintf("%s resolves to %q, not its %s tarball", key, m[1], npmRegistry)
+		}
+	}
+	return ""
 }
 
 // versionsDiffer reports whether the added and removed name@version

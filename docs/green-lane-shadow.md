@@ -33,6 +33,19 @@ What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Renames whose source path does not qualify (for example `internal/x.go` → `docs/x.md`). Denied Paths also checks both paths of a rename, and File Types rejects any rename to or from a manifest or lockfile.
 - Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
+File Types also validates lockfile contents, because a manifest bump alone
+does not constrain what its lockfile says. Every `resolved` URL a
+`package-lock.json` change adds must be the npm registry tarball
+(`https://registry.npmjs.org/<name>/-/...`) of the `node_modules/<name>`
+entry around it, which must be visible in the diff context, and no
+`"link": true` entry may be added. npm then checks the tarball against
+`integrity`. Every added or removed `go.sum` line must be a `module version
+h1:hash` entry; the go command checks those against the checksum database.
+Deleting a lockfile, a lockfile with no diff, and `pnpm-lock.yaml`/`yarn.lock`
+(not validated) all fail. This does not prove the lockfile is the resolver's
+exact output for the bump; the live gate should regenerate it in a trusted
+job instead.
+
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
 lanes. The lockfile-needs-matching-manifest rule applies in both lanes with
 no exception: a lockfile-only security bump (for example #179's
