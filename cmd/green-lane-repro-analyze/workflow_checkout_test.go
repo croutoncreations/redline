@@ -24,6 +24,7 @@ type workflowStep struct {
 type workflowDoc struct {
 	Permissions map[string]string `yaml:"permissions"`
 	Jobs        map[string]struct {
+		If          string            `yaml:"if"`
 		Permissions map[string]string `yaml:"permissions"`
 		Steps       []workflowStep    `yaml:"steps"`
 	} `yaml:"jobs"`
@@ -316,6 +317,16 @@ func TestGreenLaneToolingComesFromTrustedCode(t *testing.T) {
 		if !found {
 			t.Errorf("jobs.%s does not compute the repro plan with the trusted binary", name)
 		}
+	}
+}
+
+// A workflow_run runs in the default branch's context and cache scope, which
+// release.yml restores with secrets present. The repro job runs PR code, so
+// on workflow_run it must be limited to PRs from this repository.
+func TestGreenLaneReproSkipsForkCodeOnWorkflowRun(t *testing.T) {
+	cond := loadGreenLaneWorkflow(t).Jobs["repro"].If
+	if !strings.Contains(cond, "github.event.workflow_run.head_repository.full_name == github.repository") {
+		t.Errorf("jobs.repro if: %q must restrict workflow_run to same-repository heads", cond)
 	}
 }
 

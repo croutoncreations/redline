@@ -28,12 +28,19 @@ jobs:
   # Runs the planned tests. This job executes PR code (the PR's tests on the
   # merge-base, and the PR head), so it has a read-only token, no secrets, and
   # produces evidence only. It never decides the repro verdict.
+  #
+  # A workflow_run runs in the default branch's context, including its
+  # Actions cache scope, which release.yml restores. Fork code run there
+  # could save cache entries main would later use, so on workflow_run this
+  # job only runs for PRs from this repository (whose authors can push
+  # branches here anyway). Fork PRs are still reproduced on pull_request.
   repro:
     runs-on: ubuntu-latest
     if: |
       github.event_name == 'pull_request' ||
       github.event_name == 'pull_request_review' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.head_repository.full_name == github.repository)
     timeout-minutes: 30
     permissions:
       contents: read
