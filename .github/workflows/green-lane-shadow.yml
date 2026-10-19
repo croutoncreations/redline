@@ -309,7 +309,17 @@ jobs:
           REPRO_PASS_OUT: ${{ needs.repro-analyze.outputs.pass }}
           REPRO_MESSAGE_OUT: ${{ needs.repro-analyze.outputs.message }}
           REPRO_TEST_IDS_OUT: ${{ needs.repro-analyze.outputs.test_ids }}
+          REPRO_HEAD_SHA: ${{ needs.repro.outputs.head_sha }}
+          EVAL_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
+          # The evaluator reads the PR live; a push after the repro job
+          # started would otherwise pair an older commit's repro with the
+          # new head.
+          if [ -n "$REPRO_HEAD_SHA" ] && [ "$REPRO_HEAD_SHA" != "$EVAL_HEAD_SHA" ]; then
+            echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
+            echo "REPRO_MESSAGE=Repro ran on ${REPRO_HEAD_SHA}, but the PR head is now ${EVAL_HEAD_SHA}" >> "$GITHUB_ENV"
+            exit 0
+          fi
           if [ -z "$REPRO_PASS_OUT" ] && [ -z "$REPRO_INCONCLUSIVE_OUT" ]; then
             echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
             echo "REPRO_MESSAGE=No repro analyzer result (repro jobs failed or were skipped)" >> "$GITHUB_ENV"
