@@ -31,6 +31,30 @@ type RunUsageRecord struct {
 	Observations []capacity.TokenObservation
 }
 
+// runUsageObservationsQuery reads the redline-run evidence of the runs
+// completed in [since, until). Evidence is keyed run_id (Codex, Hermes,
+// single-model Claude) or run_id:model (one row per model in a Claude result),
+// and run IDs never contain ':'. Each run is one range seek on the
+// (provider, source, source_id) unique index, so cost follows the window, not
+// the history of a table dominated by ambient Gatepost rows. The recursive CTE
+// lists distinct providers by index seeks, and CROSS JOIN pins the join order.
+// Observations are matched to runs, not time-filtered: observed_at can precede
+// completed_at.
+const runUsageObservationsQuery = `WITH RECURSIVE providers(provider) AS (
+    SELECT MIN(provider) FROM token_observations
+    UNION ALL
+    SELECT (SELECT MIN(provider) FROM token_observations WHERE provider > providers.provider)
+    FROM providers WHERE providers.provider IS NOT NULL),
+selected AS (
+    SELECT id FROM runs WHERE state IN ('completed', 'failed') AND completed_at >= ? AND completed_at < ?)
+SELECT o.provider, o.source, o.source_id, o.observed_at, o.model, o.input_tokens, o.output_tokens,
+o.cache_read_tokens, o.cache_creation_tokens, o.confidence
+FROM selected r CROSS JOIN providers CROSS JOIN token_observations o
+WHERE providers.provider IS NOT NULL AND o.provider = providers.provider AND o.source = 'redline-run'
+    AND o.source_id >= r.id AND o.source_id < r.id || ';'
+    AND (o.source_id = r.id OR substr(o.source_id, length(r.id) + 1, 1) = ':')
+ORDER BY o.id`
+
 // ListRunUsage returns completed and failed runs whose completion time falls
 // in [since, until), each with its redline-run token observations. Ambient
 // sources such as Gatepost are never included.
@@ -85,22 +109,7 @@ ORDER BY r.completed_at, r.id`, formatTime(since), formatTime(until))
 	if len(records) == 0 {
 		return records, nil
 	}
-	// Managed evidence is a small slice of a table dominated by ambient
-	// Gatepost rows, so read only redline-run rows through the
-	// (provider, source, source_id) unique index. The recursive CTE walks the
-	// distinct providers by index seeks rather than scanning every row.
-	// Observations are not time-filtered: they are matched to runs selected
-	// by completion time, and observed_at can precede completed_at.
-	observationRows, err := d.db.QueryContext(ctx, `WITH RECURSIVE providers(provider) AS (
-    SELECT MIN(provider) FROM token_observations
-    UNION ALL
-    SELECT (SELECT MIN(provider) FROM token_observations WHERE provider > providers.provider)
-    FROM providers WHERE providers.provider IS NOT NULL)
-SELECT o.provider, o.source, o.source_id, o.observed_at, o.model, o.input_tokens, o.output_tokens,
-o.cache_read_tokens, o.cache_creation_tokens, o.confidence
-FROM providers CROSS JOIN token_observations o
-WHERE providers.provider IS NOT NULL AND o.provider = providers.provider AND o.source = 'redline-run'
-ORDER BY o.id`)
+	observationRows, err := d.db.QueryContext(ctx, runUsageObservationsQuery, formatTime(since), formatTime(until))
 	if err != nil {
 		return nil, fmt.Errorf("list run usage observations: %w", err)
 	}
@@ -113,9 +122,6 @@ ORDER BY o.id`)
 			&observation.CacheReadTokens, &observation.CacheCreationTokens, &observation.Confidence); err != nil {
 			return nil, fmt.Errorf("scan run usage observation: %w", err)
 		}
-		// Keys are run_id (Codex, Hermes, single-model Claude) or
-		// run_id:model (one row per model in a Claude result). Run IDs never
-		// contain ':', so the text before the first ':' is the run ID.
 		runID, _, _ := strings.Cut(observation.SourceID, ":")
 		position, ok := index[runID]
 		if !ok {

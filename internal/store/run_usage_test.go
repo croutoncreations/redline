@@ -3,12 +3,27 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/capacity"
 	"github.com/croutoncreations/redline/internal/domain"
 )
+
+func TestRunUsageEvidenceSeeksTheUniqueIndexPerRun(t *testing.T) {
+	t.Parallel()
+	db := openTaskDB(t)
+	plan, err := db.ExplainRunUsageObservations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "sqlite_autoindex_token_observations_1 (provider=? AND source=? AND source_id>? AND source_id<?)") ||
+		strings.Contains(joined, "SCAN o") || strings.Contains(joined, "SCAN token_observations") {
+		t.Fatalf("evidence query must seek the unique index per run, plan:\n%s", joined)
+	}
+}
 
 func TestListRunUsageScopesRunsEvidenceAndIdentity(t *testing.T) {
 	t.Parallel()
