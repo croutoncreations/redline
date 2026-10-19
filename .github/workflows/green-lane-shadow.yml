@@ -217,10 +217,14 @@ jobs:
           ref: ${{ github.event_name == 'workflow_run' && github.sha || github.event.pull_request.base.sha }}
           persist-credentials: false
       
+      # No cache: the repro job runs PR code in this same workflow run and
+      # cache scope, and code on a hosted runner can obtain the Actions
+      # runtime token and save an entry under setup-go's predictable key. A
+      # restored Go build cache would then feed into the evaluator binary.
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
       
       - name: Build evaluator
         run: go build -o green-lane-check ./cmd/green-lane-check

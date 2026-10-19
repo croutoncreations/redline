@@ -292,6 +292,19 @@ func TestGreenLaneToolingComesFromTrustedCode(t *testing.T) {
 	if builds == 0 {
 		t.Fatal("expected go build steps in the green-lane workflow")
 	}
+	// The repro job runs PR code in the same run and cache scope, and code
+	// on a hosted runner can save a cache entry under setup-go's predictable
+	// key. Any job that builds trusted tooling must not restore that cache.
+	for jobName, job := range loadGreenLaneWorkflow(t).Jobs {
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions/setup-go@") && step.With["cache"] != "false" {
+				t.Errorf("jobs.%s setup-go has cache %q; want \"false\" so PR code cannot poison trusted builds", jobName, step.With["cache"])
+			}
+			if strings.HasPrefix(step.Uses, "actions/cache@") {
+				t.Errorf("jobs.%s uses actions/cache; trusted builds must not restore caches PR code can write", jobName)
+			}
+		}
+	}
 	jobs := loadGreenLaneWorkflow(t).Jobs
 	for _, name := range []string{"repro", "repro-analyze"} {
 		found := false
