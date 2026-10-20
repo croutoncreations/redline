@@ -1,7 +1,7 @@
 # CLI reference
 
-Every `redline` command except `serve`, `mcp`, `demo`, and the standalone read-only
-`reset preview` is a client of the local HTTP API.
+Every `redline` command except `version`, `serve`, `mcp`, `demo`, `token rotate`, and the
+standalone read-only `reset preview` is a client of the local HTTP API.
 The default API is `http://127.0.0.1:7436`; override it with `--api` before the subcommand:
 
 ```bash
@@ -29,6 +29,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
+redline --config redline.yaml token rotate --yes          # replace the API token (see mobile.md)
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
@@ -57,6 +58,7 @@ echo "Add table tests for the parser." | redline task add --name "Parser tests" 
 redline task list
 redline task enable add-tests
 redline task disable add-tests
+redline task retry add-tests
 redline task dispatch add-tests
 redline candidates --provider codex-main
 ```
@@ -106,6 +108,7 @@ redline resume --provider codex-main
 redline run list
 redline run show <run-id>
 redline run events <run-id>
+redline run events <run-id> --limit 500
 redline run logs <run-id>
 redline run logs <run-id> --stream stderr --tail-bytes 8192
 redline run logs <run-id> --stream prepare_stderr
@@ -124,7 +127,7 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 ## Machine-readable output
 
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
-`reset preview`, and the
+`calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
 `scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
 `usage refresh`, `task add`, `later`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`.
@@ -138,9 +141,12 @@ redline notification list
 ## Mobile pairing
 
 ```bash
-redline pair
-redline pair --port 8443
+redline --config redline.yaml pair --qr
+redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
 ```
+
+`--qr` is required. Without `--host`, the Tailscale MagicDNS name is discovered automatically; either
+way the host must be listed in `api.trusted_hosts`. `--port` defaults to 443.
 
 See [Mobile dashboard setup](mobile.md).
 
