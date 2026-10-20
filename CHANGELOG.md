@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
   scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
   The preview cannot notify, select jobs, alter scheduling, or start work.
+- `redline metrics launch` and `GET /v1/metrics/launch` now include `profile_usage`: Redline-managed token totals per
+  execution profile and provider account for the report window. Each total has an input/output/cache-read/cache-creation
+  breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
+  evidence report `tokens: null` rather than zero, and interactive usage is excluded.
 
 ## [0.1.10] - 2026-10-01
 
