@@ -229,6 +229,18 @@ repositories, paths, credentials, or live allowance data.
 
 </details>
 
+## Green Lane Shadow Check
+
+The `green-lane-shadow` check runs on every PR to simulate auto-merge decisions **without actually merging anything**. It evaluates six rules (size, test repro, CI status, cross-vendor review, duplicate detection, denied paths) and posts a clear "would merge" or "would not merge" verdict as a GitHub check run.
+
+**This is shadow mode only.** The check is report-only and will never merge, approve, or modify settings. It helps validate the auto-merge design before the full infrastructure (trusted dispatcher, reviewer Apps, gate App, provenance verification) is built.
+
+See [docs/green-lane-shadow.md](docs/green-lane-shadow.md) for:
+- Complete rule descriptions
+- How to read the output
+- Pre-enable checklist
+- Current limitations
+
 ## Documentation
 
 | Using Redline | Reference |
@@ -237,6 +249,7 @@ repositories, paths, credentials, or live allowance data.
 | [Execution profiles and tasks](docs/profiles-and-tasks.md) | [HTTP API](docs/api.md) |
 | [Scheduling and the allowance model](docs/scheduling.md) | [Architecture](docs/architecture.md) |
 | [Runs, logs, and notifications](docs/runs-and-notifications.md) | [Hermes integration](docs/hermes.md) |
+| [Public reset-signal preview](docs/reset-signal-preview.md) | [Scheduling and allowance model](docs/scheduling.md) |
 | [MCP and agent access](docs/mcp.md) | [Native macOS app](docs/native-macos.md) |
 | [Mobile dashboard](docs/mobile.md) · [launchd](docs/launchd.md) | [Outcome metrics](docs/launch-metrics.md) |
 | [Troubleshooting](docs/troubleshooting.md) | [Changelog](CHANGELOG.md) · [Releasing](docs/releasing.md) |

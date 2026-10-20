@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
+  trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
+  scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
+  The preview cannot notify, select jobs, alter scheduling, or start work.
+- `redline metrics launch` and `GET /v1/metrics/launch` now include `profile_usage`: Redline-managed token totals per
+  execution profile and provider account for the report window. Each total has an input/output/cache-read/cache-creation
+  breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
+  evidence report `tokens: null` rather than zero, and interactive usage is excluded.
+
+## [0.1.10] - 2026-10-01
+
+### Added
+
+- `redline demo serve --run-duration` keeps an admitted demo job in the running state for a set
+  time, and finished demo runs now carry a realistic transcript instead of a placeholder.
+- `SECURITY.md` with the supported reporting channels and scope, and a bug report issue form that
+  collects version, install method, OS, harness, and area.
+- `llms.txt` agent index linking the docs and launch post.
+
+### Fixed
+
+- The macOS app's dashboard window now shows JavaScript `confirm()` and `alert()` dialogs as
+  native sheets. Previously `WKWebView` suppressed them, so the Delete buttons for jobs, execution
+  profiles, and Hermes connections silently did nothing in the app. The web dashboard in a browser
+  was unaffected.
+- Dashboard dropdowns are now the same height as text fields; native `<select>` chrome made the
+  job and profile forms look misaligned, especially in WebKit.
+- `redline demo serve` no longer panics on startup comparing uncomparable usage sources.
+- Sparkle `appcast.xml` points each older DMG at its own release tag, so delta updates from
+  earlier versions download from the right place.
+- Relay state and usage lockout files written beside the database are ignored by git in a
+  checked-out working copy.
+
 ## [0.1.9] - 2026-09-25
 
 ### Added

@@ -8,7 +8,27 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs for the same pull request only. Every other event
+# (push to main, tags, workflow_dispatch, schedule) gets a run-unique group and
+# is never cancelled. The pr-/run- prefixes keep PR 123 and run ID 123 apart.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download actionlint
+        run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          echo "$PWD" >> "$GITHUB_PATH"
+      - name: Run actionlint
+        run: actionlint
+
   go:
     runs-on: ubuntu-latest
     steps:
@@ -92,7 +112,7 @@ jobs:
           echo $! > serve.pid
       - name: Wait for health
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if ./redline --config smoke-config.yaml --api http://127.0.0.1:7436 health; then
               exit 0
             fi
