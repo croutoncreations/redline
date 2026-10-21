@@ -83,9 +83,19 @@ redline --config redline.yaml serve   # dashboard at http://127.0.0.1:7436
 redline status --provider codex-main
 ```
 
-The dashboard needs the `api-token` that `serve` creates beside `redline.yaml`; open
-`http://127.0.0.1:7436/?access_token=$(<api-token)` once to sign the browser in (the bare URL
-returns `401`). If port `7436` is already taken (for example by the macOS app), start `serve` with
+The dashboard needs the `api-token` that `serve` creates beside `redline.yaml`. Run one of these
+from that directory to sign the browser in once (the bare URL returns `401`):
+
+```bash
+open "http://127.0.0.1:7436/?access_token=$(<api-token)"        # macOS
+xdg-open "http://127.0.0.1:7436/?access_token=$(<api-token)"    # Linux
+```
+
+```powershell
+Start-Process "http://127.0.0.1:7436/?access_token=$((Get-Content api-token -Raw).Trim())"   # Windows
+```
+
+If port `7436` is already taken (for example by the macOS app), start `serve` with
 `--listen 127.0.0.1:17436` and pass `--api http://127.0.0.1:17436` to the other commands.
 
 → [CLI reference](docs/cli.md) · [Run as a launchd service](docs/launchd.md)
