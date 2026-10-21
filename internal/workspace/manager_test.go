@@ -442,7 +442,7 @@ func TestFinalizeHookFailureNamesWorkspaceRunAndLogFiles(t *testing.T) {
 	assertErrorContains(t, err, "hook output was not captured")
 }
 
-func TestCommandWorkspaceBadOutputShowsWhatWasReturned(t *testing.T) {
+func TestCommandWorkspaceBadOutputDescribesButDoesNotEchoOutput(t *testing.T) {
 	repo := t.TempDir()
 	prepare := func(output string, exit int) error {
 		runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
@@ -455,7 +455,10 @@ func TestCommandWorkspaceBadOutputShowsWhatWasReturned(t *testing.T) {
 		return err
 	}
 
-	assertErrorContains(t, prepare("Cloning into 'x'...\n", 0), "working_directory", `"Cloning into 'x'..."`)
+	assertErrorContains(t, prepare("Cloning into 'x'...\n", 0), "working_directory", "got 19 bytes of output")
+	if err := prepare(`token=hunter2-secret`, 0); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("malformed prepare output must not be echoed into the stored error: %v", err)
+	}
 	assertErrorContains(t, prepare("", 0), "empty output")
 	assertErrorContains(t, prepare(`{"branch":"b"}`, 0), "unusable working_directory", "did not return working_directory")
 	missing := filepath.Join(repo, "nope")

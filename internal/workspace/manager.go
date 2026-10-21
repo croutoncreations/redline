@@ -295,8 +295,8 @@ func (m Manager) prepareCommand(
 		Metadata         map[string]string `json:"metadata"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return domain.Workspace{}, fmt.Errorf("decode prepare command output as JSON with working_directory (got %s): %w",
-			excerpt(stdout.String()), err)
+		return domain.Workspace{}, fmt.Errorf("decode prepare command output as JSON with working_directory (%s; contents are not echoed because they may hold secrets): %w",
+			describeOutput(stdout.String()), err)
 	}
 	if err := requireDirectory(result.WorkingDirectory); err != nil {
 		return domain.Workspace{}, fmt.Errorf("prepare command returned an unusable working_directory: %w", err)
@@ -410,16 +410,12 @@ func (m Manager) hookLogHint(runID, phase string) string {
 		" and " + ArtifactPath(m.OutputDirectory, runID, phase, "stdout")
 }
 
-func excerpt(value string) string {
+func describeOutput(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "empty output"
+		return "got empty output"
 	}
-	const limit = 120
-	if len(value) > limit {
-		value = value[:limit] + "..."
-	}
-	return strconv.Quote(value)
+	return "got " + strconv.Itoa(len(value)) + " bytes of output"
 }
 
 func safeName(value string) string {
