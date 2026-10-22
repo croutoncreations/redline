@@ -25,6 +25,9 @@ A PR qualifies only when all these checks pass:
    was unedited or last edited by that same bot. The completion record must name
    the full current head SHA; running, skipped, rate-limited, ambiguous or unknown
    records do not count. Codex must explicitly report no unresolved findings.
+   When its security-review state is present, that review must also be completed on the exact current head
+   with no unresolved findings, even if it has no inline threads. An absent or
+   null security-review state means that review was not requested.
    Only the latest summary per provider is considered. Ordinary issue comments,
    pending/dismissed reviews, reviews on older commits and a successful workflow
    without review evidence do not count. Pushing requires a new review.

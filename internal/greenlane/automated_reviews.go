@@ -104,18 +104,25 @@ func completedAutomatedReview(pr PRInfo) bool {
 				Code     json.RawMessage `json:"code_review"`
 				Security json.RawMessage `json:"security_review"`
 			}
-			var code struct {
-				Commit     string `json:"commit_sha"`
-				Status     string `json:"status"`
-				Findings   *bool  `json:"has_any_findings"`
-				Unresolved *bool  `json:"has_unresolved_findings"`
-			}
-			if summaryJSON(summaryPayload(c.Body, "<!-- codex-review-state:v1 "), &state) == nil && summaryJSON(state.Code, &code) == nil && code.Commit == pr.HeadSHA && code.Status == "completed" && code.Findings != nil && code.Unresolved != nil && !*code.Unresolved {
+			if summaryJSON(summaryPayload(c.Body, "<!-- codex-review-state:v1 "), &state) == nil && completedCodexComponent(state.Code, pr.HeadSHA) &&
+				(len(state.Security) == 0 || bytes.Equal(bytes.TrimSpace(state.Security), []byte("null")) || completedCodexComponent(state.Security, pr.HeadSHA)) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// Both review types use the same exact-head completion protocol. A populated
+// security review must finish and clear findings even without inline threads.
+func completedCodexComponent(raw json.RawMessage, head string) bool {
+	var review struct {
+		Commit     string `json:"commit_sha"`
+		Status     string `json:"status"`
+		Findings   *bool  `json:"has_any_findings"`
+		Unresolved *bool  `json:"has_unresolved_findings"`
+	}
+	return summaryJSON(raw, &review) == nil && review.Commit == head && review.Status == "completed" && review.Findings != nil && review.Unresolved != nil && !*review.Unresolved
 }
 
 // Original author/App attribution survives edits by repository writers.
