@@ -12,6 +12,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   work that can only fail when the harness starts. Hermes tasks that select an existing runtime
   job remain valid without a separate prompt.
 
+### Security
+
+- Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
+  from Redline: `net/http` HTTP/1 and HTTP/2 client/server issues (request desync, memory and CPU
+  exhaustion, an HPACK race crash), `net/textproto`/`mime/multipart` header limits, and
+  `crypto/tls` ECH parsing. `go.mod` now requires Go 1.26.9 (previously 1.26.0 with a 1.26.6
+  toolchain pin), so `go install github.com/croutoncreations/redline/cmd/redline@latest` also
+  builds with the patched standard library. With the default `GOTOOLCHAIN=auto`, older local Go
+  versions download 1.26.9 automatically.
+
+### Added
+
+- `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
+  trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
+  scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
+  The preview cannot notify, select jobs, alter scheduling, or start work.
+- `redline metrics launch` and `GET /v1/metrics/launch` now include `profile_usage`: Redline-managed token totals per
+  execution profile and provider account for the report window. Each total has an input/output/cache-read/cache-creation
+  breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
+  evidence report `tokens: null` rather than zero, and interactive usage is excluded.
+
 ## [0.1.10] - 2026-10-01
 
 ### Added

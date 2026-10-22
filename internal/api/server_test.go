@@ -72,6 +72,67 @@ func TestLaunchMetricsReportsAutomaticWaitRate(t *testing.T) {
 	}
 }
 
+func TestLaunchMetricsReportsProfileUsageInWindow(t *testing.T) {
+	t.Parallel()
+	server, db := newAPIServer(t, codexPayload)
+	ctx := context.Background()
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "codex-profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "existing-directory"},
+		{ID: "claude-profile", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "existing-directory"},
+	} {
+		if err := db.CreateProfile(ctx, profile, apiNow.Add(-30*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish := func(runID, profileID, account string, completedAt time.Time, observations ...capacity.TokenObservation) {
+		t.Helper()
+		task := domain.Task{ID: "task-" + runID, Name: runID, Prompt: "p", Priority: 50,
+			ExecutionProfileID: profileID, Type: domain.OneOff}
+		if err := db.CreateTask(ctx, task, completedAt.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, runID, task.ID, account, "rev", completedAt.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.RecordDispatchAttempt(ctx, domain.DispatchAttempt{ProviderAccountID: account, Trigger: "automatic",
+			Outcome: domain.DispatchAdmitted, Decision: "RUN", RunID: runID,
+			StartedAt: completedAt.Add(-time.Minute), CompletedAt: completedAt.Add(-time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteRun(ctx, runID, domain.RunCompletion{State: domain.RunCompleted}, completedAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.SaveTokenObservations(ctx, observations); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := apiNow.Add(-time.Hour)
+	finish("codex-recent", "codex-profile", "codex-main", recent, capacity.TokenObservation{
+		Provider: "codex", Source: "redline-run", SourceID: "codex-recent", ObservedAt: recent,
+		InputTokens: 10, OutputTokens: 2, CacheReadTokens: 90})
+	old := apiNow.Add(-10 * 24 * time.Hour)
+	finish("codex-old", "codex-profile", "codex-main", old, capacity.TokenObservation{
+		Provider: "codex", Source: "redline-run", SourceID: "codex-old", ObservedAt: old, InputTokens: 1000})
+	finish("claude-recent", "claude-profile", "claude-main", recent)
+
+	var report launchmetrics.Report
+	getJSON(t, server.URL+"/v1/metrics/launch?provider=codex-main&days=7", &report)
+	if len(report.ProfileUsage) != 1 {
+		t.Fatalf("profile usage = %#v", report.ProfileUsage)
+	}
+	usage := report.ProfileUsage[0]
+	if usage.ProfileID != "codex-profile" || usage.ProviderAccountID != "codex-main" || usage.Automatic.TerminalRuns != 1 ||
+		usage.Automatic.Tokens == nil || usage.Automatic.Tokens.Total != 102 || usage.Automatic.Tokens.CacheRead != 90 {
+		t.Fatalf("codex usage = %#v tokens=%#v", usage, usage.Automatic.Tokens)
+	}
+	var unfiltered launchmetrics.Report
+	getJSON(t, server.URL+"/v1/metrics/launch?days=30", &unfiltered)
+	if len(unfiltered.ProfileUsage) != 2 || unfiltered.ProfileUsage[0].ProfileID != "claude-profile" ||
+		unfiltered.ProfileUsage[0].All.Tokens != nil || unfiltered.ProfileUsage[1].All.Tokens.Total != 1102 {
+		t.Fatalf("unfiltered = %#v", unfiltered.ProfileUsage)
+	}
+}
+
 func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)

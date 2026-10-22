@@ -2363,6 +2363,12 @@ func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
 		Since: since, Until: until, Providers: providerIDs, Attempts: filtered,
 		Runs: runs, RunObservations: observationsByRun, Capacity: capacities,
 	})
+	runUsage, err := s.store.ListRunUsage(r.Context(), since, until)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	report.ProfileUsage = launchmetrics.BuildProfileUsage(runUsage, providerFilter)
 	writeJSON(w, http.StatusOK, report)
 }
 

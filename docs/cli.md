@@ -1,6 +1,7 @@
 # CLI reference
 
-Every `redline` command except `serve`, `mcp`, and `demo` is a client of the local HTTP API.
+Every `redline` command except `serve`, `mcp`, `demo`, and the standalone read-only
+`reset preview` is a client of the local HTTP API.
 The default API is `http://127.0.0.1:7436`; override it with `--api` before the subcommand:
 
 ```bash
@@ -31,6 +32,18 @@ redline token sync --provider claude-main
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
+
+### Public reset-signal preview
+
+```bash
+redline reset preview
+redline reset preview --timeout 8s
+```
+
+This performs one bounded GET of each documented public tracker and prints a JSON likelihood
+report. It does not read Redline account state, poll, notify, select jobs, change scheduler state,
+or start anything. Tracker percentages remain separately attributed; Redline does not combine
+them into its own probability. See [Public reset-signal preview](reset-signal-preview.md).
 
 ## Profiles and tasks
 
@@ -110,7 +123,8 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 
 ## Machine-readable output
 
-`task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`, and the
+`task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
+`reset preview`, and the
 `scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
 `usage refresh`, `task add`, `later`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`.
