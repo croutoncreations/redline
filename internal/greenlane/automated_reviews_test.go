@@ -40,6 +40,9 @@ func TestAuthenticatedSummaryCompletion(t *testing.T) {
 		{"duplicate JSON key", func(c *AutomatedReviewComment) {
 			c.Body = strings.Replace(c.Body, `"kind":"reviewed"`, `"kind":"skipped","kind":"reviewed"`, 1)
 		}, false},
+		{"mixed-case duplicate JSON key", func(c *AutomatedReviewComment) {
+			c.Body = strings.Replace(c.Body, `"kind":"reviewed"`, `"kind":"skipped","Kind":"reviewed"`, 1)
+		}, false},
 		{"unknown protocol", func(c *AutomatedReviewComment) { c.Body = strings.Replace(c.Body, `"kind":`, `"unknown":`, 1) }, false},
 		{"duplicate marker", func(c *AutomatedReviewComment) { c.Body += "\n" + strings.Split(c.Body, "\n")[2] }, false},
 		{"quoted", func(c *AutomatedReviewComment) { c.Body = strings.Replace(c.Body, "\n<!-- final", "\n> <!-- final", 1) }, false},
@@ -136,6 +139,8 @@ func TestCodexSecurityReviewReadiness(t *testing.T) {
 		{"missing findings", strings.Replace(component, `"has_any_findings":false,`, "", 1), false},
 		{"missing unresolved", strings.Replace(component, `,"has_unresolved_findings":false`, "", 1), false},
 		{"unknown schema", strings.Replace(component, `"status":`, `"unknown":`, 1), false},
+		{"mixed-case duplicate status", strings.Replace(component, `"status":"completed"`, `"status":"running","Status":"completed"`, 1), false},
+		{"Unicode alias", strings.Replace(component, `"status":"completed"`, `"status":"running","ſtatus":"completed"`, 1), false},
 		{"duplicate status", strings.Replace(component, `"status":"completed"`, `"status":"running","status":"completed"`, 1), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

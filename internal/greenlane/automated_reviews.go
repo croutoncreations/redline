@@ -156,6 +156,14 @@ func summaryJSON(data []byte, target any) error {
 					return err
 				}
 				name, ok := key.(string)
+				// Provider protocol keys are ASCII. Reject Unicode aliases too:
+				// encoding/json's field matching includes Unicode case folding.
+				for _, r := range name {
+					if r > 127 {
+						return fmt.Errorf("non-ASCII summary key")
+					}
+				}
+				name = strings.ToLower(name)
 				if !ok || seen[name] {
 					return fmt.Errorf("duplicate summary key")
 				}
