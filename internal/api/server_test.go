@@ -1270,6 +1270,24 @@ func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
 		"id": "job", "name": "Job", "execution_profile_id": "hermes", "type": "one_off", "runtime_job_id": "existing-job",
 	})
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/job", `{"runtime_job_id":" \n"}`, http.StatusBadRequest)
+	fallback := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "file-fallback", "name": "File fallback", "execution_profile_id": "codex-devx", "type": "one_off", "prompt": " \t", "prompt_file": "task.md",
+	})
+	if fallback.Prompt != "" || fallback.PromptFile != "task.md" {
+		t.Fatalf("blank prompt hides file fallback: %#v", fallback)
+	}
+	fallback = postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "prompt-fallback", "name": "Prompt fallback", "execution_profile_id": "hermes", "type": "one_off", "prompt": "Do work", "runtime_job_id": " \n",
+	})
+	if fallback.RuntimeJobID != "" || fallback.Prompt != "Do work" {
+		t.Fatalf("blank job hides prompt fallback: %#v", fallback)
+	}
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid", `{"prompt":" \t","prompt_file":"task.md"}`, http.StatusOK)
+	fallback = domain.Task{}
+	getJSON(t, server.URL+"/v1/tasks/valid", &fallback)
+	if fallback.Prompt != "" || fallback.PromptFile != "task.md" {
+		t.Fatalf("PATCH did not normalize blank override: %#v", fallback)
+	}
 	var unchanged domain.Task
 	getJSON(t, server.URL+"/v1/tasks/job", &unchanged)
 	if unchanged.RuntimeJobID != "existing-job" {

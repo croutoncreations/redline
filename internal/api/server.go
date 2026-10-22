@@ -1228,7 +1228,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
 		return
 	}
-	if err := validateTaskInput(task, profile); err != nil {
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -1318,7 +1318,7 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
 		return
 	}
-	if err := validateTaskInput(task, profile); err != nil {
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -1334,9 +1334,16 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func validateTaskInput(task domain.Task, profile domain.ExecutionProfile) error {
-	if strings.TrimSpace(task.Prompt) != "" || strings.TrimSpace(task.PromptFile) != "" ||
-		(profile.HarnessType == "hermes" && strings.TrimSpace(task.RuntimeJobID) != "") {
+func normalizeAndValidateTaskInput(task *domain.Task, profile domain.ExecutionProfile) error {
+	// Dispatch selects raw nonempty overrides before fallbacks. Clear blank
+	// overrides so execution uses the same input that passed validation.
+	for _, input := range []*string{&task.Prompt, &task.PromptFile, &task.RuntimeJobID} {
+		if strings.TrimSpace(*input) == "" {
+			*input = ""
+		}
+	}
+	if task.Prompt != "" || task.PromptFile != "" ||
+		(profile.HarnessType == "hermes" && task.RuntimeJobID != "") {
 		return nil
 	}
 	return fmt.Errorf("prompt or prompt_file is required")
