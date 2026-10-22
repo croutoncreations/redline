@@ -210,6 +210,9 @@ func (e *Evaluator) checkRepro(reproResult *ReproResult) RuleResult {
 
 // checkCI implements Rule 3: CI status
 func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
+	if len(e.config.RequiredChecks) == 0 {
+		return RuleResult{Name: "CI", Inconclusive: true, Message: "No required-check policy configured"}
+	}
 	pending := []string{}
 	failed := []string{}
 	missing := []string{}
@@ -220,6 +223,10 @@ func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
 	for _, check := range pr.CheckRuns {
 		for _, required := range e.config.RequiredChecks {
 			if check.Name == required {
+				source, ok := e.config.CheckSources[required]
+				if !ok || source.AppID <= 0 || source.WorkflowID <= 0 || check.AppID != source.AppID || check.WorkflowID != source.WorkflowID || check.HeadSHA != pr.HeadSHA {
+					continue
+				}
 				seen[required] = true
 
 				if check.Status != "completed" {
@@ -271,6 +278,10 @@ func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
 
 // checkReviewer implements Rule 4: cross-vendor reviewer
 func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
+	provenance := e.checkProvenance(pr)
+	if provenance.Pass {
+		return provenance
+	}
 	// Check for CodeRabbit review first
 	codeRabbitReview := checkCodeRabbitReview(pr)
 
@@ -279,7 +290,7 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 	hasApproval := false
 	hasRequestChanges := false
 
-	for _, review := range pr.Reviews {
+	for _, review := range effectiveReviews(pr.Reviews) {
 		if review.CommitID != pr.HeadSHA {
 			continue
 		}
@@ -313,12 +324,12 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 	}
 
 	if !hasApproval {
-		message.WriteString("No human approval on current head SHA. ")
+		message.WriteString("No approval on current head SHA. ")
 	} else {
-		message.WriteString("Human approval found, but ")
+		message.WriteString("Approval found, but ")
 	}
 
-	message.WriteString("Cross-vendor provenance not verified (shadow mode: needs real Apps)")
+	message.WriteString(provenance.Message)
 
 	// Either CodeRabbit or human requesting changes should fail
 	if codeRabbitReview.RequestedChanges || hasRequestChanges {
@@ -329,12 +340,9 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 		}
 	}
 
-	// In shadow mode, we note that provenance checking is not yet implemented
-	return RuleResult{
-		Name:    "Reviewer",
-		Pass:    false,
-		Message: message.String(),
-	}
+	// Review activity is diagnostic only; trusted receipts decide provenance.
+	provenance.Message = message.String()
+	return provenance
 }
 
 // CodeRabbitReview represents CodeRabbit's review status
@@ -349,41 +357,32 @@ type CodeRabbitReview struct {
 func checkCodeRabbitReview(pr PRInfo) CodeRabbitReview {
 	result := CodeRabbitReview{}
 
-	// Look for reviews from coderabbitai[bot]
-	for _, review := range pr.Reviews {
-		if review.User != "coderabbitai[bot]" {
-			continue
-		}
-
-		// Must be on the current head SHA
-		if review.CommitID != pr.HeadSHA {
-			continue
-		}
-
-		// Check for explicit approve or request changes
-		if review.State == "APPROVED" {
-			result.Reviewed = true
-			result.Approved = true
-			return result
-		}
-
-		if review.State == "CHANGES_REQUESTED" {
-			result.Reviewed = true
-			result.RequestedChanges = true
-			// Count findings from review comments
-			result.FindingsCount = countReviewComments(pr, review.ID)
-			return result
-		}
-
-		// For COMMENTED state, check if there are actual review comments (findings)
-		if review.State == "COMMENTED" {
-			findings := countReviewComments(pr, review.ID)
-			if findings > 0 {
-				result.Reviewed = true
-				result.FindingsCount = findings
-				return result
+	// A decisive review takes priority over diagnostic COMMENTED findings.
+	review, decisive := effectiveReviews(pr.Reviews)["coderabbitai[bot]"]
+	if !decisive {
+		for _, candidate := range pr.Reviews {
+			if candidate.User != "coderabbitai[bot]" || candidate.State != "COMMENTED" || candidate.CommitID != pr.HeadSHA {
+				continue
+			}
+			if !result.Reviewed || candidate.SubmittedAt.After(review.SubmittedAt) || (candidate.SubmittedAt.Equal(review.SubmittedAt) && candidate.ID > review.ID) {
+				if countReviewComments(pr, candidate.ID) > 0 {
+					review = candidate
+					result.Reviewed = true
+				}
 			}
 		}
+	}
+	if review.CommitID != pr.HeadSHA || review.State == "DISMISSED" {
+		return CodeRabbitReview{}
+	}
+	result.FindingsCount = countReviewComments(pr, review.ID)
+	switch review.State {
+	case "APPROVED":
+		result.Reviewed = true
+		result.Approved = true
+	case "CHANGES_REQUESTED":
+		result.Reviewed = true
+		result.RequestedChanges = true
 	}
 
 	return result

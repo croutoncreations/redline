@@ -1,0 +1,52 @@
+name: Green Lane Reconcile
+
+on:
+  # GitHub exposes thread resolve/unresolve as webhooks, not Actions events.
+  # Reconcile from trusted main without ever executing PR code.
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: read
+
+concurrency:
+  group: green-lane-reconcile
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build trusted evaluator
+        run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      - name: Reconcile open PRs
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        with:
+          script: |
+            await require('./.github/green-lane/reconcile.cjs')({github, context, core});
+      - name: Upload evaluations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: green-lane-reconciliation-${{ github.run_id }}
+          path: evaluation-*.json
+          if-no-files-found: ignore
+          retention-days: 30

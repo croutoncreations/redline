@@ -153,6 +153,7 @@ func checkoutFetches(t *testing.T, remote, ref string) bool {
 func TestGreenLaneCheckoutsSurviveADeletedPRBranch(t *testing.T) {
 	remote, mainSHA, prSHA := gitFixture(t)
 	events := map[string]map[string]string{
+		"workflow_dispatch on trusted main": {"github.event_name": "workflow_dispatch", "github.sha": mainSHA, "steps.pr_info.outputs.head_sha": prSHA, "steps.pr_info.outputs.base_sha": mainSHA, "needs.repro.outputs.head_sha": prSHA},
 		"workflow_run after merge and branch deletion": {
 			"github.event_name":                     "workflow_run",
 			"github.sha":                            mainSHA, // default-branch commit the workflow runs at
@@ -345,7 +346,7 @@ func TestGreenLaneStaysShadowOnly(t *testing.T) {
 			t.Errorf("jobs.%s has no explicit permissions block", jobName)
 		}
 		for scope, level := range job.Permissions {
-			if level == "write" && (jobName != "evaluate" || scope != "checks") {
+			if level == "write" && ((jobName != "evaluate" && jobName != "invalidate-closed") || scope != "checks") {
 				t.Errorf("jobs.%s has %s: write", jobName, scope)
 			}
 		}
@@ -358,5 +359,57 @@ func TestGreenLaneStaysShadowOnly(t *testing.T) {
 		if strings.Contains(string(raw), forbidden) {
 			t.Errorf("workflow contains %q; green lane is shadow-only", forbidden)
 		}
+	}
+}
+
+func TestReconciliationNeverExecutesPRCode(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/green-lane-reconcile.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc workflowDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	job := doc.Jobs["evaluate"]
+	if !strings.Contains(job.If, "github.event.repository.default_branch") {
+		t.Fatal("reconciliation dispatch must reject non-default workflow refs")
+	}
+	for scope, level := range doc.Permissions {
+		if level == "write" && scope != "checks" {
+			t.Fatalf("reconciliation write permission %s", scope)
+		}
+	}
+	for _, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") && step.With["ref"] != "${{ github.sha }}" {
+			t.Fatal("reconciliation must use exact trusted workflow commit")
+		}
+		if strings.HasPrefix(step.Uses, "actions/setup-go@") && step.With["cache"] != "false" {
+			t.Fatal("reconciliation must not restore PR-influenced caches")
+		}
+		if strings.Contains(step.Run, "green-lane-repro") {
+			t.Fatal("reconciliation must never run PR tests")
+		}
+	}
+	for _, name := range []string{"repro", "evaluate"} {
+		if !strings.Contains(loadGreenLaneWorkflow(t).Jobs[name].If, "github.event.repository.default_branch") {
+			t.Fatalf("%s dispatch not bound to default branch", name)
+		}
+	}
+}
+
+func TestClosedPRInvalidationNeverChecksOutCode(t *testing.T) {
+	job := loadGreenLaneWorkflow(t).Jobs["invalidate-closed"]
+	if !strings.Contains(job.If, "pull_request_target") || !strings.Contains(job.If, "closed") {
+		t.Fatal("invalidation must run on trusted close events")
+	}
+	for _, step := range job.Steps {
+		if step.Run != "" || strings.HasPrefix(step.Uses, "actions/checkout@") {
+			t.Fatal("close event must not execute PR code")
+		}
+	}
+	raw, _ := os.ReadFile(greenLaneWorkflow)
+	if !strings.Contains(string(raw), "advisory_candidate: false") {
+		t.Fatal("close invalidation must clear candidate status")
 	}
 }

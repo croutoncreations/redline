@@ -61,6 +61,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Test shadow publisher boundaries
+        run: node --test .github/green-lane/*.test.cjs
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:dashboard

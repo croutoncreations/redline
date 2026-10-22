@@ -18,13 +18,21 @@ func NewEvaluator(config Config) *Evaluator {
 // Evaluate runs all green-lane rules against the PR and returns the result
 func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSummary) EvaluationResult {
 	result := EvaluationResult{
+		ReviewSnapshot: ReviewSnapshot(pr),
+		CheckSnapshot:  CheckSnapshot(pr.CheckEvidence), CheckSources: e.config.CheckSources,
+		Repository: pr.Repository, BaseBranch: pr.BaseBranch,
 		PRNumber:    pr.Number,
 		HeadSHA:     pr.HeadSHA,
 		BaseSHA:     pr.BaseSHA,
+		UpdatedAt:   pr.UpdatedAt,
 		EvaluatedAt: time.Now().UTC(),
 		Rules:       make([]RuleResult, 0),
 	}
 
+	for _, issuer := range e.config.ProvenanceIssuers {
+		result.ProvenanceApps = append(result.ProvenanceApps, issuer.AppID)
+	}
+	result.Rules = append(result.Rules, e.checkPRState(pr), e.checkReviewReadiness(pr))
 	lane := selectLane(pr)
 	result.Lane = lane
 
@@ -38,7 +46,11 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 	if lane == LaneDocsDeps {
 		result.Rules = append(result.Rules, e.checkDocsDepsFiles(pr))
 	} else {
-		result.Rules = append(result.Rules, e.checkRepro(reproResult))
+		if reproResult != nil && (reproResult.HeadSHA != pr.HeadSHA || reproResult.BaseSHA != pr.BaseSHA) {
+			result.Rules = append(result.Rules, RuleResult{Name: "Test Repro", Inconclusive: true, Message: "Repro evidence does not match the evaluated head/base snapshot"})
+		} else {
+			result.Rules = append(result.Rules, e.checkRepro(reproResult))
+		}
 	}
 
 	// Rule 3: CI status
@@ -59,15 +71,24 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 
 	// Determine verdict
 	allPass := true
+	result.AdvisoryCandidate = true
 	var reasons []string
 
 	for _, r := range result.Rules {
 		if !r.Pass {
 			allPass = false
+			if r.Name != "Reviewer" {
+				result.AdvisoryCandidate = false
+			}
 			reasons = append(reasons, fmt.Sprintf("%s: %s", r.Name, r.Message))
 		}
 	}
 
+	if result.AdvisoryCandidate {
+		result.CandidateMessage = "Advisory only: all non-provenance rules pass; live gate and integration freshness are not implemented"
+	} else {
+		result.CandidateMessage = "Not a candidate: one or more non-provenance rules are blocked"
+	}
 	if allPass {
 		result.Verdict = VerdictWouldMerge
 		result.Summary = fmt.Sprintf("All %s-lane rules pass. Shadow mode: would merge if live.", lane)
@@ -94,6 +115,8 @@ func join(items []string, sep string) string {
 
 // ReproResult represents the outcome of the test repro job
 type ReproResult struct {
+	HeadSHA      string
+	BaseSHA      string
 	Pass         bool
 	Inconclusive bool
 	Message      string

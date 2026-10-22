@@ -388,7 +388,7 @@ func TestCheckReviewer(t *testing.T) {
 			},
 			headSHA:  "abc123",
 			wantPass: false,
-			wantMsg:  "Human approval found, but",
+			wantMsg:  "Approval found, but",
 		},
 		{
 			name: "CodeRabbit with explicit approve counts",
@@ -450,7 +450,7 @@ func TestCheckReviewer(t *testing.T) {
 			},
 			headSHA:  "abc123",
 			wantPass: false,
-			wantMsg:  "No human approval",
+			wantMsg:  "No approval",
 		},
 	}
 
