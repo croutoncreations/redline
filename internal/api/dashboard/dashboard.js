@@ -1524,4 +1524,18 @@ document.addEventListener('keydown',event => {
   document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open'));
   if (document.activeElement?.closest('.provider-compact')) document.activeElement.blur();
 });
+$('#scheduler-setup').addEventListener('click', () => {
+  const configPath = latestDashboard?.config_path;
+  $('#scheduler-config-path').textContent = configPath || 'Configuration path unavailable';
+  $('#scheduler-config-fallback').hidden = Boolean(configPath);
+  // Quote for the host shell, not the browser OS. This dialog never executes commands.
+  const quote = value => "'" + String(value).replaceAll("'", latestDashboard?.host_os === 'windows' ? "''" : "'\"'\"'") + "'";
+  const listen = latestDashboard?.listen_address;
+  $('#scheduler-restart-command').textContent = configPath
+    ? `redline --config ${quote(configPath)} serve${listen ? ` --listen ${quote(listen)}` : ''}`
+    : 'redline --config /path/to/redline.yaml serve';
+  $('#scheduler-setup-dialog').showModal();
+});
+$('#close-scheduler-setup').addEventListener('click', () => $('#scheduler-setup-dialog').close());
+
 refresh(); connectLive();

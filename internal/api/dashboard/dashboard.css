@@ -196,3 +196,13 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
   .provider-compact.detail-left .provider-detail{left:auto;right:8px}
   .provider-compact.detail-left .provider-detail:before{left:auto;right:28px}
 }
+
+
+/* Setup instructions use readable wrapped commands on desktop and narrow screens. */
+#scheduler-setup-dialog{max-height:90vh;overflow:auto}
+#scheduler-setup-dialog .onboarding-body{min-height:0;font-size:13px;line-height:1.6;color:var(--text)}
+#scheduler-setup-dialog ol{padding-left:22px}
+#scheduler-setup-dialog li{margin-bottom:18px}
+#scheduler-setup-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#111519;border:1px solid var(--line);border-radius:6px;font-size:12px}
+#scheduler-setup-dialog a{color:var(--accent)}
+.scheduler-banner{flex-wrap:wrap}.scheduler-banner span{flex:1;min-width:180px}

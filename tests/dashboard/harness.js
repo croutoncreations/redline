@@ -270,6 +270,7 @@ async function loadDashboard(page, options = {}) {
     }
     if (url.pathname === '/v1/profiles' && method === 'POST') {
       const body = request.postDataJSON(); state.requests.push({ method, path: url.pathname, body });
+      if (state.profileSaveError) return json(400, { error: state.profileSaveError });
       const profile = { ...body, created_at: '2026-07-20T19:00:00Z' }; state.profiles.push(profile); return json(201, profile);
     }
     const profileMatch = url.pathname.match(/^\/v1\/profiles\/([^/]+)$/);

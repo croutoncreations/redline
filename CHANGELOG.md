@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Add authenticated CLI dashboard opening and sign-in recovery instructions on dashboard aliases.
+- Validate local Git-worktree paths and base branches before saving profiles.
+- Show the running configuration path and restart steps in scheduling setup instructions.
+
 ### Added
 
 - Display-only Cursor usage on the mobile dashboard: monthly Cursor Models and Other Models

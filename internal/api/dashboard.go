@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -26,17 +27,20 @@ import (
 var dashboardFiles embed.FS
 
 type dashboardResponse struct {
-	GeneratedAt  time.Time                `json:"generated_at"`
-	ActivePolicy string                   `json:"active_policy"`
-	Policies     map[string]config.Policy `json:"policies"`
-	Health       domain.OperationalHealth `json:"health"`
-	Scheduler    scheduler.Status         `json:"scheduler"`
-	UsageMonitor scheduler.Status         `json:"usage_monitor"`
-	Providers    []dashboardProvider      `json:"providers"`
-	Tasks        []dashboardTask          `json:"tasks"`
-	Runs         []domain.Run             `json:"runs"`
-	Attempts     []domain.DispatchAttempt `json:"attempts"`
-	UnreadRuns   int                      `json:"unread_runs"`
+	ListenAddress string                   `json:"listen_address,omitempty"`
+	HostOS        string                   `json:"host_os"`
+	ConfigPath    string                   `json:"config_path,omitempty"`
+	GeneratedAt   time.Time                `json:"generated_at"`
+	ActivePolicy  string                   `json:"active_policy"`
+	Policies      map[string]config.Policy `json:"policies"`
+	Health        domain.OperationalHealth `json:"health"`
+	Scheduler     scheduler.Status         `json:"scheduler"`
+	UsageMonitor  scheduler.Status         `json:"usage_monitor"`
+	Providers     []dashboardProvider      `json:"providers"`
+	Tasks         []dashboardTask          `json:"tasks"`
+	Runs          []domain.Run             `json:"runs"`
+	Attempts      []domain.DispatchAttempt `json:"attempts"`
+	UnreadRuns    int                      `json:"unread_runs"`
 	// CursorUsage is display-only. It is not a provider account and never
 	// takes part in scheduling.
 	CursorUsage *cursorusage.Report `json:"cursor_usage,omitempty"`
@@ -379,6 +383,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		return dashboardResponse{}, err
 	}
 	result := dashboardResponse{
+		ConfigPath: s.config.SourcePath, ListenAddress: s.config.ListenAddress, HostOS: runtime.GOOS,
 		GeneratedAt: s.now(), ActivePolicy: s.config.ActivePolicy,
 		Policies:  s.config.Policies,
 		Scheduler: s.scheduler.Status(), UsageMonitor: s.usageMonitor.Status(),

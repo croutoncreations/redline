@@ -80,7 +80,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|account|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|account|version>")
 		return 1
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
@@ -90,6 +90,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return 0
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
+	case "dashboard":
+		return runDashboard(client, remaining[1:], stdout, stderr, openInBrowser)
 	case "demo":
 		return runDemo(remaining[1:], stdout, stderr, now)
 	case "mcp":
@@ -158,7 +160,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
+	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
 	fmt.Fprintln(output, "          pair, relay, account, version")
 	fmt.Fprintln(output, "")
@@ -553,6 +555,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	cfg.ListenAddress = listener.Addr().String()
 	apiServer := api.NewServerWithRelayManager(cfg, database, now, management)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -568,6 +571,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
+	fmt.Fprintf(stdout, "Open the dashboard: redline --config %s --api %s dashboard\n", shellQuote(configPath), dashboardOrigin(listener.Addr().String()))
 
 	// Remote access is opt-in. The supervisor dials out and follows the same
 	// coordinator observed by API pairing instead of retaining startup state.

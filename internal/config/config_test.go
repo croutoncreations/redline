@@ -718,3 +718,18 @@ func TestExampleConfigKeepsCursorTrackingOff(t *testing.T) {
 		t.Fatalf("example config must not read Cursor by default, source=%q", source)
 	}
 }
+
+func TestLoadRecordsActualConfigurationPathForSetupInstructions(t *testing.T) {
+	path := writeConfig(t, validConfig)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourcePath != expected || cfg.ListenAddress != "" {
+		t.Fatalf("source=%q listen=%q", cfg.SourcePath, cfg.ListenAddress)
+	}
+}
