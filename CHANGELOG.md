@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   branches before saving, so setup can show a correction instead of an unattended run failure.
 - The scheduler-off banner now opens instructions with the running service’s configuration path,
   host-appropriate restart command, and the allowance implications of enabling dispatch.
+- Task creation and updates now reject jobs with no `prompt` or `prompt_file` instead of queuing
+  work that can only fail when the harness starts. Hermes tasks that select an existing runtime
+  job remain valid without a separate prompt.
 
 ### Security
 
