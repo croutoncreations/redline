@@ -346,7 +346,7 @@ func TestGreenLaneStaysShadowOnly(t *testing.T) {
 			t.Errorf("jobs.%s has no explicit permissions block", jobName)
 		}
 		for scope, level := range job.Permissions {
-			if level == "write" && (jobName != "evaluate" || scope != "checks") {
+			if level == "write" && ((jobName != "evaluate" && jobName != "invalidate-closed") || scope != "checks") {
 				t.Errorf("jobs.%s has %s: write", jobName, scope)
 			}
 		}
@@ -395,5 +395,21 @@ func TestReconciliationNeverExecutesPRCode(t *testing.T) {
 		if !strings.Contains(loadGreenLaneWorkflow(t).Jobs[name].If, "github.event.repository.default_branch") {
 			t.Fatalf("%s dispatch not bound to default branch", name)
 		}
+	}
+}
+
+func TestClosedPRInvalidationNeverChecksOutCode(t *testing.T) {
+	job := loadGreenLaneWorkflow(t).Jobs["invalidate-closed"]
+	if !strings.Contains(job.If, "pull_request_target") || !strings.Contains(job.If, "closed") {
+		t.Fatal("invalidation must run on trusted close events")
+	}
+	for _, step := range job.Steps {
+		if step.Run != "" || strings.HasPrefix(step.Uses, "actions/checkout@") {
+			t.Fatal("close event must not execute PR code")
+		}
+	}
+	raw, _ := os.ReadFile(greenLaneWorkflow)
+	if !strings.Contains(string(raw), "advisory_candidate: false") {
+		t.Fatal("close invalidation must clear candidate status")
 	}
 }

@@ -19,7 +19,8 @@ func NewEvaluator(config Config) *Evaluator {
 func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSummary) EvaluationResult {
 	result := EvaluationResult{
 		ReviewSnapshot: ReviewSnapshot(pr),
-		Repository:     pr.Repository, BaseBranch: pr.BaseBranch,
+		CheckSnapshot:  CheckSnapshot(pr.CheckEvidence), CheckSources: e.config.CheckSources,
+		Repository: pr.Repository, BaseBranch: pr.BaseBranch,
 		PRNumber:    pr.Number,
 		HeadSHA:     pr.HeadSHA,
 		BaseSHA:     pr.BaseSHA,
@@ -28,6 +29,9 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 		Rules:       make([]RuleResult, 0),
 	}
 
+	for _, issuer := range e.config.ProvenanceIssuers {
+		result.ProvenanceApps = append(result.ProvenanceApps, issuer.AppID)
+	}
 	result.Rules = append(result.Rules, e.checkPRState(pr), e.checkReviewReadiness(pr))
 	lane := selectLane(pr)
 	result.Lane = lane

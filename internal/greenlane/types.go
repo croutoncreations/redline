@@ -22,20 +22,23 @@ type RuleResult struct {
 
 // EvaluationResult contains the full evaluation outcome
 type EvaluationResult struct {
-	ReviewSnapshot    string       `json:"review_snapshot"`
-	Repository        string       `json:"repository"`
-	BaseBranch        string       `json:"base_branch"`
-	Verdict           Verdict      `json:"verdict"`
-	Lane              Lane         `json:"lane"`
-	Rules             []RuleResult `json:"rules"`
-	Summary           string       `json:"summary"`
-	EvaluatedAt       time.Time    `json:"evaluated_at"`
-	PRNumber          int          `json:"pr_number"`
-	HeadSHA           string       `json:"head_sha"`
-	BaseSHA           string       `json:"base_sha"`
-	UpdatedAt         string       `json:"pr_updated_at"`
-	AdvisoryCandidate bool         `json:"advisory_candidate"`
-	CandidateMessage  string       `json:"candidate_message"`
+	CheckSnapshot     string                 `json:"check_snapshot"`
+	CheckSources      map[string]CheckSource `json:"check_sources"`
+	ProvenanceApps    []int64                `json:"provenance_apps"`
+	ReviewSnapshot    string                 `json:"review_snapshot"`
+	Repository        string                 `json:"repository"`
+	BaseBranch        string                 `json:"base_branch"`
+	Verdict           Verdict                `json:"verdict"`
+	Lane              Lane                   `json:"lane"`
+	Rules             []RuleResult           `json:"rules"`
+	Summary           string                 `json:"summary"`
+	EvaluatedAt       time.Time              `json:"evaluated_at"`
+	PRNumber          int                    `json:"pr_number"`
+	HeadSHA           string                 `json:"head_sha"`
+	BaseSHA           string                 `json:"base_sha"`
+	UpdatedAt         string                 `json:"pr_updated_at"`
+	AdvisoryCandidate bool                   `json:"advisory_candidate"`
+	CandidateMessage  string                 `json:"candidate_message"`
 }
 
 // PRFile represents a file changed in the PR
@@ -97,6 +100,7 @@ type ReviewThread struct {
 }
 
 type PRInfo struct {
+	CheckEvidence         []CheckEvidence
 	Repository            string
 	State                 string
 	UpdatedAt             string

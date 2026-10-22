@@ -25,15 +25,39 @@ async function reviewSnapshot(github, context, number, head, base) {
   throw new Error('Review-thread pagination did not finish');
 }
 
+async function checkSnapshot(github, context, result) {
+ const {owner,repo}=context.repo;
+ const evidence=[];const seen=new Set();let count=0;
+ for(let page=1;page<=100;page++){
+  const {data}=await github.rest.checks.listForRef({owner,repo,ref:result.head_sha,per_page:100,page});
+  count+=data.check_runs.length;
+  for(const r of data.check_runs){
+   const receipt=r.name==='green-lane-provenance' && (result.provenance_apps||[]).includes(r.app?.id);
+   if(!receipt && !Object.hasOwn(result.check_sources||{},r.name))continue;
+   if(seen.has(r.id))throw new Error('Duplicate check run');seen.add(r.id);
+   evidence.push({id:r.id,name:r.name,status:r.status,conclusion:r.conclusion||'',head:r.head_sha,app:r.app.id,
+    details:Buffer.from(r.details_url||'','utf8').toString('base64'),text:Buffer.from(receipt?(r.output?.text||''):'','utf8').toString('base64')});
+  }
+  if(data.check_runs.length<100){
+   if(count!==data.total_count)throw new Error('Incomplete check-run pagination');
+   evidence.sort((a,b)=>a.id-b.id);
+   return createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
+  }
+ }
+ throw new Error('Check-run pagination did not finish');
+}
+
 module.exports = async function publish({github, context, result, checkId, expectedHead, writeResult = r => fs.writeFileSync('evaluation-result.json', JSON.stringify(r, null, 2))}) {
   const {owner, repo} = context.repo;
   if (!Number.isSafeInteger(result.pr_number) || result.pr_number <= 0) throw new Error('Invalid result PR number');
   const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: result.pr_number});
+  let checksMatch=false;
+  try{checksMatch=result.check_snapshot===await checkSnapshot(github,context,result)}catch{checksMatch=false}
   let reviewsMatch=false;
   try { reviewsMatch=result.review_snapshot===await reviewSnapshot(github,context,result.pr_number,result.head_sha,result.base_sha); }
   catch { reviewsMatch=false; }
   const age = Date.now() - Date.parse(result.evaluated_at);
-  if (!reviewsMatch || result.repository !== `${owner}/${repo}` || current.head.sha !== result.head_sha ||
+  if (!checksMatch || !reviewsMatch || result.repository !== `${owner}/${repo}` || current.head.sha !== result.head_sha ||
       current.base.sha !== result.base_sha || current.base.ref !== result.base_branch ||
       current.updated_at !== result.pr_updated_at || current.state !== 'open' || current.draft ||
       current.mergeable !== true || (expectedHead && expectedHead !== result.head_sha) ||

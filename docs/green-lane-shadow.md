@@ -184,8 +184,8 @@ and the actual Actions job's check-run URL, run ID, name, status and conclusion.
 A display name or hand-written details URL alone cannot satisfy CI.
 
 The trusted publisher re-fetches PR metadata and every review/thread page
-immediately before posting; a review-state fingerprint catches resolution or
-review changes even when `updated_at` does not change. A mismatch, closed/draft
+immediately before posting; check/receipt and review-state fingerprints catch CI reruns, pending/failed provenance, resolution or
+review changes even when `updated_at` does not change. A trusted closed-only `pull_request_target` job immediately publishes a neutral invalidation without checkout, build, PR execution or merge credentials. A mismatch, closed/draft
 PR, unknown mergeability or evaluation older than five minutes clears the
 candidate bit and keeps the report blocked. This is snapshot validation for a
 report, not an atomic merge transaction: base freshness/merge-queue integration
@@ -357,7 +357,7 @@ has observed a completed author/reviewer execution. Feed structured metadata on
 stdin, pass `-key-id`, and supply the 64-byte Ed25519 private key as base64 in
 `GREEN_LANE_SIGNING_KEY`. The signer never prints the private key. Do not infer
 providers from PR bodies, GitHub users or harness names, or sign PR-controlled
-metadata without validating it against the actual execution record. Never put
+metadata without validating it against the actual execution record. Keep signing keys in an external trusted service or protected environment restricted to the default branch, not ordinary repository secrets accessible to PR-controlled workflows. Never put
 the signing key or review/merge credentials in a job that executes PR code.
 
 The signed payload is transported as base64 (`payload`) so whitespace changes

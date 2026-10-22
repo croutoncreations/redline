@@ -67,7 +67,8 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 	if err != nil {
 		return pr, err
 	}
-	checks, receipts, provenanceError, err := c.checks(ctx, before.Head.SHA)
+	var checkEvidence []greenlane.CheckEvidence
+	checks, receipts, provenanceError, err := c.checks(ctx, before.Head.SHA, &checkEvidence)
 	if err != nil {
 		return pr, err
 	}
@@ -88,7 +89,8 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 		return pr, err
 	}
 	pr = greenlane.PRInfo{
-		Repository: c.owner + "/" + c.repo, Number: before.Number, Title: before.Title, Body: before.Body,
+		CheckEvidence: checkEvidence,
+		Repository:    c.owner + "/" + c.repo, Number: before.Number, Title: before.Title, Body: before.Body,
 		State: before.State, UpdatedAt: before.UpdatedAt, HeadSHA: before.Head.SHA, BaseSHA: before.Base.SHA,
 		BaseBranch: before.Base.Ref, Draft: before.Draft, Mergeable: before.Mergeable != nil && *before.Mergeable,
 		Author: before.User.Login, Files: files, CheckRuns: checks, Reviews: reviews, ReviewComments: comments,
@@ -134,7 +136,7 @@ func (c *GitHubClient) files(ctx context.Context, n, expected int) ([]greenlane.
 	return nil, fmt.Errorf("PR file pagination reached API cap")
 }
 
-func (c *GitHubClient) checks(ctx context.Context, head string) ([]greenlane.CheckRun, []greenlane.SignedReceipt, string, error) {
+func (c *GitHubClient) checks(ctx context.Context, head string, evidence *[]greenlane.CheckEvidence) ([]greenlane.CheckRun, []greenlane.SignedReceipt, string, error) {
 	var all []greenlane.CheckRun
 	var receipts []greenlane.SignedReceipt
 	var evidenceError string
@@ -177,6 +179,7 @@ func (c *GitHubClient) checks(ctx context.Context, head string) ([]greenlane.Che
 				if !trustedApp {
 					continue
 				}
+				*evidence = append(*evidence, greenlane.NewCheckEvidence(row.ID, row.Name, row.Status, row.Conclusion, row.Head, row.App.ID, row.Details, row.Output.Text))
 				if row.Head != head || row.Status != "completed" || row.Conclusion != "success" {
 					evidenceError = "provenance publishing check is stale or incomplete"
 					continue
@@ -196,6 +199,7 @@ func (c *GitHubClient) checks(ctx context.Context, head string) ([]greenlane.Che
 			if !required {
 				continue
 			}
+			*evidence = append(*evidence, greenlane.NewCheckEvidence(row.ID, row.Name, row.Status, row.Conclusion, row.Head, row.App.ID, row.Details, ""))
 			check := greenlane.CheckRun{Name: row.Name, Status: row.Status, Conclusion: row.Conclusion, AppID: row.App.ID, HeadSHA: row.Head}
 			if source.AppID == row.App.ID {
 				// details_url is data, never a fetch target. Resolve only numeric run
@@ -430,6 +434,8 @@ func sameEvidence(a, b greenlane.PRInfo) bool {
 		sort.Slice(p.Provenance, func(i, j int) bool {
 			return p.Provenance[i].KeyID+p.Provenance[i].Signature < p.Provenance[j].KeyID+p.Provenance[j].Signature
 		})
+		p.CheckEvidence = append([]greenlane.CheckEvidence{}, p.CheckEvidence...)
+		sort.Slice(p.CheckEvidence, func(i, j int) bool { return p.CheckEvidence[i].ID < p.CheckEvidence[j].ID })
 		p.CheckRuns = append([]greenlane.CheckRun(nil), p.CheckRuns...)
 		sort.Slice(p.CheckRuns, func(i, j int) bool { return fmt.Sprint(p.CheckRuns[i]) < fmt.Sprint(p.CheckRuns[j]) })
 		return p
