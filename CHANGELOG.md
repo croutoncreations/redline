@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
+  session without printing its credential. Unauthenticated dashboard visitors receive sign-in
+  instructions; API authentication remains required.
+- Local Git-worktree execution profiles reject missing/non-Git directories and invalid base
+  branches before saving, so setup can show a correction instead of an unattended run failure.
+- The scheduler-off banner now opens instructions with the running service’s configuration path,
+  host-appropriate restart command, and the allowance implications of enabling dispatch.
+
 ### Security
 
 - Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
