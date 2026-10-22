@@ -13,6 +13,10 @@ var dashboardSignIn = template.Must(template.New("dashboard-signin").Parse(`<!do
 {{else}}<p>Open Redline on its host computer and run <code>redline pair</code> to connect this device.</p><p><a href="/pair">Pair this device</a></p>{{end}}
 <p>Installed the macOS app? Choose <strong>Open Dashboard</strong> from Redline’s menu bar.</p><p><a href="https://github.com/croutoncreations/redline/blob/main/docs/cli.md">Dashboard and CLI instructions</a></p></main></body></html>`))
 
+func isDashboardPath(path string) bool {
+	return path == "/" || path == "/dashboard" || path == "/m"
+}
+
 func (s *Server) serveDashboardSignIn(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

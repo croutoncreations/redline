@@ -547,7 +547,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
-	fmt.Fprintf(stdout, "Open the dashboard: redline --config %s --api http://%s dashboard\n", shellQuote(configPath), listener.Addr())
+	fmt.Fprintf(stdout, "Open the dashboard: redline --config %s --api %s dashboard\n", shellQuote(configPath), dashboardOrigin(listener.Addr().String()))
 	errors := make(chan error, 1)
 	go func() { errors <- server.Serve(listener) }()
 	select {

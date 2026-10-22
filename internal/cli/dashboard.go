@@ -69,3 +69,22 @@ func shellQuote(value string) string {
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
+
+// A wildcard listener is not a browser destination. Use the corresponding local
+// address in the suggested command while preserving the actual listen endpoint.
+func dashboardOrigin(listenAddress string) string {
+	host, port, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return "http://" + listenAddress
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			host = "127.0.0.1"
+		} else {
+			host = "::1"
+		}
+	} else if host == "" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}

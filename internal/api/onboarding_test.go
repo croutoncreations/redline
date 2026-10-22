@@ -31,6 +31,8 @@ func TestUnauthenticatedDashboardExplainsLocalSignInWithoutExposingSecrets(t *te
 	defer server.Close()
 	for _, tt := range []struct{ path, accept, content, want string }{
 		{"/", "text/html", "text/html", "redline --api"},
+		{"/dashboard", "text/html", "text/html", "redline --api"},
+		{"/m", "text/html", "text/html", "redline --api"},
 		{"/", "application/json", "application/json", "authentication is required"},
 		{"/v1/dashboard", "text/html", "application/json", "authentication is required"},
 	} {

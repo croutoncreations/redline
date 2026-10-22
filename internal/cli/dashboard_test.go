@@ -70,3 +70,17 @@ func TestDashboardDoesNotOpenAfterServiceAuthenticationFails(t *testing.T) {
 		t.Fatal("failed authentication must not open the browser or disclose credentials")
 	}
 }
+
+func TestDashboardCommandUsesLoopbackForWildcardListeners(t *testing.T) {
+	for _, tt := range []struct{ listen, want string }{
+		{"0.0.0.0:7436", "http://127.0.0.1:7436"},
+		{"[::]:17436", "http://[::1]:17436"},
+		{":7436", "http://127.0.0.1:7436"},
+		{"127.0.0.1:17436", "http://127.0.0.1:17436"},
+		{"[::1]:17436", "http://[::1]:17436"},
+	} {
+		if got := dashboardOrigin(tt.listen); got != tt.want {
+			t.Errorf("dashboardOrigin(%q)=%q, want %q", tt.listen, got, tt.want)
+		}
+	}
+}

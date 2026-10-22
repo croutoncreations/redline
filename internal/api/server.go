@@ -337,7 +337,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		authorized, viaCookie := s.authorized(r)
 		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
-			if r.Method == http.MethodGet && r.URL.Path == "/" && strings.Contains(r.Header.Get("Accept"), "text/html") {
+			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
 				s.serveDashboardSignIn(w, r)
 				return
 			}
@@ -478,7 +478,7 @@ func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
+	if r.Method != http.MethodGet || !isDashboardPath(r.URL.Path) {
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
