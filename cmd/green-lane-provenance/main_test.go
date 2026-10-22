@@ -54,3 +54,15 @@ func TestSignerRejectsIncompleteOrUnstructuredMetadata(t *testing.T) {
 		t.Fatal("invalid key accepted or disclosed")
 	}
 }
+
+func TestSignerRejectsHiddenTrailingInputBeyondLimit(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	encoded := base64.StdEncoding.EncodeToString(key)
+	boundary := authorInput + strings.Repeat(" ", 65536-len(authorInput))
+	if _, err := signReceipt(strings.NewReader(boundary), "key", encoded); err != nil {
+		t.Fatalf("exact bounded input rejected: %v", err)
+	}
+	if _, err := signReceipt(strings.NewReader(boundary+"{}"), "key", encoded); err == nil {
+		t.Fatal("trailing JSON beyond the reader limit was hidden")
+	}
+}

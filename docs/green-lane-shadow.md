@@ -222,31 +222,44 @@ The check run summary shows:
 
 ### Example Output
 
-```
-❌ WOULD NOT MERGE
+An otherwise-ready code PR with a current-head approval but no configured
+provenance issuer remains a neutral shadow candidate. Representative check
+summary (the CLI step summary contains the same eight rule results):
 
-Rule Results:
-✅ PASS: Size
+```
+# WOULD_NOT_MERGE (shadow only)
+
+Advisory candidate: yes — never merge authorization.
+Advisory only: all non-provenance rules pass; live gate and integration freshness are not implemented
+
+PR #42 · head `abc123` · base `base123`
+
+PASS: PR State
+OK: open, ready and mergeable on allowed base main
+
+PASS: Review Readiness
+OK: all 2 review threads resolved and an effective approval exists on current head
+
+PASS: Size
 OK: 85 changed lines in 3 files (45 lockfile/generated)
 
-✅ PASS: Test Repro
-OK: tests [TestPagination] failed on base, passed on head
+PASS: Test Repro
+OK: tests [internal/example.TestPagination] failed on base, passed on head
 
-✅ PASS: CI
+PASS: CI
 OK: all 7 required checks passed
 
-❌ FAIL: Reviewer
-Approval found, but cross-vendor provenance not verified (shadow mode: needs human or real Apps)
+INCONCLUSIVE: Reviewer
+CodeRabbit: no real review on head SHA. Approval found, but Cross-vendor provenance not verified: no trusted receipt issuers configured
 
-✅ PASS: Duplicates
+PASS: Duplicates
 OK: no duplicate found for Root-Cause: backend/routes/users#pagination-bug
 
-✅ PASS: Denied Paths
+PASS: Denied Paths
 OK: no denied paths touched
 
-Summary:
-Would not merge. Reasons:
-- Reviewer: Approval found, but cross-vendor provenance not verified
+Would not merge (code lane). Reasons:
+- Reviewer: CodeRabbit: no real review on head SHA. Approval found, but Cross-vendor provenance not verified: no trusted receipt issuers configured
 ```
 
 ## Artifacts

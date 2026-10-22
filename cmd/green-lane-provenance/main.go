@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -36,7 +37,11 @@ func signReceipt(input io.Reader, keyID, encoded string) (greenlane.SignedReceip
 		return empty, fmt.Errorf("issuer key ID and base64 Ed25519 private key are required")
 	}
 	var receipt greenlane.ProvenanceReceipt
-	d := json.NewDecoder(io.LimitReader(input, 65536))
+	data, err := io.ReadAll(io.LimitReader(input, 65537))
+	if err != nil || len(data) > 65536 {
+		return empty, fmt.Errorf("receipt input exceeds size limit or cannot be read")
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&receipt); err != nil {
 		return empty, fmt.Errorf("invalid receipt input")

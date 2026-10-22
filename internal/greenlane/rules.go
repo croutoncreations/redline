@@ -324,12 +324,12 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 	}
 
 	if !hasApproval {
-		message.WriteString("No human approval on current head SHA. ")
+		message.WriteString("No approval on current head SHA. ")
 	} else {
-		message.WriteString("Human approval found, but ")
+		message.WriteString("Approval found, but ")
 	}
 
-	message.WriteString("Cross-vendor provenance not verified (shadow mode: needs real Apps)")
+	message.WriteString(provenance.Message)
 
 	// Either CodeRabbit or human requesting changes should fail
 	if codeRabbitReview.RequestedChanges || hasRequestChanges {
@@ -341,7 +341,7 @@ func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
 	}
 
 	// Review activity is diagnostic only; trusted receipts decide provenance.
-	provenance.Message = message.String() + ". " + provenance.Message
+	provenance.Message = message.String()
 	return provenance
 }
 
