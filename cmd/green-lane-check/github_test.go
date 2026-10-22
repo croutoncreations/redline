@@ -130,7 +130,7 @@ func apiClient(t *testing.T, mode string) (*GitHubClient, *apiFixture) {
 			if mode == "head changes during fetch" && f.metadataReads > 1 {
 				head = "new"
 			}
-			send(map[string]any{"number": 1, "title": "docs", "body": "Root-Cause: docs/readme#example", "state": "open", "updated_at": "2026-10-21T00:00:00Z", "draft": false, "mergeable": true, "changed_files": 1, "head": map[string]any{"sha": head}, "base": map[string]any{"sha": "base", "ref": "main"}, "user": map[string]any{"login": "author"}})
+			send(map[string]any{"number": 1, "title": "docs", "body": "Root-Cause: docs/readme#example", "state": "open", "updated_at": "2026-10-21T00:00:00Z", "draft": false, "mergeable": true, "changed_files": 1, "head": map[string]any{"sha": head}, "base": map[string]any{"sha": "base", "ref": "main"}, "user": map[string]any{"login": "jfox85"}})
 		default:
 			t.Errorf("unexpected request %s", r.URL)
 			w.WriteHeader(404)
@@ -154,8 +154,8 @@ func TestGitHubSnapshotPaginationAndCIIdentity(t *testing.T) {
 		t.Fatal("lost check or review identity")
 	}
 	result := greenlane.NewEvaluator(c.config).Evaluate(pr, nil, nil)
-	if !result.AdvisoryCandidate || result.Verdict != greenlane.VerdictWouldNotMerge {
-		t.Fatalf("candidate must remain blocked by missing provenance: %+v", result)
+	if !result.AdvisoryCandidate || result.Verdict != greenlane.VerdictWouldMerge {
+		t.Fatalf("reviewed candidate should qualify without provenance: %+v", result)
 	}
 }
 func TestGitHubCollectionFailsClosed(t *testing.T) {

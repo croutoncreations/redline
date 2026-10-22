@@ -14,12 +14,18 @@ func TestReviewReadiness(t *testing.T) {
 		message string
 	}{
 		{"approved", func(p *PRInfo) {}, true, "OK"},
+		{"automated commented review without findings", func(p *PRInfo) { p.Reviews[0].User = "coderabbitai[bot]"; p.Reviews[0].State = "COMMENTED" }, true, "OK"},
+		{"no reviews", func(p *PRInfo) { p.Reviews = nil }, false, "No completed"},
+		{"pending", func(p *PRInfo) { p.Reviews[0].State = "PENDING" }, false, "No completed"},
+		{"issue comments do not count", func(p *PRInfo) { p.Reviews = nil; p.ReviewComments = []ReviewComment{{Body: "looks good"}} }, false, "No completed"},
+		{"old commented review", func(p *PRInfo) { p.Reviews[0].State = "COMMENTED"; p.Reviews[0].CommitID = "old" }, false, "No completed"},
+		{"author comment", func(p *PRInfo) { p.Reviews[0].State = "COMMENTED"; p.Reviews[0].User = "JFOX85" }, false, "No completed"},
 		{"unresolved", func(p *PRInfo) { p.ReviewThreads = []ReviewThread{{ID: "thread"}} }, false, "Unresolved"},
 		{"outdated unresolved", func(p *PRInfo) { p.ReviewThreads = []ReviewThread{{ID: "old", Outdated: true}} }, false, "Unresolved"},
 		{"resolved", func(p *PRInfo) { p.ReviewThreads = []ReviewThread{{ID: "resolved", Resolved: true}} }, true, "OK"},
 		{"partial pagination", func(p *PRInfo) { p.ReviewThreadsComplete = false }, false, "completely fetched"},
-		{"old approval", func(p *PRInfo) { p.Reviews[0].CommitID = "older" }, false, "No effective"},
-		{"self approval", func(p *PRInfo) { p.Reviews[0].User = p.Author }, false, "No effective"},
+		{"old approval", func(p *PRInfo) { p.Reviews[0].CommitID = "older" }, false, "No completed"},
+		{"self approval", func(p *PRInfo) { p.Reviews[0].User = p.Author }, false, "No completed"},
 		{"old request persists", func(p *PRInfo) {
 			p.Reviews = append(p.Reviews, Review{ID: 2, User: "other", State: "CHANGES_REQUESTED", CommitID: "older"})
 		}, false, "earlier heads"},
@@ -31,7 +37,7 @@ func TestReviewReadiness(t *testing.T) {
 		}, true, "OK"},
 		{"dismissal removes approval", func(p *PRInfo) {
 			p.Reviews = append(p.Reviews, Review{ID: 2, User: "reviewer", State: "DISMISSED", CommitID: p.HeadSHA})
-		}, false, "No effective"},
+		}, false, "No completed"},
 		{"trusted dismissal clears request", func(p *PRInfo) {
 			p.Reviews = append(p.Reviews, Review{ID: 2, User: "other", State: "CHANGES_REQUESTED"}, Review{ID: 3, User: "other", State: "DISMISSED"})
 		}, true, "OK"},
@@ -86,5 +92,29 @@ func TestCodeRabbitUsesLatestDecisiveReview(t *testing.T) {
 	p.Reviews = []Review{{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: p.HeadSHA}, {ID: 2, User: "coderabbitai[bot]", State: "CHANGES_REQUESTED", CommitID: p.HeadSHA}, {ID: 3, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: p.HeadSHA}}
 	if r := checkCodeRabbitReview(p); !r.RequestedChanges || r.Approved {
 		t.Fatalf("%+v", r)
+	}
+}
+
+func TestAllowedAuthors(t *testing.T) {
+	for _, author := range []string{"jfox85", "JFOX85", "unknown[bot]", "", "jfox85-extra"} {
+		p := passingPR()
+		p.Author = author
+		want := strings.EqualFold(author, "jfox85")
+		if r := NewEvaluator(DefaultConfig()).checkAuthor(p); r.Pass != want {
+			t.Fatalf("%s: %+v", author, r)
+		}
+	}
+	c := DefaultConfig()
+	c.AllowedAuthors = nil
+	if NewEvaluator(c).checkAuthor(passingPR()).Pass {
+		t.Fatal("empty allowlist trusted an author")
+	}
+}
+
+func TestLockfileInMixedCodePRStaysManual(t *testing.T) {
+	p := passingPR(PRFile{Filename: "internal/fix.go", Additions: 1}, PRFile{Filename: "go.mod", Patch: goModBump}, PRFile{Filename: "go.sum", Additions: 1})
+	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
+	if r.Verdict != VerdictWouldNotMerge || ruleByName(t, r, "Denied Paths").Pass {
+		t.Fatal("code change bypassed manual lockfile policy")
 	}
 }

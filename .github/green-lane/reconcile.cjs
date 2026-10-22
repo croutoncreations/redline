@@ -3,20 +3,23 @@ const fs = require('node:fs');
 const publish = require('./publish.cjs');
 
 // This job never checks out PR code, consumes repro artifacts, or holds merge
-// credentials. Code-lane candidates need a full SHA-bound repro rerun.
+// credentials. Required CI supplies the test gate for all code changes.
 module.exports = async ({github, context, core, run=execFileSync, publishReport=publish}) => {
   const prs = await github.paginate(github.rest.pulls.list, {...context.repo, state:'open', per_page:100});
-  if (prs.length > 25) throw new Error('More than 25 open PRs; reconciliation needs explicit sharding');
-  const cachePath=`${process.env.RUNNER_TEMP}/green-lane-duplicates.json`;
-  const duplicateSnapshot=run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,env:{...process.env,LIST_OPEN_PRS:'true'}});
-  fs.writeFileSync(cachePath,duplicateSnapshot);
+  let selected = prs;
+  if (process.env.RECONCILE_PR_NUMBERS) {
+    const numbers = JSON.parse(process.env.RECONCILE_PR_NUMBERS);
+    if (!Array.isArray(numbers) || numbers.length > 5 || new Set(numbers).size !== numbers.length || numbers.some(n => !Number.isSafeInteger(n) || n <= 0)) throw new Error('Invalid reconciliation shard');
+    // PRs closed after planning need no refresh; the closed-event job invalidates them.
+    selected = prs.filter(pr => numbers.includes(pr.number));
+  } else if (prs.length > 5) throw new Error('More than five open PRs; reconciliation requires a planned shard');
   let failures = 0;
-  for (const pr of prs) {
+  for (const pr of selected) {
     try {
       if (!Number.isSafeInteger(pr.number) || pr.number <= 0) throw new Error('Invalid PR number');
       const raw = run(`${process.env.RUNNER_TEMP}/green-lane-check`, [], {
         encoding:'utf8', timeout:180000, maxBuffer:2*1024*1024,
-        env:{...process.env, PR_NUMBER:String(pr.number),LIST_OPEN_PRS:'',DUPLICATE_SNAPSHOT_PATH:cachePath, EXPECTED_HEAD_SHA:pr.head.sha, EXPECTED_BASE_SHA:pr.base.sha, REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
+        env:{...process.env, PR_NUMBER:String(pr.number), EXPECTED_HEAD_SHA:pr.head.sha, EXPECTED_BASE_SHA:pr.base.sha, REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
       });
       await publishReport({github,context,result:JSON.parse(raw),expectedHead:pr.head.sha,writeResult:r=>fs.writeFileSync(`evaluation-${pr.number}.json`,JSON.stringify(r,null,2))});
     } catch (err) {

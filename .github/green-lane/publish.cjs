@@ -74,7 +74,7 @@ module.exports = async function publish({github, context, result, checkId, expec
   summary += `**Advisory candidate:** ${candidate ? 'yes' : 'no'} — never merge authorization.\n\n${result.candidate_message}\n\n`;
   summary += `PR #${result.pr_number} · head \`${result.head_sha}\` · base \`${result.base_sha}\`\n\n`;
   for (const rule of result.rules) summary += `### ${rule.pass ? 'PASS' : rule.inconclusive ? 'INCONCLUSIVE' : 'FAIL'}: ${rule.name}\n${rule.message}\n\n`;
-  summary += `${result.summary}\n\nShadow only. No merge or approval action is taken. Live gate, integration freshness and issuer provisioning are separate requirements.`;
+  summary += `${result.summary}\n\nShadow only. No merge or approval action is taken. Automatic merging has not been enabled.`;
   await writeResult(result);
   const serialized = JSON.stringify(result);
   const output = {title: `Green Lane Shadow: ${result.verdict}`, summary: summary.slice(0,10000),

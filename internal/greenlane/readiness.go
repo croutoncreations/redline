@@ -68,14 +68,29 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		r.Message = "Unresolved review threads (outdated threads also block): " + strings.Join(unresolved, ", ")
 		return r
 	}
-	approved := false
 	var requests []string
 	for user, review := range effectiveReviews(pr.Reviews) {
 		if review.State == "CHANGES_REQUESTED" {
 			requests = append(requests, user)
 		}
-		if review.State == "APPROVED" && review.CommitID == pr.HeadSHA && user != pr.Author {
-			approved = true
+	}
+	// A submitted COMMENTED review counts, including an automated review
+	// with no findings. Issue comments and successful workflow jobs do not.
+	latest := map[string]Review{}
+	for _, review := range pr.Reviews {
+		if review.User == "" || review.ID <= 0 || (review.State != "APPROVED" && review.State != "COMMENTED" && review.State != "CHANGES_REQUESTED" && review.State != "DISMISSED") {
+			continue
+		}
+		user := strings.ToLower(review.User)
+		old, ok := latest[user]
+		if !ok || review.SubmittedAt.After(old.SubmittedAt) || (review.SubmittedAt.Equal(old.SubmittedAt) && review.ID > old.ID) {
+			latest[user] = review
+		}
+	}
+	reviewed := false
+	for user, review := range latest {
+		if user != strings.ToLower(pr.Author) && review.CommitID == pr.HeadSHA && (review.State == "APPROVED" || review.State == "COMMENTED") {
+			reviewed = true
 		}
 	}
 	if len(requests) > 0 {
@@ -83,11 +98,25 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		r.Message = "Outstanding changes requested, including earlier heads: " + strings.Join(requests, ", ")
 		return r
 	}
-	if !approved {
-		r.Message = "No effective independent approval on current head SHA"
+	if !reviewed {
+		r.Message = "No completed non-author review on current head SHA"
 		return r
 	}
 	r.Pass = true
-	r.Message = fmt.Sprintf("OK: all %d review threads resolved and an effective approval exists on current head", len(pr.ReviewThreads))
+	r.Message = fmt.Sprintf("OK: all %d review threads resolved and a completed non-author review exists on current head", len(pr.ReviewThreads))
+	return r
+}
+
+// Only explicit GitHub logins are trusted; agent-written PRs using the owner's
+// account naturally share that identity. An empty list admits nobody.
+func (e *Evaluator) checkAuthor(pr PRInfo) RuleResult {
+	r := RuleResult{Name: "Author", Message: "PR author is not allowed: " + pr.Author}
+	for _, author := range e.config.AllowedAuthors {
+		if author != "" && strings.EqualFold(author, pr.Author) {
+			r.Pass = true
+			r.Message = "OK: allowed PR author " + pr.Author
+			break
+		}
+	}
 	return r
 }

@@ -6,6 +6,7 @@ package greenlane
 func DefaultConfig() Config {
 	return Config{
 		AllowedBaseBranches: []string{"main"},
+		AllowedAuthors:      []string{"jfox85"},
 		CheckSources: map[string]CheckSource{
 			"actionlint":    {AppID: 15368, WorkflowID: 321038296},
 			"go":            {AppID: 15368, WorkflowID: 321038296},
@@ -15,8 +16,7 @@ func DefaultConfig() Config {
 			"macos":         {AppID: 15368, WorkflowID: 321038296},
 			"macos-intel":   {AppID: 15368, WorkflowID: 321038296},
 		},
-		// Issuers must be provisioned by the trusted author/reviewer services.
-		// An empty allowlist deliberately prevents provenance from passing.
+		// Retained for legacy receipt tooling; not used by the simple policy.
 		ProvenanceIssuers:  map[string]ReceiptIssuer{},
 		MaxChangedLines:    150,
 		MaxLockfileChanges: 300,
@@ -65,6 +65,15 @@ func DefaultDeniedPaths() []string {
 		"cmd/green-lane-provenance/**",
 		"cmd/green-lane-repro-analyze/**",
 		"internal/greenlane/**",
+
+		// Dependency lockfiles stay manual in every lane, including mixed code PRs.
+		"**/go.sum",
+		"**/package-lock.json",
+		"**/pnpm-lock.yaml",
+		"**/yarn.lock",
+		"**/Package.resolved",
+		"**/gradle.lockfile",
+		"**/*.lock",
 
 		// Test runner config
 		"playwright.config.*",

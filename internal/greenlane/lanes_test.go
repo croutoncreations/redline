@@ -23,7 +23,7 @@ const packageJSONBump = `@@ -6,6 +6,6 @@
 // passingPR fills in the rules the lanes share (CI, root cause) so a test
 // can isolate the lane-specific rules.
 func passingPR(files ...PRFile) PRInfo {
-	pr := PRInfo{Repository: "owner/repo", Number: 1, HeadSHA: "abc", BaseSHA: "base", State: "open", BaseBranch: "main", Mergeable: true, SnapshotConsistent: true, ReviewThreadsComplete: true, Author: "author", Reviews: []Review{{ID: 1, User: "reviewer", State: "APPROVED", CommitID: "abc"}}, Body: "Root-Cause: docs/cli#pair-examples", Files: files}
+	pr := PRInfo{Repository: "owner/repo", Number: 1, HeadSHA: "abc", BaseSHA: "base", State: "open", BaseBranch: "main", Mergeable: true, SnapshotConsistent: true, ReviewThreadsComplete: true, Author: "jfox85", Reviews: []Review{{ID: 1, User: "reviewer", State: "APPROVED", CommitID: "abc"}}, Body: "Root-Cause: docs/cli#pair-examples", Files: files}
 	for _, name := range DefaultConfig().RequiredChecks {
 		pr.CheckRuns = append(pr.CheckRuns, CheckRun{Name: name, Status: "completed", Conclusion: "success", HeadSHA: pr.HeadSHA, AppID: 15368, WorkflowID: 321038296})
 	}
@@ -154,21 +154,20 @@ func TestDocsDepsLaneSkipsRepro(t *testing.T) {
 	if hasRule(res, "Test Repro") {
 		t.Error("docs/deps lane must not evaluate the repro rule")
 	}
-	for _, name := range []string{"Size", "File Types", "CI", "Duplicates", "Denied Paths"} {
+	for _, name := range []string{"Size", "File Types", "CI", "Author", "Review Readiness", "Denied Paths"} {
 		if r := ruleByName(t, res, name); !r.Pass {
 			t.Errorf("%s failed: %s", name, r.Message)
 		}
 	}
-	// Shadow mode never has reviewer provenance, so the verdict stays no.
-	if res.Verdict != VerdictWouldNotMerge || ruleByName(t, res, "Reviewer").Pass {
-		t.Errorf("verdict = %s; the reviewer rule must still block", res.Verdict)
+	if res.Verdict != VerdictWouldMerge {
+		t.Errorf("reviewed, allowed docs PR should qualify: %+v", res)
 	}
 }
 
-func TestCodeLaneStillRequiresRepro(t *testing.T) {
+func TestCodeLaneUsesCIWithoutMandatoryRepro(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	res := eval.Evaluate(passingPR(PRFile{Filename: "internal/cli/cli.go", Additions: 5}), nil, nil)
-	if res.Lane != LaneCode || !hasRule(res, "Test Repro") || hasRule(res, "File Types") {
+	if res.Lane != LaneCode || hasRule(res, "Test Repro") || hasRule(res, "File Types") || res.Verdict != VerdictWouldMerge {
 		t.Fatalf("lane=%s rules=%+v", res.Lane, res.Rules)
 	}
 }

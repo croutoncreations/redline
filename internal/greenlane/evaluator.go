@@ -15,7 +15,8 @@ func NewEvaluator(config Config) *Evaluator {
 	return &Evaluator{config: config}
 }
 
-// Evaluate runs all green-lane rules against the PR and returns the result
+// Evaluate runs the simple policy. The legacy repro/duplicate arguments are
+// retained for callers but no longer affect eligibility.
 func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSummary) EvaluationResult {
 	result := EvaluationResult{
 		ReviewSnapshot: ReviewSnapshot(pr),
@@ -29,10 +30,7 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 		Rules:       make([]RuleResult, 0),
 	}
 
-	for _, issuer := range e.config.ProvenanceIssuers {
-		result.ProvenanceApps = append(result.ProvenanceApps, issuer.AppID)
-	}
-	result.Rules = append(result.Rules, e.checkPRState(pr), e.checkReviewReadiness(pr))
+	result.Rules = append(result.Rules, e.checkPRState(pr), e.checkAuthor(pr), e.checkReviewReadiness(pr))
 	lane := selectLane(pr)
 	result.Lane = lane
 
@@ -40,30 +38,15 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 	sizeResult := e.checkSize(pr, e.laneLimits(lane))
 	result.Rules = append(result.Rules, sizeResult)
 
-	// Rule 2: the code lane needs a fails-before/passes-after repro; the
-	// docs/deps lane has no tests to run and instead restricts what its
-	// manifest edits may contain.
+	// Dependency syntax/lockfile validation remains conservative. Ordinary
+	// bug fixes rely on required CI; a new fails-before test is not mandatory.
 	if lane == LaneDocsDeps {
 		result.Rules = append(result.Rules, e.checkDocsDepsFiles(pr))
-	} else {
-		if reproResult != nil && (reproResult.HeadSHA != pr.HeadSHA || reproResult.BaseSHA != pr.BaseSHA) {
-			result.Rules = append(result.Rules, RuleResult{Name: "Test Repro", Inconclusive: true, Message: "Repro evidence does not match the evaluated head/base snapshot"})
-		} else {
-			result.Rules = append(result.Rules, e.checkRepro(reproResult))
-		}
 	}
 
 	// Rule 3: CI status
 	ciResult := e.checkCI(pr)
 	result.Rules = append(result.Rules, ciResult)
-
-	// Rule 4: Cross-vendor review
-	reviewResult := e.checkReviewer(pr)
-	result.Rules = append(result.Rules, reviewResult)
-
-	// Rule 5: No duplicate PRs
-	dupeResult := e.checkDuplicates(pr, openPRs)
-	result.Rules = append(result.Rules, dupeResult)
 
 	// Rule 6: Denied paths
 	pathResult := e.checkDeniedPaths(pr)
@@ -77,17 +60,15 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 	for _, r := range result.Rules {
 		if !r.Pass {
 			allPass = false
-			if r.Name != "Reviewer" {
-				result.AdvisoryCandidate = false
-			}
+			result.AdvisoryCandidate = false
 			reasons = append(reasons, fmt.Sprintf("%s: %s", r.Name, r.Message))
 		}
 	}
 
 	if result.AdvisoryCandidate {
-		result.CandidateMessage = "Advisory only: all non-provenance rules pass; live gate and integration freshness are not implemented"
+		result.CandidateMessage = "Advisory only: all policy rules pass; shadow mode never authorizes a merge"
 	} else {
-		result.CandidateMessage = "Not a candidate: one or more non-provenance rules are blocked"
+		result.CandidateMessage = "Not a candidate: one or more policy rules are blocked"
 	}
 	if allPass {
 		result.Verdict = VerdictWouldMerge
