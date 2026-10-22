@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
+  `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
+
 - The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
   session without printing its credential. Unauthenticated dashboard visitors receive sign-in
   instructions; API authentication remains required.
