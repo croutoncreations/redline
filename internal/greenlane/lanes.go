@@ -142,6 +142,7 @@ func parseManifestEntry(goMod bool, line string) (e manifestEntry, ok bool) {
 // unreadable patch means the PR is not a plain dependency bump.
 func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 	result := RuleResult{Name: "File Types"}
+	var unverifiedLockfiles []string
 	for _, f := range pr.Files {
 		// A rename to or from a manifest or lockfile removes or rewrites
 		// that dependency file wholesale (package.json -> deps.md), so it is
@@ -163,6 +164,7 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 				result.Message = fmt.Sprintf("%s: %s", f.Filename, msg)
 				return result
 			}
+			unverifiedLockfiles = append(unverifiedLockfiles, f.Filename)
 			continue
 		default:
 			continue
@@ -282,6 +284,15 @@ func (e *Evaluator) checkDocsDepsFiles(pr PRInfo) RuleResult {
 			return result
 		}
 	}
+	// Syntax and registry checks do not prove that a lockfile was generated
+	// from the accepted manifest. Do not admit even plausible lockfile edits
+	// until an isolated, trusted resolver comparison supplies that evidence.
+	if len(unverifiedLockfiles) > 0 {
+		sort.Strings(unverifiedLockfiles)
+		result.Inconclusive = true
+		result.Message = fmt.Sprintf("Lockfile changes require trusted resolver validation (not implemented): %s; manual review required", strings.Join(unverifiedLockfiles, ", "))
+		return result
+	}
 	result.Pass = true
 	result.Message = "OK: only docs, changelog and dependency version bumps"
 	return result
@@ -303,19 +314,19 @@ var (
 // npmRegistry is the only tarball host a docs/deps lockfile may resolve to.
 const npmRegistry = "https://registry.npmjs.org/"
 
-// checkLockfile validates what a docs/deps PR adds to a lockfile, since the
+// checkLockfile screens what a docs/deps PR adds to a lockfile, since the
 // manifest bump alone does not constrain it (#183 Codex review). It fails
 // closed: a deleted lockfile, a missing patch, or a lockfile format it cannot
-// read is not a confirmed version bump.
+// read is not a confirmed version bump. A clean result is only a syntax and
+// URL screen, not resolver provenance; checkDocsDepsFiles still blocks it.
 //
-//   - go.sum: every added or removed line must be a well-formed entry. The go
-//     command checks hashes against the checksum database, so a malformed
-//     line is the only thing to reject.
+//   - go.sum: every added or removed line must be a well-formed entry.
+//     Checksum verification alone does not prove resolver consistency.
 //   - package-lock.json: every added "resolved" URL must be the npm registry
 //     tarball for the package whose entry encloses it (no other hosts, git or
 //     file: URLs, or another package's tarball), and no "link": true entry
-//     may be added. npm verifies the tarball against "integrity", so a
-//     registry URL for the right package cannot smuggle in other code.
+//     may be added. Even an allowed URL and matching integrity cannot prove
+//     that the resolver selected this package version for the manifest.
 //   - pnpm-lock.yaml, yarn.lock: not validated, so never admitted.
 func checkLockfile(f PRFile) string {
 	if f.Status == "removed" {
@@ -364,7 +375,13 @@ func checkLockfile(f PRFile) string {
 			return fmt.Sprintf("resolved URL %q with no enclosing package entry visible in the diff context", m[1])
 		}
 		name := key[strings.LastIndex(key, "node_modules/")+len("node_modules/"):]
-		if strings.Contains(name, "..") || !strings.HasPrefix(m[1], npmRegistry+name+"/-/") {
+		// Require a plain tarball filename after the exact package prefix.
+		// npm's URL parser normalizes dot segments and backslashes; percent
+		// escapes, queries and fragments must not alter the fetched path.
+		tarball, ok := strings.CutPrefix(m[1], npmRegistry+name+"/-/")
+		if !ok || tarball == "" ||
+			strings.Contains(name, "..") || strings.ContainsAny(name, "%\\?#") ||
+			strings.Contains(tarball, "..") || strings.ContainsAny(tarball, "/\\%?#") {
 			return fmt.Sprintf("%s resolves to %q, not its %s tarball", key, m[1], npmRegistry)
 		}
 	}

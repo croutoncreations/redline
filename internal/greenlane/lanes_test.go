@@ -326,8 +326,8 @@ func TestDocsDepsLockfileContents(t *testing.T) {
 		pass  bool
 		inMsg string
 	}{
-		{"registry bump", PRFile{Filename: "package-lock.json", Patch: lockBump}, true, ""},
-		{"nested registry bump", PRFile{Filename: "package-lock.json", Patch: "@@ -40,3 +40,3 @@\n     \"node_modules/a/node_modules/b\": {\n-      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.0.tgz\",\n+      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.1.tgz\","}, true, ""},
+		{"registry bump", PRFile{Filename: "package-lock.json", Patch: lockBump}, false, "trusted resolver validation"},
+		{"nested registry bump", PRFile{Filename: "package-lock.json", Patch: "@@ -40,3 +40,3 @@\n     \"node_modules/a/node_modules/b\": {\n-      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.0.tgz\",\n+      \"resolved\": \"https://registry.npmjs.org/b/-/b-1.0.1.tgz\","}, false, "trusted resolver validation"},
 		{"other host", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "+      \"resolved\": \"https://registry.npmjs.org/", "+      \"resolved\": \"https://evil.example/")}, false, "not its https://registry.npmjs.org/ tarball"},
 		{"registry lookalike", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "+      \"resolved\": \"https://registry.npmjs.org/", "+      \"resolved\": \"https://registry.npmjs.org.evil.example/")}, false, "not its"},
 		{"another package's tarball", PRFile{Filename: "package-lock.json", Patch: strings.ReplaceAll(lockBump, "@playwright/test/-/test-1.64.1.tgz", "evil/-/evil-1.0.0.tgz")}, false, "not its"},
@@ -343,6 +343,9 @@ func TestDocsDepsLockfileContents(t *testing.T) {
 		if r.Pass != tc.pass || !strings.Contains(r.Message, tc.inMsg) {
 			t.Errorf("%s: %+v, want pass=%v containing %q", tc.name, r, tc.pass, tc.inMsg)
 		}
+		if want := strings.Contains(tc.inMsg, "trusted resolver validation"); r.Inconclusive != want {
+			t.Errorf("%s: inconclusive=%v, want %v", tc.name, r.Inconclusive, want)
+		}
 	}
 
 	goMod := PRFile{Filename: "go.mod", Patch: goModBump}
@@ -351,12 +354,15 @@ func TestDocsDepsLockfileContents(t *testing.T) {
 		name, patch string
 		pass        bool
 	}{
-		{"go.sum bump", goSum, true},
+		{"go.sum bump", goSum, false},
 		{"go.sum junk line", goSum + "\n+not a sum line", false},
 	} {
 		r := eval.checkDocsDepsFiles(PRInfo{Files: []PRFile{goMod, {Filename: "go.sum", Patch: tc.patch}}})
 		if r.Pass != tc.pass {
 			t.Errorf("%s: %+v, want pass=%v", tc.name, r, tc.pass)
+		}
+		if want := tc.name == "go.sum bump"; r.Inconclusive != want {
+			t.Errorf("%s: inconclusive=%v, want %v", tc.name, r.Inconclusive, want)
 		}
 	}
 }
@@ -394,5 +400,54 @@ func TestDocsDepsLaneKeepsDeniedPaths(t *testing.T) {
 	res := eval.Evaluate(passingPR(PRFile{Filename: ".github/release-notes-draft.md", Additions: 2}), nil, nil)
 	if res.Lane != LaneDocsDeps || ruleByName(t, res, "Denied Paths").Pass {
 		t.Errorf("lane=%s denied=%+v", res.Lane, ruleByName(t, res, "Denied Paths"))
+	}
+}
+
+// Test the URL screen directly as well as the final lane verdict: the
+// resolver blocker must not hide regressions in the defense-in-depth check.
+func TestLockfileTarballPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, url string
+		valid     bool
+	}{
+		{"plain", "https://registry.npmjs.org/safe/-/safe-1.0.1.tgz", true},
+		{"scoped", "https://registry.npmjs.org/@scope/safe/-/safe-1.0.1.tgz", true},
+		{"dot segments", "https://registry.npmjs.org/safe/-/../../evil/-/evil-1.0.0.tgz", false},
+		{"encoded dot segments", "https://registry.npmjs.org/safe/-/%2e%2e/%2e%2e/evil/-/evil-1.0.0.tgz", false},
+		{"backslash", `https://registry.npmjs.org/safe/-/..\\..\\evil/-/evil-1.0.0.tgz`, false},
+		{"encoded separator", "https://registry.npmjs.org/safe/-/safe%2fother.tgz", false},
+		{"query", "https://registry.npmjs.org/safe/-/safe-1.0.1.tgz?x=1", false},
+		{"fragment", "https://registry.npmjs.org/safe/-/safe-1.0.1.tgz#other", false},
+		{"empty filename", "https://registry.npmjs.org/safe/-/", false},
+		{"subdirectory", "https://registry.npmjs.org/safe/-/other/file.tgz", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "safe"
+			if tc.name == "scoped" {
+				name = "@scope/safe"
+			}
+			f := PRFile{Filename: "package-lock.json", Patch: "@@ -1,2 +1,2 @@\n     \"node_modules/" + name + "\": {\n+      \"resolved\": \"" + tc.url + "\","}
+			msg := checkLockfile(f)
+			if (msg == "") != tc.valid {
+				t.Fatalf("checkLockfile = %q, valid=%v", msg, tc.valid)
+			}
+		})
+	}
+}
+
+func TestPlausibleLockfileEditsRemainIneligible(t *testing.T) {
+	for _, patch := range []string{
+		"@@ -10,2 +10,2 @@\n     \"node_modules/safe\": {\n-      \"hasInstallScript\": false,\n+      \"hasInstallScript\": true,",
+		"@@ -10,2 +10,2 @@\n     \"node_modules/safe\": {\n-      \"version\": \"2.0.0\",\n+      \"version\": \"1.0.0\",",
+	} {
+		files := []PRFile{{Filename: "package.json", Patch: packageJSONBump}, {Filename: "package-lock.json", Patch: patch}}
+		res := NewEvaluator(DefaultConfig()).Evaluate(passingPR(files...), nil, nil)
+		r := ruleByName(t, res, "File Types")
+		if r.Pass || !r.Inconclusive || !strings.Contains(r.Message, "trusted resolver validation") {
+			t.Fatalf("lockfile admitted: %+v", r)
+		}
+		if res.Verdict != VerdictWouldNotMerge {
+			t.Fatalf("verdict = %s", res.Verdict)
+		}
 	}
 }

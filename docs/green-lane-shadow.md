@@ -33,18 +33,24 @@ What does **not** qualify, and so stays in the `code` lane with the repro rule:
 - Renames whose source path does not qualify (for example `internal/x.go` → `docs/x.md`). Denied Paths also checks both paths of a rename, and File Types rejects any rename to or from a manifest or lockfile.
 - Lockfiles whose manifest is not admitted: `Cargo.lock`, generic `*.lock`, `Package.resolved`, `gradle.lockfile`. Every lockfile the lane admits has a manifest mapping in the Size rule, so a lockfile-only PR always fails Size.
 
-File Types also validates lockfile contents, because a manifest bump alone
-does not constrain what its lockfile says. Every `resolved` URL a
-`package-lock.json` change adds must be the npm registry tarball
-(`https://registry.npmjs.org/<name>/-/...`) of the `node_modules/<name>`
-entry around it, which must be visible in the diff context, and no
-`"link": true` entry may be added. npm then checks the tarball against
-`integrity`. Every added or removed `go.sum` line must be a `module version
-h1:hash` entry; the go command checks those against the checksum database.
-Deleting a lockfile, a lockfile with no diff, and `pnpm-lock.yaml`/`yarn.lock`
-(not validated) all fail. This does not prove the lockfile is the resolver's
-exact output for the bump; the live gate should regenerate it in a trusted
-job instead.
+File Types screens lockfile contents but **never passes a lockfile change**
+until trusted resolver validation exists. Obvious violations fail; a plausible
+`go.sum` or `package-lock.json` change is **inconclusive**, with a message
+requiring trusted resolver validation and manual review. Manifest-only version
+bumps and docs can still pass File Types. This restriction is independent of the
+Reviewer placeholder, so implementing reviewer provenance cannot accidentally
+admit unverified lockfiles.
+
+The defense-in-depth screen requires added npm `resolved` URLs to name the
+exact enclosing package on `https://registry.npmjs.org/`, followed by one plain
+filename. Dot segments, backslashes, percent escapes, extra path segments,
+queries, fragments and empty filenames are rejected. `"link": true`, deleted
+lockfiles, missing diffs and unimplemented pnpm/yarn validation also fail.
+`go.sum` entries must have the expected syntax. Registry URL/integrity or
+checksum validation does not establish that a lockfile matches its manifest:
+install-script metadata, arbitrary transitive version edits, and other
+hand-written changes still need resolver comparison in an isolated trusted
+job. That job must not have merge credentials or execute install scripts.
 
 The CI, Reviewer, Duplicates and Denied Paths rules are identical in both
 lanes. The lockfile-needs-matching-manifest rule applies in both lanes with
@@ -239,8 +245,11 @@ Before switching from shadow to live merges, the following must be built and ver
 
 ### Policy & Process
 10. ❌ **Extended denied paths** in `.github/green-lane.yml` read from base branch
-11. ❌ **Lockfile/generated limits** enforced (max 300 lines, must have matching manifest/source)
-12. ❌ **Live recheck before merge** (fully paginated duplicate query, fresh check/review state, SHA-pinned merge)
+11. ✅ **Lockfile/generated limits** enforced (code: 300 lines; docs/deps: 150; matching manifest/source required)
+12. ❌ **Live recheck before merge** (fully paginated duplicate query with file lists, fresh check/review state, SHA-pinned merge)
+
+Lockfile eligibility is blocked until trusted resolver validation exists; syntax
+and URL screening alone do not satisfy that requirement.
 
 ### Validation
 13. ❌ **Shadow period complete:** At least 1 week with 0 wrong "would merge" calls
@@ -259,8 +268,8 @@ Before switching from shadow to live merges, the following must be built and ver
 3. **Test repro limitations:**
    - ✅ Fully implemented for Go test files (`*_test.go`)
    - ❌ Not implemented for TypeScript/Jest/Vitest, Kotlin, or Swift tests
-   - PRs without changed test files are marked inconclusive
-   - The evaluator expects to see test function changes; PRs that only fix tests without changing their signatures may not be detected correctly
+   - Code-lane PRs without new/changed tests or affected fixture readers are inconclusive
+   - Changed test bodies are detected; directly changed tests and indirectly affected tests follow the required/optional rules described above
 
 4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
 
@@ -274,10 +283,68 @@ This shadow pilot design (rev 3) was reviewed and approved by the repo owner (Jo
 
 ## Next Steps
 
-1. **Monitor shadow runs:** Review the check results on PRs over the next week.
-2. **Verify verdicts:** Check that "would merge" decisions match your manual judgment.
-3. **Build missing infrastructure:** Implement the pre-enable checklist items.
-4. **Go/no-go:** After the shadow period, decide whether to proceed with live merges.
+1. Merge these shadow-only tooling fixes after code review, then verify the new
+   plan → run → analyze pipeline in real Actions runs. This PR's shadow scorer
+   is still built from the old base branch; its result does not exercise the
+   new analyzer.
+2. Implement review readiness and trusted provenance as described below.
+3. Collect manually adjudicated candidate and rejection examples for at least
+   one week after the positive eligibility path is observable.
+4. Build the protected merge gate and complete the pre-enable checklist before
+   considering live merges. Keep lockfile changes manual until resolver
+   validation is implemented.
+
+### Follow-up: review readiness and trusted provenance
+
+The current Reviewer rule intentionally always fails. A successful review
+workflow, CodeRabbit findings, or a human approval alone does not verify the
+cross-vendor requirement. Merely waiting a week cannot exercise `would_merge`.
+Implement this as a focused follow-up, rather than adding a partial merge gate
+to the repro repair:
+
+1. **Review readiness:** fetch every review thread with GraphQL pagination.
+   Block unresolved threads, including outdated threads: an outdated diff or a
+   reply does not prove the finding was addressed. Use the latest effective
+   review per reviewer; outstanding change requests remain blocking across
+   pushes until cleared by a later effective review or a trusted dismissal.
+   A disposition must be recorded by a trusted reviewer/owner and the thread
+   resolved; PR-body claims are not evidence. Reevaluate on thread
+   resolve/reopen, new review, dismissal, and head changes. If the thread event
+   is not available to the workflow, use a trusted webhook dispatcher or
+   reconciliation job; a review-comment event alone is insufficient.
+2. **Trusted provenance:** have the trusted dispatcher store author and
+   reviewer receipts outside PR-controlled files. Each receipt identifies the
+   repository/PR, head SHA, harness, provider/model and run ID. A reviewer
+   receipt also binds to the reviewed content and structured outcome. Validate
+   the publishing App/installation and the receipt's trusted issuer; a login,
+   workflow success or comment text is insufficient. Unknown author/provider,
+   missing receipt or same-provider review remains ineligible. CodeRabbit's
+   App identity establishes its service identity, not automatically an
+   independent model provider relative to the author.
+3. **Useful shadow reporting:** report review readiness and provenance
+   separately. Add a clearly advisory candidate field only when all implemented
+   non-provenance requirements pass, with explicit unimplemented blockers.
+   Never turn that field into a successful authorization check. The final
+   verdict remains `would_not_merge` until every mandatory requirement passes;
+   the existing `would_merge` verdict must not be weakened.
+4. **Consistent snapshot:** require an open, non-draft, mergeable PR against an
+   allowed base branch. Bind CI (including expected check/workflow identities),
+   review receipts, repro, file lists and policy to the same head/base SHAs.
+   The present workflow's early head comparison is not sufficient if the CLI
+   fetches a newer PR afterward. Reject mismatches inside the evaluator and
+   re-fetch state before publication and immediately before a SHA-pinned merge.
+   Require base freshness or merge-queue validation for integration safety.
+5. **Acceptance tests:** unresolved/outdated threads; dismissed and superseded
+   reviews; changes requested on an older head; same-provider and unknown
+   provenance; forged receipts; pushes between reads; changed base; draft or
+   conflicted PRs; missing/pending CI; and missing API pages all stay blocked.
+   Include a real independently reviewed positive candidate and demonstrate
+   its advisory status separately from merge authorization.
+
+Once these checks have been validated in shadow, implement the trusted publisher
+and gate App with separate credentials and App-bound branch protections. Never
+execute PR code in the job that holds review-publishing or merge credentials.
+There is no human override in the shadow check; manual merging is unchanged.
 
 ---
 
