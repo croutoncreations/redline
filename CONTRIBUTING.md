@@ -8,7 +8,7 @@ running the test suites, and packaging the macOS app. End-user installation is c
 
 - Go 1.21 or later with automatic toolchain downloads enabled (the default); the exact version
   is pinned in `go.mod` and fetched on first use
-- Node.js 18 or later and npm (dashboard tests only)
+- Node.js 20 or later and npm (dashboard tests only)
 - Xcode 16 or later (Swift 6.0+; `macos/Package.swift` requires it), for the macOS app only
 - Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
 

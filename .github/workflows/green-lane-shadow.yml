@@ -1,0 +1,118 @@
+name: Green Lane Shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to evaluate with trusted main tooling
+        required: true
+        type: string
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, closed]
+  pull_request_review:
+    types: [submitted, dismissed]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: read
+
+# Report only: no merge/approval permission, PR checkout or PR code execution.
+# Never require this shadow check in branch protection.
+jobs:
+  invalidate-closed:
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      # Trusted close-event code only: no checkout, build or PR execution.
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.checks.create({...context.repo,
+              name: 'green-lane-shadow', head_sha: pr.head.sha,
+              status: 'completed', conclusion: 'neutral',
+              output: {title: 'Green Lane Shadow: closed',
+                summary: 'PR closed. Not an advisory candidate and never merge authorization.',
+                text: JSON.stringify({pr_number: pr.number, head_sha: pr.head.sha,
+                  verdict: 'would_not_merge', advisory_candidate: false})}
+            });
+
+
+  evaluate:
+    if: >-
+      (github.event_name != 'pull_request_target' || github.event.action != 'closed') &&
+      (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_review' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build trusted evaluator
+        run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      - name: Get current PR
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let number;
+            if (context.eventName === 'workflow_run') {
+              const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {...context.repo, commit_sha:context.payload.workflow_run.head_sha, per_page:100});
+              const prs = associated.filter(pr => pr.state === 'open' && pr.head.sha === context.payload.workflow_run.head_sha);
+              if (prs.length === 0) return;
+              if (prs.length > 1) throw new Error('Multiple PRs share this head; hourly reconciliation will evaluate each');
+              number = prs[0].number;
+            } else {
+              number = context.eventName === 'workflow_dispatch' ? Number(context.payload.inputs.pr_number) : context.payload.pull_request.number;
+            }
+            if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid PR number');
+            const {data:pr} = await github.rest.pulls.get({...context.repo,pull_number:number});
+            core.setOutput('number',number);
+            core.setOutput('head',pr.head.sha);
+            core.setOutput('base',pr.base.sha);
+      - name: Evaluate
+        if: steps.pr.outputs.number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head }}
+          EXPECTED_BASE_SHA: ${{ steps.pr.outputs.base }}
+        run: '"$RUNNER_TEMP/green-lane-check" > result.json'
+      - name: Publish current evaluation
+        if: always() && steps.pr.outputs.number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            try {
+              const result = JSON.parse(fs.readFileSync('result.json','utf8'));
+              await require('./.github/green-lane/publish.cjs')({github,context,result,expectedHead:process.env.EXPECTED_HEAD_SHA});
+            } catch (error) {
+              await github.rest.checks.create({...context.repo,name:'green-lane-shadow',head_sha:process.env.EXPECTED_HEAD_SHA,status:'completed',conclusion:'neutral',output:{title:'Green Lane Shadow: unavailable',summary:'Evaluation or publication failed. No candidate or merge authorization; rerun required.'}});
+              throw error;
+            }
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.pr.outputs.number != ''
+        with:
+          name: green-lane-evaluation-${{ steps.pr.outputs.number }}-${{ github.run_id }}
+          path: evaluation-result.json
+          if-no-files-found: ignore
+          retention-days: 30
