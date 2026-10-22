@@ -14,14 +14,19 @@ import (
 const greenLaneWorkflow = "../../.github/workflows/green-lane-shadow.yml"
 
 type workflowStep struct {
-	Name string            `yaml:"name"`
-	Uses string            `yaml:"uses"`
-	With map[string]string `yaml:"with"`
+	Name             string            `yaml:"name"`
+	Uses             string            `yaml:"uses"`
+	Run              string            `yaml:"run"`
+	WorkingDirectory string            `yaml:"working-directory"`
+	With             map[string]string `yaml:"with"`
 }
 
 type workflowDoc struct {
-	Jobs map[string]struct {
-		Steps []workflowStep `yaml:"steps"`
+	Permissions map[string]string `yaml:"permissions"`
+	Jobs        map[string]struct {
+		If          string            `yaml:"if"`
+		Permissions map[string]string `yaml:"permissions"`
+		Steps       []workflowStep    `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 
@@ -156,6 +161,7 @@ func TestGreenLaneCheckoutsSurviveADeletedPRBranch(t *testing.T) {
 			"github.event.workflow_run.head_sha":    prSHA,
 			"steps.pr_info.outputs.head_sha":        prSHA,
 			"steps.pr_info.outputs.base_sha":        mainSHA,
+			"needs.repro.outputs.head_sha":          prSHA,
 		},
 		"pull_request_review": {
 			"github.event_name":                  "pull_request_review",
@@ -166,6 +172,7 @@ func TestGreenLaneCheckoutsSurviveADeletedPRBranch(t *testing.T) {
 			"github.event.pull_request.head.sha": prSHA,
 			"steps.pr_info.outputs.head_sha":     prSHA,
 			"steps.pr_info.outputs.base_sha":     mainSHA,
+			"needs.repro.outputs.head_sha":       prSHA,
 		},
 		"pull_request": {
 			"github.event_name":                  "pull_request",
@@ -176,6 +183,7 @@ func TestGreenLaneCheckoutsSurviveADeletedPRBranch(t *testing.T) {
 			"github.event.pull_request.head.sha": prSHA,
 			"steps.pr_info.outputs.head_sha":     prSHA,
 			"steps.pr_info.outputs.base_sha":     mainSHA,
+			"needs.repro.outputs.head_sha":       prSHA,
 		},
 	}
 	checkouts := 0
@@ -200,10 +208,12 @@ func TestGreenLaneCheckoutsSurviveADeletedPRBranch(t *testing.T) {
 					t.Errorf("jobs.%s checkout ref %q resolves to %q for %s; want an exact commit SHA", jobName, expr, ref, event)
 				}
 				// evaluate builds and runs the evaluator with checks: write,
-				// so it must come from the trusted default/base commit,
-				// never from the PR head.
-				if jobName == "evaluate" && ref != mainSHA {
-					t.Errorf("jobs.evaluate checkout resolves to %q for %s; want the trusted base/default commit %s", ref, event, mainSHA)
+				// and every "trusted" checkout supplies the repro tooling, so
+				// they must come from the trusted default/base commit, never
+				// from the PR head.
+				trusted := jobName == "evaluate" || step.With["path"] == "trusted"
+				if trusted && ref != mainSHA {
+					t.Errorf("jobs.%s trusted checkout resolves to %q for %s; want the trusted base/default commit %s", jobName, ref, event, mainSHA)
 				}
 				if !checkoutFetches(t, remote, ref) {
 					t.Errorf("jobs.%s checkout of %q for %s fails once the PR branch is deleted", jobName, ref, event)
@@ -252,5 +262,101 @@ func TestGreenLaneScriptsStayValidWhenOutputsAreMissing(t *testing.T) {
 	}
 	if scripts == 0 {
 		t.Fatal("expected github-script steps in the green-lane workflow; found none")
+	}
+}
+
+// A PR must not be able to change the code that scores it. Every go build in
+// the workflow must run inside the trusted (base-branch) checkout, the
+// trusted binary must be built before PR code is checked out, and nothing
+// may "go run" from the PR checkout (the old analyze step ran
+// "go run ./cmd/green-lane-repro-analyze" in the PR's own workspace).
+func TestGreenLaneToolingComesFromTrustedCode(t *testing.T) {
+	builds := 0
+	for jobName, job := range loadGreenLaneWorkflow(t).Jobs {
+		trustedBuilt := false
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "go run") {
+				t.Errorf("jobs.%s step %q uses go run; build from the trusted checkout instead", jobName, step.Name)
+			}
+			if strings.Contains(step.Run, "go build") {
+				builds++
+				if step.WorkingDirectory != "trusted" && jobName != "evaluate" {
+					t.Errorf("jobs.%s step %q builds outside the trusted checkout", jobName, step.Name)
+				}
+				trustedBuilt = true
+			}
+			if strings.HasPrefix(step.Uses, "actions/checkout@") && step.With["path"] == "pr" && !trustedBuilt {
+				t.Errorf("jobs.%s checks out the PR before building trusted tooling", jobName)
+			}
+		}
+	}
+	if builds == 0 {
+		t.Fatal("expected go build steps in the green-lane workflow")
+	}
+	// The repro job runs PR code in the same run and cache scope, and code
+	// on a hosted runner can save a cache entry under setup-go's predictable
+	// key. Any job that builds trusted tooling must not restore that cache.
+	for jobName, job := range loadGreenLaneWorkflow(t).Jobs {
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions/setup-go@") && step.With["cache"] != "false" {
+				t.Errorf("jobs.%s setup-go has cache %q; want \"false\" so PR code cannot poison trusted builds", jobName, step.With["cache"])
+			}
+			if strings.HasPrefix(step.Uses, "actions/cache@") {
+				t.Errorf("jobs.%s uses actions/cache; trusted builds must not restore caches PR code can write", jobName)
+			}
+		}
+	}
+	jobs := loadGreenLaneWorkflow(t).Jobs
+	for _, name := range []string{"repro", "repro-analyze"} {
+		found := false
+		for _, step := range jobs[name].Steps {
+			if strings.Contains(step.Run, "green-lane-repro\" plan") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("jobs.%s does not compute the repro plan with the trusted binary", name)
+		}
+	}
+}
+
+// A workflow_run runs in the default branch's context and cache scope, which
+// release.yml restores with secrets present. The repro job runs PR code, so
+// on workflow_run it must be limited to PRs from this repository.
+func TestGreenLaneReproSkipsForkCodeOnWorkflowRun(t *testing.T) {
+	cond := loadGreenLaneWorkflow(t).Jobs["repro"].If
+	if !strings.Contains(cond, "github.event.workflow_run.head_repository.full_name == github.repository") {
+		t.Errorf("jobs.repro if: %q must restrict workflow_run to same-repository heads", cond)
+	}
+}
+
+// Shadow mode: jobs that touch PR code are read-only, the only write scope
+// anywhere is checks: write on evaluate (to post the report-only check), and
+// nothing in the workflow can merge, approve or enable auto-merge.
+func TestGreenLaneStaysShadowOnly(t *testing.T) {
+	doc := loadGreenLaneWorkflow(t)
+	for scope, level := range doc.Permissions {
+		if level == "write" && scope != "checks" {
+			t.Errorf("workflow-level permission %s: write", scope)
+		}
+	}
+	for jobName, job := range doc.Jobs {
+		if job.Permissions == nil {
+			t.Errorf("jobs.%s has no explicit permissions block", jobName)
+		}
+		for scope, level := range job.Permissions {
+			if level == "write" && (jobName != "evaluate" || scope != "checks") {
+				t.Errorf("jobs.%s has %s: write", jobName, scope)
+			}
+		}
+	}
+	raw, err := os.ReadFile(filepath.FromSlash(greenLaneWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"pulls.merge", "merge_method", "enablePullRequestAutoMerge", "gh pr merge", "createReview", "event: 'APPROVE'", "addLabels"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("workflow contains %q; green lane is shadow-only", forbidden)
+		}
 	}
 }

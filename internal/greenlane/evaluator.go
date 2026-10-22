@@ -25,13 +25,21 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 		Rules:       make([]RuleResult, 0),
 	}
 
-	// Rule 1: Size check
-	sizeResult := e.checkSize(pr)
+	lane := selectLane(pr)
+	result.Lane = lane
+
+	// Rule 1: Size check, with the lane's caps
+	sizeResult := e.checkSize(pr, e.laneLimits(lane))
 	result.Rules = append(result.Rules, sizeResult)
 
-	// Rule 2: Test repro (fails before, passes after)
-	reproCheckResult := e.checkRepro(reproResult)
-	result.Rules = append(result.Rules, reproCheckResult)
+	// Rule 2: the code lane needs a fails-before/passes-after repro; the
+	// docs/deps lane has no tests to run and instead restricts what its
+	// manifest edits may contain.
+	if lane == LaneDocsDeps {
+		result.Rules = append(result.Rules, e.checkDocsDepsFiles(pr))
+	} else {
+		result.Rules = append(result.Rules, e.checkRepro(reproResult))
+	}
 
 	// Rule 3: CI status
 	ciResult := e.checkCI(pr)
@@ -62,11 +70,11 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 
 	if allPass {
 		result.Verdict = VerdictWouldMerge
-		result.Summary = "All rules pass. Shadow mode: would merge if live."
+		result.Summary = fmt.Sprintf("All %s-lane rules pass. Shadow mode: would merge if live.", lane)
 	} else {
 		result.Verdict = VerdictWouldNotMerge
-		result.Summary = fmt.Sprintf("Would not merge. Reasons:\n- %s",
-			join(reasons, "\n- "))
+		result.Summary = fmt.Sprintf("Would not merge (%s lane). Reasons:\n- %s",
+			lane, join(reasons, "\n- "))
 	}
 
 	return result

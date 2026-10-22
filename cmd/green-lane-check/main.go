@@ -124,74 +124,22 @@ func run() error {
 
 func loadConfig(path string) (greenlane.Config, error) {
 	if path == "" {
-		// Return default config
-		return greenlane.Config{
-			MaxChangedLines:    150,
-			MaxLockfileChanges: 300,
-			MaxFiles:           6,
-			RequiredChecks: []string{
-				"go",
-				"dashboard",
-				"linux-smoke",
-				"windows-smoke",
-				"macos",
-				"macos-intel",
-			},
-			DeniedPaths: getDefaultDeniedPaths(),
-		}, nil
+		return greenlane.DefaultConfig(), nil
 	}
 
-	// Load from file (YAML parsing would go here)
-	// For simplicity, using JSON for now
+	// Optional JSON override, unset in the shadow workflow. Fields it omits
+	// keep their defaults.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return greenlane.Config{}, err
 	}
 
-	var config greenlane.Config
+	config := greenlane.DefaultConfig()
 	if err := json.Unmarshal(data, &config); err != nil {
 		return greenlane.Config{}, err
 	}
 
 	return config, nil
-}
-
-func getDefaultDeniedPaths() []string {
-	return []string{
-		// Common denied paths
-		".github/workflows/**",
-		".github/actions/**",
-		"**/.env*",
-		"**/*secret*",
-		"**/*credential*",
-		"**/*.pem",
-		"**/*.p12",
-		"**/*.keystore",
-		"**/*.jks",
-		"CODEOWNERS",
-
-		// Green-lane controls
-		".github/green-lane.yml",
-		".github/green-lane/**",
-		".github/prompts/**",
-
-		// Test runner config
-		"playwright.config.*",
-
-		// Redline-specific
-		"internal/apiauth/**",
-		"internal/nativeusage/credentials*",
-		"macos/Sources/RedlineKit/APICredentialStore.swift",
-		".goreleaser.yaml",
-		".github/release-notes-*",
-		"scripts/package-macos-release.sh",
-		"scripts/generate-sparkle-appcast.sh",
-		"scripts/rehearse-macos-release-vm.sh",
-		"scripts/lib/macos-signing.sh",
-		"**/*.entitlements",
-		"macos/**/Info.plist",
-		"internal/store/sqlite.go",
-	}
 }
 
 func writeSummary(path string, result greenlane.EvaluationResult) error {
@@ -204,6 +152,7 @@ func writeSummary(path string, result greenlane.EvaluationResult) error {
 	// Write summary in markdown
 	fmt.Fprintf(f, "# Green Lane Shadow Evaluation\n\n")
 	fmt.Fprintf(f, "**Verdict:** %s\n\n", result.Verdict)
+	fmt.Fprintf(f, "**Lane:** %s\n\n", result.Lane)
 	fmt.Fprintf(f, "**PR:** #%d\n", result.PRNumber)
 	fmt.Fprintf(f, "**Head SHA:** `%s`\n", result.HeadSHA)
 	fmt.Fprintf(f, "**Evaluated at:** %s\n\n", result.EvaluatedAt.Format("2006-01-02 15:04:05 UTC"))
@@ -295,6 +244,9 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 			Additions int    `json:"additions"`
 			Deletions int    `json:"deletions"`
 			Changes   int    `json:"changes"`
+			Patch     string `json:"patch"`
+			// Set for renames; the source path is touched too.
+			PreviousFilename string `json:"previous_filename"`
 		}
 
 		if err := json.Unmarshal(filesData, &filesResp); err != nil {
@@ -312,6 +264,9 @@ func (c *GitHubClient) GetPR(ctx context.Context, number int) (greenlane.PRInfo,
 				Additions: f.Additions,
 				Deletions: f.Deletions,
 				Changes:   f.Changes,
+				Patch:     f.Patch,
+
+				PreviousFilename: f.PreviousFilename,
 			})
 		}
 

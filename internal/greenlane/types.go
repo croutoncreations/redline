@@ -21,6 +21,7 @@ type RuleResult struct {
 // EvaluationResult contains the full evaluation outcome
 type EvaluationResult struct {
 	Verdict     Verdict      `json:"verdict"`
+	Lane        Lane         `json:"lane"`
 	Rules       []RuleResult `json:"rules"`
 	Summary     string       `json:"summary"`
 	EvaluatedAt time.Time    `json:"evaluated_at"`
@@ -36,6 +37,20 @@ type PRFile struct {
 	Additions int
 	Deletions int
 	Changes   int
+	Patch     string // unified diff hunk text; GitHub omits it for large files
+	// PreviousFilename is the source path of a rename (GitHub's
+	// previous_filename). A rename touches both paths, so rules that look
+	// at paths must check both.
+	PreviousFilename string
+}
+
+// Paths returns every path the change touches: the file and, for a rename,
+// its source.
+func (f PRFile) Paths() []string {
+	if f.PreviousFilename != "" && f.PreviousFilename != f.Filename {
+		return []string{f.Filename, f.PreviousFilename}
+	}
+	return []string{f.Filename}
 }
 
 // CheckRun represents a GitHub check run status
@@ -81,11 +96,23 @@ type PRInfo struct {
 	ReviewComments []ReviewComment
 }
 
-// Config represents the green-lane configuration
+// Config represents the green-lane configuration. cmd/green-lane-check loads
+// an optional override with encoding/json, so every field carries a json tag
+// matching its yaml tag; without it, snake_case keys such as "docs_deps" are
+// silently ignored.
 type Config struct {
-	DeniedPaths        []string `yaml:"denied_paths"`
-	MaxChangedLines    int      `yaml:"max_changed_lines"`
-	MaxLockfileChanges int      `yaml:"max_lockfile_changes"`
-	MaxFiles           int      `yaml:"max_files"`
-	RequiredChecks     []string `yaml:"required_checks"`
+	DeniedPaths        []string `yaml:"denied_paths" json:"denied_paths"`
+	MaxChangedLines    int      `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges int      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles           int      `yaml:"max_files" json:"max_files"`
+	RequiredChecks     []string `yaml:"required_checks" json:"required_checks"`
+	// DocsDeps holds the tighter caps for the docs/changelog/dependency lane.
+	DocsDeps SizeLimits `yaml:"docs_deps" json:"docs_deps"`
+}
+
+// SizeLimits caps a lane's diff size.
+type SizeLimits struct {
+	MaxChangedLines    int `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges int `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles           int `yaml:"max_files" json:"max_files"`
 }

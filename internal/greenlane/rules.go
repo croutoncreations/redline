@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// checkSize implements Rule 1: size ≤ 150 changed lines
-func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
+// checkSize implements Rule 1: size caps for the PR's lane.
+func (e *Evaluator) checkSize(pr PRInfo, limits SizeLimits) RuleResult {
 	lockfilePatterns := []string{
 		"**/go.sum",
 		"**/package-lock.json",
@@ -47,29 +47,29 @@ func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 	}
 
 	// Check file count
-	if fileCount > e.config.MaxFiles {
+	if fileCount > limits.MaxFiles {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, e.config.MaxFiles),
+			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, limits.MaxFiles),
 		}
 	}
 
 	// Check regular lines
-	if regularLines > e.config.MaxChangedLines {
+	if regularLines > limits.MaxChangedLines {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, e.config.MaxChangedLines),
+			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, limits.MaxChangedLines),
 		}
 	}
 
 	// Check lockfile/generated lines
-	if lockfileLines > e.config.MaxLockfileChanges {
+	if lockfileLines > limits.MaxLockfileChanges {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, e.config.MaxLockfileChanges),
+			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, limits.MaxLockfileChanges),
 		}
 	}
 
@@ -461,11 +461,15 @@ func (e *Evaluator) checkDuplicates(pr PRInfo, openPRs []PRSummary) RuleResult {
 func (e *Evaluator) checkDeniedPaths(pr PRInfo) RuleResult {
 	var denied []string
 
+	// A rename touches both paths: moving a denied file elsewhere edits the
+	// denied path as much as changing it in place.
 	for _, file := range pr.Files {
-		for _, pattern := range e.config.DeniedPaths {
-			if matchPattern(file.Filename, pattern) {
-				denied = append(denied, file.Filename)
-				break
+		for _, p := range file.Paths() {
+			for _, pattern := range e.config.DeniedPaths {
+				if matchPattern(p, pattern) {
+					denied = append(denied, p)
+					break
+				}
 			}
 		}
 	}
@@ -543,9 +547,14 @@ func matchPattern(path, pattern string) bool {
 		}
 	}
 
-	// Handle * wildcards
+	// Handle * wildcards. A pattern with a directory part (".github/release-notes-*")
+	// matches the full path; a bare one ("playwright.config.*") matches the base name.
 	if strings.Contains(pattern, "*") {
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
+		target := filepath.Base(path)
+		if strings.Contains(pattern, "/") {
+			target = path
+		}
+		matched, _ := filepath.Match(pattern, target)
 		return matched
 	}
 
