@@ -52,6 +52,7 @@ session cookie and redirects to the clean URL (a plain browser request gets a JS
 
 ```bash
 open "http://127.0.0.1:7436/?access_token=$(cat api-token)"   # macOS; elsewhere paste the URL
+open "http://127.0.0.1:17436/?access_token=$(cat api-token)"  # same, after serve --listen 127.0.0.1:17436
 ```
 
 Only `redline serve` reads configuration and opens SQLite. Every other CLI command is a client of
