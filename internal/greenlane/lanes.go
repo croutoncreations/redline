@@ -13,13 +13,11 @@ import (
 type Lane string
 
 const (
-	// LaneCode is the default lane: every rule applies, including the
-	// fails-before/passes-after repro.
+	// LaneCode is the default lane, with required CI as its test gate.
 	LaneCode Lane = "code"
 	// LaneDocsDeps covers PRs that only touch docs, the changelog and
-	// dependency manifests/lockfiles. It skips the repro rule, applies
-	// tighter size caps, limits manifest edits to version bumps, and keeps
-	// the same denied-path, CI, reviewer and duplicate rules.
+	// dependency manifests/lockfiles. It applies tighter size caps and
+	// restricts manifest edits to version bumps, with shared readiness rules.
 	LaneDocsDeps Lane = "docs-deps"
 )
 
@@ -35,7 +33,7 @@ var (
 // scripts or source files under docs/ stay in the code lane. Markdown inside
 // Go source trees (cmd/, internal/) or any testdata/ directory is not
 // documentation either: tests can read it and go:embed can ship it, so a
-// change there needs the repro rule. Denied paths such as
+// change there uses the code lane. Denied paths such as
 // .github/release-notes-*.md are still rejected by the Denied Paths rule.
 func isDocsFile(file string) bool {
 	return strings.EqualFold(path.Ext(file), ".md") && !inGoSourceOrTestdata(file)

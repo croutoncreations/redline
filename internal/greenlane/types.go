@@ -135,6 +135,7 @@ type CheckSource struct {
 }
 
 type Config struct {
+	AllowedAuthors      []string                 `json:"allowed_authors"`
 	AllowedBaseBranches []string                 `json:"allowed_base_branches"`
 	CheckSources        map[string]CheckSource   `json:"check_sources"`
 	ProvenanceIssuers   map[string]ReceiptIssuer `json:"provenance_issuers"`

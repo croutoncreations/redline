@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/greenlane"
@@ -35,8 +34,6 @@ func run() error {
 		prNumberStr = "0"
 	}
 	configPath := os.Getenv("CONFIG_PATH")
-	reproPassStr := os.Getenv("REPRO_PASS")
-	reproMessage := os.Getenv("REPRO_MESSAGE")
 
 	if repoOwner == "" || repoName == "" || prNumberStr == "" {
 		return fmt.Errorf("missing required environment variables")
@@ -77,14 +74,7 @@ func run() error {
 		return fmt.Errorf("failed to fetch PR: %w", err)
 	}
 
-	// Fetch open PRs for duplicate detection
-	openPRs, err := client.duplicates(ctx, prNumber, os.Getenv("DUPLICATE_SNAPSHOT_PATH"))
-	if err != nil {
-		return fmt.Errorf("failed to fetch open PRs: %w", err)
-	}
-
-	// Re-fetch all relevant evidence after duplicate discovery. A changing
-	// snapshot must never become a candidate, even if both snapshots pass.
+	// Re-fetch evidence to detect changes during collection.
 	fresh, err := client.GetPR(ctx, prNumber)
 	if err != nil {
 		return fmt.Errorf("failed to recheck PR: %w", err)
@@ -103,33 +93,9 @@ func run() error {
 		pr.SnapshotMessage = "base differs from workflow snapshot"
 	}
 
-	// Parse repro result
-	var reproResult *greenlane.ReproResult
-	reproInconclusiveStr := os.Getenv("REPRO_INCONCLUSIVE")
-	reproTestIDsStr := os.Getenv("REPRO_TEST_IDS")
-
-	if reproPassStr != "" || reproInconclusiveStr != "" {
-		reproPass := reproPassStr == "true"
-		reproInconclusive := reproInconclusiveStr == "true"
-
-		var testIDs []string
-		if reproTestIDsStr != "" {
-			testIDs = strings.Split(reproTestIDsStr, ",")
-		}
-
-		reproResult = &greenlane.ReproResult{
-			HeadSHA:      os.Getenv("REPRO_HEAD_SHA"),
-			BaseSHA:      os.Getenv("REPRO_BASE_SHA"),
-			Pass:         reproPass,
-			Inconclusive: reproInconclusive,
-			Message:      reproMessage,
-			TestIDs:      testIDs,
-		}
-	}
-
 	// Run evaluation
 	evaluator := greenlane.NewEvaluator(config)
-	result := evaluator.Evaluate(pr, reproResult, openPRs)
+	result := evaluator.Evaluate(pr, nil, nil)
 
 	// Output results
 	jsonOut, err := json.MarshalIndent(result, "", "  ")
@@ -212,8 +178,8 @@ func writeSummary(path string, result greenlane.EvaluationResult) error {
 	if result.Verdict == greenlane.VerdictWouldMerge {
 		fmt.Fprintf(f, "---\n")
 		fmt.Fprintf(f, "✨ **This PR would be merged automatically if green-lane were live.**\n\n")
-		fmt.Fprintf(f, "Shadow mode: no action taken. The real gate App, cross-vendor reviewer Apps, ")
-		fmt.Fprintf(f, "and provenance infrastructure do not exist yet.\n")
+		fmt.Fprintf(f, "Shadow mode: no action taken. ")
+		fmt.Fprintf(f, "Automatic merging has not been enabled.\n")
 	} else {
 		fmt.Fprintf(f, "---\n")
 		fmt.Fprintf(f, "⏸️ **This PR would NOT be merged and would wait for manual review.**\n")

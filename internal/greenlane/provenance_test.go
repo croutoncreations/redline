@@ -57,24 +57,6 @@ func (f receiptFixture) sign(t *testing.T, key string, r ProvenanceReceipt) Sign
 	}
 	return SignedReceipt{KeyID: key, Payload: payload, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(f.keys[key], append([]byte(ReceiptDomain), payload...))), SourceAppID: f.config.ProvenanceIssuers[key].AppID}
 }
-func TestSignedProvenanceAndAdvisoryCandidates(t *testing.T) {
-	f := newReceiptFixture(t)
-	eval := NewEvaluator(f.config)
-	res := eval.Evaluate(f.pr, nil, nil)
-	if !res.AdvisoryCandidate || res.Verdict != VerdictWouldNotMerge {
-		t.Fatalf("missing provenance must stay blocked but observable: %+v", res)
-	}
-	f.pr.Provenance = []SignedReceipt{f.sign(t, "author", f.author), f.sign(t, "reviewer", f.review)}
-	res = eval.Evaluate(f.pr, nil, nil)
-	if !res.AdvisoryCandidate || res.Verdict != VerdictWouldMerge {
-		t.Fatalf("valid independent review should exercise positive shadow path: %+v", res)
-	}
-	f.pr.ReviewThreads = []ReviewThread{{ID: "unresolved", Outdated: true}}
-	res = eval.Evaluate(f.pr, nil, nil)
-	if res.AdvisoryCandidate || res.Verdict != VerdictWouldNotMerge {
-		t.Fatal("valid provenance bypassed feedback readiness")
-	}
-}
 func TestProvenanceRejectsUntrustedEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -138,16 +120,16 @@ func TestProvenanceRejectsUntrustedEvidence(t *testing.T) {
 		})
 	}
 }
-func TestMissingProvenanceCannotAuthorizeCodeOrLocks(t *testing.T) {
-	f := newReceiptFixture(t)
-	f.pr.Files = []PRFile{{Filename: "internal/fix.go", Additions: 2}}
-	r := NewEvaluator(f.config).Evaluate(f.pr, &ReproResult{Pass: true, HeadSHA: "older", BaseSHA: f.pr.BaseSHA}, nil)
-	if r.AdvisoryCandidate {
-		t.Fatal("stale repro admitted candidate")
+func TestSimplePolicyNeedsNoProvenanceReproOrTrailer(t *testing.T) {
+	p := passingPR(PRFile{Filename: "internal/fix.go", Additions: 2})
+	p.Body = "Small bug fix"
+	p.Reviews[0].State = "COMMENTED"
+	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
+	if r.Verdict != VerdictWouldMerge || !r.AdvisoryCandidate {
+		t.Fatalf("simple reviewed fix must qualify: %+v", r)
 	}
-	f.pr.Files = []PRFile{{Filename: "go.mod", Patch: goModBump}, {Filename: "go.sum", Patch: "@@ -1 +1 @@\n+example.org/x v1.0.0 h1:abc="}}
-	r = NewEvaluator(f.config).Evaluate(f.pr, nil, nil)
-	if r.AdvisoryCandidate {
+	p.Files = []PRFile{{Filename: "go.mod", Patch: goModBump}, {Filename: "go.sum", Patch: "@@ -1 +1 @@\n+example.org/x v1.0.0 h1:abc="}}
+	if r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil); r.AdvisoryCandidate {
 		t.Fatal("unverified lockfile admitted candidate")
 	}
 }
