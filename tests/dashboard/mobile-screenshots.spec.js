@@ -28,7 +28,9 @@ test('captures Pixel 9 Cursor usage card states', async ({ page }, testInfo) => 
   fs.mkdirSync(proofDir, { recursive: true });
   await card.screenshot({ path: path.join(proofDir, 'mobile-cursor-card.png') });
 
-  await page.clock.fastForward('04:00');
+  // Match the live UI's existing refresh grace: four minutes remains fresh;
+  // six minutes is beyond the expiry plus grace, as covered by mobile.spec.js.
+  await page.clock.fastForward('06:00');
   await expect(page.getByTestId('cursor-state')).toHaveText('Out of date');
   await card.screenshot({ path: path.join(proofDir, 'mobile-cursor-card-out-of-date.png') });
 });
