@@ -2,6 +2,7 @@ package greenlane
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"sort"
@@ -23,9 +24,17 @@ func ReviewSnapshot(pr PRInfo) string {
 		Outdated bool   `json:"outdated"`
 	}
 	state := struct {
-		Threads []thread `json:"threads"`
-		Reviews []review `json:"reviews"`
-	}{Threads: []thread{}, Reviews: []review{}}
+		Automated []AutomatedReviewComment `json:"automated"`
+		Threads   []thread                 `json:"threads"`
+		Reviews   []review                 `json:"reviews"`
+	}{Threads: []thread{}, Reviews: []review{}, Automated: []AutomatedReviewComment{}}
+	for _, c := range pr.AutomatedReviews {
+		if TrustedAutomatedSummary(c) {
+			c.Body = base64.StdEncoding.EncodeToString([]byte(c.Body))
+			state.Automated = append(state.Automated, c)
+		}
+	}
+	sort.Slice(state.Automated, func(i, j int) bool { return state.Automated[i].ID < state.Automated[j].ID })
 	for _, r := range pr.Reviews {
 		state.Reviews = append(state.Reviews, review{r.ID, r.User, r.State, r.CommitID})
 	}
