@@ -25,6 +25,8 @@ when it is unavailable:
 ```bash
 cp config.example.yaml redline.yaml
 go run ./cmd/redline --config redline.yaml serve
+# In another terminal, open an authenticated dashboard session:
+go run ./cmd/redline --config redline.yaml dashboard
 ```
 
 The copy creates `redline.yaml`; starting the service adds `redline.db` and `api-token`, and task
@@ -38,7 +40,8 @@ port with `--listen`, then use the same port in the matching `--api` value for C
 
 ```bash
 go run ./cmd/redline --config redline.yaml serve --listen 127.0.0.1:17436
-go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
+go run ./cmd/redline --config redline.yaml --api http://127.0.0.1:17436 dashboard
+go run ./cmd/redline --config redline.yaml --api http://127.0.0.1:17436 status --provider codex-main
 ```
 
 The status command reports live usage only when that provider's CLI is installed and signed in.

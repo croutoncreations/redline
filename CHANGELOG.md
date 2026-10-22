@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
+  `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
+
+- The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
+  session without printing its credential. Unauthenticated dashboard visitors receive sign-in
+  instructions; API authentication remains required.
+- Local Git-worktree execution profiles reject missing/non-Git directories and invalid base
+  branches before saving, so setup can show a correction instead of an unattended run failure.
+- The scheduler-off banner now opens instructions with the running service’s configuration path,
+  host-appropriate restart command, and the allowance implications of enabling dispatch.
 - Task creation and updates now reject jobs with no `prompt` or `prompt_file` instead of queuing
   work that can only fail when the harness starts. Hermes tasks that select an existing runtime
   job remain valid without a separate prompt.

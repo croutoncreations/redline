@@ -1305,9 +1305,8 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "editable-profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
-	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(`{
-		"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":"/repo"
-	}`))
+	repo := onboardingRepository(t)
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(fmt.Sprintf(`{"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":%q}`, repo)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1321,7 +1320,7 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != "/repo" {
+	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != repo {
 		t.Fatalf("status=%d profile=%#v", response.StatusCode, updated)
 	}
 	response, err = http.Get(server.URL + "/v1/profiles/editable-profile")

@@ -16,10 +16,19 @@ When running from source, substitute `go run ./cmd/redline` for `redline`.
 redline version                                           # release version, commit, build date
 redline --config redline.yaml serve                       # run the service
 redline --config redline.yaml serve --listen 127.0.0.1:17436
+redline dashboard                                         # open the authenticated local dashboard
+redline --config redline.yaml --api http://127.0.0.1:17436 dashboard
 redline mcp                                               # stdio MCP server (see mcp.md)
 redline health
 redline health --window 24h
 ```
+
+`redline dashboard` reuses the protected local API credential and opens your default browser.
+Use the same `--config` and `--api` values as the running service. It checks that the service is
+reachable before opening the browser, and never prints the credential or authenticated URL.
+The command requires a local desktop browser and an HTTP loopback API URL. For another device,
+use `redline pair` instead. Opening the bare dashboard URL in a browser shows these sign-in
+instructions; API requests continue to require authentication.
 
 ## Usage and decisions
 

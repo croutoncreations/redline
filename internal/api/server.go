@@ -337,6 +337,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		authorized, viaCookie := s.authorized(r)
 		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
+			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
+				s.serveDashboardSignIn(w, r)
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
 		}
@@ -474,7 +478,7 @@ func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
+	if r.Method != http.MethodGet || !isDashboardPath(r.URL.Path) {
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
@@ -1133,6 +1137,11 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if s.config.DemoScenario == "" {
+		if err := workspace.ValidateLocalRepository(ctx, profile); err != nil {
+			return err
+		}
+	}
 	if profile.HarnessType == "hermes" && profile.AgentContextID == "" {
 		return fmt.Errorf("agent_context_id is required for a Hermes execution profile")
 	}
