@@ -23,7 +23,8 @@ func ValidateLocalRepository(ctx context.Context, profile domain.ExecutionProfil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "git", "-C", profile.Repository, "rev-parse", "--is-inside-work-tree").Output()
+	probe := repositoryValidationCommand(ctx, profile.Repository, "rev-parse", "--is-inside-work-tree")
+	output, err := probe.Output()
 	if err != nil || strings.TrimSpace(string(output)) != "true" {
 		return fmt.Errorf("repository must be a Git working tree; choose the directory containing your checkout: %s", profile.Repository)
 	}
@@ -31,8 +32,21 @@ func ValidateLocalRepository(ctx context.Context, profile domain.ExecutionProfil
 	if ref == "" {
 		ref = "HEAD"
 	}
-	if err := exec.CommandContext(ctx, "git", "-C", profile.Repository, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}").Run(); err != nil {
+	if err := repositoryValidationCommand(ctx, profile.Repository, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}").Run(); err != nil {
 		return fmt.Errorf("base branch must be an existing commit in the repository; check %q or create the repository's first commit", ref)
 	}
 	return nil
+}
+
+func repositoryValidationCommand(ctx context.Context, repository string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repository}, args...)...)
+	// A service launched from a Git hook or agent can inherit repository-local
+	// overrides. These read-only probes must inspect the selected directory.
+	cmd.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(entry), "GIT_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	return cmd
 }

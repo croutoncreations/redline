@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +46,19 @@ func TestUnauthenticatedDashboardExplainsLocalSignInWithoutExposingSecrets(t *te
 		}
 		body, _ := io.ReadAll(res.Body)
 		res.Body.Close()
+		if tt.content == "text/html" {
+			page := string(body)
+			start := strings.Index(page, "<style>") + len("<style>")
+			end := strings.Index(page, "</style>")
+			if start < len("<style>") || end < start {
+				t.Fatal("sign-in stylesheet missing")
+			}
+			hash := sha256.Sum256([]byte(page[start:end]))
+			policy := res.Header.Get("Content-Security-Policy")
+			if !strings.Contains(policy, "'sha256-"+base64.StdEncoding.EncodeToString(hash[:])+"'") || strings.Contains(policy, "unsafe-inline") {
+				t.Fatal("CSP must allow only the exact sign-in stylesheet")
+			}
+		}
 		if res.StatusCode != http.StatusUnauthorized || !strings.Contains(res.Header.Get("Content-Type"), tt.content) || !strings.Contains(string(body), tt.want) || strings.Contains(string(body), cfg.APIToken) || strings.Contains(string(body), cfg.SourcePath) {
 			t.Fatalf("unexpected unauthenticated response: status=%d content-type=%s", res.StatusCode, res.Header.Get("Content-Type"))
 		}
@@ -127,4 +142,17 @@ func TestDashboardReportsLoadedServiceSetupMetadata(t *testing.T) {
 	if data.ConfigPath != cfg.SourcePath || data.ListenAddress != cfg.ListenAddress || data.HostOS == "" {
 		t.Fatalf("setup metadata = %#v", data)
 	}
+}
+
+func TestLocalProfileValidationDoesNotUseInheritedGitRepository(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	repo := onboardingRepository(t)
+	notGit := t.TempDir()
+	t.Setenv("GIT_DIR", filepath.Join(repo, ".git"))
+	t.Setenv("GIT_WORK_TREE", repo)
+	invalid := fmt.Sprintf(`{"id":"inherited","provider_account_id":"codex-main","harness_type":"codex-cli","workspace_provider":"git-worktree","repository":%q}`, notGit)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", invalid, http.StatusBadRequest)
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing.git"))
+	valid := fmt.Sprintf(`{"id":"selected","provider_account_id":"codex-main","harness_type":"codex-cli","workspace_provider":"git-worktree","repository":%q}`, repo)
+	requestStatus(t, http.MethodPost, server.URL+"/v1/profiles", valid, http.StatusCreated)
 }
