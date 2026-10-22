@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Task creation and updates now reject jobs with no `prompt` or `prompt_file` instead of queuing
+  work that can only fail when the harness starts. Hermes tasks that select an existing runtime
+  job remain valid without a separate prompt.
+
 ### Security
 
 - Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
