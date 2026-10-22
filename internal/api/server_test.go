@@ -1236,7 +1236,7 @@ func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
 
 func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
 	t.Parallel()
-	server, _ := newAPIServer(t, codexPayload)
+	server, db := newAPIServer(t, codexPayload)
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "codex-devx", "provider_account_id": "codex-main",
 		"harness_type": "codex-cli", "workspace_provider": "devx",
@@ -1293,6 +1293,10 @@ func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
 	if unchanged.RuntimeJobID != "existing-job" {
 		t.Fatalf("rejected PATCH changed task: %#v", unchanged)
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"unavailable","name":"Unavailable","execution_profile_id":"codex-devx","type":"one_off","prompt":"Do work"}`, http.StatusInternalServerError)
 }
 
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {

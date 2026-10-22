@@ -1225,7 +1225,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
 		return
 	}
 	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
@@ -1315,7 +1319,11 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
 		return
 	}
 	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
