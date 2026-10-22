@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `green-lane-shadow` check is a **report-only** evaluation that runs on every pull request to simulate auto-merge decisions without actually merging anything. It evaluates PRs against six rules and posts a clear "would merge" or "would not merge" verdict.
+The `green-lane-shadow` check is a **report-only** evaluation that runs on every pull request to simulate auto-merge decisions without actually merging anything. It evaluates PRs against eight rules and posts a clear "would merge" or "would not merge" verdict.
 
 **Important:** This is shadow mode. The check will NEVER:
 - Merge a PR
@@ -60,7 +60,7 @@ fails Size by decision.
 
 ## Rules Evaluated
 
-The green-lane-shadow check evaluates six rules:
+The green-lane-shadow check evaluates eight rules:
 
 ### 1. Size (lane caps)
 - `code` lane: ≤150 regular changed lines (additions + deletions), ≤300 lockfile/generated lines, ≤6 files
@@ -134,7 +134,8 @@ base vs head itself, so this does not weaken the rule further, but the live
 gate must not treat repro alone as sufficient.
 
 ### 3. CI Status
-All required checks must pass on the current head SHA:
+All seven required checks must pass on the current head SHA:
+- `actionlint`
 - `go`
 - `dashboard`
 - `linux-smoke`
@@ -142,25 +143,53 @@ All required checks must pass on the current head SHA:
 - `macos`
 - `macos-intel`
 
-### 4. Cross-Vendor Reviewer
-Requires an approved review from a different AI provider than the author.
+### 4. Review readiness and signed provenance
 
-**CodeRabbit Detection (Implemented):**
-CodeRabbit (`coderabbitai[bot]`) counts as a reviewer vendor when it posts a real review on the current head SHA:
-- **Explicit approve/request-changes:** `APPROVED` or `CHANGES_REQUESTED` reviews count
-- **Inline findings:** `COMMENTED` reviews with inline review comments (not just summary/walkthrough) count
-- **Non-blocking findings are fine:** Comments without REQUEST_CHANGES don't fail the gate
-- **Empty or summary-only comments don't count:** Must have actual diff review activity
+**Review Readiness** requires a complete, paginated GraphQL thread list with
+zero unresolved threads (including outdated ones), no effective change requests
+from any head, and a non-author approval on the current head. Reviews are
+ordered by submission time and ID, not API array order. Later COMMENTED reviews
+do not clear change requests; a later effective approval or GitHub dismissal
+can. A dismissed approval no longer counts. A reply, PR-body assertion, or
+outdated diff is not a disposition: the thread must actually be resolved.
 
-The check reports CodeRabbit status separately (approved/reviewed/requested changes + findings count) even though full cross-vendor provenance is not yet implemented.
+**Reviewer** independently verifies author/reviewer provenance. The default
+issuer allowlist is empty, so the repository remains blocked until trusted
+issuers are provisioned. Once configured, each receipt must have:
 
-**Status:** CodeRabbit detection is fully implemented. The required infrastructure for other reviewers does not exist yet:
-- Trusted dispatcher recording provenance (harness, provider/model, run ID, head SHA)
-- Read-only analyzer with structured prompts
-- Trusted publisher with separated approval credentials
-- Reviewer GitHub Apps (Claude and Codex)
+- a valid Ed25519 signature from an allowed, role-scoped issuer key;
+- the expected publishing GitHub App ID, read from GitHub's check-run API;
+- the same repository, PR number, head and base SHA as the evaluation;
+- actual provider/model, harness, run ID, schema version and issuance time;
+- for a reviewer, an approved outcome and the exact effective GitHub review
+  ID/login on the current head, matching the issuer's configured reviewer.
 
-Shadow mode always reports "needs human or real Apps" for the overall reviewer rule, but shows CodeRabbit evidence when available.
+The author and reviewer providers must differ. Unknown issuers/providers,
+conflicting author receipts, forged signatures, wrong publishing Apps, stale
+receipts, dismissed/superseded reviews and missing execution metadata block.
+CodeRabbit activity remains diagnostic: its service identity does not establish
+which model provider reviewed relative to the author.
+
+### PR State and snapshot binding
+
+An additional PR State rule requires an open, non-draft, mergeable PR on an
+allowed base branch (default `main`). Unknown mergeability blocks. The CLI
+collects the target twice around complete duplicate discovery and rejects
+changes to files, checks, receipts, reviews, threads or metadata between reads.
+It also checks workflow-expected head/base SHAs and binds code repro evidence to
+both SHAs. GitHub file counts and GraphQL total counts catch missing pages.
+
+CI checks must match their configured App and workflow IDs, current head SHA,
+and the actual Actions job's check-run URL, run ID, name, status and conclusion.
+A display name or hand-written details URL alone cannot satisfy CI.
+
+The trusted publisher re-fetches PR metadata and every review/thread page
+immediately before posting; a review-state fingerprint catches resolution or
+review changes even when `updated_at` does not change. A mismatch, closed/draft
+PR, unknown mergeability or evaluation older than five minutes clears the
+candidate bit and keeps the report blocked. This is snapshot validation for a
+report, not an atomic merge transaction: base freshness/merge-queue integration
+and the final live merge recheck remain required before enabling automation.
 
 ### 5. No Duplicate PRs
 Checks that no other open PR addresses the same root cause by:
@@ -204,7 +233,7 @@ OK: 85 changed lines in 3 files (45 lockfile/generated)
 OK: tests [TestPagination] failed on base, passed on head
 
 ✅ PASS: CI
-OK: all 6 required checks passed
+OK: all 7 required checks passed
 
 ❌ FAIL: Reviewer
 Approval found, but cross-vendor provenance not verified (shadow mode: needs human or real Apps)
@@ -236,9 +265,9 @@ Before switching from shadow to live merges, the following must be built and ver
 1. ✅ Evaluator logic (this implementation)
 2. ✅ Test repro job with Go test runner, fresh workspaces, `-count=1`, evidence preservation
 3. ✅ CodeRabbit head-SHA detection with inline findings check
-4. ❌ **Trusted dispatcher** recording provenance for author and reviewer runs (except CodeRabbit)
+4. ❌ **Trusted dispatcher deployment** recording observed author/reviewer execution metadata (receipt signer/verifier implemented; issuer services/keys/Apps not provisioned)
 5. ❌ **Read-only analyzer** with structured prompts (separate job, no secrets/tokens)
-6. ❌ **Trusted publisher** that validates analyzer output and submits reviews with reviewer App tokens
+6. ❌ **Review-publishing service deployment** using isolated reviewer App credentials (report publication checks are implemented; review posting/issuer provisioning is not)
 7. ❌ **Reviewer GitHub Apps** (Claude and Codex) with installation tokens
 8. ❌ **Gate GitHub App** for posting the `green-lane` check (pinned via `app_id`) and merging
 9. ❌ **Branch protection ruleset** requiring `green-lane` check pinned to gate App's `app_id`
@@ -246,7 +275,7 @@ Before switching from shadow to live merges, the following must be built and ver
 ### Policy & Process
 10. ❌ **Extended denied paths** in `.github/green-lane.yml` read from base branch
 11. ✅ **Lockfile/generated limits** enforced (code: 300 lines; docs/deps: 150; matching manifest/source required)
-12. ❌ **Live recheck before merge** (fully paginated duplicate query with file lists, fresh check/review state, SHA-pinned merge)
+12. ❌ **Live recheck before merge** (paginated duplicate file lists and report snapshot checks are implemented; atomic merge/base freshness and SHA-pinned merge are not)
 
 Lockfile eligibility is blocked until trusted resolver validation exists; syntax
 and URL screening alone do not satisfy that requirement.
@@ -260,10 +289,10 @@ and URL screening alone do not satisfy that requirement.
 
 1. **No actual merges:** This check is report-only. Manual merging is unchanged.
 
-2. **Reviewer provenance partially implemented:** 
-   - ✅ CodeRabbit detection works: The check distinguishes between real reviews (with findings or explicit approve/request-changes) and summary-only comments
-   - ❌ Other reviewer provenance not verified: Cannot distinguish between Anthropic and OpenAI reviews, so non-CodeRabbit approvals always report "needs human"
-   - The real gate will verify cross-vendor provenance from the trusted dispatcher for all reviewers
+2. **Trusted issuer deployment is incomplete:**
+   - Signature, App identity, provider independence and review-ID verification are implemented and tested.
+   - No real issuer keys, publishing Apps or author/reviewer dispatcher services are provisioned; default provenance remains blocked.
+   - CodeRabbit activity is diagnostic; its service name is not a model-provider receipt.
 
 3. **Test repro limitations:**
    - ✅ Fully implemented for Go test files (`*_test.go`)
@@ -271,7 +300,7 @@ and URL screening alone do not satisfy that requirement.
    - Code-lane PRs without new/changed tests or affected fixture readers are inconclusive
    - Changed test bodies are detected; directly changed tests and indirectly affected tests follow the required/optional rules described above
 
-4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
+4. **Duplicate detection heuristic:** The client fetches complete file lists and both rename paths for other open PRs. The root-cause/token-overlap heuristic remains approximate and concurrent repository changes still require a final live recheck.
 
 5. **No policy file yet:** Denied paths and limits are compiled into `internal/greenlane/config.go`, which is itself a denied path and is built from the base commit. A `.github/green-lane.yml` config file will be added before going live.
 
@@ -281,71 +310,81 @@ and URL screening alone do not satisfy that requirement.
 
 This shadow pilot design (rev 3) was reviewed and approved by the repo owner (Jon Fox, GitHub `jfox85`) on Oct 8, 2026. See `green-lane-plan-rev3.md` for the full design, risk analysis, and rollout plan.
 
+## Advisory candidates
+
+`advisory_candidate` is true only when every non-provenance rule passes. It is
+separate from `verdict`, has an explicit non-authorization message in JSON and
+the check summary, and never changes the check conclusion. Missing provenance
+still produces `would_not_merge`/neutral. An unverified lockfile, unresolved
+thread, stale repro, missing required CI, duplicate or denied path cannot
+become an advisory candidate. A fully valid, independently signed example can
+produce `would_merge` in shadow; there is still no merge step or required gate.
+
+## Reconciliation and manual reruns
+
+GitHub exposes thread resolved/unresolved webhooks but does not list them as
+Actions triggers. See the [webhook documentation](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review_thread)
+and [Actions event reference](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows).
+`green-lane-reconcile.yml` therefore refreshes open PR reports hourly at minute
+23, or by manual dispatch. It builds once from trusted default-branch code,
+uses only read scopes plus checks:write, disables caches, and never executes PR
+code or consumes untrusted repro artifacts. There are no merge credentials.
+The sweep collects duplicate file lists once into a trusted job-local snapshot
+(repository-bound, maximum five minutes old) rather than repeating an O(N²)
+scan for every PR. Both dispatch paths reject non-default-branch workflow refs.
+API failures post a neutral unavailable report; incomplete data never admits a
+candidate. More than 25 open PRs requires explicit sharding rather than silently
+truncating the sweep. Standard Actions schedule delay/capacity limits apply.
+
+The lightweight sweep deliberately supplies no repro evidence. Code-lane PRs
+therefore remain blocked until a full current-head/base repro run; docs PRs can
+refresh all their readiness rules without executing PR code. To rerun the full
+pipeline, dispatch **Green Lane Shadow** with the `pr_number` input from the
+trusted main branch. Dispatch repro permits same-repository PRs only, preserving
+the default-branch cache boundary; fork PR repro still runs in PR events.
+
+## Provisioning provenance issuers
+
+The verifier and `cmd/green-lane-provenance` signer are implemented; no real
+issuer service, keys, GitHub App or live gate is created by this change. Add
+issuer policy in trusted base configuration only after the real author/reviewer
+services are ready. Each key ID maps to base64 Ed25519 public key, one role,
+provider, publishing App ID, and (for reviewer keys) the expected reviewer login.
+An empty allowlist is intentional. Removing an issuer revokes its receipts.
+
+Run the signer only inside the isolated trusted dispatcher/publisher after it
+has observed a completed author/reviewer execution. Feed structured metadata on
+stdin, pass `-key-id`, and supply the 64-byte Ed25519 private key as base64 in
+`GREEN_LANE_SIGNING_KEY`. The signer never prints the private key. Do not infer
+providers from PR bodies, GitHub users or harness names, or sign PR-controlled
+metadata without validating it against the actual execution record. Never put
+the signing key or review/merge credentials in a job that executes PR code.
+
+The signed payload is transported as base64 (`payload`) so whitespace changes
+in the outer JSON cannot break its signature. Signature bytes are base64 and
+cover `redline-green-lane-provenance-v1\n` plus the decoded payload bytes.
+Publish an array of signed receipts in a completed successful check named
+`green-lane-provenance`, using each issuer's configured publishing App. The
+collector overwrites source App identity using the API; a receipt cannot claim
+its own source App. Retain the observed execution record outside PR-controlled
+files with the run ID for audit. Receipts bind both head and base, so either
+changing requires fresh receipts. Ingestion is limited to 100 receipts/64 KiB
+per check. CI identities and issuer policy must be configured per repository.
+
 ## Next Steps
 
-1. Merge these shadow-only tooling fixes after code review, then verify the new
-   plan → run → analyze pipeline in real Actions runs. This PR's shadow scorer
-   is still built from the old base branch; its result does not exercise the
-   new analyzer.
-2. Implement review readiness and trusted provenance as described below.
-3. Collect manually adjudicated candidate and rejection examples for at least
-   one week after the positive eligibility path is observable.
-4. Build the protected merge gate and complete the pre-enable checklist before
-   considering live merges. Keep lockfile changes manual until resolver
-   validation is implemented.
+1. Review and merge this shadow-only readiness follow-up; its own check still
+   uses old trusted base tooling until merge. CI tests the new verifier,
+   collector and publisher boundaries directly.
+2. Provision the trusted author/reviewer services, role-scoped keys and
+   publishing Apps; then validate real independent review receipts. The
+   cryptographic positive path is tested locally, but no production issuer
+   has been configured or claimed to exist.
+3. Collect manually adjudicated candidates and rejection cases for at least a
+   week after real receipts can exercise the positive path. Record false
+   positives/negatives and rerun stability.
+4. Build a separate protected live gate with App-bound branch protections,
+   isolated merge credentials, base freshness/merge queue and a final
+   SHA-pinned merge. Keep lockfiles manual until resolver validation exists.
 
-### Follow-up: review readiness and trusted provenance
-
-The current Reviewer rule intentionally always fails. A successful review
-workflow, CodeRabbit findings, or a human approval alone does not verify the
-cross-vendor requirement. Merely waiting a week cannot exercise `would_merge`.
-Implement this as a focused follow-up, rather than adding a partial merge gate
-to the repro repair:
-
-1. **Review readiness:** fetch every review thread with GraphQL pagination.
-   Block unresolved threads, including outdated threads: an outdated diff or a
-   reply does not prove the finding was addressed. Use the latest effective
-   review per reviewer; outstanding change requests remain blocking across
-   pushes until cleared by a later effective review or a trusted dismissal.
-   A disposition must be recorded by a trusted reviewer/owner and the thread
-   resolved; PR-body claims are not evidence. Reevaluate on thread
-   resolve/reopen, new review, dismissal, and head changes. If the thread event
-   is not available to the workflow, use a trusted webhook dispatcher or
-   reconciliation job; a review-comment event alone is insufficient.
-2. **Trusted provenance:** have the trusted dispatcher store author and
-   reviewer receipts outside PR-controlled files. Each receipt identifies the
-   repository/PR, head SHA, harness, provider/model and run ID. A reviewer
-   receipt also binds to the reviewed content and structured outcome. Validate
-   the publishing App/installation and the receipt's trusted issuer; a login,
-   workflow success or comment text is insufficient. Unknown author/provider,
-   missing receipt or same-provider review remains ineligible. CodeRabbit's
-   App identity establishes its service identity, not automatically an
-   independent model provider relative to the author.
-3. **Useful shadow reporting:** report review readiness and provenance
-   separately. Add a clearly advisory candidate field only when all implemented
-   non-provenance requirements pass, with explicit unimplemented blockers.
-   Never turn that field into a successful authorization check. The final
-   verdict remains `would_not_merge` until every mandatory requirement passes;
-   the existing `would_merge` verdict must not be weakened.
-4. **Consistent snapshot:** require an open, non-draft, mergeable PR against an
-   allowed base branch. Bind CI (including expected check/workflow identities),
-   review receipts, repro, file lists and policy to the same head/base SHAs.
-   The present workflow's early head comparison is not sufficient if the CLI
-   fetches a newer PR afterward. Reject mismatches inside the evaluator and
-   re-fetch state before publication and immediately before a SHA-pinned merge.
-   Require base freshness or merge-queue validation for integration safety.
-5. **Acceptance tests:** unresolved/outdated threads; dismissed and superseded
-   reviews; changes requested on an older head; same-provider and unknown
-   provenance; forged receipts; pushes between reads; changed base; draft or
-   conflicted PRs; missing/pending CI; and missing API pages all stay blocked.
-   Include a real independently reviewed positive candidate and demonstrate
-   its advisory status separately from merge authorization.
-
-Once these checks have been validated in shadow, implement the trusted publisher
-and gate App with separate credentials and App-bound branch protections. Never
-execute PR code in the job that holds review-publishing or merge credentials.
-There is no human override in the shadow check; manual merging is unchanged.
-
----
-
-**Questions?** See the full plan in `green-lane-plan-rev3.md` or reach out to the repo owner.
+There is no human override in the shadow check. Manual merging is unchanged.

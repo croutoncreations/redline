@@ -5,6 +5,19 @@ package greenlane
 // rules that score it.
 func DefaultConfig() Config {
 	return Config{
+		AllowedBaseBranches: []string{"main"},
+		CheckSources: map[string]CheckSource{
+			"actionlint":    {AppID: 15368, WorkflowID: 321038296},
+			"go":            {AppID: 15368, WorkflowID: 321038296},
+			"dashboard":     {AppID: 15368, WorkflowID: 321038296},
+			"linux-smoke":   {AppID: 15368, WorkflowID: 321038296},
+			"windows-smoke": {AppID: 15368, WorkflowID: 321038296},
+			"macos":         {AppID: 15368, WorkflowID: 321038296},
+			"macos-intel":   {AppID: 15368, WorkflowID: 321038296},
+		},
+		// Issuers must be provisioned by the trusted author/reviewer services.
+		// An empty allowlist deliberately prevents provenance from passing.
+		ProvenanceIssuers:  map[string]ReceiptIssuer{},
 		MaxChangedLines:    150,
 		MaxLockfileChanges: 300,
 		MaxFiles:           6,
@@ -14,6 +27,7 @@ func DefaultConfig() Config {
 			MaxFiles:           5,
 		},
 		RequiredChecks: []string{
+			"actionlint",
 			"go",
 			"dashboard",
 			"linux-smoke",
@@ -48,6 +62,7 @@ func DefaultDeniedPaths() []string {
 		".github/green-lane/**",
 		".github/prompts/**",
 		"cmd/green-lane-check/**",
+		"cmd/green-lane-provenance/**",
 		"cmd/green-lane-repro-analyze/**",
 		"internal/greenlane/**",
 

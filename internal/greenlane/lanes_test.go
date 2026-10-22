@@ -23,9 +23,9 @@ const packageJSONBump = `@@ -6,6 +6,6 @@
 // passingPR fills in the rules the lanes share (CI, root cause) so a test
 // can isolate the lane-specific rules.
 func passingPR(files ...PRFile) PRInfo {
-	pr := PRInfo{Number: 1, HeadSHA: "abc", Body: "Root-Cause: docs/cli#pair-examples", Files: files}
+	pr := PRInfo{Repository: "owner/repo", Number: 1, HeadSHA: "abc", BaseSHA: "base", State: "open", BaseBranch: "main", Mergeable: true, SnapshotConsistent: true, ReviewThreadsComplete: true, Author: "author", Reviews: []Review{{ID: 1, User: "reviewer", State: "APPROVED", CommitID: "abc"}}, Body: "Root-Cause: docs/cli#pair-examples", Files: files}
 	for _, name := range DefaultConfig().RequiredChecks {
-		pr.CheckRuns = append(pr.CheckRuns, CheckRun{Name: name, Status: "completed", Conclusion: "success"})
+		pr.CheckRuns = append(pr.CheckRuns, CheckRun{Name: name, Status: "completed", Conclusion: "success", HeadSHA: pr.HeadSHA, AppID: 15368, WorkflowID: 321038296})
 	}
 	return pr
 }
