@@ -80,6 +80,10 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 	if err != nil {
 		return pr, err
 	}
+	automated, err := c.automatedReviews(ctx, n)
+	if err != nil {
+		return pr, err
+	}
 	threads, err := c.threads(ctx, n, before.Head.SHA, before.Base.SHA)
 	if err != nil {
 		return pr, err
@@ -89,8 +93,8 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 		return pr, err
 	}
 	pr = greenlane.PRInfo{
-		CheckEvidence: checkEvidence,
-		Repository:    c.owner + "/" + c.repo, Number: before.Number, Title: before.Title, Body: before.Body,
+		CheckEvidence: checkEvidence, AutomatedReviews: automated,
+		Repository: c.owner + "/" + c.repo, Number: before.Number, Title: before.Title, Body: before.Body,
 		State: before.State, UpdatedAt: before.UpdatedAt, HeadSHA: before.Head.SHA, BaseSHA: before.Base.SHA,
 		BaseBranch: before.Base.Ref, Draft: before.Draft, Mergeable: before.Mergeable != nil && *before.Mergeable,
 		Author: before.User.Login, Files: files, CheckRuns: checks, Reviews: reviews, ReviewComments: comments,
@@ -422,6 +426,8 @@ func (c *GitHubClient) GetOpenPRs(ctx context.Context, exclude ...int) ([]greenl
 // cannot invalidate the evidence snapshot. Sort API lists before comparing.
 func sameEvidence(a, b greenlane.PRInfo) bool {
 	normalize := func(p greenlane.PRInfo) greenlane.PRInfo {
+		p.AutomatedReviews = append([]greenlane.AutomatedReviewComment{}, p.AutomatedReviews...)
+		sort.Slice(p.AutomatedReviews, func(i, j int) bool { return p.AutomatedReviews[i].ID < p.AutomatedReviews[j].ID })
 		p.Files = append([]greenlane.PRFile(nil), p.Files...)
 		sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Filename < p.Files[j].Filename })
 		p.Reviews = append([]greenlane.Review(nil), p.Reviews...)
@@ -490,4 +496,108 @@ func (c *GitHubClient) reviewComments(ctx context.Context, n int) ([]greenlane.R
 		}
 	}
 	return nil, fmt.Errorf("review-comment pagination did not finish")
+}
+
+// Fetch every page: losing an updated or deleted summary must not leave a
+// stale completion authoritative. Untrusted comments are never evidence.
+func (c *GitHubClient) automatedReviews(ctx context.Context, n int) ([]greenlane.AutomatedReviewComment, error) {
+	all := []greenlane.AutomatedReviewComment{}
+	seen := map[int64]bool{}
+	nodeIDs := []string{}
+	for page := 1; page <= 100; page++ {
+		raw, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=100&page=%d", c.apiBase, c.owner, c.repo, n, page))
+		if err != nil {
+			return nil, err
+		}
+		var rows []struct {
+			ID        int64  `json:"id"`
+			NodeID    string `json:"node_id"`
+			Body      string `json:"body"`
+			UpdatedAt string `json:"updated_at"`
+			User      struct {
+				ID    int64  `json:"id"`
+				Login string `json:"login"`
+				Type  string `json:"type"`
+			} `json:"user"`
+			App *struct {
+				ID int64 `json:"id"`
+			} `json:"performed_via_github_app"`
+		}
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if r.ID <= 0 || seen[r.ID] {
+				return nil, fmt.Errorf("invalid or repeated issue-comment page")
+			}
+			seen[r.ID] = true
+			if r.App == nil {
+				continue
+			}
+			item := greenlane.AutomatedReviewComment{ID: r.ID, Body: r.Body, UpdatedAt: r.UpdatedAt, UserID: r.User.ID, User: r.User.Login, UserType: r.User.Type, AppID: r.App.ID}
+			if greenlane.TrustedAutomatedSummary(item) {
+				if r.NodeID == "" {
+					return nil, fmt.Errorf("missing summary node ID")
+				}
+				nodeIDs = append(nodeIDs, r.NodeID)
+				all = append(all, item)
+			}
+		}
+		if len(rows) < 100 {
+			return c.summaryEditors(ctx, all, nodeIDs)
+		}
+	}
+	return nil, fmt.Errorf("issue-comment pagination did not finish")
+}
+
+// Join REST App attribution to GraphQL editor identity over the same raw body.
+func (c *GitHubClient) summaryEditors(ctx context.Context, all []greenlane.AutomatedReviewComment, ids []string) ([]greenlane.AutomatedReviewComment, error) {
+	const query = `query($ids:[ID!]!){nodes(ids:$ids){... on IssueComment{id databaseId body updatedAt lastEditedAt editor{__typename login ... on Bot{databaseId}}}}}`
+	for start := 0; start < len(ids); start += 100 {
+		end := start + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		payload, _ := json.Marshal(map[string]any{"query": query, "variables": map[string]any{"ids": ids[start:end]}})
+		data, err := c.request(ctx, "POST", c.apiBase+"/graphql", payload)
+		if err != nil {
+			return nil, err
+		}
+		var response struct {
+			Errors []json.RawMessage `json:"errors"`
+			Data   struct {
+				Nodes []*struct {
+					ID           string `json:"id"`
+					DatabaseID   int64  `json:"databaseId"`
+					Body         string `json:"body"`
+					UpdatedAt    string `json:"updatedAt"`
+					LastEditedAt string `json:"lastEditedAt"`
+					Editor       *struct {
+						Type  string `json:"__typename"`
+						Login string `json:"login"`
+						ID    int64  `json:"databaseId"`
+					} `json:"editor"`
+				} `json:"nodes"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &response); err != nil {
+			return nil, err
+		}
+		if len(response.Errors) > 0 || len(response.Data.Nodes) != end-start {
+			return nil, fmt.Errorf("summary editor query incomplete")
+		}
+		for i, node := range response.Data.Nodes {
+			item := &all[start+i]
+			if node == nil || node.ID != ids[start+i] || node.DatabaseID != item.ID || node.Body != item.Body || node.UpdatedAt != item.UpdatedAt {
+				return nil, fmt.Errorf("summary changed during editor verification")
+			}
+			item.LastEditedAt = node.LastEditedAt
+			if node.Editor != nil {
+				item.EditorID = node.Editor.ID
+				item.EditorUser = node.Editor.Login
+				item.EditorType = node.Editor.Type
+			}
+		}
+	}
+	return all, nil
 }

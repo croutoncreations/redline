@@ -100,6 +100,7 @@ type ReviewThread struct {
 }
 
 type PRInfo struct {
+	AutomatedReviews      []AutomatedReviewComment
 	CheckEvidence         []CheckEvidence
 	Repository            string
 	State                 string

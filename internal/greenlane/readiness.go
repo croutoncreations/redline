@@ -75,7 +75,8 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		}
 	}
 	// A submitted COMMENTED review counts, including an automated review
-	// with no findings. Issue comments and successful workflow jobs do not.
+	// with no findings. Trusted exact-head completion summaries also count;
+	// ordinary issue comments and successful workflow jobs do not.
 	latest := map[string]Review{}
 	for _, review := range pr.Reviews {
 		if review.User == "" || review.ID <= 0 || (review.State != "APPROVED" && review.State != "COMMENTED" && review.State != "CHANGES_REQUESTED" && review.State != "DISMISSED") {
@@ -87,7 +88,7 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 			latest[user] = review
 		}
 	}
-	reviewed := false
+	reviewed := completedAutomatedReview(pr)
 	for user, review := range latest {
 		if user != strings.ToLower(pr.Author) && review.CommitID == pr.HeadSHA && (review.State == "APPROVED" || review.State == "COMMENTED") {
 			reviewed = true
