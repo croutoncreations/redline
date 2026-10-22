@@ -29,7 +29,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
-redline --config redline.yaml token rotate --yes          # replace the API token (see mobile.md)
+redline --config redline.yaml token rotate --yes          # without --yes only warns; with it, replaces the token, signs out paired browsers (see mobile.md)
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
@@ -108,7 +108,7 @@ redline resume --provider codex-main
 redline run list
 redline run show <run-id>
 redline run events <run-id>
-redline run events <run-id> --limit 500
+redline run events <run-id> --limit 500   # --limit defaults to 100
 redline run logs <run-id>
 redline run logs <run-id> --stream stderr --tail-bytes 8192
 redline run logs <run-id> --stream prepare_stderr
