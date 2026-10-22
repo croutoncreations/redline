@@ -1251,6 +1251,30 @@ func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
 		"execution_profile_id": "codex-devx", "type": "one_off",
 	})
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid", `{"prompt":""}`, http.StatusBadRequest)
+	for _, input := range []string{`"prompt":" \t"`, `"prompt_file":" \n"`, `"runtime_job_id":"job"`} {
+		requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"blank","name":"Blank","execution_profile_id":"codex-devx","type":"one_off",`+input+`}`, http.StatusBadRequest)
+		requestStatus(t, http.MethodGet, server.URL+"/v1/tasks/blank", ``, http.StatusNotFound)
+	}
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes", "runtime": "hermes", "transport": "gateway", "url": "https://hermes.example",
+	})
+	agentContext := postJSON[domain.AgentContext](t, server.URL+"/v1/agent-contexts", map[string]any{
+		"id": "hermes", "runtime_connection_id": connection.ID, "session_mode": "isolated",
+	})
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "hermes", "provider_account_id": "codex-main", "agent_context_id": agentContext.ID,
+		"harness_type": "hermes", "workspace_provider": "runtime-owned", "repository": "/srv/redline",
+	})
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"blank-job","name":"Blank job","execution_profile_id":"hermes","type":"one_off","runtime_job_id":" \t"}`, http.StatusBadRequest)
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "job", "name": "Job", "execution_profile_id": "hermes", "type": "one_off", "runtime_job_id": "existing-job",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/job", `{"runtime_job_id":" \n"}`, http.StatusBadRequest)
+	var unchanged domain.Task
+	getJSON(t, server.URL+"/v1/tasks/job", &unchanged)
+	if unchanged.RuntimeJobID != "existing-job" {
+		t.Fatalf("rejected PATCH changed task: %#v", unchanged)
+	}
 }
 
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {

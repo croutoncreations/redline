@@ -1335,8 +1335,8 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateTaskInput(task domain.Task, profile domain.ExecutionProfile) error {
-	if task.Prompt != "" || task.PromptFile != "" ||
-		(profile.HarnessType == "hermes" && task.RuntimeJobID != "") {
+	if strings.TrimSpace(task.Prompt) != "" || strings.TrimSpace(task.PromptFile) != "" ||
+		(profile.HarnessType == "hermes" && strings.TrimSpace(task.RuntimeJobID) != "") {
 		return nil
 	}
 	return fmt.Errorf("prompt or prompt_file is required")
