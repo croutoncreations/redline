@@ -183,7 +183,7 @@ func writeSummary(path string, result greenlane.EvaluationResult) error {
 		fmt.Fprintf(f, "---\n")
 		fmt.Fprintf(f, "✨ **This PR would be merged automatically if green-lane were live.**\n\n")
 		fmt.Fprintf(f, "Shadow mode: no action taken. ")
-		fmt.Fprintf(f, "Automatic merging has not been enabled.\n")
+		fmt.Fprintf(f, "The separate live worker, when enabled, re-evaluates independently.\n")
 	} else {
 		fmt.Fprintf(f, "---\n")
 		fmt.Fprintf(f, "⏸️ **This PR would NOT be merged and would wait for manual review.**\n")

@@ -369,6 +369,7 @@ func TestDocsDepsLockfileContents(t *testing.T) {
 func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	for _, file := range []string{
+		"scripts/brew-lint.sh", "scripts/check-homebrew-versions.sh", "scripts/update-homebrew-cask.sh",
 		"cmd/green-lane-check/main.go",
 		"cmd/green-lane-repro-analyze/analyze.go",
 		"internal/greenlane/rules.go",

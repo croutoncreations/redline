@@ -3,9 +3,11 @@
 The green lane is repository automation in GitHub Actions. It does not change
 Redline's application, daemon, scheduler, dashboard or agent execution.
 
-**Current mode: shadow only.** It reports `would_merge` or `would_not_merge`.
-No workflow merges or approves PRs. Do not require `green-lane-shadow` in branch
-protection: it is an informational report, not merge authorization.
+**Shadow reports remain informational.** They report `would_merge` or
+`would_not_merge` and perform no merges or approvals. A separate, opt-in
+[limited live pilot](#limited-redline-live-pilot) independently evaluates and
+merges eligible PRs. Do not require `green-lane-shadow` in branch protection;
+a shadow report is not merge authorization.
 
 ## Eligibility
 
@@ -38,8 +40,8 @@ A PR qualifies only when all these checks pass:
    outdated threads. No effective `CHANGES_REQUESTED` review remains, including
    on older commits. A later comment does not clear requested changes; the
    reviewer must approve or the request must be dismissed.
-5. **Required CI green.** All seven Redline CI jobs must complete successfully:
-   `actionlint`, `go`, `dashboard`, `linux-smoke`, `windows-smoke`, `macos`, and
+5. **Required CI green.** All eight Redline CI jobs must complete successfully:
+   `actionlint`, `go`, `homebrew`, `dashboard`, `linux-smoke`, `windows-smoke`, `macos`, and
    `macos-intel`. The collector verifies the actual GitHub Actions App, workflow,
    run and job identities on the current head, rather than trusting check names.
 6. **Small change.** Code: at most 150 regular changed lines and six files.
@@ -200,3 +202,5 @@ reviewed change to the pilot. No new credential or branch administration service
 is introduced.
 
 The merged Homebrew CI check is also required for live/shadow eligibility and main protection. Release CI selection accepts only `push` or `workflow_dispatch` runs of the CI workflow on main for the exact tagged commit; PR-event runs remain excluded.
+
+Release-check and Homebrew publishing helpers (`scripts/brew-lint.sh`, `scripts/check-homebrew-versions.sh`, `scripts/update-homebrew-cask.sh`) are critical paths and excluded from automated merging.
