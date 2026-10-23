@@ -31,9 +31,18 @@ module.exports = async function live({github, context, core, run=execFileSync,
       p.allowsForcePushes === false && p.allowsDeletions === false && p.requiresConversationResolution === true &&
       checks.every(name => p.requiredStatusChecks?.some(c => c.context === name && c.app?.databaseId === 15368));
   };
+  const trustedWriters = async () => {
+    const users = await github.paginate(github.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
+    // PR authorship alone does not establish control of a same-repository head.
+    // This single-owner pilot stops if another principal can replace that head.
+    return users.some(u => u.login === 'jfox85' && u.permissions?.push === true) && users.every(u =>
+      u.login === 'jfox85' || (u.permissions?.push === false && u.permissions?.maintain === false && u.permissions?.admin === false));
+  };
   if (process.env.LIVE_PILOT_ENABLED !== 'true' || !await enabled()) return finish('Pilot is disabled; no merge attempted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
+
+  if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
 
   const prs = await github.paginate(github.rest.pulls.list,{...repo,state:'open',base:'main',sort:'created',direction:'asc',per_page:100});
   for (const listed of prs) {
@@ -54,7 +63,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
     const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
       encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
       env:{...process.env,REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
-        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',
+        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
         DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
     }));
     report.evaluations.push(result);
@@ -70,6 +79,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
         fresh.updated_at !== result.pr_updated_at || fresh.state !== 'open' || fresh.draft || held(fresh) ||
         fresh.mergeable !== true || fresh.head.repo?.full_name !== 'croutoncreations/redline') continue;
     if (!await protectedMain()) throw new Error('Main protection changed during evaluation');
+    if (!await trustedWriters()) throw new Error('Repository writer permissions changed during evaluation');
     if (await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
     // Re-read live workflow state; disabling it also stops an in-flight run here.
     if (!await enabled()) return finish('Kill switch was turned off during evaluation');

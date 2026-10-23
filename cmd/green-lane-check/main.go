@@ -50,6 +50,10 @@ func run() error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	if os.Getenv("REQUIRE_AUTOMATED_REVIEW") == "true" {
+		config.RequireAutomatedReview = true
+	}
+
 	// Fetch PR information
 	ctx := context.Background()
 	client := &GitHubClient{

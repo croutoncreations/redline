@@ -187,3 +187,14 @@ workflow dispatch is supported. The worker has `actions:write` only for this
 post-merge dispatch. If dispatch fails, its artifact still records the confirmed
 merge, and the worker fails without retrying any merge. The dispatcher runs CI
 on current main, which may have advanced further if another actor merged.
+
+For live merges, the evaluator additionally requires an authenticated current-head
+Codex/CodeRabbit completion summary; generic human COMMENTED/APPROVED reviews do
+not substitute for this. The worker also enumerates all repository collaborators
+at start and immediately before merging. Only `jfox85` may have push, maintain or
+admin permission during this single-owner pilot. Additional read-only users are
+fine; additional writers or unavailable permission evidence stop the pilot. This
+binds same-repository branch control to the allowed principal rather than merely
+trusting the original PR creator. Expanding the writer set requires a separately
+reviewed change to the pilot. No new credential or branch administration service
+is introduced.
