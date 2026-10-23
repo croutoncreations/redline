@@ -39,6 +39,8 @@ Jobs are called *tasks* in the CLI and API; the dashboard and this page say *job
 - **Safe by default.** Automatic dispatch is off until you turn it on. A configured reserve (a
   slice of your allowance Redline will never spend) is always held back for your interactive
   work, and stale telemetry means *wait*, never *run*.
+- **Use it before you lose it.** Firesale accelerates queued work near a reset, and opt-in
+  redemption uses expiring banked resets before they lapse.
 - **Works with your agents.** Codex CLI, Claude Code, Pi, Hermes, or any command. Redline does
   not replace your harness; it decides when to launch it.
 - **Isolated by design.** Jobs run in Git worktrees or DevX sessions, and completed runs keep
@@ -250,6 +252,7 @@ See [docs/green-lane-shadow.md](docs/green-lane-shadow.md) for:
 | [Execution profiles and tasks](docs/profiles-and-tasks.md) | [HTTP API](docs/api.md) |
 | [Scheduling and the allowance model](docs/scheduling.md) | [Architecture](docs/architecture.md) |
 | [Runs, logs, and notifications](docs/runs-and-notifications.md) | [Hermes integration](docs/hermes.md) |
+| [Public reset-signal preview](docs/reset-signal-preview.md) | [Scheduling and allowance model](docs/scheduling.md) |
 | [MCP and agent access](docs/mcp.md) | [Native macOS app](docs/native-macos.md) |
 | [Mobile dashboard](docs/mobile.md) · [launchd](docs/launchd.md) | [Outcome metrics](docs/launch-metrics.md) |
 | [Troubleshooting](docs/troubleshooting.md) | [Changelog](CHANGELOG.md) · [Releasing](docs/releasing.md) |

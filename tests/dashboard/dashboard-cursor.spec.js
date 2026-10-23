@@ -37,6 +37,7 @@ test.describe('Desktop Cursor usage card', () => {
     // Cursor is never a job target: profile accounts come from providers only.
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Profiles' }).click();
+    await expect(page.locator('#profile-provider option').first()).toBeAttached();
     const accounts = await page.locator('#profile-provider option').evaluateAll(options => options.map(option => option.value));
     expect(accounts.length).toBeGreaterThan(0);
     expect(accounts.some(value => /cursor|grok/i.test(value))).toBe(false);

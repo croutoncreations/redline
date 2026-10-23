@@ -37,6 +37,7 @@ import (
 	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/croutoncreations/redline/internal/pairing"
 	"github.com/croutoncreations/redline/internal/relay"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/version"
@@ -80,11 +81,18 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|candidates|pause|resume|pair|relay|account|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|relay|account|version>")
 		return 1
+	}
+	// The public reset preview is standalone and unauthenticated. Handle it
+	// before constructing the service client so it never reads a local token.
+	if remaining[0] == "reset" && (len(remaining) < 2 || remaining[1] != "redeem") {
+		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "reset":
+		return runResetRedeem(client, remaining[2:], stdin, stdout, stderr, now)
 	case "version":
 		fmt.Fprintln(stdout, version.String())
 		return 0
@@ -161,7 +169,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
-	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, candidates, pause, resume,")
+	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
 	fmt.Fprintln(output, "          pair, relay, account, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
@@ -170,6 +178,35 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
+}
+
+func runResetPreview(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	if len(args) == 0 || args[0] != "preview" {
+		fmt.Fprintln(stderr, "usage: redline reset preview [--timeout 5s]")
+		return 1
+	}
+	flags := flag.NewFlagSet("reset preview", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	timeout := flags.Duration("timeout", 5*time.Second, "total timeout for each bounded source request")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 30*time.Second {
+		fmt.Fprintln(stderr, "invalid reset preview arguments; timeout must be between 0 and 30s")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+time.Second)
+	defer cancel()
+	fetcher := resetsignal.Fetcher{
+		Timeout:   *timeout,
+		MaxBody:   256 << 10,
+		UserAgent: "redline-reset-preview/" + version.Version + " (+https://github.com/croutoncreations/redline)",
+		Now:       now,
+	}
+	sources := resetsignal.FetchAll(ctx, fetcher, nil)
+	report := resetsignal.BuildReport(now(), sources)
+	writeJSON(stdout, report)
+	return 0
 }
 
 func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int {
@@ -591,6 +628,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	relayFinished := false
 	serverFinished := false
 	exitCode := 0
+
 	select {
 	case err := <-serverDone:
 		serverFinished = true
@@ -743,6 +781,8 @@ func runStatus(client apiclient.Client, args []string, stdout, stderr io.Writer)
 		} else if snapshot.ShortWindowNotStarted {
 			// Full: the provider starts the clock on first use.
 			short = "100% remaining (starts on first use)"
+		} else if snapshot.ShortWindowUnavailable {
+			short = "unavailable (dispatch held until readable)"
 		}
 		weekly := percent(snapshot.Weekly.Remaining) + " weekly remaining"
 		if snapshot.WeeklyUnavailable {
@@ -1370,6 +1410,8 @@ func writeDecisionText(w io.Writer, response decisionResponse) {
 	}
 	if s.Short == nil && s.ShortWindowNotStarted {
 		rows = append(rows, [2]string{"5-hour window", "100% remaining (starts on first use)"})
+	} else if s.Short == nil && s.ShortWindowUnavailable {
+		rows = append(rows, [2]string{"5-hour window", "unavailable (dispatch held until readable)"})
 	} else if s.Short == nil {
 		rows = append(rows, [2]string{"5-hour window", "unrestricted"})
 	} else {

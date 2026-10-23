@@ -19,12 +19,12 @@ func (d *DB) ListSnapshots(ctx context.Context, account, provider string, limit 
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, provider, observed_at, short_remaining,
 short_resets_at, weekly_remaining, weekly_resets_at, source, confidence,
 banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-banked_resets_expiries, plan, source_stale, weekly_unavailable
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
 FROM (
     SELECT id, provider_account_id, provider, observed_at, short_remaining, short_resets_at,
            weekly_remaining, weekly_resets_at, source, confidence,
            banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-           banked_resets_expiries, plan, source_stale, weekly_unavailable
+           banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
     FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?
     ORDER BY observed_at DESC, id DESC LIMIT ?
 ) ORDER BY observed_at ASC, id ASC`, account, provider, limit)
@@ -41,18 +41,18 @@ FROM (
 		var shortRemaining sql.NullFloat64
 		var shortReset sql.NullString
 		var bankedResets sql.NullInt64
-		var bankedResetsExpireAt, bankedResetsExpiries sql.NullString
+		var bankedResetsExpireAt, bankedResetsExpiries, bankedResetDetails sql.NullString
 		if err := rows.Scan(
 			&id, &snapshot.Account,
 			&snapshot.Provider, &observedAt, &shortRemaining, &shortReset,
 			&snapshot.Weekly.Remaining, &weeklyReset, &snapshot.Source, &snapshot.Confidence,
 			&bankedResets, &bankedResetsExpireAt, &snapshot.ShortWindowUnavailable,
 			&snapshot.ShortWindowNotStarted, &bankedResetsExpiries, &snapshot.Plan, &snapshot.SourceStale,
-			&snapshot.WeeklyUnavailable,
+			&snapshot.WeeklyUnavailable, &bankedResetDetails,
 		); err != nil {
 			return nil, fmt.Errorf("scan usage snapshot: %w", err)
 		}
-		if err := scanBankedResets(&snapshot, bankedResets, bankedResetsExpireAt); err != nil {
+		if err := scanBankedResets(&snapshot, bankedResets, bankedResetsExpireAt, bankedResetDetails); err != nil {
 			return nil, err
 		}
 		if err := scanBankedResetExpiries(&snapshot, bankedResetsExpiries); err != nil {

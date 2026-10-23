@@ -47,8 +47,13 @@ func TestShadowWorkflowExportsEveryJobOutputItReads(t *testing.T) {
 	for _, match := range needsOutputRef.FindAllStringSubmatch(string(raw), -1) {
 		refs[match[1]+"."+match[2]] = true
 	}
+	// The current trusted shadow evaluator is a single job with no repro
+	// dependencies. If cross-job outputs return, validate every reference.
 	if len(refs) == 0 {
-		t.Fatal("expected the evaluate job to read repro outputs; found no needs.*.outputs.* references")
+		if _, hasRepro := workflow.Jobs["repro"]; hasRepro {
+			t.Fatal("repro job exists but the evaluator reads none of its outputs")
+		}
+		return
 	}
 	keys := make([]string, 0, len(refs))
 	for ref := range refs {

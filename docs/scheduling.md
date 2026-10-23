@@ -16,12 +16,85 @@ redline decision --provider codex-main
 redline decision --provider claude-main --json
 ```
 
+## Redeeming banked resets
+
+Start with a dry run for each provider, then perform the first real redemption manually:
+
+```bash
+redline reset redeem --provider claude-main --dry-run
+redline reset redeem --provider codex-main --dry-run
+redline reset redeem --provider claude-main
+```
+
+Dry runs use nonexistent IDs, not a real reset: Claude expects `ineligible` / `unknown_grant`,
+Codex expects `no_credit`, reported as `dry_run_ok`. Real redemption spends Claude's claimable
+next grant or Codex's soonest-expiring itemized credit. A missing Codex detail list means to wait
+for collection and try again shortly. Claude eligibility and cooldowns are respected. Multiple
+configured accounts of the same provider type (including profile/card accounts) are refused because the local CLI login is ambiguous. Manual redemption, dry runs, and automatic redemption only support the default provider login: accounts with `claude_config_dir` or a non-default `openusage_card` are refused. For those accounts, use the provider CLI; reminder notifications still work and the automatic reset horizon is not shortened.
+
+Redline reads credentials without refreshing or rewriting them. If Claude's login needs refreshing,
+run `claude`, then retry or redeem in Claude Code with `/limit-reset`. Codex requires a ChatGPT
+OAuth login, not an API key. Each operation persists an idempotency key before contacting the
+provider, reuses pending keys on retry, allows only one redemption per provider, and shares usage
+reads' rate-limit lockout. Inspect recent attempts through the API's `banked-resets/redemptions` route.
+
+These are **undocumented provider endpoints** and may change. Codex has a known enforcement bug:
+a redemption can be acknowledged while limits still enforce the old window, and single-window
+accounts may fail. Redline refreshes real provider telemetry after success and reports `verified`
+only when weekly remaining increases or the weekly reset moves later. `verified: false` includes a
+warning; do not rely on new capacity until usage confirms it. Provider telemetry is still stored,
+never replaced with an invented refill.
+
+After dry runs and a manual first redemption, opt in per provider:
+
+```yaml
+banked_resets:
+  on_expiry: redeem       # default: notify; off disables the expiry action
+  redeem_lead: 1h
+  remind_before: [24h]
+```
+
+The usage monitor attempts the next eligible reset no earlier than `expires_at - redeem_lead`,
+even with the scheduler disabled. `on_expiry: redeem` requires `usage_monitor.enabled: true` and
+native reset telemetry (not `usage_source: openusage`); other configurations fail to load.
+Claude grants must be claimable, explicitly usable, out of cooldown, and not require hitting a
+limit. Codex needs itemized credits with resets left. Demo mode and multiple accounts remain
+blocked. **Provider pause is not respected for redemption**: pause controls job dispatch, not
+whether an expiring reset is saved from being lost. Notifications may be disabled without
+preventing redemption; reminders still require notifications.
+
+In redeem mode, usable banked resets that clear the weekly window and will be applied before
+the real weekly reset shorten the effective scheduling horizon to their redeem time. This can
+trigger firesale earlier. `off` and `notify` never shorten it; model-specific pools keep their
+own reset. A redeemed grant stays guarded until telemetry observed after the redemption shows a
+lower, positive remaining count; then its next use can be selected. Codex credits are single-use.
+A provider acknowledgement alone never invents capacity: only refreshed, verified usage demonstrates
+a refill.
+
+Automatic attempts are limited to one per provider per five minutes. Transient errors retry on
+later successful monitor cycles before expiry, reusing pending request keys and respecting provider
+cooldowns and 429 lockouts. `nothing_to_reset` waits at least 30 minutes before trying again;
+`redeemed` and `gone` stop retries for that reset. Retry state survives daemon restarts. If a failed
+reset expires unused, the next successful monitor cycle sends one `reset.redeem_failed` notice,
+even if the credit has disappeared from telemetry. Redeem mode suppresses `redeem_now` only for
+resets automatic redemption will attempt before they expire; those redemptions send their own
+outcome events. Any other reset (demo mode, multiple accounts of the provider type, or a Claude
+grant that is unclaimable, unusable, requires a limit, or stays in cooldown past expiry) still
+gets `redeem_now`.
+
+If a request's response is lost, automatic retries adopt that pending request and reuse its key
+before considering another reset, even if it disappears from telemetry. At expiry an unresolved
+request is reported as **outcome unknown**, not expired unused; check the provider. If no expiry can
+be recovered, retries stop with that same unknown outcome 24 hours after the first attempt.
+
+MCP deliberately has no redemption tool: spending resets from an agent is out of scope.
+
 ## Dispatch tiers and priority
 
 Each task has a `dispatch_tier` that controls when it becomes eligible:
 
 ```yaml
-dispatch_tier: behind # behind, well_behind, or expiring
+dispatch_tier: behind # behind, well_behind, expiring, or firesale
 priority: 60
 ```
 
@@ -31,8 +104,9 @@ five-hour window exists. `priority` only orders tasks whose tiers are already un
 intervals, repository-change checks, and enable/disable state remain independent eligibility gates.
 Existing databases migrate tasks to `behind`, preserving the prior default behavior.
 
-In the dashboard these tiers appear as **Behind pace**, **Well behind pace**, and **Capacity
-likely to expire**.
+Tiers unlock in order: `behind` (1), `well_behind` (2), `expiring` (3), `firesale` (4).
+In the dashboard they appear as **Standard surplus**, **High surplus**, **Near expiry**, and
+**Firesale (lots expiring)**.
 
 ## Policies
 
@@ -47,6 +121,49 @@ policy stores an override in SQLite; selecting **Default** returns to the provid
 when present, or to `active_policy` otherwise.
 
 See `config.example.yaml` for the bundled `late`, `standard`, and `early` policy definitions.
+
+## Effective horizon and firesale
+
+Decisions expose `effective_reset_at` and `effective_reset_source`. The effective horizon is the
+earliest future reset event that clears the weekly allowance, no later than its real reset.
+The service always supplies the real `weekly` event, plus a `banked_reset` event for the next
+auto-redeemable reset that clears the weekly allowance before that boundary. This requires
+`banked_resets.on_expiry: redeem` and automatic redemption to be able to run: usage monitoring
+enabled, a single account of that provider type, and not demo mode. The event is timed at the
+earliest permitted attempt, respecting redeem lead, provider throttling, retry deadlines,
+cooldowns, and provider lockouts. Predicted global resets are not implemented yet.
+Slots, overflow, pace thresholds, and projections use this horizon; pace gap still measures time
+remaining as a fraction of a seven-day week. Model-specific weekly pools retain their own resets.
+
+A policy's optional `firesale_trigger` (0–1) upgrades an admitted decision to `firesale: true`
+and unlocks the highest tier when `max(pace_gap, overflow) >= firesale_trigger`. Overflow is used
+only when a five-hour window exists. The bundled early policy uses `0.35`, standard uses `0.45`,
+and late omits it (disabled). Firesale never changes WAIT or UNKNOWN into RUN, bypasses the
+rolling reserve, or relaxes pause, enable, repository-change, or exhausted-pool gates.
+
+```yaml
+policies:
+  standard:
+    firesale_trigger: 0.45 # alongside the normal policy fields
+providers:
+  claude-main:
+    firesale_max_concurrent_runs: 3
+```
+
+During a provider-level firesale, a task's optional `firesale_min_interval` replaces its normal
+`min_interval`. It must be positive when set; it may be shorter or longer than the normal interval.
+Unset (zero) uses the normal interval. The provider's optional `firesale_max_concurrent_runs`
+raises its effective cap only if larger; allowance-pool, runtime-connection, and agent-context
+limits still apply. Finished runs promptly wake the scheduler while the provider's latest recorded
+automatic usage decision is firesale. A model pool can unlock the firesale tier independently,
+but cannot activate these provider-level cooldown or concurrency overrides.
+
+Automatic dispatch emits `firesale.started` and `firesale.ended` once per provider state transition
+when notifications are enabled and the event is listed in `notifications.events` (neither is in
+the default list, so existing hooks do not receive new event types after upgrading). Events
+include string-valued `pace_gap`, `overflow`, `effective_reset_at`, and `unlocked_tier` data.
+Manual evaluations do not emit transitions; decisions without a provider usage evaluation do not
+change the recorded state.
 
 ## Automatic dispatch
 
@@ -210,3 +327,4 @@ See [the metrics methodology](launch-metrics.md) for definitions and caveats.
 - [Profiles and tasks](profiles-and-tasks.md)
 - [Runs, logs, and notifications](runs-and-notifications.md)
 - [Architecture](architecture.md)
+- [Firesale and banked-reset design](design/firesale-and-banked-resets.md)

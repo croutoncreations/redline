@@ -2,6 +2,8 @@ package nativeusage_test
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,8 +88,8 @@ func TestClaudeNativeKeepsTheSnapshotWhenAUsedWindowHasNoReset(t *testing.T) {
 // unavailable -- never a full bar.
 func TestClaudeNativeRequiresAnExplicitZeroToCallAWindowNotStarted(t *testing.T) {
 	for name, fiveHour := range map[string]string{
-		"empty object":     `{}`,
-		"null utilization": `{"utilization":null,"resets_at":null}`,
+		"missing utilization": `{"resets_at":null}`,
+		"null utilization":    `{"utilization":null,"resets_at":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -169,4 +171,36 @@ func (s staticCredentials) Access(context.Context, string) (nativeusage.Credenti
 
 func (s staticCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (nativeusage.Credential, error) {
 	return s.Access(ctx, provider)
+}
+
+func TestClaudeNativeAcceptsOnlyAnExplicitlyInactiveShortWindow(t *testing.T) {
+	for _, tt := range []struct {
+		name, window string
+		wantError    bool
+	}{
+		{"inactive", `{"utilization":0,"resets_at":null}`, false},
+		{"active missing reset", `{"utilization":20,"resets_at":null}`, false},
+		{"missing reset field", `{"utilization":0}`, true},
+		{"empty reset", `{"utilization":0,"resets_at":""}`, true},
+		{"missing utilization", `{"resets_at":null}`, false},
+		{"empty window", `{}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"five_hour":%s,"seven_day":{"utilization":32,"resets_at":"2026-10-23T17:00:00Z"}}`, tt.window)
+			}))
+			defer server.Close()
+			client := nativeusage.Client{HTTPClient: server.Client(), Credentials: staticCredentials{token: "test-token"}, ClaudeUsageURL: server.URL, Now: time.Now}
+			got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("snapshot=%#v err=%v", got, err)
+			}
+			if !tt.wantError && tt.name != "inactive" && !got.ShortWindowUnavailable {
+				t.Fatal("unknown active session must hold dispatch", got)
+			}
+			if !tt.wantError && (got.Short != nil || len(got.Allowances) != 1 || math.Abs(got.Weekly.Remaining-.68) > 1e-9) {
+				t.Fatalf("inactive session must not invent a reset or discard the weekly allowance: %#v", got)
+			}
+		})
+	}
 }

@@ -244,6 +244,16 @@ func TestHelpIsSuccessfulAndIncludesProjectLinks(t *testing.T) {
 	}
 }
 
+func TestResetPreviewRejectsInvalidArgumentsWithoutFetching(t *testing.T) {
+	for _, args := range [][]string{{"reset"}, {"reset", "preview", "--timeout=0"}, {"reset", "preview", "unexpected"}} {
+		var stdout, stderr bytes.Buffer
+		exit := cli.Run(args, &stdout, &stderr, time.Now)
+		if exit != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "reset preview") {
+			t.Fatalf("args=%v exit=%d stdout=%s stderr=%s", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestVersionCommandAndFlagPrintBuildVersion(t *testing.T) {
 	for _, args := range [][]string{{"version"}, {"--version"}} {
 		var stdout, stderr bytes.Buffer
@@ -575,6 +585,18 @@ func TestStatusShowsAnUnstartedFiveHourWindowAsFull(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--api", server.URL, "status", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
 	if exit != 0 || !strings.Contains(stdout.String(), "5-hour 100% remaining (starts on first use)") {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestStatusShowsUnavailableFiveHourWindowAsHeld(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"provider":"claude","observed_at":"2026-09-28T00:27:54Z","short_window_unavailable":true,"weekly":{"remaining":0.87,"resets_at":"2026-10-02T17:00:00Z"},"source":"native"}`)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "status", "--provider", "claude-main"}, &stdout, &stderr, time.Now)
+	if exit != 0 || !strings.Contains(stdout.String(), "5-hour unavailable (dispatch held until readable)") || strings.Contains(stdout.String(), "unrestricted") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }

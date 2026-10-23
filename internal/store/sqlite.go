@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -584,6 +587,115 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 		}
 		version = 31
 	}
+	// Versions 32–34 rather than 28–30: unmerged mobile, Grok, and multi-account
+	// branches stamped 28–31 for unrelated migrations. Like v26, inspect the schema
+	// so either history (including our earlier builds) can be opened safely.
+	// Keep the bodies schema-guarded independently of the version stamp.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_reset_details", "TEXT"); err != nil {
+		return err
+	}
+	if version < 32 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (32)`); err != nil {
+			return fmt.Errorf("record banked reset details migration: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_notices (
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(provider_account_id, expires_at, kind)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_banked_reset_notices_deadline
+ON banked_reset_notices(provider_account_id, expires_at, kind);`); err != nil {
+		return fmt.Errorf("create banked reset notices: %w", err)
+	}
+	if version < 33 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (33)`); err != nil {
+			return fmt.Errorf("record banked reset notices migration: %w", err)
+		}
+	}
+	if err := addColumnIfMissing(ctx, tx, "tasks", "firesale_min_interval_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	var tasksSQL string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'`).Scan(&tasksSQL); err != nil {
+		return fmt.Errorf("inspect task tier constraint: %w", err)
+	}
+	// Inspect the real tier's CHECK, not a leftover temporary column's constraint.
+	tierCheck := regexp.MustCompile(`(?i)CHECK\s*\(\s*"?dispatch_tier"?\s+IN\s*\([^)]*\)`).FindString(tasksSQL)
+	if !strings.Contains(tierCheck, "'firesale'") {
+		if err := addColumnIfMissing(ctx, tx, "tasks", "dispatch_tier_v30", "TEXT NOT NULL DEFAULT 'behind' CHECK(dispatch_tier_v30 IN ('behind', 'well_behind', 'expiring', 'firesale'))"); err != nil {
+			return err
+		}
+		// foreign_keys deliberately stays ON: ALTER ADD/DROP/RENAME COLUMN
+		// preserves tasks and incoming references, unlike a table copy.
+		if _, err := tx.ExecContext(ctx, `
+UPDATE tasks SET dispatch_tier_v30 = dispatch_tier;
+ALTER TABLE tasks DROP COLUMN dispatch_tier;
+ALTER TABLE tasks RENAME COLUMN dispatch_tier_v30 TO dispatch_tier;
+`); err != nil {
+			return fmt.Errorf("migrate firesale task policy: %w", err)
+		}
+	}
+	if version < 34 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (34)`); err != nil {
+			return fmt.Errorf("record firesale task policy migration: %w", err)
+		}
+	}
+	// As with 32–34, guard the actual schema independently of the stamp so
+	// databases from colliding branch histories can safely reopen.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE,
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual', 'automatic', 'dry_run')),
+    state TEXT NOT NULL CHECK(state IN ('pending', 'done')),
+    outcome TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_banked_reset_redemptions_provider
+ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
+		return fmt.Errorf("create banked reset redemptions: %w", err)
+	}
+	if version < 35 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (35)`); err != nil {
+			return fmt.Errorf("record banked reset redemptions migration: %w", err)
+		}
+	}
+	// Keep retry deadlines independently of telemetry: expired credits can
+	// disappear from the next successful usage read.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS automatic_banked_reset_redemptions (
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_attempt_at TEXT NOT NULL,
+    retry_at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    PRIMARY KEY(provider_account_id, reset_id)
+)`); err != nil {
+		return fmt.Errorf("create automatic banked reset redemptions: %w", err)
+	}
+	if version < 36 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (36)`); err != nil {
+			return fmt.Errorf("record automatic banked reset redemptions migration: %w", err)
+		}
+	}
+	// As with 32–36, inspect the schema even when a colliding branch has
+	// already stamped this version. NULL preserves legacy consumption guards.
+	if err := addColumnIfMissing(ctx, tx, "banked_reset_redemptions", "resets_left_before", "INTEGER"); err != nil {
+		return err
+	}
+	if version < 37 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (37)`); err != nil {
+			return fmt.Errorf("record redemption observed count migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -917,7 +1029,6 @@ func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definiti
 	return nil
 }
 
-// bankedResetColumns converts a snapshot's optional reset report for storage.
 func migrateAccountUsageV30(ctx context.Context, tx *sql.Tx) error {
 	hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
 	if err != nil {
@@ -993,6 +1104,7 @@ WHERE provider_account_id = '' AND provider = ?`, accounts[0], strings.ToLower(p
 	return adopted, nil
 }
 
+// bankedResetColumns converts a snapshot's optional reset report for storage.
 func bankedResetColumns(s decision.UsageSnapshot) (count, expires, expiries any) {
 	if s.BankedResets != nil {
 		count = *s.BankedResets
@@ -1027,7 +1139,13 @@ func scanBankedResetExpiries(s *decision.UsageSnapshot, expiries sql.NullString)
 
 // scanBankedResets restores the optional reset report, keeping zero distinct
 // from absent.
-func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires sql.NullString) error {
+func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires, details sql.NullString) error {
+	if details.Valid {
+		if err := json.Unmarshal([]byte(details.String), &s.BankedResetDetails); err != nil {
+			s.BankedResetDetails = nil
+			log.Printf("decode stored banked reset details: %v", err)
+		}
+	}
 	if count.Valid {
 		value := int(count.Int64)
 		s.BankedResets = &value
@@ -1058,12 +1176,20 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	}
 	defer tx.Rollback()
 	bankedResets, bankedResetsExpireAt, bankedResetsExpiries := bankedResetColumns(s)
+	var bankedResetDetails any
+	if len(s.BankedResetDetails) > 0 {
+		encoded, err := json.Marshal(s.BankedResetDetails)
+		if err != nil {
+			return fmt.Errorf("encode banked reset details: %w", err)
+		}
+		bankedResetDetails = string(encoded)
+	}
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
 banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-banked_resets_expiries, plan, source_stale, weekly_unavailable
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -1085,6 +1211,7 @@ banked_resets_expiries, plan, source_stale, weekly_unavailable
 		s.Plan,
 		s.SourceStale,
 		s.WeeklyUnavailable,
+		bankedResetDetails,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -1139,7 +1266,7 @@ func (d *DB) latestSnapshot(ctx context.Context, account, provider, source strin
 	query := `SELECT id, provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
 banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-banked_resets_expiries, plan, source_stale, weekly_unavailable
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
 FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 	args := []any{account, provider}
 	if source != "" {
@@ -1154,7 +1281,7 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 	var shortReset sql.NullString
 	var raw []byte
 	var bankedResets sql.NullInt64
-	var bankedResetsExpireAt, bankedResetsExpiries sql.NullString
+	var bankedResetsExpireAt, bankedResetsExpiries, bankedResetDetails sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Account,
@@ -1175,6 +1302,7 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 		&s.Plan,
 		&s.SourceStale,
 		&s.WeeklyUnavailable,
+		&bankedResetDetails,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider account %q", ErrNotFound, account)
@@ -1199,7 +1327,7 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
 	dropContradictoryNotStarted(&s)
-	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt); err != nil {
+	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt, bankedResetDetails); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
 	if err := scanBankedResetExpiries(&s, bankedResetsExpiries); err != nil {

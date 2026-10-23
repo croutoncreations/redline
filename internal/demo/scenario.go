@@ -225,6 +225,7 @@ func knownScenario(name string) bool {
 
 func fixtureConfig(root, scenario, provider string) config.Config {
 	pace := 0.08
+	firesale := 0.45
 	label := scenario
 	if isDecisionScenario(scenario) {
 		pace = 0.30
@@ -250,7 +251,7 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 		UsageMonitor: config.UsageMonitor{Enabled: false},
 		Providers:    providers,
 		Policies: map[string]config.Policy{
-			"standard": standardPolicy(scenario, &pace),
+			"standard": standardPolicy(scenario, &pace, &firesale),
 		},
 	}
 }
@@ -258,8 +259,8 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 // standardPolicy is the demo's policy. The multi-account scenario adds the
 // 72h/50% and 24h/20% weekly floors so the account pages draw floor ticks;
 // every other scenario keeps the policy its screenshots were taken with.
-func standardPolicy(scenario string, pace *float64) config.Policy {
-	policy := config.Policy{TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: pace}
+func standardPolicy(scenario string, pace, firesale *float64) config.Policy {
+	policy := config.Policy{TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: pace, FiresaleTrigger: firesale}
 	if scenario == "multi-account" {
 		policy.PaceThresholds = []config.PaceThreshold{{TimeRemaining: "72h", MinWeeklyRemaining: .5}, {TimeRemaining: "24h", MinWeeklyRemaining: .2}}
 	}
@@ -422,7 +423,7 @@ func seedDecisionScenario(ctx context.Context, env *Environment, scenario, provi
 	result := decision.Evaluate(decision.Input{
 		Snapshot: env.Snapshots[provider], WindowWeeklyCost: env.Config.Providers[provider].WindowWeeklyCost,
 		WindowWeeklyCostSource: "demo", CalibrationConfidence: "synthetic",
-		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, PaceGapTrigger: policy.PaceGapTrigger,
+		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
 		Now: now, MaxSnapshotAge: 15 * time.Minute,
 	})
 	result.Policy = "standard"

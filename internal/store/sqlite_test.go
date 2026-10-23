@@ -862,6 +862,7 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		BankedResets:           &resets,
 		BankedResetsExpireAt:   &resetsExpire,
 		BankedResetsExpiries:   []time.Time{resetsExpire, resetsExpire.Add(24 * time.Hour)},
+		BankedResetDetails:     []decision.BankedReset{{ID: "credit", ResetsLeft: 1, ExpiresAt: &resetsExpire}},
 		Plan:                   "Pro",
 		SourceStale:            true,
 	}

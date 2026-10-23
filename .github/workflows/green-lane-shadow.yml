@@ -1,8 +1,14 @@
 name: Green Lane Shadow
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to evaluate with trusted main tooling
+        required: true
+        type: string
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, closed]
   pull_request_review:
     types: [submitted, dismissed]
   workflow_run:
@@ -13,557 +19,102 @@ permissions:
   contents: read
   pull-requests: read
   checks: write
+  actions: read
 
+# Report only: no merge/approval permission, PR checkout or PR code execution.
+# Never require this shadow check in branch protection.
 jobs:
-  repro:
+  invalidate-closed:
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' || 
-      github.event_name == 'pull_request_review' || 
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
     permissions:
       contents: read
-    
-    outputs:
-      has_tests: ${{ steps.tests.outputs.has_tests }}
-      no_tests_reason: ${{ steps.tests.outputs.no_tests_reason }}
-      pass: ${{ steps.analyze.outputs.pass }}
-      inconclusive: ${{ steps.analyze.outputs.inconclusive }}
-      message: ${{ steps.analyze.outputs.message }}
-      test_ids: ${{ steps.analyze.outputs.test_ids }}
-    
+      checks: write
     steps:
-      - name: Get PR info
-        id: pr_info
-        uses: actions/github-script@v7
+      # Trusted close-event code only: no checkout, build or PR execution.
+      - uses: actions/github-script@v7
         with:
           script: |
-            let pr_data;
-            
-            if (context.eventName === 'workflow_run') {
-              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.payload.workflow_run.head_sha
-              });
-              
-              if (prs.data.length === 0) {
-                core.setFailed('No PR found for workflow run');
-                return;
-              }
-              
-              pr_data = prs.data[0];
-            } else {
-              pr_data = context.payload.pull_request;
-            }
-            
-            core.setOutput('head_sha', pr_data.head.sha);
-            core.setOutput('base_sha', pr_data.base.sha);
-            core.setOutput('number', pr_data.number);
-            return pr_data.number;
-      
+            const pr = context.payload.pull_request;
+            await github.rest.checks.create({...context.repo,
+              name: 'green-lane-shadow', head_sha: pr.head.sha,
+              status: 'completed', conclusion: 'neutral',
+              output: {title: 'Green Lane Shadow: closed',
+                summary: 'PR closed. Not an advisory candidate and never merge authorization.',
+                text: JSON.stringify({pr_number: pr.number, head_sha: pr.head.sha,
+                  verdict: 'would_not_merge', advisory_candidate: false})}
+            });
+
+
+  evaluate:
+    if: >-
+      (github.event_name != 'pull_request_target' || github.event.action != 'closed') &&
+      (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr_info.outputs.head_sha }}
-          fetch-depth: 0
+          # Review events may name a base predating the evaluator/publisher.
+          # Use the repository's trusted default branch, never PR head/merge code.
+          ref: ${{ github.event_name == 'pull_request_review' && format('refs/heads/{0}', github.event.repository.default_branch) || github.sha }}
           persist-credentials: false
-      
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: false
-      
-      - name: Identify changed test files and IDs
-        id: tests
-        run: |
-          set -euo pipefail
-          
-          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
-          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
-          
-          # Find test files this PR changed, measured from the merge-base like
-          # the added-test extraction below, so a test file main changed after
-          # the branch point is not overlaid onto base.
-          git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep '_test\.go$' > changed_tests.txt || true
-          
-          if [ ! -s changed_tests.txt ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "no_tests_reason=No test files changed in PR" >> "$GITHUB_OUTPUT"
-            echo "No test files changed"
-            exit 0
-          fi
-          
-          # Only test functions the PR *adds* are repro candidates. Taking every
-          # test in a changed file would require unchanged tests, which pass
-          # on base, to fail there too. Read them from added diff lines.
-          # Diff from the merge-base (three dots) so tests main removed after
-          # the branch point are not mistaken for tests this PR added, and pin
-          # the prefixes and path quoting the extractor parses.
-          if ! git -c core.quotePath=false diff --no-color --no-ext-diff --unified=0 \
-              --src-prefix=a/ --dst-prefix=b/ "$BASE_SHA...$HEAD_SHA" -- '*_test.go' \
-              | go run ./cmd/green-lane-repro-analyze added-tests > added_tests.tsv; then
-            # The extractor runs from the PR head; a branch that predates it
-            # cannot name its added tests, so the rule is inconclusive.
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "no_tests_reason=Could not extract the tests this PR adds (the PR head may predate the added-tests extractor)" >> "$GITHUB_OUTPUT"
-            echo "::warning::Could not extract added tests (the PR head may predate cmd/green-lane-repro-analyze added-tests)"
-            exit 0
-          fi
-          
-          # Every line must be "path_test.go<TAB>TestName". Anything else (for
-          # example an older analyzer that ignored the subcommand and printed
-          # its own key=value output) is not a list of tests.
-          if grep -qvE $'^[^\t]+_test\\.go\tTest[A-Za-z0-9_]*$' added_tests.tsv; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "no_tests_reason=Added-test extraction produced unexpected output" >> "$GITHUB_OUTPUT"
-            echo "::warning::Added-test extraction produced unexpected output; treating the repro rule as inconclusive"
-            exit 0
-          fi
-          
-          if [ ! -s added_tests.tsv ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "no_tests_reason=Test files changed but no test functions were added" >> "$GITHUB_OUTPUT"
-            echo "No test functions added in changed test files"
-            exit 0
-          fi
-          
-          echo "has_tests=true" >> "$GITHUB_OUTPUT"
-          
-          # Get unique test IDs and the packages that declare them
-          cut -f2 added_tests.tsv | sort -u > test_ids_unique.txt
-          TEST_IDS=$(tr '\n' '|' < test_ids_unique.txt | sed 's/|$//')
-          echo "test_pattern=^($TEST_IDS)$" >> "$GITHUB_OUTPUT"
-          
-          # Get unique package directories (relative paths need a ./ prefix
-          # so go test treats them as directories, not import paths)
-          cut -f1 added_tests.tsv | xargs -I {} dirname {} | sed 's#^#./#' | sort -u > test_dirs.txt
-          TEST_DIRS=$(tr '\n' ' ' < test_dirs.txt)
-          # shellcheck disable=SC2086
-          echo "test_dirs=$TEST_DIRS" >> "$GITHUB_OUTPUT"
-          
-          echo "Test pattern: $TEST_IDS"
-          echo "Test directories: $TEST_DIRS"
-      
-      - name: Run tests on base (with PR test files)
-        id: base
-        if: steps.tests.outputs.has_tests == 'true'
-        run: |
-          set -euo pipefail
-          
-          BASE_SHA="${{ steps.pr_info.outputs.base_sha }}"
-          
-          # Create fresh workspace for base
-          mkdir -p /tmp/base-workspace
-          cd /tmp/base-workspace
-          
-          # Checkout base commit
-          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-          git checkout --quiet "$BASE_SHA"
-          
-          # Overlay PR's test files onto base
-          cd "$GITHUB_WORKSPACE"
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              mkdir -p "/tmp/base-workspace/$(dirname "$file")"
-              cp "$file" "/tmp/base-workspace/$file"
-            fi
-          done < changed_tests.txt
-          
-          cd /tmp/base-workspace
-          
-          # Calculate test file hashes
-          : > "$GITHUB_WORKSPACE/base_test_hashes.txt"
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              HASH=$(git hash-object "$file")
-              echo "$file:$HASH" >> "$GITHUB_WORKSPACE/base_test_hashes.txt"
-            fi
-          done < "$GITHUB_WORKSPACE/changed_tests.txt"
-          
-          # Run tests with -count=1 to disable caching
-          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
-          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
-          
-          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
-          
-          # shellcheck disable=SC2086
-          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/base_results.json" 2> "$GITHUB_WORKSPACE/base_stderr.txt"; then
-            # Test failure is expected
-            echo "result=some_failed" >> "$GITHUB_OUTPUT"
-          else
-            echo "result=all_passed" >> "$GITHUB_OUTPUT"
-          fi
-          
-          # Check for compile failures
-          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/base_results.json" 2>/dev/null; then
-            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-      
-      - name: Run tests on head
-        id: head
-        if: steps.tests.outputs.has_tests == 'true' && steps.base.outputs.compile_ok == 'true'
-        run: |
-          set -euo pipefail
-          
-          HEAD_SHA="${{ steps.pr_info.outputs.head_sha }}"
-          
-          # Create fresh workspace for head
-          mkdir -p /tmp/head-workspace
-          cd /tmp/head-workspace
-          
-          # Checkout head commit
-          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-          git checkout --quiet "$HEAD_SHA"
-          
-          # Calculate test file hashes
-          cd "$GITHUB_WORKSPACE"
-          : > head_test_hashes.txt
-          while IFS= read -r file; do
-            if [ -f "$file" ]; then
-              HASH=$(git hash-object "$file")
-              echo "$file:$HASH" >> head_test_hashes.txt
-            fi
-          done < changed_tests.txt
-          
-          cd /tmp/head-workspace
-          
-          # Run tests
-          TEST_PATTERN="${{ steps.tests.outputs.test_pattern }}"
-          TEST_DIRS="${{ steps.tests.outputs.test_dirs }}"
-          
-          echo "Running: go test -count=1 -json -run '$TEST_PATTERN' $TEST_DIRS"
-          
-          # shellcheck disable=SC2086
-          if ! go test -count=1 -json -run "$TEST_PATTERN" $TEST_DIRS > "$GITHUB_WORKSPACE/head_results.json" 2> "$GITHUB_WORKSPACE/head_stderr.txt"; then
-            echo "result=some_failed" >> "$GITHUB_OUTPUT"
-          else
-            echo "result=all_passed" >> "$GITHUB_OUTPUT"
-          fi
-          
-          # Check for compile failures
-          if grep -qE '\[(build|setup) failed\]|"Action":"build-fail"' "$GITHUB_WORKSPACE/head_results.json" 2>/dev/null; then
-            echo "compile_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "compile_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-      
-      - name: Analyze repro results
-        id: analyze
-        if: steps.tests.outputs.has_tests == 'true'
-        env:
-          BASE_COMPILE_OK: ${{ steps.base.outputs.compile_ok }}
-          HEAD_COMPILE_OK: ${{ steps.head.outputs.compile_ok }}
-        run: |
-          set -euo pipefail
-          
-          # If base didn't compile, it's inconclusive
-          if [ "$BASE_COMPILE_OK" != "true" ]; then
-            {
-              echo "pass=false"
-              echo "inconclusive=true"
-              echo "message=Compile failed on base commit"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          
-          # If head didn't compile, it's inconclusive
-          if [ "$HEAD_COMPILE_OK" != "true" ]; then
-            {
-              echo "pass=false"
-              echo "inconclusive=true"
-              echo "message=Compile failed on head commit"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          
-          # Run analyzer
-          cd "$GITHUB_WORKSPACE"
-          go run ./cmd/green-lane-repro-analyze >> "$GITHUB_OUTPUT"
-      
-      - name: Complete check run on failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // If we have a check_id from evaluate job, complete it
-            // This step runs in repro job so we can't complete the evaluate check
-            // But we ensure repro job completes cleanly
-            console.log('Repro job failed, but outputs are set');
-      
-      - name: Upload repro artifacts
-        uses: actions/upload-artifact@v4
-        if: always() && steps.tests.outputs.has_tests == 'true'
-        with:
-          name: repro-results-${{ steps.pr_info.outputs.number }}-${{ github.run_id }}
-          path: |
-            base_results.json
-            head_results.json
-            base_test_hashes.txt
-            head_test_hashes.txt
-            base_failure_output.txt
-          retention-days: 30
-
-  evaluate:
-    runs-on: ubuntu-latest
-    needs: repro
-    if: |
-      always() && (
-        github.event_name == 'pull_request' || 
-        github.event_name == 'pull_request_review' ||
-        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
-      )
-    
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.event.pull_request.base.ref }}
-          persist-credentials: false
-      
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      
-      # For pull_request events the evaluator is built from the base checkout
-      # above, not the PR head (this job holds checks: write; the workflow_run
-      # path checks out the run's head branch, a known pre-existing gap). A
-      # base branch that predates
-      # cmd/green-lane-check, e.g. a stacked PR's parent, cannot evaluate;
-      # the check then completes neutral instead of failing.
-      - name: Build evaluator
-        id: build
-        run: |
-          if [ -d cmd/green-lane-check ]; then
-            go build -o green-lane-check ./cmd/green-lane-check
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::cmd/green-lane-check is not on the base branch; the shadow evaluation is skipped"
-          fi
-      
-      - name: Get PR number and info
+      - name: Build trusted evaluator
+        run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      - name: Get current PR
         id: pr
         uses: actions/github-script@v7
         with:
           script: |
-            let pr_number, pr_data;
-            
+            let number;
             if (context.eventName === 'workflow_run') {
-              // Get PRs associated with the workflow run's head SHA
-              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: context.payload.workflow_run.head_sha
-              });
-              
-              if (prs.data.length === 0) {
-                console.log('No PR found for workflow run');
-                return;
-              }
-              
-              pr_data = prs.data[0];
-              pr_number = pr_data.number;
+              const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {...context.repo, commit_sha:context.payload.workflow_run.head_sha, per_page:100});
+              const prs = associated.filter(pr => pr.state === 'open' && pr.head.sha === context.payload.workflow_run.head_sha);
+              if (prs.length === 0) return;
+              if (prs.length > 1) throw new Error('Multiple PRs share this head; hourly reconciliation will evaluate each');
+              number = prs[0].number;
             } else {
-              pr_number = context.payload.pull_request.number;
-              const pr = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pr_number
-              });
-              pr_data = pr.data;
+              number = context.eventName === 'workflow_dispatch' ? Number(context.payload.inputs.pr_number) : context.payload.pull_request.number;
             }
-            
-            core.setOutput('number', pr_number);
-            core.setOutput('head_sha', pr_data.head.sha);
-            core.setOutput('base_ref', pr_data.base.ref);
-            return pr_number;
-      
-      - name: Create check run
-        id: check
-        uses: actions/github-script@v7
-        env:
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-        with:
-          script: |
-            const head_sha = process.env.HEAD_SHA;
-            if (!head_sha) {
-              core.setFailed('No PR found to evaluate');
-              return;
-            }
-            
-            const check = await github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'green-lane-shadow',
-              head_sha: head_sha,
-              status: 'in_progress',
-              output: {
-                title: 'Green Lane Shadow Evaluation',
-                summary: 'Evaluating PR against green-lane rules...'
-              }
-            });
-            core.setOutput('check_id', check.data.id);
-            return check.data.id;
-      
-      - name: Set repro environment variables
-        id: repro_env
-        env:
-          HAS_TESTS: ${{ needs.repro.outputs.has_tests }}
-          REPRO_INCONCLUSIVE_OUT: ${{ needs.repro.outputs.inconclusive }}
-          REPRO_PASS_OUT: ${{ needs.repro.outputs.pass }}
-          REPRO_MESSAGE_OUT: ${{ needs.repro.outputs.message }}
-          REPRO_TEST_IDS_OUT: ${{ needs.repro.outputs.test_ids }}
-          NO_TESTS_REASON: ${{ needs.repro.outputs.no_tests_reason }}
-        run: |
-          if [ "$HAS_TESTS" = "true" ]; then
-            if [ "$REPRO_INCONCLUSIVE_OUT" = "true" ]; then
-              echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
-            else
-              echo "REPRO_PASS=$REPRO_PASS_OUT" >> "$GITHUB_ENV"
-              {
-                echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-                printf '%s\n' "$REPRO_MESSAGE_OUT"
-                echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-              } >> "$GITHUB_ENV"
-              if [ -n "$REPRO_TEST_IDS_OUT" ]; then
-                {
-                  echo "REPRO_TEST_IDS<<__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                  printf '%s\n' "$REPRO_TEST_IDS_OUT"
-                  echo "__REPRO_IDS_EOF_${GITHUB_RUN_ID}__"
-                } >> "$GITHUB_ENV"
-              fi
-            fi
-          else
-            echo "REPRO_INCONCLUSIVE=true" >> "$GITHUB_ENV"
-            # The repro job says why it found nothing to check; fall back to the
-            # old wording only if it did not run far enough to say.
-            {
-              echo "REPRO_MESSAGE<<__REPRO_EOF_${GITHUB_RUN_ID}__"
-              printf '%s\n' "${NO_TESTS_REASON:-No test files changed in PR}"
-              echo "__REPRO_EOF_${GITHUB_RUN_ID}__"
-            } >> "$GITHUB_ENV"
-          fi
-      
-      - name: Run evaluation
-        id: eval
-        if: steps.build.outputs.available == 'true'
+            if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid PR number');
+            const {data:pr} = await github.rest.pulls.get({...context.repo,pull_number:number});
+            core.setOutput('number',number);
+            core.setOutput('head',pr.head.sha);
+            core.setOutput('base',pr.base.sha);
+      - name: Evaluate
+        if: steps.pr.outputs.number != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          ./green-lane-check > result.json || true
-          echo "result_file=result.json" >> "$GITHUB_OUTPUT"
-      
-      - name: Parse result and update check
-        if: always()
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head }}
+          EXPECTED_BASE_SHA: ${{ steps.pr.outputs.base }}
+        run: '"$RUNNER_TEMP/green-lane-check" > result.json'
+      - name: Publish current evaluation
+        if: always() && steps.pr.outputs.number != ''
         uses: actions/github-script@v7
         env:
-          CHECK_ID: ${{ steps.check.outputs.check_id }}
-          EVALUATOR_AVAILABLE: ${{ steps.build.outputs.available }}
-          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head }}
         with:
           script: |
-            const fs = require('fs');
-            
-            // Without a check run there is nothing to complete; say so
-            // instead of failing on an empty id.
-            const checkId = Number(process.env.CHECK_ID);
-            if (!checkId) {
-              core.warning('No green-lane-shadow check run was created; nothing to update.');
-              return;
-            }
-            
-            if (process.env.EVALUATOR_AVAILABLE !== 'true') {
-              await github.rest.checks.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                check_run_id: checkId,
-                status: 'completed',
-                conclusion: 'neutral',
-                output: {
-                  title: 'Green Lane Shadow: evaluator not on base branch',
-                  summary: `The base branch (${process.env.BASE_REF || 'unknown'}) does not contain cmd/green-lane-check, so this PR was not evaluated. Shadow mode only; no action taken.`
-                }
-              });
-              return;
-            }
-            
-            let result;
+            const fs = require('node:fs');
             try {
-              const content = fs.readFileSync('result.json', 'utf8');
-              result = JSON.parse(content);
+              const result = JSON.parse(fs.readFileSync('result.json','utf8'));
+              await require('./.github/green-lane/publish.cjs')({github,context,result,expectedHead:process.env.EXPECTED_HEAD_SHA});
             } catch (error) {
-              await github.rest.checks.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                check_run_id: checkId,
-                status: 'completed',
-                conclusion: 'failure',
-                output: {
-                  title: 'Green Lane Shadow Evaluation Failed',
-                  summary: 'Failed to evaluate PR: ' + error.message
-                }
-              });
+              await github.rest.checks.create({...context.repo,name:'green-lane-shadow',head_sha:process.env.EXPECTED_HEAD_SHA,status:'completed',conclusion:'neutral',output:{title:'Green Lane Shadow: unavailable',summary:'Evaluation or publication failed. No candidate or merge authorization; rerun required.'}});
               throw error;
             }
-            
-            // Build output
-            let summary = `# ${result.verdict === 'would_merge' ? '✅' : '❌'} ${result.verdict.replace('_', ' ').toUpperCase()}\n\n`;
-            summary += `**PR #${result.pr_number}**\n`;
-            summary += `**Head SHA:** \`${result.head_sha}\`\n`;
-            summary += `**Evaluated at:** ${result.evaluated_at}\n\n`;
-            
-            summary += '## Rule Results\n\n';
-            for (const rule of result.rules) {
-              let status = rule.pass ? '✅ PASS' : (rule.inconclusive ? '⚠️ INCONCLUSIVE' : '❌ FAIL');
-              summary += `### ${status}: ${rule.name}\n`;
-              summary += `${rule.message}\n\n`;
-            }
-            
-            summary += '## Summary\n\n';
-            summary += result.summary + '\n\n';
-            
-            if (result.verdict === 'would_merge') {
-              summary += '---\n\n';
-              summary += '✨ **This PR would be merged automatically if green-lane were live.**\n\n';
-              summary += 'Shadow mode: no action taken. The real gate App, cross-vendor reviewer Apps, ';
-              summary += 'and provenance infrastructure do not exist yet.\n';
-            } else {
-              summary += '---\n\n';
-              summary += '⏸️ **This PR would NOT be merged and would wait for manual review.**\n';
-            }
-            
-            // Save result as artifact
-            const artifactContent = JSON.stringify(result, null, 2);
-            fs.writeFileSync('evaluation-result.json', artifactContent);
-            
-            // Update check run
-            const conclusion = result.verdict === 'would_merge' ? 'success' : 'neutral';
-            await github.rest.checks.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              check_run_id: checkId,
-              status: 'completed',
-              conclusion: conclusion,
-              output: {
-                title: `Green Lane Shadow: ${result.verdict.replace('_', ' ')}`,
-                summary: summary
-              }
-            });
-      
-      - name: Upload evaluation artifact
-        uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.pr.outputs.number != ''
         with:
           name: green-lane-evaluation-${{ steps.pr.outputs.number }}-${{ github.run_id }}
           path: evaluation-result.json
+          if-no-files-found: ignore
           retention-days: 30

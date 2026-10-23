@@ -37,6 +37,27 @@ func input(s decision.UsageSnapshot) decision.Input {
 	}
 }
 
+func TestEvaluateHoldsWhenShortWindowIsUnavailable(t *testing.T) {
+	snapshot := limitedSnapshot()
+	snapshot.Short = nil
+	snapshot.Weekly.Remaining = .95
+	snapshot.ShortWindowUnavailable = true
+	in := input(snapshot)
+	trigger := .3
+	in.PaceGapTrigger = &trigger
+	if got := decision.Evaluate(in); got.Decision != decision.Unknown {
+		t.Fatalf("unreadable active session admitted: %+v", got)
+	}
+	if at := decision.ProjectTriggerAt(in, time.Minute); at != nil {
+		t.Fatalf("projected dispatch through unreadable session: %v", at)
+	}
+	snapshot.ShortWindowUnavailable, snapshot.ShortWindowNotStarted = false, true
+	in.Snapshot = snapshot
+	if got := decision.Evaluate(in); got.Decision != decision.Admit {
+		t.Fatalf("untouched session should allow weekly pacing: %+v", got)
+	}
+}
+
 func TestEvaluateProratesCurrentAndFinalSlots(t *testing.T) {
 	got := decision.Evaluate(input(limitedSnapshot()))
 
