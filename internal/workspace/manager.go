@@ -53,7 +53,7 @@ func (m Manager) Prepare(
 			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace requires repository to be set to the workspace directory, got empty value")
 		}
 		if profile.PrepareCommand != "" {
-			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace %s does not support prepare_command (got %q); remove prepare_command or use another workspace_provider", profile.Repository, profile.PrepareCommand)
+			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace %s does not support prepare_command; remove prepare_command or use another workspace_provider", profile.Repository)
 		}
 		return domain.Workspace{Directory: profile.Repository}, nil
 	}
@@ -285,8 +285,8 @@ func (m Manager) prepareCommand(
 		return domain.Workspace{}, fmt.Errorf("run prepare command in %s: %w", profile.Repository, err)
 	}
 	if exitCode != 0 {
-		return domain.Workspace{}, fmt.Errorf("prepare command exited with code %d in %s: %s",
-			exitCode, profile.Repository, strings.TrimSpace(stderr.String()))
+		return domain.Workspace{}, fmt.Errorf("prepare command exited with code %d in %s (stderr %s; contents are not echoed because they may hold secrets)",
+			exitCode, profile.Repository, describeOutput(stderr.String()))
 	}
 	var result struct {
 		WorkingDirectory string            `json:"working_directory"`

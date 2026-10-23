@@ -466,6 +466,32 @@ func TestCommandWorkspaceBadOutputDescribesButDoesNotEchoOutput(t *testing.T) {
 	assertErrorContains(t, prepare("", 2), "code 2", repo)
 }
 
+func TestCommandWorkspaceFailureDoesNotEchoStderr(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "token=hunter2-secret\n")
+		return 3, nil
+	}}
+	_, err := workspace.Manager{Runner: runner}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "command", Repository: repo, PrepareCommand: "prepare-workspace",
+	})
+	assertErrorContains(t, err, "code 3", repo, "stderr got 20 bytes of output")
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("prepare command stderr must not be echoed into the stored error: %v", err)
+	}
+}
+
+func TestRuntimeOwnedPrepareCommandErrorDoesNotEchoCommand(t *testing.T) {
+	repo := t.TempDir()
+	_, err := workspace.Manager{}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "runtime-owned", Repository: repo, PrepareCommand: "deploy --token=hunter2-secret",
+	})
+	assertErrorContains(t, err, "does not support prepare_command", repo)
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("prepare_command value must not be echoed into the stored error: %v", err)
+	}
+}
+
 func TestCleanupErrorsNameWorkspaceAndValidValues(t *testing.T) {
 	manager := workspace.Manager{}
 	err := manager.Cleanup(context.Background(), workspace.CleanupRequest{
