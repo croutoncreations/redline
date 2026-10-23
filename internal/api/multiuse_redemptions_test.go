@@ -138,6 +138,51 @@ func TestRedeemMultiuseGrantIgnoresDecrementObservedBeforeCompletion(t *testing.
 	}
 }
 
+// Redemptions without expected_reset_id (CLI --yes, direct API) must apply the
+// same completed-use guard: a stale multi-use grant must replay, not spend.
+func TestRedeemUnconfirmedMultiuseGrantIsGuarded(t *testing.T) {
+	for _, telemetry := range []string{"stale", "decremented"} {
+		t.Run(telemetry, func(t *testing.T) {
+			s, db, snapshot := redemptionServer(t, "claude")
+			snapshot.ObservedAt = snapshot.ObservedAt.Add(time.Second)
+			snapshot.BankedResetDetails[0].ResetsLeft = 2
+			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+				t.Fatal(err)
+			}
+			var requests []nativeusage.RedeemRequest
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				return nativeusage.RedeemRequest{ResetID: "reset", RequestID: fmt.Sprintf("key-%d", len(requests))}
+			}, redeem: func(req nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+				requests = append(requests, req)
+				return nativeusage.RedeemResult{Outcome: "redeemed"}, nil
+			}}
+			if got, err := s.RedeemBankedReset(t.Context(), "main", "manual", false); err != nil || got.Replayed || len(requests) != 1 {
+				t.Fatalf("first=%+v err=%v requests=%d", got, err, len(requests))
+			}
+			// Later telemetry, observed after the redemption and its refresh.
+			later := s.now().Add(time.Minute)
+			s.now = func() time.Time { return later }
+			snapshot.ObservedAt = later
+			if telemetry == "decremented" {
+				snapshot.BankedResetDetails[0].ResetsLeft = 1
+			}
+			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.RedeemBankedReset(t.Context(), "main", "manual", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if telemetry == "stale" && (!got.Replayed || len(requests) != 1) {
+				t.Fatalf("unconfirmed retry spent a stale grant again: result=%+v requests=%d", got, len(requests))
+			}
+			if telemetry == "decremented" && (got.Replayed || len(requests) != 2) {
+				t.Fatalf("reflected remaining use not spent: result=%+v requests=%d", got, len(requests))
+			}
+		})
+	}
+}
+
 func TestAutomaticRedemptionMultiuseGrantReflection(t *testing.T) {
 	_, db, snapshot := redemptionServer(t, "claude")
 	now := snapshot.ObservedAt.Add(time.Second)

@@ -168,8 +168,11 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 					details = candidate
 				}
 			}
+			// Every selection path (automatic, confirmed, and unconfirmed such
+			// as CLI --yes or direct API calls) applies the completed-use guard,
+			// so a lost response or stale telemetry cannot spend a use twice.
 			var replay *store.BankedResetRedemption
-			if name == "codex" {
+			{
 				completed, lookupErr := s.store.RedeemedBankedResetRedemptions(ctx, providerID)
 				if lookupErr != nil {
 					return result, lookupErr
