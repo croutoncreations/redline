@@ -29,7 +29,7 @@ notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring]
 
 providers:
   codex-main:
@@ -55,6 +55,11 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Banked-reset reminders require notifications.enabled (defaults shown).
+    # banked_resets:
+    #   remind_before: [24h] # [] disables reminders, not the expiry action
+    #   on_expiry: notify   # off | notify (redeem will be added in milestone 5)
+    #   redeem_lead: 1h
     # Example: allow two Claude runs, but never overlap two Fable runs.
     # max_concurrent_runs: 2
     # pool_concurrency:

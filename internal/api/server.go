@@ -36,6 +36,7 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/resetreminder"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/tasktemplate"
@@ -848,7 +849,16 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 }
 
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
-	_, _, usageErr := s.fetchAndStore(ctx, providerID)
+	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
+	if usageErr == nil {
+		reminders := resetreminder.Checker{
+			Enabled: s.config.Notifications.Enabled && s.config.NotificationEvents()[domain.EventResetExpiring],
+			Store:   s.store, Notifier: s.notifier,
+		}
+		if err := reminders.Check(ctx, providerID, configured, snapshot, s.now()); err != nil {
+			log.Printf("redline %s banked reset reminders failed: %v", providerID, err)
+		}
+	}
 	_, tokenErr := s.syncTokens(ctx, providerID)
 	return errors.Join(usageErr, tokenErr)
 }

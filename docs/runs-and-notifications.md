@@ -35,20 +35,43 @@ failures.
 
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, and `scheduler.error`.
+`run.completed`, `run.failed`, `scheduler.error`, and `reset.expiring` (all enabled by default).
 
 ```yaml
 notifications:
   enabled: true
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring]
 ```
 
 The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
 `REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
 outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
 possibly non-idempotent hook.
+
+### Banked-reset reminders
+
+The usage monitor checks banked reset deadlines independently of `scheduler.enabled`.
+Per-provider `banked_resets` defaults are `remind_before: [24h]`, `on_expiry: notify`, and
+`redeem_lead: 1h`. Durations must be positive. `remind_before: []` disables ordinary reminders;
+`on_expiry: off` disables the expiry action. Only `off` and `notify` are accepted;
+`redeem` and automatic redemption will be added in milestone 5.
+
+`reset.expiring` includes `provider_account_id`, a human-readable `message`, and string-valued
+`data` fields: `reset_id`, `expires_at` (RFC3339 UTC), `lead` (duration), `action` (`remind` or
+`redeem_now`), and `count`. One notification is sent per distinct expiry; `count` sums remaining
+resets sharing it. `reset_id` is informational (the first credit ID, or `aggregate` when details
+are unavailable or their positive remaining counts disagree with the authoritative aggregate).
+Spent details are ignored. `lead` is the configured threshold; the message describes time
+actually remaining.
+
+Each (provider account, expiry, kind) is claimed persistently before delivery, so restarts and
+switching between aggregate and itemized snapshots do not double-send.
+Missed reminder thresholds produce only the shortest-lead applicable reminder, not a burst.
+Once the expiry action is due, it replaces ordinary reminders for that deadline.
+Expired resets are ignored. Disabled or filtered notifications do not claim notices, so enabling
+`reset.expiring` later can still send relevant reminders. Failed deliveries are not retried.
 
 Notification commands, workspace prepare/finalize hooks, and the **Custom command** harness are
 run through `/bin/sh -lc` on macOS and Linux and through `cmd /C` on Windows. Windows hooks that

@@ -152,9 +152,10 @@ providers:
 ```
 
 Defaults: `remind_before: [24h]`, `on_expiry: notify`, `redeem_lead: 1h`. Automatic redemption is
-always opt-in. Notifications still require `notifications.enabled`. The default event list gains
-`reset.expiring`, `reset.redeemed`, `reset.redeem_failed`, `firesale.started`, and
-`firesale.ended`.
+always opt-in. Notifications still require `notifications.enabled`. Milestone 2 adds
+`reset.expiring` to the default event list; `reset.redeemed`, `reset.redeem_failed`,
+`firesale.started`, and `firesale.ended` are registered for later milestones. Until milestone 5,
+`on_expiry: redeem` behaves like `notify` and never redeems automatically.
 
 Tasks gain `firesale_min_interval` (API, CLI `--firesale-interval`, MCP, dashboard) and accept
 `dispatch_tier: firesale`.
@@ -164,12 +165,16 @@ Tasks gain `firesale_min_interval` (API, CLI `--firesale-interval`, MCP, dashboa
 The usage monitor (which runs whether or not automatic dispatch is enabled) evaluates banked reset
 deadlines on each cycle:
 
-- For each reset and each `remind_before` lead, emit `reset.expiring` once when
-  `now >= expires_at − lead`. Deduplicated in a `banked_reset_notices` table keyed by
-  `(provider, reset id, expires_at, kind)`.
+- For each unexpired reset and each `remind_before` lead, emit `reset.expiring` once when
+  `now >= expires_at − lead`. If multiple thresholds have passed, emit only the shortest-lead
+  applicable reminder. Without itemized details, use the aggregate expiry and id `aggregate`.
+  Deduplicated before delivery in `banked_reset_notices`, keyed by
+  `(provider_account_id, reset_id, expires_at, kind)`. Disabled or filtered notifications do not
+  claim notices; delivery failures are not retried.
 - At `expires_at − redeem_lead`:
   - `notify`: emit `reset.expiring` with `action: redeem_now` (deduplicated the same way).
-  - `redeem`: attempt redemption (below). Retries until expiry on transient failures with backoff.
+  - `redeem`: currently notify only. Milestone 5 will attempt redemption (below), retrying until
+    expiry on transient failures with backoff.
 
 ## Redemption
 
@@ -237,8 +242,8 @@ OpenAI-Beta: codex-1
 
 1. **Reset details.** Itemized `BankedReset` parsing for Claude grants and Codex credits (detail
    endpoint, cached), persisted with snapshots, exposed in the API.
-2. **Reminders.** `banked_resets` config, `reset.expiring` reminders and the expiry-time `notify`
-   action, deduplicated.
+2. **Reminders — implemented.** `banked_resets` config, `reset.expiring` reminders and the
+   expiry-time `notify` action, deduplicated. `redeem` is accepted but notifies only until milestone 5.
 3. **Effective horizon and firesale.** `ResetEvent` seam (weekly source only), horizon-based
    evaluation, `firesale` tier/state, `firesale_trigger`, `firesale_min_interval`,
    `firesale_max_concurrent_runs`, immediate re-dispatch, firesale notifications, CLI/MCP/dashboard.

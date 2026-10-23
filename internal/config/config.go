@@ -48,6 +48,7 @@ type Notifications struct {
 
 var knownNotificationEvents = map[string]bool{
 	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
+	"reset.expiring": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -61,7 +62,7 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {
@@ -115,6 +116,39 @@ type Provider struct {
 	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
 	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
 	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
+	BankedResets      BankedResets          `yaml:"banked_resets"`
+}
+
+type BankedResets struct {
+	RemindBefore []string `yaml:"remind_before"`
+	OnExpiry     string   `yaml:"on_expiry"`
+	RedeemLead   string   `yaml:"redeem_lead"`
+}
+
+func (p Provider) BankedResetRemindBefore() []time.Duration {
+	if p.BankedResets.RemindBefore == nil {
+		return []time.Duration{24 * time.Hour}
+	}
+	leads := make([]time.Duration, len(p.BankedResets.RemindBefore))
+	for i, raw := range p.BankedResets.RemindBefore {
+		leads[i], _ = time.ParseDuration(raw)
+	}
+	return leads
+}
+
+func (p Provider) BankedResetOnExpiry() string {
+	if p.BankedResets.OnExpiry == "" {
+		return "notify"
+	}
+	return p.BankedResets.OnExpiry
+}
+
+func (p Provider) BankedResetRedeemLead() time.Duration {
+	if p.BankedResets.RedeemLead == "" {
+		return time.Hour
+	}
+	lead, _ := time.ParseDuration(p.BankedResets.RedeemLead)
+	return lead
 }
 
 func (p Provider) EffectiveMaxConcurrentRuns() int {
@@ -309,6 +343,21 @@ func (cfg *Config) validate() error {
 				return fmt.Errorf("provider %q: policy %q is not defined under policies", name, provider.Policy)
 			}
 		}
+		for i, raw := range provider.BankedResets.RemindBefore {
+			if _, err := positiveDuration(fmt.Sprintf("banked_resets remind_before[%d]", i), raw); err != nil {
+				return fmt.Errorf("provider %q: %w", name, err)
+			}
+		}
+		if raw := provider.BankedResets.RedeemLead; raw != "" {
+			if _, err := positiveDuration("banked_resets redeem_lead", raw); err != nil {
+				return fmt.Errorf("provider %q: %w", name, err)
+			}
+		}
+		switch provider.BankedResetOnExpiry() {
+		case "off", "notify":
+		default:
+			return fmt.Errorf("provider %q: banked_resets on_expiry must be off or notify (redeem will be added in milestone 5)", name)
+		}
 		if provider.MaxConcurrentRuns < 0 {
 			return fmt.Errorf("provider %q: max_concurrent_runs must not be negative, got %d", name, provider.MaxConcurrentRuns)
 		}
@@ -372,7 +421,7 @@ func (cfg *Config) validate() error {
 	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error)", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.expiring)", event)
 		}
 	}
 	return nil

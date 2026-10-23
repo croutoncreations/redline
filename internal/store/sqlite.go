@@ -519,6 +519,21 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record banked reset details migration: %w", err)
 		}
 	}
+	if version < 29 {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_notices (
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(provider_account_id, expires_at, kind)
+)`); err != nil {
+			return fmt.Errorf("create banked reset notices: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (29)`); err != nil {
+			return fmt.Errorf("record banked reset notices migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

@@ -141,6 +141,7 @@ const (
 	EventRunCompleted   = "run.completed"
 	EventRunFailed      = "run.failed"
 	EventSchedulerError = "scheduler.error"
+	EventResetExpiring  = "reset.expiring"
 )
 
 type NotificationEvent struct {
