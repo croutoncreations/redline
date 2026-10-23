@@ -12,25 +12,22 @@ import (
 	"github.com/croutoncreations/redline/internal/store"
 )
 
-func (s *Server) automaticBankedResets(ctx context.Context, providerID, provider string, details []decision.BankedReset) ([]decision.BankedReset, error) {
+func (s *Server) automaticBankedResets(ctx context.Context, providerID, provider string, details []decision.BankedReset, observedAt time.Time) ([]decision.BankedReset, error) {
 	attempts, err := s.store.AutomaticBankedResetRedemptions(ctx, providerID)
 	if err != nil {
 		return nil, err
 	}
-	return s.availableAutomaticBankedResets(ctx, providerID, provider, details, attempts)
+	return s.availableAutomaticBankedResets(ctx, providerID, provider, details, observedAt, attempts)
 }
 
-func (s *Server) availableAutomaticBankedResets(ctx context.Context, providerID, provider string, details []decision.BankedReset, attempts []store.AutomaticBankedResetRedemption) ([]decision.BankedReset, error) {
+func (s *Server) availableAutomaticBankedResets(ctx context.Context, providerID, provider string, details []decision.BankedReset, observedAt time.Time, attempts []store.AutomaticBankedResetRedemption) ([]decision.BankedReset, error) {
 	completed, err := s.store.RedeemedBankedResetRedemptions(ctx, providerID)
 	if err != nil {
 		return nil, err
 	}
-	consumed := make(map[string]bool, len(completed))
-	for _, attempt := range completed {
-		consumed[attempt.ResetID] = true
-	}
+	consumed := consumedBankedResets(completed, details, observedAt)
 	for _, attempt := range attempts {
-		if attempt.Outcome == "gone" || attempt.Outcome == "redeemed" || attempt.Outcome == "unknown" {
+		if attempt.Outcome == "gone" || attempt.Outcome == "unknown" {
 			consumed[attempt.ResetID] = true
 		}
 	}
@@ -49,7 +46,7 @@ type automaticResetState struct {
 	details  []decision.BankedReset
 }
 
-func (s *Server) automaticResetState(ctx context.Context, providerID, name string, details []decision.BankedReset) (automaticResetState, error) {
+func (s *Server) automaticResetState(ctx context.Context, providerID, name string, details []decision.BankedReset, observedAt time.Time) (automaticResetState, error) {
 	var state automaticResetState
 	var err error
 	state.attempts, err = s.store.AutomaticBankedResetRedemptions(ctx, providerID)
@@ -86,7 +83,7 @@ func (s *Server) automaticResetState(ctx context.Context, providerID, name strin
 	}
 	// Retain full consumed history for now: a stale snapshot must never promise
 	// a second refill. Candidate-ID queries could bound dashboard reads later.
-	state.details, err = s.availableAutomaticBankedResets(ctx, providerID, name, details, state.attempts)
+	state.details, err = s.availableAutomaticBankedResets(ctx, providerID, name, details, observedAt, state.attempts)
 	return state, err
 }
 
@@ -166,7 +163,7 @@ func (s *Server) providerResetEvents(ctx context.Context, providerID string, sna
 		return events, nil
 	}
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	state, err := s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails)
+	state, err := s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails, snapshot.ObservedAt)
 	if err != nil {
 		return nil, err
 	}

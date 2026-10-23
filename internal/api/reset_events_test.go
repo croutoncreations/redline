@@ -84,7 +84,7 @@ func TestProviderResetEventsPendingPrecedence(t *testing.T) {
 				t.Fatal(err)
 			}
 			snapshot.BankedResetDetails[0].ID = "B"
-			state, err := s.automaticResetState(t.Context(), "main", "codex", snapshot.BankedResetDetails)
+			state, err := s.automaticResetState(t.Context(), "main", "codex", snapshot.BankedResetDetails, snapshot.ObservedAt)
 			if err != nil {
 				t.Fatal(err)
 			}

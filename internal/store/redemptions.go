@@ -12,6 +12,7 @@ type BankedResetRedemption struct {
 	ID                int64      `json:"id"`
 	ProviderAccountID string     `json:"provider_account_id"`
 	ResetID           string     `json:"reset_id"`
+	ResetsLeftBefore  *int       `json:"resets_left_before,omitempty"`
 	RequestID         string     `json:"request_id"`
 	Trigger           string     `json:"trigger"`
 	State             string     `json:"state"`
@@ -22,7 +23,7 @@ type BankedResetRedemption struct {
 	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }
 
-const redemptionColumns = `id, provider_account_id, reset_id, request_id, trigger, state, outcome, code, reason, created_at, completed_at`
+const redemptionColumns = `id, provider_account_id, reset_id, request_id, trigger, state, outcome, code, reason, created_at, completed_at, resets_left_before`
 
 // BeginBankedResetRedemption commits the idempotency key before any provider
 // request. An interrupted operation keeps its key even after a process restart.
@@ -39,7 +40,7 @@ func (d *DB) BeginBankedResetRedemption(ctx context.Context, attempt BankedReset
 	if !errors.Is(err, sql.ErrNoRows) {
 		return attempt, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO banked_reset_redemptions(provider_account_id,reset_id,request_id,trigger,state,created_at) VALUES(?,?,?,?,'pending',?)`, attempt.ProviderAccountID, attempt.ResetID, attempt.RequestID, attempt.Trigger, formatTime(attempt.CreatedAt))
+	res, err := tx.ExecContext(ctx, `INSERT INTO banked_reset_redemptions(provider_account_id,reset_id,request_id,trigger,state,created_at,resets_left_before) VALUES(?,?,?,?,'pending',?,?)`, attempt.ProviderAccountID, attempt.ResetID, attempt.RequestID, attempt.Trigger, formatTime(attempt.CreatedAt), attempt.ResetsLeftBefore)
 	if err != nil {
 		return attempt, err
 	}
@@ -87,8 +88,8 @@ func (d *DB) BankedResetRedemptions(ctx context.Context, providerID string, limi
 	return d.redemptions(ctx, `SELECT `+redemptionColumns+` FROM banked_reset_redemptions WHERE provider_account_id=? ORDER BY id DESC LIMIT ?`, providerID, limit)
 }
 
-// RedeemedBankedResetRedemptions includes all consumed resets, not just the
-// recent history, so stale telemetry cannot make an old credit spendable again.
+// RedeemedBankedResetRedemptions includes all successful real attempts, newest
+// first, so callers can compare each reset's latest use with current telemetry.
 func (d *DB) RedeemedBankedResetRedemptions(ctx context.Context, providerID string) ([]BankedResetRedemption, error) {
 	return d.redemptions(ctx, `SELECT `+redemptionColumns+` FROM banked_reset_redemptions WHERE provider_account_id=? AND state='done' AND outcome='redeemed' AND trigger!='dry_run' ORDER BY id DESC`, providerID)
 }
@@ -114,7 +115,7 @@ func scanRedemption(row interface{ Scan(...any) error }) (BankedResetRedemption,
 	var a BankedResetRedemption
 	var created string
 	var completed sql.NullString
-	if err := row.Scan(&a.ID, &a.ProviderAccountID, &a.ResetID, &a.RequestID, &a.Trigger, &a.State, &a.Outcome, &a.Code, &a.Reason, &created, &completed); err != nil {
+	if err := row.Scan(&a.ID, &a.ProviderAccountID, &a.ResetID, &a.RequestID, &a.Trigger, &a.State, &a.Outcome, &a.Code, &a.Reason, &created, &completed, &a.ResetsLeftBefore); err != nil {
 		return a, err
 	}
 	var err error

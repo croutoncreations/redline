@@ -64,7 +64,7 @@ func TestAutomaticBankedResetRedemptionsMigration36AndPersistence(t *testing.T) 
 				t.Fatalf("provider isolation: %+v %v", other, err)
 			}
 			var version int
-			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(stamp, 36) {
+			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(stamp, 37) {
 				t.Fatalf("version=%d err=%v", version, err)
 			}
 		})

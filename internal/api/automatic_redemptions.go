@@ -18,7 +18,7 @@ func (s *Server) redeemExpiringBankedReset(ctx context.Context, providerID strin
 		return nil
 	}
 	now := s.now()
-	state, err := s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails)
+	state, err := s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails, snapshot.ObservedAt)
 	if err != nil {
 		return err
 	}
@@ -52,10 +52,7 @@ func (s *Server) redeemExpiringBankedReset(ctx context.Context, providerID strin
 	if err != nil {
 		return err
 	}
-	consumed := make(map[string]bool, len(completed))
-	for _, a := range completed {
-		consumed[a.ResetID] = true
-	}
+	consumed := consumedBankedResets(completed, snapshot.BankedResetDetails, snapshot.ObservedAt)
 	finalizedPending := false
 	for _, a := range state.attempts {
 		expired := !a.ExpiresAt.IsZero() && !a.ExpiresAt.After(now)
@@ -68,7 +65,7 @@ func (s *Server) redeemExpiringBankedReset(ctx context.Context, providerID strin
 		// earlier terminal outcome for the same reset does not resolve it, and
 		// leaving it pending would block every later reset.
 		isPending := state.pending.ID != 0 && state.pending.ResetID == a.ResetID
-		if expired && (isPending || (a.Outcome != "redeemed" && a.Outcome != "gone" && !consumed[a.ResetID])) {
+		if expired && (isPending || (a.Outcome != "gone" && !consumed[a.ResetID])) {
 			if err := s.expiredBankedReset(ctx, a, now); err != nil {
 				return err
 			}
@@ -78,7 +75,7 @@ func (s *Server) redeemExpiringBankedReset(ctx context.Context, providerID strin
 		}
 	}
 	if finalizedPending {
-		state, err = s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails)
+		state, err = s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails, snapshot.ObservedAt)
 		if err != nil {
 			return err
 		}

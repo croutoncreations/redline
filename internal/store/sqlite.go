@@ -610,6 +610,16 @@ ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
 			return fmt.Errorf("record automatic banked reset redemptions migration: %w", err)
 		}
 	}
+	// As with 32–36, inspect the schema even when a colliding branch has
+	// already stamped this version. NULL preserves legacy consumption guards.
+	if err := addColumnIfMissing(ctx, tx, "banked_reset_redemptions", "resets_left_before", "INTEGER"); err != nil {
+		return err
+	}
+	if version < 37 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (37)`); err != nil {
+			return fmt.Errorf("record redemption observed count migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

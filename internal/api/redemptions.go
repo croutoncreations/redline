@@ -92,9 +92,8 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	if s.usageSources.SkipBankedResetProviders[name] {
 		return result, fmt.Errorf("%w: cannot redeem %s resets with multiple accounts configured; use the provider CLI", store.ErrConflict, name)
 	}
-	// A confirmed retry of a reset that already redeemed replays the stored
-	// result before lockouts or telemetry are consulted: current usage may no
-	// longer list it, and a fresh Claude request key would spend again.
+	// Replay confirmed retries before lockouts unless stored telemetry shows
+	// a remaining use after the latest successful redemption of this grant.
 	if !dryRun && expectedResetID != "" {
 		pending, err := s.store.PendingBankedResetRedemption(ctx, providerID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -106,9 +105,17 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				return result, err
 			}
 			for _, attempt := range completed {
-				if attempt.ResetID == expectedResetID {
+				if attempt.ResetID != expectedResetID {
+					continue
+				}
+				snapshot, _, err := s.store.LatestSnapshot(ctx, name)
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					return result, err
+				}
+				if !redemptionReflected(attempt, snapshot.BankedResetDetails, snapshot.ObservedAt) {
 					return replayedRedemption(attempt), nil
 				}
+				break // Only the latest successful use can release the guard.
 			}
 		}
 	}
@@ -145,7 +152,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		} else {
 			details := pre.BankedResetDetails
 			if trigger == "automatic" {
-				details, err = s.automaticBankedResets(ctx, providerID, name, details)
+				details, err = s.automaticBankedResets(ctx, providerID, name, details, pre.ObservedAt)
 				if err != nil {
 					return result, err
 				}
@@ -167,10 +174,9 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				if lookupErr != nil {
 					return result, lookupErr
 				}
-				consumed := make(map[string]bool, len(completed))
+				consumed := consumedBankedResets(completed, details, pre.ObservedAt)
 				for _, a := range completed {
-					consumed[a.ResetID] = true
-					if replay == nil {
+					if consumed[a.ResetID] && replay == nil {
 						for _, detail := range details {
 							if detail.ID == a.ResetID {
 								copy := a
@@ -223,7 +229,11 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		}
 		return result, nil
 	}
-	attempt, err := s.store.BeginBankedResetRedemption(ctx, store.BankedResetRedemption{ProviderAccountID: providerID, ResetID: req.ResetID, RequestID: req.RequestID, Trigger: trigger, CreatedAt: s.now().UTC()})
+	newAttempt := store.BankedResetRedemption{ProviderAccountID: providerID, ResetID: req.ResetID, RequestID: req.RequestID, Trigger: trigger, CreatedAt: s.now().UTC()}
+	if !dryRun && pending.ID == 0 {
+		newAttempt.ResetsLeftBefore = &selected.ResetsLeft
+	}
+	attempt, err := s.store.BeginBankedResetRedemption(ctx, newAttempt)
 	if err != nil {
 		return result, err
 	}
@@ -265,6 +275,35 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		s.notifyRedemption(ctx, providerID, result)
 	}
 	return result, nil
+}
+
+// redemptionReflected releases a successful use's consumption guard only when
+// telemetry shows a positive, decreased count for the same grant. Missing/zero
+// counts and legacy attempts without an observed count remain conservative.
+//
+// The observation must also postdate the redemption's completion: a lower
+// count seen at or before completion may reflect a different, earlier use.
+func redemptionReflected(prior store.BankedResetRedemption, details []decision.BankedReset, observedAt time.Time) bool {
+	if prior.ResetsLeftBefore == nil || prior.CompletedAt == nil || !observedAt.After(*prior.CompletedAt) {
+		return false
+	}
+	for _, detail := range details {
+		if detail.ID == prior.ResetID {
+			return detail.ResetsLeft > 0 && detail.ResetsLeft < *prior.ResetsLeftBefore
+		}
+	}
+	return false
+}
+
+// completed is newest first; older uses cannot release the latest use's guard.
+func consumedBankedResets(completed []store.BankedResetRedemption, details []decision.BankedReset, observedAt time.Time) map[string]bool {
+	consumed := make(map[string]bool, len(completed))
+	for _, prior := range completed {
+		if _, seen := consumed[prior.ResetID]; !seen {
+			consumed[prior.ResetID] = !redemptionReflected(prior, details, observedAt)
+		}
+	}
+	return consumed
 }
 
 func replayedRedemption(a store.BankedResetRedemption) nativeusage.RedeemResult {
