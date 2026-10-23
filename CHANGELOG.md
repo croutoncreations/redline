@@ -34,6 +34,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Banked resets are tracked per grant or credit (expiry, which windows they clear, usability), and
+  a `reset.expiring` notification reminds before one lapses (`banked_resets.remind_before`,
+  default 24h) and again at `redeem_lead` with `on_expiry: notify`, deduplicated per deadline.
 - Opt-in `banked_resets.on_expiry: redeem` automatically uses expiring resets from the usage
   monitor, independently of dispatch enablement or pause. Redeemable weekly resets shorten the
   scheduling horizon and can trigger firesale. Persisted retries respect five-minute provider
