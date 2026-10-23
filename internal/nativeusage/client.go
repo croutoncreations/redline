@@ -2,6 +2,7 @@
 package nativeusage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -210,9 +211,27 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 }
 
 type claudeWindow struct {
-	Utilization float64 `json:"utilization"`
-	ResetsAt    string  `json:"resets_at"`
+	Utilization *float64        `json:"utilization"`
+	ResetsAt    json.RawMessage `json:"resets_at"`
 }
+
+// Claude returns an explicit null reset for a session window that has not started.
+// Missing fields, empty strings, and active windows with no reset remain errors.
+func (w claudeWindow) inactive() bool {
+	return w.Utilization != nil && *w.Utilization == 0 && bytes.Equal(bytes.TrimSpace(w.ResetsAt), []byte("null"))
+}
+
+func (w claudeWindow) normalized(key, label, role string, period time.Duration) (decision.UsageWindow, decision.AllowanceWindow, error) {
+	if w.Utilization == nil {
+		return decision.UsageWindow{}, decision.AllowanceWindow{}, fmt.Errorf("native claude %s utilization is missing", label)
+	}
+	var reset string
+	if err := json.Unmarshal(w.ResetsAt, &reset); err != nil {
+		return decision.UsageWindow{}, decision.AllowanceWindow{}, fmt.Errorf("parse %s reset: %w", label, err)
+	}
+	return normalizedWindow(key, label, role, *w.Utilization, reset, period)
+}
+
 type claudeLimit struct {
 	Kind     string  `json:"kind"`
 	Percent  float64 `json:"percent"`
@@ -294,8 +313,8 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		return decision.UsageSnapshot{}, fmt.Errorf("decode native claude usage: %w", err)
 	}
 	snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native", Confidence: "high"}
-	if payload.FiveHour != nil {
-		window, allowance, err := normalizedWindow("session", "Session", "short", payload.FiveHour.Utilization, payload.FiveHour.ResetsAt, 5*time.Hour)
+	if payload.FiveHour != nil && !payload.FiveHour.inactive() {
+		window, allowance, err := payload.FiveHour.normalized("session", "Session", "short", 5*time.Hour)
 		if err != nil {
 			return decision.UsageSnapshot{}, err
 		}
@@ -305,7 +324,7 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 	if payload.SevenDay == nil {
 		return decision.UsageSnapshot{}, fmt.Errorf("native claude usage is missing weekly window")
 	}
-	weekly, allowance, err := normalizedWindow("weekly", "Weekly", "weekly", payload.SevenDay.Utilization, payload.SevenDay.ResetsAt, 7*24*time.Hour)
+	weekly, allowance, err := payload.SevenDay.normalized("weekly", "Weekly", "weekly", 7*24*time.Hour)
 	if err != nil {
 		return decision.UsageSnapshot{}, err
 	}
