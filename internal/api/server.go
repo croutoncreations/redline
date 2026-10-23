@@ -862,14 +862,16 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
 	if usageErr == nil {
-		expiryAction := configured.BankedResetOnExpiry()
-		if expiryAction == "redeem" && !s.automaticRedemptionEnabled(configured) {
-			expiryAction = "notify"
+		// Redeem mode only suppresses redeem-now for resets automatic redemption
+		// will actually attempt; on error, every reset falls back to notify.
+		handled, err := s.automaticallyRedeemable(ctx, providerID, configured, snapshot)
+		if err != nil {
+			log.Printf("redline %s automatic banked reset selection failed: %v", providerID, err)
 		}
 		reminders := resetreminder.Checker{
 			Enabled: s.config.Notifications.Enabled && s.config.NotificationEvents()[domain.EventResetExpiring],
 			Store:   s.store, Notifier: s.notifier,
-			ExpiryAction: expiryAction,
+			AutoRedeems: func(reset decision.BankedReset) bool { return handled[reset.ID] },
 		}
 		if err := reminders.Check(ctx, providerID, configured, snapshot, s.now()); err != nil {
 			log.Printf("redline %s banked reset reminders failed: %v", providerID, err)

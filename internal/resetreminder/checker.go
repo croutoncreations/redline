@@ -33,8 +33,11 @@ type Checker struct {
 	Enabled  bool
 	Store    Store
 	Notifier Notifier
-	// ExpiryAction overrides the configured action when automatic redemption cannot run.
-	ExpiryAction string
+	// AutoRedeems reports whether automatic redemption will attempt a reset
+	// before it expires. In redeem mode the redeem-now notification is
+	// suppressed only for deadlines whose resets all satisfy it; nil means
+	// none do, so every expiring reset is notified.
+	AutoRedeems func(decision.BankedReset) bool
 }
 
 func (r Checker) Check(ctx context.Context, providerID string, provider config.Provider, snapshot decision.UsageSnapshot, now time.Time) error {
@@ -60,24 +63,29 @@ func (r Checker) Check(ctx context.Context, providerID string, provider config.P
 	// A deadline, not a credit ID, is the notification identity. Keep the first ID
 	// as informational payload while summing all remaining resets at that deadline.
 	var deadlines []decision.BankedReset
+	var autoHandled []bool
 	byExpiry := make(map[time.Time]int)
 	for _, reset := range resets {
 		if reset.ResetsLeft <= 0 || reset.ExpiresAt == nil || !reset.ExpiresAt.After(now) {
 			continue
 		}
+		auto := r.AutoRedeems != nil && r.AutoRedeems(reset)
 		expires := reset.ExpiresAt.UTC()
 		if i, ok := byExpiry[expires]; ok {
 			deadlines[i].ResetsLeft += reset.ResetsLeft
+			autoHandled[i] = autoHandled[i] && auto
 		} else {
 			byExpiry[expires] = len(deadlines)
 			deadlines = append(deadlines, reset)
+			autoHandled = append(autoHandled, auto)
 		}
 	}
 	var errs []error
-	for _, reset := range deadlines {
-		action := r.ExpiryAction
-		if action == "" {
-			action = provider.BankedResetOnExpiry()
+	for i, reset := range deadlines {
+		action := provider.BankedResetOnExpiry()
+		if action == "redeem" && !autoHandled[i] {
+			// Automatic redemption will not attempt this deadline; warn instead.
+			action = "notify"
 		}
 		if action != "off" && !now.Before(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead())) {
 			if action == "notify" {

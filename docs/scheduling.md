@@ -79,9 +79,10 @@ reset expires unused, the next successful monitor cycle sends one `reset.redeem_
 even if the credit has disappeared from telemetry. When automatic redemption is enabled, redeem
 mode suppresses the “redeem it now” notification; the redemption sends its own outcome events.
 `on_expiry: redeem` is rejected at config load when the usage monitor is disabled or the provider
-is pinned to `usage_source: openusage`. When automatic redemption cannot run for another reason
-(demo mode or multiple accounts of the provider type), redeem mode falls back to notify mode and
-sends `redeem_now` when checked.
+is pinned to `usage_source: openusage`. Redeem mode suppresses `redeem_now` only for resets
+automatic redemption will attempt before they expire; any other reset (demo mode, multiple
+accounts of the provider type, or a Claude grant that is unclaimable, unusable, requires a limit,
+or stays in cooldown past expiry) still gets `redeem_now`.
 
 If a request's response is lost, automatic retries adopt that pending request and reuse its key
 before considering another reset, even if it disappears from telemetry. At expiry an unresolved

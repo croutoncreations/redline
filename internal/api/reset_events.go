@@ -90,12 +90,26 @@ func (s *Server) automaticResetState(ctx context.Context, providerID, name strin
 // nextAutomaticBankedReset is the single timing/selection rule for both spending
 // and the effective horizon. A pending request owns the provider until resolved.
 func (s *Server) nextAutomaticBankedReset(provider config.Provider, state automaticResetState) (decision.BankedReset, time.Time) {
+	var selected decision.BankedReset
+	var selectedAt time.Time
+	for _, reset := range state.details {
+		at, ok := s.automaticAttemptAt(provider, state, reset)
+		if ok && (selected.ID == "" || at.Before(selectedAt)) {
+			selected, selectedAt = reset, at
+		}
+	}
+	return selected, selectedAt
+}
+
+// automaticAttemptAt is the earliest time automatic redemption may attempt
+// reset, and whether that is before it expires. Reminders use the same rule to
+// decide whether redeem mode will really handle a deadline.
+func (s *Server) automaticAttemptAt(provider config.Provider, state automaticResetState, reset decision.BankedReset) (time.Time, bool) {
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	now := s.now()
-	providerAt := now
-	later := func(at time.Time) {
-		if at.After(providerAt) {
-			providerAt = at
+	at := s.now()
+	later := func(deadline time.Time) {
+		if deadline.After(at) {
+			at = deadline
 		}
 	}
 	later(s.usageSources.NativeBlockedUntil(name))
@@ -105,37 +119,45 @@ func (s *Server) nextAutomaticBankedReset(provider config.Provider, state automa
 	for _, a := range state.attempts {
 		later(a.LastAttemptAt.Add(5 * time.Minute))
 	}
-	var selected decision.BankedReset
-	var selectedAt time.Time
-	for _, reset := range state.details {
-		at := providerAt
-		laterReset := func(deadline time.Time) {
-			if deadline.After(at) {
-				at = deadline
-			}
-		}
-		if reset.ExpiresAt != nil {
-			laterReset(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead()))
-		}
-		if reset.CooldownUntil != nil {
-			laterReset(*reset.CooldownUntil)
-		}
-		for _, a := range state.attempts {
-			if a.ResetID == reset.ID {
-				laterReset(a.RetryAt)
-			}
-		}
-		if state.pending.ID == 0 && !automaticResetUsable(name, reset, at) {
-			continue
-		}
-		if reset.ExpiresAt != nil && !at.Before(*reset.ExpiresAt) {
-			continue
-		}
-		if selected.ID == "" || at.Before(selectedAt) {
-			selected, selectedAt = reset, at
+	if reset.ExpiresAt != nil {
+		later(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead()))
+	}
+	if reset.CooldownUntil != nil {
+		later(*reset.CooldownUntil)
+	}
+	for _, a := range state.attempts {
+		if a.ResetID == reset.ID {
+			later(a.RetryAt)
 		}
 	}
-	return selected, selectedAt
+	if state.pending.ID == 0 && !automaticResetUsable(name, reset, at) {
+		return at, false
+	}
+	if reset.ExpiresAt != nil && !at.Before(*reset.ExpiresAt) {
+		return at, false
+	}
+	return at, true
+}
+
+// automaticallyRedeemable reports the reset IDs that automatic redemption will
+// attempt before they expire. Redeem mode suppresses redeem-now reminders only
+// for these; every other expiring reset falls back to a notification.
+func (s *Server) automaticallyRedeemable(ctx context.Context, providerID string, provider config.Provider, snapshot decision.UsageSnapshot) (map[string]bool, error) {
+	if !s.automaticRedemptionEnabled(provider) {
+		return nil, nil
+	}
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	state, err := s.automaticResetState(ctx, providerID, name, snapshot.BankedResetDetails, snapshot.ObservedAt)
+	if err != nil {
+		return nil, err
+	}
+	handled := make(map[string]bool, len(state.details))
+	for _, reset := range state.details {
+		if _, ok := s.automaticAttemptAt(provider, state, reset); ok {
+			handled[reset.ID] = true
+		}
+	}
+	return handled, nil
 }
 
 func automaticResetUsable(provider string, reset decision.BankedReset, at time.Time) bool {

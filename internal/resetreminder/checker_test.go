@@ -93,7 +93,7 @@ func TestBankedResetRedeemModeRemindersOnlyBeforeAction(t *testing.T) {
 	}
 	defer db.Close()
 	n := &resetNotifier{}
-	r := resetreminder.Checker{Enabled: true, Store: db, Notifier: n}
+	r := resetreminder.Checker{Enabled: true, Store: db, Notifier: n, AutoRedeems: func(decision.BankedReset) bool { return true }}
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	expires := now.Add(2 * time.Hour)
 	p := config.Provider{Provider: "claude", BankedResets: config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{"24h", "1h"}}}

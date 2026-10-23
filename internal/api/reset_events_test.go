@@ -183,6 +183,59 @@ func TestMonitorRedeemExpiryNotificationFallsBackWhenAutomaticDisabled(t *testin
 	}
 }
 
+// A grant automatic redemption will never attempt must not silence the
+// redeem-now warning just because redeem mode is configured.
+func TestMonitorRedeemModeNotifiesUnredeemableGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*decision.BankedReset, time.Time)
+		want   int
+	}{
+		{"usable", func(*decision.BankedReset, time.Time) {}, 0},
+		{"unclaimable", func(r *decision.BankedReset, _ time.Time) { r.Claimable = false }, 1},
+		{"requires limit", func(r *decision.BankedReset, _ time.Time) { yes := true; r.RequiresLimit = &yes }, 1},
+		{"not usable now", func(r *decision.BankedReset, _ time.Time) { no := false; r.UsableNow = &no }, 1},
+		{"cooldown past expiry", func(r *decision.BankedReset, now time.Time) {
+			until := now.Add(2 * time.Hour)
+			r.CooldownUntil = &until
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, snapshot := redemptionServer(t, "claude")
+			p := s.config.Providers["main"]
+			p.BankedResets = config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{}}
+			s.config.Providers["main"] = p
+			s.config.UsageMonitor.Enabled = true
+			s.config.Notifications.Enabled = true
+			tc.mutate(&snapshot.BankedResetDetails[0], snapshot.ObservedAt)
+			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+				t.Fatal(err)
+			}
+			source := staticUsageSource{snapshots: map[string]decision.UsageSnapshot{"main": snapshot}}
+			s.usageSources = usage.NewManager(source, source, s.now)
+			notifier := &redemptionNotifier{}
+			s.notifier = notifier
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "key"}
+			}, redeem: func(nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+				return nativeusage.RedeemResult{Outcome: "redeemed"}, nil
+			}}
+			if err := s.monitorProvider(t.Context(), "main"); err != nil {
+				t.Fatal(err)
+			}
+			var expiring []domain.NotificationEvent
+			for _, e := range notifier.events {
+				if e.Type == domain.EventResetExpiring {
+					expiring = append(expiring, e)
+				}
+			}
+			if len(expiring) != tc.want || (tc.want == 1 && expiring[0].Data["action"] != "redeem_now") {
+				t.Fatalf("expiring=%+v all=%+v", expiring, notifier.events)
+			}
+		})
+	}
+}
+
 func TestProviderResetEventsAutomaticGates(t *testing.T) {
 	for _, gate := range []string{"enabled", "notify", "off", "demo", "multiple accounts", "monitor disabled"} {
 		t.Run(gate, func(t *testing.T) {

@@ -81,8 +81,11 @@ Per-provider `banked_resets` defaults are `remind_before: [24h]`, `on_expiry: no
 deadline; opt-in `redeem` automatically attempts redemption instead, without a `redeem_now`
 notification when automatic redemption is enabled. `redeem` is rejected at config load unless
 `usage_monitor.enabled: true`, and for providers pinned to `usage_source: openusage` (which has no
-itemized reset telemetry). If automatic redemption still cannot run (demo mode or multiple accounts
-of the provider type), redeem mode behaves as notify mode and sends `redeem_now` when checked.
+itemized reset telemetry). Redeem mode suppresses `redeem_now` only for resets automatic
+redemption will actually attempt before they expire. Every other reset gets `redeem_now` as in
+notify mode, for example when automatic redemption cannot run at all (demo mode or multiple
+accounts of the provider type), or a Claude grant is unclaimable, not usable now, requires a
+limit, or stays in cooldown or retry backoff past its expiry.
 Earlier ordinary reminders still send. Automatic redemption does not require notifications,
 scheduler enablement, or an unpaused provider.
 

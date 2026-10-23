@@ -32,6 +32,45 @@ func TestCheckerLateFirstObservationOnlySendsExpiryAction(t *testing.T) {
 	}
 }
 
+// Redeem mode only suppresses redeem-now for deadlines automatic redemption will
+// attempt; a deadline with any reset it will skip must still warn the user.
+func TestCheckerRedeemModeNotifiesResetsAutomaticRedemptionSkips(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	expires := now.Add(30 * time.Minute)
+	p := config.Provider{Provider: "claude", BankedResets: config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{}}}
+	for _, tc := range []struct {
+		name   string
+		auto   func(decision.BankedReset) bool
+		resets []string
+		want   int
+	}{
+		{"handled", func(decision.BankedReset) bool { return true }, []string{"a"}, 0},
+		{"skipped", func(decision.BankedReset) bool { return false }, []string{"a"}, 1},
+		{"no selector", nil, []string{"a"}, 1},
+		{"one of two at same deadline skipped", func(r decision.BankedReset) bool { return r.ID == "a" }, []string{"a", "b"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			n := &resetNotifier{}
+			r := resetreminder.Checker{Enabled: true, Store: db, Notifier: n, AutoRedeems: tc.auto}
+			var details []decision.BankedReset
+			for _, id := range tc.resets {
+				details = append(details, decision.BankedReset{ID: id, ExpiresAt: &expires, ResetsLeft: 1})
+			}
+			if err := r.Check(t.Context(), "main", p, decision.UsageSnapshot{BankedResetDetails: details}, now); err != nil {
+				t.Fatal(err)
+			}
+			if len(n.events) != tc.want || (tc.want == 1 && n.events[0].Data["action"] != "redeem_now") {
+				t.Fatalf("events=%+v", n.events)
+			}
+		})
+	}
+}
+
 func TestCheckerDeduplicatesAggregateAndItemizedDeadlines(t *testing.T) {
 	for _, itemizedFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate-first", true: "itemized-first"}[itemizedFirst], func(t *testing.T) {
