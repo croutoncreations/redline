@@ -62,7 +62,9 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring", "reset.redeemed", "reset.redeem_failed", "firesale.started", "firesale.ended"}
+		// Keep the pre-firesale default so upgrading never sends new event
+		// types to existing hooks. reset.* and firesale.* are opt-in.
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {

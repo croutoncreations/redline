@@ -1021,6 +1021,7 @@ async function openTask(id='') {
     $('#task-type').value = task?.type || 'one_off';
     $('#task-interval').value = durationInput(task?.min_interval || 0);
     $('#task-firesale-interval').value = durationInput(task?.firesale_min_interval || 0);
+    $('#task-firesale-interval').dataset.hadValue = task?.firesale_min_interval > 0 ? 'true' : '';
     syncIntervalField();
     syncFiresaleWarning();
     $('#task-prompt').value = task?.prompt || '';
@@ -1101,9 +1102,13 @@ async function saveTask(event) {
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
     priority, type:$('#task-type').value,
     dispatch_tier:$('#task-tier').value,
-    min_interval:recurring ? $('#task-interval').value.trim() : '', firesale_min_interval:recurring ? $('#task-firesale-interval').value.trim() : '', prompt:$('#task-prompt').value,
+    min_interval:recurring ? $('#task-interval').value.trim() : '', prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
   };
+  // Send the firesale interval only when set, or to clear an existing one, so
+  // ordinary saves still work against daemons that predate the field.
+  const firesaleInterval = recurring ? $('#task-firesale-interval').value.trim() : '';
+  if (firesaleInterval || $('#task-firesale-interval').dataset.hadValue) payload.firesale_min_interval = firesaleInterval;
   if (!id) payload.enabled = $('#task-enabled').checked;
   const save = $('#save-task'); save.disabled = true;
   try {

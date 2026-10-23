@@ -81,15 +81,23 @@ func TestBankedResetRedeemRequiresRunnableAutomaticRedemption(t *testing.T) {
 	})
 }
 
+// Upgrading must not start sending new event types to existing hooks: the
+// default list stays the pre-firesale set, and new events are opt-in.
 func TestResetNotificationEvents(t *testing.T) {
 	defaults := config.Config{}.NotificationEvents()
-	if !defaults["reset.expiring"] {
-		t.Fatalf("defaults=%v", defaults)
+	legacy := []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
+	if len(defaults) != len(legacy) {
+		t.Fatalf("defaults=%v, want only %v", defaults, legacy)
+	}
+	for _, event := range legacy {
+		if !defaults[event] {
+			t.Fatalf("defaults=%v missing %s", defaults, event)
+		}
 	}
 	for _, event := range []string{"reset.expiring", "reset.redeemed", "reset.redeem_failed", "firesale.started", "firesale.ended"} {
 		cfg, err := config.Load(writeConfig(t, validConfig+"\nnotifications:\n  events: ["+event+"]\n"))
-		if !defaults[event] {
-			t.Fatalf("missing default event %s", event)
+		if defaults[event] {
+			t.Fatalf("new event %s is enabled by default", event)
 		}
 		if err != nil {
 			t.Fatal(err)
