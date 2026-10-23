@@ -61,7 +61,7 @@ providers:
     # Banked-reset reminders require notifications.enabled (defaults shown).
     # banked_resets:
     #   remind_before: [24h] # [] disables reminders, not the expiry action
-    #   on_expiry: notify   # off | notify | redeem (automatic spending is opt-in)
+    #   on_expiry: notify   # off | notify | redeem (opt-in; needs usage_monitor.enabled)
     #   redeem_lead: 1h
     # Before enabling redeem: dry run, then a manual first redemption.
     # Requires usage_monitor.enabled; redemption ignores dispatch pause to avoid losing resets.

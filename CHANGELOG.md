@@ -41,7 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   monitor, independently of dispatch enablement or pause. Redeemable weekly resets shorten the
   scheduling horizon and can trigger firesale. Persisted retries respect five-minute provider
   throttling, cooldowns, 429 lockouts, and a 30-minute `nothing_to_reset` delay; expired failed
-  resets notify once. Roll out with dry runs, then a manual first redemption, then enable redeem.
+  resets notify once. Requires the usage monitor and native reset telemetry. Roll out with dry
+  runs, then a manual first redemption, then enable redeem.
 - Manual banked-reset redemption for Claude grants and Codex credits through authenticated API
   routes and `redline reset redeem`, with safe dry runs, confirmation, persisted retry keys,
   shared rate-limit lockouts, refill verification, attempt history, and redemption notifications.

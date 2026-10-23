@@ -20,7 +20,7 @@ func TestBankedResetConfiguration(t *testing.T) {
 		{"custom", "remind_before: [48h, 30m]\n      on_expiry: notify\n      redeem_lead: 15m", []time.Duration{48 * time.Hour, 30 * time.Minute}, "notify", 15 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := strings.Replace(validConfig, "provider: codex", "provider: codex\n    banked_resets:\n      "+tc.block, 1)
+			raw := strings.Replace(validConfig, "provider: codex", "provider: codex\n    banked_resets:\n      "+tc.block, 1) + "\nusage_monitor:\n  enabled: true\n"
 			cfg, err := config.Load(writeConfig(t, raw))
 			if err != nil {
 				t.Fatal(err)
@@ -52,6 +52,33 @@ func TestBankedResetRejectsInvalidConfiguration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Redeem mode suppresses the redeem-now notification, so it is only accepted
+// where automatic redemption can actually run: the usage monitor must be on
+// and the provider must have itemized (native) reset telemetry.
+func TestBankedResetRedeemRequiresRunnableAutomaticRedemption(t *testing.T) {
+	monitor := "\nusage_monitor:\n  enabled: true\n"
+	for _, tc := range []struct {
+		name, provider, extra, want string
+	}{
+		{"monitor disabled", "on_expiry: redeem", "", "usage_monitor"},
+		{"pinned openusage", "on_expiry: redeem\n    usage_source: openusage", monitor, "openusage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := strings.Replace(validConfig, "provider: codex", "provider: codex\n    banked_resets:\n      "+tc.provider, 1) + tc.extra
+			_, err := config.Load(writeConfig(t, raw))
+			if err == nil || !strings.Contains(err.Error(), "on_expiry") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+	t.Run("monitor enabled", func(t *testing.T) {
+		raw := strings.Replace(validConfig, "provider: codex", "provider: codex\n    banked_resets:\n      on_expiry: redeem", 1) + monitor
+		if _, err := config.Load(writeConfig(t, raw)); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestResetNotificationEvents(t *testing.T) {

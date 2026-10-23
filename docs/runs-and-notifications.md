@@ -79,11 +79,12 @@ Per-provider `banked_resets` defaults are `remind_before: [24h]`, `on_expiry: no
 `redeem_lead: 1h`. Durations must be positive. `remind_before: []` disables ordinary reminders;
 `on_expiry: off` disables the expiry action. `notify` asks the user to redeem at the action
 deadline; opt-in `redeem` automatically attempts redemption instead, without a `redeem_now`
-notification when automatic redemption is enabled. If automatic redemption cannot run (demo mode,
-multiple accounts of the provider type, or the usage monitor disabled), redeem mode behaves as
-notify mode and sends `redeem_now` when checked. Earlier ordinary reminders still send. Automatic
-redemption does not require notifications, scheduler enablement, or an unpaused provider; it does
-require the usage monitor.
+notification when automatic redemption is enabled. `redeem` is rejected at config load unless
+`usage_monitor.enabled: true`, and for providers pinned to `usage_source: openusage` (which has no
+itemized reset telemetry). If automatic redemption still cannot run (demo mode or multiple accounts
+of the provider type), redeem mode behaves as notify mode and sends `redeem_now` when checked.
+Earlier ordinary reminders still send. Automatic redemption does not require notifications,
+scheduler enablement, or an unpaused provider.
 
 `reset.expiring` includes `provider_account_id`, a human-readable `message`, and string-valued
 `data` fields: `reset_id`, `expires_at` (RFC3339 UTC), `lead` (duration), `action` (`remind` or

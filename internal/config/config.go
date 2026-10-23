@@ -360,6 +360,16 @@ func (cfg *Config) validate() error {
 		default:
 			return fmt.Errorf("provider %q: banked_resets on_expiry must be off, notify, or redeem", name)
 		}
+		// Redeem mode replaces the redeem-now notification, so reject it where
+		// automatic redemption could never run instead of silently missing expiry.
+		if provider.BankedResetOnExpiry() == "redeem" {
+			if !cfg.UsageMonitor.Enabled {
+				return fmt.Errorf("provider %q: banked_resets on_expiry: redeem requires usage_monitor.enabled: true; use on_expiry: notify otherwise", name)
+			}
+			if provider.EffectiveUsageSource() == "openusage" {
+				return fmt.Errorf("provider %q: banked_resets on_expiry: redeem needs native reset telemetry and is unavailable with usage_source: openusage; use on_expiry: notify", name)
+			}
+		}
 		if provider.FiresaleMaxConcurrentRuns < 0 {
 			return fmt.Errorf("provider %q: firesale_max_concurrent_runs must not be negative", name)
 		}

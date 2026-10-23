@@ -55,7 +55,8 @@ banked_resets:
 ```
 
 The usage monitor attempts the next eligible reset no earlier than `expires_at - redeem_lead`,
-even with the scheduler disabled. Enable `usage_monitor.enabled` for automatic redemption.
+even with the scheduler disabled. `on_expiry: redeem` requires `usage_monitor.enabled: true` and
+native reset telemetry (not `usage_source: openusage`); other configurations fail to load.
 Claude grants must be claimable, explicitly usable, out of cooldown, and not require hitting a
 limit. Codex needs itemized credits with resets left. Demo mode and multiple accounts remain
 blocked. **Provider pause is not respected for redemption**: pause controls job dispatch, not
@@ -77,8 +78,10 @@ cooldowns and 429 lockouts. `nothing_to_reset` waits at least 30 minutes before 
 reset expires unused, the next successful monitor cycle sends one `reset.redeem_failed` notice,
 even if the credit has disappeared from telemetry. When automatic redemption is enabled, redeem
 mode suppresses the “redeem it now” notification; the redemption sends its own outcome events.
-When automatic redemption cannot run (demo mode, multiple accounts of the provider type, or the
-usage monitor disabled), redeem mode falls back to notify mode and sends `redeem_now` when checked.
+`on_expiry: redeem` is rejected at config load when the usage monitor is disabled or the provider
+is pinned to `usage_source: openusage`. When automatic redemption cannot run for another reason
+(demo mode or multiple accounts of the provider type), redeem mode falls back to notify mode and
+sends `redeem_now` when checked.
 
 If a request's response is lost, automatic retries adopt that pending request and reuse its key
 before considering another reset, even if it disappears from telemetry. At expiry an unresolved
