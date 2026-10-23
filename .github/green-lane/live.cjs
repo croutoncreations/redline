@@ -25,11 +25,15 @@ module.exports = async function live({github, context, core, run=execFileSync,
   };
   const tip = async () => (await github.rest.git.getRef({...repo,ref:'heads/main'})).data.object.sha;
   const protectedMain = async () => {
-    const response = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){ref(qualifiedName:"refs/heads/main"){branchProtectionRule{isAdminEnforced allowsForcePushes allowsDeletions requiresStrictStatusChecks requiresStatusChecks requiresConversationResolution requiredStatusChecks{context app{databaseId}}}}}}`,repo);
-    const p = response.repository?.ref?.branchProtectionRule;
-    return p?.isAdminEnforced === true && p.requiresStrictStatusChecks === true && p.requiresStatusChecks === true &&
-      p.allowsForcePushes === false && p.allowsDeletions === false && p.requiresConversationResolution === true &&
-      checks.every(name => p.requiredStatusChecks?.some(c => c.context === name && c.app?.databaseId === 15368));
+    // GITHUB_TOKEN cannot read branch-administration details (including via
+    // GraphQL). The contents-readable summary exposes protection, enforcement
+    // and required App-bound checks. Strict up-to-date/conversation settings
+    // remain configured and enforced natively; no admin credential is granted.
+    const {data:branch} = await github.rest.repos.getBranch({...repo,branch:'main'});
+    const p = branch.protection?.required_status_checks;
+    return branch.protected === true && branch.protection?.enabled === true &&
+      p?.enforcement_level === 'everyone' && checks.every(name =>
+        p.checks?.some(c => c.context === name && c.app_id === 15368));
   };
   const trustedWriters = async () => {
     const users = await github.paginate(github.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
