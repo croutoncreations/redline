@@ -124,6 +124,7 @@ func TestSimplePolicyNeedsNoProvenanceReproOrTrailer(t *testing.T) {
 	p := passingPR(PRFile{Filename: "internal/fix.go", Additions: 2})
 	p.Body = "Small bug fix"
 	p.Reviews[0].State = "COMMENTED"
+	p.Reviews[0].Body = "Reviewed the implementation and focused tests"
 	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
 	if r.Verdict != VerdictWouldMerge || !r.AdvisoryCandidate {
 		t.Fatalf("simple reviewed fix must qualify: %+v", r)

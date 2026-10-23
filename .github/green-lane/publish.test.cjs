@@ -35,3 +35,17 @@ for(const change of ['edit','delete','human editor','running'])test(`publication
  else{comment.body+='\n'+change;node.body=comment.body}
  r=await run(f);assert.equal(r.posted.conclusion,'neutral');assert.equal(r.written.verdict,'would_not_merge');
 });
+
+for (const body of [undefined, null, '', 'Reviewed <tags> & "quotes" \u2028 café']) {
+ test(`review body snapshot parity: ${JSON.stringify(body)}`, async()=>{
+  const f=fixture(); f.result.verdict='would_merge';
+  f.reviews=[{id:1,user:{login:'reviewer'},state:'APPROVED',commit_id:'head',body}];
+  // Go hashes review bodies as UTF-8 base64 to avoid JSON HTML/Unicode escaping differences.
+  const canonical={id:1,user:'reviewer',state:'APPROVED',commit:'head',body:Buffer.from(body ?? '', 'utf8').toString('base64')};
+  f.result.review_snapshot=createHash('sha256').update(JSON.stringify({automated:[],threads:[],reviews:[canonical]})).digest('hex');
+  if (body) assert.equal(f.result.review_snapshot,'db35604bd99c33113262a7c08cce94aa8bfdc52e42e9222d1a8ab7a6a83a3adb');
+  let r=await run(structuredClone(f)); assert.equal(r.posted.conclusion,'success');
+  f.reviews[0].body='Changed after evaluation';
+  r=await run(f);assert.equal(r.written.verdict,'would_not_merge');
+ });
+}

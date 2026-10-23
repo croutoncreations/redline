@@ -47,7 +47,7 @@ func TestShadowWorkflowsTrustBoundary(t *testing.T) {
 				for _, step := range job.Steps {
 					if strings.HasPrefix(step.Uses, "actions/checkout@") {
 						ref := step.With["ref"]
-						if step.With["persist-credentials"] != "false" || strings.Contains(ref, "head") || !strings.Contains(ref, "github.sha") {
+						if step.With["persist-credentials"] != "false" || !trustedShadowCheckout(ref) {
 							t.Fatalf("unsafe checkout: %+v", step.With)
 						}
 						if jobName == "invalidate-closed" {
@@ -72,5 +72,19 @@ func TestShadowWorkflowsTrustBoundary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Allow only the two explicit trusted expressions. A substring check for "head"
+// rejects refs/heads/... while failing to describe the actual trust boundary.
+func trustedShadowCheckout(ref string) bool {
+	return ref == "${{ github.sha }}" || ref == "${{ github.event_name == 'pull_request_review' && format('refs/heads/{0}', github.event.repository.default_branch) || github.sha }}"
+}
+
+func TestShadowCheckoutRejectsPRCode(t *testing.T) {
+	for _, ref := range []string{"", "main", "${{ github.event.pull_request.head.sha }}", "${{ github.ref }}", "refs/pull/195/merge", "${{ github.event.pull_request.base.sha }}", "${{ github.sha || github.event.pull_request.head.sha }}"} {
+		if trustedShadowCheckout(ref) {
+			t.Fatalf("untrusted checkout accepted: %s", ref)
+		}
 	}
 }
