@@ -37,10 +37,29 @@ module.exports = async function live({github, context, core, run=execFileSync,
   };
   const trustedWriters = async () => {
     const users = await github.paginate(github.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
+    const snapshot = [];
+    report.writer_snapshots ??= [];
+    report.writer_snapshots.push(snapshot);
     // PR authorship alone does not establish control of a same-repository head.
-    // This single-owner pilot stops if another principal can replace that head.
-    return users.some(u => u.login === 'jfox85' && u.permissions?.push === true) && users.every(u =>
-      u.login === 'jfox85' || (u.permissions?.push === false && u.permissions?.maintain === false && u.permissions?.admin === false));
+    // The list response may omit permission flags for installation tokens. Read
+    // each user's explicit repository permission; missing/unknown proof blocks.
+    // Persist only public identity/permission evidence, never request headers.
+    try {
+      for (const user of users) {
+        if (typeof user.login !== 'string' || !user.login) return false;
+        const entry = {login:user.login,list_permissions:user.permissions ?? null};
+        snapshot.push(entry);
+        const {data} = await github.rest.repos.getCollaboratorPermissionLevel({...repo,username:user.login});
+        entry.permission = data.permission ?? null;
+        entry.verified_login = data.user?.login ?? null;
+        if (entry.verified_login !== user.login || !['admin','maintain','write','read','triage'].includes(entry.permission)) return false;
+        if (user.login === 'jfox85') {
+          if (!['admin','maintain','write'].includes(entry.permission)) return false;
+        } else if (!['read','triage'].includes(entry.permission) ||
+          ['push','maintain','admin'].some(key => user.permissions?.[key] === true)) return false;
+      }
+      return snapshot.some(user => user.login === 'jfox85');
+    } finally { await write(report); }
   };
   if (process.env.LIVE_PILOT_ENABLED !== 'true' || !await enabled()) return finish('Pilot is disabled; no merge attempted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
