@@ -29,7 +29,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
-redline --config redline.yaml token rotate --yes          # without --yes only warns; with it, replaces the token, signs out paired browsers (see mobile.md)
+redline --config redline.yaml token rotate --yes          # without --yes only warns; with it, replaces the token file; restart Redline before old browser sessions and tokens stop working (see mobile.md)
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
