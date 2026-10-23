@@ -149,7 +149,7 @@ Additional live safeguards:
 
 - Require strict, admin-enforced `main` protection with all eight required
   GitHub Actions CI checks, resolved conversations, and no force-push/deletion.
-  Protection is rechecked before the merge. This is not an approval rule.
+  The worker rechecks the contents-readable protection summary (protected branch, enforcement for everyone and all App-bound CI checks) before merging. GitHub reserves detailed administration settings for admin credentials, so strictness and conversation resolution are configured/verified by the owner and enforced natively; the worker receives no admin credential. This is not an approval rule.
 - Pin the actual `refs/heads/main` tip to the workflow's trusted code SHA; abort
   if it changed since the run started or during evaluation. The PR-recorded
   base SHA is preserved as evidence, but is **not** used as the current main tip.
