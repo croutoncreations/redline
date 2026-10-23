@@ -19,9 +19,18 @@ A PR qualifies only when all these checks pass:
 3. **At least one completed review on the latest commit.** A submitted GitHub
    review with state `COMMENTED` or `APPROVED` counts, from a reviewer other than
    the PR author. Automated reviews count; **manual approval is not required**.
-   A review with zero findings counts. Issue comments, pending/dismissed reviews,
-   reviews on older commits and a successful review workflow without a submitted
-   review do not count. Pushing another commit requires a new review.
+   A review with zero findings counts. CodeRabbit and Codex can instead publish a
+   completed review in their canonical summary comment: the known GitHub App and
+   immutable bot user IDs must match, and GitHub must confirm that the comment
+   was unedited or last edited by that same bot. The completion record must name
+   the full current head SHA; running, skipped, rate-limited, ambiguous or unknown
+   records do not count. Codex must explicitly report no unresolved findings.
+   When its security-review state is present, that review must also be completed on the exact current head
+   with no unresolved findings, even if it has no inline threads. An absent or
+   null security-review state means that review was not requested.
+   Only the latest summary per provider is considered. Ordinary issue comments,
+   pending/dismissed reviews, reviews on older commits and a successful workflow
+   without review evidence do not count. Pushing requires a new review.
 4. **Feedback addressed.** Every inline review thread is resolved, including
    outdated threads. No effective `CHANGES_REQUESTED` review remains, including
    on older commits. A later comment does not clear requested changes; the
@@ -47,7 +56,7 @@ Lockfile changes remain manual until trusted resolver regeneration exists;
 plausible syntax or URLs do not suffice.
 
 There is **no** requirement for signed author receipts, model-provider
-independence, an issuer service, a GitHub App, a human approval, a new
+independence, an issuer service, a new GitHub App, a human approval, a new
 fails-before/passes-after repro test or a `Root-Cause` trailer. Required CI is
 the test gate. The older repro/provenance helpers remain available as legacy
 tooling but do not participate in this policy. Duplicate scanning is no longer
@@ -72,7 +81,8 @@ base code; fork token restrictions may require the hourly sweep to publish.
 
 `green-lane-reconcile.yml` refreshes all open PRs hourly at minute 23 and by
 manual dispatch. This catches resolved/reopened threads, which do not directly
-trigger Actions. A planning job paginates the open list and splits it into
+trigger Actions. Bot summary edits also enter through this sweep (or manual
+dispatch), without introducing an issue-comment write workflow. A planning job paginates the open list and splits it into
 five-PR shards; up to four shards run concurrently. No PR is silently omitted.
 Repositories exceeding 256 shards fail explicitly. Each shard fetches current
 evidence independently; there is no all-repository file-list/duplicate scan.
@@ -82,6 +92,13 @@ PRs closed after planning are omitted from the sweep and invalidated on close.
 ```bash
 gh workflow run green-lane-reconcile.yml --repo croutoncreations/redline --ref main
 ```
+
+The evaluator reads review evidence twice. The publisher then independently
+re-fetches summaries, App/author/editor identities, submitted reviews and threads
+and compares their canonical digest immediately before posting. An edited,
+deleted, stale or restarted summary invalidates the earlier evaluation, even
+when the PR timestamp does not change. Protocol changes fail closed until the
+trusted parser is updated. No new App installation or credentials are required.
 
 Failed collection/publication clears the current head's report to neutral where
 GitHub check permissions remain available. Artifacts retain the evaluation JSON
@@ -93,7 +110,7 @@ informational.
 1. Merge the simplified policy and reconciliation fix. Infrastructure PRs touch
    excluded paths and need the normal merge process.
 2. Rerun both workflows from `main`. Compare real eligible and rejected PRs,
-   including an automated `COMMENTED` review with all threads resolved. Exercise
+   including a clean automated summary and a submitted `COMMENTED` review with all threads resolved. Exercise
    failed CI, unresolved feedback, stale reviews, unknown authors and large or
    critical-path changes. Observe the results before enabling merges.
 3. Add a separate opt-in merge step that repeats the current checks, verifies

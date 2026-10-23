@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const automatedReviews = require('./automated-reviews.cjs');
 const {createHash} = require('node:crypto');
 
 // This report is never merge authorization. The publisher executes trusted
@@ -7,6 +8,7 @@ async function reviewSnapshot(github, context, number, head, base) {
   const {owner, repo} = context.repo;
   const reviews = (await github.paginate(github.rest.pulls.listReviews, {owner,repo,pull_number:number,per_page:100}))
     .map(r=>({id:r.id,user:r.user.login,state:r.state,commit:r.commit_id})).sort((a,b)=>a.id-b.id);
+  const automated=await automatedReviews(github,context,number);
   const threads=[]; const seen=new Set(); let cursor=null;
   for (let page=0;page<100;page++) {
     const response=await github.graphql(`query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid reviewThreads(first:100,after:$cursor){totalCount nodes{id isResolved isOutdated} pageInfo{hasNextPage endCursor}}}}}`,{owner,repo,number,cursor});
@@ -16,7 +18,7 @@ async function reviewSnapshot(github, context, number, head, base) {
     if (!pr.reviewThreads.pageInfo.hasNextPage) {
       if (threads.length!==pr.reviewThreads.totalCount || new Set(threads.map(t=>t.id)).size!==threads.length) throw new Error('Incomplete review-thread pagination');
       threads.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
-      return createHash('sha256').update(JSON.stringify({threads,reviews})).digest('hex');
+      return createHash('sha256').update(JSON.stringify({automated,threads,reviews})).digest('hex');
     }
     cursor=pr.reviewThreads.pageInfo.endCursor;
     if (!cursor || seen.has(cursor)) throw new Error('Review-thread pagination stalled');

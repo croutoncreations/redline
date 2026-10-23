@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 )
 
 type Config struct {
+	ListenAddress string `yaml:"-"`
+	// SourcePath identifies the config actually loaded by this service, never a YAML-supplied path.
+	SourcePath      string              `yaml:"-"`
 	Database        string              `yaml:"database"`
 	RunArtifactsDir string              `yaml:"run_artifacts_dir"`
 	ActivePolicy    string              `yaml:"active_policy"`
@@ -210,6 +214,10 @@ func Load(path string) (Config, error) {
 	cfg, warnings, err := decode(data)
 	if err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	cfg.SourcePath, err = filepath.Abs(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve config path: %w", err)
 	}
 	cfg.Warnings = warnings
 	if err := cfg.validate(); err != nil {

@@ -221,3 +221,66 @@ func TestEvidenceComparisonDetectsReviewAndCheckChanges(t *testing.T) {
 		t.Fatal("CI change not detected")
 	}
 }
+
+func TestAutomatedReviewEditorJoin(t *testing.T) {
+	for _, mode := range []string{"valid", "human editor", "body changed", "node missing", "partial error", "pagination", "repeated page"} {
+		t.Run(mode, func(t *testing.T) {
+			body := "<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"
+			pages := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				send := func(v any) {
+					if err := json.NewEncoder(w).Encode(v); err != nil {
+						t.Error(err)
+					}
+				}
+				if r.Method == "GET" {
+					pages++
+					if (mode == "pagination" && pages == 1) || mode == "repeated page" {
+						rows := []any{}
+						for i := 1; i <= 100; i++ {
+							rows = append(rows, map[string]any{"id": 100 + i})
+						}
+						send(rows)
+						return
+					}
+					send([]any{map[string]any{"id": 42, "node_id": "node", "body": body, "updated_at": "2026-01-01T00:00:00Z", "user": map[string]any{"id": 136622811, "login": "coderabbitai[bot]", "type": "Bot"}, "performed_via_github_app": map[string]any{"id": 347564}}})
+					return
+				}
+				editor := map[string]any{"__typename": "Bot", "login": "coderabbitai", "databaseId": 136622811}
+				if mode == "human editor" {
+					editor = map[string]any{"__typename": "User", "login": "author"}
+				}
+				node := map[string]any{"id": "node", "databaseId": 42, "body": body, "updatedAt": "2026-01-01T00:00:00Z", "lastEditedAt": "2026-01-01T00:00:00Z", "editor": editor}
+				if mode == "body changed" {
+					node["body"] = "changed"
+				}
+				response := map[string]any{"data": map[string]any{"nodes": []any{node}}}
+				if mode == "node missing" {
+					response["data"] = map[string]any{"nodes": []any{nil}}
+				}
+				if mode == "partial error" {
+					response["errors"] = []any{map[string]any{"message": "denied"}}
+				}
+				send(response)
+			}))
+			defer server.Close()
+			c := &GitHubClient{apiBase: server.URL, client: server.Client(), owner: "owner", repo: "repo"}
+			got, err := c.automatedReviews(context.Background(), 1)
+			wantErr := mode == "body changed" || mode == "node missing" || mode == "partial error" || mode == "repeated page"
+			if (err != nil) != wantErr {
+				t.Fatalf("err=%v want error %v", err, wantErr)
+			}
+			if !wantErr {
+				if len(got) != 1 || got[0].ID != 42 {
+					t.Fatalf("unexpected evidence: %d", len(got))
+				}
+				if mode == "human editor" && got[0].EditorType != "User" {
+					t.Fatal("editor omitted")
+				}
+				if mode == "pagination" && pages != 2 {
+					t.Fatal("pagination incomplete")
+				}
+			}
+		})
+	}
+}

@@ -350,7 +350,7 @@ test('describes enabled jobs as waiting when the global scheduler is off', async
   dashboard.scheduler = { enabled: false };
   await loadDashboard(page, { dashboard });
 
-  await expect(page.locator('#scheduler-banner')).toContainText('nothing will run');
+  await expect(page.locator('#scheduler-banner')).toContainText('Automatic dispatch is off');
   await expect(page.locator('#tasks-body')).toContainText('Ready · scheduler off');
   await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
 });
@@ -1021,4 +1021,62 @@ test('renders form dropdowns at the same height as text fields', async ({ page }
   await expect(page.getByRole('dialog', { name: 'Harness & workspace setup' })).toBeVisible();
   const profile = await heights('#profiles-dialog', ['profile-id', 'profile-provider', 'profile-harness', 'profile-workspace', 'profile-base-branch', 'profile-cleanup', 'profile-repository-recent', 'profile-repository']);
   expect(new Set(Object.values(profile)).size, JSON.stringify(profile)).toBe(1);
+});
+
+
+test('repository validation feedback keeps onboarding on the workspace step and allows correction', async ({ page }) => {
+  const dashboard = dashboardFixture(); dashboard.tasks = [];
+  const state = await loadDashboard(page, { dashboard, profiles: [], waitForReady: false,
+    profileSaveError: 'repository must be an existing directory on this Redline host; choose a local Git repository: /missing/repo',
+  });
+  const guide = page.getByRole('dialog', { name: 'Set up Redline' });
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click();
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.locator('#onboarding-repository').fill('/missing/repo');
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click();
+  await expect(page.locator('#onboarding-error')).toContainText('existing directory');
+  await expect(page.locator('[data-onboarding-step="3"]')).toBeVisible();
+  await expect(page.locator('#onboarding-repository')).toHaveValue('/missing/repo');
+  expect(state.profiles).toHaveLength(0);
+  state.profileSaveError = '';
+  await page.locator('#onboarding-repository').fill('/repo/valid');
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click();
+  await expect(page.locator('[data-onboarding-step="4"]')).toBeVisible();
+  expect(state.profiles[0].repository).toBe('/repo/valid');
+});
+
+test('scheduler setup shows the actual config and local listener without activating scheduling', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.scheduler = { enabled: false };
+  dashboard.config_path = "/Users/tester/My Projects/redline's config.yaml";
+  dashboard.listen_address = '127.0.0.1:17436';
+  dashboard.host_os = 'darwin';
+  const state = await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Enable scheduling…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Enable automatic scheduling' });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#scheduler-config-path')).toHaveText(dashboard.config_path);
+  await expect(page.locator('#scheduler-restart-command')).toContainText('--listen \'127.0.0.1:17436\'');
+  await expect(dialog).toContainText('subscription allowance');
+  await expect(dialog).toContainText('Ctrl+C');
+  await expect(dialog.getByRole('link', { name: 'Read the scheduling setup guide' })).toHaveAttribute('href', /docs\/getting-started/);
+  expect(state.requests.filter(item => item.method !== 'GET')).toHaveLength(0);
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
+test('scheduler instructions safely render unknown paths and support Windows hosts', async ({ page }) => {
+  const dashboard = dashboardFixture(); dashboard.scheduler = { enabled: false };
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Enable scheduling…' }).click();
+  await expect(page.locator('#scheduler-config-fallback')).toBeVisible();
+  await page.getByRole('dialog', { name: 'Enable automatic scheduling' }).getByRole('button', { name: 'Close', exact: true }).click();
+  dashboard.config_path = "C:\\Users\\tester's <img src=x onerror=alert(1)>\\redline.yaml";
+  dashboard.host_os = 'windows'; dashboard.listen_address = '127.0.0.1:18436';
+  await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), dashboard);
+  await page.getByRole('button', { name: 'Enable scheduling…' }).click();
+  await expect(page.locator('#scheduler-config-path')).toHaveText(dashboard.config_path);
+  await expect(page.locator('#scheduler-config-path img')).toHaveCount(0);
+  await expect(page.locator('#scheduler-restart-command')).toContainText("tester's".replace("'", "''"));
+  await expect(page.locator('#scheduler-config-fallback')).toBeHidden();
 });
