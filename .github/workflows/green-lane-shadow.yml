@@ -55,7 +55,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request_review' && github.event.pull_request.base.sha || github.sha }}
+          # Review events may name a base predating the evaluator/publisher.
+          # Use the repository's trusted default branch, never PR head/merge code.
+          ref: ${{ github.event_name == 'pull_request_review' && format('refs/heads/{0}', github.event.repository.default_branch) || github.sha }}
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
