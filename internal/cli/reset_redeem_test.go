@@ -14,7 +14,7 @@ import (
 )
 
 func TestResetRedeemExitCodesBodyAndJSON(t *testing.T) {
-	for outcome, exit := range map[string]int{"redeemed": 0, "dry_run_ok": 0, "nothing_to_reset": 3, "cooldown": 4, "unavailable": 4, "gone": 5, "failed": 1} {
+	for outcome, exit := range map[string]int{"redeemed": 0, "dry_run_ok": 0, "nothing_to_reset": 3, "cooldown": 4, "unavailable": 4, "gone": 5, "failed": 1, "unknown": 1} {
 		t.Run(outcome, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "POST" || r.URL.EscapedPath() != "/v1/providers/team%2Fcodex/banked-resets/redeem" {
@@ -37,6 +37,18 @@ func TestResetRedeemExitCodesBodyAndJSON(t *testing.T) {
 				t.Fatalf("exit=%d out=%s err=%s", got, &out, &errOut)
 			}
 		})
+	}
+}
+
+func TestResetRedeemUnknownHumanOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"outcome":"unknown","reason":"check the provider"}`)
+	}))
+	defer server.Close()
+	var out, errOut bytes.Buffer
+	exit := cli.RunWithInput([]string{"--api", server.URL, "reset", "redeem", "--provider", "main", "--yes"}, strings.NewReader(""), &out, &errOut, time.Now)
+	if exit != 1 || !strings.Contains(out.String(), "outcome unknown") {
+		t.Fatalf("exit=%d out=%s err=%s", exit, &out, &errOut)
 	}
 }
 

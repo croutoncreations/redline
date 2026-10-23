@@ -1,6 +1,7 @@
 # Design: firesale mode and banked resets
 
-Status: accepted, in implementation (2026-10-22)
+Status: accepted, milestones 1–5 implemented (2026-10-22). Rollout: dry run both providers,
+then a manual first redemption, then enable `on_expiry: redeem`.
 
 ## Problem
 
@@ -57,7 +58,7 @@ the weekly window. Sources:
 | Source | Included when |
 |---|---|
 | `weekly` | Always (the real weekly reset). |
-| `banked_reset` | Provider `banked_resets.on_expiry: redeem`, the reset clears the weekly window, is usable without being at a limit, and its redeem time (`expires_at − redeem_lead`) is before the real weekly reset. |
+| `banked_reset` | The next auto-redeemable reset clears the weekly window and can be attempted before the real weekly reset. Requires `banked_resets.on_expiry: redeem`, usage monitoring enabled, one account of that provider type, and not demo mode. Timing respects redeem lead, provider throttle, retry deadline, cooldown, and provider lockout. |
 | `predicted_global` | Future. A reset-signal source above a configured confidence. |
 
 A banked reset that will only be *notified about* never shortens the horizon: if the user does not
@@ -176,8 +177,15 @@ deadlines on each cycle:
   retried.
 - At `expires_at − redeem_lead`:
   - `notify`: emit `reset.expiring` with `action: redeem_now` (deduplicated the same way).
-  - `redeem`: currently notify only. Milestone 5 will attempt redemption (below), retrying until
-    expiry on transient failures with backoff.
+  - `redeem`: attempt redemption (below), retrying until expiry on transient failures with
+    persisted backoff (at least five minutes per provider; 30 minutes for `nothing_to_reset`).
+    Respect cooldowns and 429 lockouts; `redeemed` and `gone` stop retries. Do not send
+    `redeem_now`. Failed resets that expire unused notify once via `expired_unredeemed`.
+    A pending real request of any trigger is retried first with its stored key, even if telemetry
+    no longer lists it. An unresolved request at expiry is finalized as `unknown` and notifies
+    "redemption request outcome unknown at expiry; check the provider", never "expired unused".
+    If its expiry cannot be recovered, the same finalization occurs 24 hours after its first attempt.
+    Dispatch pause does not block redemption: an expiring reset should be used rather than lost.
 
 ## Redemption
 
@@ -245,15 +253,15 @@ OpenAI-Beta: codex-1
 
 ## Milestones
 
-1. **Reset details.** Itemized `BankedReset` parsing for Claude grants and Codex credits (detail
+1. **Reset details — implemented.** Itemized `BankedReset` parsing for Claude grants and Codex credits (detail
    endpoint, cached), persisted with snapshots, exposed in the API.
 2. **Reminders — implemented.** `banked_resets` config, `reset.expiring` reminders and the
-   expiry-time `notify` action, deduplicated. `redeem` is accepted but notifies only until milestone 5.
-3. **Effective horizon and firesale — implemented.** `ResetEvent` seam (weekly source only), horizon-based
+   expiry-time `notify` action, deduplicated. `redeem` is opt-in automatic redemption (milestone 5).
+3. **Effective horizon and firesale — implemented.** `ResetEvent` seam, horizon-based
    evaluation, `firesale` tier/state, `firesale_trigger`, `firesale_min_interval`,
    `firesale_max_concurrent_runs`, immediate re-dispatch, firesale notifications, CLI/MCP/dashboard.
-4. **Redemption engine.** Claude and Codex clients, attempts table, manual and dry-run CLI/API.
-5. **Automatic redemption.** `on_expiry: redeem`, banked-reset events in the horizon, post-redeem
+4. **Redemption engine — implemented.** Claude and Codex clients, attempts table, manual and dry-run CLI/API.
+5. **Automatic redemption — implemented.** `on_expiry: redeem`, banked-reset events in the horizon, post-redeem
    verification.
 
 ## Open questions

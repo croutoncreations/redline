@@ -73,9 +73,12 @@ func (r Checker) Check(ctx context.Context, providerID string, provider config.P
 	}
 	var errs []error
 	for _, reset := range deadlines {
-		if provider.BankedResetOnExpiry() == "notify" && !now.Before(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead())) {
-			if err := r.send(ctx, providerID, provider, reset, now, provider.BankedResetRedeemLead(), kindExpiryAction, actionRedeemNow); err != nil {
-				errs = append(errs, err)
+		action := provider.BankedResetOnExpiry()
+		if action != "off" && !now.Before(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead())) {
+			if action == "notify" {
+				if err := r.send(ctx, providerID, provider, reset, now, provider.BankedResetRedeemLead(), kindExpiryAction, actionRedeemNow); err != nil {
+					errs = append(errs, err)
+				}
 			}
 			continue
 		}

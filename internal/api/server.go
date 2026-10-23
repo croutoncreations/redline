@@ -869,6 +869,9 @@ func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 		if err := reminders.Check(ctx, providerID, configured, snapshot, s.now()); err != nil {
 			log.Printf("redline %s banked reset reminders failed: %v", providerID, err)
 		}
+		if err := s.redeemExpiringBankedReset(ctx, providerID, configured, snapshot); err != nil {
+			log.Printf("redline %s automatic banked reset redemption failed: %v", providerID, err)
+		}
 	}
 	_, tokenErr := s.syncTokens(ctx, providerID)
 	return errors.Join(usageErr, tokenErr)
@@ -2554,12 +2557,16 @@ func (s *Server) providerDecisionInput(
 	if err != nil {
 		return decision.Input{}, err
 	}
+	events, err := s.providerResetEvents(ctx, providerID, snapshot)
+	if err != nil {
+		return decision.Input{}, err
+	}
 	return decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
 		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
-		ResetEvents:    []decision.ResetEvent{{Source: decision.ResetWeekly, At: snapshot.Weekly.ResetsAt, Clears: []string{"weekly"}, Confidence: snapshot.Confidence}},
+		ResetEvents:    events,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, nil
 }

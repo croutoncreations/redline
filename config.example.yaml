@@ -34,6 +34,7 @@ notifications:
 providers:
   codex-main:
     provider: codex
+    # The banked_resets options shown under claude-main apply to Codex too.
     # Optional provider default. If omitted, active_policy is used. A dashboard
     # override takes precedence and is persisted in SQLite until reset.
     # policy: standard
@@ -60,8 +61,11 @@ providers:
     # Banked-reset reminders require notifications.enabled (defaults shown).
     # banked_resets:
     #   remind_before: [24h] # [] disables reminders, not the expiry action
-    #   on_expiry: notify   # off | notify (redeem will be added in milestone 5)
+    #   on_expiry: notify   # off | notify | redeem (automatic spending is opt-in)
     #   redeem_lead: 1h
+    # Before enabling redeem: dry run, then a manual first redemption.
+    # Requires usage_monitor.enabled; redemption ignores dispatch pause to avoid losing resets.
+    # Redeemable weekly resets shorten the scheduling horizon; retries respect cooldowns/429s.
     # Example: allow two Claude runs, but never overlap two Fable runs.
     # max_concurrent_runs: 2
     # firesale_max_concurrent_runs: 3

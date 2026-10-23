@@ -45,9 +45,43 @@ only when weekly remaining increases or the weekly reset moves later. `verified:
 warning; do not rely on new capacity until usage confirms it. Provider telemetry is still stored,
 never replaced with an invented refill.
 
-There is no automatic spending or banked-reset scheduling horizon yet. `banked_resets.on_expiry`
-remains `off` or `notify`, not `redeem`. MCP deliberately has no redemption tool: spending resets
-from an agent is out of scope.
+After dry runs and a manual first redemption, opt in per provider:
+
+```yaml
+banked_resets:
+  on_expiry: redeem       # default: notify; off disables the expiry action
+  redeem_lead: 1h
+  remind_before: [24h]
+```
+
+The usage monitor attempts the next eligible reset no earlier than `expires_at - redeem_lead`,
+even with the scheduler disabled. Enable `usage_monitor.enabled` for automatic redemption.
+Claude grants must be claimable, explicitly usable, out of cooldown, and not require hitting a
+limit. Codex needs itemized credits with resets left. Demo mode and multiple accounts remain
+blocked. **Provider pause is not respected for redemption**: pause controls job dispatch, not
+whether an expiring reset is saved from being lost. Notifications may be disabled without
+preventing redemption; reminders still require notifications.
+
+In redeem mode, usable banked resets that clear the weekly window and will be applied before
+the real weekly reset shorten the effective scheduling horizon to their redeem time. This can
+trigger firesale earlier. `off` and `notify` never shorten it; model-specific pools keep their
+own reset. Redeemed IDs are excluded even if stale details still list them. A provider acknowledgement
+alone never invents capacity: only refreshed, verified usage demonstrates a refill.
+
+Automatic attempts are limited to one per provider per five minutes. Transient errors retry on
+later successful monitor cycles before expiry, reusing pending request keys and respecting provider
+cooldowns and 429 lockouts. `nothing_to_reset` waits at least 30 minutes before trying again;
+`redeemed` and `gone` stop retries for that reset. Retry state survives daemon restarts. If a failed
+reset expires unused, the next successful monitor cycle sends one `reset.redeem_failed` notice,
+even if the credit has disappeared from telemetry. In redeem mode there is no “redeem it now”
+notification; the redemption sends its own outcome events.
+
+If a request's response is lost, automatic retries adopt that pending request and reuse its key
+before considering another reset, even if it disappears from telemetry. At expiry an unresolved
+request is reported as **outcome unknown**, not expired unused; check the provider. If no expiry can
+be recovered, retries stop with that same unknown outcome 24 hours after the first attempt.
+
+MCP deliberately has no redemption tool: spending resets from an agent is out of scope.
 
 ## Dispatch tiers and priority
 
@@ -86,10 +120,14 @@ See `config.example.yaml` for the bundled `late`, `standard`, and `early` policy
 
 Decisions expose `effective_reset_at` and `effective_reset_source`. The effective horizon is the
 earliest future reset event that clears the weekly allowance, no later than its real reset.
-Currently the service supplies only the real `weekly` event: banked resets and predicted resets
-do not shorten scheduling yet. Slots, overflow, pace thresholds, and projections use this horizon;
-pace gap still measures time remaining as a fraction of a seven-day week. Model-specific weekly
-pools retain their own resets.
+The service always supplies the real `weekly` event, plus a `banked_reset` event for the next
+auto-redeemable reset that clears the weekly allowance before that boundary. This requires
+`banked_resets.on_expiry: redeem` and automatic redemption to be able to run: usage monitoring
+enabled, a single account of that provider type, and not demo mode. The event is timed at the
+earliest permitted attempt, respecting redeem lead, provider throttling, retry deadlines,
+cooldowns, and provider lockouts. Predicted global resets are not implemented yet.
+Slots, overflow, pace thresholds, and projections use this horizon; pace gap still measures time
+remaining as a fraction of a seven-day week. Model-specific weekly pools retain their own resets.
 
 A policy's optional `firesale_trigger` (0–1) upgrades an admitted decision to `firesale: true`
 and unlocks the highest tier when `max(pace_gap, overflow) >= firesale_trigger`. Overflow is used
@@ -282,3 +320,4 @@ See [the metrics methodology](launch-metrics.md) for definitions and caveats.
 - [Profiles and tasks](profiles-and-tasks.md)
 - [Runs, logs, and notifications](runs-and-notifications.md)
 - [Architecture](architecture.md)
+- [Firesale and banked-reset design](design/firesale-and-banked-resets.md)

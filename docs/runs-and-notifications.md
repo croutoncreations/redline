@@ -60,20 +60,27 @@ and `unlocked_tier`. See [firesale scheduling](scheduling.md#effective-horizon-a
 
 ### Banked-reset redemptions
 
-Manual redemption emits `reset.redeemed` on provider-acknowledged success, or `reset.redeem_failed`
+Manual and automatic redemption emit `reset.redeemed` on provider-acknowledged success, or `reset.redeem_failed`
 for failed, unavailable, cooldown, or gone outcomes. Dry runs and `nothing_to_reset` emit neither.
 Each event includes string-valued data: `reset_id`, `request_id`, `outcome`, `code`, `reason`, and
 `verified` (`true` or `false`). A successful response with no observed weekly refill sends only
 `reset.redeemed`, with `verified: "false"` and a note to check usage; it never assumes allowance
-has refilled. See [redemption caveats](scheduling.md#redeeming-banked-resets).
+has refilled. In automatic (`on_expiry: redeem`) mode, retries may emit further failure events;
+an attempted reset that expires unused also emits one `reset.redeem_failed` with `reset_id`,
+`expires_at`, and `reason: "expired unused"`. This final notice is deduplicated by provider and
+expiry with kind `expired_unredeemed`, including across restarts and vanished credit details.
+Disabled or filtered notifications do not claim it. See
+[automatic redemption and retry rules](scheduling.md#redeeming-banked-resets).
 
 ### Banked-reset reminders
 
 The usage monitor checks banked reset deadlines independently of `scheduler.enabled`.
 Per-provider `banked_resets` defaults are `remind_before: [24h]`, `on_expiry: notify`, and
 `redeem_lead: 1h`. Durations must be positive. `remind_before: []` disables ordinary reminders;
-`on_expiry: off` disables the expiry action. Only `off` and `notify` are accepted;
-`redeem` and automatic redemption will be added in milestone 5.
+`on_expiry: off` disables the expiry action. `notify` asks the user to redeem at the action
+deadline; opt-in `redeem` automatically attempts redemption instead, without a `redeem_now`
+notification. Earlier ordinary reminders still send. Automatic redemption does not require
+notifications, scheduler enablement, or an unpaused provider; it does require the usage monitor.
 
 `reset.expiring` includes `provider_account_id`, a human-readable `message`, and string-valued
 `data` fields: `reset_id`, `expires_at` (RFC3339 UTC), `lead` (duration), `action` (`remind` or

@@ -53,7 +53,7 @@ func TestBankedResetRedemptionsMigration35SchemaGuardAndLimit(t *testing.T) {
 				t.Fatal("request ID not unique")
 			}
 			var version int
-			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(stamp, 35) {
+			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(stamp, 36) {
 				t.Fatalf("version=%d err=%v", version, err)
 			}
 		})

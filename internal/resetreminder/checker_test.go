@@ -86,6 +86,28 @@ func TestBankedResetRemindersExpiryAction(t *testing.T) {
 	}
 }
 
+func TestBankedResetRedeemModeRemindersOnlyBeforeAction(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	n := &resetNotifier{}
+	r := resetreminder.Checker{Enabled: true, Store: db, Notifier: n}
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	expires := now.Add(2 * time.Hour)
+	p := config.Provider{Provider: "claude", BankedResets: config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{"24h", "1h"}}}
+	snapshot := decision.UsageSnapshot{BankedResetDetails: []decision.BankedReset{{ID: "grant", ExpiresAt: &expires, ResetsLeft: 1}}}
+	for _, at := range []time.Time{now, now.Add(time.Hour), now.Add(90 * time.Minute)} {
+		if err := r.Check(t.Context(), "main", p, snapshot, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(n.events) != 1 || n.events[0].Data["action"] != "remind" || n.events[0].Data["lead"] != "24h" {
+		t.Fatalf("events=%+v", n.events)
+	}
+}
+
 func TestBankedResetRemindersAggregateFallback(t *testing.T) {
 	for _, itemized := range []bool{false, true} {
 		t.Run(fmt.Sprint(itemized), func(t *testing.T) {

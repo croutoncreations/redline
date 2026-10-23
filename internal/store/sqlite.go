@@ -592,6 +592,24 @@ ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
 			return fmt.Errorf("record banked reset redemptions migration: %w", err)
 		}
 	}
+	// Keep retry deadlines independently of telemetry: expired credits can
+	// disappear from the next successful usage read.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS automatic_banked_reset_redemptions (
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_attempt_at TEXT NOT NULL,
+    retry_at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    PRIMARY KEY(provider_account_id, reset_id)
+)`); err != nil {
+		return fmt.Errorf("create automatic banked reset redemptions: %w", err)
+	}
+	if version < 36 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (36)`); err != nil {
+			return fmt.Errorf("record automatic banked reset redemptions migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

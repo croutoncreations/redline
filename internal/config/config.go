@@ -356,9 +356,9 @@ func (cfg *Config) validate() error {
 			}
 		}
 		switch provider.BankedResetOnExpiry() {
-		case "off", "notify":
+		case "off", "notify", "redeem":
 		default:
-			return fmt.Errorf("provider %q: banked_resets on_expiry must be off or notify (redeem will be added in milestone 5)", name)
+			return fmt.Errorf("provider %q: banked_resets on_expiry must be off, notify, or redeem", name)
 		}
 		if provider.FiresaleMaxConcurrentRuns < 0 {
 			return fmt.Errorf("provider %q: firesale_max_concurrent_runs must not be negative", name)

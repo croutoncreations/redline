@@ -119,13 +119,16 @@ Redemption POSTs require the bearer API token; mobile pairing session cookies al
 
 - `POST /v1/providers/{id}/banked-resets/redeem` with `{"dry_run": true}` validates the provider
   request using a nonexistent reset ID. `{"dry_run": false}` spends the selected one-time reset.
-  No automatic redemption is enabled. An optional `expected_reset_id` binds real redemption to
+  Automatic redemption is opt-in via `banked_resets.on_expiry: redeem`
+  ([setup](scheduling.md#redeeming-banked-resets)); this endpoint always performs a manual or
+  dry-run redemption. An optional `expected_reset_id` binds real redemption to
   a previously confirmed ID; a different current selection returns **409**, names both IDs, and
   spends nothing. It is ignored for dry runs. Unresolved redemptions are retried before selecting
   another reset. Completed successes return `replayed: true` and `completed_at` without a new
   provider call or verification claim.
 - `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
-  first, including pending operations whose idempotency keys survive restarts.
+  first, including pending operations whose idempotency keys survive restarts. An ambiguous
+  request finalized at expiry has outcome `unknown`; check the provider before trying another reset.
 
 Example result:
 

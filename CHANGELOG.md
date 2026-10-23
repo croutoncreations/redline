@@ -34,14 +34,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Opt-in `banked_resets.on_expiry: redeem` automatically uses expiring resets from the usage
+  monitor, independently of dispatch enablement or pause. Redeemable weekly resets shorten the
+  scheduling horizon and can trigger firesale. Persisted retries respect five-minute provider
+  throttling, cooldowns, 429 lockouts, and a 30-minute `nothing_to_reset` delay; expired failed
+  resets notify once. Roll out with dry runs, then a manual first redemption, then enable redeem.
 - Manual banked-reset redemption for Claude grants and Codex credits through authenticated API
   routes and `redline reset redeem`, with safe dry runs, confirmation, persisted retry keys,
   shared rate-limit lockouts, refill verification, attempt history, and redemption notifications.
-  Automatic spending remains disabled; MCP exposes no spending tool.
+  Automatic spending is opt-in; MCP exposes no spending tool.
 - Firesale scheduling unlocks a fourth task tier under large allowance surplus, with optional
   per-task faster intervals, higher provider concurrency, prompt re-dispatch after completion,
   and `firesale.started` / `firesale.ended` notifications. Decisions report the effective reset
-  horizon; only real weekly resets are produced for now. CLI, API, MCP, and dashboard support
+  horizon, including opted-in banked resets. CLI, API, MCP, and dashboard support
   the new task settings, and existing tasks migrate without changing their cooldowns.
 - `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
   trackers. It preserves source attribution and freshness, distinguishes predictions, promises,

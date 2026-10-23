@@ -16,6 +16,7 @@ func TestBankedResetConfiguration(t *testing.T) {
 		lead        time.Duration
 	}{
 		{"disabled", "remind_before: []\n      on_expiry: off", []time.Duration{}, "off", time.Hour},
+		{"automatic", "on_expiry: redeem", []time.Duration{24 * time.Hour}, "redeem", time.Hour},
 		{"custom", "remind_before: [48h, 30m]\n      on_expiry: notify\n      redeem_lead: 15m", []time.Duration{48 * time.Hour, 30 * time.Minute}, "notify", 15 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,7 +43,7 @@ func TestBankedResetConfiguration(t *testing.T) {
 }
 
 func TestBankedResetRejectsInvalidConfiguration(t *testing.T) {
-	for _, block := range []string{"remind_before: [0s]", "remind_before: [-1h]", "remind_before: [bad]", "redeem_lead: 0s", "redeem_lead: -1h", "redeem_lead: bad", "on_expiry: automatic", "on_expiry: redeem"} {
+	for _, block := range []string{"remind_before: [0s]", "remind_before: [-1h]", "remind_before: [bad]", "redeem_lead: 0s", "redeem_lead: -1h", "redeem_lead: bad", "on_expiry: automatic"} {
 		t.Run(block, func(t *testing.T) {
 			raw := strings.Replace(validConfig, "provider: codex", "provider: codex\n    banked_resets:\n      "+block, 1)
 			_, err := config.Load(writeConfig(t, raw))

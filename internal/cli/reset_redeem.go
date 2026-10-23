@@ -86,7 +86,11 @@ func runResetRedeem(client apiclient.Client, args []string, stdin io.Reader, std
 			fmt.Fprintln(stdout)
 			return 0
 		}
-		fmt.Fprintf(stdout, "%s: %s", *provider, result.Outcome)
+		outcome := result.Outcome
+		if outcome == "unknown" {
+			outcome = "outcome unknown"
+		}
+		fmt.Fprintf(stdout, "%s: %s", *provider, outcome)
 		if result.Code != "" {
 			fmt.Fprintf(stdout, " (%s)", result.Code)
 		}

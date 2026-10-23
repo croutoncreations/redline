@@ -71,7 +71,8 @@ Redline refuses rather than spending another reset: re-run to confirm.
 
 `--json` prints the API result, including `outcome`, `code`, `reason`, `reset_id`, `request_id`,
 `verified`, and any `cleared` / `cooldown_until` fields. Exit codes: **0** redeemed or dry_run_ok,
-**3** nothing_to_reset, **4** cooldown or unavailable, **5** gone, **1** failed or error.
+**3** nothing_to_reset, **4** cooldown or unavailable, **5** gone, **1** failed, unknown, or error.
+An `unknown` result is shown as "outcome unknown"; check the provider before trying another reset.
 `verified: false` does not make an acknowledged redemption fail; inspect usage before relying on
 new allowance. See [redemption caveats](scheduling.md#redeeming-banked-resets).
 

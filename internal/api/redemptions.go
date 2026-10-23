@@ -144,6 +144,23 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 			selected.ID = pending.ResetID
 		} else {
 			details := pre.BankedResetDetails
+			if trigger == "automatic" {
+				details, err = s.automaticBankedResets(ctx, providerID, name, details)
+				if err != nil {
+					return result, err
+				}
+				// The automatic selector already reserved the provider throttle.
+				// Recheck only its candidate against fresh telemetry, not a new reset.
+				if expectedResetID != "" {
+					var candidate []decision.BankedReset
+					for _, detail := range details {
+						if detail.ID == expectedResetID {
+							candidate = append(candidate, detail)
+						}
+					}
+					details = candidate
+				}
+			}
 			var replay *store.BankedResetRedemption
 			if name == "codex" {
 				completed, lookupErr := s.store.RedeemedBankedResetRedemptions(ctx, providerID)
