@@ -215,6 +215,10 @@ func newFixtureRepo(t *testing.T) *fixtureRepo {
 			t.Skipf("%s not available", tool)
 		}
 	}
+	// Each fixture is a private repo under t.TempDir and the end-to-end
+	// tests spend their time in go test subprocesses, so they run
+	// concurrently. Keep process-global state (Setenv, Chdir) out of them.
+	t.Parallel()
 	r := &fixtureRepo{t: t, dir: t.TempDir()}
 	r.git("init", "-q", "-b", "main")
 	// The buggy code lives in internal/calc so the package path has the
