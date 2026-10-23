@@ -16,6 +16,39 @@ redline decision --provider codex-main
 redline decision --provider claude-main --json
 ```
 
+## Redeeming banked resets
+
+Start with a dry run for each provider, then perform the first real redemption manually:
+
+```bash
+redline reset redeem --provider claude-main --dry-run
+redline reset redeem --provider codex-main --dry-run
+redline reset redeem --provider claude-main
+```
+
+Dry runs use nonexistent IDs, not a real reset: Claude expects `ineligible` / `unknown_grant`,
+Codex expects `no_credit`, reported as `dry_run_ok`. Real redemption spends Claude's claimable
+next grant or Codex's soonest-expiring itemized credit. A missing Codex detail list means to wait
+for collection and try again shortly. Claude eligibility and cooldowns are respected. Multiple
+configured accounts of the same provider type are refused because the local CLI login is ambiguous.
+
+Redline reads credentials without refreshing or rewriting them. If Claude's login needs refreshing,
+run `claude`, then retry or redeem in Claude Code with `/limit-reset`. Codex requires a ChatGPT
+OAuth login, not an API key. Each operation persists an idempotency key before contacting the
+provider, reuses pending keys on retry, allows only one redemption per provider, and shares usage
+reads' rate-limit lockout. Inspect recent attempts through the API's `banked-resets/redemptions` route.
+
+These are **undocumented provider endpoints** and may change. Codex has a known enforcement bug:
+a redemption can be acknowledged while limits still enforce the old window, and single-window
+accounts may fail. Redline refreshes real provider telemetry after success and reports `verified`
+only when weekly remaining increases or the weekly reset moves later. `verified: false` includes a
+warning; do not rely on new capacity until usage confirms it. Provider telemetry is still stored,
+never replaced with an invented refill.
+
+There is no automatic spending or banked-reset scheduling horizon yet. `banked_resets.on_expiry`
+remains `off` or `notify`, not `redeem`. MCP deliberately has no redemption tool: spending resets
+from an agent is out of scope.
+
 ## Dispatch tiers and priority
 
 Each task has a `dispatch_tier` that controls when it becomes eligible:

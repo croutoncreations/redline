@@ -54,6 +54,27 @@ report. It does not read Redline account state, poll, notify, select jobs, chang
 or start anything. Tracker percentages remain separately attributed; Redline does not combine
 them into its own probability. See [Public reset-signal preview](reset-signal-preview.md).
 
+### Redeem a banked reset
+
+```bash
+redline reset redeem --provider claude-main --dry-run
+redline reset redeem --provider codex-main --dry-run --json
+redline reset redeem --provider claude-main
+redline reset redeem --provider codex-main --yes --json
+```
+
+A dry run sends a nonexistent ID, never a real grant or credit. Run it first, then make the first
+real redemption manually. Real redemption prompts on a TTY with the provider, reset ID, expiry,
+and windows cleared: `This spends a one-time reset. Continue? [y/N]`. Non-interactive use requires
+`--yes`; this explicitly waives the prompt. If the available reset changes after confirmation,
+Redline refuses rather than spending another reset: re-run to confirm.
+
+`--json` prints the API result, including `outcome`, `code`, `reason`, `reset_id`, `request_id`,
+`verified`, and any `cleared` / `cooldown_until` fields. Exit codes: **0** redeemed or dry_run_ok,
+**3** nothing_to_reset, **4** cooldown or unavailable, **5** gone, **1** failed or error.
+`verified: false` does not make an acknowledged redemption fail; inspect usage before relying on
+new allowance. See [redemption caveats](scheduling.md#redeeming-banked-resets).
+
 ## Profiles and tasks
 
 ```bash
@@ -138,7 +159,7 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
 `reset preview`, and the
 `scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
-`usage refresh`, `task add`, `later`, `scheduler evaluate|execute`, and `run logs` print JSON with
+`usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`.
 
 ## Notifications

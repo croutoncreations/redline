@@ -87,6 +87,11 @@ type Server struct {
 	started      bool
 	pairingMu    sync.Mutex
 	pairing      map[string]time.Time
+
+	redeemer            bankedResetRedeemer
+	redemptionDisabled  bool
+	redemptionMu        sync.Mutex
+	redemptionsInFlight map[string]bool
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -118,6 +123,8 @@ func NewDemoServer(
 	executor Executor,
 ) *Server {
 	server := newServer(cfg, database, now, executor, demoRevisionResolver{}, nil)
+	server.redemptionDisabled = true
+	server.redeemer = nil
 	source := staticUsageSource{snapshots: snapshots}
 	server.usageSources = usage.NewManager(source, source, now)
 	server.discovery = discoverer
@@ -195,9 +202,11 @@ func newServer(
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
 	}
+	credentials := nativeusage.NewDefaultCredentials()
+	server.redeemer = nativeusage.NewRedeemer(credentials)
 	server.usageSources = usage.NewManager(
 		openusage.Source{},
-		nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now},
+		nativeusage.Client{Credentials: credentials, Now: now},
 		now,
 	)
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
@@ -238,6 +247,8 @@ func newServer(
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
+	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
+	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)

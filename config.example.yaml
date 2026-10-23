@@ -29,7 +29,7 @@ notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, firesale.started, firesale.ended]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
 
 providers:
   codex-main:

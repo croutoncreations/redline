@@ -34,6 +34,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Manual banked-reset redemption for Claude grants and Codex credits through authenticated API
+  routes and `redline reset redeem`, with safe dry runs, confirmation, persisted retry keys,
+  shared rate-limit lockouts, refill verification, attempt history, and redemption notifications.
+  Automatic spending remains disabled; MCP exposes no spending tool.
 - Firesale scheduling unlocks a fourth task tier under large allowance surplus, with optional
   per-task faster intervals, higher provider concurrency, prompt re-dispatch after completion,
   and `firesale.started` / `firesale.ended` notifications. Decisions report the effective reset

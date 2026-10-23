@@ -106,6 +106,15 @@ func (m *Manager) Fetch(ctx context.Context, accountID string, provider config.P
 	return snapshot, raw, err
 }
 
+// FetchFresh bypasses OpenUsage and supplementary caches for post-redemption
+// verification, while still honoring the provider's native rate-limit lockout.
+func (m *Manager) FetchFresh(ctx context.Context, accountID string, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	if m.Native == nil {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("native usage source is unavailable")
+	}
+	return m.fetch(ctx, accountID, provider, m.Native, true)
+}
+
 // supplementBankedResets adds missing reset reports or details to a snapshot.
 // It never fails the fetch: resets are
 // informational, and a rate-limited or ineligible lookup must not cost the
@@ -300,18 +309,32 @@ func (m *Manager) fetchNative(ctx context.Context, provider config.Provider) (de
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("rate limited by provider; next request after %s", until.Format(time.RFC3339))
 	}
 	snapshot, raw, err := m.Native.Fetch(ctx, provider)
+	m.RecordNativeError(key, err)
+	return snapshot, raw, err
+}
+
+// NativeBlockedUntil shares the native usage lockout with reset redemptions.
+func (m *Manager) NativeBlockedUntil(provider string) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nativeBlockedUntil[providerKey(provider)]
+}
+
+// RecordNativeError applies the same persisted rate-limit backoff to a redeem
+// response as to a usage response.
+func (m *Manager) RecordNativeError(provider string, err error) {
 	if wait, limited := rateLimitWait(err); limited {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}
+		key := providerKey(provider)
 		if until := m.Now().UTC().Add(wait); until.After(m.nativeBlockedUntil[key]) {
 			m.nativeBlockedUntil[key] = until
 		}
 		m.saveLockoutsLocked()
-		m.mu.Unlock()
 	}
-	return snapshot, raw, err
 }
 
 // rateLimitWait reports whether err is a provider rate limit and how long to

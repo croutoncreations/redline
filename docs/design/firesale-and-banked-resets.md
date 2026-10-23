@@ -225,10 +225,12 @@ OpenAI-Beta: codex-1
   trigger (`manual` | `automatic` | `dry_run`), outcome, raw result code, timestamps. The request id
   row is written **before** the request is sent; retries reuse it, so a crash cannot spend twice.
 - Single flight per provider.
-- After a successful redemption, usage is force-refreshed. Redline verifies the refill (weekly
-  remaining increased or reset moved) before trusting it; until verified, the decision continues to
-  use the pre-redeem snapshot. Known Codex bugs (enforcement still on the old window, failures for
-  single-window accounts) are surfaced as `reset.redeem_failed` rather than hidden.
+- After a successful redemption, usage is force-refreshed and stored like any other observation.
+  Redline reports whether the refill is verified (weekly remaining increased or the weekly reset
+  moved later). A redeemed reset counts as applied for the effective horizon only once verified.
+  Each redemption sends one `reset.redeemed` event carrying `verified`; an unverified refill adds a
+  note about the known Codex bugs (enforcement still on the old window, failures for single-window
+  accounts) instead of being hidden or reported as success.
 - Shares the provider's 429 lockout with usage reads.
 
 ### Manual and dry-run paths

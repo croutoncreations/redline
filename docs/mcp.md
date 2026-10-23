@@ -84,6 +84,9 @@ Read-only tools:
 | `redline_run_events` | Bounded lifecycle audit trail |
 | `redline_run_logs` | At most 32 KiB from one supported log stream |
 
+There is no banked-reset redemption tool. Spending a one-time reset from an agent is out of
+scope; use the [manual CLI/API workflow](scheduling.md#redeeming-banked-resets).
+
 State-changing tools:
 
 | Tool | Effect |

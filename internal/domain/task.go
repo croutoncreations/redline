@@ -139,13 +139,15 @@ type DispatchAttempt struct {
 }
 
 const (
-	EventRunStarted      = "run.started"
-	EventRunCompleted    = "run.completed"
-	EventRunFailed       = "run.failed"
-	EventSchedulerError  = "scheduler.error"
-	EventResetExpiring   = "reset.expiring"
-	EventFiresaleStarted = "firesale.started"
-	EventFiresaleEnded   = "firesale.ended"
+	EventRunStarted        = "run.started"
+	EventRunCompleted      = "run.completed"
+	EventRunFailed         = "run.failed"
+	EventSchedulerError    = "scheduler.error"
+	EventResetExpiring     = "reset.expiring"
+	EventResetRedeemed     = "reset.redeemed"
+	EventResetRedeemFailed = "reset.redeem_failed"
+	EventFiresaleStarted   = "firesale.started"
+	EventFiresaleEnded     = "firesale.ended"
 )
 
 type NotificationEvent struct {

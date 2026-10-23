@@ -48,7 +48,7 @@ type Notifications struct {
 
 var knownNotificationEvents = map[string]bool{
 	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
-	"reset.expiring": true, "firesale.started": true, "firesale.ended": true,
+	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -62,7 +62,7 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring", "firesale.started", "firesale.ended"}
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring", "reset.redeemed", "reset.redeem_failed", "firesale.started", "firesale.ended"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {
@@ -431,7 +431,7 @@ func (cfg *Config) validate() error {
 	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.expiring)", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
 	return nil

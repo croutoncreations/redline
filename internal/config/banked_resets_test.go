@@ -60,11 +60,8 @@ func TestResetNotificationEvents(t *testing.T) {
 	}
 	for _, event := range []string{"reset.expiring", "reset.redeemed", "reset.redeem_failed", "firesale.started", "firesale.ended"} {
 		cfg, err := config.Load(writeConfig(t, validConfig+"\nnotifications:\n  events: ["+event+"]\n"))
-		if event == "reset.redeemed" || event == "reset.redeem_failed" {
-			if err == nil || !strings.Contains(err.Error(), "not recognized") {
-				t.Fatalf("future event %s: error=%v", event, err)
-			}
-			continue
+		if !defaults[event] {
+			t.Fatalf("missing default event %s", event)
 		}
 		if err != nil {
 			t.Fatal(err)

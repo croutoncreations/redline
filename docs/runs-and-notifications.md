@@ -35,15 +35,15 @@ failures.
 
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `firesale.started`, and
-`firesale.ended` (all enabled by default).
+`run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
+`reset.redeem_failed`, `firesale.started`, and `firesale.ended` (all enabled by default).
 
 ```yaml
 notifications:
   enabled: true
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, firesale.started, firesale.ended]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
 ```
 
 The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
@@ -57,6 +57,15 @@ Automatic dispatch emits `firesale.started` and `firesale.ended` on provider sta
 using the previous recorded automatic usage decision. Manual evaluations and skipped usage checks
 do not change this state. Data includes `pace_gap`, `overflow`, `effective_reset_at` (RFC3339 UTC),
 and `unlocked_tier`. See [firesale scheduling](scheduling.md#effective-horizon-and-firesale).
+
+### Banked-reset redemptions
+
+Manual redemption emits `reset.redeemed` on provider-acknowledged success, or `reset.redeem_failed`
+for failed, unavailable, cooldown, or gone outcomes. Dry runs and `nothing_to_reset` emit neither.
+Each event includes string-valued data: `reset_id`, `request_id`, `outcome`, `code`, `reason`, and
+`verified` (`true` or `false`). A successful response with no observed weekly refill sends only
+`reset.redeemed`, with `verified: "false"` and a note to check usage; it never assumes allowance
+has refilled. See [redemption caveats](scheduling.md#redeeming-banked-resets).
 
 ### Banked-reset reminders
 

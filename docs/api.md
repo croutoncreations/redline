@@ -113,6 +113,40 @@ both intervals as integer nanoseconds. Decision results expose `firesale`, `effe
 and `effective_reset_source`; automatic scheduler records also retain `provider_firesale` when
 provider usage was evaluated, independently of model-pool tier unlocks.
 
+## Banked reset redemption
+
+Redemption POSTs require the bearer API token; mobile pairing session cookies alone receive **403** (including dry runs). The GET history route still accepts session cookie authentication.
+
+- `POST /v1/providers/{id}/banked-resets/redeem` with `{"dry_run": true}` validates the provider
+  request using a nonexistent reset ID. `{"dry_run": false}` spends the selected one-time reset.
+  No automatic redemption is enabled. An optional `expected_reset_id` binds real redemption to
+  a previously confirmed ID; a different current selection returns **409**, names both IDs, and
+  spends nothing. It is ignored for dry runs. Unresolved redemptions are retried before selecting
+  another reset. Completed successes return `replayed: true` and `completed_at` without a new
+  provider call or verification claim.
+- `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
+  first, including pending operations whose idempotency keys survive restarts.
+
+Example result:
+
+```json
+{"outcome":"redeemed","code":"reset","reason":"","reset_id":"grant_1","request_id":"a-persisted-key","verified":true,"cleared":["five_hour","weekly"]}
+```
+
+Outcomes are `redeemed`, `nothing_to_reset`, `unavailable`, `cooldown`, `gone`, `failed`, and
+`dry_run_ok`. `cooldown_until` is an optional RFC3339 timestamp; `resets_left` is optional.
+Refill verification compares weekly remaining allowance and the reset boundary after a usage
+refresh. Unverified redemption still returns `redeemed` with a note. HTTP errors cover invalid
+requests, unknown providers, transport/storage failures, and **409** for an in-progress redemption
+or ambiguous local login (multiple configured accounts of the same provider type). Demo servers
+refuse both real and dry-run redemption with **409**, without reading credentials or sending requests.
+
+Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger`
+(`manual`, `automatic`, or `dry_run`), `state` (`pending` or `done`), `outcome`, `code`, `reason`,
+`created_at`, and optional `completed_at`. Transport failures remain pending with failure details
+so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
+sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
+
 ## Related
 
 - [MCP and agent interface](mcp.md)

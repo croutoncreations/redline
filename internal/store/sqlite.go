@@ -568,6 +568,30 @@ ALTER TABLE tasks RENAME COLUMN dispatch_tier_v30 TO dispatch_tier;
 			return fmt.Errorf("record firesale task policy migration: %w", err)
 		}
 	}
+	// As with 32–34, guard the actual schema independently of the stamp so
+	// databases from colliding branch histories can safely reopen.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_account_id TEXT NOT NULL,
+    reset_id TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE,
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual', 'automatic', 'dry_run')),
+    state TEXT NOT NULL CHECK(state IN ('pending', 'done')),
+    outcome TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_banked_reset_redemptions_provider
+ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
+		return fmt.Errorf("create banked reset redemptions: %w", err)
+	}
+	if version < 35 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (35)`); err != nil {
+			return fmt.Errorf("record banked reset redemptions migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
