@@ -21,7 +21,7 @@ redline decision --provider claude-main --json
 Each task has a `dispatch_tier` that controls when it becomes eligible:
 
 ```yaml
-dispatch_tier: behind # behind, well_behind, or expiring
+dispatch_tier: behind # behind, well_behind, expiring, or firesale
 priority: 60
 ```
 
@@ -31,8 +31,9 @@ five-hour window exists. `priority` only orders tasks whose tiers are already un
 intervals, repository-change checks, and enable/disable state remain independent eligibility gates.
 Existing databases migrate tasks to `behind`, preserving the prior default behavior.
 
-In the dashboard these tiers appear as **Behind pace**, **Well behind pace**, and **Capacity
-likely to expire**.
+Tiers unlock in order: `behind` (1), `well_behind` (2), `expiring` (3), `firesale` (4).
+In the dashboard they appear as **Standard surplus**, **High surplus**, **Near expiry**, and
+**Firesale (lots expiring)**.
 
 ## Policies
 
@@ -47,6 +48,44 @@ policy stores an override in SQLite; selecting **Default** returns to the provid
 when present, or to `active_policy` otherwise.
 
 See `config.example.yaml` for the bundled `late`, `standard`, and `early` policy definitions.
+
+## Effective horizon and firesale
+
+Decisions expose `effective_reset_at` and `effective_reset_source`. The effective horizon is the
+earliest future reset event that clears the weekly allowance, no later than its real reset.
+Currently the service supplies only the real `weekly` event: banked resets and predicted resets
+do not shorten scheduling yet. Slots, overflow, pace thresholds, and projections use this horizon;
+pace gap still measures time remaining as a fraction of a seven-day week. Model-specific weekly
+pools retain their own resets.
+
+A policy's optional `firesale_trigger` (0–1) upgrades an admitted decision to `firesale: true`
+and unlocks the highest tier when `max(pace_gap, overflow) >= firesale_trigger`. Overflow is used
+only when a five-hour window exists. The bundled early policy uses `0.35`, standard uses `0.45`,
+and late omits it (disabled). Firesale never changes WAIT or UNKNOWN into RUN, bypasses the
+rolling reserve, or relaxes pause, enable, repository-change, or exhausted-pool gates.
+
+```yaml
+policies:
+  standard:
+    firesale_trigger: 0.45 # alongside the normal policy fields
+providers:
+  claude-main:
+    firesale_max_concurrent_runs: 3
+```
+
+During a provider-level firesale, a task's optional `firesale_min_interval` replaces its normal
+`min_interval`. It must be positive when set; it may be shorter or longer than the normal interval.
+Unset (zero) uses the normal interval. The provider's optional `firesale_max_concurrent_runs`
+raises its effective cap only if larger; allowance-pool, runtime-connection, and agent-context
+limits still apply. Finished runs promptly wake the scheduler while the provider's latest recorded
+automatic usage decision is firesale. A model pool can unlock the firesale tier independently,
+but cannot activate these provider-level cooldown or concurrency overrides.
+
+Automatic dispatch emits `firesale.started` and `firesale.ended` once per provider state transition
+when notifications are enabled and the event is selected (both are in the default list). Events
+include string-valued `pace_gap`, `overflow`, `effective_reset_at`, and `unlocked_tier` data.
+Manual evaluations do not emit transitions; decisions without a provider usage evaluation do not
+change the recorded state.
 
 ## Automatic dispatch
 

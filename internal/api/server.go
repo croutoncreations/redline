@@ -1189,31 +1189,33 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskRequest struct {
-	ID                 string              `json:"id"`
-	Name               string              `json:"name"`
-	Prompt             string              `json:"prompt"`
-	PromptFile         string              `json:"prompt_file"`
-	Priority           int                 `json:"priority"`
-	ExecutionProfileID string              `json:"execution_profile_id"`
-	RuntimeJobID       string              `json:"runtime_job_id"`
-	Type               domain.TaskType     `json:"type"`
-	MinInterval        string              `json:"min_interval"`
-	RequireRepoChange  bool                `json:"require_repo_change"`
-	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
-	Enabled            *bool               `json:"enabled"`
+	ID                  string              `json:"id"`
+	Name                string              `json:"name"`
+	Prompt              string              `json:"prompt"`
+	PromptFile          string              `json:"prompt_file"`
+	Priority            int                 `json:"priority"`
+	ExecutionProfileID  string              `json:"execution_profile_id"`
+	RuntimeJobID        string              `json:"runtime_job_id"`
+	Type                domain.TaskType     `json:"type"`
+	MinInterval         string              `json:"min_interval"`
+	FiresaleMinInterval string              `json:"firesale_min_interval"`
+	RequireRepoChange   bool                `json:"require_repo_change"`
+	DispatchTier        domain.DispatchTier `json:"dispatch_tier"`
+	Enabled             *bool               `json:"enabled"`
 }
 
 type taskUpdateRequest struct {
-	Name               *string              `json:"name"`
-	Prompt             *string              `json:"prompt"`
-	PromptFile         *string              `json:"prompt_file"`
-	Priority           *int                 `json:"priority"`
-	ExecutionProfileID *string              `json:"execution_profile_id"`
-	RuntimeJobID       *string              `json:"runtime_job_id"`
-	Type               *domain.TaskType     `json:"type"`
-	MinInterval        *string              `json:"min_interval"`
-	RequireRepoChange  *bool                `json:"require_repo_change"`
-	DispatchTier       *domain.DispatchTier `json:"dispatch_tier"`
+	Name                *string              `json:"name"`
+	Prompt              *string              `json:"prompt"`
+	PromptFile          *string              `json:"prompt_file"`
+	Priority            *int                 `json:"priority"`
+	ExecutionProfileID  *string              `json:"execution_profile_id"`
+	RuntimeJobID        *string              `json:"runtime_job_id"`
+	Type                *domain.TaskType     `json:"type"`
+	MinInterval         *string              `json:"min_interval"`
+	FiresaleMinInterval *string              `json:"firesale_min_interval"`
+	RequireRepoChange   *bool                `json:"require_repo_change"`
+	DispatchTier        *domain.DispatchTier `json:"dispatch_tier"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1231,6 +1233,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	firesaleInterval := time.Duration(0)
+	if request.FiresaleMinInterval != "" {
+		firesaleInterval, err = parseDuration(request.FiresaleMinInterval)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid firesale_min_interval"})
+			return
+		}
+	}
 	id := request.ID
 	if id == "" {
 		id = uuid.NewString()
@@ -1239,7 +1249,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		ID: id, Name: request.Name, Prompt: request.Prompt, PromptFile: request.PromptFile,
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
 		RuntimeJobID: request.RuntimeJobID,
-		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+		Type:         request.Type, MinInterval: interval, FiresaleMinInterval: firesaleInterval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
 	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
 	if err != nil {
@@ -1329,6 +1339,16 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if request.FiresaleMinInterval != nil {
+		task.FiresaleMinInterval = 0
+		if *request.FiresaleMinInterval != "" {
+			task.FiresaleMinInterval, err = parseDuration(*request.FiresaleMinInterval)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, problem{Error: "invalid firesale_min_interval"})
+				return
+			}
+		}
+	}
 	if request.RequireRepoChange != nil {
 		task.RequireRepoChange = *request.RequireRepoChange
 	}
@@ -1404,11 +1424,14 @@ type schedulerRequest struct {
 }
 
 type schedulerResponse struct {
-	Snapshot     decision.UsageSnapshot `json:"snapshot"`
-	Result       decision.Result        `json:"result"`
-	Trigger      string                 `json:"trigger,omitempty"`
-	SelectedTask *domain.Task           `json:"selected_task,omitempty"`
-	Run          *domain.Run            `json:"run,omitempty"`
+	// ProviderFiresale is captured before per-request admission denials clear Result.Firesale:
+	// it reflects the provider's state, not this attempt's outcome.
+	ProviderFiresale *bool                  `json:"provider_firesale,omitempty"`
+	Snapshot         decision.UsageSnapshot `json:"snapshot"`
+	Result           decision.Result        `json:"result"`
+	Trigger          string                 `json:"trigger,omitempty"`
+	SelectedTask     *domain.Task           `json:"selected_task,omitempty"`
+	Run              *domain.Run            `json:"run,omitempty"`
 }
 
 func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
@@ -1517,9 +1540,9 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	} else if concurrency, limitErr := s.effectiveProviderConcurrency(r.Context(), providerID); limitErr != nil {
 		writeError(w, limitErr)
 		return
-	} else if active >= concurrency.MaxConcurrentRuns {
+	} else if cap := providerDispatchCap(s.config.Providers[providerID], concurrency.MaxConcurrentRuns, base); active >= cap {
 		response.DispatchAvailable = false
-		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", concurrency.MaxConcurrentRuns)
+		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", cap)
 	}
 	revisions := make(map[string]profileRevision)
 	for _, task := range tasks {
@@ -1600,8 +1623,12 @@ func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
 	if err != nil {
 		return err
 	}
-	for range concurrency.MaxConcurrentRuns {
-		_, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+	limit := concurrency.MaxConcurrentRuns
+	for index := 0; index < limit; index++ {
+		response, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+		if response.ProviderFiresale != nil && *response.ProviderFiresale {
+			limit = max(limit, s.config.Providers[provider].FiresaleMaxConcurrentRuns)
+		}
 		if err != nil {
 			return err
 		}
@@ -1713,7 +1740,7 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	maxConcurrent := concurrency.MaxConcurrentRuns
-	if active >= maxConcurrent {
+	if active >= maxConcurrent && configuredProvider.FiresaleMaxConcurrentRuns <= maxConcurrent {
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive,
 			Reason: fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)}
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
@@ -1721,6 +1748,16 @@ func (s *Server) dispatchCore(
 	response.Snapshot, response.Result, err = s.evaluateProvider(ctx, request.ProviderAccountID)
 	if err != nil {
 		return response, false, err
+	}
+	firesale := response.Result.Firesale
+	response.ProviderFiresale = &firesale
+	maxConcurrent = providerDispatchCap(configuredProvider, maxConcurrent, response.Result)
+	if active >= maxConcurrent {
+		response.Result.Decision = decision.Wait
+		response.Result.Mode = decision.ModeActive
+		response.Result.Reason = fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)
+		response.Result.Firesale = false
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	task, profile, revision, selectedResult, err := s.selectTask(
 		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
@@ -1734,7 +1771,7 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	response.SelectedTask = &task
-	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
+	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency, ProviderFiresale: firesale}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
 		if contextErr != nil {
@@ -1756,6 +1793,7 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			response.Result.Decision = decision.Wait
+			response.Result.Firesale = false
 			response.Result.Mode = decision.ModeActive
 			response.Result.Reason = err.Error()
 			response.Result.TaskSelectionReason = "another scheduler request consumed concurrency first"
@@ -1773,8 +1811,25 @@ func (s *Server) dispatchCore(
 		if err := s.executor.Execute(context.Background(), run, task, profile); err != nil {
 			log.Printf("redline run %s execution bookkeeping failed: %v", run.ID, err)
 		}
+		s.triggerAfterRun(run)
 	}()
 	return response, true, nil
+}
+
+func (s *Server) triggerAfterRun(run domain.Run) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finished, err := s.store.GetRun(ctx, run.ID)
+	if err != nil || (finished.State != domain.RunCompleted && finished.State != domain.RunFailed) {
+		return
+	}
+	firesale, err := s.store.LatestAutomaticFiresale(ctx, run.ProviderAccountID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("redline %s firesale state lookup failed: %v", run.ProviderAccountID, err)
+	}
+	if err == nil && firesale {
+		s.scheduler.Trigger()
+	}
 }
 
 func (s *Server) selectTask(
@@ -1799,8 +1854,12 @@ func (s *Server) evaluateCandidate(
 	snapshot decision.UsageSnapshot, base decision.Result, revisions map[string]profileRevision,
 ) (candidateVerdict, error) {
 	verdict := candidateVerdict{Result: base}
-	if task.LastCompletedAt != nil && task.MinInterval > 0 {
-		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
+	interval := task.MinInterval
+	if base.Firesale && task.FiresaleMinInterval > 0 {
+		interval = task.FiresaleMinInterval
+	}
+	if task.LastCompletedAt != nil && interval > 0 {
+		eligibleAt := task.LastCompletedAt.Add(interval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
 			return verdict, nil
@@ -1989,7 +2048,7 @@ func (s *Server) evaluateCandidateBudget(
 		poolDecision := decision.Evaluate(decision.Input{
 			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
 			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger,
+			PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
 			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 		})
 		poolResults = append(poolResults, decision.PoolResult{
@@ -2021,6 +2080,13 @@ func (s *Server) evaluateCandidateBudget(
 	return decorateBudgetResult(result, profile.Model, routing, required, triggering, poolResults), true, ""
 }
 
+func providerDispatchCap(provider config.Provider, effective int, base decision.Result) int {
+	if base.Firesale {
+		return max(effective, provider.FiresaleMaxConcurrentRuns)
+	}
+	return effective
+}
+
 func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
 	if required == "" {
 		required = domain.DispatchBehind
@@ -2030,6 +2096,8 @@ func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
 
 func dispatchTierRank(tier domain.DispatchTier) int {
 	switch tier {
+	case domain.DispatchFiresale:
+		return 4
 	case domain.DispatchExpiring:
 		return 3
 	case domain.DispatchWellBehind:
@@ -2053,6 +2121,14 @@ func decorateBudgetResult(
 }
 
 func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, response schedulerResponse) error {
+	previousFiresale := false
+	if response.Trigger == "automatic" && response.ProviderFiresale != nil {
+		previous, err := s.store.LatestAutomaticFiresale(ctx, provider)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		previousFiresale = previous
+	}
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		return err
@@ -2062,6 +2138,25 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		record.SelectedTaskID = response.SelectedTask.ID
 	}
 	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
+	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
+		eventType := domain.EventFiresaleEnded
+		if *response.ProviderFiresale {
+			eventType = domain.EventFiresaleStarted
+		}
+		event := domain.NotificationEvent{
+			Version: 1, Type: eventType, OccurredAt: s.now().UTC(), ProviderAccountID: provider,
+			Message: "Redline " + eventType,
+			Data: map[string]string{
+				"pace_gap":           strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
+				"overflow":           strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
+				"effective_reset_at": response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
+				"unlocked_tier":      string(response.Result.UnlockedTier),
+			},
+		}
+		if notifyErr := s.notifier.Notify(ctx, event); notifyErr != nil {
+			log.Printf("redline %s firesale notification failed: %v", provider, notifyErr)
+		}
+	}
 	return err
 }
 
@@ -2424,27 +2519,38 @@ func (s *Server) evaluateStoredProvider(
 	if err != nil {
 		return decision.Result{}, err
 	}
-	thresholds, err := selection.Definition.DecisionThresholds()
+	input, err := s.providerDecisionInput(ctx, providerID, snapshot, selection)
 	if err != nil {
 		return decision.Result{}, err
+	}
+	result := decision.Evaluate(input)
+	result.Policy = selection.Policy
+	return result, nil
+}
+
+func (s *Server) providerDecisionInput(
+	ctx context.Context, providerID string, snapshot decision.UsageSnapshot, selection providerPolicySelection,
+) (decision.Input, error) {
+	thresholds, err := selection.Definition.DecisionThresholds()
+	if err != nil {
+		return decision.Input{}, err
 	}
 	maxAge, err := s.config.SnapshotAge()
 	if err != nil {
-		return decision.Result{}, err
+		return decision.Input{}, err
 	}
 	estimate, err := s.calibration(ctx, providerID)
 	if err != nil {
-		return decision.Result{}, err
+		return decision.Input{}, err
 	}
-	result := decision.Evaluate(decision.Input{
+	return decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
-		PaceGapTrigger: selection.Definition.PaceGapTrigger,
+		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
+		ResetEvents:    []decision.ResetEvent{{Source: decision.ResetWeekly, At: snapshot.Weekly.ResetsAt, Clears: []string{"weekly"}, Confidence: snapshot.Confidence}},
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-	})
-	result.Policy = selection.Policy
-	return result, nil
+	}, nil
 }
 
 func (s *Server) calibration(ctx context.Context, providerID string) (calibration.Estimate, error) {

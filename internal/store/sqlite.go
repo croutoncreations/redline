@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -510,28 +511,61 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
-	if version < 28 {
-		// addColumnIfMissing is safe if another branch added this column under a different version.
-		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_reset_details", "TEXT"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (28)`); err != nil {
+	// Versions 32–34 rather than 28–30: unmerged mobile, Grok, and multi-account
+	// branches stamped 28–31 for unrelated migrations. Like v26, inspect the schema
+	// so either history (including our earlier builds) can be opened safely.
+	// Keep the bodies schema-guarded independently of the version stamp.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_reset_details", "TEXT"); err != nil {
+		return err
+	}
+	if version < 32 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (32)`); err != nil {
 			return fmt.Errorf("record banked reset details migration: %w", err)
 		}
 	}
-	if version < 29 {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_notices (
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS banked_reset_notices (
     provider_account_id TEXT NOT NULL,
     reset_id TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     kind TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(provider_account_id, expires_at, kind)
-)`); err != nil {
-			return fmt.Errorf("create banked reset notices: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (29)`); err != nil {
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_banked_reset_notices_deadline
+ON banked_reset_notices(provider_account_id, expires_at, kind);`); err != nil {
+		return fmt.Errorf("create banked reset notices: %w", err)
+	}
+	if version < 33 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (33)`); err != nil {
 			return fmt.Errorf("record banked reset notices migration: %w", err)
+		}
+	}
+	if err := addColumnIfMissing(ctx, tx, "tasks", "firesale_min_interval_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	var tasksSQL string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'`).Scan(&tasksSQL); err != nil {
+		return fmt.Errorf("inspect task tier constraint: %w", err)
+	}
+	// Inspect the real tier's CHECK, not a leftover temporary column's constraint.
+	tierCheck := regexp.MustCompile(`(?i)CHECK\s*\(\s*"?dispatch_tier"?\s+IN\s*\([^)]*\)`).FindString(tasksSQL)
+	if !strings.Contains(tierCheck, "'firesale'") {
+		if err := addColumnIfMissing(ctx, tx, "tasks", "dispatch_tier_v30", "TEXT NOT NULL DEFAULT 'behind' CHECK(dispatch_tier_v30 IN ('behind', 'well_behind', 'expiring', 'firesale'))"); err != nil {
+			return err
+		}
+		// foreign_keys deliberately stays ON: ALTER ADD/DROP/RENAME COLUMN
+		// preserves tasks and incoming references, unlike a table copy.
+		if _, err := tx.ExecContext(ctx, `
+UPDATE tasks SET dispatch_tier_v30 = dispatch_tier;
+ALTER TABLE tasks DROP COLUMN dispatch_tier;
+ALTER TABLE tasks RENAME COLUMN dispatch_tier_v30 TO dispatch_tier;
+`); err != nil {
+			return fmt.Errorf("migrate firesale task policy: %w", err)
+		}
+	}
+	if version < 34 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (34)`); err != nil {
+			return fmt.Errorf("record firesale task policy migration: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

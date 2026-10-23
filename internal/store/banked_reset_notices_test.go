@@ -26,7 +26,7 @@ func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	if _, err := raw.Exec(`DROP TABLE banked_reset_notices; DELETE FROM schema_migrations WHERE version = 29`); err != nil {
+	if _, err := raw.Exec(`DROP TABLE banked_reset_notices; DELETE FROM schema_migrations WHERE version >= 33`); err != nil {
 		t.Fatal(err)
 	}
 	db, err = store.Open(path)
@@ -38,7 +38,7 @@ func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 {
+	if version != 34 {
 		t.Fatalf("version=%d", version)
 	}
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)

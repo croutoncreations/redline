@@ -29,7 +29,7 @@ notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, firesale.started, firesale.ended]
 
 providers:
   codex-main:
@@ -40,6 +40,8 @@ providers:
     # Safe default is one active run. Raise this to admit independent jobs in
     # parallel; optional pool limits can be stricter than the provider cap.
     # max_concurrent_runs: 2
+    # Optional higher provider cap during firesale (pool/runtime caps still apply).
+    # firesale_max_concurrent_runs: 3
     # pool_concurrency:
     #   weekly: 2
     # auto prefers a healthy local OpenUsage API and falls back to Redline's
@@ -62,6 +64,7 @@ providers:
     #   redeem_lead: 1h
     # Example: allow two Claude runs, but never overlap two Fable runs.
     # max_concurrent_runs: 2
+    # firesale_max_concurrent_runs: 3
     # pool_concurrency:
     #   model:fable:weekly: 1
     # Optional explicit aliases. These are the built-in Claude defaults and may
@@ -80,6 +83,7 @@ policies:
     trigger_margin: 0.02
     rolling_reserve: 0.25
     pace_gap_trigger: 0.30
+    firesale_trigger: 0.45
     pace_thresholds:
       - { time_remaining: 72h, min_weekly_remaining: 0.50 }
       - { time_remaining: 24h, min_weekly_remaining: 0.20 }
@@ -87,6 +91,7 @@ policies:
     trigger_margin: 0.00
     rolling_reserve: 0.10
     pace_gap_trigger: 0.15
+    firesale_trigger: 0.35
     pace_thresholds:
       - { time_remaining: 120h, min_weekly_remaining: 0.50 }
       - { time_remaining: 72h, min_weekly_remaining: 0.30 }

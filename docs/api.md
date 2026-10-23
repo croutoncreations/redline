@@ -104,6 +104,15 @@ that restarts without saving its cursor should request a new baseline; it won't 
 Run log responses are tail-bounded to 64 KiB and may only resolve regular files beneath the
 configured `run_artifacts_dir`; paths and symlinks that escape that root are rejected.
 
+## Firesale task fields
+
+Task create/update requests accept `dispatch_tier: "firesale"` and `firesale_min_interval`, a
+positive duration string such as `"10m"`. Omit the interval to use the normal cooldown; PATCH
+with `""` clears it. It may be shorter or longer than `min_interval`. Task responses represent
+both intervals as integer nanoseconds. Decision results expose `firesale`, `effective_reset_at`,
+and `effective_reset_source`; automatic scheduler records also retain `provider_firesale` when
+provider usage was evaluated, independently of model-pool tier unlocks.
+
 ## Related
 
 - [MCP and agent interface](mcp.md)

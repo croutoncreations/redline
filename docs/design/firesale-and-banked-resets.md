@@ -247,7 +247,7 @@ OpenAI-Beta: codex-1
    endpoint, cached), persisted with snapshots, exposed in the API.
 2. **Reminders — implemented.** `banked_resets` config, `reset.expiring` reminders and the
    expiry-time `notify` action, deduplicated. `redeem` is accepted but notifies only until milestone 5.
-3. **Effective horizon and firesale.** `ResetEvent` seam (weekly source only), horizon-based
+3. **Effective horizon and firesale — implemented.** `ResetEvent` seam (weekly source only), horizon-based
    evaluation, `firesale` tier/state, `firesale_trigger`, `firesale_min_interval`,
    `firesale_max_concurrent_runs`, immediate re-dispatch, firesale notifications, CLI/MCP/dashboard.
 4. **Redemption engine.** Claude and Codex clients, attempts table, manual and dry-run CLI/API.

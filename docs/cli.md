@@ -74,8 +74,10 @@ redline candidates --provider codex-main
 (up to 256 KiB). `--profile auto` picks the Claude Code profile whose `repository` is the git top
 level of the current directory (`--cwd` overrides the directory and `--harness` the harness type).
 A non-matching `--default-profile` requires `--allow-default-profile`. Other flags: `--prompt-file`, `--type`
-(`one_off` default), `--tier` (`behind` default), `--priority` (50 default), `--min-interval`, and
-`--disabled` to save a draft.
+(`one_off` default), `--tier` (`behind` default; also `well_behind`, `expiring`, `firesale`),
+`--priority` (50 default), `--min-interval`, `--firesale-interval` (optional positive provider-firesale
+cooldown), and `--disabled` to save a draft. YAML uses `firesale_min_interval` for that cooldown.
+Task updates are available through the API, MCP, or dashboard, not a CLI update command.
 
 ### Queue work for later
 
@@ -86,7 +88,8 @@ redline later --tier expiring --json "sweep the docs for stale flags"
 # For hook-supplied text, pass it through stdin: redline later --prompt - --json
 ```
 
-`later` queues free text as a one-off task using `--profile auto` resolution. It never dispatches
+`later` accepts `--tier firesale` and the optional `--firesale-interval` flag, like `task add`.
+It queues free text as a one-off task using `--profile auto` resolution. It never dispatches
 and never bypasses limits: the task starts in a fresh harness session only when the provider is
 behind pace (or near expiry for `--tier expiring`) and above its reserve. If no profile matches,
 it fails closed unless `--default-profile ID --allow-default-profile` is passed explicitly; the

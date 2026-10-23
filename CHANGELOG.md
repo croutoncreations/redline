@@ -34,6 +34,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Firesale scheduling unlocks a fourth task tier under large allowance surplus, with optional
+  per-task faster intervals, higher provider concurrency, prompt re-dispatch after completion,
+  and `firesale.started` / `firesale.ended` notifications. Decisions report the effective reset
+  horizon; only real weekly resets are produced for now. CLI, API, MCP, and dashboard support
+  the new task settings, and existing tasks migrate without changing their cooldowns.
 - `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
   trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
   scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.

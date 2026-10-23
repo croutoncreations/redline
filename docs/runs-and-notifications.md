@@ -35,20 +35,28 @@ failures.
 
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, `scheduler.error`, and `reset.expiring` (all enabled by default).
+`run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `firesale.started`, and
+`firesale.ended` (all enabled by default).
 
 ```yaml
 notifications:
   enabled: true
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, firesale.started, firesale.ended]
 ```
 
 The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
 `REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
 outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
 possibly non-idempotent hook.
+
+### Firesale transitions
+
+Automatic dispatch emits `firesale.started` and `firesale.ended` on provider state transitions,
+using the previous recorded automatic usage decision. Manual evaluations and skipped usage checks
+do not change this state. Data includes `pace_gap`, `overflow`, `effective_reset_at` (RFC3339 UTC),
+and `unlocked_tier`. See [firesale scheduling](scheduling.md#effective-horizon-and-firesale).
 
 ### Banked-reset reminders
 

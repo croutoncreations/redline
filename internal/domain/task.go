@@ -22,6 +22,7 @@ const (
 	DispatchBehind     DispatchTier = "behind"
 	DispatchWellBehind DispatchTier = "well_behind"
 	DispatchExpiring   DispatchTier = "expiring"
+	DispatchFiresale   DispatchTier = "firesale"
 )
 
 type ExecutionProfile struct {
@@ -93,6 +94,7 @@ type Task struct {
 	Type                         TaskType      `json:"type"`
 	DispatchTier                 DispatchTier  `json:"dispatch_tier"`
 	MinInterval                  time.Duration `json:"min_interval"`
+	FiresaleMinInterval          time.Duration `json:"firesale_min_interval"`
 	RequireRepoChange            bool          `json:"require_repo_change"`
 	Enabled                      bool          `json:"enabled"`
 	State                        TaskState     `json:"state"`
@@ -137,11 +139,13 @@ type DispatchAttempt struct {
 }
 
 const (
-	EventRunStarted     = "run.started"
-	EventRunCompleted   = "run.completed"
-	EventRunFailed      = "run.failed"
-	EventSchedulerError = "scheduler.error"
-	EventResetExpiring  = "reset.expiring"
+	EventRunStarted      = "run.started"
+	EventRunCompleted    = "run.completed"
+	EventRunFailed       = "run.failed"
+	EventSchedulerError  = "scheduler.error"
+	EventResetExpiring   = "reset.expiring"
+	EventFiresaleStarted = "firesale.started"
+	EventFiresaleEnded   = "firesale.ended"
 )
 
 type NotificationEvent struct {

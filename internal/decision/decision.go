@@ -214,7 +214,42 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64       `json:"min_weekly_remaining"`
 }
 
+type ResetSource string
+
+const (
+	ResetWeekly          ResetSource = "weekly"
+	ResetBankedReset     ResetSource = "banked_reset"
+	ResetPredictedGlobal ResetSource = "predicted_global"
+)
+
+type ResetEvent struct {
+	Source     ResetSource `json:"source"`
+	At         time.Time   `json:"at"`
+	Clears     []string    `json:"clears"`
+	Confidence string      `json:"confidence"`
+	Detail     string      `json:"detail"`
+}
+
+// effectiveReset defaults to the real weekly reset; other windows cannot shorten it.
+func effectiveReset(in Input) ResetEvent {
+	reset := ResetEvent{Source: ResetWeekly, At: in.Snapshot.Weekly.ResetsAt, Clears: []string{"weekly"}}
+	for _, event := range in.ResetEvents {
+		if !event.At.After(in.Now) || !event.At.Before(reset.At) {
+			continue
+		}
+		for _, window := range event.Clears {
+			if window == "weekly" {
+				reset = event
+				break
+			}
+		}
+	}
+	return reset
+}
+
 type Input struct {
+	ResetEvents            []ResetEvent
+	FiresaleTrigger        *float64
 	Snapshot               UsageSnapshot
 	WindowWeeklyCost       float64
 	WindowWeeklyCostSource string
@@ -249,6 +284,9 @@ type CandidateRejection struct {
 }
 
 type Result struct {
+	Firesale               bool                 `json:"firesale"`
+	EffectiveResetAt       time.Time            `json:"effective_reset_at"`
+	EffectiveResetSource   ResetSource          `json:"effective_reset_source"`
 	Decision               Decision             `json:"decision"`
 	Policy                 string               `json:"policy,omitempty"`
 	Mode                   Mode                 `json:"mode"`
@@ -290,13 +328,28 @@ func Evaluate(in Input) Result {
 	if !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
 		return unknown("weekly reset is not in the future")
 	}
+	reset := effectiveReset(in)
+	in.Snapshot.Weekly.ResetsAt = reset.At
+	var result Result
 	if in.Snapshot.Short == nil {
-		return evaluatePace(in)
+		result = evaluatePace(in)
+	} else if !in.Snapshot.Short.ResetsAt.After(in.Now) {
+		result = unknown("short-window reset is not in the future")
+	} else {
+		result = evaluateSlots(in)
 	}
-	if !in.Snapshot.Short.ResetsAt.After(in.Now) {
-		return unknown("short-window reset is not in the future")
+	pressure := result.PaceGap
+	if in.Snapshot.Short != nil {
+		pressure = math.Max(pressure, result.Overflow)
 	}
-	return evaluateSlots(in)
+	if result.Decision == Admit && in.FiresaleTrigger != nil && pressure >= *in.FiresaleTrigger {
+		result.Firesale = true
+		result.UnlockedTier = domain.DispatchFiresale
+		result.Reason += "; firesale pressure reached"
+	}
+	result.EffectiveResetAt = reset.At
+	result.EffectiveResetSource = reset.Source
+	return result
 }
 
 // ProjectTriggerAt returns the first scheduler poll at which unchanged weekly
@@ -311,7 +364,8 @@ func ProjectTriggerAt(in Input, pollInterval time.Duration) *time.Time {
 		projected := in.Now
 		return &projected
 	}
-	for projected := in.Now.Add(pollInterval); projected.Before(in.Snapshot.Weekly.ResetsAt); projected = projected.Add(pollInterval) {
+	horizon := effectiveReset(in).At
+	for projected := in.Now.Add(pollInterval); projected.Before(horizon); projected = projected.Add(pollInterval) {
 		future := projectInput(in, projected)
 		if result := Evaluate(future); result.Decision == Admit {
 			at := projected
@@ -486,6 +540,11 @@ func validateInput(in Input) error {
 	}
 	if err := unitFraction("rolling reserve", in.RollingReserve); err != nil {
 		return err
+	}
+	if in.FiresaleTrigger != nil {
+		if err := unitFraction("firesale trigger", *in.FiresaleTrigger); err != nil {
+			return err
+		}
 	}
 	if in.PaceGapTrigger != nil {
 		if err := unitFraction("pace gap trigger", *in.PaceGapTrigger); err != nil {

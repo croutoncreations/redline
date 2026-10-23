@@ -109,6 +109,10 @@ State-changing tools:
 once a task is admitted, its harness is trusted to run to completion. Tool annotations are hints,
 not an authorization boundary; use the approval controls of the MCP host.
 
+`redline_task_create` and `redline_task_update` accept `dispatch_tier: firesale` and optional
+`firesale_min_interval` (a positive duration string, e.g. `10m`). An empty update string clears
+the override; omission preserves it. The interval applies only during provider-level firesale.
+
 `redline_task_create` accepts `enabled: false` to save a task as a disabled draft that the
 scheduler ignores until it is enabled. `redline_task_delete` is annotated destructive; the service
 rejects deleting a running task or one with run or scheduler history, so audit trails stay intact.

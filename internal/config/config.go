@@ -48,7 +48,7 @@ type Notifications struct {
 
 var knownNotificationEvents = map[string]bool{
 	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
-	"reset.expiring": true,
+	"reset.expiring": true, "firesale.started": true, "firesale.ended": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -62,7 +62,7 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
-		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring"}
+		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error", "reset.expiring", "firesale.started", "firesale.ended"}
 	}
 	result := make(map[string]bool, len(events))
 	for _, event := range events {
@@ -108,15 +108,16 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	Provider          string                `yaml:"provider"`
-	UsageSource       string                `yaml:"usage_source"`
-	OpenUsageURL      string                `yaml:"openusage_url"`
-	WindowWeeklyCost  float64               `yaml:"window_weekly_cost"`
-	Policy            string                `yaml:"policy"`
-	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
-	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
-	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
-	BankedResets      BankedResets          `yaml:"banked_resets"`
+	FiresaleMaxConcurrentRuns int                   `yaml:"firesale_max_concurrent_runs"`
+	Provider                  string                `yaml:"provider"`
+	UsageSource               string                `yaml:"usage_source"`
+	OpenUsageURL              string                `yaml:"openusage_url"`
+	WindowWeeklyCost          float64               `yaml:"window_weekly_cost"`
+	Policy                    string                `yaml:"policy"`
+	MaxConcurrentRuns         int                   `yaml:"max_concurrent_runs"`
+	PoolConcurrency           map[string]int        `yaml:"pool_concurrency"`
+	ModelGroups               map[string]ModelGroup `yaml:"model_groups"`
+	BankedResets              BankedResets          `yaml:"banked_resets"`
 }
 
 type BankedResets struct {
@@ -205,10 +206,11 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 }
 
 type Policy struct {
-	TriggerMargin  float64         `yaml:"trigger_margin" json:"trigger_margin"`
-	RollingReserve float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
-	PaceGapTrigger *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
-	PaceThresholds []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
+	FiresaleTrigger *float64        `yaml:"firesale_trigger,omitempty" json:"firesale_trigger,omitempty"`
+	TriggerMargin   float64         `yaml:"trigger_margin" json:"trigger_margin"`
+	RollingReserve  float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
+	PaceGapTrigger  *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
+	PaceThresholds  []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
 }
 
 type PaceThreshold struct {
@@ -358,6 +360,9 @@ func (cfg *Config) validate() error {
 		default:
 			return fmt.Errorf("provider %q: banked_resets on_expiry must be off or notify (redeem will be added in milestone 5)", name)
 		}
+		if provider.FiresaleMaxConcurrentRuns < 0 {
+			return fmt.Errorf("provider %q: firesale_max_concurrent_runs must not be negative", name)
+		}
 		if provider.MaxConcurrentRuns < 0 {
 			return fmt.Errorf("provider %q: max_concurrent_runs must not be negative, got %d", name, provider.MaxConcurrentRuns)
 		}
@@ -392,6 +397,11 @@ func (cfg *Config) validate() error {
 		}
 		if err := fraction("rolling_reserve", policy.RollingReserve); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)
+		}
+		if policy.FiresaleTrigger != nil {
+			if err := fraction("firesale_trigger", *policy.FiresaleTrigger); err != nil {
+				return fmt.Errorf("policy %q: %w", name, err)
+			}
 		}
 		if policy.PaceGapTrigger != nil {
 			if err := fraction("pace_gap_trigger", *policy.PaceGapTrigger); err != nil {
