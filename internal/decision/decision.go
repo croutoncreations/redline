@@ -54,21 +54,52 @@ type UsageSnapshot struct {
 	BankedResets *int `json:"banked_resets,omitempty"`
 	// BankedResetsExpireAt is when the soonest-expiring banked reset lapses.
 	// Nil when there are none or the provider did not say.
-	BankedResetsExpireAt *time.Time `json:"banked_resets_expire_at,omitempty"`
+	BankedResetsExpireAt *time.Time    `json:"banked_resets_expire_at,omitempty"`
+	BankedResetDetails   []BankedReset `json:"banked_reset_details,omitempty"`
+}
+
+// BankedReset describes one grant or credit, not additional scheduling capacity.
+type BankedReset struct {
+	ID            string     `json:"id"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	Clears        []string   `json:"clears,omitempty"`
+	UsableNow     *bool      `json:"usable_now,omitempty"`
+	RequiresLimit *bool      `json:"requires_limit,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	ResetsLeft    int        `json:"resets_left"`
+	// Only Claude's next_grant_id is claimable.
+	Claimable bool `json:"claimable,omitempty"`
 }
 
 // BankedResets is a provider's report of on-demand quota resets.
 type BankedResets struct {
 	Available     int
 	NextExpiresAt *time.Time
+	Details       []BankedReset
 }
 
 // ApplyBankedResets copies a reset report onto the snapshot. A nil report
 // leaves the snapshot saying nothing about resets.
 func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
+	s.BankedResetDetails = nil
 	if resets == nil {
 		s.BankedResets, s.BankedResetsExpireAt = nil, nil
 		return
+	}
+	for _, detail := range resets.Details {
+		var clears []string
+		seen := make(map[string]bool)
+		for _, window := range detail.Clears {
+			if window == "seven_day" || window == "seven_day_overage_included" {
+				window = "weekly"
+			}
+			if (window == "five_hour" || window == "weekly") && !seen[window] {
+				clears = append(clears, window)
+				seen[window] = true
+			}
+		}
+		detail.Clears = clears
+		s.BankedResetDetails = append(s.BankedResetDetails, detail)
 	}
 	count := resets.Available
 	s.BankedResets = &count
@@ -139,6 +170,11 @@ func (s UsageSnapshot) Validate() error {
 	}
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
+	}
+	for _, detail := range s.BankedResetDetails {
+		if detail.ID == "" || detail.ResetsLeft < 0 {
+			return fmt.Errorf("banked reset details require an id and non-negative resets left")
+		}
 	}
 	if s.Short != nil {
 		if s.Short.ResetsAt.IsZero() {

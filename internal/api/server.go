@@ -211,17 +211,16 @@ func newServer(
 			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
 		}
 	}
-	// The banked-reset lookup reads the one local Claude Code login. With
-	// several Claude accounts configured it cannot tell which account that
-	// login belongs to, and a count shown on the wrong account is worse
-	// than none.
-	claudeAccounts := 0
+	// Supplementary lookups read one local login per provider type. Several
+	// accounts of that type make the login ambiguous, but do not affect others.
+	providerAccounts := make(map[string]int)
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(provider.Provider, "claude") {
-			claudeAccounts++
-		}
+		providerAccounts[strings.ToLower(strings.TrimSpace(provider.Provider))]++
 	}
-	server.usageSources.SkipBankedResets = claudeAccounts > 1
+	server.usageSources.SkipBankedResetProviders = map[string]bool{
+		"claude": providerAccounts["claude"] > 1,
+		"codex":  providerAccounts["codex"] > 1,
+	}
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {

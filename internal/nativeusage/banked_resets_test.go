@@ -181,6 +181,74 @@ func (c *refreshTrackingCredentials) AccessWithoutRefresh(context.Context, strin
 	return nativeusage.Credential{AccessToken: "t"}, nil
 }
 
+func TestClaudeNativeResetDetails(t *testing.T) {
+	server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"next_grant_id":"g","cooldown_until":"2026-09-24T15:00:00Z","grants":[
+		{"id":"g","resets_left":2,"ends_at":"2026-10-22T00:00:00Z","clears":["five_hour","seven_day","seven_day_overage_included"],"usable_now":false,"use_requires_limit":true},
+		{"id":"other","resets_left":1}, {"id":"spent","resets_left":0}, {"id":"expired","resets_left":1,"ends_at":"2026-09-01T00:00:00Z"}
+	]}}`)
+	got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.BankedResetDetails) != 2 {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+	d := got.BankedResetDetails[0]
+	if d.ID != "g" || d.ResetsLeft != 2 || !d.Claimable || d.ExpiresAt == nil || d.CooldownUntil == nil || d.UsableNow == nil || *d.UsableNow || d.RequiresLimit == nil || !*d.RequiresLimit || len(d.Clears) != 2 || d.Clears[1] != "weekly" || got.BankedResetDetails[1].Claimable {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+}
+
+func TestClaudeNativeMalformedResetDetailsDoNotBreakUsage(t *testing.T) {
+	for name, fields := range map[string]struct{ status, grant string }{
+		"cooldown_until":     {status: `,"cooldown_until":"unexpected"`},
+		"next_grant_id":      {status: `,"next_grant_id":5`},
+		"clears":             {grant: `,"clears":"x"`},
+		"partial clears":     {grant: `,"clears":["weekly",5]`},
+		"usable_now":         {grant: `,"usable_now":"yes"`},
+		"use_requires_limit": {grant: `,"use_requires_limit":"yes"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true`+fields.status+`,"grants":[{"id":"g","resets_left":2,"ends_at":"2026-10-22T00:00:00Z"`+fields.grant+`}]}}`)
+			got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Short == nil || got.Short.Remaining != .9 || got.Weekly.Remaining != .5 || len(got.Allowances) != 2 || got.BankedResets == nil || *got.BankedResets != 2 || got.BankedResetsExpireAt == nil {
+				t.Fatalf("usage or aggregate lost: %#v", got)
+			}
+			if len(got.BankedResetDetails) != 1 {
+				t.Fatalf("details = %#v", got.BankedResetDetails)
+			}
+			d := got.BankedResetDetails[0]
+			if d.CooldownUntil != nil || d.Claimable || len(d.Clears) != 0 || d.UsableNow != nil || d.RequiresLimit != nil {
+				t.Fatalf("malformed fields must be unknown: %#v", d)
+			}
+		})
+	}
+}
+
+func TestCodexBankedResetDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/wham/rate-limit-reset-credits" || r.Method != "GET" || r.Header.Get("Authorization") != "Bearer t" || r.Header.Get("ChatGPT-Account-Id") != "account" || r.Header.Get("User-Agent") != "Redline" {
+			t.Errorf("request = %#v", r)
+		}
+		_, _ = w.Write([]byte(`{"available_count":7,"unknown":true,"credits":[{"id":"soon","expires_at":"2026-10-01T00:00:00Z"},{"id":"forever","expires_at":null},{"id":"bad","expires_at":"oops"},{"id":3},{"expires_at":null},null]}`))
+	}))
+	defer server.Close()
+	client := nativeusage.Client{HTTPClient: server.Client(), Credentials: staticCredentials{token: "t", account: "account"}, CodexResetCreditsURL: server.URL + "/wham/rate-limit-reset-credits", Now: func() time.Time { return bankedNow }}
+	got, err := client.BankedResets(context.Background(), config.Provider{Provider: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Available != 7 || len(got.Details) != 2 || got.NextExpiresAt == nil {
+		t.Fatalf("resets = %#v", got)
+	}
+	if got.Details[0].ID != "soon" || got.Details[0].ResetsLeft != 1 || len(got.Details[0].Clears) != 2 || got.Details[1].ExpiresAt != nil {
+		t.Fatalf("details = %#v", got.Details)
+	}
+}
+
 func TestCodexNativeReadsResetCreditCount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":11,"limit_window_seconds":604800,"reset_at":1790436725}},

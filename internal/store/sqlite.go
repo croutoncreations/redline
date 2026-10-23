@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -508,6 +510,15 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
+	if version < 28 {
+		// addColumnIfMissing is safe if another branch added this column under a different version.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_reset_details", "TEXT"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (28)`); err != nil {
+			return fmt.Errorf("record banked reset details migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -821,7 +832,13 @@ func bankedResetColumns(s decision.UsageSnapshot) (count, expires any) {
 
 // scanBankedResets restores the optional reset report, keeping zero distinct
 // from absent.
-func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires sql.NullString) error {
+func scanBankedResets(s *decision.UsageSnapshot, count sql.NullInt64, expires, details sql.NullString) error {
+	if details.Valid {
+		if err := json.Unmarshal([]byte(details.String), &s.BankedResetDetails); err != nil {
+			s.BankedResetDetails = nil
+			log.Printf("decode stored banked reset details: %v", err)
+		}
+	}
 	if count.Valid {
 		value := int(count.Int64)
 		s.BankedResets = &value
@@ -852,11 +869,19 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	}
 	defer tx.Rollback()
 	bankedResets, bankedResetsExpireAt := bankedResetColumns(s)
+	var bankedResetDetails any
+	if len(s.BankedResetDetails) > 0 {
+		encoded, err := json.Marshal(s.BankedResetDetails)
+		if err != nil {
+			return fmt.Errorf("encode banked reset details: %w", err)
+		}
+		bankedResetDetails = string(encoded)
+	}
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
 provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets, banked_resets_expire_at, banked_reset_details
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -871,6 +896,7 @@ banked_resets, banked_resets_expire_at
 		raw,
 		bankedResets,
 		bankedResetsExpireAt,
+		bankedResetDetails,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -922,7 +948,7 @@ func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source stri
 func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at
+banked_resets, banked_resets_expire_at, banked_reset_details
 FROM usage_snapshots WHERE provider = ?`
 	args := []any{provider}
 	if source != "" {
@@ -937,7 +963,7 @@ FROM usage_snapshots WHERE provider = ?`
 	var shortReset sql.NullString
 	var raw []byte
 	var bankedResets sql.NullInt64
-	var bankedResetsExpireAt sql.NullString
+	var bankedResetsExpireAt, bankedResetDetails sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Provider,
@@ -951,6 +977,7 @@ FROM usage_snapshots WHERE provider = ?`
 		&raw,
 		&bankedResets,
 		&bankedResetsExpireAt,
+		&bankedResetDetails,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)
@@ -974,7 +1001,7 @@ FROM usage_snapshots WHERE provider = ?`
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
-	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt); err != nil {
+	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt, bankedResetDetails); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
