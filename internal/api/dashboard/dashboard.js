@@ -944,8 +944,10 @@ async function deleteRuntimeConnection() {
     $('#profile-hermes-status').textContent='Choose or import a connection to discover profiles, projects, and models.';
   } catch(error) { showRuntimeError(error.message); }
 }
-function showTaskError(message) {
+function showTaskError(message, field) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
+  for (const input of document.querySelectorAll('#task-form [aria-invalid="true"]')) input.removeAttribute('aria-invalid');
+  if (message && field) field.setAttribute('aria-invalid', 'true');
 }
 function syncIntervalField() {
   const recurring = $('#task-type').value === 'recurring';
@@ -953,6 +955,9 @@ function syncIntervalField() {
   $('#task-firesale-interval').disabled = !recurring;
   $('#task-firesale-interval-field').hidden = !recurring;
   $('#task-interval-note').hidden = recurring;
+  // An interval error no longer applies once the fields are disabled.
+  const invalid = document.querySelector('#task-form [aria-invalid="true"]');
+  if (!recurring && invalid && (invalid.id === 'task-interval' || invalid.id === 'task-firesale-interval')) showTaskError('');
 }
 function syncFiresaleWarning() {
   const profile = profiles.find(item => item.id === $('#task-profile').value);
@@ -1083,7 +1088,7 @@ async function saveTask(event) {
   const recurring = $('#task-type').value === 'recurring';
   for (const [selector, label] of [['#task-interval','Minimum interval'],['#task-firesale-interval','Firesale interval']]) {
     if (recurring && !validTaskDuration($(selector).value.trim())) {
-      showTaskError(`${label} must be a duration like 10m, 2h or 1d, or blank.`);
+      showTaskError(`${label} must be a duration like 10m, 2h or 1d, or blank.`, $(selector));
       $(selector).focus(); return;
     }
   }

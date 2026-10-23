@@ -286,6 +286,30 @@ test('hides and clears the firesale interval for one-off jobs', async ({ page })
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ type:'one_off', firesale_min_interval:'' });
 });
 
+test('aligns the minimum and firesale interval inputs on one row', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-type').selectOption('recurring');
+  const minimum = await page.locator('#task-interval').boundingBox();
+  const firesale = await page.locator('#task-firesale-interval').boundingBox();
+  expect(Math.abs(minimum.y - firesale.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(minimum.height - firesale.height)).toBeLessThanOrEqual(1);
+});
+
+test('clears an interval error once the job no longer uses intervals', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Validate then switch');
+  await page.locator('#task-type').selectOption('recurring');
+  await page.locator('#task-firesale-interval').fill('10x');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect(page.locator('#task-form-error')).toBeVisible();
+  await expect(page.locator('#task-firesale-interval')).toHaveAttribute('aria-invalid', 'true');
+  await page.locator('#task-type').selectOption('one_off');
+  await expect(page.locator('#task-form-error')).toBeHidden();
+  await expect(page.locator('#task-firesale-interval')).not.toHaveAttribute('aria-invalid', 'true');
+});
+
 for (const [field, label] of [['task-interval', 'Minimum interval'], ['task-firesale-interval', 'Firesale interval']]) {
   test(`validates ${label.toLowerCase()} before saving`, async ({ page }) => {
     const state = await loadDashboard(page);
