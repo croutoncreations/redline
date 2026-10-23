@@ -153,9 +153,9 @@ providers:
 
 Defaults: `remind_before: [24h]`, `on_expiry: notify`, `redeem_lead: 1h`. Automatic redemption is
 always opt-in. Notifications still require `notifications.enabled`. Milestone 2 adds
-`reset.expiring` to the default event list; `reset.redeemed`, `reset.redeem_failed`,
-`firesale.started`, and `firesale.ended` are registered for later milestones. Until milestone 5,
-`on_expiry: redeem` behaves like `notify` and never redeems automatically.
+`reset.expiring` to the default event list. `reset.redeemed`, `reset.redeem_failed`,
+`firesale.started`, `firesale.ended`, and `on_expiry: redeem` are added by the milestones that
+implement them, so configuration never accepts behavior that does not exist yet.
 
 Tasks gain `firesale_min_interval` (API, CLI `--firesale-interval`, MCP, dashboard) and accept
 `dispatch_tier: firesale`.
@@ -167,10 +167,13 @@ deadlines on each cycle:
 
 - For each unexpired reset and each `remind_before` lead, emit `reset.expiring` once when
   `now >= expires_at − lead`. If multiple thresholds have passed, emit only the shortest-lead
-  applicable reminder. Without itemized details, use the aggregate expiry and id `aggregate`.
+  applicable reminder. Once the expiry action is due, ordinary reminders for that deadline are
+  suppressed. Resets sharing an expiry produce one notification with a count. Without itemized
+  details, or when cached details disagree with the authoritative count, use the aggregate expiry.
   Deduplicated before delivery in `banked_reset_notices`, keyed by
-  `(provider_account_id, reset_id, expires_at, kind)`. Disabled or filtered notifications do not
-  claim notices; delivery failures are not retried.
+  `(provider_account_id, expires_at, kind)` so aggregate and itemized views of the same deadline
+  never repeat. Disabled or filtered notifications do not claim notices; delivery failures are not
+  retried.
 - At `expires_at − redeem_lead`:
   - `notify`: emit `reset.expiring` with `action: redeem_now` (deduplicated the same way).
   - `redeem`: currently notify only. Milestone 5 will attempt redemption (below), retrying until
