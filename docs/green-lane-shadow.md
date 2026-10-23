@@ -195,7 +195,13 @@ Codex/CodeRabbit completion summary; generic human COMMENTED/APPROVED reviews do
 not substitute for this. The worker also enumerates all repository collaborators
 at start and immediately before merging. Only `jfox85` may have push, maintain or
 admin permission during this single-owner pilot. Additional read-only users are
-fine; additional writers or unavailable permission evidence stop the pilot. This
+fine; additional writers or unavailable permission evidence stop the pilot. The
+worker reads each listed user's explicit repository permission through the
+metadata-readable permission endpoint, rather than requiring optional permission
+flags in the collaborator listing. It saves public identity/permission snapshots
+in the result artifact before rejecting a writer check, including checks just
+before merging. Unknown permissions, mismatched identities and failed reads
+remain blocking. This
 binds same-repository branch control to the allowed principal rather than merely
 trusting the original PR creator. Expanding the writer set requires a separately
 reviewed change to the pilot. No new credential or branch administration service

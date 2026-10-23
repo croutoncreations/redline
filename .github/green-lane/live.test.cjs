@@ -10,7 +10,7 @@ function fixture() {
   f.result=n=>({repository:'croutoncreations/redline',pr_number:n,head_sha:head,base_sha:base,base_branch:'main',pr_updated_at:'now',evaluated_at:new Date().toISOString(),verdict:'would_merge',rules:[{pass:true}]});
   f.github={paginate:async method=>method === f.github.rest.repos.listCollaborators ? f.writers : f.prs.map(f.pr),graphql:async()=>{throw new Error('branch administration is inaccessible to GITHUB_TOKEN')},rest:{
     actions:{createWorkflowDispatch:async args=>{f.dispatches.push(args);if(f.dispatchError)throw new Error('dispatch failed')},getWorkflow:async()=>{f.enabledReads++;return {data:{state:f.state}}}},git:{getRef:async()=>({data:{object:{sha:f.tip}}})},
-    repos:{getBranch:async()=>({data:f.protection ?? {}}),listCollaborators:()=>{},compareCommitsWithBasehead:async args=>{assert.ok(args.basehead.startsWith(`${main}...`));return {data:{behind_by:f.behind,status:'ahead',merge_base_commit:{sha:f.behind ? base : main}}}}},
+    repos:{getCollaboratorPermissionLevel:async({username})=>{if(f.permissionError)throw new Error('permission inaccessible');return {data:f.permissionResult ? f.permissionResult(username) : {permission:username==='jfox85' ? 'admin' : username==='reader' ? 'read' : 'write',user:{login:username}}}},getBranch:async()=>({data:f.protection ?? {}}),listCollaborators:()=>{},compareCommitsWithBasehead:async args=>{assert.ok(args.basehead.startsWith(`${main}...`));return {data:{behind_by:f.behind,status:'ahead',merge_base_commit:{sha:f.behind ? base : main}}}}},
     pulls:{get:async({pull_number:n})=>{f.reads++;return {data:f.pr(n)}},merge:async args=>{f.merges.push(args);if(f.mergeError)throw new Error('timeout');return {data:{merged:!f.rejected,sha:merged}}}}
   }};
   f.context={repo:{owner:'croutoncreations',repo:'redline'},sha:main,ref:'refs/heads/main',eventName:'schedule'};
@@ -48,3 +48,18 @@ test('rejected merge never advances to second candidate',async()=>{const f=fixtu
 test('post-merge dispatch failure preserves confirmed merge and never retries merge',async()=>{const f=fixture();f.dispatchError=true;await assert.rejects(run(f),/dispatch failed/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merged');assert.equal(f.report.merged[0].commit,merged);assert.equal(f.dispatches.length,1)});
 
 test('read-only collaborators cannot provide branch-write authorization',async()=>{const f=fixture();f.writers.push({login:'reader',permissions:{push:false,maintain:false,admin:false}});await run(f);assert.equal(f.merges.length,1)});
+
+test('installation-token collaborator list can omit flags when explicit permission proves owner control',async()=>{
+ const f=fixture();f.writers=[{login:'jfox85'},{login:'reader'}];await run(f);assert.equal(f.merges.length,1);
+ assert.equal(f.report.writer_snapshots.length,2);assert.equal(f.report.writer_snapshots[0][0].permission,'admin');
+});
+for(const [name,edit] of Object.entries({
+ missingOwner:f=>f.writers=[{login:'reader'}],emptyList:f=>f.writers=[],
+ inaccessible:f=>f.permissionError=true,unknown:f=>f.permissionResult=login=>({permission:'unknown',user:{login}}),
+ missingUser:f=>f.permissionResult=()=>({permission:'admin'}),wrongUser:f=>f.permissionResult=()=>({permission:'admin',user:{login:'other'}}),
+ ownerReadOnly:f=>f.permissionResult=login=>({permission:'read',user:{login}}),
+ hiddenWriter:f=>{f.writers.push({login:'hidden'});f.permissionResult=login=>({permission:login==='jfox85'?'admin':'write',user:{login}})},
+ changedBeforeMerge:f=>f.onValidate=()=>f.permissionResult=login=>({permission:'read',user:{login}})
+}))test(`explicit writer permission fails closed: ${name}`,async()=>{
+ const f=fixture();edit(f);await assert.rejects(run(f));assert.equal(f.merges.length,0);assert.ok(f.report.writer_snapshots.length>=1);
+});
