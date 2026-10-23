@@ -160,7 +160,7 @@ Additional live safeguards:
   enforces up-to-date checks if another actor advances main in the final API
   interval; GitHub's merge API only provides a head-SHA precondition, not a
   base-SHA precondition. Workflow serialization covers this worker, not humans.
-- Optional `green-lane-hold` PR label defers that PR. It is an opt-out, never an
+- Optional `green-lane-hold`, `maintenance:skip`, or `do-not-touch` PR label defers that PR. It is an opt-out, never an
   approval or opt-in requirement.
 
 ### Kill switch
@@ -180,3 +180,10 @@ attempt and confirmed merge SHA) to its run artifact. Routine deferrals only
 appear in logs/artifacts; the worker posts no routine PR comments or push
 notifications. GitHub's own workflow failure/merge notifications still follow
 each user's GitHub settings.
+
+After a confirmed merge, the worker explicitly dispatches `ci.yml` from `main`.
+GitHub suppresses push-triggered workflows for `GITHUB_TOKEN` merges; explicit
+workflow dispatch is supported. The worker has `actions:write` only for this
+post-merge dispatch. If dispatch fails, its artifact still records the confirmed
+merge, and the worker fails without retrying any merge. The dispatcher runs CI
+on current main, which may have advanced further if another actor merged.

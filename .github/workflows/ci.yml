@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch: # Post-merge CI for the live pilot (GITHUB_TOKEN suppresses push events).
   pull_request:
   push:
     branches: [main]

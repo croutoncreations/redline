@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: read
+      actions: write # Explicit post-merge CI dispatch; token merges do not trigger push workflows.
       checks: read
     steps:
       - uses: actions/checkout@v4

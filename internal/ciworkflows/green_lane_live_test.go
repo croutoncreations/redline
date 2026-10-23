@@ -44,7 +44,7 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 			t.Fatalf("missing guard %s", guard)
 		}
 	}
-	if len(job.Permissions) != 4 || job.Permissions["contents"] != "write" || job.Permissions["pull-requests"] != "write" || job.Permissions["checks"] != "read" || job.Permissions["actions"] != "read" {
+	if len(job.Permissions) != 4 || job.Permissions["contents"] != "write" || job.Permissions["pull-requests"] != "write" || job.Permissions["checks"] != "read" || job.Permissions["actions"] != "write" {
 		t.Fatalf("unexpected permissions: %v", job.Permissions)
 	}
 	checkout, runner := false, false
@@ -67,5 +67,16 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	}
 	if !checkout || !runner {
 		t.Fatal("missing trusted checkout or live runner")
+	}
+}
+
+func TestCIPostMergeDispatch(t *testing.T) {
+	wf := load(t, "ci.yml")
+	var triggers map[string]any
+	if err := wf.On.Decode(&triggers); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := triggers["workflow_dispatch"]; !ok {
+		t.Fatal("token-authenticated merges require explicit CI dispatch support")
 	}
 }

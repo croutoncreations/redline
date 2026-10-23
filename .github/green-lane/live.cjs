@@ -4,7 +4,7 @@ const {snapshotMatches} = require('./publish.cjs');
 
 const checks = ['actionlint','go','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
 const sha = value => /^[a-f0-9]{40}$/.test(value || '');
-const held = pr => pr.labels?.some(label => label.name === 'green-lane-hold');
+const held = pr => pr.labels?.some(label => ['green-lane-hold','maintenance:skip','do-not-touch'].includes(label.name));
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
@@ -73,6 +73,8 @@ module.exports = async function live({github, context, core, run=execFileSync,
     if (await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
     // Re-read live workflow state; disabling it also stops an in-flight run here.
     if (!await enabled()) return finish('Kill switch was turned off during evaluation');
+    const age = Date.now() - Date.parse(result.evaluated_at);
+    if (!Number.isFinite(age) || age < -60000 || age > 300000) continue;
     report.state='merge_requested'; report.attempt={pr:number,head:result.head_sha,main_tip:context.sha};
     await write(report);
     // Disable client retries in the workflow. Never try a second PR after this
@@ -80,6 +82,11 @@ module.exports = async function live({github, context, core, run=execFileSync,
     const {data:merged} = await github.rest.pulls.merge({...repo,pull_number:number,sha:result.head_sha,merge_method:'squash'});
     if (merged.merged !== true || !sha(merged.sha)) throw new Error('GitHub did not confirm the exact-head squash merge');
     report.state='merged'; report.merged.push({pr:number,head:result.head_sha,commit:merged.sha});
+    await write(report);
+    // GITHUB_TOKEN merges suppress push-triggered workflows. Explicit dispatch
+    // is the supported exception; no extra credential or merge retry is needed.
+    await github.rest.actions.createWorkflowDispatch({...repo,workflow_id:'ci.yml',ref:'main'});
+    report.ci_dispatched=true;
     return finish(`Merged PR #${number} at ${merged.sha}; one-merge run complete`);
   }
   return finish('No current-main, fully qualified PR; no merge attempted');
