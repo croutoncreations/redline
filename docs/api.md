@@ -16,7 +16,8 @@ To open the dashboard in a browser from a source or headless install, visit it o
 token as a query parameter, for example `http://127.0.0.1:7436/?access_token=<token>`. Loopback
 hosts only: Redline sets the HttpOnly session cookie and redirects to the URL without the token.
 Treat the original URL containing `access_token` as a secret, since browser history can retain it.
-Without it a browser request is answered with a JSON `401`. Remote devices use
+Without a token or session, a browser `GET` of `/`, `/dashboard` or `/m` gets a `401` HTML sign-in
+page; every other request gets a JSON `401`. Remote devices use
 [pairing](mobile.md) instead.
 
 For a direct API call:
