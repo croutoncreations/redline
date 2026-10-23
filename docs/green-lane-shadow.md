@@ -17,8 +17,11 @@ A PR qualifies only when all these checks pass:
    an author's claim does not grant trust. An empty list admits nobody.
 2. **Ready PR.** Open, non-draft, mergeable, targeting `main`.
 3. **At least one completed review on the latest commit.** A submitted GitHub
-   review with state `COMMENTED` or `APPROVED` counts, from a reviewer other than
-   the PR author. Automated reviews count; **manual approval is not required**.
+   review with state `APPROVED`, or a nonempty human `COMMENTED` review, counts
+   from a reviewer other than the PR author. Empty review publications (including
+   inline replies) do not count. Bot `COMMENTED` publications must use the
+   authenticated completion protocol below; reply prose is not completion.
+   Automated reviews count; **manual approval is not required**.
    A review with zero findings counts. CodeRabbit and Codex can instead publish a
    completed review in their canonical summary comment: the known GitHub App and
    immutable bot user IDs must match, and GitHub must confirm that the comment

@@ -76,6 +76,7 @@ type CheckRun struct {
 
 // Review represents a GitHub PR review
 type Review struct {
+	Body        string
 	ID          int64
 	User        string
 	State       string
