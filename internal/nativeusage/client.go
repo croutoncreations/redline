@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	defaultClaudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
-	defaultCodexUsageURL  = "https://chatgpt.com/backend-api/wham/usage"
+	defaultClaudeUsageURL       = "https://api.anthropic.com/api/oauth/usage"
+	defaultCodexUsageURL        = "https://chatgpt.com/backend-api/wham/usage"
+	defaultCodexResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 
 	// Anthropic only includes banked limit resets (the "cedar_ember" program,
 	// Claude Code's /limit-reset) when asked with these query parameters and a
@@ -43,11 +44,12 @@ type ReadOnlyCredentials interface {
 }
 
 type Client struct {
-	HTTPClient     *http.Client
-	Credentials    Credentials
-	ClaudeUsageURL string
-	CodexUsageURL  string
-	Now            func() time.Time
+	HTTPClient           *http.Client
+	Credentials          Credentials
+	ClaudeUsageURL       string
+	CodexUsageURL        string
+	CodexResetCreditsURL string
+	Now                  func() time.Time
 }
 
 func (c Client) Name() string { return "native" }
@@ -77,6 +79,17 @@ func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.U
 // (for example, the account is not in Anthropic's program).
 func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*decision.BankedResets, error) {
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if name == "codex" {
+		url := c.CodexResetCreditsURL
+		if url == "" {
+			url = defaultCodexResetCreditsURL
+		}
+		body, err := c.fetchBodyURL(ctx, name, true, url)
+		if err != nil {
+			return nil, err
+		}
+		return parseCodexResetCredits(body, c.now())
+	}
 	if name != "claude" {
 		return nil, fmt.Errorf("native banked resets for %q are unsupported", name)
 	}
@@ -102,6 +115,10 @@ func (c Client) now() time.Time {
 }
 
 func (c Client) fetchBody(ctx context.Context, name string, readOnly bool) ([]byte, error) {
+	return c.fetchBodyURL(ctx, name, readOnly, "")
+}
+
+func (c Client) fetchBodyURL(ctx context.Context, name string, readOnly bool, overrideURL string) ([]byte, error) {
 	if c.Credentials == nil {
 		return nil, fmt.Errorf("native credentials are unavailable")
 	}
@@ -134,6 +151,9 @@ func (c Client) fetchBody(ctx context.Context, name string, readOnly bool) ([]by
 		url = withQuery(url, claudeBankedResetsQuery)
 	} else if name != "codex" {
 		return nil, fmt.Errorf("native provider %q is unsupported", name)
+	}
+	if overrideURL != "" {
+		url = overrideURL
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -252,14 +272,29 @@ type claudePayload struct {
 // claudeResetStatus is the banked limit reset block. Field names follow
 // Claude Code 2.1.280's own schema for this undocumented response.
 type claudeResetStatus struct {
-	Eligible bool               `json:"eligible"`
-	Grants   []claudeResetGrant `json:"grants"`
+	Eligible      bool               `json:"eligible"`
+	Grants        []claudeResetGrant `json:"grants"`
+	NextGrantID   json.RawMessage    `json:"next_grant_id"`
+	CooldownUntil json.RawMessage    `json:"cooldown_until"`
 }
 
 type claudeResetGrant struct {
-	ID         string `json:"id"`
-	ResetsLeft *int   `json:"resets_left"`
-	EndsAt     string `json:"ends_at"`
+	ID            string          `json:"id"`
+	ResetsLeft    *int            `json:"resets_left"`
+	EndsAt        string          `json:"ends_at"`
+	Clears        json.RawMessage `json:"clears"`
+	UsableNow     json.RawMessage `json:"usable_now"`
+	RequiresLimit json.RawMessage `json:"use_requires_limit"`
+}
+
+// Informational reset fields must not invalidate usage or aggregate counts.
+func resetDetail[T any](raw json.RawMessage) T {
+	var value T
+	if err := json.Unmarshal(raw, &value); err != nil {
+		var zero T
+		return zero
+	}
+	return value
 }
 
 // claudeBankedResets totals the resets left across grants the way Claude
@@ -293,6 +328,16 @@ func claudeBankedResets(status *claudeResetStatus, now time.Time) *decision.Bank
 			expires = parsed
 		}
 		resets.Available += *grant.ResetsLeft
+		// A missing id must not invalidate an otherwise usable aggregate.
+		if strings.TrimSpace(grant.ID) != "" {
+			detail := decision.BankedReset{ID: grant.ID, ResetsLeft: *grant.ResetsLeft,
+				Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
+				CooldownUntil: resetDetail[*time.Time](status.CooldownUntil), Claimable: grant.ID == resetDetail[string](status.NextGrantID)}
+			if !expires.IsZero() {
+				detail.ExpiresAt = &expires
+			}
+			resets.Details = append(resets.Details, detail)
+		}
 		if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
 			resets.NextExpiresAt = &expires
 		}
@@ -371,6 +416,39 @@ type codexPayload struct {
 	ResetCredits *struct {
 		AvailableCount *int `json:"available_count"`
 	} `json:"rate_limit_reset_credits"`
+}
+
+func parseCodexResetCredits(body []byte, now time.Time) (*decision.BankedResets, error) {
+	var payload struct {
+		AvailableCount *int              `json:"available_count"`
+		Credits        []json.RawMessage `json:"credits"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode native codex reset credits: %w", err)
+	}
+	if payload.AvailableCount == nil || *payload.AvailableCount < 0 {
+		return nil, fmt.Errorf("native codex reset credits available_count is missing or negative")
+	}
+	resets := &decision.BankedResets{Available: *payload.AvailableCount}
+	for _, raw := range payload.Credits {
+		var credit struct {
+			ID        string     `json:"id"`
+			ExpiresAt *time.Time `json:"expires_at"`
+		}
+		if err := json.Unmarshal(raw, &credit); err != nil || strings.TrimSpace(credit.ID) == "" {
+			continue
+		}
+		if credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
+			continue
+		}
+		// Codex does not report clears; both windows are assumed (see design).
+		resets.Details = append(resets.Details, decision.BankedReset{ID: credit.ID, ExpiresAt: credit.ExpiresAt,
+			ResetsLeft: 1, Clears: []string{"five_hour", "weekly"}})
+		if credit.ExpiresAt != nil && (resets.NextExpiresAt == nil || credit.ExpiresAt.Before(*resets.NextExpiresAt)) {
+			resets.NextExpiresAt = credit.ExpiresAt
+		}
+	}
+	return resets, nil
 }
 
 func parseCodex(body []byte, now time.Time) (decision.UsageSnapshot, error) {
