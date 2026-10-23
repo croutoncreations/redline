@@ -65,6 +65,8 @@ firesale_min_interval: 10m # optional; unset uses min_interval
 ```
 
 There is no ordering constraint between the intervals. Repository-change checks still apply.
+Both intervals apply only to recurring tasks: a one-off task never runs again after it succeeds,
+so the API accepts but ignores intervals on one-off tasks and the dashboard hides both fields.
 Use `--firesale-interval 10m` with `task add` or `later`, or edit the field in the dashboard,
 HTTP API, or MCP. The `firesale` tier waits for a policy's firesale trigger; see
 [effective horizon and firesale](scheduling.md#effective-horizon-and-firesale).

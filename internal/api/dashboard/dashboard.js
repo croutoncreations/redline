@@ -557,9 +557,11 @@ function renderTasks(tasks) {
     const schedulerOff = !latestDashboard?.scheduler?.enabled && task.enabled && task.state === 'queued';
     const firesaleInterval = task.type === 'recurring' && task.firesale_min_interval > 0
       ? ` · ${duration(task.firesale_min_interval).replace(' minimum','')} in firesale` : '';
-    const recurrence = (schedulerOff ? 'Waiting for global scheduling' : duration(task.min_interval)) + firesaleInterval;
+    // One-off jobs never re-run after success, so an interval has no effect on them.
+    const interval = task.type === 'recurring' ? duration(task.min_interval) : 'Runs once';
+    const recurrence = (schedulerOff ? 'Waiting for global scheduling' : interval) + firesaleInterval;
     const status = schedulerOff ? 'Ready · scheduler off' : task.state;
-    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(task.type === 'one_off' ? 'One-off' : title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
@@ -953,8 +955,10 @@ function syncIntervalField() {
   const recurring = $('#task-type').value === 'recurring';
   $('#task-interval').disabled = !recurring;
   $('#task-firesale-interval').disabled = !recurring;
+  // One-off jobs never re-run after success, so neither interval applies.
+  // Values stay in the inputs so switching back to recurring keeps them.
+  $('#task-interval-field').hidden = !recurring;
   $('#task-firesale-interval-field').hidden = !recurring;
-  $('#task-interval-note').hidden = recurring;
   // An interval error no longer applies once the fields are disabled.
   const invalid = document.querySelector('#task-form [aria-invalid="true"]');
   if (!recurring && invalid && (invalid.id === 'task-interval' || invalid.id === 'task-firesale-interval')) showTaskError('');

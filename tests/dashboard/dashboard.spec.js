@@ -204,9 +204,9 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   await page.locator('#task-profile').selectOption('codex-devx');
   await page.locator('#task-priority').fill('82');
   await page.locator('#task-tier').selectOption('expiring');
-  await expect(page.locator('#task-interval')).toBeDisabled();
-  await expect(page.locator('#task-interval-note')).toBeVisible();
+  await expect(page.locator('#task-interval-field')).toBeHidden();
   await page.locator('#task-type').selectOption('recurring');
+  await expect(page.locator('#task-interval-field')).toBeVisible();
   await expect(page.locator('#task-interval')).toBeEnabled();
   await page.locator('#task-interval').fill('7d');
   await page.locator('#task-prompt').fill('Inspect one cache invalidation path and report findings.');
@@ -284,6 +284,37 @@ test('hides and clears the firesale interval for one-off jobs', async ({ page })
   await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ type:'one_off', firesale_min_interval:'' });
+});
+
+test('one-off jobs hide both interval fields and keep typed values for recurring', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await page.locator('#task-name').fill('Toggle type');
+  await expect(page.locator('#task-interval-field')).toBeHidden();
+  await expect(page.locator('#task-firesale-interval-field')).toBeHidden();
+  await page.locator('#task-type').selectOption('recurring');
+  await page.locator('#task-interval').fill('7d');
+  await page.locator('#task-firesale-interval').fill('10m');
+  await page.locator('#task-type').selectOption('one_off');
+  await expect(page.locator('#task-interval-field')).toBeHidden();
+  await expect(page.locator('#task-firesale-interval-field')).toBeHidden();
+  await page.locator('#task-type').selectOption('recurring');
+  await expect(page.locator('#task-interval')).toHaveValue('7d');
+  await expect(page.locator('#task-firesale-interval')).toHaveValue('10m');
+  await page.locator('#task-type').selectOption('one_off');
+  await page.getByRole('button', { name: 'Create enabled job' }).click();
+  await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
+  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ type: 'one_off', min_interval: '', firesale_min_interval: '' });
+});
+
+test('one-off jobs in the queue never show an interval', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  Object.assign(dashboard.tasks[0], { type: 'one_off', min_interval: 7 * 86400e9, firesale_min_interval: 600e9 });
+  await loadDashboard(page, { dashboard });
+  const row = page.locator('[data-task-row="audit-auth"]');
+  await expect(row).toContainText('One-off');
+  await expect(row).not.toContainText('minimum');
+  await expect(row).not.toContainText('in firesale');
 });
 
 test('aligns the minimum and firesale interval inputs on one row', async ({ page }) => {
