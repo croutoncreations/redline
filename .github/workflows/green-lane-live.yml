@@ -1,0 +1,54 @@
+name: Green Lane Live Pilot
+
+on:
+  schedule:
+    - cron: '47 * * * *'
+  workflow_dispatch:
+
+# Exactly one serialized merge worker; no PR event or PR-controlled checkout.
+concurrency:
+  group: green-lane-live-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: >-
+      github.repository == 'croutoncreations/redline' &&
+      github.ref == 'refs/heads/main' &&
+      (vars.GREEN_LANE_LIVE_ENABLED == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build trusted evaluator
+        run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      - name: Evaluate and merge at most one PR
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIVE_PILOT_ENABLED: ${{ vars.GREEN_LANE_LIVE_ENABLED }}
+        with:
+          retries: 0
+          script: |
+            await require('./.github/green-lane/live.cjs')({github,context,core});
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: green-lane-live-${{ github.run_id }}
+          path: live-result.json
+          if-no-files-found: warn

@@ -126,3 +126,57 @@ informational.
 This document supersedes the signed-provenance and cross-provider deployment
 requirements in the older green-lane plan. No signing keys or issuer Apps need
 to be provisioned for the simplified policy.
+
+## Limited Redline live pilot
+
+`Green Lane Live Pilot` is a separate hourly worker (`:47`) with a manual
+workflow-dispatch option. It runs trusted `main` code only, never checks out PR
+code, and independently runs the existing evaluator. Shadow status, artifacts,
+PR comments, and Claude's claims are not merge authorization. Claude's hourly
+maintenance task keeps its existing no-merge role. No manual approval is needed;
+the existing current-head independent review requirement still applies.
+
+Live merging starts only when repository Actions variable
+`GREEN_LANE_LIVE_ENABLED` is exactly `true`. Missing/false means no merges.
+The worker is serialized using `green-lane-live-merge` concurrency, never cancels
+an active merge worker, and makes **at most one squash-merge API call per run**.
+There is no retry after a timeout or rejected merge, since the result could be
+ambiguous. Each merge request carries the exact evaluated PR head SHA.
+
+Additional live safeguards:
+
+- Require strict, admin-enforced `main` protection with all seven required
+  GitHub Actions CI checks, resolved conversations, and no force-push/deletion.
+  Protection is rechecked before the merge. This is not an approval rule.
+- Pin the actual `refs/heads/main` tip to the workflow's trusted code SHA; abort
+  if it changed since the run started or during evaluation. The PR-recorded
+  base SHA is preserved as evidence, but is **not** used as the current main tip.
+- Require the PR head to contain that actual main tip (zero commits behind).
+  Otherwise defer for a normal branch refresh, CI, and automated re-review.
+  After one merge, other PRs may need another refresh. The worker never refreshes
+  branches or resolves conflicts itself.
+- Revalidate review and CI snapshot hashes, freshness, PR state/head/base and
+  metadata immediately before merging. Native strict branch protection also
+  enforces up-to-date checks if another actor advances main in the final API
+  interval; GitHub's merge API only provides a head-SHA precondition, not a
+  base-SHA precondition. Workflow serialization covers this worker, not humans.
+- Optional `green-lane-hold` PR label defers that PR. It is an opt-out, never an
+  approval or opt-in requirement.
+
+### Kill switch
+
+**Disable `Green Lane Live Pilot` in GitHub Actions** (or run
+`gh workflow disable green-lane-live.yml -R croutoncreations/redline`). The worker
+re-reads that workflow's live enabled state immediately before its merge call,
+so disabling also stops a running evaluation before that call. Cancel an active
+run as well for an immediate operational stop. A merge request already accepted
+by GitHub cannot be recalled. Set `GREEN_LANE_LIVE_ENABLED=false` to prevent new
+runs from entering the pilot; that variable is captured at run start and is not
+an in-flight kill switch. Re-enabling requires both an active workflow and the
+variable set to `true`.
+
+The job writes `live-result.json` (including exact main tip, evaluations, merge
+attempt and confirmed merge SHA) to its run artifact. Routine deferrals only
+appear in logs/artifacts; the worker posts no routine PR comments or push
+notifications. GitHub's own workflow failure/merge notifications still follow
+each user's GitHub settings.
