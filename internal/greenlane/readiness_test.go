@@ -14,7 +14,17 @@ func TestReviewReadiness(t *testing.T) {
 		message string
 	}{
 		{"approved", func(p *PRInfo) {}, true, "OK"},
-		{"automated commented review without findings", func(p *PRInfo) { p.Reviews[0].User = "coderabbitai[bot]"; p.Reviews[0].State = "COMMENTED" }, true, "OK"},
+		{"bot reply publication does not count", func(p *PRInfo) { p.Reviews[0].User = "coderabbitai[bot]"; p.Reviews[0].State = "COMMENTED" }, false, "No completed"},
+		{"bot review prose needs completion protocol", func(p *PRInfo) {
+			p.Reviews[0].User = "coderabbitai[bot]"
+			p.Reviews[0].State = "COMMENTED"
+			p.Reviews[0].Body = "Verified the fix"
+		}, false, "No completed"},
+		{"empty human reply publication does not count", func(p *PRInfo) { p.Reviews[0].State = "COMMENTED" }, false, "No completed"},
+		{"nonempty human review", func(p *PRInfo) {
+			p.Reviews[0].State = "COMMENTED"
+			p.Reviews[0].Body = "Reviewed implementation and tests"
+		}, true, "OK"},
 		{"no reviews", func(p *PRInfo) { p.Reviews = nil }, false, "No completed"},
 		{"pending", func(p *PRInfo) { p.Reviews[0].State = "PENDING" }, false, "No completed"},
 		{"issue comments do not count", func(p *PRInfo) { p.Reviews = nil; p.ReviewComments = []ReviewComment{{Body: "looks good"}} }, false, "No completed"},
@@ -116,5 +126,14 @@ func TestLockfileInMixedCodePRStaysManual(t *testing.T) {
 	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
 	if r.Verdict != VerdictWouldNotMerge || ruleByName(t, r, "Denied Paths").Pass {
 		t.Fatal("code change bypassed manual lockfile policy")
+	}
+}
+
+func TestReviewBodyIsPartOfSnapshot(t *testing.T) {
+	p := passingPR(PRFile{Filename: "README.md"})
+	before := ReviewSnapshot(p)
+	p.Reviews[0].Body = "Reviewed implementation"
+	if before == ReviewSnapshot(p) {
+		t.Fatal("review body edits must invalidate the snapshot")
 	}
 }

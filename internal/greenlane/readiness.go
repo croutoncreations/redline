@@ -74,8 +74,8 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 			requests = append(requests, user)
 		}
 	}
-	// A submitted COMMENTED review counts, including an automated review
-	// with no findings. Trusted exact-head completion summaries also count;
+	// Bot COMMENTED publications can be inline replies, not completed reviews.
+	// Bots must use the authenticated exact-head completion summaries;
 	// ordinary issue comments and successful workflow jobs do not.
 	latest := map[string]Review{}
 	for _, review := range pr.Reviews {
@@ -90,7 +90,7 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 	}
 	reviewed := completedAutomatedReview(pr)
 	for user, review := range latest {
-		if user != strings.ToLower(pr.Author) && review.CommitID == pr.HeadSHA && (review.State == "APPROVED" || review.State == "COMMENTED") {
+		if user != strings.ToLower(pr.Author) && review.CommitID == pr.HeadSHA && (review.State == "APPROVED" || (review.State == "COMMENTED" && !strings.HasSuffix(strings.ToLower(review.User), "[bot]") && strings.TrimSpace(review.Body) != "")) {
 			reviewed = true
 		}
 	}

@@ -17,6 +17,7 @@ func ReviewSnapshot(pr PRInfo) string {
 		User   string `json:"user"`
 		State  string `json:"state"`
 		Commit string `json:"commit"`
+		Body   string `json:"body"`
 	}
 	type thread struct {
 		ID       string `json:"id"`
@@ -36,7 +37,7 @@ func ReviewSnapshot(pr PRInfo) string {
 	}
 	sort.Slice(state.Automated, func(i, j int) bool { return state.Automated[i].ID < state.Automated[j].ID })
 	for _, r := range pr.Reviews {
-		state.Reviews = append(state.Reviews, review{r.ID, r.User, r.State, r.CommitID})
+		state.Reviews = append(state.Reviews, review{r.ID, r.User, r.State, r.CommitID, r.Body})
 	}
 	for _, r := range pr.ReviewThreads {
 		state.Threads = append(state.Threads, thread{r.ID, r.Resolved, r.Outdated})
