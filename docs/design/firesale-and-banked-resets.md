@@ -132,7 +132,8 @@ type BankedReset struct {
 - **Codex:** the `wham/usage` count is free. Per-credit details come from
   `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`, which is rate-limited per IP,
   so it is fetched only when the count is non-zero, cached for at least 30 minutes, and backed off
-  on 429. Codex credits do not report `clears`; Redline treats them as clearing the weekly and
+  on 429. That backoff applies only to further detail lookups; it never locks out `wham/usage`
+  collection. Codex credits do not report `clears`; Redline treats them as clearing the weekly and
   five-hour windows. Only the weekly refill is observed (redeeming starts a new weekly window);
   the five-hour refill is assumed.
 
@@ -156,10 +157,11 @@ providers:
 ```
 
 Defaults: `remind_before: [24h]`, `on_expiry: notify`, `redeem_lead: 1h`. Automatic redemption is
-always opt-in. Notifications still require `notifications.enabled`. Milestone 2 adds
-`reset.expiring` to the default event list. `reset.redeemed`, `reset.redeem_failed`,
-`firesale.started`, `firesale.ended`, and `on_expiry: redeem` are added by the milestones that
-implement them, so configuration never accepts behavior that does not exist yet.
+always opt-in. Notifications still require `notifications.enabled`, and the new `reset.*` and
+`firesale.*` events must be listed in `notifications.events`. The default list stays the
+pre-firesale four events, so upgrading never sends new event types to existing hooks.
+`on_expiry: redeem` was added by the milestone that implements it, so configuration never
+accepted behavior that did not exist yet.
 
 Tasks gain `firesale_min_interval` (API, CLI `--firesale-interval`, MCP, dashboard) and accept
 `dispatch_tier: firesale`.

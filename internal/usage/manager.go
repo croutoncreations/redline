@@ -220,8 +220,11 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 		state.nextFetch = fetchedAt.Add(m.bankedResetInterval(key))
 	}
 	m.resetStates[key] = state
-	// Supplementary lookups share the provider's native rate-limit lockout.
-	if wait, limited := rateLimitWait(err); limited {
+	// Claude's report comes from the same endpoint as native usage, so its rate
+	// limit is shared. Codex credit details are a separate, per-IP limited
+	// endpoint: a 429 there backs off only further detail lookups (nextFetch
+	// above) and must not stop wham/usage collection.
+	if wait, limited := rateLimitWait(err); limited && key != "codex" {
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}

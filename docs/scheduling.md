@@ -159,7 +159,8 @@ automatic usage decision is firesale. A model pool can unlock the firesale tier 
 but cannot activate these provider-level cooldown or concurrency overrides.
 
 Automatic dispatch emits `firesale.started` and `firesale.ended` once per provider state transition
-when notifications are enabled and the event is selected (both are in the default list). Events
+when notifications are enabled and the event is listed in `notifications.events` (neither is in
+the default list, so existing hooks do not receive new event types after upgrading). Events
 include string-valued `pace_gap`, `overflow`, `effective_reset_at`, and `unlocked_tier` data.
 Manual evaluations do not emit transitions; decisions without a provider usage evaluation do not
 change the recorded state.

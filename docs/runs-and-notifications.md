@@ -36,7 +36,10 @@ failures.
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
 `run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
-`reset.redeem_failed`, `firesale.started`, and `firesale.ended` (all enabled by default).
+`reset.redeem_failed`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
+empty, only `run.started`, `run.completed`, `run.failed`, and `scheduler.error` are sent; list the
+`reset.*` and `firesale.*` events explicitly to receive them. Hooks should ignore event types they
+do not recognize.
 
 ```yaml
 notifications:

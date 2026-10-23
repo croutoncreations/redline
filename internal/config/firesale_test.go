@@ -35,8 +35,8 @@ func TestLoadFiresaleConfiguration(t *testing.T) {
 	if cfg.Providers["codex-main"].FiresaleMaxConcurrentRuns != 3 {
 		t.Fatal("concurrency not loaded")
 	}
-	if !cfg.NotificationEvents()["firesale.started"] || !cfg.NotificationEvents()["firesale.ended"] {
-		t.Fatal("missing default firesale events")
+	if cfg.NotificationEvents()["firesale.started"] || cfg.NotificationEvents()["firesale.ended"] {
+		t.Fatal("firesale events must be opt-in")
 	}
 	raw = strings.Replace(raw, "firesale_max_concurrent_runs: 3", "firesale_max_concurrent_runs: -1", 1)
 	if _, err := config.Load(writeConfig(t, raw)); err == nil {

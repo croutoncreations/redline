@@ -419,7 +419,9 @@ func TestCodexResetDetailsAreCachedWithoutReplacingSourceCount(t *testing.T) {
 	}
 }
 
-func TestCodexResetDetailsFailureKeepsCacheAndSharesNativeLockout(t *testing.T) {
+// The Codex credit-details endpoint is separate from wham/usage, so a 429 on
+// it backs off only further detail lookups and never blocks usage collection.
+func TestCodexResetDetailsFailureKeepsCacheWithoutNativeLockout(t *testing.T) {
 	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
 	s := snapshot("openusage", now)
 	expires := now.Add(24 * time.Hour)
@@ -445,8 +447,11 @@ func TestCodexResetDetailsFailureKeepsCacheAndSharesNativeLockout(t *testing.T) 
 	if resets.calls != 2 || len(got.BankedResetDetails) != 1 || *got.BankedResets != 3 || !got.BankedResetsExpireAt.Equal(expires) {
 		t.Fatalf("calls=%d snapshot=%#v", resets.calls, got)
 	}
-	if _, _, err := manager.Fetch(context.Background(), "native", config.Provider{Provider: " Codex ", UsageSource: "native"}); err == nil || native.calls != 0 {
-		t.Fatalf("native lockout: calls=%d err=%v", native.calls, err)
+	if until := manager.NativeBlockedUntil("codex"); !until.IsZero() {
+		t.Fatalf("credit-details 429 locked out native Codex usage until %s", until)
+	}
+	if _, _, err := manager.Fetch(context.Background(), "native", config.Provider{Provider: " Codex ", UsageSource: "native"}); native.calls != 1 || (err != nil && strings.Contains(err.Error(), "rate limited")) {
+		t.Fatalf("native usage blocked: calls=%d err=%v", native.calls, err)
 	}
 	now = now.Add(time.Hour + time.Minute)
 	fetch(t, manager, "a", provider)

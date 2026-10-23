@@ -283,7 +283,10 @@ test('hides and clears the firesale interval for one-off jobs', async ({ page })
   await expect(page.locator('#task-firesale-interval-field')).toBeHidden();
   await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
-  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ type:'one_off', firesale_min_interval:'' });
+  const body = state.requests.find(item => item.path === '/v1/tasks').body;
+  expect(body).toMatchObject({ type:'one_off' });
+  // Omitted so ordinary saves work against daemons that predate the field.
+  expect(body).not.toHaveProperty('firesale_min_interval');
 });
 
 test('one-off jobs hide both interval fields and keep typed values for recurring', async ({ page }) => {
@@ -304,7 +307,9 @@ test('one-off jobs hide both interval fields and keep typed values for recurring
   await page.locator('#task-type').selectOption('one_off');
   await page.getByRole('button', { name: 'Create enabled job' }).click();
   await expect(page.getByRole('dialog', { name: 'New scheduled job' })).toBeHidden();
-  expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ type: 'one_off', min_interval: '', firesale_min_interval: '' });
+  const body = state.requests.find(item => item.path === '/v1/tasks').body;
+  expect(body).toMatchObject({ type: 'one_off', min_interval: '' });
+  expect(body).not.toHaveProperty('firesale_min_interval');
 });
 
 test('one-off jobs in the queue never show an interval', async ({ page }) => {
@@ -375,6 +380,14 @@ test('edits and clears an existing firesale interval', async ({ page }) => {
   await page.locator('#task-firesale-interval').fill('');
   await page.getByRole('button', { name: 'Save changes' }).click();
   expect(state.requests.find(item => item.path === '/v1/tasks/audit-auth' && item.method === 'PATCH').body).toMatchObject({ dispatch_tier: 'firesale', firesale_min_interval: '' });
+});
+
+test('saving an ordinary job omits the firesale interval for older daemons', async ({ page }) => {
+  const state = await loadDashboard(page);
+  await page.locator('[data-task="audit-auth"]').click();
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  const body = state.requests.find(item => item.path === '/v1/tasks/audit-auth' && item.method === 'PATCH').body;
+  expect(body).not.toHaveProperty('firesale_min_interval');
 });
 
 test('allows a user to turn a new job off before creating it', async ({ page }) => {

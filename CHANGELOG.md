@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- The default `notifications.events` list is unchanged (`run.started`, `run.completed`,
+  `run.failed`, `scheduler.error`). To receive the new `reset.expiring`, `reset.redeemed`,
+  `reset.redeem_failed`, `firesale.started`, and `firesale.ended` events, list them explicitly.
+  Hooks should ignore event types they do not recognize.
+- Native Codex usage now also reads per-credit reset details from a separate endpoint while banked
+  resets are available (at most every 30 minutes). A rate limit on that endpoint only backs off
+  the detail lookup; usage collection continues.
+- Earlier versions ignored unknown config keys with a warning. `banked_resets`,
+  `firesale_trigger`, `firesale_max_concurrent_runs`, and related settings are now recognized, so
+  any already present take effect, and invalid values (or `on_expiry: redeem` without
+  `usage_monitor.enabled`, or with `usage_source: openusage`) stop the service from starting.
+  Before upgrading, check your current version's startup log for `ignoring unknown key` warnings.
+- After rolling back to an older daemon, reload any open dashboard tab before editing jobs.
+
 ### Fixed
 
 - Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,

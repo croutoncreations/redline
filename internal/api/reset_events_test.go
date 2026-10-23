@@ -157,6 +157,7 @@ func TestMonitorRedeemExpiryNotificationFallsBackWhenAutomaticDisabled(t *testin
 			s.config.Providers["main"] = p
 			s.config.UsageMonitor.Enabled = gate != "monitor disabled"
 			s.config.Notifications.Enabled = true
+			s.config.Notifications.Events = []string{domain.EventResetExpiring}
 			s.redemptionDisabled = gate == "demo"
 			if gate == "multiple accounts" {
 				s.config.Providers["other"] = p
@@ -207,6 +208,7 @@ func TestMonitorRedeemModeNotifiesUnredeemableGrant(t *testing.T) {
 			s.config.Providers["main"] = p
 			s.config.UsageMonitor.Enabled = true
 			s.config.Notifications.Enabled = true
+			s.config.Notifications.Events = []string{domain.EventResetExpiring}
 			tc.mutate(&snapshot.BankedResetDetails[0], snapshot.ObservedAt)
 			if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
 				t.Fatal(err)

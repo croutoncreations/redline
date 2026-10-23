@@ -79,7 +79,7 @@ func TestUsageMonitorBankedResetReminderFailures(t *testing.T) {
 			p.UsageSource = "openusage"
 			cfg.Providers = map[string]config.Provider{"codex-main": p}
 			cfg.UsageMonitor = config.UsageMonitor{Enabled: true, PollInterval: "1h"}
-			cfg.Notifications = config.Notifications{Enabled: true, Command: "exit 9"}
+			cfg.Notifications = config.Notifications{Enabled: true, Command: "exit 9", Events: []string{domain.EventResetExpiring}}
 			status := runReminderMonitor(t, cfg, db)
 			wantUsageError := failure == "fetch" || failure == "snapshot_store"
 			if len(status.Providers) != 1 || (status.Providers[0].Error != "") != wantUsageError {
@@ -132,8 +132,8 @@ func TestUsageMonitorBankedResetRemindersWithoutScheduler(t *testing.T) {
 	for i, notifications := range []config.Notifications{
 		{Command: ":"},
 		{Enabled: true, Command: ":", Events: []string{domain.EventRunStarted}},
-		{Enabled: true, Command: ":"},
-		{Enabled: true, Command: ":"},
+		{Enabled: true, Command: ":", Events: []string{domain.EventResetExpiring}},
+		{Enabled: true, Command: ":", Events: []string{domain.EventResetExpiring}},
 	} {
 		cfg.Notifications = notifications
 		status := runReminderMonitor(t, cfg, db)

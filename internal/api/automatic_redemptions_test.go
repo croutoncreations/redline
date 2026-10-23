@@ -27,7 +27,7 @@ func (automaticRateLimitError) RetryAfter() time.Duration { return 10 * time.Min
 // to ensure retry limits, terminal outcomes, and deadlines survive restarts.
 func automaticMonitorCycle(t *testing.T, db *store.DB, snapshot decision.UsageSnapshot, now time.Time, mode string, redeemer testRedeemer, notifier *redemptionNotifier, configure ...func(*Server)) {
 	t.Helper()
-	cfg := config.Config{Providers: map[string]config.Provider{"main": {Provider: snapshot.Provider, UsageSource: "native", BankedResets: config.BankedResets{OnExpiry: mode, RemindBefore: []string{}}}}, UsageMonitor: config.UsageMonitor{Enabled: true, PollInterval: "1h"}, Notifications: config.Notifications{Enabled: true}}
+	cfg := config.Config{Providers: map[string]config.Provider{"main": {Provider: snapshot.Provider, UsageSource: "native", BankedResets: config.BankedResets{OnExpiry: mode, RemindBefore: []string{}}}}, UsageMonitor: config.UsageMonitor{Enabled: true, PollInterval: "1h"}, Notifications: config.Notifications{Enabled: true, Events: []string{domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed}}}
 	s := NewServerWithDependencies(cfg, db, func() time.Time { return now }, nil, nil)
 	s.redeemer, s.notifier = redeemer, notifier
 	snapshot.ObservedAt = now
@@ -252,7 +252,7 @@ func TestExpiredBankedResetUnknownWarningWinsSharedExpiry(t *testing.T) {
 	expiry := now.Add(-time.Minute)
 	notifier := &redemptionNotifier{}
 	s.notifier = notifier
-	s.config.Notifications = config.Notifications{Enabled: true}
+	s.config.Notifications = config.Notifications{Enabled: true, Events: []string{domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed}}
 	if _, err := db.BeginBankedResetRedemption(t.Context(), store.BankedResetRedemption{ProviderAccountID: "main", ResetID: "ambiguous", RequestID: "key", Trigger: "automatic", CreatedAt: now.Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
