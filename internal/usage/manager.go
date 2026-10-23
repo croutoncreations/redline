@@ -161,9 +161,25 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	if state.known && now.Sub(state.fetchedAt) <= 24*time.Hour {
 		report := state.resets
 		if report != nil && report.NextExpiresAt != nil && !report.NextExpiresAt.After(now) {
-			// The soonest grant lapsed since we last asked; the count is
-			// no longer trustworthy until the next lookup.
-			report = nil
+			if len(report.Details) == 0 {
+				// Without details we cannot tell how many resets remain.
+				report = nil
+			} else {
+				filtered := *report
+				filtered.Details = nil
+				filtered.NextExpiresAt = nil
+				for _, detail := range report.Details {
+					if detail.ExpiresAt != nil && !detail.ExpiresAt.After(now) {
+						filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						continue
+					}
+					filtered.Details = append(filtered.Details, detail)
+					if detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
+						filtered.NextExpiresAt = detail.ExpiresAt
+					}
+				}
+				report = &filtered
+			}
 		}
 		if codexDetails {
 			if report != nil {

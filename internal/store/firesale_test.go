@@ -21,6 +21,7 @@ func TestLatestAutomaticFiresaleSkipsUnevaluatedAndManualDecisions(t *testing.T)
 		{"p", `{"trigger":"automatic","provider_firesale":true}`},
 		{"p", `{"trigger":"manual","provider_firesale":false}`},
 		{"p", `{"trigger":"automatic","result":{"firesale":false}}`},
+		{"p", `{"trigger":"automatic","provider_firesale":false,"result":{"decision":"UNKNOWN"}}`},
 		{"other", `{"trigger":"automatic","provider_firesale":false}`},
 	} {
 		if _, err := db.RecordSchedulerDecision(t.Context(), domain.SchedulerDecision{ProviderAccountID: record.provider, DecisionJSON: []byte(record.json)}, time.Now()); err != nil {

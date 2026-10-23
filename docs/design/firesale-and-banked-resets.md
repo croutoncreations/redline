@@ -34,7 +34,9 @@ capacity:
 - Counting banked resets as extra capacity. Resets that will not be applied by Redline before the
   current weekly reset are held for the user and never change scheduling.
 - Building the predicted-global-reset source. Only the seam is built now.
-- Redeeming resets for capacity the user wants interactively. Redline redeems only at expiry.
+- Automatically redeeming resets for capacity the user wants interactively. Automatic redemption
+  waits until the configured lead before expiry; manual CLI/API redemption can spend a selected
+  reset at any time.
 
 ## Concepts
 
@@ -180,7 +182,8 @@ deadlines on each cycle:
   - `redeem`: attempt redemption (below), retrying until expiry on transient failures with
     persisted backoff (at least five minutes per provider; 30 minutes for `nothing_to_reset`).
     Respect cooldowns and 429 lockouts; `redeemed` and `gone` stop retries. Do not send
-    `redeem_now`. Failed resets that expire unused notify once via `expired_unredeemed`.
+    `redeem_now` when automatic redemption is enabled; otherwise fall back to `notify`.
+    Failed resets that expire unused notify once via `expired_unredeemed`.
     A pending real request of any trigger is retried first with its stored key, even if telemetry
     no longer lists it. An unresolved request at expiry is finalized as `unknown` and notifies
     "redemption request outcome unknown at expiry; check the provider", never "expired unused".

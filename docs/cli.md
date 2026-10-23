@@ -113,9 +113,10 @@ redline later --tier expiring --json "sweep the docs for stale flags"
 `later` accepts `--tier firesale` and the optional `--firesale-interval` flag, like `task add`.
 It queues free text as a one-off task using `--profile auto` resolution. It never dispatches
 and never bypasses limits: the task starts in a fresh harness session only when the provider is
-behind pace (or near expiry for `--tier expiring`) and above its reserve. If no profile matches,
-it fails closed unless `--default-profile ID --allow-default-profile` is passed explicitly; the
-text output warns that the fallback may target another repository. Hooks should pass untrusted
+behind pace (or near expiry for `--tier expiring`) and above its reserve. A task created with
+`--tier firesale` waits for the policy's firesale trigger, not the standard surplus threshold.
+If no profile matches, it fails closed unless `--default-profile ID --allow-default-profile` is
+passed explicitly; the text output warns that the fallback may target another repository. Hooks should pass untrusted
 text via `--prompt -` and stdin, never as positional flags. For positional text starting with a
 hyphen, use `redline later -- "-something"`. With `--json` it prints the created task, how the
 profile was chosen, and the matched repository. `task add --json`, in both YAML and flag mode,

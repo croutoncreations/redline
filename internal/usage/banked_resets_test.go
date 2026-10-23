@@ -164,6 +164,36 @@ func TestBankedResetsSkippedWhenPinnedToOpenUsageOrDisabled(t *testing.T) {
 	}
 }
 
+func TestCachedBankedResetsKeepValidCreditsAfterOneExpires(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+			expires, later := now.Add(time.Minute), now.Add(time.Hour)
+			resets := &fakeResets{results: []resetResult{{resets: &decision.BankedResets{Available: 2, NextExpiresAt: &expires,
+				Details: []decision.BankedReset{{ID: "expired", ExpiresAt: &expires, ResetsLeft: 1}, {ID: "valid", ExpiresAt: &later, ResetsLeft: 1}}}}}}
+			s := claudeSnapshot(now)
+			s.Provider = provider
+			wantCount := 1
+			if provider == "codex" {
+				s.ApplyBankedResets(&decision.BankedResets{Available: 2})
+				wantCount = 2 // The primary usage count remains authoritative.
+			}
+			p := autoClaude()
+			p.Provider = provider
+			manager := usage.NewManager(repeatSource(s, 3), &fakeSource{name: "native"}, func() time.Time { return now })
+			manager.BankedResets = resets
+			fetch(t, manager, "main", p)
+			now = now.Add(2 * time.Minute)
+			for i := 0; i < 2; i++ {
+				got := fetch(t, manager, "main", p)
+				if got.BankedResets == nil || *got.BankedResets != wantCount || len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].ID != "valid" || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(later) {
+					t.Fatalf("snapshot=%+v", got)
+				}
+			}
+		})
+	}
+}
+
 func TestCachedBankedResetsHiddenOnceTheirExpiryPasses(t *testing.T) {
 	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
 	expires := now.Add(10 * time.Minute)

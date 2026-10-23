@@ -32,6 +32,20 @@ func claudeClient(server *httptest.Server) nativeusage.Client {
 		ClaudeUsageURL: server.URL + "/api/oauth/usage", Now: func() time.Time { return bankedNow }}
 }
 
+func TestCodexBankedResetsSkipExpiredCredits(t *testing.T) {
+	server, _ := claudeServer(t, `{"available_count":3,"credits":[
+		{"id":"expired","expires_at":"2026-09-24T13:00:00Z"},
+		{"id":"at-now","expires_at":"2026-09-24T14:00:00Z"},
+		{"id":"valid","expires_at":"2026-09-25T14:00:00Z"}]}`)
+	client := nativeusage.Client{HTTPClient: server.Client(), Credentials: staticCredentials{token: "codex-token"},
+		CodexResetCreditsURL: server.URL, Now: func() time.Time { return bankedNow }}
+	got, err := client.BankedResets(t.Context(), config.Provider{Provider: "codex"})
+	want := bankedNow.Add(24 * time.Hour)
+	if err != nil || got == nil || len(got.Details) != 1 || got.Details[0].ID != "valid" || got.NextExpiresAt == nil || !got.NextExpiresAt.Equal(want) {
+		t.Fatalf("resets=%+v err=%v", got, err)
+	}
+}
+
 // Anthropic only reports banked resets when asked for the cedar_ember block by
 // a Claude Code CLI user agent; anything else is answered "surface" ineligible.
 func TestClaudeNativeAsksForBankedResetsAsTheCLI(t *testing.T) {

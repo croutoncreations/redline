@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +150,12 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		}
 		if pending.ID != 0 {
 			selected.ID = pending.ResetID
+			for _, detail := range pre.BankedResetDetails {
+				if detail.ID == pending.ResetID {
+					selected = detail
+					break
+				}
+			}
 		} else {
 			details := pre.BankedResetDetails
 			if trigger == "automatic" {
@@ -266,9 +273,18 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		if refreshErr == nil {
 			refreshErr = s.store.SaveSnapshot(ctx, post, raw)
 		}
-		result.Verified = refreshErr == nil && post.ObservedAt.After(completedAt) && (post.Weekly.Remaining > pre.Weekly.Remaining || post.Weekly.ResetsAt.After(pre.Weekly.ResetsAt))
+		refilled := post.Weekly.Remaining > pre.Weekly.Remaining || post.Weekly.ResetsAt.After(pre.Weekly.ResetsAt)
+		clearsWeekly := slices.Contains(result.Cleared, "weekly") || slices.Contains(selected.Clears, "weekly")
+		clearsShort := slices.Contains(result.Cleared, "five_hour") || slices.Contains(selected.Clears, "five_hour")
+		if clearsShort && !clearsWeekly {
+			refilled = pre.Short != nil && post.Short != nil && (post.Short.Remaining > pre.Short.Remaining || post.Short.ResetsAt.After(pre.Short.ResetsAt))
+		}
+		result.Verified = refreshErr == nil && post.ObservedAt.After(completedAt) && refilled
 		if !result.Verified {
-			result.Reason = strings.TrimSpace(result.Reason + " Usage has not refilled yet; refresh and check again. Codex may still enforce the old window (known provider bug).")
+			result.Reason = strings.TrimSpace(result.Reason + " Usage has not refilled yet; refresh and check again.")
+			if name == "codex" {
+				result.Reason += " Codex may still enforce the old window (known provider bug)."
+			}
 		}
 	}
 	if err := s.store.CompleteBankedResetRedemption(context.WithoutCancel(ctx), attempt.ID, result.Outcome, result.Code, result.Reason, completedAt); err != nil {

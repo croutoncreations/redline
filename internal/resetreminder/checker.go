@@ -33,6 +33,8 @@ type Checker struct {
 	Enabled  bool
 	Store    Store
 	Notifier Notifier
+	// ExpiryAction overrides the configured action when automatic redemption cannot run.
+	ExpiryAction string
 }
 
 func (r Checker) Check(ctx context.Context, providerID string, provider config.Provider, snapshot decision.UsageSnapshot, now time.Time) error {
@@ -73,7 +75,10 @@ func (r Checker) Check(ctx context.Context, providerID string, provider config.P
 	}
 	var errs []error
 	for _, reset := range deadlines {
-		action := provider.BankedResetOnExpiry()
+		action := r.ExpiryAction
+		if action == "" {
+			action = provider.BankedResetOnExpiry()
+		}
 		if action != "off" && !now.Before(reset.ExpiresAt.Add(-provider.BankedResetRedeemLead())) {
 			if action == "notify" {
 				if err := r.send(ctx, providerID, provider, reset, now, provider.BankedResetRedeemLead(), kindExpiryAction, actionRedeemNow); err != nil {

@@ -7,6 +7,8 @@ import (
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/usage"
 )
@@ -17,6 +19,52 @@ func NewHorizonTestServer(cfg config.Config, db *store.DB, now func() time.Time,
 	source := staticUsageSource{snapshots: snapshots}
 	s.usageSources = usage.NewManager(source, source, now)
 	return s
+}
+
+func TestAutomaticFiresaleUnknownCyclePreservesState(t *testing.T) {
+	s, db, snapshot := redemptionServer(t, "codex")
+	trigger := .01
+	p := s.config.Providers["main"]
+	p.WindowWeeklyCost = .1
+	s.config.Providers["main"] = p
+	s.config.ActivePolicy = "standard"
+	s.config.Policies = map[string]config.Policy{"standard": {FiresaleTrigger: &trigger}}
+	notifier := &redemptionNotifier{}
+	s.notifier = notifier
+	snapshot.Weekly.Remaining = .9
+	snapshot.Short = &decision.UsageWindow{Remaining: .9, ResetsAt: s.now().Add(time.Hour)}
+	setSnapshot := func() {
+		source := freshRedemptionSource{fetch: func() decision.UsageSnapshot { return snapshot }}
+		s.usageSources = usage.NewManager(source, source, s.now)
+		s.usageSources.MaxSnapshotAge = 48 * time.Hour
+	}
+	cycle := func() schedulerResponse {
+		t.Helper()
+		setSnapshot()
+		response, _, err := s.dispatchCore(t.Context(), schedulerRequest{ProviderAccountID: "main"}, "automatic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	first := cycle()
+	if first.Result.Decision != decision.Admit || first.ProviderFiresale == nil || !*first.ProviderFiresale {
+		t.Fatalf("initial firesale=%+v", first)
+	}
+	snapshot.ObservedAt = snapshot.ObservedAt.Add(-24 * time.Hour)
+	unknown := cycle()
+	if unknown.Result.Decision != decision.Unknown || unknown.ProviderFiresale != nil {
+		t.Errorf("unknown cycle=%+v", unknown)
+	}
+	snapshot.ObservedAt = s.now()
+	cycle()
+	if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventFiresaleStarted {
+		t.Fatalf("transitions=%+v", notifier.events)
+	}
+	records, err := db.ListSchedulerDecisions(t.Context(), "main", 10)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
 }
 
 func TestProviderResetEventsRetryTiming(t *testing.T) {
@@ -95,6 +143,41 @@ func TestProviderResetEventsPendingPrecedence(t *testing.T) {
 			events, err := s.providerResetEvents(t.Context(), "main", snapshot)
 			if err != nil || len(events) != 1 {
 				t.Fatalf("events=%+v err=%v", events, err)
+			}
+		})
+	}
+}
+
+func TestMonitorRedeemExpiryNotificationFallsBackWhenAutomaticDisabled(t *testing.T) {
+	for _, gate := range []string{"enabled", "multiple accounts", "demo", "monitor disabled"} {
+		t.Run(gate, func(t *testing.T) {
+			s, _, _ := redemptionServer(t, "claude")
+			p := s.config.Providers["main"]
+			p.BankedResets = config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{}}
+			s.config.Providers["main"] = p
+			s.config.UsageMonitor.Enabled = gate != "monitor disabled"
+			s.config.Notifications.Enabled = true
+			s.redemptionDisabled = gate == "demo"
+			if gate == "multiple accounts" {
+				s.config.Providers["other"] = p
+				s.usageSources.SkipBankedResetProviders = map[string]bool{"claude": true}
+			}
+			notifier := &redemptionNotifier{}
+			s.notifier = notifier
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "key"}
+			}, redeem: func(nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+				return nativeusage.RedeemResult{Outcome: "nothing_to_reset"}, nil
+			}}
+			if err := s.monitorProvider(t.Context(), "main"); err != nil {
+				t.Fatal(err)
+			}
+			if gate == "enabled" {
+				if len(notifier.events) != 0 {
+					t.Fatalf("automatic enabled: events=%+v", notifier.events)
+				}
+			} else if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventResetExpiring || notifier.events[0].Data["action"] != "redeem_now" {
+				t.Fatalf("automatic disabled: events=%+v", notifier.events)
 			}
 		})
 	}

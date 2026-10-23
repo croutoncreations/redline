@@ -105,6 +105,76 @@ func TestRedeemVerificationRequiresFreshNativeObservation(t *testing.T) {
 	}
 }
 
+func TestRedeemVerificationUsesClearedWindowsAndProviderWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, change string
+		clears, cleared        []string
+		wantVerified           bool
+	}{
+		{"claude session refilled", "claude", "short remaining", []string{"five_hour"}, nil, true},
+		{"claude session moved", "claude", "short boundary", []string{"five_hour"}, nil, true},
+		{"response session refilled", "claude", "short remaining", nil, []string{"five_hour"}, true},
+		{"claude unverified", "claude", "unchanged", []string{"five_hour"}, nil, false},
+		{"codex unverified", "codex", "unchanged", []string{"weekly"}, nil, false},
+		{"weekly also cleared", "claude", "short remaining", []string{"five_hour", "weekly"}, nil, false},
+		{"response clears weekly", "claude", "short remaining", []string{"five_hour"}, []string{"weekly"}, false},
+		{"unknown clears uses weekly", "claude", "weekly", nil, nil, true},
+		{"missing session", "claude", "missing short", []string{"five_hour"}, nil, false},
+		{"stale session refill", "claude", "stale short", []string{"five_hour"}, nil, false},
+		{"pending session refilled", "claude", "pending", []string{"five_hour"}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, pre := redemptionServer(t, tc.provider)
+			pre.ObservedAt = pre.ObservedAt.Add(time.Second)
+			now := pre.ObservedAt
+			s.now = func() time.Time { return now }
+			pre.Short = &decision.UsageWindow{Remaining: .1, ResetsAt: pre.ObservedAt.Add(time.Hour)}
+			pre.BankedResetDetails[0].Clears = tc.clears
+			if err := db.SaveSnapshot(t.Context(), pre, nil); err != nil {
+				t.Fatal(err)
+			}
+			post := pre
+			short := *pre.Short
+			post.Short = &short
+			post.ObservedAt = pre.ObservedAt.Add(time.Second)
+			switch tc.change {
+			case "short remaining", "stale short", "pending":
+				post.Short.Remaining = .9
+			case "short boundary":
+				post.Short.ResetsAt = post.Short.ResetsAt.Add(time.Hour)
+			case "weekly":
+				post.Weekly.Remaining = .9
+			case "missing short":
+				post.Short = nil
+				post.Weekly.Remaining = .9
+			}
+			if tc.change == "stale short" {
+				post.ObservedAt = pre.ObservedAt
+			}
+			source := freshRedemptionSource{fetch: func() decision.UsageSnapshot {
+				now = post.ObservedAt
+				return post
+			}}
+			s.usageSources = usage.NewManager(source, source, s.now)
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "key"}
+			}, redeem: func(nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+				return nativeusage.RedeemResult{Outcome: "redeemed", Cleared: tc.cleared}, nil
+			}}
+			if tc.change == "pending" {
+				if _, err := db.BeginBankedResetRedemption(t.Context(), store.BankedResetRedemption{ProviderAccountID: "main", ResetID: "reset", RequestID: "key", Trigger: "manual", CreatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.RedeemBankedReset(t.Context(), "main", "manual", false)
+			wantCodexWarning := tc.provider == "codex" && !tc.wantVerified
+			if err != nil || got.Verified != tc.wantVerified || strings.Contains(got.Reason, "Codex may still enforce the old window (known provider bug)") != wantCodexWarning {
+				t.Fatalf("result=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
 type selectingRedeemer struct{ testRedeemer }
 
 func (r selectingRedeemer) Prepare(_ context.Context, _ config.Provider, resetID string, _ bool) (nativeusage.RedeemRequest, error) {

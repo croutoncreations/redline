@@ -65,16 +65,20 @@ preventing redemption; reminders still require notifications.
 In redeem mode, usable banked resets that clear the weekly window and will be applied before
 the real weekly reset shorten the effective scheduling horizon to their redeem time. This can
 trigger firesale earlier. `off` and `notify` never shorten it; model-specific pools keep their
-own reset. Redeemed IDs are excluded even if stale details still list them. A provider acknowledgement
-alone never invents capacity: only refreshed, verified usage demonstrates a refill.
+own reset. A redeemed grant stays guarded until telemetry observed after the redemption shows a
+lower, positive remaining count; then its next use can be selected. Codex credits are single-use.
+A provider acknowledgement alone never invents capacity: only refreshed, verified usage demonstrates
+a refill.
 
 Automatic attempts are limited to one per provider per five minutes. Transient errors retry on
 later successful monitor cycles before expiry, reusing pending request keys and respecting provider
 cooldowns and 429 lockouts. `nothing_to_reset` waits at least 30 minutes before trying again;
 `redeemed` and `gone` stop retries for that reset. Retry state survives daemon restarts. If a failed
 reset expires unused, the next successful monitor cycle sends one `reset.redeem_failed` notice,
-even if the credit has disappeared from telemetry. In redeem mode there is no “redeem it now”
-notification; the redemption sends its own outcome events.
+even if the credit has disappeared from telemetry. When automatic redemption is enabled, redeem
+mode suppresses the “redeem it now” notification; the redemption sends its own outcome events.
+When automatic redemption cannot run (demo mode, multiple accounts of the provider type, or the
+usage monitor disabled), redeem mode falls back to notify mode and sends `redeem_now` when checked.
 
 If a request's response is lost, automatic retries adopt that pending request and reuse its key
 before considering another reset, even if it disappears from telemetry. At expiry an unresolved

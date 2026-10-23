@@ -88,7 +88,7 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 		if err != nil {
 			return nil, err
 		}
-		return parseCodexResetCredits(body)
+		return parseCodexResetCredits(body, c.now())
 	}
 	if name != "claude" {
 		return nil, fmt.Errorf("native banked resets for %q are unsupported", name)
@@ -418,7 +418,7 @@ type codexPayload struct {
 	} `json:"rate_limit_reset_credits"`
 }
 
-func parseCodexResetCredits(body []byte) (*decision.BankedResets, error) {
+func parseCodexResetCredits(body []byte, now time.Time) (*decision.BankedResets, error) {
 	var payload struct {
 		AvailableCount *int              `json:"available_count"`
 		Credits        []json.RawMessage `json:"credits"`
@@ -436,6 +436,9 @@ func parseCodexResetCredits(body []byte) (*decision.BankedResets, error) {
 			ExpiresAt *time.Time `json:"expires_at"`
 		}
 		if err := json.Unmarshal(raw, &credit); err != nil || strings.TrimSpace(credit.ID) == "" {
+			continue
+		}
+		if credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
 			continue
 		}
 		// Codex does not report clears; both windows are assumed (see design).

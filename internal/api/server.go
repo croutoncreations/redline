@@ -862,9 +862,14 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
 	if usageErr == nil {
+		expiryAction := configured.BankedResetOnExpiry()
+		if expiryAction == "redeem" && !s.automaticRedemptionEnabled(configured) {
+			expiryAction = "notify"
+		}
 		reminders := resetreminder.Checker{
 			Enabled: s.config.Notifications.Enabled && s.config.NotificationEvents()[domain.EventResetExpiring],
 			Store:   s.store, Notifier: s.notifier,
+			ExpiryAction: expiryAction,
 		}
 		if err := reminders.Check(ctx, providerID, configured, snapshot, s.now()); err != nil {
 			log.Printf("redline %s banked reset reminders failed: %v", providerID, err)
@@ -1764,7 +1769,9 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	firesale := response.Result.Firesale
-	response.ProviderFiresale = &firesale
+	if response.Result.Decision != decision.Unknown {
+		response.ProviderFiresale = &firesale
+	}
 	maxConcurrent = providerDispatchCap(configuredProvider, maxConcurrent, response.Result)
 	if active >= maxConcurrent {
 		response.Result.Decision = decision.Wait

@@ -537,6 +537,7 @@ func (d *DB) LatestAutomaticFiresale(ctx context.Context, provider string) (bool
 	err := d.db.QueryRowContext(ctx, `SELECT json_extract(decision_json, '$.provider_firesale')
 FROM scheduler_decisions WHERE provider_account_id = ?
 AND json_extract(decision_json, '$.trigger') = 'automatic'
+AND COALESCE(json_extract(decision_json, '$.result.decision'), '') != 'UNKNOWN'
 AND json_type(decision_json, '$.provider_firesale') IN ('true', 'false')
 ORDER BY created_at DESC, id DESC LIMIT 1`, provider).Scan(&firesale)
 	if errors.Is(err, sql.ErrNoRows) {
