@@ -209,6 +209,47 @@ func TestRedeemIndeterminateOutcomeReusesRequestKey(t *testing.T) {
 	}
 }
 
+// Codex request IDs are deterministic per credit. After a completed attempt
+// that did not redeem, a retry must use a new key and a new history row, not
+// overwrite the earlier result or resend a key the provider already answered.
+func TestRedeemCodexRetryAfterCompletedNonRedemptionUsesNewKey(t *testing.T) {
+	s, db, _ := redemptionServer(t, "codex")
+	var requests []nativeusage.RedeemRequest
+	s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+		return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "deterministic"}
+	}, redeem: func(req nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+		requests = append(requests, req)
+		if len(requests) == 1 {
+			return nativeusage.RedeemResult{Outcome: "nothing_to_reset", Code: "nothing_to_reset"}, nil
+		}
+		return nativeusage.RedeemResult{Outcome: "redeemed", Code: "reset"}, nil
+	}}
+	for range 2 {
+		if _, err := s.RedeemBankedReset(t.Context(), "main", "manual", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(requests) != 2 || requests[1].RequestID == requests[0].RequestID {
+		t.Fatalf("retry reused the completed key: %+v", requests)
+	}
+	rows, err := db.BankedResetRedemptions(t.Context(), "main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string]string{}
+	for _, row := range rows {
+		outcomes[row.RequestID] = row.Outcome
+	}
+	if len(rows) != 2 || outcomes["deterministic"] != "nothing_to_reset" || outcomes[requests[1].RequestID] != "redeemed" {
+		t.Fatalf("history=%+v", rows)
+	}
+	// The derived key is itself deterministic, so a lost response still converges.
+	again, _ := s.redeemer.Prepare(t.Context(), s.config.Providers["main"], "reset", false)
+	if again.RequestID != "deterministic" {
+		t.Fatalf("prepare=%+v", again)
+	}
+}
+
 func TestAutomaticRedemptionMultiuseGrantReflection(t *testing.T) {
 	_, db, snapshot := redemptionServer(t, "claude")
 	now := snapshot.ObservedAt.Add(time.Second)

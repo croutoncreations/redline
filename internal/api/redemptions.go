@@ -16,7 +16,12 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/google/uuid"
 )
+
+// redemptionGenerationNamespace derives the next deterministic request key
+// after a completed non-redemption reused a provider's deterministic key.
+var redemptionGenerationNamespace = uuid.MustParse("5f0c2a8e-3b7d-4e0a-9c61-7a2d4b8e1f93")
 
 type bankedResetRedeemer interface {
 	Prepare(context.Context, config.Provider, string, bool) (nativeusage.RedeemRequest, error)
@@ -244,6 +249,17 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		newAttempt.ResetsLeftBefore = &selected.ResetsLeft
 	}
 	attempt, err := s.store.BeginBankedResetRedemption(ctx, newAttempt)
+	// Deterministic (Codex) keys can collide with a finished attempt. A finished
+	// non-redemption must not be overwritten or resent with the key the provider
+	// already answered: derive the next generation of the key instead. Each
+	// generation is itself deterministic, so a lost response still converges.
+	for generation := 1; err == nil && attempt.State == "done" && attempt.Outcome != "redeemed" && pending.ID == 0; generation++ {
+		if generation > 1000 {
+			return result, fmt.Errorf("too many completed redemption attempts for reset %q", req.ResetID)
+		}
+		newAttempt.RequestID = uuid.NewSHA1(redemptionGenerationNamespace, []byte(fmt.Sprintf("%s:%d", req.RequestID, generation))).String()
+		attempt, err = s.store.BeginBankedResetRedemption(ctx, newAttempt)
+	}
 	if err != nil {
 		return result, err
 	}

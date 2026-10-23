@@ -133,7 +133,8 @@ type BankedReset struct {
   `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`, which is rate-limited per IP,
   so it is fetched only when the count is non-zero, cached for at least 30 minutes, and backed off
   on 429. Codex credits do not report `clears`; Redline treats them as clearing the weekly and
-  five-hour windows (observed behavior: redeeming starts a new weekly window).
+  five-hour windows. Only the weekly refill is observed (redeeming starts a new weekly window);
+  the five-hour refill is assumed.
 
 Details are persisted with the usage snapshot (JSON column) so stored-snapshot evaluation and the
 dashboard see the same data.
@@ -182,7 +183,8 @@ deadlines on each cycle:
   - `redeem`: attempt redemption (below), retrying until expiry on transient failures with
     persisted backoff (at least five minutes per provider; 30 minutes for `nothing_to_reset`).
     Respect cooldowns and 429 lockouts; `redeemed` and `gone` stop retries. Do not send
-    `redeem_now` when automatic redemption is enabled; otherwise fall back to `notify`.
+    `redeem_now` for a deadline only when automatic redemption is eligible for every reset at that
+    deadline (it will attempt them before expiry); otherwise fall back to `notify` for it.
     Failed resets that expire unused notify once via `expired_unredeemed`.
     A pending real request of any trigger is retried first with its stored key, even if telemetry
     no longer lists it. An unresolved request at expiry is finalized as `unknown` and notifies
@@ -228,9 +230,11 @@ OpenAI-Beta: codex-1
 
 - Credit chosen: the soonest-expiring credit.
 - `redeem_request_id` is a UUIDv5 of `(account id, credit id)` so the same credit always gets the
-  same key.
+  same key. If that key already finished without redeeming (e.g. `nothing_to_reset`), the retry
+  derives the next deterministic generation of the key and records a new attempt, so earlier
+  results are never overwritten and an answered key is never resent.
 - Outcomes (`code`): `reset`, `already_redeemed` → redeemed; `nothing_to_reset` → not spent;
-  `no_credit` → gone; anything else → failed.
+  `no_credit` → gone; anything else → indeterminate (kept pending, retried with the same key).
 - ChatGPT logins only; API-key logins are refused.
 
 ### Safety
