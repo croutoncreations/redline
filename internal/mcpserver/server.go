@@ -74,32 +74,34 @@ type runLogsInput struct {
 }
 
 type taskCreateInput struct {
-	ID                 string `json:"id,omitempty" jsonschema:"optional stable task ID"`
-	Name               string `json:"name" jsonschema:"human-readable task name"`
-	Prompt             string `json:"prompt,omitempty" jsonschema:"agent instructions; use prompt_file instead when appropriate"`
-	PromptFile         string `json:"prompt_file,omitempty" jsonschema:"path to a prompt file available to the Redline service"`
-	Priority           int    `json:"priority" jsonschema:"higher values run before lower values within the unlocked dispatch tier"`
-	ExecutionProfileID string `json:"execution_profile_id" jsonschema:"existing execution profile ID"`
-	RuntimeJobID       string `json:"runtime_job_id,omitempty" jsonschema:"existing Hermes job ID to trigger instead of starting a new prompt session"`
-	Type               string `json:"type" jsonschema:"one_off or recurring"`
-	DispatchTier       string `json:"dispatch_tier" jsonschema:"behind, well_behind, or expiring"`
-	MinInterval        string `json:"min_interval,omitempty" jsonschema:"minimum interval between recurring runs, such as 6h or 7d"`
-	RequireRepoChange  bool   `json:"require_repo_change,omitempty" jsonschema:"only rerun after the source revision changes"`
-	Enabled            *bool  `json:"enabled,omitempty" jsonschema:"set false to create the task disabled as a draft; defaults to true"`
+	ID                  string `json:"id,omitempty" jsonschema:"optional stable task ID"`
+	Name                string `json:"name" jsonschema:"human-readable task name"`
+	Prompt              string `json:"prompt,omitempty" jsonschema:"agent instructions; use prompt_file instead when appropriate"`
+	PromptFile          string `json:"prompt_file,omitempty" jsonschema:"path to a prompt file available to the Redline service"`
+	Priority            int    `json:"priority" jsonschema:"higher values run before lower values within the unlocked dispatch tier"`
+	ExecutionProfileID  string `json:"execution_profile_id" jsonschema:"existing execution profile ID"`
+	RuntimeJobID        string `json:"runtime_job_id,omitempty" jsonschema:"existing Hermes job ID to trigger instead of starting a new prompt session"`
+	Type                string `json:"type" jsonschema:"one_off or recurring"`
+	DispatchTier        string `json:"dispatch_tier" jsonschema:"behind, well_behind, expiring, or firesale"`
+	MinInterval         string `json:"min_interval,omitempty" jsonschema:"minimum interval between recurring runs, such as 6h or 7d"`
+	FiresaleMinInterval string `json:"firesale_min_interval,omitempty" jsonschema:"positive cooldown during provider firesale, such as 10m; omitted uses normal interval"`
+	RequireRepoChange   bool   `json:"require_repo_change,omitempty" jsonschema:"only rerun after the source revision changes"`
+	Enabled             *bool  `json:"enabled,omitempty" jsonschema:"set false to create the task disabled as a draft; defaults to true"`
 }
 
 type taskUpdateInput struct {
-	ID                 string  `json:"id" jsonschema:"task ID"`
-	Name               *string `json:"name,omitempty" jsonschema:"new human-readable name"`
-	Prompt             *string `json:"prompt,omitempty" jsonschema:"new inline agent instructions"`
-	PromptFile         *string `json:"prompt_file,omitempty" jsonschema:"new prompt file path"`
-	Priority           *int    `json:"priority,omitempty" jsonschema:"new priority"`
-	ExecutionProfileID *string `json:"execution_profile_id,omitempty" jsonschema:"new execution profile ID"`
-	RuntimeJobID       *string `json:"runtime_job_id,omitempty" jsonschema:"new existing Hermes job ID; empty clears it"`
-	Type               *string `json:"type,omitempty" jsonschema:"one_off or recurring"`
-	DispatchTier       *string `json:"dispatch_tier,omitempty" jsonschema:"behind, well_behind, or expiring"`
-	MinInterval        *string `json:"min_interval,omitempty" jsonschema:"new minimum interval; an empty string clears it"`
-	RequireRepoChange  *bool   `json:"require_repo_change,omitempty" jsonschema:"whether source revision must change before rerun"`
+	ID                  string  `json:"id" jsonschema:"task ID"`
+	Name                *string `json:"name,omitempty" jsonschema:"new human-readable name"`
+	Prompt              *string `json:"prompt,omitempty" jsonschema:"new inline agent instructions"`
+	PromptFile          *string `json:"prompt_file,omitempty" jsonschema:"new prompt file path"`
+	Priority            *int    `json:"priority,omitempty" jsonschema:"new priority"`
+	ExecutionProfileID  *string `json:"execution_profile_id,omitempty" jsonschema:"new execution profile ID"`
+	RuntimeJobID        *string `json:"runtime_job_id,omitempty" jsonschema:"new existing Hermes job ID; empty clears it"`
+	Type                *string `json:"type,omitempty" jsonschema:"one_off or recurring"`
+	DispatchTier        *string `json:"dispatch_tier,omitempty" jsonschema:"behind, well_behind, expiring, or firesale"`
+	MinInterval         *string `json:"min_interval,omitempty" jsonschema:"new minimum interval; an empty string clears it"`
+	FiresaleMinInterval *string `json:"firesale_min_interval,omitempty" jsonschema:"positive cooldown during provider firesale; empty clears it"`
+	RequireRepoChange   *bool   `json:"require_repo_change,omitempty" jsonschema:"whether source revision must change before rerun"`
 }
 
 type taskControlInput struct {
@@ -226,6 +228,7 @@ type taskView struct {
 	Type                         domain.TaskType     `json:"type"`
 	DispatchTier                 domain.DispatchTier `json:"dispatch_tier"`
 	MinInterval                  string              `json:"min_interval"`
+	FiresaleMinInterval          string              `json:"firesale_min_interval"`
 	RequireRepoChange            bool                `json:"require_repo_change"`
 	Enabled                      bool                `json:"enabled"`
 	State                        domain.TaskState    `json:"state"`
@@ -522,6 +525,7 @@ func (s *server) taskUpdate(ctx context.Context, _ *mcp.CallToolRequest, input t
 	putOptional(body, "type", input.Type)
 	putOptional(body, "dispatch_tier", input.DispatchTier)
 	putOptional(body, "min_interval", input.MinInterval)
+	putOptional(body, "firesale_min_interval", input.FiresaleMinInterval)
 	putOptional(body, "require_repo_change", input.RequireRepoChange)
 	var item domain.Task
 	if err := s.client.Do(ctx, http.MethodPatch, "/v1/tasks/"+url.PathEscape(input.ID), body, &item); err != nil {
@@ -831,7 +835,7 @@ func viewTask(item domain.Task, includePrompt bool) taskView {
 		ID: item.ID, Name: item.Name, PromptFile: item.PromptFile, Priority: item.Priority,
 		QueueSequence: item.QueueSequence, ExecutionProfileID: item.ExecutionProfileID,
 		RuntimeJobID: item.RuntimeJobID,
-		Type:         item.Type, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(),
+		Type:         item.Type, DispatchTier: item.DispatchTier, MinInterval: item.MinInterval.String(), FiresaleMinInterval: item.FiresaleMinInterval.String(),
 		RequireRepoChange: item.RequireRepoChange, Enabled: item.Enabled, State: item.State,
 		LastStartedAt: item.LastStartedAt, LastCompletedAt: item.LastCompletedAt,
 		LastSuccessfulSourceRevision: item.LastSuccessfulSourceRevision,

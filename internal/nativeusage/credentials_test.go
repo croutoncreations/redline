@@ -3,7 +3,9 @@ package nativeusage
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,6 +54,35 @@ func TestAccessWithoutRefreshNeverRotatesSharedClaudeToken(t *testing.T) {
 	got, err := credentials.AccessWithoutRefresh(context.Background(), "claude")
 	if err != nil || got.AccessToken != "live" {
 		t.Fatalf("credential=%#v err=%v", got, err)
+	}
+}
+
+func TestAccessWithoutRefreshNeverRotatesSharedCodexToken(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	for _, remaining := range []time.Duration{-time.Minute, 5 * time.Minute, time.Hour} {
+		t.Run(remaining.String(), func(t *testing.T) {
+			token := "header." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, now.Add(remaining).Unix()))) + ".signature"
+			original := []byte(fmt.Sprintf(`{"tokens":{"access_token":%q,"refresh_token":"refresh","account_id":"account"}}`, token))
+			store := &memorySecretStore{value: append([]byte(nil), original...)}
+			refreshCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				refreshCalls++
+				_, _ = w.Write([]byte(`{"access_token":"new","refresh_token":"next"}`))
+			}))
+			defer server.Close()
+			credentials := &DefaultCredentials{HTTPClient: server.Client(), Now: func() time.Time { return now }, CodexStore: store, CodexRefreshURL: server.URL}
+			got, err := credentials.AccessWithoutRefresh(context.Background(), "codex")
+			if refreshCalls != 0 || store.swaps != 0 || !bytes.Equal(store.value, original) {
+				t.Fatalf("refresh calls=%d swaps=%d: the shared credential was touched", refreshCalls, store.swaps)
+			}
+			if remaining <= 5*time.Minute {
+				if err == nil || got.AccessToken != "" {
+					t.Fatalf("near-expiry token should be unavailable: credential=%#v err=%v", got, err)
+				}
+			} else if err != nil || got.AccessToken != token || got.AccountID != "account" {
+				t.Fatalf("credential=%#v err=%v", got, err)
+			}
+		})
 	}
 }
 

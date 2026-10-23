@@ -9,6 +9,26 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
+// RecordBankedResetNotice claims a deadline notification before delivery. A false
+// result means another cycle (or process) has already claimed this notice.
+// Claims are keyed by provider, expiry, and kind; resetID is informational only.
+func (d *DB) RecordBankedResetNotice(ctx context.Context, providerID, resetID string, expiresAt time.Time, kind string, now time.Time) (bool, error) {
+	if providerID == "" || resetID == "" || expiresAt.IsZero() || kind == "" || now.IsZero() {
+		return false, fmt.Errorf("banked reset notice provider, reset, expiry, kind, and timestamp are required")
+	}
+	result, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO banked_reset_notices
+(provider_account_id, reset_id, expires_at, kind, created_at) VALUES (?, ?, ?, ?, ?)`,
+		providerID, resetID, formatTime(expiresAt), kind, formatTime(now))
+	if err != nil {
+		return false, fmt.Errorf("record banked reset notice: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read banked reset notice result: %w", err)
+	}
+	return rows == 1, nil
+}
+
 func (d *DB) CreateNotificationDelivery(
 	ctx context.Context,
 	eventType string,
