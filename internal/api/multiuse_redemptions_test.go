@@ -183,6 +183,32 @@ func TestRedeemUnconfirmedMultiuseGrantIsGuarded(t *testing.T) {
 	}
 }
 
+// An indeterminate provider answer may follow an applied redemption, so the
+// request stays pending and the retry reuses its key instead of a fresh one.
+func TestRedeemIndeterminateOutcomeReusesRequestKey(t *testing.T) {
+	s, db, _ := redemptionServer(t, "claude")
+	var requests []nativeusage.RedeemRequest
+	s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+		return nativeusage.RedeemRequest{ResetID: "reset", RequestID: fmt.Sprintf("key-%d", len(requests))}
+	}, redeem: func(req nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+		requests = append(requests, req)
+		if len(requests) == 1 {
+			return nativeusage.RedeemResult{Outcome: "failed", Code: "reset_unconfirmed"}, fmt.Errorf("%w: claude returned %q", nativeusage.ErrIndeterminate, "reset_unconfirmed")
+		}
+		return nativeusage.RedeemResult{Outcome: "redeemed", Code: "already_used"}, nil
+	}}
+	if _, err := s.RedeemBankedReset(t.Context(), "main", "manual", false); err == nil {
+		t.Fatal("indeterminate outcome reported as success")
+	}
+	if pending, err := db.PendingBankedResetRedemption(t.Context(), "main"); err != nil || pending.RequestID != "key-0" {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	got, err := s.RedeemBankedReset(t.Context(), "main", "manual", false)
+	if err != nil || got.Outcome != "redeemed" || len(requests) != 2 || requests[1].RequestID != "key-0" {
+		t.Fatalf("retry=%+v err=%v requests=%+v", got, err, requests)
+	}
+}
+
 func TestAutomaticRedemptionMultiuseGrantReflection(t *testing.T) {
 	_, db, snapshot := redemptionServer(t, "claude")
 	now := snapshot.ObservedAt.Add(time.Second)

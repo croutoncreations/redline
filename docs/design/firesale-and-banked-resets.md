@@ -208,8 +208,11 @@ User-Agent: <same Claude Code UA as the grants read>
 - `grant_id` must match `^[a-z0-9_-]{1,40}$`, `request_id` `^[A-Za-z0-9_-]{1,64}$`; both checked
   before sending.
 - Results: `reset` and `already_used` → redeemed; `not_limited` → nothing to reset;
-  `cooldown` / `paused` → retry after `cooldown_until`; `ineligible`, `unavailable`, unknown values,
-  `reset_unconfirmed`, `stamp_indeterminate` → failed (never assumed successful).
+  `cooldown` / `paused` → retry after `cooldown_until`; `ineligible`, `unavailable` → failed.
+  `reset_unconfirmed`, `stamp_indeterminate`, and unrecognized values are indeterminate: never
+  assumed successful, but the request stays pending and retries reuse the same `request_id`, so a
+  response that followed an applied redemption cannot lead to a second spend. Unrecognized Codex
+  codes are handled the same way.
 - Uses the read-only credential path. If the token needs refreshing, redemption fails and falls
   back to a notification asking the user to redeem manually.
 - Never redeems when more than one Claude account is configured.

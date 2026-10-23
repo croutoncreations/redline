@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,12 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/google/uuid"
 )
+
+// ErrIndeterminate means the provider answered but did not say whether the
+// reset was spent (an unrecognized or explicitly indeterminate result). The
+// caller must keep the request pending and retry with the same request ID,
+// never treat it as a definitive failure that frees a new key.
+var ErrIndeterminate = errors.New("redemption outcome is indeterminate")
 
 type RedeemRequest struct {
 	ResetID   string
@@ -193,6 +200,9 @@ func (r *Redeemer) Redeem(ctx context.Context, provider config.Provider, req Red
 	var normalized decision.UsageSnapshot
 	normalized.ApplyBankedResets(&decision.BankedResets{Details: []decision.BankedReset{{Clears: data.Cleared}}})
 	result.Cleared = normalized.BankedResetDetails[0].Clears
+	// Only results known to mean "not spent" may end the request as failed.
+	// Anything else might follow an applied redemption, so it stays pending.
+	determinate := true
 	if name == "claude" {
 		switch result.Code {
 		case "reset", "already_used":
@@ -203,6 +213,9 @@ func (r *Redeemer) Redeem(ctx context.Context, provider config.Provider, req Red
 			result.Outcome = "cooldown"
 		case "no_grant", "unknown_grant", "not_next_grant":
 			result.Outcome = "gone"
+		case "ineligible", "unavailable":
+		default:
+			determinate = false
 		}
 		if req.DryRun && (result.Code == "ineligible" || result.Code == "unknown_grant") {
 			result.Outcome = "dry_run_ok"
@@ -215,10 +228,15 @@ func (r *Redeemer) Redeem(ctx context.Context, provider config.Provider, req Red
 			result.Outcome = "nothing_to_reset"
 		case "no_credit":
 			result.Outcome = "gone"
+		default:
+			determinate = false
 		}
 		if req.DryRun && result.Code == "no_credit" {
 			result.Outcome = "dry_run_ok"
 		}
+	}
+	if !determinate && !req.DryRun {
+		return result, fmt.Errorf("%w: %s returned %q", ErrIndeterminate, name, result.Code)
 	}
 	return result, nil
 }

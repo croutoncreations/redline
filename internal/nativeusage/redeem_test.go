@@ -68,9 +68,11 @@ func TestRedeemClaudeRequestsAndCachedProfile(t *testing.T) {
 
 func TestRedeemProviderMappingsAndDryRun(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
-		codes := map[string]string{"reset": "redeemed", "unknown": "failed"}
+		// "indeterminate" outcomes are returned as ErrIndeterminate on real
+		// redemptions so the request key stays pending; dry runs report failed.
+		codes := map[string]string{"reset": "redeemed", "unknown": "indeterminate"}
 		if provider == "claude" {
-			for k, v := range map[string]string{"already_used": "redeemed", "not_limited": "nothing_to_reset", "cooldown": "cooldown", "paused": "cooldown", "low_priority_active": "cooldown", "ineligible": "failed", "no_grant": "gone", "unknown_grant": "gone", "not_next_grant": "gone", "unavailable": "failed", "reset_unconfirmed": "failed", "stamp_indeterminate": "failed"} {
+			for k, v := range map[string]string{"already_used": "redeemed", "not_limited": "nothing_to_reset", "cooldown": "cooldown", "paused": "cooldown", "low_priority_active": "cooldown", "ineligible": "failed", "no_grant": "gone", "unknown_grant": "gone", "not_next_grant": "gone", "unavailable": "failed", "reset_unconfirmed": "indeterminate", "stamp_indeterminate": "indeterminate"} {
 				codes[k] = v
 			}
 		} else {
@@ -92,7 +94,11 @@ func TestRedeemProviderMappingsAndDryRun(t *testing.T) {
 				r.claudeBaseURL = server.URL
 				r.codexConsumeURL = server.URL
 				got, err := r.Redeem(context.Background(), config.Provider{Provider: provider}, RedeemRequest{ResetID: "grant", RequestID: "req"})
-				if err != nil || got.Outcome != outcome || got.Code != code {
+				if outcome == "indeterminate" {
+					if !errors.Is(err, ErrIndeterminate) || got.Code != code || !strings.Contains(err.Error(), code) {
+						t.Fatalf("indeterminate got=%+v err=%v", got, err)
+					}
+				} else if err != nil || got.Outcome != outcome || got.Code != code {
 					t.Fatalf("got=%+v err=%v", got, err)
 				}
 				if outcome == "cooldown" && got.CooldownUntil == nil {
@@ -100,6 +106,9 @@ func TestRedeemProviderMappingsAndDryRun(t *testing.T) {
 				}
 				dry, err := r.Redeem(t.Context(), config.Provider{Provider: provider}, RedeemRequest{ResetID: "real-reset", RequestID: "request", DryRun: true})
 				want := outcome
+				if want == "indeterminate" {
+					want = "failed"
+				}
 				if (provider == "claude" && (code == "ineligible" || code == "unknown_grant")) || (provider == "codex" && code == "no_credit") {
 					want = "dry_run_ok"
 				}
