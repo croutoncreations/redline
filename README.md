@@ -39,6 +39,8 @@ Jobs are called *tasks* in the CLI and API; the dashboard and this page say *job
 - **Safe by default.** Automatic dispatch is off until you turn it on. A configured reserve (a
   slice of your allowance Redline will never spend) is always held back for your interactive
   work, and stale telemetry means *wait*, never *run*.
+- **Use it before you lose it.** Firesale accelerates queued work near a reset, and opt-in
+  redemption uses expiring banked resets before they lapse.
 - **Works with your agents.** Codex CLI, Claude Code, Pi, Hermes, or any command. Redline does
   not replace your harness; it decides when to launch it.
 - **Isolated by design.** Jobs run in Git worktrees or DevX sessions, and completed runs keep

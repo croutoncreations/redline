@@ -190,11 +190,11 @@ func (d *DB) CreateTask(ctx context.Context, task domain.Task, now time.Time) er
 	enabled := state != domain.Disabled
 	_, err = tx.ExecContext(ctx, `INSERT INTO tasks (
 id, name, prompt, prompt_file, priority, queue_sequence, execution_profile_id,
-runtime_job_id, task_type, min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
+runtime_job_id, task_type, min_interval_ns, firesale_min_interval_ns, dispatch_tier, require_repo_change, enabled, state,
 last_started_at, last_completed_at, last_successful_source_revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Prompt, task.PromptFile, task.Priority, sequence,
-		task.ExecutionProfileID, task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange,
+		task.ExecutionProfileID, task.RuntimeJobID, task.Type, int64(task.MinInterval), int64(task.FiresaleMinInterval), task.DispatchTier, task.RequireRepoChange,
 		enabled, state, nullableTime(task.LastStartedAt), nullableTime(task.LastCompletedAt),
 		task.LastSuccessfulSourceRevision, formatTime(now), formatTime(now),
 	)
@@ -229,9 +229,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 		return fmt.Errorf("%w: running task %q cannot be edited", ErrConflict, task.ID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET name = ?, prompt = ?, prompt_file = ?, priority = ?,
-execution_profile_id = ?, runtime_job_id = ?, task_type = ?, min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
+execution_profile_id = ?, runtime_job_id = ?, task_type = ?, min_interval_ns = ?, firesale_min_interval_ns = ?, dispatch_tier = ?, require_repo_change = ?, updated_at = ?
 WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.ExecutionProfileID,
-		task.RuntimeJobID, task.Type, int64(task.MinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
+		task.RuntimeJobID, task.Type, int64(task.MinInterval), int64(task.FiresaleMinInterval), task.DispatchTier, task.RequireRepoChange, formatTime(now), task.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -294,8 +294,11 @@ func validateTaskDefinition(task domain.Task) error {
 	if task.MinInterval < 0 {
 		return fmt.Errorf("minimum interval cannot be negative")
 	}
-	if task.DispatchTier != domain.DispatchBehind && task.DispatchTier != domain.DispatchWellBehind && task.DispatchTier != domain.DispatchExpiring {
-		return fmt.Errorf("dispatch tier must be behind, well_behind, or expiring")
+	if task.FiresaleMinInterval < 0 {
+		return fmt.Errorf("firesale minimum interval cannot be negative")
+	}
+	if task.DispatchTier != domain.DispatchBehind && task.DispatchTier != domain.DispatchWellBehind && task.DispatchTier != domain.DispatchExpiring && task.DispatchTier != domain.DispatchFiresale {
+		return fmt.Errorf("dispatch tier must be behind, well_behind, expiring, or firesale")
 	}
 	return nil
 }
@@ -488,6 +491,24 @@ provider_account_id, decision_json, selected_task_id, created_at
 	return id, nil
 }
 
+// LatestAutomaticFiresale ignores decisions that never evaluated provider usage.
+func (d *DB) LatestAutomaticFiresale(ctx context.Context, provider string) (bool, error) {
+	var firesale bool
+	err := d.db.QueryRowContext(ctx, `SELECT json_extract(decision_json, '$.provider_firesale')
+FROM scheduler_decisions WHERE provider_account_id = ?
+AND json_extract(decision_json, '$.trigger') = 'automatic'
+AND COALESCE(json_extract(decision_json, '$.result.decision'), '') != 'UNKNOWN'
+AND json_type(decision_json, '$.provider_firesale') IN ('true', 'false')
+ORDER BY created_at DESC, id DESC LIMIT 1`, provider).Scan(&firesale)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read automatic firesale state: %w", err)
+	}
+	return firesale, nil
+}
+
 func (d *DB) ListSchedulerDecisions(
 	ctx context.Context,
 	providerAccountID string,
@@ -522,7 +543,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 }
 
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
-t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.dispatch_tier,
+t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.firesale_min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
 t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
 
@@ -530,13 +551,13 @@ type scanner interface{ Scan(...any) error }
 
 func scanTask(row scanner) (domain.Task, error) {
 	var task domain.Task
-	var minInterval int64
+	var minInterval, firesaleInterval int64
 	var requireChange, enabled bool
 	var lastStarted, lastCompleted sql.NullString
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
-		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &task.DispatchTier,
+		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &firesaleInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
 		&task.LastSuccessfulSourceRevision, &created, &updated,
 	)
@@ -547,6 +568,7 @@ func scanTask(row scanner) (domain.Task, error) {
 		return domain.Task{}, fmt.Errorf("scan task: %w", err)
 	}
 	task.MinInterval = time.Duration(minInterval)
+	task.FiresaleMinInterval = time.Duration(firesaleInterval)
 	task.RequireRepoChange = requireChange
 	task.Enabled = enabled
 	var parseErr error

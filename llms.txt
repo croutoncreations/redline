@@ -22,7 +22,7 @@ Agent safety contract:
 
 - [README](https://github.com/croutoncreations/redline/blob/main/README.md): Purpose, installation, how scheduling works, MCP setup, and screenshots.
 - [Getting started](https://github.com/croutoncreations/redline/blob/main/docs/getting-started.md): Install the app, confirm usage monitoring, create a profile, and queue a first job.
-- [Scheduling and the allowance model](https://github.com/croutoncreations/redline/blob/main/docs/scheduling.md): Policies, pace gap, reserve, dispatch tiers, near-expiry release, and calibration.
+- [Scheduling and the allowance model](https://github.com/croutoncreations/redline/blob/main/docs/scheduling.md): Policies, pace gap, reserve, dispatch tiers, firesale, effective reset horizons, banked-reset redemption, and calibration.
 - [Execution profiles and tasks](https://github.com/croutoncreations/redline/blob/main/docs/profiles-and-tasks.md): Harness, model, and workspace configuration and the task lifecycle.
 - [Troubleshooting](https://github.com/croutoncreations/redline/blob/main/docs/troubleshooting.md): Common failures and corrective checks.
 
@@ -35,7 +35,7 @@ Agent safety contract:
 
 ## Optional
 
-- [Runs, logs, and notifications](https://github.com/croutoncreations/redline/blob/main/docs/runs-and-notifications.md): Run results, artifacts, bounded logs, and notifications.
+- [Runs, logs, and notifications](https://github.com/croutoncreations/redline/blob/main/docs/runs-and-notifications.md): Run results, artifacts, bounded logs, banked-reset reminders and redemption notifications, and firesale start/end events.
 - [Hermes integration](https://github.com/croutoncreations/redline/blob/main/docs/hermes.md): Dispatching jobs to Hermes runtimes.
 - [Native macOS app](https://github.com/croutoncreations/redline/blob/main/docs/native-macos.md): Menu-bar app, bundled service and CLI, and release packaging.
 - [Run as a launchd service](https://github.com/croutoncreations/redline/blob/main/docs/launchd.md): Headless macOS service setup.
