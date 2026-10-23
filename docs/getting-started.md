@@ -51,7 +51,9 @@ Usage monitoring does not enable automatic dispatch.
 Continue to **Workspace** in the first-run guide. Redline preselects the account, directly
 compatible installed harness, and discovered model when possible. It also defaults to an isolated
 Git worktree. Choose a profile name, repository path, and base branch. You can edit the result
-later under **Profiles**.
+later under **Profiles**. For local Git worktrees, Redline checks the repository directory and
+base branch before saving; correct the field if the path is missing, is not a Git checkout, or
+has no commit yet.
 
 The fields mean:
 
@@ -87,9 +89,14 @@ optionally require the repository to change before another run.
 
 ## 5. Enable dispatch deliberately
 
-Review the queue and profiles, then set `scheduler.enabled` to `true` in Redline's configuration
-and restart the app. The dashboard's **Scheduler off** banner shows this instruction while global
-scheduling is disabled. Start with the **Standard** policy. The provider card explains the latest
+Review the queue and profiles, then choose **Enable scheduling…** in the dashboard’s
+**Scheduler off** banner. The instructions show the actual configuration file used by the running
+service and a restart command for its listen address. Set `scheduler.enabled` to `true` in that
+file and save it. For the menu-bar app, quit Redline from its menu and reopen it. For a CLI
+service, stop its terminal process with Ctrl+C and use the displayed restart command. If Redline
+is managed by launchd or another service manager, restart it through that manager. Opening these
+instructions does not enable scheduling. Start with the **Standard** policy. The provider card
+explains the latest
 `WAIT` or `RUN` decision and estimates when the next tier will become eligible if usage does not
 change.
 

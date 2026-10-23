@@ -337,6 +337,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		authorized, viaCookie := s.authorized(r)
 		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
+			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
+				s.serveDashboardSignIn(w, r)
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
 		}
@@ -474,7 +478,7 @@ func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
+	if r.Method != http.MethodGet || !isDashboardPath(r.URL.Path) {
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
@@ -1133,6 +1137,11 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if s.config.DemoScenario == "" {
+		if err := workspace.ValidateLocalRepository(ctx, profile); err != nil {
+			return err
+		}
+	}
 	if profile.HarnessType == "hermes" && profile.AgentContextID == "" {
 		return fmt.Errorf("agent_context_id is required for a Hermes execution profile")
 	}
@@ -1223,6 +1232,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		RuntimeJobID: request.RuntimeJobID,
 		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
 	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
+		return
+	}
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
 	if request.Enabled != nil && !*request.Enabled {
 		task.State = domain.Disabled
 	}
@@ -1304,8 +1326,17 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 	if request.DispatchTier != nil {
 		task.DispatchTier = *request.DispatchTier
 	}
-	if _, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID); err != nil {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
+		return
+	}
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
 	if err := s.store.UpdateTask(r.Context(), task, s.now()); err != nil {
@@ -1318,6 +1349,21 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func normalizeAndValidateTaskInput(task *domain.Task, profile domain.ExecutionProfile) error {
+	// Dispatch selects raw nonempty overrides before fallbacks. Clear blank
+	// overrides so execution uses the same input that passed validation.
+	for _, input := range []*string{&task.Prompt, &task.PromptFile, &task.RuntimeJobID} {
+		if strings.TrimSpace(*input) == "" {
+			*input = ""
+		}
+	}
+	if task.Prompt != "" || task.PromptFile != "" ||
+		(profile.HarnessType == "hermes" && task.RuntimeJobID != "") {
+		return nil
+	}
+	return fmt.Errorf("prompt or prompt_file is required")
 }
 
 func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
@@ -2341,6 +2387,12 @@ func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
 		Since: since, Until: until, Providers: providerIDs, Attempts: filtered,
 		Runs: runs, RunObservations: observationsByRun, Capacity: capacities,
 	})
+	runUsage, err := s.store.ListRunUsage(r.Context(), since, until)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	report.ProfileUsage = launchmetrics.BuildProfileUsage(runUsage, providerFilter)
 	writeJSON(w, http.StatusOK, report)
 }
 

@@ -72,6 +72,67 @@ func TestLaunchMetricsReportsAutomaticWaitRate(t *testing.T) {
 	}
 }
 
+func TestLaunchMetricsReportsProfileUsageInWindow(t *testing.T) {
+	t.Parallel()
+	server, db := newAPIServer(t, codexPayload)
+	ctx := context.Background()
+	for _, profile := range []domain.ExecutionProfile{
+		{ID: "codex-profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "existing-directory"},
+		{ID: "claude-profile", ProviderAccountID: "claude-main", HarnessType: "claude-code", WorkspaceProvider: "existing-directory"},
+	} {
+		if err := db.CreateProfile(ctx, profile, apiNow.Add(-30*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish := func(runID, profileID, account string, completedAt time.Time, observations ...capacity.TokenObservation) {
+		t.Helper()
+		task := domain.Task{ID: "task-" + runID, Name: runID, Prompt: "p", Priority: 50,
+			ExecutionProfileID: profileID, Type: domain.OneOff}
+		if err := db.CreateTask(ctx, task, completedAt.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AdmitTask(ctx, runID, task.ID, account, "rev", completedAt.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.RecordDispatchAttempt(ctx, domain.DispatchAttempt{ProviderAccountID: account, Trigger: "automatic",
+			Outcome: domain.DispatchAdmitted, Decision: "RUN", RunID: runID,
+			StartedAt: completedAt.Add(-time.Minute), CompletedAt: completedAt.Add(-time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteRun(ctx, runID, domain.RunCompletion{State: domain.RunCompleted}, completedAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.SaveTokenObservations(ctx, observations); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := apiNow.Add(-time.Hour)
+	finish("codex-recent", "codex-profile", "codex-main", recent, capacity.TokenObservation{
+		Provider: "codex", Source: "redline-run", SourceID: "codex-recent", ObservedAt: recent,
+		InputTokens: 10, OutputTokens: 2, CacheReadTokens: 90})
+	old := apiNow.Add(-10 * 24 * time.Hour)
+	finish("codex-old", "codex-profile", "codex-main", old, capacity.TokenObservation{
+		Provider: "codex", Source: "redline-run", SourceID: "codex-old", ObservedAt: old, InputTokens: 1000})
+	finish("claude-recent", "claude-profile", "claude-main", recent)
+
+	var report launchmetrics.Report
+	getJSON(t, server.URL+"/v1/metrics/launch?provider=codex-main&days=7", &report)
+	if len(report.ProfileUsage) != 1 {
+		t.Fatalf("profile usage = %#v", report.ProfileUsage)
+	}
+	usage := report.ProfileUsage[0]
+	if usage.ProfileID != "codex-profile" || usage.ProviderAccountID != "codex-main" || usage.Automatic.TerminalRuns != 1 ||
+		usage.Automatic.Tokens == nil || usage.Automatic.Tokens.Total != 102 || usage.Automatic.Tokens.CacheRead != 90 {
+		t.Fatalf("codex usage = %#v tokens=%#v", usage, usage.Automatic.Tokens)
+	}
+	var unfiltered launchmetrics.Report
+	getJSON(t, server.URL+"/v1/metrics/launch?days=30", &unfiltered)
+	if len(unfiltered.ProfileUsage) != 2 || unfiltered.ProfileUsage[0].ProfileID != "claude-profile" ||
+		unfiltered.ProfileUsage[0].All.Tokens != nil || unfiltered.ProfileUsage[1].All.Tokens.Total != 1102 {
+		t.Fatalf("unfiltered = %#v", unfiltered.ProfileUsage)
+	}
+}
+
 func TestDashboardPageAndAssetsAreServed(t *testing.T) {
 	t.Parallel()
 	server, _ := newAPIServer(t, codexPayload)
@@ -806,7 +867,7 @@ func TestRunDetailEndpointReturnsRunAndNotFound(t *testing.T) {
 		"id": "run-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "run-task", "name": "Run task", "execution_profile_id": "run-profile", "type": "one_off",
+		"id": "run-task", "name": "Run task", "prompt": "test", "execution_profile_id": "run-profile", "type": "one_off",
 	})
 	if _, err := db.AdmitTask(t.Context(), "run-detail", "run-task", "codex-main", "revision", apiNow); err != nil {
 		t.Fatal(err)
@@ -826,7 +887,7 @@ func TestRunActivityCanBeMarkedRead(t *testing.T) {
 		"id": "activity-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "activity-task", "name": "Activity task", "execution_profile_id": "activity-profile", "type": "one_off",
+		"id": "activity-task", "name": "Activity task", "prompt": "test", "execution_profile_id": "activity-profile", "type": "one_off",
 	})
 	run, err := db.AdmitTask(t.Context(), "activity-run", "activity-task", "codex-main", "revision", apiNow)
 	if err != nil {
@@ -1049,7 +1110,7 @@ func TestServiceTaskAndSimulatedSchedulerFlow(t *testing.T) {
 		t.Fatalf("profile = %#v", profile)
 	}
 	task := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "review", "name": "Review auth", "priority": 80,
+		"id": "review", "name": "Review auth", "prompt": "test", "priority": 80,
 		"execution_profile_id": "codex-devx", "type": "one_off",
 	})
 	if task.State != domain.Queued {
@@ -1097,7 +1158,7 @@ func TestTaskCRUDOverServiceAPI(t *testing.T) {
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "editable", "name": "Before", "priority": 10, "execution_profile_id": "codex-devx", "type": "one_off",
+		"id": "editable", "name": "Before", "prompt": "test", "priority": 10, "execution_profile_id": "codex-devx", "type": "one_off",
 	})
 
 	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/tasks/editable", strings.NewReader(`{
@@ -1160,17 +1221,82 @@ func TestNewTasksDefaultEnabledAndMayBeExplicitlyDisabled(t *testing.T) {
 		"id": "codex-devx", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	defaultOn := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "default-on", "name": "Default on", "execution_profile_id": "codex-devx", "type": "one_off",
+		"id": "default-on", "name": "Default on", "prompt": "test", "execution_profile_id": "codex-devx", "type": "one_off",
 	})
 	if !defaultOn.Enabled || defaultOn.State != domain.Queued {
 		t.Fatalf("default task = %#v", defaultOn)
 	}
 	explicitlyOff := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "explicitly-off", "name": "Explicitly off", "execution_profile_id": "codex-devx", "type": "one_off", "enabled": false,
+		"id": "explicitly-off", "name": "Explicitly off", "prompt": "test", "execution_profile_id": "codex-devx", "type": "one_off", "enabled": false,
 	})
 	if explicitlyOff.Enabled || explicitlyOff.State != domain.Disabled {
 		t.Fatalf("explicitly disabled task = %#v", explicitlyOff)
 	}
+}
+
+func TestTaskWithoutPromptIsRejectedByServiceAPI(t *testing.T) {
+	t.Parallel()
+	server, db := newAPIServer(t, codexPayload)
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "codex-devx", "provider_account_id": "codex-main",
+		"harness_type": "codex-cli", "workspace_provider": "devx",
+	})
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{
+		"id":"missing-prompt", "name":"Missing prompt",
+		"execution_profile_id":"codex-devx", "type":"one_off"
+	}`, http.StatusBadRequest)
+	requestStatus(t, http.MethodGet, server.URL+"/v1/tasks/missing-prompt", ``, http.StatusNotFound)
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "valid", "name": "Valid", "prompt": "Do work",
+		"execution_profile_id": "codex-devx", "type": "one_off",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid", `{"prompt":""}`, http.StatusBadRequest)
+	for _, input := range []string{`"prompt":" \t"`, `"prompt_file":" \n"`, `"runtime_job_id":"job"`} {
+		requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"blank","name":"Blank","execution_profile_id":"codex-devx","type":"one_off",`+input+`}`, http.StatusBadRequest)
+		requestStatus(t, http.MethodGet, server.URL+"/v1/tasks/blank", ``, http.StatusNotFound)
+	}
+	connection := postJSON[domain.RuntimeConnection](t, server.URL+"/v1/runtime-connections", map[string]any{
+		"id": "hermes", "runtime": "hermes", "transport": "gateway", "url": "https://hermes.example",
+	})
+	agentContext := postJSON[domain.AgentContext](t, server.URL+"/v1/agent-contexts", map[string]any{
+		"id": "hermes", "runtime_connection_id": connection.ID, "session_mode": "isolated",
+	})
+	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
+		"id": "hermes", "provider_account_id": "codex-main", "agent_context_id": agentContext.ID,
+		"harness_type": "hermes", "workspace_provider": "runtime-owned", "repository": "/srv/redline",
+	})
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"blank-job","name":"Blank job","execution_profile_id":"hermes","type":"one_off","runtime_job_id":" \t"}`, http.StatusBadRequest)
+	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "job", "name": "Job", "execution_profile_id": "hermes", "type": "one_off", "runtime_job_id": "existing-job",
+	})
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/job", `{"runtime_job_id":" \n"}`, http.StatusBadRequest)
+	fallback := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "file-fallback", "name": "File fallback", "execution_profile_id": "codex-devx", "type": "one_off", "prompt": " \t", "prompt_file": "task.md",
+	})
+	if fallback.Prompt != "" || fallback.PromptFile != "task.md" {
+		t.Fatalf("blank prompt hides file fallback: %#v", fallback)
+	}
+	fallback = postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
+		"id": "prompt-fallback", "name": "Prompt fallback", "execution_profile_id": "hermes", "type": "one_off", "prompt": "Do work", "runtime_job_id": " \n",
+	})
+	if fallback.RuntimeJobID != "" || fallback.Prompt != "Do work" {
+		t.Fatalf("blank job hides prompt fallback: %#v", fallback)
+	}
+	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid", `{"prompt":" \t","prompt_file":"task.md"}`, http.StatusOK)
+	fallback = domain.Task{}
+	getJSON(t, server.URL+"/v1/tasks/valid", &fallback)
+	if fallback.Prompt != "" || fallback.PromptFile != "task.md" {
+		t.Fatalf("PATCH did not normalize blank override: %#v", fallback)
+	}
+	var unchanged domain.Task
+	getJSON(t, server.URL+"/v1/tasks/job", &unchanged)
+	if unchanged.RuntimeJobID != "existing-job" {
+		t.Fatalf("rejected PATCH changed task: %#v", unchanged)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"unavailable","name":"Unavailable","execution_profile_id":"codex-devx","type":"one_off","prompt":"Do work"}`, http.StatusInternalServerError)
 }
 
 func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
@@ -1179,9 +1305,8 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 	postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", map[string]any{
 		"id": "editable-profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
-	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(`{
-		"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":"/repo"
-	}`))
+	repo := onboardingRepository(t)
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(fmt.Sprintf(`{"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":%q}`, repo)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1195,7 +1320,7 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != "/repo" {
+	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != repo {
 		t.Fatalf("status=%d profile=%#v", response.StatusCode, updated)
 	}
 	response, err = http.Get(server.URL + "/v1/profiles/editable-profile")
@@ -1224,7 +1349,7 @@ func TestListAndTaskControlEndpoints(t *testing.T) {
 		"id": "listed-profile", "provider_account_id": "codex-main", "harness_type": "pi", "model": "openai-codex/gpt-5.6-sol", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "controlled-task", "name": "Controlled", "priority": 42, "execution_profile_id": "listed-profile", "type": "one_off",
+		"id": "controlled-task", "name": "Controlled", "prompt": "test", "priority": 42, "execution_profile_id": "listed-profile", "type": "one_off",
 	})
 
 	var profiles []domain.ExecutionProfile
@@ -1263,7 +1388,7 @@ func TestProfileAndTaskValidationErrorsOverServiceAPI(t *testing.T) {
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"bad-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"never"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPost, server.URL+"/v1/tasks", `{"id":"overflow-duration","name":"Bad","execution_profile_id":"valid","type":"recurring","min_interval":"1e100d"}`, http.StatusBadRequest)
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "valid-task", "name": "Valid", "execution_profile_id": "valid", "type": "one_off",
+		"id": "valid-task", "name": "Valid", "prompt": "test", "execution_profile_id": "valid", "type": "one_off",
 	})
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"min_interval":"never"}`, http.StatusBadRequest)
 	requestStatus(t, http.MethodPatch, server.URL+"/v1/tasks/valid-task", `{"execution_profile_id":"missing"}`, http.StatusBadRequest)
@@ -1277,7 +1402,7 @@ func TestTaskAPIRoundTripsDispatchTier(t *testing.T) {
 		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	task := postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "filler", "name": "Filler", "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+		"id": "filler", "name": "Filler", "prompt": "test", "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
 	})
 	if task.DispatchTier != domain.DispatchExpiring {
 		t.Fatalf("task = %#v", task)
@@ -1292,10 +1417,10 @@ func TestSchedulerUnlocksJobsByDispatchTierBeforeApplyingPriority(t *testing.T) 
 		"id": "profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "deep-filler", "name": "Deep filler", "priority": 100, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
+		"id": "deep-filler", "name": "Deep filler", "prompt": "test", "priority": 100, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "expiring",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "useful-work", "name": "Useful work", "priority": 20, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "behind",
+		"id": "useful-work", "name": "Useful work", "prompt": "test", "priority": 20, "execution_profile_id": "profile", "type": "one_off", "dispatch_tier": "behind",
 	})
 	response := postJSON[struct {
 		Result       decision.Result `json:"result"`
@@ -2158,7 +2283,7 @@ func TestMissingOptionalLifecycleLogIsAnEmptySuccessfulTail(t *testing.T) {
 		"id": "logs-profile", "provider_account_id": "codex-main", "harness_type": "command", "workspace_provider": "existing-directory",
 	})
 	postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-		"id": "logs-task", "name": "Logs task", "execution_profile_id": "logs-profile", "type": "one_off",
+		"id": "logs-task", "name": "Logs task", "prompt": "test", "execution_profile_id": "logs-profile", "type": "one_off",
 	})
 	if _, err := db.AdmitTask(t.Context(), "logs-run", "logs-task", "codex-main", "revision", apiNow); err != nil {
 		t.Fatal(err)
@@ -2768,7 +2893,7 @@ func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 	})
 	for _, id := range []string{"first", "second"} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-			"id": id, "name": id, "priority": 50,
+			"id": id, "name": id, "prompt": "test", "priority": 50,
 			"execution_profile_id": "profile", "type": "one_off",
 		})
 	}
@@ -2848,9 +2973,9 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 		postJSON[domain.ExecutionProfile](t, server.URL+"/v1/profiles", profile)
 	}
 	for _, task := range []map[string]any{
-		{"id": "fable-one", "name": "Fable one", "priority": 100, "execution_profile_id": "fable-profile", "type": "one_off"},
-		{"id": "fable-two", "name": "Fable two", "priority": 90, "execution_profile_id": "fable-profile", "type": "one_off"},
-		{"id": "opus", "name": "Opus", "priority": 50, "execution_profile_id": "opus-profile", "type": "one_off"},
+		{"id": "fable-one", "name": "Fable one", "prompt": "test", "priority": 100, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "fable-two", "name": "Fable two", "prompt": "test", "priority": 90, "execution_profile_id": "fable-profile", "type": "one_off"},
+		{"id": "opus", "name": "Opus", "prompt": "test", "priority": 50, "execution_profile_id": "opus-profile", "type": "one_off"},
 	} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", task)
 	}
@@ -2956,7 +3081,7 @@ func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
 	})
 	for _, taskID := range []string{"hermes-one", "hermes-two"} {
 		postJSON[domain.Task](t, server.URL+"/v1/tasks", map[string]any{
-			"id": taskID, "name": taskID, "priority": 50,
+			"id": taskID, "name": taskID, "prompt": "test", "priority": 50,
 			"execution_profile_id": profile.ID, "type": "one_off",
 		})
 	}
