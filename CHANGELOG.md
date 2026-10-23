@@ -57,7 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `brew style` and `brew audit --strict` before publishing. A daily workflow flags a Homebrew cask
   that lags the latest release. The formula description was shortened to pass `brew audit`.
 - Maintenance: Go dependency updates (`modernc.org/sqlite` 1.60.1, `golang.org/x/sys` 0.49.0) and
-  new repository CI checks. Running the dashboard browser tests (`npm test`) now needs Node 20 or
+  new repository CI checks. Running the dashboard browser tests (`npm run test:dashboard`) now needs Node 20 or
   newer, up from Node 18; see `CONTRIBUTING.md`.
 
 ### Fixed
