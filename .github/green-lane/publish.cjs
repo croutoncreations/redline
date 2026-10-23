@@ -7,7 +7,7 @@ const {createHash} = require('node:crypto');
 async function reviewSnapshot(github, context, number, head, base) {
   const {owner, repo} = context.repo;
   const reviews = (await github.paginate(github.rest.pulls.listReviews, {owner,repo,pull_number:number,per_page:100}))
-    .map(r=>({id:r.id,user:r.user.login,state:r.state,commit:r.commit_id})).sort((a,b)=>a.id-b.id);
+    .map(r=>({id:r.id,user:r.user.login,state:r.state,commit:r.commit_id,body:Buffer.from(r.body ?? '', 'utf8').toString('base64')})).sort((a,b)=>a.id-b.id);
   const automated=await automatedReviews(github,context,number);
   const threads=[]; const seen=new Set(); let cursor=null;
   for (let page=0;page<100;page++) {

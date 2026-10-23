@@ -166,3 +166,12 @@ func TestIgnoredRepliesPreserveCompletion(t *testing.T) {
 		t.Fatal(r.Message)
 	}
 }
+
+func TestReviewSnapshotPublisherParity(t *testing.T) {
+	// Shared with publish.test.cjs, including HTML and Unicode escape hazards.
+	p := PRInfo{Reviews: []Review{{ID: 1, User: "reviewer", State: "APPROVED", CommitID: "head", Body: "Reviewed <tags> & \"quotes\" \u2028 café"}}}
+	const want = "db35604bd99c33113262a7c08cce94aa8bfdc52e42e9222d1a8ab7a6a83a3adb"
+	if got := ReviewSnapshot(p); got != want {
+		t.Fatalf("publisher parity: got %s want %s", got, want)
+	}
+}
