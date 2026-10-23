@@ -51,8 +51,9 @@ account state.
 
 The dashboard is at `http://127.0.0.1:7436` (or your `--listen` port), but it requires the API
 token on first visit. Open it once with the token as a query parameter and Redline stores a
-session cookie and redirects to the clean URL. Without the token, a browser gets a `401` sign-in
-page; non-browser clients get a JSON `401`:
+session cookie and redirects to the clean URL. Without the token or a session, a browser opening
+`/`, `/dashboard` or `/m` gets a `401` sign-in page; other requests without credentials get a JSON
+`401`:
 
 ```bash
 open "http://127.0.0.1:7436/?access_token=$(cat api-token)"   # macOS; elsewhere paste the URL
