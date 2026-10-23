@@ -82,6 +82,11 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		if review.User == "" || review.ID <= 0 || (review.State != "APPROVED" && review.State != "COMMENTED" && review.State != "CHANGES_REQUESTED" && review.State != "DISMISSED") {
 			continue
 		}
+		// Reply-only publications do not revoke an earlier completion. Keep
+		// explicit changes requests and dismissals as invalidating events.
+		if review.State == "COMMENTED" && (strings.HasSuffix(strings.ToLower(review.User), "[bot]") || strings.TrimSpace(review.Body) == "") {
+			continue
+		}
 		user := strings.ToLower(review.User)
 		old, ok := latest[user]
 		if !ok || review.SubmittedAt.After(old.SubmittedAt) || (review.SubmittedAt.Equal(old.SubmittedAt) && review.ID > old.ID) {

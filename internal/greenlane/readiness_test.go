@@ -137,3 +137,32 @@ func TestReviewBodyIsPartOfSnapshot(t *testing.T) {
 		t.Fatal("review body edits must invalidate the snapshot")
 	}
 }
+
+func TestIgnoredRepliesPreserveCompletion(t *testing.T) {
+	for _, user := range []string{"reviewer", "coderabbitai[bot]"} {
+		for _, reply := range []string{"", "  ", "Verified inline fix"} {
+			for _, invalidation := range []string{"", "CHANGES_REQUESTED", "DISMISSED"} {
+				t.Run(user+"/"+reply+"/"+invalidation, func(t *testing.T) {
+					p := passingPR(PRFile{Filename: "README.md"})
+					p.Reviews = []Review{{ID: 1, User: user, State: "APPROVED", CommitID: p.HeadSHA}}
+					if invalidation != "" {
+						p.Reviews = append(p.Reviews, Review{ID: 2, User: user, State: invalidation, CommitID: p.HeadSHA})
+					}
+					p.Reviews = append(p.Reviews, Review{ID: 3, User: user, State: "COMMENTED", Body: reply, CommitID: p.HeadSHA})
+					got := NewEvaluator(DefaultConfig()).checkReviewReadiness(p)
+					// A substantive human review can restore completion after dismissal;
+					// comments never clear a changes request.
+					want := invalidation == "" || (invalidation == "DISMISSED" && user == "reviewer" && strings.TrimSpace(reply) != "")
+					if got.Pass != want {
+						t.Fatalf("pass=%v want=%v: %s", got.Pass, want, got.Message)
+					}
+				})
+			}
+		}
+	}
+	p := passingPR(PRFile{Filename: "README.md"})
+	p.Reviews = []Review{{ID: 1, User: "reviewer", State: "COMMENTED", Body: "Reviewed implementation", CommitID: p.HeadSHA}, {ID: 2, User: "reviewer", State: "COMMENTED", CommitID: p.HeadSHA}}
+	if r := NewEvaluator(DefaultConfig()).checkReviewReadiness(p); !r.Pass {
+		t.Fatal(r.Message)
+	}
+}
