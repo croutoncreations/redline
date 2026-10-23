@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch: # Post-merge CI for the live pilot (GITHUB_TOKEN suppresses push events).
   pull_request:
   push:
     branches: [main]
@@ -39,6 +40,8 @@ jobs:
           cache: true
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
+      - name: Test green-lane workflow helpers
+        run: node --test .github/green-lane/*.test.cjs
       - name: Vet
         run: go vet ./...
       - name: Test with race detector
@@ -52,6 +55,37 @@ jobs:
               GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -o /dev/null ./cmd/redline
             done
           done
+
+  # The same checks gate publishing in release.yml; running them here catches
+  # .goreleaser.yaml or cask template regressions before a tag is pushed.
+  homebrew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Snapshot build (no publish)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish,before
+      - name: Render cask from a placeholder DMG
+        run: |
+          set -euo pipefail
+          mkdir -p dist/cask-check/Casks
+          head -c 1024 /dev/urandom > dist/cask-check/Redline-0.0.0-universal.dmg
+          REDLINE_VERSION=0.0.0 REDLINE_CASK_DRY_RUN=1 \
+            scripts/update-homebrew-cask.sh dist/cask-check/Redline-0.0.0-universal.dmg \
+            > dist/cask-check/Casks/redline.rb
+      - uses: Homebrew/actions/setup-homebrew@f9676f1ffe2e1a720f81b2c54c51cfb99915ec14 # main
+      - name: brew style and brew audit --strict
+        run: scripts/brew-lint.sh dist/homebrew/Formula/redline.rb dist/cask-check/Casks/redline.rb
 
   dashboard:
     runs-on: ubuntu-latest

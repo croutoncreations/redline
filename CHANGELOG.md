@@ -60,6 +60,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
   evidence report `tokens: null` rather than zero, and interactive usage is excluded.
 
+### Changed
+
+- Tagged releases now wait for green CI on `main` and lint the generated Homebrew formula with
+  `brew style` and `brew audit --strict` before publishing. A daily workflow flags a Homebrew cask
+  that lags the latest release. The formula description was shortened to pass `brew audit`.
+
 ## [0.1.10] - 2026-10-01
 
 ### Added

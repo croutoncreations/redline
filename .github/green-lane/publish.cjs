@@ -49,7 +49,7 @@ async function checkSnapshot(github, context, result) {
  throw new Error('Check-run pagination did not finish');
 }
 
-module.exports = async function publish({github, context, result, checkId, expectedHead, writeResult = r => fs.writeFileSync('evaluation-result.json', JSON.stringify(r, null, 2))}) {
+async function snapshotMatches({github, context, result, expectedHead}) {
   const {owner, repo} = context.repo;
   if (!Number.isSafeInteger(result.pr_number) || result.pr_number <= 0) throw new Error('Invalid result PR number');
   const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: result.pr_number});
@@ -59,11 +59,16 @@ module.exports = async function publish({github, context, result, checkId, expec
   try { reviewsMatch=result.review_snapshot===await reviewSnapshot(github,context,result.pr_number,result.head_sha,result.base_sha); }
   catch { reviewsMatch=false; }
   const age = Date.now() - Date.parse(result.evaluated_at);
-  if (!checksMatch || !reviewsMatch || result.repository !== `${owner}/${repo}` || current.head.sha !== result.head_sha ||
+  return !(!checksMatch || !reviewsMatch || result.repository !== `${owner}/${repo}` || current.head.sha !== result.head_sha ||
       current.base.sha !== result.base_sha || current.base.ref !== result.base_branch ||
       current.updated_at !== result.pr_updated_at || current.state !== 'open' || current.draft ||
       current.mergeable !== true || (expectedHead && expectedHead !== result.head_sha) ||
-      !Number.isFinite(age) || age < -60000 || age > 300000) {
+      !Number.isFinite(age) || age < -60000 || age > 300000);
+}
+
+module.exports = async function publish({github, context, result, checkId, expectedHead, writeResult = r => fs.writeFileSync('evaluation-result.json', JSON.stringify(r, null, 2))}) {
+  const {owner, repo} = context.repo;
+  if (!await snapshotMatches({github,context,result,expectedHead})) {
     result.verdict = 'would_not_merge';
     result.advisory_candidate = false;
     result.candidate_message = 'Snapshot changed or expired before publication; rerun required';
@@ -76,7 +81,7 @@ module.exports = async function publish({github, context, result, checkId, expec
   summary += `**Advisory candidate:** ${candidate ? 'yes' : 'no'} — never merge authorization.\n\n${result.candidate_message}\n\n`;
   summary += `PR #${result.pr_number} · head \`${result.head_sha}\` · base \`${result.base_sha}\`\n\n`;
   for (const rule of result.rules) summary += `### ${rule.pass ? 'PASS' : rule.inconclusive ? 'INCONCLUSIVE' : 'FAIL'}: ${rule.name}\n${rule.message}\n\n`;
-  summary += `${result.summary}\n\nShadow only. No merge or approval action is taken. Automatic merging has not been enabled.`;
+  summary += `${result.summary}\n\nShadow only. No merge or approval action is taken. The separate live pilot, when enabled, re-evaluates independently.`;
   await writeResult(result);
   const serialized = JSON.stringify(result);
   const output = {title: `Green Lane Shadow: ${result.verdict}`, summary: summary.slice(0,10000),
@@ -86,3 +91,5 @@ module.exports = async function publish({github, context, result, checkId, expec
   else await github.rest.checks.create({...check, name: 'green-lane-shadow', head_sha: result.head_sha});
   return result;
 };
+
+module.exports.snapshotMatches = snapshotMatches;

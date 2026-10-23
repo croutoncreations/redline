@@ -99,6 +99,9 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 			reviewed = true
 		}
 	}
+	if e.config.RequireAutomatedReview {
+		reviewed = completedAutomatedReview(pr)
+	}
 	if len(requests) > 0 {
 		sort.Strings(requests)
 		r.Message = "Outstanding changes requested, including earlier heads: " + strings.Join(requests, ", ")
@@ -106,6 +109,9 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 	}
 	if !reviewed {
 		r.Message = "No completed non-author review on current head SHA"
+		if e.config.RequireAutomatedReview {
+			r.Message = "No authenticated completed automated review on current head SHA"
+		}
 		return r
 	}
 	r.Pass = true
