@@ -10,6 +10,7 @@ func DefaultConfig() Config {
 		CheckSources: map[string]CheckSource{
 			"actionlint":    {AppID: 15368, WorkflowID: 321038296},
 			"go":            {AppID: 15368, WorkflowID: 321038296},
+			"homebrew":      {AppID: 15368, WorkflowID: 321038296},
 			"dashboard":     {AppID: 15368, WorkflowID: 321038296},
 			"linux-smoke":   {AppID: 15368, WorkflowID: 321038296},
 			"windows-smoke": {AppID: 15368, WorkflowID: 321038296},
@@ -29,6 +30,7 @@ func DefaultConfig() Config {
 		RequiredChecks: []string{
 			"actionlint",
 			"go",
+			"homebrew",
 			"dashboard",
 			"linux-smoke",
 			"windows-smoke",

@@ -145,7 +145,7 @@ ambiguous. Each merge request carries the exact evaluated PR head SHA.
 
 Additional live safeguards:
 
-- Require strict, admin-enforced `main` protection with all seven required
+- Require strict, admin-enforced `main` protection with all eight required
   GitHub Actions CI checks, resolved conversations, and no force-push/deletion.
   Protection is rechecked before the merge. This is not an approval rule.
 - Pin the actual `refs/heads/main` tip to the workflow's trusted code SHA; abort
@@ -198,3 +198,5 @@ binds same-repository branch control to the allowed principal rather than merely
 trusting the original PR creator. Expanding the writer set requires a separately
 reviewed change to the pilot. No new credential or branch administration service
 is introduced.
+
+The merged Homebrew CI check is also required for live/shadow eligibility and main protection. Release CI selection accepts only `push` or `workflow_dispatch` runs of the CI workflow on main for the exact tagged commit; PR-event runs remain excluded.

@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const live = require('./live.cjs');
 const main='a'.repeat(40), head='b'.repeat(40), base='c'.repeat(40), merged='d'.repeat(40);
-const names=['actionlint','go','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
+const names=['actionlint','go','homebrew','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
 function fixture() {
   const f={state:'active',tip:main,prs:[1,2],merges:[],reads:0,enabledReads:0,dispatches:[],valid:true,behind:0,
     writers:[{login:'jfox85',permissions:{push:true,maintain:true,admin:true}}],protection:{isAdminEnforced:true,requiresStrictStatusChecks:true,requiresStatusChecks:true,allowsForcePushes:false,

@@ -2,7 +2,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const {snapshotMatches} = require('./publish.cjs');
 
-const checks = ['actionlint','go','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
+const checks = ['actionlint','go','homebrew','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
 const sha = value => /^[a-f0-9]{40}$/.test(value || '');
 const held = pr => pr.labels?.some(label => ['green-lane-hold','maintenance:skip','do-not-touch'].includes(label.name));
 
