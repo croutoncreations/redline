@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch: # Post-merge CI for the live pilot (GITHUB_TOKEN suppresses push events).
   pull_request:
   push:
     branches: [main]
@@ -39,6 +40,8 @@ jobs:
           cache: true
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
+      - name: Test green-lane workflow helpers
+        run: node --test .github/green-lane/*.test.cjs
       - name: Vet
         run: go vet ./...
       - name: Test with race detector

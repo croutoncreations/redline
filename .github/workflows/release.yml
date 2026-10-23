@@ -6,7 +6,7 @@ name: Release
 # and notarization need a Developer ID identity that does not live in CI.
 #
 # Nothing is published unless:
-#   1. ci-gate: the tagged commit is on main and the CI workflow's push run for
+#   1. ci-gate: the tagged commit is on main and the CI workflow's main-branch push/dispatch run for
 #      that commit succeeded (waits for an in-progress run), and
 #   2. homebrew-check: a snapshot build's generated formula passes
 #      `brew style` and `brew audit --strict`.
@@ -51,15 +51,15 @@ jobs:
           while :; do
             # Do not hide gh's stderr: it is the only signal for API errors.
             runs="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml \
-              --commit "${GITHUB_SHA}" --branch main --event push --limit 20 \
-              --json databaseId,status,conclusion,url)"
-            latest="$(jq -c 'sort_by(.databaseId) | last // empty' <<<"${runs}")"
+              --commit "${GITHUB_SHA}" --branch main --limit 20 \
+              --json databaseId,status,conclusion,url,event)"
+            latest="$(jq -c 'map(select(.event == "push" or .event == "workflow_dispatch")) | sort_by(.databaseId) | last // empty' <<<"${runs}")"
             if [[ -z "${latest}" ]]; then
               # CI only runs for the head commit of each push to main. A commit
               # that is no longer the tip and has no run will never get one.
               git fetch --quiet origin main
               if [[ "$(git rev-parse origin/main)" != "${GITHUB_SHA}" ]]; then
-                echo "::error::No CI push run on main exists for ${GITHUB_SHA}, and main has moved past it, so one will not appear. Tag a commit that CI ran on (normally the merge commit at the tip of main). Nothing was published."
+                echo "::error::No trusted CI push/dispatch run on main exists for ${GITHUB_SHA}, and main has moved past it, so one will not appear. Tag a commit that CI ran on (normally the merge commit at the tip of main). Nothing was published."
                 exit 1
               fi
               state="no CI run found yet"
@@ -78,7 +78,7 @@ jobs:
               state="CI ${status}: ${url}"
             fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error::Timed out after ${WAIT_MINUTES} minutes waiting for a successful CI push run on main for ${GITHUB_SHA} (${state}). Nothing was published."
+              echo "::error::Timed out after ${WAIT_MINUTES} minutes waiting for a successful CI push/dispatch run on main for ${GITHUB_SHA} (${state}). Nothing was published."
               exit 1
             fi
             echo "Waiting: ${state}"

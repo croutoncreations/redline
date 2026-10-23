@@ -175,3 +175,25 @@ func TestReviewSnapshotPublisherParity(t *testing.T) {
 		t.Fatalf("publisher parity: got %s want %s", got, want)
 	}
 }
+
+func TestLiveRequiresTrustedAutomatedCompletion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	p := passingPR()
+	p.HeadSHA = reviewHead
+	for _, state := range []string{"COMMENTED", "APPROVED"} {
+		p.Reviews = []Review{{ID: 1, User: "collaborator", State: state, CommitID: reviewHead, Body: "looks good"}}
+		if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+			t.Fatalf("live accepted untrusted %s review", state)
+		}
+	}
+	p.AutomatedReviews = []AutomatedReviewComment{{ID: 43, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z", Body: `<!-- codex-pull-request-review-summary -->
+<!-- codex-review-state:v1 {"code_review":{"commit_sha":"` + reviewHead + `","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":null} -->`}}
+	if !NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+		t.Fatal("live rejected trusted authenticated current-head completion")
+	}
+	p.AutomatedReviews[0].AppID = 1
+	if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+		t.Fatal("live accepted spoofed App plus collaborator approval")
+	}
+}

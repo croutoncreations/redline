@@ -176,7 +176,7 @@ func TestWorkflowsDoNotShareGroups(t *testing.T) {
 func TestTriggersAndJobsUnchanged(t *testing.T) {
 	want := map[string]struct{ on, jobs []string }{
 		"ci.yml": {
-			on:   []string{"pull_request", "push"},
+			on:   []string{"pull_request", "push", "workflow_dispatch"},
 			jobs: []string{"actionlint", "dashboard", "go", "homebrew", "linux-smoke", "macos", "macos-intel", "windows-smoke"},
 		},
 		"claude-code-review.yml": {
