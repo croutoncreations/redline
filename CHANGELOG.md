@@ -62,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Document dashboard sign-in for source and headless installs, including cross-platform browser
+  commands and matching the browser URL to an alternate service port.
 - Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
   `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
 - The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
