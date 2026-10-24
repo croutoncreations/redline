@@ -259,3 +259,42 @@ func TestLiveBodyBlockSurvivesOtherProviderCompletion(t *testing.T) {
 		t.Fatal(r.Message)
 	}
 }
+
+func TestHistoricalBodyNeedsLaterAuthenticProviderCompletion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	for _, tc := range []struct {
+		name string
+		edit func(*PRInfo)
+	}{
+		{"completion predates finding", func(p *PRInfo) {}},
+		{"forged later App", func(p *PRInfo) {
+			c := p.AutomatedReviews[0]
+			c.ID++
+			c.AppID = 1
+			c.UpdatedAt = "2026-01-03T00:00:00Z"
+			p.AutomatedReviews = append(p.AutomatedReviews, c)
+		}},
+		{"author edited later summary", func(p *PRInfo) {
+			c := p.AutomatedReviews[0]
+			c.ID++
+			c.UpdatedAt = "2026-01-03T00:00:00Z"
+			c.LastEditedAt = c.UpdatedAt
+			c.EditorID = 123
+			c.EditorType = "User"
+			c.EditorUser = "jfox85"
+			p.AutomatedReviews = append(p.AutomatedReviews, c)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := passingPR()
+			p.HeadSHA = reviewHead
+			p.AutomatedReviews = []AutomatedReviewComment{cleanSummary()}
+			p.Reviews = []Review{{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: strings.Repeat("a", 40), Body: "Fix missing candidates", SubmittedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}}
+			tc.edit(&p)
+			if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+				t.Fatal("historical feedback cleared without later authentic completion")
+			}
+		})
+	}
+}

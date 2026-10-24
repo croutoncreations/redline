@@ -175,6 +175,9 @@ func reviewBodySuperseded(pr PRInfo, review Review) bool {
 	// the finding rather than treating old coverage as a resolution receipt.
 	var latest time.Time
 	for _, summary := range fresh.AutomatedReviews {
+		if !TrustedAutomatedSummary(summary) || !authenticSummaryEditor(summary) {
+			continue
+		}
 		stamp, err := time.Parse(time.RFC3339, summary.UpdatedAt)
 		if err != nil {
 			return false
