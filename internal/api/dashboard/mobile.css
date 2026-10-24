@@ -116,7 +116,6 @@ button { color: inherit; font: inherit; }
   letter-spacing: .14em; text-transform: uppercase; margin: 0 0 6px;
 }
 .m-heading { font-size: 18px; font-weight: 700; margin: 0 0 12px; letter-spacing: -.01em; }
-.m-subheading { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
 .m-error-banner {
   margin: 8px 16px; padding: 10px 12px; border: 1px solid #713638;
   background: #2d181a; color: #ffaaa5; border-radius: 9px; font-size: 11px;
