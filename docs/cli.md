@@ -1,6 +1,6 @@
 # CLI reference
 
-Every `redline` command except `version`, `serve`, `mcp`, `demo`, `token rotate`, and the
+Every `redline` command except `version`, `serve`, `demo`, `token rotate`, and the
 standalone read-only `reset preview` is a client of the local HTTP API.
 The default API is `http://127.0.0.1:7436`; override it with `--api` before the subcommand:
 
@@ -163,9 +163,9 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
 `calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
-`scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
+`scheduler status|history|attempts` commands print JSON on success. `status`, `decision`,
 `usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
-`--json`.
+`--json`. On failure, commands print a plain-text error to stderr and exit non-zero.
 
 ## Notifications
 
