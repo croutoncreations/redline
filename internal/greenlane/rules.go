@@ -469,11 +469,15 @@ func matchPattern(path, pattern string) bool {
 				return matched
 			}
 
-			// For literal suffix, check if path contains it
+			// For literal suffix, require a full trailing path segment — not a
+			// substring. "**/go.sum" must match "pkg/go.sum" but not
+			// "pkg/go.summary" or "pkg/go.sum.bak". Keep the prefix check so
+			// "macos/**/Info.plist" still rejects "linux/.../Info.plist".
 			if suffix == "" {
 				return strings.HasPrefix(path, prefix)
 			}
-			return strings.HasPrefix(path, prefix) && strings.Contains(path, suffix)
+			suffixOK := path == suffix || strings.HasSuffix(path, "/"+suffix)
+			return strings.HasPrefix(path, prefix) && suffixOK
 		}
 	}
 

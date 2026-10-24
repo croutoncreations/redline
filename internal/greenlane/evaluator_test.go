@@ -115,6 +115,16 @@ func TestCheckSize(t *testing.T) {
 			wantPass: false,
 			wantMsg:  "without source change in same directory",
 		},
+		{
+			// A file whose name merely contains "go.sum" as a substring must
+			// count toward the regular line budget, not the lockfile bucket.
+			name: "go.sum substring lookalike counts as regular lines",
+			files: []PRFile{
+				{Filename: "docs/go.summation.md", Additions: 140, Deletions: 20},
+			},
+			wantPass: false,
+			wantMsg:  "Too many changed lines",
+		},
 	}
 
 	for _, tt := range tests {
@@ -296,6 +306,19 @@ func TestMatchPattern(t *testing.T) {
 		{"internal/nativeusage/credentials_darwin.go", "internal/nativeusage/credentials*", true},
 		{"docs/release-notes-draft.md", ".github/release-notes-*", false},
 		{"web/playwright.config.ts", "playwright.config.*", true},
+		// Literal **/suffix must match whole trailing path segments only —
+		// not a substring. Otherwise go.summation.md is treated as go.sum.
+		{"backend/go.sum", "**/go.sum", true},
+		{"go.sum", "**/go.sum", true},
+		{"foo/go.summary", "**/go.sum", false},
+		{"docs/go.summation.md", "**/go.sum", false},
+		{"vendor/module/go.sum.bak", "**/go.sum", false},
+		{"pkg/package-lock.json", "**/package-lock.json", true},
+		{"pkg/package-lock.json.old", "**/package-lock.json", false},
+		// Prefix before ** must still be required.
+		{"macos/App/Info.plist", "macos/**/Info.plist", true},
+		{"macos/App/MyInfo.plist", "macos/**/Info.plist", false},
+		{"linux/App/Info.plist", "macos/**/Info.plist", false},
 	}
 
 	for _, tt := range tests {
