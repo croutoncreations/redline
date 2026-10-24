@@ -1,200 +1,227 @@
-# Green Lane Shadow Mode
+# Green lane: small, reviewed PRs
 
-## Overview
+The green lane is repository automation in GitHub Actions. It does not change
+Redline's application, daemon, scheduler, dashboard or agent execution.
 
-The `green-lane-shadow` check is a **report-only** evaluation that runs on every pull request to simulate auto-merge decisions without actually merging anything. It evaluates PRs against six rules and posts a clear "would merge" or "would not merge" verdict.
+**Shadow reports remain informational.** They report `would_merge` or
+`would_not_merge` and perform no merges or approvals. A separate, opt-in
+[limited live pilot](#limited-redline-live-pilot) independently evaluates and
+merges eligible PRs. Do not require `green-lane-shadow` in branch protection;
+a shadow report is not merge authorization.
 
-**Important:** This is shadow mode. The check will NEVER:
-- Merge a PR
-- Approve a PR
-- Enable auto-merge
-- Add labels that affect merging
-- Change branch protection
-- Touch repository settings
+## Eligibility
 
-## Rules Evaluated
+A PR qualifies only when all these checks pass:
 
-The green-lane-shadow check evaluates six rules:
+1. **Allowed author.** The GitHub author login is explicitly allowed. Initially
+   this is `jfox85`, including agents opening PRs using that account. Add separate
+   agent logins explicitly to `AllowedAuthors` in trusted policy; bot status or
+   an author's claim does not grant trust. An empty list admits nobody.
+2. **Ready PR.** Open, non-draft, mergeable, targeting `main`.
+3. **At least one completed review on the latest commit.** A submitted GitHub
+   review with state `APPROVED`, or a nonempty human `COMMENTED` review, counts
+   from a reviewer other than the PR author. Empty review publications (including
+   inline replies) do not count. Bot `COMMENTED` publications must use the
+   authenticated completion protocol below; reply prose is not completion.
+   Automated reviews count; **manual approval is not required**.
+   A review with zero findings counts. CodeRabbit and Codex can instead publish a
+   completed review in their canonical summary comment: the known GitHub App and
+   immutable bot user IDs must match, and GitHub must confirm that the comment
+   was unedited or last edited by that same bot. The completion record must name
+   the full current head SHA; running, skipped, rate-limited, ambiguous or unknown
+   records do not count. Codex must explicitly report no unresolved findings.
+   When its security-review state is present, that review must also be completed on the exact current head
+   with no unresolved findings, even if it has no inline threads. An absent or
+   null security-review state means that review was not requested.
+   Only the latest summary per provider is considered. Ordinary issue comments,
+   pending/dismissed reviews, reviews on older commits and a successful workflow
+   without review evidence do not count. Pushing requires a new review.
+4. **Feedback addressed.** Every inline review thread is resolved, including
+   outdated threads. No effective `CHANGES_REQUESTED` review remains, including
+   on older commits. A later comment does not clear requested changes; the
+   reviewer must approve or the request must be dismissed.
+5. **Required CI green.** All eight Redline CI jobs must complete successfully:
+   `actionlint`, `go`, `homebrew`, `dashboard`, `linux-smoke`, `windows-smoke`, `macos`, and
+   `macos-intel`. The collector verifies the actual GitHub Actions App, workflow,
+   run and job identities on the current head, rather than trusting check names.
+6. **Small change.** Code: at most 150 regular changed lines and six files.
+   Docs/dependencies: at most 100 regular changed lines and five files. Existing
+   lockfile/generated caps and same-directory manifest requirements also apply.
+7. **No critical paths.** Authentication secrets, credentials, CI workflows,
+   release/signing controls, database schema, CODEOWNERS and green-lane policy
+   tooling are excluded by `DefaultDeniedPaths`. Both paths of renames count.
+   The complete policy is in `internal/greenlane/config.go`.
+8. **Fresh evidence.** Incomplete API pagination, API failures or a changing
+   snapshot block eligibility. Metadata, reviews, threads and CI are checked
+   again immediately before publishing, and reports expire after five minutes
+   for publication purposes. Existing posted reports are historical snapshots.
 
-### 1. Size (≤150 changed lines)
-- Regular files must have ≤150 changed lines (additions + deletions)
-- Lockfiles and generated files have a separate cap of ≤300 lines
-- Maximum 6 files total
-- Lockfile changes require a matching manifest change
-- Generated file changes require a matching source change
+Docs/dependency changes retain their restrictive file/patch validation.
+Lockfile changes remain manual until trusted resolver regeneration exists;
+plausible syntax or URLs do not suffice.
 
-**Lockfiles and generated patterns:**
-- `go.sum`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `*.lock`
-- `Package.resolved`, `gradle.lockfile`
-- `*.pb.go`, `*_gen.go`, `*.generated.*`, `dist/**`
+There is **no** requirement for signed author receipts, model-provider
+independence, an issuer service, a new GitHub App, a human approval, a new
+fails-before/passes-after repro test or a `Root-Cause` trailer. Required CI is
+the test gate. The older repro/provenance helpers remain available as legacy
+tooling but do not participate in this policy. Duplicate scanning is no longer
+an eligibility prerequisite.
 
-### 2. Test Repro (fails before, passes after)
-Tests that the same test IDs:
-- Execute and fail on the base commit
-- Execute and pass on the head commit
-- In fresh workspaces with identical blobs and dependencies
+## Workflows
 
-**Implementation:**
-- Identifies added/changed Go test function names from the diff
-- Runs those specific tests on base (with PR's test files overlaid) using `go test -count=1 -json -run '^(TestA|TestB)$'`
-- Runs the same tests on head in a fresh workspace
-- Each test must execute and fail on base, then execute and pass on head
-- Skipped tests count as failures
-- Compile failures on either base or head are inconclusive
-- Preserves evidence: test/fixture blob hashes, results, base failure output
-- Runs with read-only permissions and no secrets
+`green-lane-shadow.yml` refreshes reports on PR changes, review submissions or
+dismissals, and CI completion. Close events post a neutral invalidation without
+checking out any code. A manual rerun accepts a `pr_number` input from trusted
+`main`:
 
-**Status:** Fully implemented. PRs without changed test files are marked inconclusive.
-
-### 3. CI Status
-All required checks must pass on the current head SHA:
-- `go`
-- `dashboard`
-- `linux-smoke`
-- `windows-smoke`
-- `macos`
-- `macos-intel`
-
-### 4. Cross-Vendor Reviewer
-Requires an approved review from a different AI provider than the author.
-
-**CodeRabbit Detection (Implemented):**
-CodeRabbit (`coderabbitai[bot]`) counts as a reviewer vendor when it posts a real review on the current head SHA:
-- **Explicit approve/request-changes:** `APPROVED` or `CHANGES_REQUESTED` reviews count
-- **Inline findings:** `COMMENTED` reviews with inline review comments (not just summary/walkthrough) count
-- **Non-blocking findings are fine:** Comments without REQUEST_CHANGES don't fail the gate
-- **Empty or summary-only comments don't count:** Must have actual diff review activity
-
-The check reports CodeRabbit status separately (approved/reviewed/requested changes + findings count) even though full cross-vendor provenance is not yet implemented.
-
-**Status:** CodeRabbit detection is fully implemented. The required infrastructure for other reviewers does not exist yet:
-- Trusted dispatcher recording provenance (harness, provider/model, run ID, head SHA)
-- Read-only analyzer with structured prompts
-- Trusted publisher with separated approval credentials
-- Reviewer GitHub Apps (Claude and Codex)
-
-Shadow mode always reports "needs human or real Apps" for the overall reviewer rule, but shows CodeRabbit evidence when available.
-
-### 5. No Duplicate PRs
-Checks that no other open PR addresses the same root cause by:
-- Requiring a `Root-Cause:` trailer in the PR body (format: `area/file-or-symbol#slug`)
-- Failing if another PR has the exact same root cause
-- Failing if another PR edits the same non-test file AND has ≥50% token overlap in root cause slugs
-
-### 6. Denied Paths
-Blocks changes to sensitive paths including:
-- Workflows and actions: `.github/workflows/**`, `.github/actions/**`
-- Secrets and credentials: `**/.env*`, `**/*secret*`, `**/*credential*`, `**/*.pem`, etc.
-- Auth and billing code: `internal/apiauth/**`, `internal/nativeusage/credentials*`
-- Release infrastructure: `.goreleaser.yaml`, signing scripts, entitlements
-- Green-lane controls: `.github/green-lane.yml`, test runner config
-- Schema migrations: `internal/store/sqlite.go`
-
-See `.github/green-lane.yml` for the complete list (planned).
-
-## Reading the Output
-
-The check run summary shows:
-
-1. **Verdict:** "would merge" or "would not merge"
-2. **Per-rule status:** ✅ PASS, ❌ FAIL, or ⚠️ INCONCLUSIVE
-3. **Messages:** Clear explanation of what passed, failed, or couldn't be determined
-4. **Final summary:** Overall verdict with reasons
-
-### Example Output
-
-```
-❌ WOULD NOT MERGE
-
-Rule Results:
-✅ PASS: Size
-OK: 85 changed lines in 3 files (45 lockfile/generated)
-
-✅ PASS: Test Repro
-OK: tests [TestPagination] failed on base, passed on head
-
-✅ PASS: CI
-OK: all 6 required checks passed
-
-❌ FAIL: Reviewer
-Approval found, but cross-vendor provenance not verified (shadow mode: needs human or real Apps)
-
-✅ PASS: Duplicates
-OK: no duplicate found for Root-Cause: backend/routes/users#pagination-bug
-
-✅ PASS: Denied Paths
-OK: no denied paths touched
-
-Summary:
-Would not merge. Reasons:
-- Reviewer: Approval found, but cross-vendor provenance not verified
+```bash
+gh workflow run green-lane-shadow.yml --repo croutoncreations/redline --ref main -f pr_number=186
 ```
 
-## Artifacts
+The workflow builds and runs trusted code only. It never checks out or executes
+PR code and has read scopes plus `checks:write`, with no merge permission.
+The `pull_request_target` handler is safe only while that boundary is preserved.
+Manual dispatch on another branch is refused. Review-triggered runs use trusted
+base code; fork token restrictions may require the hourly sweep to publish.
 
-Each evaluation is saved as a JSON artifact with 30-day retention:
-- Artifact name: `green-lane-evaluation-{PR#}-{run-id}`
-- Contains: Full evaluation result, timestamp, all rule outcomes
+`green-lane-reconcile.yml` refreshes all open PRs hourly at minute 23 and by
+manual dispatch. This catches resolved/reopened threads, which do not directly
+trigger Actions. Bot summary edits also enter through this sweep (or manual
+dispatch), without introducing an issue-comment write workflow. A planning job paginates the open list and splits it into
+five-PR shards; up to four shards run concurrently. No PR is silently omitted.
+Repositories exceeding 256 shards fail explicitly. Each shard fetches current
+evidence independently; there is no all-repository file-list/duplicate scan.
+PRs opened after planning enter the next sweep or their normal event handler;
+PRs closed after planning are omitted from the sweep and invalidated on close.
 
-Use these to review what the gate "would have done" over the shadow period.
+```bash
+gh workflow run green-lane-reconcile.yml --repo croutoncreations/redline --ref main
+```
 
-## Pre-Enable Checklist
+The evaluator reads review evidence twice. The publisher then independently
+re-fetches summaries, App/author/editor identities, submitted reviews and threads
+and compares their canonical digest immediately before posting. An edited,
+deleted, stale or restarted summary invalidates the earlier evaluation, even
+when the PR timestamp does not change. Protocol changes fail closed until the
+trusted parser is updated. No new App installation or credentials are required.
 
-Before switching from shadow to live merges, the following must be built and verified:
+Failed collection/publication clears the current head's report to neutral where
+GitHub check permissions remain available. Artifacts retain the evaluation JSON
+for 30 days. `advisory_candidate` now means all policy rules passed, and remains
+informational.
 
-### Infrastructure (Does Not Exist Yet)
-1. ✅ Evaluator logic (this implementation)
-2. ✅ Test repro job with Go test runner, fresh workspaces, `-count=1`, evidence preservation
-3. ✅ CodeRabbit head-SHA detection with inline findings check
-4. ❌ **Trusted dispatcher** recording provenance for author and reviewer runs (except CodeRabbit)
-5. ❌ **Read-only analyzer** with structured prompts (separate job, no secrets/tokens)
-6. ❌ **Trusted publisher** that validates analyzer output and submits reviews with reviewer App tokens
-7. ❌ **Reviewer GitHub Apps** (Claude and Codex) with installation tokens
-8. ❌ **Gate GitHub App** for posting the `green-lane` check (pinned via `app_id`) and merging
-9. ❌ **Branch protection ruleset** requiring `green-lane` check pinned to gate App's `app_id`
+## Rollout
 
-### Policy & Process
-10. ❌ **Extended denied paths** in `.github/green-lane.yml` read from base branch
-11. ❌ **Lockfile/generated limits** enforced (max 300 lines, must have matching manifest/source)
-12. ❌ **Live recheck before merge** (fully paginated duplicate query, fresh check/review state, SHA-pinned merge)
+1. Merge the simplified policy and reconciliation fix. Infrastructure PRs touch
+   excluded paths and need the normal merge process.
+2. Rerun both workflows from `main`. Compare real eligible and rejected PRs,
+   including a clean automated summary and a submitted `COMMENTED` review with all threads resolved. Exercise
+   failed CI, unresolved feedback, stale reviews, unknown authors and large or
+   critical-path changes. Observe the results before enabling merges.
+3. Add a separate opt-in merge step that repeats the current checks, verifies
+   the base is still current and merges the exact evaluated head SHA. Respect
+   branch protections. This can use GitHub Actions permissions without deploying
+   an issuer service or a new App. The live merge step is not implemented yet.
+4. Port the policy to other repos after the Redline pilot is validated, changing
+   the author list, required CI identity and critical paths for each repo.
 
-### Validation
-13. ❌ **Shadow period complete:** At least 1 week with 0 wrong "would merge" calls
-14. ❌ **No provenance gaps** on PRs called eligible (except CodeRabbit, which uses App identity)
-15. ❌ **Repro results stable** across reruns (no flaky passes)
+This document supersedes the signed-provenance and cross-provider deployment
+requirements in the older green-lane plan. No signing keys or issuer Apps need
+to be provisioned for the simplified policy.
 
-## Current Limitations (Shadow Mode)
+## Limited Redline live pilot
 
-1. **No actual merges:** This check is report-only. Manual merging is unchanged.
+`Green Lane Live Pilot` is a separate hourly worker (`:47`) with a manual
+workflow-dispatch option. It runs trusted `main` code only, never checks out PR
+code, and independently runs the existing evaluator. Shadow status, artifacts,
+PR comments, and Claude's claims are not merge authorization. Claude's hourly
+maintenance task keeps its existing no-merge role. No manual approval is needed;
+the existing current-head independent review requirement still applies.
 
-2. **Reviewer provenance partially implemented:** 
-   - ✅ CodeRabbit detection works: The check distinguishes between real reviews (with findings or explicit approve/request-changes) and summary-only comments
-   - ❌ Other reviewer provenance not verified: Cannot distinguish between Anthropic and OpenAI reviews, so non-CodeRabbit approvals always report "needs human"
-   - The real gate will verify cross-vendor provenance from the trusted dispatcher for all reviewers
+Live merging starts only when repository Actions variable
+`GREEN_LANE_LIVE_ENABLED` is exactly `true`. Missing/false means no merges.
+The worker is serialized using `green-lane-live-merge` concurrency, never cancels
+an active merge worker, and makes **at most one squash-merge API call per run**.
+There is no retry after a timeout or rejected merge, since the result could be
+ambiguous. Each merge request carries the exact evaluated PR head SHA.
 
-3. **Test repro limitations:**
-   - ✅ Fully implemented for Go test files (`*_test.go`)
-   - ❌ Not implemented for TypeScript/Jest/Vitest, Kotlin, or Swift tests
-   - PRs without changed test files are marked inconclusive
-   - The evaluator expects to see test function changes; PRs that only fix tests without changing their signatures may not be detected correctly
+Additional live safeguards:
 
-4. **Duplicate detection simplified:** The check doesn't fetch files for every open PR (to stay fast), so it may miss some duplicate patterns. The real gate will use full file lists.
+- Require strict, admin-enforced `main` protection with all eight required
+  GitHub Actions CI checks, resolved conversations, and no force-push/deletion.
+  The worker rechecks the contents-readable protection summary (protected branch, enforcement for everyone and all App-bound CI checks) before merging. GitHub reserves detailed administration settings for admin credentials, so strictness and conversation resolution are configured/verified by the owner and enforced natively; the worker receives no admin credential. This is not an approval rule.
+- Pin the actual `refs/heads/main` tip to the workflow's trusted code SHA; abort
+  if it changed since the run started or during evaluation. The PR-recorded
+  base SHA is preserved as evidence, but is **not** used as the current main tip.
+- Require the PR head to contain that actual main tip (zero commits behind).
+  Otherwise defer for a normal branch refresh, CI, and automated re-review.
+  After one merge, other PRs may need another refresh. The worker never refreshes
+  branches or resolves conflicts itself.
+- Revalidate review and CI snapshot hashes, freshness, PR state/head/base and
+  metadata immediately before merging. Native strict branch protection also
+  enforces up-to-date checks if another actor advances main in the final API
+  interval; GitHub's merge API only provides a head-SHA precondition, not a
+  base-SHA precondition. Workflow serialization covers this worker, not humans.
+- Optional `green-lane-hold`, `maintenance:skip`, or `do-not-touch` PR label defers that PR. It is an opt-out, never an
+  approval or opt-in requirement.
 
-5. **No policy file yet:** Denied paths and limits are hardcoded in the evaluator. A `.github/green-lane.yml` config file will be added before going live.
+### Kill switch
 
-6. **Check not pinned:** The shadow check is not pinned to an App ID, so it's not a required check. The real `green-lane` check will be required and pinned to prevent spoofing.
+**Disable `Green Lane Live Pilot` in GitHub Actions** (or run
+`gh workflow disable green-lane-live.yml -R croutoncreations/redline`). The worker
+re-reads that workflow's live enabled state immediately before its merge call,
+so disabling also stops a running evaluation before that call. Cancel an active
+run as well for an immediate operational stop. A merge request already accepted
+by GitHub cannot be recalled. Set `GREEN_LANE_LIVE_ENABLED=false` to prevent new
+runs from entering the pilot; that variable is captured at run start and is not
+an in-flight kill switch. Re-enabling requires both an active workflow and the
+variable set to `true`.
 
-## Owner's Pre-Approval
+The job writes `live-result.json` (including exact main tip, evaluations, merge
+attempt and confirmed merge SHA) to its run artifact. Routine deferrals only
+appear in logs/artifacts; the worker posts no routine PR comments or push
+notifications. GitHub's own workflow failure/merge notifications still follow
+each user's GitHub settings.
 
-This shadow pilot design (rev 3) was reviewed and approved by the repo owner (Jon Fox, GitHub `jfox85`) on Oct 8, 2026. See `green-lane-plan-rev3.md` for the full design, risk analysis, and rollout plan.
+After a confirmed merge, the worker explicitly dispatches `ci.yml` from `main`.
+GitHub suppresses push-triggered workflows for `GITHUB_TOKEN` merges; explicit
+workflow dispatch is supported. The worker has `actions:write` only for this
+post-merge dispatch. If dispatch fails, its artifact still records the confirmed
+merge, and the worker fails without retrying any merge. The dispatcher runs CI
+on current main, which may have advanced further if another actor merged.
 
-## Next Steps
+For live merges, the evaluator additionally requires an authenticated current-head
+Codex/CodeRabbit completion summary; generic human COMMENTED/APPROVED reviews do
+not substitute for this. The worker also enumerates all repository collaborators
+at start and immediately before merging. Only `jfox85` may have push, maintain or
+admin permission during this single-owner pilot. Additional read-only users are
+fine; additional writers or unavailable permission evidence stop the pilot. The
+worker reads each listed user's explicit repository permission through the
+metadata-readable permission endpoint, rather than requiring optional permission
+flags in the collaborator listing. It saves public identity/permission snapshots
+in the result artifact before rejecting a writer check, including checks just
+before merging. Unknown permissions, mismatched identities and failed reads
+remain blocking. This
+binds same-repository branch control to the allowed principal rather than merely
+trusting the original PR creator. Expanding the writer set requires a separately
+reviewed change to the pilot.
 
-1. **Monitor shadow runs:** Review the check results on PRs over the next week.
-2. **Verify verdicts:** Check that "would merge" decisions match your manual judgment.
-3. **Build missing infrastructure:** Implement the pre-enable checklist items.
-4. **Go/no-go:** After the shadow period, decide whether to proceed with live merges.
+The ordinary workflow token returned an empty collaborator list in the live
+probe. Writer enumeration and explicit permission reads therefore use a separate
+fine-grained personal access token stored as `GREEN_LANE_ACCESS_AUDIT_TOKEN` in
+Redline Actions secrets. Create it as `jfox85`, an organization member with admin
+access; this endpoint requires the token's authenticated user to be an organization
+member with write, maintain or admin access (a read-only or outside collaborator
+cannot perform this audit). Select resource owner `croutoncreations`, only the
+`redline` repository, and only **Metadata: read**; use a 30-day expiration for the
+pilot. No organization permissions, contents access or write permissions are
+needed. The workflow uses this client only for the two access-audit APIs, while
+the normal workflow token continues to evaluate and merge. The audit secret is
+removed from the environment before the evaluator runs and is never written to
+artifacts. Missing, expired or insufficient audit credentials stop merging;
+renew the secret before expiration to keep the pilot running. No GitHub App or
+branch administration service is introduced.
 
----
+The merged Homebrew CI check is also required for live/shadow eligibility and main protection. Release CI selection accepts only `push` or `workflow_dispatch` runs of the CI workflow on main for the exact tagged commit; PR-event runs remain excluded.
 
-**Questions?** See the full plan in `green-lane-plan-rev3.md` or reach out to the repo owner.
+Release-check and Homebrew publishing helpers (`scripts/brew-lint.sh`, `scripts/check-homebrew-versions.sh`, `scripts/update-homebrew-cask.sh`) are critical paths and excluded from automated merging.

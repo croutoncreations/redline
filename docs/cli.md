@@ -16,10 +16,19 @@ When running from source, substitute `go run ./cmd/redline` for `redline`.
 redline version                                           # release version, commit, build date
 redline --config redline.yaml serve                       # run the service
 redline --config redline.yaml serve --listen 127.0.0.1:17436
+redline dashboard                                         # open the authenticated local dashboard
+redline --config redline.yaml --api http://127.0.0.1:17436 dashboard
 redline mcp                                               # stdio MCP server (see mcp.md)
 redline health
 redline health --window 24h
 ```
+
+`redline dashboard` reuses the protected local API credential and opens your default browser.
+Use the same `--config` and `--api` values as the running service. It checks that the service is
+reachable before opening the browser, and never prints the credential or authenticated URL.
+The command requires a local desktop browser and an HTTP loopback API URL. For another device,
+use `redline pair` instead. Opening the bare dashboard URL in a browser shows these sign-in
+instructions; API requests continue to require authentication.
 
 ## Usage and decisions
 
@@ -45,6 +54,28 @@ report. It does not read Redline account state, poll, notify, select jobs, chang
 or start anything. Tracker percentages remain separately attributed; Redline does not combine
 them into its own probability. See [Public reset-signal preview](reset-signal-preview.md).
 
+### Redeem a banked reset
+
+```bash
+redline reset redeem --provider claude-main --dry-run
+redline reset redeem --provider codex-main --dry-run --json
+redline reset redeem --provider claude-main
+redline reset redeem --provider codex-main --yes --json
+```
+
+A dry run sends a nonexistent ID, never a real grant or credit. Run it first, then make the first
+real redemption manually. Real redemption prompts on a TTY with the provider, reset ID, expiry,
+and windows cleared: `This spends a one-time reset. Continue? [y/N]`. Non-interactive use requires
+`--yes`; this explicitly waives the prompt. If the available reset changes after confirmation,
+Redline refuses rather than spending another reset: re-run to confirm.
+
+`--json` prints the API result, including `outcome`, `code`, `reason`, `reset_id`, `request_id`,
+`verified`, and any `cleared` / `cooldown_until` fields. Exit codes: **0** redeemed or dry_run_ok,
+**3** nothing_to_reset, **4** cooldown or unavailable, **5** gone, **1** failed, unknown, or error.
+An `unknown` result is shown as "outcome unknown"; check the provider before trying another reset.
+`verified: false` does not make an acknowledged redemption fail; inspect usage before relying on
+new allowance. See [redemption caveats](scheduling.md#redeeming-banked-resets).
+
 ## Profiles and tasks
 
 ```bash
@@ -65,8 +96,10 @@ redline candidates --provider codex-main
 (up to 256 KiB). `--profile auto` picks the Claude Code profile whose `repository` is the git top
 level of the current directory (`--cwd` overrides the directory and `--harness` the harness type).
 A non-matching `--default-profile` requires `--allow-default-profile`. Other flags: `--prompt-file`, `--type`
-(`one_off` default), `--tier` (`behind` default), `--priority` (50 default), `--min-interval`, and
-`--disabled` to save a draft.
+(`one_off` default), `--tier` (`behind` default; also `well_behind`, `expiring`, `firesale`),
+`--priority` (50 default), `--min-interval`, `--firesale-interval` (optional positive provider-firesale
+cooldown), and `--disabled` to save a draft. YAML uses `firesale_min_interval` for that cooldown.
+Task updates are available through the API, MCP, or dashboard, not a CLI update command.
 
 ### Queue work for later
 
@@ -77,11 +110,13 @@ redline later --tier expiring --json "sweep the docs for stale flags"
 # For hook-supplied text, pass it through stdin: redline later --prompt - --json
 ```
 
-`later` queues free text as a one-off task using `--profile auto` resolution. It never dispatches
+`later` accepts `--tier firesale` and the optional `--firesale-interval` flag, like `task add`.
+It queues free text as a one-off task using `--profile auto` resolution. It never dispatches
 and never bypasses limits: the task starts in a fresh harness session only when the provider is
-behind pace (or near expiry for `--tier expiring`) and above its reserve. If no profile matches,
-it fails closed unless `--default-profile ID --allow-default-profile` is passed explicitly; the
-text output warns that the fallback may target another repository. Hooks should pass untrusted
+behind pace (or near expiry for `--tier expiring`) and above its reserve. A task created with
+`--tier firesale` waits for the policy's firesale trigger, not the standard surplus threshold.
+If no profile matches, it fails closed unless `--default-profile ID --allow-default-profile` is
+passed explicitly; the text output warns that the fallback may target another repository. Hooks should pass untrusted
 text via `--prompt -` and stdin, never as positional flags. For positional text starting with a
 hyphen, use `redline later -- "-something"`. With `--json` it prints the created task, how the
 profile was chosen, and the matched repository. `task add --json`, in both YAML and flag mode,
@@ -126,7 +161,7 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
 `reset preview`, and the
 `scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
-`usage refresh`, `task add`, `later`, `scheduler evaluate|execute`, and `run logs` print JSON with
+`usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`.
 
 ## Notifications

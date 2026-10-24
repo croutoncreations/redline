@@ -157,10 +157,40 @@ func TestBankedResetsSkippedWhenPinnedToOpenUsageOrDisabled(t *testing.T) {
 	manager := usage.NewManager(repeatSource(claudeSnapshot(now), 2), &fakeSource{name: "native"}, func() time.Time { return now })
 	manager.BankedResets = resets
 	fetch(t, manager, "claude-main", config.Provider{Provider: "claude", UsageSource: "openusage", OpenUsageURL: "http://x"})
-	manager.SkipBankedResets = true
+	manager.SkipBankedResetProviders = map[string]bool{"claude": true}
 	fetch(t, manager, "claude-main", autoClaude())
 	if resets.calls != 0 {
 		t.Fatalf("lookups = %d, want none", resets.calls)
+	}
+}
+
+func TestCachedBankedResetsKeepValidCreditsAfterOneExpires(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+			expires, later := now.Add(time.Minute), now.Add(time.Hour)
+			resets := &fakeResets{results: []resetResult{{resets: &decision.BankedResets{Available: 2, NextExpiresAt: &expires,
+				Details: []decision.BankedReset{{ID: "expired", ExpiresAt: &expires, ResetsLeft: 1}, {ID: "valid", ExpiresAt: &later, ResetsLeft: 1}}}}}}
+			s := claudeSnapshot(now)
+			s.Provider = provider
+			wantCount := 1
+			if provider == "codex" {
+				s.ApplyBankedResets(&decision.BankedResets{Available: 2})
+				wantCount = 2 // The primary usage count remains authoritative.
+			}
+			p := autoClaude()
+			p.Provider = provider
+			manager := usage.NewManager(repeatSource(s, 3), &fakeSource{name: "native"}, func() time.Time { return now })
+			manager.BankedResets = resets
+			fetch(t, manager, "main", p)
+			now = now.Add(2 * time.Minute)
+			for i := 0; i < 2; i++ {
+				got := fetch(t, manager, "main", p)
+				if got.BankedResets == nil || *got.BankedResets != wantCount || len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].ID != "valid" || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(later) {
+					t.Fatalf("snapshot=%+v", got)
+				}
+			}
+		})
 	}
 }
 
@@ -263,6 +293,73 @@ func TestRestoredResetLockoutSurvivesASecondRestart(t *testing.T) {
 	}
 }
 
+func TestNativeAndResetRateLimitsKeepLaterDeadlineInBothOrders(t *testing.T) {
+	for _, nativeFirst := range []bool{true, false} {
+		name := "reset finishes first"
+		if nativeFirst {
+			name = "native finishes first"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+			native := &controlledRateLimit{started: make(chan struct{}), release: make(chan struct{}), wait: 15 * time.Minute}
+			resets := &controlledRateLimit{started: make(chan struct{}), release: make(chan struct{}), wait: 2 * time.Hour}
+			if nativeFirst {
+				native.wait, resets.wait = resets.wait, native.wait
+			}
+			manager := usage.NewManager(repeatSource(claudeSnapshot(now), 1), native, func() time.Time { return now })
+			manager.BankedResets = resets
+			provider := config.Provider{Provider: "claude", UsageSource: "native"}
+			nativeDone := make(chan struct{})
+			go func() {
+				_, _, _ = manager.Fetch(context.Background(), "native", provider)
+				close(nativeDone)
+			}()
+			<-native.started
+			if _, _, err := manager.Fetch(context.Background(), "auto", autoClaude()); err != nil {
+				t.Fatal(err)
+			}
+			<-resets.started
+			if nativeFirst {
+				close(native.release)
+				<-nativeDone
+				close(resets.release)
+				manager.WaitForBankedResetLookups()
+			} else {
+				close(resets.release)
+				manager.WaitForBankedResetLookups()
+				close(native.release)
+				<-nativeDone
+			}
+			now = now.Add(30 * time.Minute)
+			_, _, err := manager.Fetch(context.Background(), "native", provider)
+			if err == nil || native.calls != 1 {
+				t.Fatalf("longer lockout was shortened: native calls=%d err=%v", native.calls, err)
+			}
+		})
+	}
+}
+
+type controlledRateLimit struct {
+	started, release chan struct{}
+	wait             time.Duration
+	calls            int
+}
+
+func (s *controlledRateLimit) Name() string { return "native" }
+func (s *controlledRateLimit) Fetch(context.Context, config.Provider) (decision.UsageSnapshot, []byte, error) {
+	s.calls++
+	if s.calls == 1 {
+		close(s.started)
+		<-s.release
+	}
+	return decision.UsageSnapshot{}, nil, retryAfterError(s.wait)
+}
+func (s *controlledRateLimit) BankedResets(context.Context, config.Provider) (*decision.BankedResets, error) {
+	close(s.started)
+	<-s.release
+	return nil, retryAfterError(s.wait)
+}
+
 func TestZeroRetryAfterStillBacksOff(t *testing.T) {
 	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
 	native := &fakeSource{name: "native", results: []sourceResult{{err: retryAfterError(0)}}}
@@ -293,6 +390,131 @@ func TestBankedResetLookupHonorsRetryAfter(t *testing.T) {
 	fetch(t, manager, "claude-main", autoClaude())
 	if got := fetch(t, manager, "claude-main", autoClaude()); resets.calls != 2 || got.BankedResets == nil {
 		t.Fatalf("lookups = %d resets = %v after Retry-After", resets.calls, got.BankedResets)
+	}
+}
+
+func TestCodexResetDetailsAreCachedWithoutReplacingSourceCount(t *testing.T) {
+	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	expires := now.Add(24 * time.Hour)
+	s := snapshot("openusage", now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 3})
+	resets := &fakeResets{results: []resetResult{{resets: &decision.BankedResets{Available: 1, NextExpiresAt: &expires, Details: []decision.BankedReset{{ID: "credit", ExpiresAt: &expires, ResetsLeft: 1}}}}, {resets: nil}}}
+	manager := usage.NewManager(repeatSource(s, 5), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets = resets
+	manager.BankedResetInterval = time.Minute // Codex still has a 30-minute minimum.
+	manager.MaxSnapshotAge = time.Hour
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageURL: "http://x"}
+	if first := fetch(t, manager, "a", provider); len(first.BankedResetDetails) != 0 {
+		t.Fatal("first fetch used an uncached lookup")
+	}
+	now = now.Add(2 * time.Minute)
+	got := fetch(t, manager, "b", provider) // same provider cache, different account
+	if resets.calls != 1 || *got.BankedResets != 3 || len(got.BankedResetDetails) != 1 || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(expires) {
+		t.Fatalf("calls=%d snapshot=%#v", resets.calls, got)
+	}
+	now = now.Add(29 * time.Minute)
+	fetch(t, manager, "a", provider)
+	if resets.calls != 2 {
+		t.Fatalf("calls=%d, want refresh after 30m", resets.calls)
+	}
+}
+
+// The Codex credit-details endpoint is separate from wham/usage, so a 429 on
+// it backs off only further detail lookups and never blocks usage collection.
+func TestCodexResetDetailsFailureKeepsCacheWithoutNativeLockout(t *testing.T) {
+	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	s := snapshot("openusage", now)
+	expires := now.Add(24 * time.Hour)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 3, NextExpiresAt: &expires})
+	otherExpiry := expires.Add(time.Hour)
+	resets := &fakeResets{results: []resetResult{
+		{resets: &decision.BankedResets{Available: 1, NextExpiresAt: &otherExpiry, Details: []decision.BankedReset{{ID: "credit", ResetsLeft: 1}}}},
+		{err: retryAfterError(2 * time.Hour)},
+		{resets: nil},
+	}}
+	native := &fakeSource{name: "native"}
+	manager := usage.NewManager(repeatSource(s, 5), native, func() time.Time { return now })
+	manager.BankedResets, manager.MaxSnapshotAge = resets, 24*time.Hour
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageURL: "http://x"}
+	fetch(t, manager, "a", provider)
+	now = now.Add(31 * time.Minute)
+	fetch(t, manager, "a", provider) // failing background refresh
+	if status := manager.Status("a"); status.BankedResetsError == "" || status.LastError != "" {
+		t.Fatalf("status = %#v", status)
+	}
+	now = now.Add(time.Hour)
+	got := fetch(t, manager, "a", provider)
+	if resets.calls != 2 || len(got.BankedResetDetails) != 1 || *got.BankedResets != 3 || !got.BankedResetsExpireAt.Equal(expires) {
+		t.Fatalf("calls=%d snapshot=%#v", resets.calls, got)
+	}
+	if until := manager.NativeBlockedUntil("codex"); !until.IsZero() {
+		t.Fatalf("credit-details 429 locked out native Codex usage until %s", until)
+	}
+	if _, _, err := manager.Fetch(context.Background(), "native", config.Provider{Provider: " Codex ", UsageSource: "native"}); native.calls != 1 || (err != nil && strings.Contains(err.Error(), "rate limited")) {
+		t.Fatalf("native usage blocked: calls=%d err=%v", native.calls, err)
+	}
+	now = now.Add(time.Hour + time.Minute)
+	fetch(t, manager, "a", provider)
+	if resets.calls != 3 {
+		t.Fatalf("lookups = %d after Retry-After", resets.calls)
+	}
+}
+
+func TestCodexNativeResetLookupDoesNotBlockUsage(t *testing.T) {
+	now := time.Now().UTC()
+	s := snapshot("native", now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1})
+	release := make(chan struct{})
+	manager := usage.NewManager(&fakeSource{name: "openusage"}, repeatSource(s, 1), func() time.Time { return now })
+	manager.BankedResets = blockingResets{release: release}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := manager.Fetch(context.Background(), "a", config.Provider{Provider: "codex", UsageSource: "native"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("usage fetch waited for details")
+	}
+	close(release)
+	manager.WaitForBankedResetLookups()
+}
+
+func TestCodexResetLookupEligibility(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name     string
+		count    *int
+		details  bool
+		disabled bool
+		mode     string
+	}{
+		{name: "unknown count"}, {name: "zero", count: new(int)},
+		{name: "already detailed", details: true}, {name: "disabled", disabled: true}, {name: "pinned openusage", mode: "openusage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshot("openusage", now)
+			s.BankedResets = tc.count
+			if tc.details || tc.disabled || tc.mode != "" {
+				count := 1
+				s.BankedResets = &count
+			}
+			if tc.details {
+				s.BankedResetDetails = []decision.BankedReset{{ID: "existing", ResetsLeft: 1}}
+			}
+			resets := &fakeResets{}
+			manager := usage.NewManager(repeatSource(s, 1), &fakeSource{name: "native"}, func() time.Time { return now })
+			manager.BankedResets = resets
+			manager.SkipBankedResetProviders = map[string]bool{"codex": tc.disabled}
+			fetch(t, manager, "a", config.Provider{Provider: "codex", UsageSource: tc.mode, OpenUsageURL: "http://x"})
+			if resets.calls != 0 {
+				t.Fatalf("lookups = %d", resets.calls)
+			}
+		})
 	}
 }
 

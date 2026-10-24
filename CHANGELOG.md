@@ -6,8 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- The default `notifications.events` list is unchanged (`run.started`, `run.completed`,
+  `run.failed`, `scheduler.error`). To receive the new `reset.expiring`, `reset.redeemed`,
+  `reset.redeem_failed`, `firesale.started`, and `firesale.ended` events, list them explicitly.
+  Hooks should ignore event types they do not recognize.
+- Native Codex usage now also reads per-credit reset details from a separate endpoint while banked
+  resets are available (at most every 30 minutes). A rate limit on that endpoint only backs off
+  the detail lookup; usage collection continues.
+- Earlier versions ignored unknown config keys with a warning. `banked_resets`,
+  `firesale_trigger`, `firesale_max_concurrent_runs`, and related settings are now recognized, so
+  any already present take effect, and invalid values (or `on_expiry: redeem` without
+  `usage_monitor.enabled`, or with `usage_source: openusage`) stop the service from starting.
+  Before upgrading, check your current version's startup log for `ignoring unknown key` warnings.
+- After rolling back to an older daemon, reload any open dashboard tab before editing jobs.
+
 ### Added
 
+- Banked resets are tracked per grant or credit (expiry, which windows they clear, usability), and
+  a `reset.expiring` notification reminds before one lapses (`banked_resets.remind_before`,
+  default 24h) and again at `redeem_lead` with `on_expiry: notify`, deduplicated per deadline.
+- Opt-in `banked_resets.on_expiry: redeem` automatically uses expiring resets from the usage
+  monitor, independently of dispatch enablement or pause. Redeemable weekly resets shorten the
+  scheduling horizon and can trigger firesale. Persisted retries respect five-minute provider
+  throttling, cooldowns, 429 lockouts, and a 30-minute `nothing_to_reset` delay; expired failed
+  resets notify once. Requires the usage monitor and native reset telemetry. Roll out with dry
+  runs, then a manual first redemption, then enable redeem.
+- Manual banked-reset redemption for Claude grants and Codex credits through authenticated API
+  routes and `redline reset redeem`, with safe dry runs, confirmation, persisted retry keys,
+  shared rate-limit lockouts, refill verification, attempt history, and redemption notifications.
+  Automatic spending is opt-in; MCP exposes no spending tool.
+- Firesale scheduling unlocks a fourth task tier under large allowance surplus, with optional
+  per-task faster intervals, higher provider concurrency, prompt re-dispatch after completion,
+  and `firesale.started` / `firesale.ended` notifications. Decisions report the effective reset
+  horizon, including opted-in banked resets. CLI, API, MCP, and dashboard support
+  the new task settings, and existing tasks migrate without changing their cooldowns.
 - `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
   trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
   scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
@@ -16,6 +50,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   execution profile and provider account for the report window. Each total has an input/output/cache-read/cache-creation
   breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
   evidence report `tokens: null` rather than zero, and interactive usage is excluded.
+
+### Changed
+
+- Tagged releases now wait for green CI on `main` and lint the generated Homebrew formula with
+  `brew style` and `brew audit --strict` before publishing. A daily workflow flags a Homebrew cask
+  that lags the latest release. The formula description was shortened to pass `brew audit`.
+- Maintenance: Go dependency updates (`modernc.org/sqlite` 1.60.1, `golang.org/x/sys` 0.49.0) and
+  new repository CI checks. Running the dashboard browser tests (`npm run test:dashboard`) now needs Node 20 or
+  newer, up from Node 18; see `CONTRIBUTING.md`.
+
+### Fixed
+
+- Document dashboard sign-in for source and headless installs, including cross-platform browser
+  commands and matching the browser URL to an alternate service port.
+- Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
+  `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
+- The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
+  session without printing its credential. Unauthenticated dashboard visitors receive sign-in
+  instructions; API authentication remains required.
+- Local Git-worktree execution profiles reject missing/non-Git directories and invalid base
+  branches before saving, so setup can show a correction instead of an unattended run failure.
+- The scheduler-off banner now opens instructions with the running service’s configuration path,
+  host-appropriate restart command, and the allowance implications of enabling dispatch.
+- Task creation and updates now reject jobs with no `prompt` or `prompt_file` instead of queuing
+  work that can only fail when the harness starts. Hermes tasks that select an existing runtime
+  job remain valid without a separate prompt.
+
+### Security
+
+- Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
+  from Redline: `net/http` HTTP/1 and HTTP/2 client/server issues (request desync, memory and CPU
+  exhaustion, an HPACK race crash), `net/textproto`/`mime/multipart` header limits, and
+  `crypto/tls` ECH parsing. `go.mod` now requires Go 1.26.9 (previously 1.26.0 with a 1.26.6
+  toolchain pin), so `go install github.com/croutoncreations/redline/cmd/redline@latest` also
+  builds with the patched standard library. With the default `GOTOOLCHAIN=auto`, older local Go
+  versions download 1.26.9 automatically.
 
 ## [0.1.10] - 2026-10-01
 
