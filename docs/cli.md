@@ -165,7 +165,10 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 `calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
 `scheduler status|history|attempts` commands print JSON on success. `status`, `decision`,
 `usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
-`--json`. On failure, commands print a plain-text error to stderr and exit non-zero.
+`--json`. Usage, validation, and API errors print a plain-text error to stderr and exit non-zero.
+Some results are reported as JSON instead: `decision --json` exits 2 when the decision is unknown,
+`reset redeem --json` exits 3, 4, 5, or 1 for outcomes other than `redeemed` and `dry_run_ok`, and
+`reset preview` exits 0 and reports source fetch errors under `uncertainty`.
 
 ## Notifications
 
