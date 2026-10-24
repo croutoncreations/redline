@@ -12,6 +12,12 @@ automatically from the `--config` location or the platform default data director
 (`~/Library/Application Support/Redline` on macOS, `~/.config/redline` on Linux,
 `%AppData%\redline` on Windows).
 
+To sign a browser in from a source or headless install, see [Dashboard](#dashboard). Treat a URL
+containing `access_token` as a secret, since browser history can retain it. Without a session
+cookie or Bearer token, a browser `GET` of `/`, `/dashboard` or `/m` (sent with `Accept: text/html`)
+gets a `401` HTML sign-in page. Other requests without credentials get a JSON `401`, except the
+public pairing routes, which need no token. Remote devices use [pairing](mobile.md) instead.
+
 For a direct API call:
 
 ```bash
