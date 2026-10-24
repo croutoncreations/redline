@@ -204,8 +204,20 @@ before merging. Unknown permissions, mismatched identities and failed reads
 remain blocking. This
 binds same-repository branch control to the allowed principal rather than merely
 trusting the original PR creator. Expanding the writer set requires a separately
-reviewed change to the pilot. No new credential or branch administration service
-is introduced.
+reviewed change to the pilot.
+
+The ordinary workflow token returned an empty collaborator list in the live
+probe. Writer enumeration and explicit permission reads therefore use a separate
+fine-grained personal access token stored as `GREEN_LANE_ACCESS_AUDIT_TOKEN` in
+Redline Actions secrets. Select resource owner `croutoncreations`, only the
+`redline` repository, and only **Metadata: read**; use a 30-day expiration for the
+pilot. No organization permissions, contents access or write permissions are
+needed. The workflow uses this client only for the two access-audit APIs, while
+the normal workflow token continues to evaluate and merge. The audit secret is
+removed from the environment before the evaluator runs and is never written to
+artifacts. Missing, expired or insufficient audit credentials stop merging;
+renew the secret before expiration to keep the pilot running. No GitHub App or
+branch administration service is introduced.
 
 The merged Homebrew CI check is also required for live/shadow eligibility and main protection. Release CI selection accepts only `push` or `workflow_dispatch` runs of the CI workflow on main for the exact tagged commit; PR-event runs remain excluded.
 

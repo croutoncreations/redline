@@ -57,8 +57,11 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 		}
 		if step.Uses == "actions/github-script@v7" {
 			runner = true
-			if step.With["retries"] != "0" || step.With["script"] != "await require('./.github/green-lane/live.cjs')({github,context,core});\n" {
+			if step.With["retries"] != "0" || step.With["script"] != "const auditToken = process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\ndelete process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\nconst accessAudit = auditToken ? new github.constructor({auth:auditToken,request:{retries:0}}) : undefined;\nawait require('./.github/green-lane/live.cjs')({github,accessAudit,context,core});\n" {
 				t.Fatal("unexpected merge entry point or retry configuration")
+			}
+			if step.Env["GREEN_LANE_ACCESS_AUDIT_TOKEN"] != "${{ secrets.GREEN_LANE_ACCESS_AUDIT_TOKEN }}" {
+				t.Fatal("missing scoped access-audit secret")
 			}
 			if step.Env["LIVE_PILOT_ENABLED"] != "${{ vars.GREEN_LANE_LIVE_ENABLED }}" {
 				t.Fatal("missing explicit opt-in")
