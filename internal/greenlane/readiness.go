@@ -68,6 +68,25 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		r.Message = "Unresolved review threads (outdated threads also block): " + strings.Join(unresolved, ", ")
 		return r
 	}
+	// Review bodies have no GitHub resolution bit. In the live pilot, prose
+	// from a current-head non-author review is unresolved evidence, including
+	// bot nitpicks/outside-diff findings and approvals containing caveats.
+	// Do not classify free-form text as harmless or let another clean provider
+	// override it. A new head and fresh completion are needed after a fix.
+	if e.config.RequireAutomatedReview {
+		var bodies []string
+		for _, review := range pr.Reviews {
+			if review.CommitID == pr.HeadSHA && review.State != "DISMISSED" &&
+				!strings.EqualFold(review.User, pr.Author) && strings.TrimSpace(review.Body) != "" {
+				bodies = append(bodies, fmt.Sprintf("%s/%d", review.User, review.ID))
+			}
+		}
+		if len(bodies) > 0 {
+			sort.Strings(bodies)
+			r.Message = "Unclassified current-head review bodies require addressed feedback and fresh review: " + strings.Join(bodies, ", ")
+			return r
+		}
+	}
 	var requests []string
 	for user, review := range effectiveReviews(pr.Reviews) {
 		if review.State == "CHANGES_REQUESTED" {
