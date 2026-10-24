@@ -363,3 +363,145 @@ func (f *fakeRunner) Run(_ context.Context, command redprocess.Command) (int, er
 	}
 	return f.run(command)
 }
+
+func assertErrorContains(t *testing.T, err error, wants ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestPrepareRepositoryProblemsNameThePathAndCause(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone")
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{}
+	profile := func(repository string) domain.ExecutionProfile {
+		return domain.ExecutionProfile{WorkspaceProvider: "git-worktree", Repository: repository}
+	}
+
+	_, err := manager.Prepare(context.Background(), "run-1", "Task", profile(missing))
+	assertErrorContains(t, err, `workspace_provider "git-worktree"`, "cannot stat "+missing, "no such file or directory")
+
+	_, err = manager.Prepare(context.Background(), "run-1", "Task", profile(file))
+	assertErrorContains(t, err, file+" exists but is not a directory")
+
+	_, err = manager.Prepare(context.Background(), "run-1", "Task", profile(""))
+	assertErrorContains(t, err, `workspace_provider "git-worktree" requires repository`)
+}
+
+func TestPrepareRejectsUnknownProviderListingValidOnes(t *testing.T) {
+	_, err := workspace.Manager{}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "docker", Repository: t.TempDir(),
+	})
+	assertErrorContains(t, err, `"docker"`, "existing-directory", "git-worktree", "devx", "command", "runtime-owned")
+}
+
+func TestSetupHookFailureNamesDirectoryAndLogFiles(t *testing.T) {
+	repo := t.TempDir()
+	artifacts := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "npm ERR! secret-token-value\n")
+		return 7, nil
+	}}
+	manager := workspace.Manager{Runner: runner, OutputDirectory: artifacts}
+	_, err := manager.Prepare(context.Background(), "run-9", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "existing-directory", Repository: repo, PrepareCommand: "npm ci",
+	})
+	assertErrorContains(t, err, "exited with code 7", repo, "run run-9",
+		filepath.Join(artifacts, "run-9.prepare.stderr.log"))
+	if strings.Contains(err.Error(), "secret-token-value") {
+		t.Errorf("hook stderr must stay in the 0600 log file, not the error: %q", err)
+	}
+}
+
+func TestFinalizeHookFailureNamesWorkspaceRunAndLogFiles(t *testing.T) {
+	artifacts := t.TempDir()
+	runner := &fakeRunner{run: func(redprocess.Command) (int, error) { return 3, nil }}
+	manager := workspace.Manager{Runner: runner, OutputDirectory: artifacts}
+	err := manager.Finalize(context.Background(), workspace.FinalizeRequest{
+		RunID: "run-4", Status: "failed",
+		Profile:   domain.ExecutionProfile{FinalizeCommand: "push-branch"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	assertErrorContains(t, err, "exited with code 3", "/tmp/work", "run run-4", "status failed",
+		filepath.Join(artifacts, "run-4.finalize.stderr.log"))
+
+	err = workspace.Manager{Runner: runner}.Finalize(context.Background(), workspace.FinalizeRequest{
+		RunID:     "run-4",
+		Profile:   domain.ExecutionProfile{FinalizeCommand: "push-branch"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	assertErrorContains(t, err, "hook output was not captured")
+}
+
+func TestCommandWorkspaceBadOutputDescribesButDoesNotEchoOutput(t *testing.T) {
+	repo := t.TempDir()
+	prepare := func(output string, exit int) error {
+		runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+			_, _ = io.WriteString(command.Stdout, output)
+			return exit, nil
+		}}
+		_, err := workspace.Manager{Runner: runner}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+			WorkspaceProvider: "command", Repository: repo, PrepareCommand: "prepare-workspace",
+		})
+		return err
+	}
+
+	assertErrorContains(t, prepare("Cloning into 'x'...\n", 0), "working_directory", "got 19 bytes of output")
+	if err := prepare(`token=hunter2-secret`, 0); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("malformed prepare output must not be echoed into the stored error: %v", err)
+	}
+	assertErrorContains(t, prepare("", 0), "empty output")
+	assertErrorContains(t, prepare(`{"branch":"b"}`, 0), "unusable working_directory", "did not return working_directory")
+	missing := filepath.Join(repo, "nope")
+	assertErrorContains(t, prepare(`{"working_directory":"`+missing+`"}`, 0), "cannot stat "+missing)
+	assertErrorContains(t, prepare("", 2), "code 2", repo)
+}
+
+func TestCommandWorkspaceFailureDoesNotEchoStderr(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		_, _ = io.WriteString(command.Stderr, "token=hunter2-secret\n")
+		return 3, nil
+	}}
+	_, err := workspace.Manager{Runner: runner}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "command", Repository: repo, PrepareCommand: "prepare-workspace",
+	})
+	assertErrorContains(t, err, "code 3", repo, "stderr got 20 bytes of output")
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("prepare command stderr must not be echoed into the stored error: %v", err)
+	}
+}
+
+func TestRuntimeOwnedPrepareCommandErrorDoesNotEchoCommand(t *testing.T) {
+	repo := t.TempDir()
+	_, err := workspace.Manager{}.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "runtime-owned", Repository: repo, PrepareCommand: "deploy --token=hunter2-secret",
+	})
+	assertErrorContains(t, err, "does not support prepare_command", repo)
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("prepare_command value must not be echoed into the stored error: %v", err)
+	}
+}
+
+func TestCleanupErrorsNameWorkspaceAndValidValues(t *testing.T) {
+	manager := workspace.Manager{}
+	err := manager.Cleanup(context.Background(), workspace.CleanupRequest{
+		Profile: domain.ExecutionProfile{CleanupPolicy: "sometimes", WorkspaceProvider: "devx"},
+	})
+	assertErrorContains(t, err, `"sometimes"`, "never", "on_success", "always")
+
+	err = manager.Cleanup(context.Background(), workspace.CleanupRequest{
+		Profile:   domain.ExecutionProfile{CleanupPolicy: "always", WorkspaceProvider: "devx"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	assertErrorContains(t, err, "/tmp/work", "session id")
+}
