@@ -8,7 +8,7 @@ const held = pr => pr.labels?.some(label => ['green-lane-hold','maintenance:skip
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
-module.exports = async function live({github, context, core, run=execFileSync,
+module.exports = async function live({github, accessAudit, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
   const report = {state:'deferred',main_tip:context.sha,merged:[],evaluations:[]};
   const finish = async reason => { report.reason=reason; await write(report); core.info(reason); return report; };
@@ -36,7 +36,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
         p.checks?.some(c => c.context === name && c.app_id === 15368));
   };
   const trustedWriters = async () => {
-    const users = await github.paginate(github.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
+    const users = await accessAudit.paginate(accessAudit.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
     const snapshot = [];
     report.writer_snapshots ??= [];
     report.writer_snapshots.push(snapshot);
@@ -49,7 +49,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
         if (typeof user.login !== 'string' || !user.login) return false;
         const entry = {login:user.login,list_permissions:user.permissions ?? null};
         snapshot.push(entry);
-        const {data} = await github.rest.repos.getCollaboratorPermissionLevel({...repo,username:user.login});
+        const {data} = await accessAudit.rest.repos.getCollaboratorPermissionLevel({...repo,username:user.login});
         entry.permission = data.permission ?? null;
         entry.verified_login = data.user?.login ?? null;
         if (entry.verified_login !== user.login || !['admin','maintain','write','read','triage'].includes(entry.permission)) return false;
@@ -62,6 +62,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
     } finally { await write(report); }
   };
   if (process.env.LIVE_PILOT_ENABLED !== 'true' || !await enabled()) return finish('Pilot is disabled; no merge attempted');
+  if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
 
@@ -85,7 +86,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
     }
     const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
       encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
-      env:{...process.env,REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
+      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
         EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
         DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
     }));
