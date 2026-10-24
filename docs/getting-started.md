@@ -80,9 +80,10 @@ high-risk test gap.
 
 The **Run when** setting controls how much spare capacity must accumulate:
 
-- **Behind pace** runs earliest.
-- **Well behind pace** waits for a larger weekly surplus.
-- **Capacity likely to expire** is the most conservative tier.
+- **Standard surplus** runs earliest.
+- **High surplus** waits for a larger weekly surplus.
+- **Near expiry** waits until capacity is likely to expire.
+- **Firesale (lots expiring)** only unlocks when the policy's firesale trigger fires.
 
 Priority only orders jobs that are already eligible. For recurring jobs, set a minimum interval and
 optionally require the repository to change before another run.

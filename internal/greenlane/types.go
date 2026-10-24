@@ -76,6 +76,7 @@ type CheckRun struct {
 
 // Review represents a GitHub PR review
 type Review struct {
+	Body        string
 	ID          int64
 	User        string
 	State       string
@@ -136,15 +137,17 @@ type CheckSource struct {
 }
 
 type Config struct {
-	AllowedAuthors      []string                 `json:"allowed_authors"`
-	AllowedBaseBranches []string                 `json:"allowed_base_branches"`
-	CheckSources        map[string]CheckSource   `json:"check_sources"`
-	ProvenanceIssuers   map[string]ReceiptIssuer `json:"provenance_issuers"`
-	DeniedPaths         []string                 `yaml:"denied_paths" json:"denied_paths"`
-	MaxChangedLines     int                      `yaml:"max_changed_lines" json:"max_changed_lines"`
-	MaxLockfileChanges  int                      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
-	MaxFiles            int                      `yaml:"max_files" json:"max_files"`
-	RequiredChecks      []string                 `yaml:"required_checks" json:"required_checks"`
+	// Live pilot requires authenticated automated completion, never a human comment.
+	RequireAutomatedReview bool                     `json:"require_automated_review"`
+	AllowedAuthors         []string                 `json:"allowed_authors"`
+	AllowedBaseBranches    []string                 `json:"allowed_base_branches"`
+	CheckSources           map[string]CheckSource   `json:"check_sources"`
+	ProvenanceIssuers      map[string]ReceiptIssuer `json:"provenance_issuers"`
+	DeniedPaths            []string                 `yaml:"denied_paths" json:"denied_paths"`
+	MaxChangedLines        int                      `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges     int                      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles               int                      `yaml:"max_files" json:"max_files"`
+	RequiredChecks         []string                 `yaml:"required_checks" json:"required_checks"`
 	// DocsDeps holds the tighter caps for the docs/changelog/dependency lane.
 	DocsDeps SizeLimits `yaml:"docs_deps" json:"docs_deps"`
 }

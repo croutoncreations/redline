@@ -14,7 +14,17 @@ func TestReviewReadiness(t *testing.T) {
 		message string
 	}{
 		{"approved", func(p *PRInfo) {}, true, "OK"},
-		{"automated commented review without findings", func(p *PRInfo) { p.Reviews[0].User = "coderabbitai[bot]"; p.Reviews[0].State = "COMMENTED" }, true, "OK"},
+		{"bot reply publication does not count", func(p *PRInfo) { p.Reviews[0].User = "coderabbitai[bot]"; p.Reviews[0].State = "COMMENTED" }, false, "No completed"},
+		{"bot review prose needs completion protocol", func(p *PRInfo) {
+			p.Reviews[0].User = "coderabbitai[bot]"
+			p.Reviews[0].State = "COMMENTED"
+			p.Reviews[0].Body = "Verified the fix"
+		}, false, "No completed"},
+		{"empty human reply publication does not count", func(p *PRInfo) { p.Reviews[0].State = "COMMENTED" }, false, "No completed"},
+		{"nonempty human review", func(p *PRInfo) {
+			p.Reviews[0].State = "COMMENTED"
+			p.Reviews[0].Body = "Reviewed implementation and tests"
+		}, true, "OK"},
 		{"no reviews", func(p *PRInfo) { p.Reviews = nil }, false, "No completed"},
 		{"pending", func(p *PRInfo) { p.Reviews[0].State = "PENDING" }, false, "No completed"},
 		{"issue comments do not count", func(p *PRInfo) { p.Reviews = nil; p.ReviewComments = []ReviewComment{{Body: "looks good"}} }, false, "No completed"},
@@ -116,5 +126,74 @@ func TestLockfileInMixedCodePRStaysManual(t *testing.T) {
 	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
 	if r.Verdict != VerdictWouldNotMerge || ruleByName(t, r, "Denied Paths").Pass {
 		t.Fatal("code change bypassed manual lockfile policy")
+	}
+}
+
+func TestReviewBodyIsPartOfSnapshot(t *testing.T) {
+	p := passingPR(PRFile{Filename: "README.md"})
+	before := ReviewSnapshot(p)
+	p.Reviews[0].Body = "Reviewed implementation"
+	if before == ReviewSnapshot(p) {
+		t.Fatal("review body edits must invalidate the snapshot")
+	}
+}
+
+func TestIgnoredRepliesPreserveCompletion(t *testing.T) {
+	for _, user := range []string{"reviewer", "coderabbitai[bot]"} {
+		for _, reply := range []string{"", "  ", "Verified inline fix"} {
+			for _, invalidation := range []string{"", "CHANGES_REQUESTED", "DISMISSED"} {
+				t.Run(user+"/"+reply+"/"+invalidation, func(t *testing.T) {
+					p := passingPR(PRFile{Filename: "README.md"})
+					p.Reviews = []Review{{ID: 1, User: user, State: "APPROVED", CommitID: p.HeadSHA}}
+					if invalidation != "" {
+						p.Reviews = append(p.Reviews, Review{ID: 2, User: user, State: invalidation, CommitID: p.HeadSHA})
+					}
+					p.Reviews = append(p.Reviews, Review{ID: 3, User: user, State: "COMMENTED", Body: reply, CommitID: p.HeadSHA})
+					got := NewEvaluator(DefaultConfig()).checkReviewReadiness(p)
+					// A substantive human review can restore completion after dismissal;
+					// comments never clear a changes request.
+					want := invalidation == "" || (invalidation == "DISMISSED" && user == "reviewer" && strings.TrimSpace(reply) != "")
+					if got.Pass != want {
+						t.Fatalf("pass=%v want=%v: %s", got.Pass, want, got.Message)
+					}
+				})
+			}
+		}
+	}
+	p := passingPR(PRFile{Filename: "README.md"})
+	p.Reviews = []Review{{ID: 1, User: "reviewer", State: "COMMENTED", Body: "Reviewed implementation", CommitID: p.HeadSHA}, {ID: 2, User: "reviewer", State: "COMMENTED", CommitID: p.HeadSHA}}
+	if r := NewEvaluator(DefaultConfig()).checkReviewReadiness(p); !r.Pass {
+		t.Fatal(r.Message)
+	}
+}
+
+func TestReviewSnapshotPublisherParity(t *testing.T) {
+	// Shared with publish.test.cjs, including HTML and Unicode escape hazards.
+	p := PRInfo{Reviews: []Review{{ID: 1, User: "reviewer", State: "APPROVED", CommitID: "head", Body: "Reviewed <tags> & \"quotes\" \u2028 café"}}}
+	const want = "db35604bd99c33113262a7c08cce94aa8bfdc52e42e9222d1a8ab7a6a83a3adb"
+	if got := ReviewSnapshot(p); got != want {
+		t.Fatalf("publisher parity: got %s want %s", got, want)
+	}
+}
+
+func TestLiveRequiresTrustedAutomatedCompletion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	p := passingPR()
+	p.HeadSHA = reviewHead
+	for _, state := range []string{"COMMENTED", "APPROVED"} {
+		p.Reviews = []Review{{ID: 1, User: "collaborator", State: state, CommitID: reviewHead, Body: "looks good"}}
+		if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+			t.Fatalf("live accepted untrusted %s review", state)
+		}
+	}
+	p.AutomatedReviews = []AutomatedReviewComment{{ID: 43, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z", Body: `<!-- codex-pull-request-review-summary -->
+<!-- codex-review-state:v1 {"code_review":{"commit_sha":"` + reviewHead + `","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":null} -->`}}
+	if !NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+		t.Fatal("live rejected trusted authenticated current-head completion")
+	}
+	p.AutomatedReviews[0].AppID = 1
+	if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+		t.Fatal("live accepted spoofed App plus collaborator approval")
 	}
 }

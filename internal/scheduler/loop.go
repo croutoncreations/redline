@@ -29,6 +29,7 @@ type Loop struct {
 	interval  time.Duration
 	providers []string
 	dispatch  DispatchFunc
+	trigger   chan struct{}
 
 	mu      sync.RWMutex
 	cycleMu sync.Mutex
@@ -43,7 +44,19 @@ func NewLoop(enabled bool, interval time.Duration, providers []string, dispatch 
 	sort.Strings(ordered)
 	return &Loop{
 		enabled: enabled, interval: interval, providers: ordered, dispatch: dispatch,
-		status: Status{Enabled: enabled, PollInterval: interval.String(), Providers: make([]ProviderStatus, 0)},
+		trigger: make(chan struct{}, 1),
+		status:  Status{Enabled: enabled, PollInterval: interval.String(), Providers: make([]ProviderStatus, 0)},
+	}
+}
+
+// Trigger requests a cycle in Run's goroutine. Pending requests coalesce.
+func (l *Loop) Trigger() {
+	if !l.enabled {
+		return
+	}
+	select {
+	case l.trigger <- struct{}{}:
+	default:
 	}
 }
 
@@ -58,6 +71,11 @@ func (l *Loop) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-l.trigger:
+			if ctx.Err() != nil {
+				return
+			}
+			l.RunCycle(ctx, time.Now().UTC())
 		case now := <-ticker.C:
 			l.RunCycle(ctx, now.UTC())
 		}

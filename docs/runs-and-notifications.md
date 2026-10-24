@@ -35,20 +35,77 @@ failures.
 
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
-`run.completed`, `run.failed`, and `scheduler.error`.
+`run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
+`reset.redeem_failed`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
+empty, only `run.started`, `run.completed`, `run.failed`, and `scheduler.error` are sent; list the
+`reset.*` and `firesale.*` events explicitly to receive them. Hooks should ignore event types they
+do not recognize.
 
 ```yaml
 notifications:
   enabled: true
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
 ```
 
 The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_TASK_ID`, and
 `REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
 outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
 possibly non-idempotent hook.
+
+### Firesale transitions
+
+Automatic dispatch emits `firesale.started` and `firesale.ended` on provider state transitions,
+using the previous recorded automatic usage decision. Manual evaluations and skipped usage checks
+do not change this state. Data includes `pace_gap`, `overflow`, `effective_reset_at` (RFC3339 UTC),
+and `unlocked_tier`. See [firesale scheduling](scheduling.md#effective-horizon-and-firesale).
+
+### Banked-reset redemptions
+
+Manual and automatic redemption emit `reset.redeemed` on provider-acknowledged success, or `reset.redeem_failed`
+for failed, unavailable, cooldown, or gone outcomes. Dry runs and `nothing_to_reset` emit neither.
+Each event includes string-valued data: `reset_id`, `request_id`, `outcome`, `code`, `reason`, and
+`verified` (`true` or `false`). A successful response with no observed weekly refill sends only
+`reset.redeemed`, with `verified: "false"` and a note to check usage; it never assumes allowance
+has refilled. In automatic (`on_expiry: redeem`) mode, retries may emit further failure events;
+an attempted reset that expires unused also emits one `reset.redeem_failed` with `reset_id`,
+`expires_at`, and `reason: "expired unused"`. This final notice is deduplicated by provider and
+expiry with kind `expired_unredeemed`, including across restarts and vanished credit details.
+Disabled or filtered notifications do not claim it. See
+[automatic redemption and retry rules](scheduling.md#redeeming-banked-resets).
+
+### Banked-reset reminders
+
+The usage monitor checks banked reset deadlines independently of `scheduler.enabled`.
+Per-provider `banked_resets` defaults are `remind_before: [24h]`, `on_expiry: notify`, and
+`redeem_lead: 1h`. Durations must be positive. `remind_before: []` disables ordinary reminders;
+`on_expiry: off` disables the expiry action. `notify` asks the user to redeem at the action
+deadline; opt-in `redeem` automatically attempts redemption instead, without a `redeem_now`
+notification when automatic redemption is enabled. `redeem` is rejected at config load unless
+`usage_monitor.enabled: true`, and for providers pinned to `usage_source: openusage` (which has no
+itemized reset telemetry). Redeem mode suppresses `redeem_now` only for resets automatic
+redemption will actually attempt before they expire. Every other reset gets `redeem_now` as in
+notify mode, for example when automatic redemption cannot run at all (demo mode or multiple
+accounts of the provider type), or a Claude grant is unclaimable, not usable now, requires a
+limit, or stays in cooldown or retry backoff past its expiry.
+Earlier ordinary reminders still send. Automatic redemption does not require notifications,
+scheduler enablement, or an unpaused provider.
+
+`reset.expiring` includes `provider_account_id`, a human-readable `message`, and string-valued
+`data` fields: `reset_id`, `expires_at` (RFC3339 UTC), `lead` (duration), `action` (`remind` or
+`redeem_now`), and `count`. One notification is sent per distinct expiry; `count` sums remaining
+resets sharing it. `reset_id` is informational (the first credit ID, or `aggregate` when details
+are unavailable or their positive remaining counts disagree with the authoritative aggregate).
+Spent details are ignored. `lead` is the configured threshold; the message describes time
+actually remaining.
+
+Each (provider account, expiry, kind) is claimed persistently before delivery, so restarts and
+switching between aggregate and itemized snapshots do not double-send.
+Missed reminder thresholds produce only the shortest-lead applicable reminder, not a burst.
+Once the expiry action is due, it replaces ordinary reminders for that deadline.
+Expired resets are ignored. Disabled or filtered notifications do not claim notices, so enabling
+`reset.expiring` later can still send relevant reminders. Failed deliveries are not retried.
 
 Notification commands, workspace prepare/finalize hooks, and the **Custom command** harness are
 run through `/bin/sh -lc` on macOS and Linux and through `cmd /C` on Windows. Windows hooks that

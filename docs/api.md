@@ -12,14 +12,11 @@ automatically from the `--config` location or the platform default data director
 (`~/Library/Application Support/Redline` on macOS, `~/.config/redline` on Linux,
 `%AppData%\redline` on Windows).
 
-To open the dashboard in a browser from a source or headless install, visit it once with the
-token as a query parameter, for example `http://127.0.0.1:7436/?access_token=<token>`. Loopback
-hosts only: Redline sets the HttpOnly session cookie and redirects to the URL without the token.
-Treat the original URL containing `access_token` as a secret, since browser history can retain it.
-Without a session cookie or Bearer token, a browser `GET` of `/`, `/dashboard` or `/m` (sent with
-`Accept: text/html`) gets a `401` HTML sign-in page. Other requests without credentials get a JSON
-`401`, except the public pairing routes, which need no token. Remote devices use
-[pairing](mobile.md) instead.
+To sign a browser in from a source or headless install, see [Dashboard](#dashboard). Treat a URL
+containing `access_token` as a secret, since browser history can retain it. Without a session
+cookie or Bearer token, a browser `GET` of `/`, `/dashboard` or `/m` (sent with `Accept: text/html`)
+gets a `401` HTML sign-in page. Other requests without credentials get a JSON `401`, except the
+public pairing routes, which need no token. Remote devices use [pairing](mobile.md) instead.
 
 For a direct API call:
 
@@ -44,6 +41,11 @@ session cookies are Secure. Never expose Redline publicly (for example with Tail
 See [Mobile dashboard setup](mobile.md) for the HTTPS proxy and pairing flow.
 
 ## Dashboard
+
+Without the native app, sign a browser in once by opening `/?access_token=<api-token>` on a
+loopback address (for example `open "http://127.0.0.1:7436/?access_token=$(<api-token)"` from the
+directory holding the token). Redline sets the HttpOnly session cookie and redirects to the clean
+URL; a bare `/` request returns `401` until then.
 
 The dashboard at `/` summarizes current provider allowances, the dispatch queue, recent runs,
 scheduler decisions, and bounded run-log tails. Jobs and execution profiles can be created and
@@ -112,6 +114,52 @@ that restarts without saving its cursor should request a new baseline; it won't 
 
 Run log responses are tail-bounded to 64 KiB and may only resolve regular files beneath the
 configured `run_artifacts_dir`; paths and symlinks that escape that root are rejected.
+
+## Firesale task fields
+
+Task create/update requests accept `dispatch_tier: "firesale"` and `firesale_min_interval`, a
+positive duration string such as `"10m"`. Omit the interval to use the normal cooldown; PATCH
+with `""` clears it. It may be shorter or longer than `min_interval`. Task responses represent
+both intervals as integer nanoseconds. Decision results expose `firesale`, `effective_reset_at`,
+and `effective_reset_source`; automatic scheduler records also retain `provider_firesale` when
+provider usage was evaluated, independently of model-pool tier unlocks.
+
+## Banked reset redemption
+
+Redemption POSTs require the bearer API token; mobile pairing session cookies alone receive **403** (including dry runs). The GET history route still accepts session cookie authentication.
+
+- `POST /v1/providers/{id}/banked-resets/redeem` with `{"dry_run": true}` validates the provider
+  request using a nonexistent reset ID. `{"dry_run": false}` spends the selected one-time reset.
+  Automatic redemption is opt-in via `banked_resets.on_expiry: redeem`
+  ([setup](scheduling.md#redeeming-banked-resets)); this endpoint always performs a manual or
+  dry-run redemption. An optional `expected_reset_id` binds real redemption to
+  a previously confirmed ID; a different current selection returns **409**, names both IDs, and
+  spends nothing. It is ignored for dry runs. Unresolved redemptions are retried before selecting
+  another reset. Completed successes return `replayed: true` and `completed_at` without a new
+  provider call or verification claim.
+- `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
+  first, including pending operations whose idempotency keys survive restarts. An ambiguous
+  request finalized at expiry has outcome `unknown`; check the provider before trying another reset.
+
+Example result:
+
+```json
+{"outcome":"redeemed","code":"reset","reason":"","reset_id":"grant_1","request_id":"a-persisted-key","verified":true,"cleared":["five_hour","weekly"]}
+```
+
+Outcomes are `redeemed`, `nothing_to_reset`, `unavailable`, `cooldown`, `gone`, `failed`, and
+`dry_run_ok`. `cooldown_until` is an optional RFC3339 timestamp; `resets_left` is optional.
+Refill verification compares weekly remaining allowance and the reset boundary after a usage
+refresh. Unverified redemption still returns `redeemed` with a note. HTTP errors cover invalid
+requests, unknown providers, transport/storage failures, and **409** for an in-progress redemption
+or ambiguous local login (multiple configured accounts of the same provider type). Demo servers
+refuse both real and dry-run redemption with **409**, without reading credentials or sending requests.
+
+Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger`
+(`manual`, `automatic`, or `dry_run`), `state` (`pending` or `done`), `outcome`, `code`, `reason`,
+`created_at`, and optional `completed_at`. Transport failures remain pending with failure details
+so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
+sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
 
 ## Related
 
