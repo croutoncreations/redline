@@ -13,11 +13,6 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
-func (d *DB) HasActiveRun(ctx context.Context, providerAccountID string) (bool, error) {
-	count, err := d.ActiveRunCount(ctx, providerAccountID)
-	return count > 0, err
-}
-
 func (d *DB) ActiveRunCount(ctx context.Context, providerAccountID string) (int, error) {
 	var active int
 	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
