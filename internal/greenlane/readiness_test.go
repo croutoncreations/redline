@@ -237,7 +237,7 @@ func TestLiveBodyBlockSurvivesOtherProviderCompletion(t *testing.T) {
 	cfg.RequireAutomatedReview = true
 	p := passingPR()
 	p.HeadSHA = reviewHead
-	p.Reviews = []Review{{ID: 5638297150, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: reviewHead, Body: "Assert the complete retry candidate list"}}
+	p.Reviews = []Review{{ID: 5638297150, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: reviewHead, SubmittedAt: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC), Body: "Assert the complete retry candidate list"}}
 	p.AutomatedReviews = []AutomatedReviewComment{{ID: 43, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z", Body: `<!-- codex-pull-request-review-summary -->
 <!-- codex-review-state:v1 {"code_review":{"commit_sha":"` + reviewHead + `","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":null} -->`}}
 	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
@@ -247,6 +247,10 @@ func TestLiveBodyBlockSurvivesOtherProviderCompletion(t *testing.T) {
 	p.HeadSHA = strings.Repeat("a", 40)
 	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
 		t.Fatal("new head reused stale completion")
+	}
+	p.AutomatedReviews[0].Body = strings.ReplaceAll(p.AutomatedReviews[0].Body, reviewHead, p.HeadSHA)
+	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
+		t.Fatal("new head plus another provider cleared historical body feedback")
 	}
 	// The fix must receive fresh full current-head completion, not an author reply.
 	p.AutomatedReviews = []AutomatedReviewComment{cleanSummary()}

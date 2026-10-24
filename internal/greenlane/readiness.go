@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 func (e *Evaluator) checkPRState(pr PRInfo) RuleResult {
@@ -69,21 +70,22 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		return r
 	}
 	// Review bodies have no GitHub resolution bit. In the live pilot, prose
-	// from a current-head non-author review is unresolved evidence, including
+	// from a non-author review is unresolved evidence, including
 	// bot nitpicks/outside-diff findings and approvals containing caveats.
 	// Do not classify free-form text as harmless or let another clean provider
 	// override it. A new head and fresh completion are needed after a fix.
 	if e.config.RequireAutomatedReview {
 		var bodies []string
 		for _, review := range pr.Reviews {
-			if review.CommitID == pr.HeadSHA && review.State != "DISMISSED" &&
-				!strings.EqualFold(review.User, pr.Author) && strings.TrimSpace(review.Body) != "" {
+			if review.State != "DISMISSED" && !strings.EqualFold(review.User, pr.Author) &&
+				strings.TrimSpace(review.Body) != "" &&
+				(review.CommitID == pr.HeadSHA || !reviewBodySuperseded(pr, review)) {
 				bodies = append(bodies, fmt.Sprintf("%s/%d", review.User, review.ID))
 			}
 		}
 		if len(bodies) > 0 {
 			sort.Strings(bodies)
-			r.Message = "Unclassified current-head review bodies require addressed feedback and fresh review: " + strings.Join(bodies, ", ")
+			r.Message = "Unclassified review bodies require addressed feedback and fresh review: " + strings.Join(bodies, ", ")
 			return r
 		}
 	}
@@ -150,4 +152,36 @@ func (e *Evaluator) checkAuthor(pr PRInfo) RuleResult {
 		}
 	}
 	return r
+}
+
+// Historical review prose is not silently cleared by a push or by another
+// provider. Its own authenticated provider must finish a later full review of
+// the new head. Current-head bodies always block, even with such a summary.
+func reviewBodySuperseded(pr PRInfo, review Review) bool {
+	if review.CommitID == "" || review.SubmittedAt.IsZero() {
+		return false
+	}
+	fresh := pr
+	fresh.AutomatedReviews = nil
+	for _, summary := range pr.AutomatedReviews {
+		if strings.EqualFold(summary.User, review.User) {
+			fresh.AutomatedReviews = append(fresh.AutomatedReviews, summary)
+		}
+	}
+	if !completedAutomatedReview(fresh) {
+		return false
+	}
+	// Completion uses the latest summary, so require that summary to postdate
+	// the finding rather than treating old coverage as a resolution receipt.
+	var latest time.Time
+	for _, summary := range fresh.AutomatedReviews {
+		stamp, err := time.Parse(time.RFC3339, summary.UpdatedAt)
+		if err != nil {
+			return false
+		}
+		if stamp.After(latest) {
+			latest = stamp
+		}
+	}
+	return latest.After(review.SubmittedAt)
 }
