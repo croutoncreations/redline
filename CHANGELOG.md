@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-23
+
 ### Upgrade notes
 
 - The default `notifications.events` list is unchanged (`run.started`, `run.completed`,
