@@ -40,8 +40,14 @@ func TestDispatchCandidatesOrdersByPriorityThenQueueSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) == 0 || got[0].ID != "first-high" {
-		t.Fatalf("candidates = %#v, want first-high first", got)
+	want := []string{"first-high", "second-high", "low"}
+	if len(got) != len(want) {
+		t.Fatalf("candidates = %#v, want IDs %v", got, want)
+	}
+	for i, task := range got {
+		if task.ID != want[i] {
+			t.Fatalf("candidates = %#v, want IDs %v", got, want)
+		}
 	}
 }
 
