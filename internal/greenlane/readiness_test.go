@@ -210,6 +210,7 @@ func TestLiveReviewBodyFeedbackCannotBeBypassed(t *testing.T) {
 	}{
 		{"PR187 nitpick", "coderabbitai[bot]", "COMMENTED", "<!-- coderabbit-ai-generated:v1 -->\n<summary>🧹 Nitpick comments: 1</summary>\nAssert the complete candidate list in the retry-order test.", false},
 		{"outside diff", "coderabbitai[bot]", "COMMENTED", "Outside diff range comments: 1\nFix the missing check", false},
+		{"dismissed feedback", "coderabbitai[bot]", "DISMISSED", "Fix the missing check", false},
 		{"unknown provider format", "other[bot]", "COMMENTED", "Needs a fix", false},
 		{"approval with feedback", "reviewer", "APPROVED", "Looks good, but fix the order assertion", false},
 		{"empty reply", "coderabbitai[bot]", "COMMENTED", "", true},

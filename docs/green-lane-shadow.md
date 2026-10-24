@@ -201,7 +201,8 @@ bypass this block. Address the feedback in a new head and obtain fresh full
 current-head automated completion; an empty reply or author response alone
 never authorizes merging. Historical review-body prose only clears after that same authenticated provider
 publishes a later full completion for the new head. A push or another provider
-cannot silently clear it. This deliberately also defers benign review prose.
+cannot silently clear it. Dismissing a review also does not resolve its body.
+This deliberately also defers benign review prose.
 All review bodies remain bound into the twice-collected and premerge-revalidated
 review snapshot, so body edits invalidate old eligibility.
 
