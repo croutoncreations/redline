@@ -5,22 +5,23 @@ const main='a'.repeat(40), head='b'.repeat(40), base='c'.repeat(40), merged='d'.
 const names=['actionlint','go','homebrew','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
 function fixture() {
   const f={state:'active',tip:main,prs:[1,2],merges:[],reads:0,enabledReads:0,dispatches:[],valid:true,behind:0,
-    writers:[{login:'jfox85',permissions:{push:true,maintain:true,admin:true}}],protection:{isAdminEnforced:true,requiresStrictStatusChecks:true,requiresStatusChecks:true,allowsForcePushes:false,
-      allowsDeletions:false,requiresConversationResolution:true,requiredStatusChecks:names.map(context=>({context,app:{databaseId:15368}}))}};
+    writers:[{login:'jfox85',permissions:{push:true,maintain:true,admin:true}}],protection:{protected:true,protection:{enabled:true,required_status_checks:{enforcement_level:"everyone",checks:names.map(context=>({context,app_id:15368}))}}}};
   f.pr=n=>({number:n,state:'open',draft:false,mergeable:true,updated_at:'now',labels:[],head:{sha:head,repo:{full_name:'croutoncreations/redline'}},base:{sha:base,ref:'main'}});
   f.result=n=>({repository:'croutoncreations/redline',pr_number:n,head_sha:head,base_sha:base,base_branch:'main',pr_updated_at:'now',evaluated_at:new Date().toISOString(),verdict:'would_merge',rules:[{pass:true}]});
-  f.github={paginate:async method=>method === f.github.rest.repos.listCollaborators ? f.writers : f.prs.map(f.pr),graphql:async()=>({repository:{ref:{branchProtectionRule:f.protection}}}),rest:{
+  f.github={paginate:async()=>f.prs.map(f.pr),graphql:async()=>{throw new Error('branch administration is inaccessible to GITHUB_TOKEN')},rest:{
     actions:{createWorkflowDispatch:async args=>{f.dispatches.push(args);if(f.dispatchError)throw new Error('dispatch failed')},getWorkflow:async()=>{f.enabledReads++;return {data:{state:f.state}}}},git:{getRef:async()=>({data:{object:{sha:f.tip}}})},
-    repos:{listCollaborators:()=>{},compareCommitsWithBasehead:async args=>{assert.ok(args.basehead.startsWith(`${main}...`));return {data:{behind_by:f.behind,status:'ahead',merge_base_commit:{sha:f.behind ? base : main}}}}},
+    repos:{getCollaboratorPermissionLevel:async({username})=>{if(f.permissionError)throw new Error('permission inaccessible');return {data:f.permissionResult ? f.permissionResult(username) : {permission:username==='jfox85' ? 'admin' : username==='reader' ? 'read' : 'write',user:{login:username}}}},getBranch:async()=>({data:f.protection ?? {}}),listCollaborators:()=>{},compareCommitsWithBasehead:async args=>{assert.ok(args.basehead.startsWith(`${main}...`));return {data:{behind_by:f.behind,status:'ahead',merge_base_commit:{sha:f.behind ? base : main}}}}},
     pulls:{get:async({pull_number:n})=>{f.reads++;return {data:f.pr(n)}},merge:async args=>{f.merges.push(args);if(f.mergeError)throw new Error('timeout');return {data:{merged:!f.rejected,sha:merged}}}}
   }};
+  f.accessAudit={paginate:async method=>{assert.equal(method,f.accessAudit.rest.repos.listCollaborators);return f.writers},rest:{repos:{listCollaborators:f.github.rest.repos.listCollaborators,getCollaboratorPermissionLevel:f.github.rest.repos.getCollaboratorPermissionLevel}}};
+  delete f.github.rest.repos.listCollaborators;delete f.github.rest.repos.getCollaboratorPermissionLevel;
   f.context={repo:{owner:'croutoncreations',repo:'redline'},sha:main,ref:'refs/heads/main',eventName:'schedule'};
   f.run=(_path,_args,opts)=>{assert.equal(opts.env.CONFIG_PATH,'');assert.equal(opts.env.REQUIRE_AUTOMATED_REVIEW,'true');assert.equal(opts.env.EXPECTED_HEAD_SHA,head);return JSON.stringify(f.result(Number(opts.env.PR_NUMBER)))};
   return f;
 }
 async function run(f) {
   const before=process.env.LIVE_PILOT_ENABLED; process.env.LIVE_PILOT_ENABLED=f.optin ?? 'true';
-  try { return await live({github:f.github,context:f.context,core:{info:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
+  try { return await live({github:f.github,accessAudit:f.accessAudit,context:f.context,core:{info:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
   finally {if(before===undefined)delete process.env.LIVE_PILOT_ENABLED;else process.env.LIVE_PILOT_ENABLED=before}
 }
 test('one exact-head squash merge even with multiple eligible PRs; old recorded base is not main tip',async()=>{
@@ -38,8 +39,8 @@ for(const [name,edit] of Object.entries({
  threadActivityAfterSnapshot:f=>f.onValidate=()=>{const p=f.pr;f.pr=n=>({...p(n),updated_at:'later'})}
 }))test(`no merge: ${name}`,async()=>{const f=fixture();edit(f);await run(f);assert.equal(f.merges.length,0)});
 for(const [name,edit] of Object.entries({
- untrustedWriter:f=>f.writers.push({login:'other',permissions:{push:true,maintain:false,admin:false}}),missingWriterPermissions:f=>f.writers.push({login:'other'}),writerAddedDuringEvaluation:f=>f.onValidate=()=>f.writers.push({login:'other',permissions:{push:true}}),missingProtection:f=>f.protection=null,nonStrict:f=>f.protection.requiresStrictStatusChecks=false,adminBypass:f=>f.protection.isAdminEnforced=false,
- spoofedSource:f=>f.protection.requiredStatusChecks[0].app.databaseId=1,missingCI:f=>f.protection.requiredStatusChecks.pop(),
+ untrustedWriter:f=>f.writers.push({login:'other',permissions:{push:true,maintain:false,admin:false}}),missingWriterPermissions:f=>f.writers.push({login:'other'}),writerAddedDuringEvaluation:f=>f.onValidate=()=>f.writers.push({login:'other',permissions:{push:true}}),missingProtection:f=>f.protection=null,notProtected:f=>f.protection.protected=false,adminBypass:f=>f.protection.protection.required_status_checks.enforcement_level='non_admins',
+ spoofedSource:f=>f.protection.protection.required_status_checks.checks[0].app_id=1,missingCI:f=>f.protection.protection.required_status_checks.checks.pop(),
  wrongRepo:f=>f.context.repo.repo='other',untrustedRef:f=>f.context.ref='refs/pull/1/merge',reviewEvent:f=>f.context.eventName='pull_request_review',
  protectionChanges:f=>f.onValidate=()=>f.protection=null,variableReadFailure:f=>f.github.rest.actions.getWorkflow=async()=>{throw new Error('403')}
 }))test(`fails closed: ${name}`,async()=>{const f=fixture();edit(f);await assert.rejects(run(f));assert.equal(f.merges.length,0)});
@@ -49,3 +50,39 @@ test('rejected merge never advances to second candidate',async()=>{const f=fixtu
 test('post-merge dispatch failure preserves confirmed merge and never retries merge',async()=>{const f=fixture();f.dispatchError=true;await assert.rejects(run(f),/dispatch failed/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merged');assert.equal(f.report.merged[0].commit,merged);assert.equal(f.dispatches.length,1)});
 
 test('read-only collaborators cannot provide branch-write authorization',async()=>{const f=fixture();f.writers.push({login:'reader',permissions:{push:false,maintain:false,admin:false}});await run(f);assert.equal(f.merges.length,1)});
+
+test('installation-token collaborator list can omit flags when explicit permission proves owner control',async()=>{
+ const f=fixture();f.writers=[{login:'jfox85'},{login:'reader'}];await run(f);assert.equal(f.merges.length,1);
+ assert.equal(f.report.writer_snapshots.length,2);assert.equal(f.report.writer_snapshots[0][0].permission,'admin');
+});
+for(const [name,edit] of Object.entries({
+ missingOwner:f=>f.writers=[{login:'reader'}],emptyList:f=>f.writers=[],
+ inaccessible:f=>f.permissionError=true,unknown:f=>f.permissionResult=login=>({permission:'unknown',user:{login}}),
+ missingUser:f=>f.permissionResult=()=>({permission:'admin'}),wrongUser:f=>f.permissionResult=()=>({permission:'admin',user:{login:'other'}}),
+ ownerReadOnly:f=>f.permissionResult=login=>({permission:'read',user:{login}}),
+ hiddenWriter:f=>{f.writers.push({login:'hidden'});f.permissionResult=login=>({permission:login==='jfox85'?'admin':'write',user:{login}})},
+ changedBeforeMerge:f=>f.onValidate=()=>f.permissionResult=login=>({permission:'read',user:{login}})
+}))test(`explicit writer permission fails closed: ${name}`,async()=>{
+ const f=fixture();edit(f);await assert.rejects(run(f));assert.equal(f.merges.length,0);assert.ok(f.report.writer_snapshots.length>=1);
+});
+
+test('missing audit credential fails closed without falling back to workflow token',async()=>{
+ const f=fixture();delete f.accessAudit;await assert.rejects(run(f),/Missing read-only/);assert.equal(f.merges.length,0);
+});
+test('expired audit credential cannot authorize a merge',async()=>{
+ const f=fixture();f.accessAudit.paginate=async()=>{throw new Error('401')};await assert.rejects(run(f),/401/);assert.equal(f.merges.length,0);
+});
+for(const present of [true,false])test(`workflow isolates audit token and removes it before evaluator: ${present}`,async()=>{
+ const fs=require('node:fs');
+ const yaml=fs.readFileSync(require('node:path').join(__dirname,'../workflows/green-lane-live.yml'),'utf8');
+ const script=yaml.match(/          script: \|\n((?:            .*\n)+)/)[1].replace(/^            /gm,'');
+ const processMock={env:present?{GREEN_LANE_ACCESS_AUDIT_TOKEN:'test-only-audit-credential'}:{}};
+ const normal={constructor:class AuditClient{constructor(opts){assert.equal(opts.auth,'test-only-audit-credential');assert.equal(opts.request.retries,0)}}};
+ let called=false;
+ const requireMock=path=>{assert.equal(path,'./.github/green-lane/live.cjs');return async args=>{
+  called=true;assert.equal(args.github,normal);assert.equal(processMock.env.GREEN_LANE_ACCESS_AUDIT_TOKEN,undefined);
+  if(present)assert.notEqual(args.accessAudit,normal);else assert.equal(args.accessAudit,undefined);
+ }};
+ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+ await new AsyncFunction('github','context','core','require','process',script)(normal,{}, {},requireMock,processMock);assert.ok(called);
+});
