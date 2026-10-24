@@ -81,22 +81,23 @@ type dashboardDecision struct {
 // dashboardTask intentionally excludes prompts and harness commands. The dashboard is
 // operational telemetry, not a second task-definition API.
 type dashboardTask struct {
-	ID                 string              `json:"id"`
-	Name               string              `json:"name"`
-	Priority           int                 `json:"priority"`
-	Type               domain.TaskType     `json:"type"`
-	State              domain.TaskState    `json:"state"`
-	Enabled            bool                `json:"enabled"`
-	ExecutionProfileID string              `json:"execution_profile_id"`
-	ProviderAccountID  string              `json:"provider_account_id"`
-	HarnessType        string              `json:"harness_type"`
-	Model              string              `json:"model,omitempty"`
-	WorkspaceProvider  string              `json:"workspace_provider"`
-	MinInterval        time.Duration       `json:"min_interval"`
-	RequireRepoChange  bool                `json:"require_repo_change"`
-	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
-	LastStartedAt      *time.Time          `json:"last_started_at,omitempty"`
-	LastCompletedAt    *time.Time          `json:"last_completed_at,omitempty"`
+	ID                  string              `json:"id"`
+	Name                string              `json:"name"`
+	Priority            int                 `json:"priority"`
+	Type                domain.TaskType     `json:"type"`
+	State               domain.TaskState    `json:"state"`
+	Enabled             bool                `json:"enabled"`
+	ExecutionProfileID  string              `json:"execution_profile_id"`
+	ProviderAccountID   string              `json:"provider_account_id"`
+	HarnessType         string              `json:"harness_type"`
+	Model               string              `json:"model,omitempty"`
+	WorkspaceProvider   string              `json:"workspace_provider"`
+	MinInterval         time.Duration       `json:"min_interval"`
+	FiresaleMinInterval time.Duration       `json:"firesale_min_interval"`
+	RequireRepoChange   bool                `json:"require_repo_change"`
+	DispatchTier        domain.DispatchTier `json:"dispatch_tier"`
+	LastStartedAt       *time.Time          `json:"last_started_at,omitempty"`
+	LastCompletedAt     *time.Time          `json:"last_completed_at,omitempty"`
 }
 
 func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +340,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			ID: task.ID, Name: task.Name, Priority: task.Priority, Type: task.Type, State: task.State, Enabled: task.Enabled,
 			ExecutionProfileID: task.ExecutionProfileID, ProviderAccountID: profile.ProviderAccountID,
 			HarnessType: profile.HarnessType, Model: profile.Model, WorkspaceProvider: profile.WorkspaceProvider,
-			MinInterval: task.MinInterval, RequireRepoChange: task.RequireRepoChange,
+			MinInterval: task.MinInterval, FiresaleMinInterval: task.FiresaleMinInterval, RequireRepoChange: task.RequireRepoChange,
 			DispatchTier:  task.DispatchTier,
 			LastStartedAt: task.LastStartedAt, LastCompletedAt: task.LastCompletedAt,
 		})
@@ -361,15 +362,7 @@ func (s *Server) projectedTrigger(
 	snapshot decision.UsageSnapshot,
 	selection providerPolicySelection,
 ) (*time.Time, error) {
-	thresholds, err := selection.Definition.DecisionThresholds()
-	if err != nil {
-		return nil, err
-	}
-	maxAge, err := s.config.SnapshotAge()
-	if err != nil {
-		return nil, err
-	}
-	estimate, err := s.calibration(ctx, providerID)
+	input, err := s.providerDecisionInput(ctx, providerID, snapshot, selection)
 	if err != nil {
 		return nil, err
 	}
@@ -377,11 +370,5 @@ func (s *Server) projectedTrigger(
 	if err != nil {
 		return nil, err
 	}
-	return decision.ProjectTriggerAt(decision.Input{
-		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
-		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
-		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
-		PaceGapTrigger: selection.Definition.PaceGapTrigger,
-		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-	}, pollInterval), nil
+	return decision.ProjectTriggerAt(input, pollInterval), nil
 }

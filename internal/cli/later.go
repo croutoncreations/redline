@@ -28,20 +28,21 @@ const maxInlinePromptBytes = 256 * 1024
 // taskFlagValues holds the flag-based task definition shared by `task add`
 // (without --file) and `later`.
 type taskFlagValues struct {
-	name         string
-	prompt       string
-	promptFile   string
-	profile      string
-	defaultPro   string
-	harness      string
-	cwd          string
-	taskType     string
-	tier         string
-	priority     int
-	interval     string
-	disabled     bool
-	jsonOutput   bool
-	allowDefault bool
+	name             string
+	prompt           string
+	promptFile       string
+	profile          string
+	defaultPro       string
+	harness          string
+	cwd              string
+	taskType         string
+	tier             string
+	priority         int
+	interval         string
+	firesaleInterval string
+	disabled         bool
+	jsonOutput       bool
+	allowDefault     bool
 }
 
 type laterResult struct {
@@ -66,7 +67,8 @@ func runTaskAddFlags(client apiclient.Client, args []string, stdin io.Reader, st
 	flags.StringVar(&values.harness, "harness", "claude-code", "harness type matched by --profile auto")
 	flags.StringVar(&values.cwd, "cwd", "", "directory used by --profile auto (default: current directory)")
 	flags.StringVar(&values.taskType, "type", string(domain.OneOff), "one_off or recurring")
-	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, or expiring")
+	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, expiring, or firesale")
+	flags.StringVar(&values.firesaleInterval, "firesale-interval", "", "override the minimum interval during provider firesale, such as 10m")
 	flags.IntVar(&values.priority, "priority", 50, "priority within the unlocked tier")
 	flags.StringVar(&values.interval, "min-interval", "", "minimum interval between recurring runs, such as 6h or 7d")
 	flags.BoolVar(&values.disabled, "disabled", false, "create the task disabled as a draft")
@@ -158,7 +160,8 @@ func runLater(client apiclient.Client, args []string, stdin io.Reader, stdout, s
 	flags.BoolVar(&values.allowDefault, "allow-default-profile", false, "acknowledge routing to a possibly unrelated repository")
 	flags.StringVar(&values.harness, "harness", "claude-code", "harness type matched by --profile auto")
 	flags.StringVar(&values.cwd, "cwd", "", "directory used to find the repository (default: current directory)")
-	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, or expiring")
+	flags.StringVar(&values.tier, "tier", string(domain.DispatchBehind), "behind, well_behind, expiring, or firesale")
+	flags.StringVar(&values.firesaleInterval, "firesale-interval", "", "override the minimum interval during provider firesale, such as 10m")
 	flags.IntVar(&values.priority, "priority", 50, "priority within the unlocked tier")
 	flags.BoolVar(&values.jsonOutput, "json", false, "emit JSON")
 	flags.Usage = func() {
@@ -235,6 +238,9 @@ func createTaskFromFlags(ctx context.Context, client apiclient.Client, values ta
 	}
 	if values.interval != "" {
 		body["min_interval"] = values.interval
+	}
+	if values.firesaleInterval != "" {
+		body["firesale_min_interval"] = values.firesaleInterval
 	}
 	if values.disabled {
 		body["enabled"] = false

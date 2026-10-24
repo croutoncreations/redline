@@ -42,10 +42,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LIVE_PILOT_ENABLED: ${{ vars.GREEN_LANE_LIVE_ENABLED }}
+          GREEN_LANE_ACCESS_AUDIT_TOKEN: ${{ secrets.GREEN_LANE_ACCESS_AUDIT_TOKEN }}
         with:
           retries: 0
           script: |
-            await require('./.github/green-lane/live.cjs')({github,context,core});
+            const auditToken = process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;
+            delete process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;
+            const accessAudit = auditToken ? new github.constructor({auth:auditToken,request:{retries:0}}) : undefined;
+            await require('./.github/green-lane/live.cjs')({github,accessAudit,context,core});
       - uses: actions/upload-artifact@v4
         if: always()
         with:
