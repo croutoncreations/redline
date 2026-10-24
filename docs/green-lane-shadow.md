@@ -209,7 +209,10 @@ reviewed change to the pilot.
 The ordinary workflow token returned an empty collaborator list in the live
 probe. Writer enumeration and explicit permission reads therefore use a separate
 fine-grained personal access token stored as `GREEN_LANE_ACCESS_AUDIT_TOKEN` in
-Redline Actions secrets. Select resource owner `croutoncreations`, only the
+Redline Actions secrets. Create it as `jfox85`, an organization member with admin
+access; this endpoint requires the token's authenticated user to be an organization
+member with write, maintain or admin access (a read-only or outside collaborator
+cannot perform this audit). Select resource owner `croutoncreations`, only the
 `redline` repository, and only **Metadata: read**; use a 30-day expiration for the
 pilot. No organization permissions, contents access or write permissions are
 needed. The workflow uses this client only for the two access-audit APIs, while
