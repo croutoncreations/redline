@@ -192,7 +192,21 @@ on current main, which may have advanced further if another actor merged.
 
 For live merges, the evaluator additionally requires an authenticated current-head
 Codex/CodeRabbit completion summary; generic human COMMENTED/APPROVED reviews do
-not substitute for this. The worker also enumerates all repository collaborators
+not substitute for this. A nonempty current-head review body from anyone other
+than the PR author blocks the live evaluator, even if it is a bot `COMMENTED`
+publication or an approval. Review-body prose has no resolution bit, so the
+pilot does not guess whether a nitpick, outside-diff finding, caveat, or unknown
+format is harmless. A positive completion summary from any provider cannot
+bypass this block. Address the feedback in a new head and obtain fresh full
+current-head automated completion; an empty reply or author response alone
+never authorizes merging. Historical review-body prose only clears after that same authenticated provider
+publishes a later full completion for the new head. A push or another provider
+cannot silently clear it. Dismissing a review also does not resolve its body.
+This deliberately also defers benign review prose.
+All review bodies remain bound into the twice-collected and premerge-revalidated
+review snapshot, so body edits invalidate old eligibility.
+
+The worker also enumerates all repository collaborators
 at start and immediately before merging. Only `jfox85` may have push, maintain or
 admin permission during this single-owner pilot. Additional read-only users are
 fine; additional writers or unavailable permission evidence stop the pilot. The

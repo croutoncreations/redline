@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -904,9 +905,9 @@ func TestRetryControlRequeuesFailedTaskAtQueueBottom(t *testing.T) {
 	for i, task := range eligible {
 		ids[i] = task.ID
 	}
-	last := ids[len(ids)-1]
-	if last != "failed-task" {
-		t.Fatalf("eligible order = %v; want failed-task last (retried tasks go to queue bottom)", ids)
+	want := []string{"ahead-1", "ahead-2", "failed-task"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("eligible order = %v; want %v (retried tasks go to queue bottom)", ids, want)
 	}
 
 	// --- retry on a non-failed (queued) task must return ErrNotFound ---
