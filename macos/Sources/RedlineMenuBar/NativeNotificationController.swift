@@ -50,10 +50,13 @@ final class NativeNotificationController {
             content.body = event.message
             content.sound = event.hasSound ? .default : nil
             content.userInfo = ["open_dashboard": true]
-            do {
-                try await center.add(UNNotificationRequest(identifier: event.identifier, content: content, trigger: nil))
-            } catch {
-                NSLog("Redline notification %@ failed: %@", event.identifier, error.localizedDescription)
+            let identifier = event.identifier
+            // Completion-handler form, like deliver(_:taskName:): the async overload sends the
+            // main-actor UNUserNotificationCenter across isolation under strict concurrency.
+            center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { error in
+                if let error {
+                    NSLog("Redline notification %@ failed: %@", identifier, error.localizedDescription)
+                }
             }
         }
         if let highestID = deliveryTracker.highestID {
