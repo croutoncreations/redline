@@ -43,24 +43,55 @@ final class NativeNotificationController {
         guard authorized, !polling else { return }
         polling = true
         defer { polling = false }
-        guard let deliveries = try? await client.notifications() else { return }
-        for event in deliveryTracker.observe(deliveries) {
-            let content = UNMutableNotificationContent()
-            content.title = event.title
-            content.body = event.message
-            content.sound = event.hasSound ? .default : nil
-            content.userInfo = ["open_dashboard": true]
-            let identifier = event.identifier
-            // Completion-handler form, like deliver(_:taskName:): the async overload sends the
-            // main-actor UNUserNotificationCenter across isolation under strict concurrency.
-            center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { error in
+        if deliveryTracker.highestID == nil {
+            guard let deliveries = try? await client.notifications() else { return }
+            deliveryTracker.seed(deliveries)
+            persistDeliveryCursor()
+            return
+        }
+        let limit = DeliveryNotificationTracker.pageLimit
+        for _ in 0..<DeliveryNotificationTracker.maxPagesPerPoll {
+            guard let deliveries = try? await client.notifications(afterID: deliveryTracker.highestID, limit: limit) else { return }
+            var outcomes: [(id: Int64, handled: Bool)] = []
+            for event in deliveryTracker.pending(deliveries) {
+                let handled: Bool
+                if event.shouldNotify {
+                    handled = await enqueue(event)
+                } else {
+                    handled = true
+                }
+                outcomes.append((id: event.id, handled: handled))
+                if !handled { break }
+            }
+            let allHandled = deliveryTracker.record(outcomes)
+            persistDeliveryCursor()
+            if !allHandled || deliveries.count < limit { return }
+        }
+    }
+
+    private func persistDeliveryCursor() {
+        if let highestID = deliveryTracker.highestID {
+            defaults.set(highestID, forKey: Self.deliveryIDKey)
+        }
+    }
+
+    private func enqueue(_ event: NotificationDelivery) async -> Bool {
+        let content = UNMutableNotificationContent()
+        content.title = event.title
+        content.body = event.message
+        content.sound = event.hasSound ? .default : nil
+        content.userInfo = ["open_dashboard": true]
+        let identifier = event.identifier
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        // Call from the main actor inside the continuation: the async add overload
+        // sends the non-Sendable center across isolation under strict concurrency.
+        return await withCheckedContinuation { continuation in
+            center.add(request) { error in
                 if let error {
                     NSLog("Redline notification %@ failed: %@", identifier, error.localizedDescription)
                 }
+                continuation.resume(returning: error == nil)
             }
-        }
-        if let highestID = deliveryTracker.highestID {
-            defaults.set(highestID, forKey: Self.deliveryIDKey)
         }
     }
 

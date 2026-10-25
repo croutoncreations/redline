@@ -112,6 +112,49 @@ func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	}
 }
 
+func TestRedeemBankedResetFiveHourNotification(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint("explicit cleared=", explicit), func(t *testing.T) {
+			s, db, pre := redemptionServer(t, "claude")
+			pre.BankedResetDetails[0].Clears = []string{"five_hour"}
+			pre.ObservedAt = pre.ObservedAt.Add(time.Millisecond)
+			pre.Short = &decision.UsageWindow{Remaining: .1, ResetsAt: pre.ObservedAt.Add(time.Hour)}
+			if err := db.SaveSnapshot(t.Context(), pre, nil); err != nil {
+				t.Fatal(err)
+			}
+			post := pre
+			post.Short = &decision.UsageWindow{Remaining: .8, ResetsAt: pre.Short.ResetsAt}
+			post.ObservedAt = pre.ObservedAt.Add(time.Second)
+			now := pre.ObservedAt
+			s.now = func() time.Time { return now }
+			fresh := freshRedemptionSource{fetch: func() decision.UsageSnapshot {
+				now = post.ObservedAt
+				return post
+			}}
+			s.usageSources = usage.NewManager(fresh, fresh, s.now)
+			notifier := &redemptionNotifier{}
+			s.notifier = notifier
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "short-key"}
+			}, redeem: func(nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+				result := nativeusage.RedeemResult{Outcome: "redeemed"}
+				if explicit {
+					result.Cleared = []string{"five_hour"}
+				}
+				return result, nil
+			}}
+			result, err := s.RedeemBankedReset(t.Context(), "main", "manual", false)
+			if err != nil || !result.Verified || len(notifier.events) != 1 {
+				t.Fatalf("result=%+v events=%+v err=%v", result, notifier.events, err)
+			}
+			event := notifier.events[0]
+			if event.Data["cleared"] != "five_hour" || event.Data["five_hour_remaining"] != "0.8" || event.Message != "5-hour window refilled (now 80% remaining)." {
+				t.Fatalf("event=%+v", event)
+			}
+		})
+	}
+}
+
 func TestRedeemBankedResetSingleFlightAndAuthRoutes(t *testing.T) {
 	s, db, _ := redemptionServer(t, "codex")
 	entered := make(chan struct{})

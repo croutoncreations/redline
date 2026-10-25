@@ -654,7 +654,18 @@ func (s *Server) healthDetails(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	deliveries, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	var deliveries []domain.NotificationDelivery
+	var err error
+	if r.URL.Query().Has("after_id") {
+		afterID, parseErr := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be an int64"})
+			return
+		}
+		deliveries, err = s.store.ListNotificationDeliveriesAfter(r.Context(), afterID, limit)
+	} else {
+		deliveries, err = s.store.ListNotificationDeliveries(r.Context(), limit)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
