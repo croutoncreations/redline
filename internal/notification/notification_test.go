@@ -32,6 +32,37 @@ func TestCommandSinkSendsJSONOnStdinAndMetadataInEnvironment(t *testing.T) {
 	}
 }
 
+func TestRecordOnlyNotifications(t *testing.T) {
+	store := &fakeNotificationStore{}
+	s := notification.Service{Enabled: true, Events: map[string]bool{domain.EventResetExpiring: true}, Store: store, Sink: notification.CommandSink{}}
+	if err := s.Notify(t.Context(), domain.NotificationEvent{Type: domain.EventResetExpiring}); err != nil || store.status != "delivered" {
+		t.Fatalf("err=%v store=%+v", err, store)
+	}
+}
+
+func TestExplicitTestBypassesSubscriptionsButNotDisabled(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		store := &fakeNotificationStore{}
+		s := notification.Service{Enabled: enabled, Store: store, Sink: notification.CommandSink{}}
+		record, err := s.Test(t.Context(), domain.NotificationEvent{Type: domain.EventResetExpiring})
+		if enabled && (err != nil || record.ID != 1 || record.Status != "delivered" || !store.created) {
+			t.Fatalf("record=%+v err=%v store=%+v", record, err, store)
+		}
+		if !enabled && (err == nil || store.created) {
+			t.Fatalf("disabled record=%+v err=%v", record, err)
+		}
+	}
+}
+
+func TestExplicitTestReturnsFailedDelivery(t *testing.T) {
+	store := &fakeNotificationStore{}
+	s := notification.Service{Enabled: true, Store: store, Sink: failingSink{}}
+	record, err := s.Test(t.Context(), domain.NotificationEvent{Type: domain.EventResetExpiring})
+	if err == nil || record.ID != 1 || record.Status != "failed" || record.LastError != "offline" || store.status != "failed" {
+		t.Fatalf("record=%+v err=%v store=%+v", record, err, store)
+	}
+}
+
 func TestServicePersistsFailedDelivery(t *testing.T) {
 	store := &fakeNotificationStore{}
 	service := notification.Service{

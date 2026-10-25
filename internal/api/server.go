@@ -301,6 +301,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
+	mux.HandleFunc("POST /v1/notifications/test", server.testNotification)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
@@ -2168,14 +2169,16 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		}
 		event := domain.NotificationEvent{
 			Version: 1, Type: eventType, OccurredAt: s.now().UTC(), ProviderAccountID: provider,
-			Message: "Redline " + eventType,
 			Data: map[string]string{
-				"pace_gap":           strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
-				"overflow":           strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
-				"effective_reset_at": response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
-				"unlocked_tier":      string(response.Result.UnlockedTier),
+				"pace_gap":               strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
+				"overflow":               strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
+				"effective_reset_at":     response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
+				"effective_reset_source": string(response.Result.EffectiveResetSource),
+				"unlocked_tier":          string(response.Result.UnlockedTier),
 			},
 		}
+		event.Data["overflow_available"] = strconv.FormatBool(response.Result.Mode == decision.ModeSlots)
+		event = notification.WithMessage(event, s.config.Providers[provider].Provider)
 		if notifyErr := s.notifier.Notify(ctx, event); notifyErr != nil {
 			log.Printf("redline %s firesale notification failed: %v", provider, notifyErr)
 		}

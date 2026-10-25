@@ -107,7 +107,7 @@ func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	if latest.Weekly.Remaining != .9 {
 		t.Fatal(latest)
 	}
-	if len(notifier.events) != 2 || notifier.events[1].Type != "reset.redeemed" || notifier.events[1].Data["verified"] != "true" {
+	if len(notifier.events) != 2 || notifier.events[1].Type != "reset.redeemed" || notifier.events[1].Data["verified"] != "true" || notifier.events[1].Data["weekly_remaining"] != "0.9" || notifier.events[1].Title != "Claude reset redeemed" || notifier.events[1].Message != "Weekly allowance refilled (now 90% remaining)." {
 		t.Fatal(notifier.events)
 	}
 }

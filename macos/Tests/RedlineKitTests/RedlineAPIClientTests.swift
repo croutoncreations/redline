@@ -50,6 +50,8 @@ private final class RetryStubURLProtocol: URLProtocol, @unchecked Sendable {
         let body: Data
         if request.url!.path.hasSuffix("/logs") {
             body = Data(#"{"content":"hello\n","size_bytes":6,"truncated":false}"#.utf8)
+        } else if request.url!.path.hasSuffix("/notifications") {
+            body = Data(#"[{"id":42,"event_type":"reset.expiring","payload":{"title":"Test: Codex banked reset expiring","message":"1 reset expires in 24h.","data":{"test":"true"}}}]"#.utf8)
         } else if request.url!.path.hasSuffix("/refresh") {
             body = Data(#"{"weekly":{"remaining":0.55},"allowances":[],"source":"openusage"}"#.utf8)
         } else if request.url!.path.hasSuffix("/read") {
@@ -68,7 +70,12 @@ private final class RetryStubURLProtocol: URLProtocol, @unchecked Sendable {
     try await client.markRunRead("run/one")
     #expect(usage.weekly?.remaining == 0.55)
     #expect(log.content == "hello\n")
-    #expect(requests.count == 4)
+    let notifications = try await client.notifications()
+    #expect(notifications.first?.id == 42)
+    #expect(notifications.first?.title == "Test: Codex banked reset expiring")
+    #expect(requests.count == 5)
+    #expect(requests[4].0 == "GET")
+    #expect(requests[4].1 == "http://127.0.0.1:7436/v1/notifications")
     #expect(requests[0].0 == "POST")
     #expect(requests[0].1 == "http://127.0.0.1:7436/v1/providers/codex%20main/pause")
     #expect(requests[1].0 == "POST")

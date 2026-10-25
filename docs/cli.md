@@ -164,7 +164,7 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
 `calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
 `scheduler status|history|attempts` commands print JSON on success. `status`, `decision`,
-`usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
+`usage refresh`, `task add`, `later`, `reset redeem`, `notification test`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`. Usage, validation, and API errors print a plain-text error to stderr and exit non-zero.
 Some results are reported as JSON instead: `decision --json` exits 2 when the decision is unknown,
 `reset redeem --json` exits 3, 4, 5, or 1 for outcomes other than `redeemed` and `dry_run_ok`, and
@@ -174,7 +174,19 @@ Some results are reported as JSON instead: `decision --json` exits 2 when the de
 
 ```bash
 redline notification list
+redline notification test [--event TYPE] [--provider ID] [--json]
+redline notification test --event all
 ```
+
+The test command sends synthetic data only; it never contacts providers or redeems a reset.
+Defaults: `reset.expiring`, first Codex account or otherwise first configured account (sorted by
+ID). Supported types: `run.started`, `run.completed`, `run.failed`, `scheduler.error`,
+`reset.expiring`, `reset.redeemed`, `reset.redeem_failed`, `firesale.started`, `firesale.ended`.
+`all` sends one of each about a second apart. Output includes the title/message and delivery
+status; `--json` returns the delivery record (an array for `all`). Failed deliveries exit 1.
+Explicit tests bypass `notifications.events`, but require `notifications.enabled: true` and the
+local bearer API token. An empty `command` records deliveries for native Mac alerts without an
+external hook. See [notifications](runs-and-notifications.md#notifications).
 
 ## Mobile pairing
 
