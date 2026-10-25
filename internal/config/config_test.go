@@ -303,13 +303,13 @@ notifications:
 	}
 }
 
-func TestEnabledNotificationsRequireCommandAndKnownEvents(t *testing.T) {
+func TestEnabledNotificationsAllowRecordOnlyAndRequireKnownEvents(t *testing.T) {
 	missingCommand := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 notifications:
   enabled: true
   events: [run.completed]`, 1)
-	if _, err := config.Load(writeConfig(t, missingCommand)); err == nil {
-		t.Fatal("expected missing command error")
+	if _, err := config.Load(writeConfig(t, missingCommand)); err != nil {
+		t.Fatalf("record-only notifications: %v", err)
 	}
 	unknownEvent := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 notifications:

@@ -1,7 +1,7 @@
 # CLI reference
 
-Every `redline` command except `serve`, `mcp`, `demo`, and the standalone read-only
-`reset preview` is a client of the local HTTP API.
+Every `redline` command except `version`, `serve`, `demo`, `token rotate`, and the
+standalone read-only `reset preview` is a client of the local HTTP API.
 The default API is `http://127.0.0.1:7436`; override it with `--api` before the subcommand:
 
 ```bash
@@ -38,6 +38,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
+redline --config redline.yaml token rotate --yes          # without --yes only warns; with it, replaces the token file; restart Redline before old browser sessions and tokens stop working (see mobile.md)
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
@@ -88,6 +89,7 @@ echo "Add table tests for the parser." | redline task add --name "Parser tests" 
 redline task list
 redline task enable add-tests
 redline task disable add-tests
+redline task retry add-tests
 redline task dispatch add-tests
 redline candidates --provider codex-main
 ```
@@ -141,6 +143,7 @@ redline resume --provider codex-main
 redline run list
 redline run show <run-id>
 redline run events <run-id>
+redline run events <run-id> --limit 500   # --limit defaults to 100
 redline run logs <run-id>
 redline run logs <run-id> --stream stderr --tail-bytes 8192
 redline run logs <run-id> --stream prepare_stderr
@@ -159,23 +162,41 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 ## Machine-readable output
 
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
-`reset preview`, and the
-`scheduler status|history|attempts` commands always print JSON. `status`, `decision`,
-`usage refresh`, `task add`, `later`, `reset redeem`, `scheduler evaluate|execute`, and `run logs` print JSON with
-`--json`.
+`calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
+`scheduler status|history|attempts` commands print JSON on success. `status`, `decision`,
+`usage refresh`, `task add`, `later`, `reset redeem`, `notification test`, `scheduler evaluate|execute`, and `run logs` print JSON with
+`--json`. Usage, validation, and API errors print a plain-text error to stderr and exit non-zero.
+Some results are reported as JSON instead: `decision --json` exits 2 when the decision is unknown,
+`reset redeem --json` exits 3, 4, 5, or 1 for outcomes other than `redeemed` and `dry_run_ok`, and
+`reset preview` exits 0 and reports source fetch errors under `uncertainty`.
 
 ## Notifications
 
 ```bash
 redline notification list
+redline notification test [--event TYPE] [--provider ID] [--json]
+redline notification test --event all
 ```
+
+The test command sends synthetic data only; it never contacts providers or redeems a reset.
+Defaults: `reset.expiring`, first Codex account or otherwise first configured account (sorted by
+ID). Supported types: `run.started`, `run.completed`, `run.failed`, `scheduler.error`,
+`reset.expiring`, `reset.redeemed`, `reset.redeem_failed`, `firesale.started`, `firesale.ended`.
+`all` sends one of each about a second apart. Output includes the title/message and delivery
+status; `--json` returns the delivery record (an array for `all`). Failed deliveries exit 1.
+Explicit tests bypass `notifications.events`, but require `notifications.enabled: true` and the
+local bearer API token. An empty `command` records deliveries for native Mac alerts without an
+external hook. See [notifications](runs-and-notifications.md#notifications).
 
 ## Mobile pairing
 
 ```bash
-redline pair
-redline pair --port 8443
+redline --config redline.yaml pair --qr
+redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
 ```
+
+`--qr` is required. Without `--host`, the Tailscale MagicDNS name is discovered automatically; either
+way the host must be listed in `api.trusted_hosts`. `--port` defaults to 443.
 
 See [Mobile dashboard setup](mobile.md).
 

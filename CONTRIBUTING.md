@@ -48,6 +48,16 @@ The status command reports live usage only when that provider's CLI is installed
 Without provider credentials, the service and dashboard still start and explain the unavailable
 account state.
 
+To open the dashboard from a source build, sign the browser in with the `api-token` that `serve`
+created beside `redline.yaml`. Opening the bare URL in a browser returns an HTTP `401` sign-in
+page; the token exchange sets an HttpOnly session cookie and redirects to the clean URL:
+
+```bash
+open "http://127.0.0.1:17436/?access_token=$(<api-token)"   # macOS; use xdg-open on Linux
+```
+
+Use the port you passed to `--listen` (`7436` by default). This only works for loopback addresses.
+
 Only `redline serve` reads configuration and opens SQLite. Every other CLI command is a client of
 the local HTTP API. See [Architecture](docs/architecture.md) for the full picture and
 [CLI reference](docs/cli.md) for the commands.

@@ -1,0 +1,88 @@
+package notification
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/croutoncreations/redline/internal/domain"
+)
+
+// WithMessage renders reset and firesale events without changing their data.
+func WithMessage(event domain.NotificationEvent, provider string) domain.NotificationEvent {
+	name := event.ProviderAccountID
+	switch strings.ToLower(provider) {
+	case "codex":
+		name = "Codex"
+	case "claude":
+		name = "Claude"
+	}
+	d := event.Data
+	switch event.Type {
+	case domain.EventResetExpiring:
+		event.Title = name + " banked reset expiring"
+		count, _ := strconv.Atoi(d["count"])
+		if count < 1 {
+			count = 1
+		}
+		noun, verb := "reset", "expires"
+		if count > 1 {
+			noun, verb = "resets", "expire"
+		}
+		expires, _ := time.Parse(time.RFC3339, d["expires_at"])
+		duration := expires.Sub(event.OccurredAt)
+		relative := fmt.Sprintf("%dh", int(math.Ceil(duration.Hours())))
+		if duration < time.Hour {
+			relative = fmt.Sprintf("%dm", max(0, int(math.Ceil(duration.Minutes()))))
+		}
+		event.Message = fmt.Sprintf("%d %s %s in %s (%s).", count, noun, verb, relative, expires.UTC().Format("Mon 15:04 UTC"))
+		if d["action"] == "redeem_now" {
+			event.Message += " Redeem it now: redline reset redeem --provider " + event.ProviderAccountID
+		}
+	case domain.EventResetRedeemed:
+		event.Title = name + " reset redeemed"
+		event.Message = "Redeemed; the refill isn't visible yet. Check again in a few minutes."
+		if d["verified"] == "true" {
+			event.Message = "Weekly allowance refilled."
+			if remaining, err := strconv.ParseFloat(d["weekly_remaining"], 64); err == nil {
+				event.Message = fmt.Sprintf("Weekly allowance refilled (now %.0f%% remaining).", remaining*100)
+			}
+		}
+	case domain.EventResetRedeemFailed:
+		event.Title = name + " reset not redeemed"
+		event.Message = d["reason"]
+		switch event.Message {
+		case "expired unused":
+			event.Message = "Expired unused"
+		case "redemption request outcome unknown at expiry; check the provider":
+			event.Message = "Outcome unknown at expiry — check the provider"
+		case "":
+			event.Message = "Reset could not be redeemed. Check the provider."
+		}
+	case domain.EventFiresaleStarted:
+		event.Title = name + " firesale started"
+		reset, _ := time.Parse(time.RFC3339, d["effective_reset_at"])
+		deadline := reset.UTC().Format("Mon 15:04 UTC")
+		if source := d["effective_reset_source"]; source != "" && source != "weekly" {
+			label := strings.ReplaceAll(source, "_", " ")
+			if source == "predicted_global" {
+				label = "predicted global reset"
+			}
+			deadline = "the " + label + " at " + deadline
+		}
+		overflow, err := strconv.ParseFloat(d["overflow"], 64)
+		if err == nil && d["overflow_available"] != "false" {
+			event.Message = fmt.Sprintf("%.0f%% of weekly capacity would go unused before %s.", overflow*100, deadline)
+		} else {
+			gap, _ := strconv.ParseFloat(d["pace_gap"], 64)
+			event.Message = fmt.Sprintf("%.0f%% behind weekly pace before %s.", gap*100, deadline)
+		}
+		event.Message += " All job tiers unlocked."
+	case domain.EventFiresaleEnded:
+		event.Title = name + " firesale ended"
+		event.Message = "Back to normal pacing."
+	}
+	return event
+}

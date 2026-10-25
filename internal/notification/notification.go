@@ -36,6 +36,20 @@ func (s Service) Notify(ctx context.Context, event domain.NotificationEvent) err
 	if !s.Enabled || !s.Events[event.Type] {
 		return nil
 	}
+	_, err := s.deliver(ctx, event)
+	return err
+}
+
+// Test bypasses subscriptions, but never the global enabled setting.
+func (s Service) Test(ctx context.Context, event domain.NotificationEvent) (domain.NotificationDelivery, error) {
+	if !s.Enabled {
+		return domain.NotificationDelivery{}, fmt.Errorf("notifications are disabled; set notifications.enabled: true in your config")
+	}
+	return s.deliver(ctx, event)
+}
+
+func (s Service) deliver(ctx context.Context, event domain.NotificationEvent) (domain.NotificationDelivery, error) {
+	var record domain.NotificationDelivery
 	if event.Version == 0 {
 		event.Version = 1
 	}
@@ -44,13 +58,14 @@ func (s Service) Notify(ctx context.Context, event domain.NotificationEvent) err
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("encode notification event: %w", err)
+		return record, fmt.Errorf("encode notification event: %w", err)
 	}
+	createdAt := s.now()
 	deliveryID, err := s.Store.CreateNotificationDelivery(
-		context.WithoutCancel(ctx), event.Type, payload, s.now(),
+		context.WithoutCancel(ctx), event.Type, payload, createdAt,
 	)
 	if err != nil {
-		return err
+		return record, err
 	}
 	timeout := s.Timeout
 	if timeout <= 0 {
@@ -65,16 +80,15 @@ func (s Service) Notify(ctx context.Context, event domain.NotificationEvent) err
 		status = "failed"
 		lastError = deliveryErr.Error()
 	}
+	updatedAt := s.now()
 	completionErr := s.Store.CompleteNotificationDelivery(
-		context.WithoutCancel(ctx), deliveryID, status, lastError, s.now(),
+		context.WithoutCancel(ctx), deliveryID, status, lastError, updatedAt,
 	)
-	if deliveryErr != nil && completionErr != nil {
-		return errors.Join(deliveryErr, completionErr)
+	if completionErr != nil {
+		return record, errors.Join(deliveryErr, completionErr)
 	}
-	if deliveryErr != nil {
-		return deliveryErr
-	}
-	return completionErr
+	record = domain.NotificationDelivery{ID: deliveryID, EventType: event.Type, Status: status, Payload: payload, Attempts: 1, LastError: lastError, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	return record, deliveryErr
 }
 
 func (s Service) now() time.Time {
@@ -91,7 +105,7 @@ type CommandSink struct {
 
 func (s CommandSink) Deliver(ctx context.Context, event domain.NotificationEvent) error {
 	if strings.TrimSpace(s.Command) == "" {
-		return fmt.Errorf("notification command is required")
+		return nil
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {

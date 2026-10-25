@@ -24,7 +24,9 @@ final class MenuBarController: NSObject {
     private lazy var runLogWindow = RunLogWindowController(client: client)
     private lazy var pairDeviceWindow = PairDeviceWindowController(client: client)
     private lazy var notifications = NativeNotificationController(
-        onOpenRun: { [weak self] runID in self?.openRun(runID) }
+        client: client,
+        onOpenRun: { [weak self] runID in self?.openRun(runID) },
+        onOpenDashboard: { [weak self] in self?.showDashboard() }
     )
     private lazy var popoverController = StatusPopoverController(
         model: popoverModel,

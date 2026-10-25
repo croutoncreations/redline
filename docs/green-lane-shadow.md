@@ -149,7 +149,7 @@ Additional live safeguards:
 
 - Require strict, admin-enforced `main` protection with all eight required
   GitHub Actions CI checks, resolved conversations, and no force-push/deletion.
-  Protection is rechecked before the merge. This is not an approval rule.
+  The worker rechecks the contents-readable protection summary (protected branch, enforcement for everyone and all App-bound CI checks) before merging. GitHub reserves detailed administration settings for admin credentials, so strictness and conversation resolution are configured/verified by the owner and enforced natively; the worker receives no admin credential. This is not an approval rule.
 - Pin the actual `refs/heads/main` tip to the workflow's trusted code SHA; abort
   if it changed since the run started or during evaluation. The PR-recorded
   base SHA is preserved as evidence, but is **not** used as the current main tip.
@@ -192,14 +192,49 @@ on current main, which may have advanced further if another actor merged.
 
 For live merges, the evaluator additionally requires an authenticated current-head
 Codex/CodeRabbit completion summary; generic human COMMENTED/APPROVED reviews do
-not substitute for this. The worker also enumerates all repository collaborators
+not substitute for this. A nonempty current-head review body from anyone other
+than the PR author blocks the live evaluator, even if it is a bot `COMMENTED`
+publication or an approval. Review-body prose has no resolution bit, so the
+pilot does not guess whether a nitpick, outside-diff finding, caveat, or unknown
+format is harmless. A positive completion summary from any provider cannot
+bypass this block. Address the feedback in a new head and obtain fresh full
+current-head automated completion; an empty reply or author response alone
+never authorizes merging. Historical review-body prose only clears after that same authenticated provider
+publishes a later full completion for the new head. A push or another provider
+cannot silently clear it. Dismissing a review also does not resolve its body.
+This deliberately also defers benign review prose.
+All review bodies remain bound into the twice-collected and premerge-revalidated
+review snapshot, so body edits invalidate old eligibility.
+
+The worker also enumerates all repository collaborators
 at start and immediately before merging. Only `jfox85` may have push, maintain or
 admin permission during this single-owner pilot. Additional read-only users are
-fine; additional writers or unavailable permission evidence stop the pilot. This
+fine; additional writers or unavailable permission evidence stop the pilot. The
+worker reads each listed user's explicit repository permission through the
+metadata-readable permission endpoint, rather than requiring optional permission
+flags in the collaborator listing. It saves public identity/permission snapshots
+in the result artifact before rejecting a writer check, including checks just
+before merging. Unknown permissions, mismatched identities and failed reads
+remain blocking. This
 binds same-repository branch control to the allowed principal rather than merely
 trusting the original PR creator. Expanding the writer set requires a separately
-reviewed change to the pilot. No new credential or branch administration service
-is introduced.
+reviewed change to the pilot.
+
+The ordinary workflow token returned an empty collaborator list in the live
+probe. Writer enumeration and explicit permission reads therefore use a separate
+fine-grained personal access token stored as `GREEN_LANE_ACCESS_AUDIT_TOKEN` in
+Redline Actions secrets. Create it as `jfox85`, an organization member with admin
+access; this endpoint requires the token's authenticated user to be an organization
+member with write, maintain or admin access (a read-only or outside collaborator
+cannot perform this audit). Select resource owner `croutoncreations`, only the
+`redline` repository, and only **Metadata: read**; use a 30-day expiration for the
+pilot. No organization permissions, contents access or write permissions are
+needed. The workflow uses this client only for the two access-audit APIs, while
+the normal workflow token continues to evaluate and merge. The audit secret is
+removed from the environment before the evaluator runs and is never written to
+artifacts. Missing, expired or insufficient audit credentials stop merging;
+renew the secret before expiration to keep the pilot running. No GitHub App or
+branch administration service is introduced.
 
 The merged Homebrew CI check is also required for live/shadow eligibility and main protection. Release CI selection accepts only `push` or `workflow_dispatch` runs of the CI workflow on main for the exact tagged commit; PR-event runs remain excluded.
 

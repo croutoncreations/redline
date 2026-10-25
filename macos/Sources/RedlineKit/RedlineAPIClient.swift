@@ -27,6 +27,10 @@ public struct RedlineAPIClient: Sendable {
         try await request(baseURL.appending(path: "v1/dashboard"), method: "GET", as: DashboardSnapshot.self)
     }
 
+    public func notifications() async throws -> [NotificationDelivery] {
+        try await request(endpoint(["v1", "notifications"]), method: "GET", as: [NotificationDelivery].self)
+    }
+
     public func run(_ runID: String) async throws -> RunSummary {
         try await request(endpoint(["v1", "runs", runID]), method: "GET", as: RunSummary.self)
     }

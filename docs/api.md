@@ -36,6 +36,11 @@ See [Mobile dashboard setup](mobile.md) for the HTTPS proxy and pairing flow.
 
 ## Dashboard
 
+Without the native app, sign a browser in once by opening `/?access_token=<api-token>` on a
+loopback address (for example `open "http://127.0.0.1:7436/?access_token=$(<api-token)"` from the
+directory holding the token). Redline sets the HttpOnly session cookie and redirects to the clean
+URL; a bare `/` request returns `401` until then.
+
 The dashboard at `/` summarizes current provider allowances, the dispatch queue, recent runs,
 scheduler decisions, and bounded run-log tails. Jobs and execution profiles can be created and
 managed there. A server-sent event stream (`/v1/dashboard/events`) keeps the page current while it

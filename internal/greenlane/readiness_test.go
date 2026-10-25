@@ -187,6 +187,7 @@ func TestLiveRequiresTrustedAutomatedCompletion(t *testing.T) {
 			t.Fatalf("live accepted untrusted %s review", state)
 		}
 	}
+	p.Reviews = nil // A clean summary does not classify collaborator review prose.
 	p.AutomatedReviews = []AutomatedReviewComment{{ID: 43, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z", Body: `<!-- codex-pull-request-review-summary -->
 <!-- codex-review-state:v1 {"code_review":{"commit_sha":"` + reviewHead + `","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":null} -->`}}
 	if !NewEvaluator(cfg).checkReviewReadiness(p).Pass {
@@ -195,5 +196,106 @@ func TestLiveRequiresTrustedAutomatedCompletion(t *testing.T) {
 	p.AutomatedReviews[0].AppID = 1
 	if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
 		t.Fatal("live accepted spoofed App plus collaborator approval")
+	}
+}
+
+// PR187 had zero threads and positive exact-head coverage, but review-body
+// feedback still required an exact retry candidate-list assertion.
+func TestLiveReviewBodyFeedbackCannotBeBypassed(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	for _, tc := range []struct {
+		name, user, state, body string
+		pass                    bool
+	}{
+		{"PR187 nitpick", "coderabbitai[bot]", "COMMENTED", "<!-- coderabbit-ai-generated:v1 -->\n<summary>🧹 Nitpick comments: 1</summary>\nAssert the complete candidate list in the retry-order test.", false},
+		{"outside diff", "coderabbitai[bot]", "COMMENTED", "Outside diff range comments: 1\nFix the missing check", false},
+		{"dismissed feedback", "coderabbitai[bot]", "DISMISSED", "Fix the missing check", false},
+		{"unknown provider format", "other[bot]", "COMMENTED", "Needs a fix", false},
+		{"approval with feedback", "reviewer", "APPROVED", "Looks good, but fix the order assertion", false},
+		{"empty reply", "coderabbitai[bot]", "COMMENTED", "", true},
+		{"whitespace reply", "coderabbitai[bot]", "COMMENTED", " \n", true},
+		{"author response", "JFOX85", "COMMENTED", "Fixed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := passingPR()
+			p.HeadSHA = reviewHead
+			p.AutomatedReviews = []AutomatedReviewComment{cleanSummary()}
+			p.Reviews = []Review{{ID: 5638297150, User: tc.user, State: tc.state, CommitID: reviewHead, Body: tc.body}}
+			r := NewEvaluator(cfg).checkReviewReadiness(p)
+			if r.Pass != tc.pass {
+				t.Fatalf("pass=%v want=%v: %s", r.Pass, tc.pass, r.Message)
+			}
+			if !tc.pass && !strings.Contains(r.Message, "review bodies") {
+				t.Fatal(r.Message)
+			}
+		})
+	}
+}
+
+func TestLiveBodyBlockSurvivesOtherProviderCompletion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	p := passingPR()
+	p.HeadSHA = reviewHead
+	p.Reviews = []Review{{ID: 5638297150, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: reviewHead, SubmittedAt: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC), Body: "Assert the complete retry candidate list"}}
+	p.AutomatedReviews = []AutomatedReviewComment{{ID: 43, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z", Body: `<!-- codex-pull-request-review-summary -->
+<!-- codex-review-state:v1 {"code_review":{"commit_sha":"` + reviewHead + `","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":null} -->`}}
+	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
+		t.Fatal("clean Codex summary bypassed CodeRabbit body feedback")
+	}
+	// Moving the head cannot clear feedback by reusing the old completion.
+	p.HeadSHA = strings.Repeat("a", 40)
+	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
+		t.Fatal("new head reused stale completion")
+	}
+	p.AutomatedReviews[0].Body = strings.ReplaceAll(p.AutomatedReviews[0].Body, reviewHead, p.HeadSHA)
+	if r := NewEvaluator(cfg).checkReviewReadiness(p); r.Pass {
+		t.Fatal("new head plus another provider cleared historical body feedback")
+	}
+	// The fix must receive fresh full current-head completion, not an author reply.
+	p.AutomatedReviews = []AutomatedReviewComment{cleanSummary()}
+	p.AutomatedReviews[0].Body = strings.ReplaceAll(p.AutomatedReviews[0].Body, reviewHead, p.HeadSHA)
+	if r := NewEvaluator(cfg).checkReviewReadiness(p); !r.Pass {
+		t.Fatal(r.Message)
+	}
+}
+
+func TestHistoricalBodyNeedsLaterAuthenticProviderCompletion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	for _, tc := range []struct {
+		name string
+		edit func(*PRInfo)
+	}{
+		{"completion predates finding", func(p *PRInfo) {}},
+		{"forged later App", func(p *PRInfo) {
+			c := p.AutomatedReviews[0]
+			c.ID++
+			c.AppID = 1
+			c.UpdatedAt = "2026-01-03T00:00:00Z"
+			p.AutomatedReviews = append(p.AutomatedReviews, c)
+		}},
+		{"author edited later summary", func(p *PRInfo) {
+			c := p.AutomatedReviews[0]
+			c.ID++
+			c.UpdatedAt = "2026-01-03T00:00:00Z"
+			c.LastEditedAt = c.UpdatedAt
+			c.EditorID = 123
+			c.EditorType = "User"
+			c.EditorUser = "jfox85"
+			p.AutomatedReviews = append(p.AutomatedReviews, c)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := passingPR()
+			p.HeadSHA = reviewHead
+			p.AutomatedReviews = []AutomatedReviewComment{cleanSummary()}
+			p.Reviews = []Review{{ID: 1, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: strings.Repeat("a", 40), Body: "Fix missing candidates", SubmittedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}}
+			tc.edit(&p)
+			if NewEvaluator(cfg).checkReviewReadiness(p).Pass {
+				t.Fatal("historical feedback cleared without later authentic completion")
+			}
+		})
 	}
 }

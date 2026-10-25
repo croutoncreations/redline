@@ -8,7 +8,7 @@ const held = pr => pr.labels?.some(label => ['green-lane-hold','maintenance:skip
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
-module.exports = async function live({github, context, core, run=execFileSync,
+module.exports = async function live({github, accessAudit, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
   const report = {state:'deferred',main_tip:context.sha,merged:[],evaluations:[]};
   const finish = async reason => { report.reason=reason; await write(report); core.info(reason); return report; };
@@ -25,20 +25,44 @@ module.exports = async function live({github, context, core, run=execFileSync,
   };
   const tip = async () => (await github.rest.git.getRef({...repo,ref:'heads/main'})).data.object.sha;
   const protectedMain = async () => {
-    const response = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){ref(qualifiedName:"refs/heads/main"){branchProtectionRule{isAdminEnforced allowsForcePushes allowsDeletions requiresStrictStatusChecks requiresStatusChecks requiresConversationResolution requiredStatusChecks{context app{databaseId}}}}}}`,repo);
-    const p = response.repository?.ref?.branchProtectionRule;
-    return p?.isAdminEnforced === true && p.requiresStrictStatusChecks === true && p.requiresStatusChecks === true &&
-      p.allowsForcePushes === false && p.allowsDeletions === false && p.requiresConversationResolution === true &&
-      checks.every(name => p.requiredStatusChecks?.some(c => c.context === name && c.app?.databaseId === 15368));
+    // GITHUB_TOKEN cannot read branch-administration details (including via
+    // GraphQL). The contents-readable summary exposes protection, enforcement
+    // and required App-bound checks. Strict up-to-date/conversation settings
+    // remain configured and enforced natively; no admin credential is granted.
+    const {data:branch} = await github.rest.repos.getBranch({...repo,branch:'main'});
+    const p = branch.protection?.required_status_checks;
+    return branch.protected === true && branch.protection?.enabled === true &&
+      p?.enforcement_level === 'everyone' && checks.every(name =>
+        p.checks?.some(c => c.context === name && c.app_id === 15368));
   };
   const trustedWriters = async () => {
-    const users = await github.paginate(github.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
+    const users = await accessAudit.paginate(accessAudit.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
+    const snapshot = [];
+    report.writer_snapshots ??= [];
+    report.writer_snapshots.push(snapshot);
     // PR authorship alone does not establish control of a same-repository head.
-    // This single-owner pilot stops if another principal can replace that head.
-    return users.some(u => u.login === 'jfox85' && u.permissions?.push === true) && users.every(u =>
-      u.login === 'jfox85' || (u.permissions?.push === false && u.permissions?.maintain === false && u.permissions?.admin === false));
+    // The list response may omit permission flags for installation tokens. Read
+    // each user's explicit repository permission; missing/unknown proof blocks.
+    // Persist only public identity/permission evidence, never request headers.
+    try {
+      for (const user of users) {
+        if (typeof user.login !== 'string' || !user.login) return false;
+        const entry = {login:user.login,list_permissions:user.permissions ?? null};
+        snapshot.push(entry);
+        const {data} = await accessAudit.rest.repos.getCollaboratorPermissionLevel({...repo,username:user.login});
+        entry.permission = data.permission ?? null;
+        entry.verified_login = data.user?.login ?? null;
+        if (entry.verified_login !== user.login || !['admin','maintain','write','read','triage'].includes(entry.permission)) return false;
+        if (user.login === 'jfox85') {
+          if (!['admin','maintain','write'].includes(entry.permission)) return false;
+        } else if (!['read','triage'].includes(entry.permission) ||
+          ['push','maintain','admin'].some(key => user.permissions?.[key] === true)) return false;
+      }
+      return snapshot.some(user => user.login === 'jfox85');
+    } finally { await write(report); }
   };
   if (process.env.LIVE_PILOT_ENABLED !== 'true' || !await enabled()) return finish('Pilot is disabled; no merge attempted');
+  if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
 
@@ -62,7 +86,7 @@ module.exports = async function live({github, context, core, run=execFileSync,
     }
     const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
       encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
-      env:{...process.env,REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
+      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
         EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
         DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
     }));

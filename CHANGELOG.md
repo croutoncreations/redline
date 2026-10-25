@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Readable reset/firesale notification titles and messages, UTC deadlines, and verified weekly
+  refill percentages. Event payloads add optional `title` without changing existing data keys.
+- `redline notification test [--event TYPE|all] [--provider ID] [--json]` and bearer-only
+  `POST /v1/notifications/test` send synthetic samples, bypassing subscriptions but respecting
+  the global enabled flag. No provider requests or real redemptions are made.
+- Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
+  alerts from recorded deliveries, with persistent deduplication and no history replay on first
+  use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+
+## [0.1.11] - 2026-10-23
+
 ### Upgrade notes
 
 - The default `notifications.events` list is unchanged (`run.started`, `run.completed`,
@@ -92,6 +105,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Document dashboard sign-in for source and headless installs, including cross-platform browser
+  commands and matching the browser URL to an alternate service port.
 - Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
   `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
 - The CLI quickstart now offers `redline dashboard` to open an authenticated local browser

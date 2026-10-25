@@ -79,7 +79,7 @@ func TestBankedResetRemindersExpiryAction(t *testing.T) {
 				t.Fatalf("events=%+v", n.events)
 			}
 			e := n.events[0]
-			if e.Data["action"] != "redeem_now" || e.Data["lead"] != "1h" || e.Message != "Claude banked reset expires in 1h — redeem it now" {
+			if e.Data["action"] != "redeem_now" || e.Data["lead"] != "1h" || e.Message != "1 reset expires in 1h (Thu 13:00 UTC). Redeem it now: redline reset redeem --provider claude-main" {
 				t.Fatalf("event=%+v", e)
 			}
 		})
@@ -256,7 +256,7 @@ func TestBankedResetRemindersDeadlineAndPayload(t *testing.T) {
 		t.Fatalf("events=%+v", notifier.events)
 	}
 	e := notifier.events[0]
-	if e.Version != 1 || e.Type != domain.EventResetExpiring || e.ProviderAccountID != "claude-main" || !e.OccurredAt.Equal(now) || e.Message != "Claude banked reset expires in 24h" {
+	if e.Version != 1 || e.Type != domain.EventResetExpiring || e.ProviderAccountID != "claude-main" || !e.OccurredAt.Equal(now) || e.Message != "2 resets expire in 24h (Fri 12:00 UTC)." {
 		t.Fatalf("event=%+v", e)
 	}
 	for key, want := range map[string]string{"reset_id": "grant", "expires_at": expires.Format(time.RFC3339), "lead": "24h", "action": "remind", "count": "2"} {
