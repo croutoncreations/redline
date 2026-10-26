@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Readable reset/firesale notification titles and messages, UTC deadlines, and verified weekly
+  refill percentages. Event payloads add optional `title` without changing existing data keys.
+- `redline notification test [--event TYPE|all] [--provider ID] [--json]` and bearer-only
+  `POST /v1/notifications/test` send synthetic samples, bypassing subscriptions but respecting
+  the global enabled flag. No provider requests or real redemptions are made.
+- Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
+  alerts from recorded deliveries, with persistent deduplication and no history replay on first
+  use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+
 ## [0.1.11] - 2026-10-23
 
 ### Upgrade notes

@@ -228,7 +228,10 @@ func TestAutomaticFiresaleNotificationsTransitionOnly(t *testing.T) {
 			if err := json.Unmarshal(deliveries[0].Payload, &event); err != nil {
 				t.Fatal(err)
 			}
-			for _, key := range []string{"pace_gap", "overflow", "effective_reset_at", "unlocked_tier"} {
+			if event.Title != "Codex "+strings.ReplaceAll(tc.event, ".", " ") || event.Message == "Redline "+tc.event {
+				t.Fatalf("unreadable event: %+v", event)
+			}
+			for _, key := range []string{"pace_gap", "overflow", "effective_reset_at", "effective_reset_source", "unlocked_tier"} {
 				if event.Data[key] == "" {
 					t.Fatalf("missing %s: %+v", key, event)
 				}
