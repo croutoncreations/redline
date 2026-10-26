@@ -36,7 +36,7 @@ failures.
 Command notifications are disabled by default. When enabled, Redline invokes a trusted local
 command with a versioned event document on stdin. Supported events are `run.started`,
 `run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
-`reset.redeem_failed`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
+`reset.redeem_failed`, `reset.announced`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
 empty, only `run.started`, `run.completed`, `run.failed`, and `scheduler.error` are sent; list the
 `reset.*` and `firesale.*` events explicitly to receive them. Hooks should ignore event types they
 do not recognize.
@@ -53,6 +53,29 @@ The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `RED
 `REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
 outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
 possibly non-idempotent hook.
+
+### Public reset announcements
+
+`reset_signals.enabled: true` opts into independent public-feed monitoring (default poll interval
+10m, minimum 5m). `reset_signals.notify` defaults to true when enabled, but notifications also
+require `notifications.enabled` and explicitly listing `reset.announced` in `notifications.events`.
+This global event has no provider account ID. It alerts only on the selected fresh, linked,
+unretracted promise, schedule, or completion published within 72 hours. Odds-only predictions
+never alert, however high. It does not change scheduler or firesale decisions.
+
+Data fields are strings: `key`, `kind`, `url`, `account`, `quote`, `published_at`, `window_end`,
+`window_certainty`, `feeds` (comma-separated), `direct_source_verified` (`false`), and `retracted`.
+Missing timestamps/URLs are empty strings. The original post is not fetched. Quotes are untrusted
+plain text, control-stripped, whitespace-collapsed, and capped at 280 characters. Tracker-interpreted
+deadlines are explicitly attributed in messages.
+
+Like `reset.expiring`, delivery is claimed persistently **before** calling the hook: at most one
+attempt per announcement key and kind, with another only when the kind escalates (promise to
+schedule or completion). A fresh matching withdrawal, correction, or retraction gets one follow-up
+per key, with `retracted: "true"`. Restarts and repeated polls do not duplicate attempts; failed
+hooks are recorded by the notification service but not retried. Disabled/filtered notifications
+do not claim delivery. See [public reset signals](reset-signal-preview.md#optional-monitoring-and-announcement-alerts)
+for cached API/CLI access and interpretation limits.
 
 ### Firesale transitions
 

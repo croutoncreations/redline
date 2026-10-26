@@ -72,6 +72,10 @@ func BuildReport(now time.Time, sources []SourceResult) Report {
 }
 
 func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
+	return summarizeCurrentSelection(now, results, nil)
+}
+
+func summarizeCurrentSelection(now time.Time, results []SourceResult, selection *[]Signal) (Kind, string) {
 	_, grouped := groupEvidence(results)
 	type candidate struct {
 		key     string
@@ -163,6 +167,9 @@ func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 				selected = other.signals
 			}
 		}
+	}
+	if selection != nil {
+		*selection = selected
 	}
 	for _, signal := range selected {
 		if signal.Withdrawn || signal.Corrected || retractedByAnotherRecord(signal, results, now) {

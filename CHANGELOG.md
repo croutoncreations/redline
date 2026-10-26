@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Off-by-default public Codex reset-signal monitoring (`reset_signals`) and opt-in
+  `reset.announced` alerts for fresh linked promises, schedules, and completions only, never
+  odds-only predictions. Persistent deduplication allows escalation and one matching retraction
+  follow-up. Cached state is available through `redline reset signals`, `GET /v1/reset-signals`,
+  and additive dashboard JSON. Scheduling and firesale behavior are unchanged.
+
 ## [0.1.11] - 2026-10-23
 
 ### Upgrade notes
