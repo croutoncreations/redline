@@ -20,7 +20,22 @@ tap="local/redline-lint-$$"
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
 brew tap-new --no-git "${tap}" >/dev/null 2>&1
 tap_dir="$(brew --repository "${tap}")"
-trap 'brew untap --force "${tap}" >/dev/null 2>&1 || rm -rf "${tap_dir}"' EXIT
+# Newer Homebrew refuses to load formulae and casks from untrusted taps. Trust
+# only this throwaway tap, and drop the entry again on exit. Older Homebrew has
+# no trust command and loads local taps unconditionally.
+trusted=0
+if brew commands --quiet 2>/dev/null | grep -qx trust; then
+  brew trust --tap "${tap}" >/dev/null
+  trusted=1
+fi
+# shellcheck disable=SC2329 # invoked by the EXIT trap
+cleanup() {
+  if [[ "${trusted}" == 1 ]]; then
+    brew untrust --tap "${tap}" >/dev/null 2>&1 || true
+  fi
+  brew untap --force "${tap}" >/dev/null 2>&1 || rm -rf "${tap_dir}"
+}
+trap cleanup EXIT
 mkdir -p "${tap_dir}/Formula" "${tap_dir}/Casks"
 
 status=0
