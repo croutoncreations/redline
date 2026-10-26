@@ -39,6 +39,19 @@ ON CONFLICT(announcement_key,kind) DO UPDATE SET last_seen_at=excluded.last_seen
 	return needed, rows.Err()
 }
 
+// announcementKinds lists every kind announcementRank ranks above zero.
+var announcementKinds = []resetsignal.Kind{resetsignal.KindPromised, resetsignal.KindScheduled, resetsignal.KindCompleted}
+
+// rankSQL renders announcementRank as a SQL CASE on column, so the claim SQL
+// and the Go precheck share one escalation ladder.
+func rankSQL(column string) string {
+	expr := "CASE " + column
+	for _, kind := range announcementKinds {
+		expr += fmt.Sprintf(" WHEN '%s' THEN %d", kind, announcementRank(kind))
+	}
+	return expr + " ELSE 0 END"
+}
+
 func announcementRank(kind resetsignal.Kind) int {
 	switch kind {
 	case resetsignal.KindPromised:
@@ -63,7 +76,7 @@ func (d *DB) ClaimResetAnnouncement(ctx context.Context, a resetsignal.Announcem
 WHERE announcement_key=? AND kind=? AND notified_at IS NULL
 AND NOT EXISTS (SELECT 1 FROM reset_announcements AS previous WHERE previous.announcement_key=? AND
  (previous.retracted_at IS NOT NULL OR (previous.notified_at IS NOT NULL AND
- CASE previous.kind WHEN 'COMPLETED' THEN 3 WHEN 'SCHEDULED' THEN 2 ELSE 1 END >= ?)))`, formatTime(now), a.Key, a.Kind, a.Key, announcementRank(a.Kind))
+ `+rankSQL("previous.kind")+` >= ?)))`, formatTime(now), a.Key, a.Kind, a.Key, announcementRank(a.Kind))
 	if err != nil {
 		return false, err
 	}
@@ -78,7 +91,7 @@ AND NOT EXISTS (SELECT 1 FROM reset_announcements AS previous WHERE previous.ann
 }
 
 func (d *DB) UnretractedResetAnnouncements(ctx context.Context) ([]resetsignal.Announcement, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT payload_json FROM reset_announcements WHERE notified_at IS NOT NULL AND retracted_at IS NULL ORDER BY announcement_key, CASE kind WHEN 'COMPLETED' THEN 3 WHEN 'SCHEDULED' THEN 2 ELSE 1 END DESC`)
+	rows, err := d.db.QueryContext(ctx, `SELECT payload_json FROM reset_announcements WHERE notified_at IS NOT NULL AND retracted_at IS NULL ORDER BY announcement_key, `+rankSQL("kind")+` DESC`)
 	if err != nil {
 		return nil, err
 	}
