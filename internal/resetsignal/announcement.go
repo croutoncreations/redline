@@ -89,6 +89,18 @@ func ViableAnnouncement(report Report) *Announcement {
 			return viable[i].Feed < viable[j].Feed
 		})
 		backing := viable[0]
+		quote, quoteSource, quoteFeed := backing.Quote, backing.QuoteSource, backing.Feed
+		if !hasOriginalQuote(backing) {
+			// A mirror of the same post may carry the post's own words even
+			// when it cannot back the alert itself (e.g. no TTL). Its text
+			// is used for the quote only; kind and viability never change.
+			for _, s := range members {
+				if hasOriginalQuote(s) && !s.Withdrawn && !s.Corrected {
+					quote, quoteSource, quoteFeed = s.Quote, s.QuoteSource, s.Feed
+					break
+				}
+			}
+		}
 		url, _ := groupIdentity(members)
 		account := backing.OriginalAccount
 		if account == "" {
@@ -107,7 +119,7 @@ func ViableAnnouncement(report Report) *Announcement {
 		sort.Strings(feeds)
 		sort.Strings(attributions)
 		sort.Strings(attributionURLs)
-		a := Announcement{Key: key, Kind: groupKind, Quote: sanitizeText(backing.Quote, 280), QuoteSource: backing.QuoteSource, QuoteFeed: backing.Feed, Attribution: strings.Join(uniqueStrings(attributions), ","), AttributionURLs: strings.Join(uniqueStrings(attributionURLs), ","), URL: url, Account: sanitizeText(account, 80), PublishedAt: backing.PublishedAt, WindowEnd: strongest.Window.End, WindowCertainty: strongest.Window.Certainty, Feeds: uniqueStrings(feeds)}
+		a := Announcement{Key: key, Kind: groupKind, Quote: sanitizeText(quote, 280), QuoteSource: quoteSource, QuoteFeed: quoteFeed, Attribution: strings.Join(uniqueStrings(attributions), ","), AttributionURLs: strings.Join(uniqueStrings(attributionURLs), ","), URL: url, Account: sanitizeText(account, 80), PublishedAt: backing.PublishedAt, WindowEnd: strongest.Window.End, WindowCertainty: strongest.Window.Certainty, Feeds: uniqueStrings(feeds)}
 		candidates = append(candidates, candidate{announcement: a, at: latest})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
@@ -247,6 +259,13 @@ func (a Announcement) Notification(now time.Time, retracted bool) domain.Notific
 			status += " (tracker's reading)"
 		}
 	}
+	title := "Codex reset announced"
+	switch a.Kind {
+	case KindPromised:
+		title = "Codex reset promised"
+	case KindScheduled:
+		title = "Codex reset scheduled"
+	}
 	message := "Global Codex reset " + status + "."
 	if quote != "" && a.QuoteSource == "original_post" {
 		quoteSentence := fmt.Sprintf("%s: %q", label, quote)
@@ -266,6 +285,7 @@ func (a Announcement) Notification(now time.Time, retracted bool) domain.Notific
 	}
 	message += " Seen by " + strings.Join(a.Feeds, ", ") + "."
 	if retracted {
+		title = "Codex reset announcement retracted"
 		message = "Retracted: the earlier Codex reset announcement from " + attribution + " was withdrawn or corrected."
 	}
 	if a.Attribution != "" {
@@ -280,7 +300,7 @@ func (a Announcement) Notification(now time.Time, retracted bool) domain.Notific
 		message += " Data: " + credit + "."
 	}
 	data := map[string]string{"key": a.Key, "kind": string(a.Kind), "url": a.URL, "account": account, "quote": quote, "quote_source": a.QuoteSource, "attribution": a.Attribution, "attribution_urls": a.AttributionURLs, "published_at": timestamp(a.PublishedAt), "window_end": timestamp(a.WindowEnd), "window_certainty": string(a.WindowCertainty), "feeds": strings.Join(a.Feeds, ","), "direct_source_verified": "false", "retracted": fmt.Sprint(retracted)}
-	return domain.NotificationEvent{Version: 1, Type: domain.EventResetAnnounced, OccurredAt: now.UTC(), Message: message, Data: data}
+	return domain.NotificationEvent{Version: 1, Type: domain.EventResetAnnounced, OccurredAt: now.UTC(), Title: title, Message: message, Data: data}
 }
 
 func timestamp(at *time.Time) string {

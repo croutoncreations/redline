@@ -158,6 +158,7 @@ type NotificationEvent struct {
 	ProviderAccountID string            `json:"provider_account_id,omitempty"`
 	TaskID            string            `json:"task_id,omitempty"`
 	RunID             string            `json:"run_id,omitempty"`
+	Title             string            `json:"title,omitempty"`
 	Message           string            `json:"message"`
 	Data              map[string]string `json:"data,omitempty"`
 }

@@ -173,7 +173,10 @@ completion still blocks an alert; monitoring does not fall back around it. All m
 and appear in `feeds`, including mirrors without a usable TTL; they do not independently verify
 the post. The group's kind is the strongest viable member's kind, while its quote and account
 come from the best viable member: an original-post quote first, then the newest publication time.
-Noncurrent mirrors cannot supply the kind, quote, or account.
+Noncurrent mirrors cannot supply the kind or account. One exception for the quote only: when no
+viable member has an original-post quote, an unretracted mirror of the same post that does (for
+example willreset, which has no TTL) supplies the post's words. This never makes a non-viable
+mirror alert on its own or change the kind.
 
 Quotes are untrusted text, stripped of control characters, whitespace-collapsed, and capped at
 280 characters. `quote_source` distinguishes `original_post` (Reset Beacon `post.Quote` and

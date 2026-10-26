@@ -316,6 +316,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
+	mux.HandleFunc("POST /v1/notifications/test", server.testNotification)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
@@ -672,7 +673,18 @@ func (s *Server) healthDetails(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	deliveries, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	var deliveries []domain.NotificationDelivery
+	var err error
+	if r.URL.Query().Has("after_id") {
+		afterID, parseErr := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be an int64"})
+			return
+		}
+		deliveries, err = s.store.ListNotificationDeliveriesAfter(r.Context(), afterID, limit)
+	} else {
+		deliveries, err = s.store.ListNotificationDeliveries(r.Context(), limit)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -2187,14 +2199,16 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		}
 		event := domain.NotificationEvent{
 			Version: 1, Type: eventType, OccurredAt: s.now().UTC(), ProviderAccountID: provider,
-			Message: "Redline " + eventType,
 			Data: map[string]string{
-				"pace_gap":           strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
-				"overflow":           strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
-				"effective_reset_at": response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
-				"unlocked_tier":      string(response.Result.UnlockedTier),
+				"pace_gap":               strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
+				"overflow":               strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
+				"effective_reset_at":     response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
+				"effective_reset_source": string(response.Result.EffectiveResetSource),
+				"unlocked_tier":          string(response.Result.UnlockedTier),
 			},
 		}
+		event.Data["overflow_available"] = strconv.FormatBool(response.Result.Mode == decision.ModeSlots)
+		event = notification.WithMessage(event, s.config.Providers[provider].Provider)
 		if notifyErr := s.notifier.Notify(ctx, event); notifyErr != nil {
 			log.Printf("redline %s firesale notification failed: %v", provider, notifyErr)
 		}

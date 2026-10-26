@@ -32,7 +32,10 @@ usage_monitor:
 #   poll_interval: 10m # minimum 5m
 #   notify: true      # default when enabled; false keeps monitoring read-only
 
-# Notification commands are trusted local hooks. Events are sent as JSON on stdin.
+# Set enabled: true to record notifications. Use command: "" (or omit it) for
+# native Mac alerts without an external hook; authorize notifications in the app.
+# When set, command is a trusted local hook receiving event JSON on stdin.
+# Try: redline notification test --event all (requires enabled: true).
 notifications:
   enabled: false
   command: ./scripts/redline-notify

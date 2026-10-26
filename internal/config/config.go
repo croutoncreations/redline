@@ -464,9 +464,6 @@ func (cfg *Config) validate() error {
 			return err
 		}
 	}
-	if cfg.Notifications.Enabled && strings.TrimSpace(cfg.Notifications.Command) == "" {
-		return fmt.Errorf("notifications are enabled but command is empty")
-	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
 			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)

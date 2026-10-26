@@ -77,9 +77,27 @@ func (d *DB) ListNotificationDeliveries(ctx context.Context, limit int) ([]domai
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT id, event_type, status, payload_json,
+	return d.listNotificationDeliveries(ctx, `SELECT id, event_type, status, payload_json,
 attempts, last_error, created_at, updated_at FROM notification_deliveries
 ORDER BY updated_at DESC, id DESC LIMIT ?`, limit)
+}
+
+// ListNotificationDeliveriesAfter pages new deliveries without skipping older IDs
+// whose delivery status was updated more recently.
+func (d *DB) ListNotificationDeliveriesAfter(ctx context.Context, afterID int64, limit int) ([]domain.NotificationDelivery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return d.listNotificationDeliveries(ctx, `SELECT id, event_type, status, payload_json,
+attempts, last_error, created_at, updated_at FROM notification_deliveries
+WHERE id > ? ORDER BY id ASC LIMIT ?`, afterID, limit)
+}
+
+func (d *DB) listNotificationDeliveries(ctx context.Context, query string, args ...any) ([]domain.NotificationDelivery, error) {
+	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list notification deliveries: %w", err)
 	}

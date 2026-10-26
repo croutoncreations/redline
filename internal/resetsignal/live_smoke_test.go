@@ -174,6 +174,37 @@ func TestLiveSmokeAnnouncementRanking(t *testing.T) {
 	})
 }
 
+// Live shape on 2026-10-26: codex-reset is the only viable record and carries
+// its operator note; willreset has Tibo's words for the same post but no TTL.
+func TestSamePostMirrorSuppliesOriginalQuoteOnly(t *testing.T) {
+	r := liveSmokeSources(t)
+	const url = "https://x.com/thsottiaux/status/2114200291319124163"
+	const words = "Day 21/ Wonder what happens the remaining seven days. But today is a reset."
+	mirror := *r[1].Signal
+	mirror.ClaimedOriginalURL, mirror.AnnouncementID = url, "2114200291319124163"
+	mirror.Quote, mirror.QuoteSource, mirror.OriginalAccount = words, "original_post", "thsottiaux"
+	mirror.Kind, mirror.Freshness = KindPromised, MissingTTL
+	r[1].Signal = &mirror
+	a := ViableAnnouncement(BuildReport(liveSmokeNow, r[1:]))
+	if a == nil || a.URL != url || a.Kind != KindCompleted || a.Quote != words || a.QuoteSource != "original_post" || a.QuoteFeed != "willreset" {
+		t.Fatalf("announcement=%+v", a)
+	}
+	want := "Tibo (@thsottiaux): \"" + words + "\" Global Codex reset reported complete. Seen by codex-reset, willreset. Data: codex-reset.com, willreset.com."
+	if got := a.Notification(liveSmokeNow, false).Message; got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+
+	// A withdrawn mirror's text is not used, and the mirror alone never alerts.
+	mirror.Withdrawn = true
+	if a := ViableAnnouncement(BuildReport(liveSmokeNow, r[1:])); a != nil && a.Quote == words {
+		t.Fatalf("withdrawn mirror quote used: %+v", a)
+	}
+	mirror.Withdrawn = false
+	if a := ViableAnnouncement(BuildReport(liveSmokeNow, r[1:2])); a != nil {
+		t.Fatalf("non-viable mirror alone alerted: %+v", a)
+	}
+}
+
 func TestFixtureSummaryFieldsAreNotOriginalQuotes(t *testing.T) {
 	s, err := normalizeCodexReset(fixture(t, "codex-reset-null-window.json"), nil, fixtureNow)
 	if err != nil || s.QuoteSource != "tracker_summary" {

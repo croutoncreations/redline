@@ -98,11 +98,22 @@ func TestAnnouncementMessagesAndCandidate(t *testing.T) {
 	if e.Message != want || e.ProviderAccountID != "" || e.Type != "reset.announced" || e.Data["direct_source_verified"] != "false" || e.Data["quote"] != "Global reset landing" {
 		t.Fatalf("event=%+v", e)
 	}
+	if e.Title != "Codex reset promised" {
+		t.Fatalf("promised title=%q", e.Title)
+	}
+	a.Kind = KindScheduled
+	if got := a.Notification(end, false).Title; got != "Codex reset scheduled" {
+		t.Fatalf("scheduled title=%q", got)
+	}
 	a.Kind = KindCompleted
-	if !strings.HasPrefix(a.Notification(end, false).Message, "Tibo (@thsottiaux): \"Global reset landing\". Global Codex reset reported complete.") {
+	completed := a.Notification(end, false)
+	if !strings.HasPrefix(completed.Message, "Tibo (@thsottiaux): \"Global reset landing\". Global Codex reset reported complete.") {
 		t.Fatal("missing completion attribution")
 	}
-	if got := a.Notification(end, true); got.Message != "Retracted: the earlier Codex reset announcement from @thsottiaux was withdrawn or corrected." || got.Data["retracted"] != "true" {
+	if completed.Title != "Codex reset announced" {
+		t.Fatalf("completed title=%q", completed.Title)
+	}
+	if got := a.Notification(end, true); got.Message != "Retracted: the earlier Codex reset announcement from @thsottiaux was withdrawn or corrected." || got.Data["retracted"] != "true" || got.Title != "Codex reset announcement retracted" {
 		t.Fatalf("retraction=%+v", got)
 	}
 	a.Quote = strings.Repeat("世", 300)

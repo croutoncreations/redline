@@ -30,11 +30,21 @@ See [Architecture](architecture.md#execution-lifecycle) for the lifecycle state 
 
 ## Notifications
 
-Native macOS alerts can be enabled from the Redline app and cover job starts, completions, and
-failures.
+Native macOS alerts can be enabled from the Redline app and cover job starts, completions,
+failures, banked-reset reminders and redemption outcomes, and firesale starts/ends. Reset and
+firesale alerts come from the app itself, using recorded deliveries, not an external notifier.
+The app polls on its 20-second refresh cadence using the local API token. It seeds existing
+history silently on first use and persists its highest delivery ID across restarts. Clicking a
+reset or firesale alert opens the dashboard. Only redeem-now reminders and failed redemptions
+play a sound (subject to macOS notification settings).
 
-Command notifications are disabled by default. When enabled, Redline invokes a trusted local
-command with a versioned event document on stdin. Supported events are `run.started`,
+Notifications are disabled by default. Set `notifications.enabled: true` to record deliveries.
+An empty or omitted `command` enables **record-only mode**: deliveries are marked `delivered`
+without running an external hook, ready for the native Mac app to display. You must still list
+the desired reset/firesale events in `events` and authorize notifications in the app.
+When `command` is set, Redline also invokes that trusted local command with a versioned event
+document on stdin. Reset/firesale payloads include an optional, human-readable `title` plus
+`message`; existing consumers can continue using the unchanged data fields. Supported events are `run.started`,
 `run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
 `reset.redeem_failed`, `reset.announced`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
 empty, only `run.started`, `run.completed`, `run.failed`, and `scheduler.error` are sent; list the
@@ -82,14 +92,16 @@ for cached API/CLI access and interpretation limits.
 Automatic dispatch emits `firesale.started` and `firesale.ended` on provider state transitions,
 using the previous recorded automatic usage decision. Manual evaluations and skipped usage checks
 do not change this state. Data includes `pace_gap`, `overflow`, `effective_reset_at` (RFC3339 UTC),
-and `unlocked_tier`. See [firesale scheduling](scheduling.md#effective-horizon-and-firesale).
+`effective_reset_source`, and `unlocked_tier`. Messages describe unused capacity (or the pace gap
+when overflow is unavailable) and the effective reset deadline in UTC. See [firesale scheduling](scheduling.md#effective-horizon-and-firesale).
 
 ### Banked-reset redemptions
 
 Manual and automatic redemption emit `reset.redeemed` on provider-acknowledged success, or `reset.redeem_failed`
 for failed, unavailable, cooldown, or gone outcomes. Dry runs and `nothing_to_reset` emit neither.
 Each event includes string-valued data: `reset_id`, `request_id`, `outcome`, `code`, `reason`, and
-`verified` (`true` or `false`). A successful response with no observed weekly refill sends only
+`verified` (`true` or `false`), plus `weekly_remaining` when a post-redeem snapshot is available.
+Replayed results never notify. A successful response with no observed weekly refill sends only
 `reset.redeemed`, with `verified: "false"` and a note to check usage; it never assumes allowance
 has refilled. In automatic (`on_expiry: redeem`) mode, retries may emit further failure events;
 an attempted reset that expires unused also emits one `reset.redeem_failed` with `reset_id`,
@@ -136,7 +148,23 @@ need a POSIX shell should invoke one explicitly (for example `bash -lc "..."` fr
 
 ```bash
 redline notification list
+redline notification test
+redline notification test --event firesale.started --provider codex-main
+redline notification test --event all --json
 ```
+
+`notification test` records and delivers a synthetic event through the same service and message
+builders without contacting providers or redeeming anything. It defaults to `reset.expiring` and
+the first Codex account (otherwise the first account, sorted by ID). `--event all` sends each of
+the ten supported event types about one second apart. Titles start with `Test: ` and data includes
+`test: "true"`. Tests bypass the event subscription list, but disabled notifications return HTTP
+409 with instructions to enable them. The API is `POST /v1/notifications/test` with optional
+`event` and `provider` fields; it requires the bearer API token, not a pairing/browser cookie.
+It returns the delivery record, including `id`, `status`, and `last_error` on failure. Human CLI
+output includes the sent title/message and delivery status; `--json` prints the record (an array
+for `all`). A failed delivery exits non-zero. Native run alerts still use real run transitions;
+only reset/firesale test deliveries are displayed by the app. The `reset.announced` sample is a
+fake post with a placeholder link; it is global and ignores `--provider`.
 
 ## Health
 
