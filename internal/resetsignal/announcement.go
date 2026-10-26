@@ -101,7 +101,15 @@ func ViableAnnouncement(report Report) *Announcement {
 				}
 			}
 		}
-		url, _ := groupIdentity(members)
+		url, id := groupIdentity(members)
+		// Deduplicate on the post's status ID, not the group's display key,
+		// so a mirror dropping its URL (or adding one) cannot re-alert.
+		if url != "" {
+			id = statusID(url)
+		}
+		if id != "" {
+			key = "announcement:" + id
+		}
 		account := backing.OriginalAccount
 		if account == "" {
 			_, account = canonicalOriginal(url)

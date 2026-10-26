@@ -73,9 +73,11 @@ This global event has no provider account ID. It alerts only on the selected fre
 unretracted promise, schedule, or completion published within 72 hours. Odds-only predictions
 never alert, however high. It does not change scheduler or firesale decisions.
 
-Data fields are strings: `key`, `kind`, `url`, `account`, `quote`, `published_at`, `window_end`,
-`window_certainty`, `feeds` (comma-separated), `direct_source_verified` (`false`), and `retracted`.
-Missing timestamps/URLs are empty strings. The original post is not fetched. Quotes are untrusted
+Data fields are strings: `key` (`announcement:<status id>`, stable across mirrors), `kind`, `url`,
+`account`, `quote`, `quote_source` (`original_post` or `tracker_summary`), `published_at`,
+`window_end`, `window_certainty`, `feeds` (comma-separated), `attribution` and `attribution_urls`
+(comma-separated tracker credits and homepage links), `direct_source_verified` (`false`), and
+`retracted`. Missing values are empty strings. The original post is not fetched. Quotes are untrusted
 plain text, control-stripped, whitespace-collapsed, and capped at 280 characters. Tracker-interpreted
 deadlines are explicitly attributed in messages.
 

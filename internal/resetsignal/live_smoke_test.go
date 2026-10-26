@@ -75,7 +75,7 @@ func TestLiveSmokeBestBackedAnnouncement(t *testing.T) {
 	a := ViableAnnouncement(r)
 	const url = "https://x.com/thsottiaux/status/2114237083652882932"
 	const quote = "It is all propagated. Enjoy some mad codexing tomorrow. Fun week ahead too."
-	if a == nil || a.URL != url || a.Key != url || a.Kind != KindCompleted || a.Quote != quote || a.Account != "thsottiaux" || strings.Join(a.Feeds, ",") != "resetbeacon,willreset" {
+	if a == nil || a.URL != url || a.Key != "announcement:2114237083652882932" || a.Kind != KindCompleted || a.Quote != quote || a.Account != "thsottiaux" || strings.Join(a.Feeds, ",") != "resetbeacon,willreset" {
 		t.Fatalf("announcement=%+v", a)
 	}
 	if r.State != KindCompleted || !strings.Contains(r.Summary, "completed global event") {
@@ -202,6 +202,27 @@ func TestSamePostMirrorSuppliesOriginalQuoteOnly(t *testing.T) {
 	mirror.Withdrawn = false
 	if a := ViableAnnouncement(BuildReport(liveSmokeNow, r[1:2])); a != nil {
 		t.Fatalf("non-viable mirror alone alerted: %+v", a)
+	}
+}
+
+// The dedup key must not change when the URL-bearing mirror drops out and
+// only an ID-only record of the same post remains (or the reverse).
+func TestAnnouncementKeyIsStableAcrossMirrorChanges(t *testing.T) {
+	r := liveSmokeSources(t)
+	withURL := ViableAnnouncement(BuildReport(liveSmokeNow, r[2:]))
+	idOnly := *r[2].Signal
+	idOnly.ClaimedOriginalURL = ""
+	r[2].Signal = &idOnly
+	withoutURL := ViableAnnouncement(BuildReport(liveSmokeNow, r[2:]))
+	if withURL == nil || withoutURL == nil {
+		t.Fatalf("with=%+v without=%+v", withURL, withoutURL)
+	}
+	const want = "announcement:2114200291319124163"
+	if withURL.Key != want || withoutURL.Key != want {
+		t.Fatalf("keys: with URL %q, ID only %q; want both %q", withURL.Key, withoutURL.Key, want)
+	}
+	if withURL.URL != "https://x.com/thsottiaux/status/2114200291319124163" {
+		t.Fatalf("display URL lost: %q", withURL.URL)
 	}
 }
 
