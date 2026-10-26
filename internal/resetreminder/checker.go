@@ -3,7 +3,6 @@ package resetreminder
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/notification"
 )
 
 const (
@@ -115,21 +115,10 @@ func (r Checker) send(ctx context.Context, providerID string, provider config.Pr
 	if err != nil || !inserted {
 		return err
 	}
-	name := provider.Provider
-	switch strings.ToLower(name) {
-	case "claude":
-		name = "Claude"
-	case "codex":
-		name = "Codex"
-	}
-	message := fmt.Sprintf("%s banked reset expires in %s", name, resetDuration(reset.ExpiresAt.Sub(now)))
-	if action == actionRedeemNow {
-		message += " — redeem it now"
-	}
-	return r.Notifier.Notify(ctx, domain.NotificationEvent{
-		Version: 1, Type: domain.EventResetExpiring, OccurredAt: now.UTC(), ProviderAccountID: providerID, Message: message,
+	return r.Notifier.Notify(ctx, notification.WithMessage(domain.NotificationEvent{
+		Version: 1, Type: domain.EventResetExpiring, OccurredAt: now.UTC(), ProviderAccountID: providerID,
 		Data: map[string]string{"reset_id": reset.ID, "expires_at": reset.ExpiresAt.UTC().Format(time.RFC3339), "lead": resetDuration(lead), "action": action, "count": strconv.Itoa(reset.ResetsLeft)},
-	})
+	}, provider.Provider))
 }
 
 func resetDuration(d time.Duration) string {

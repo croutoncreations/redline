@@ -485,8 +485,11 @@ func runHealth(client apiclient.Client, args []string, stdout, stderr io.Writer)
 }
 
 func runNotifications(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "test" {
+		return runNotificationTest(client, args[1:], stdout, stderr)
+	}
 	if len(args) != 1 || args[0] != "list" {
-		fmt.Fprintln(stderr, "usage: redline notification list")
+		fmt.Fprintln(stderr, "usage: redline notification <list|test [--event TYPE|all] [--provider ID] [--json]>")
 		return 1
 	}
 	var deliveries []domain.NotificationDelivery

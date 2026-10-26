@@ -9,6 +9,7 @@ import (
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/store"
 )
 
@@ -151,5 +152,5 @@ func (s *Server) expiredBankedReset(ctx context.Context, a store.AutomaticBanked
 	if !a.ExpiresAt.IsZero() {
 		data["expires_at"] = a.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	return s.notifier.Notify(ctx, domain.NotificationEvent{Version: 1, Type: domain.EventResetRedeemFailed, OccurredAt: now.UTC(), ProviderAccountID: a.ProviderAccountID, Message: "Banked reset: " + reason, Data: data})
+	return s.notifier.Notify(ctx, notification.WithMessage(domain.NotificationEvent{Version: 1, Type: domain.EventResetRedeemFailed, OccurredAt: now.UTC(), ProviderAccountID: a.ProviderAccountID, Data: data}, s.config.Providers[a.ProviderAccountID].Provider))
 }
