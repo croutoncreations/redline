@@ -12,6 +12,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/domain"
 	redprocess "github.com/croutoncreations/redline/internal/process"
+	"github.com/croutoncreations/redline/internal/push"
 )
 
 type Store interface {
@@ -24,6 +25,7 @@ type Sink interface {
 }
 
 type Service struct {
+	Push    *push.Dispatcher
 	Enabled bool
 	Events  map[string]bool
 	Store   Store
@@ -36,7 +38,7 @@ func (s Service) Notify(ctx context.Context, event domain.NotificationEvent) err
 	if !s.Enabled || !s.Events[event.Type] {
 		return nil
 	}
-	_, err := s.deliver(ctx, event)
+	_, err := s.deliver(ctx, event, false)
 	return err
 }
 
@@ -45,10 +47,18 @@ func (s Service) Test(ctx context.Context, event domain.NotificationEvent) (doma
 	if !s.Enabled {
 		return domain.NotificationDelivery{}, fmt.Errorf("notifications are disabled; set notifications.enabled: true in your config")
 	}
-	return s.deliver(ctx, event)
+	return s.deliver(ctx, event, false)
 }
 
-func (s Service) deliver(ctx context.Context, event domain.NotificationEvent) (domain.NotificationDelivery, error) {
+// TestPush follows the ordinary delivery path, awaiting its content-free test wake.
+func (s Service) TestPush(ctx context.Context, event domain.NotificationEvent) (domain.NotificationDelivery, error) {
+	if !s.Enabled {
+		return domain.NotificationDelivery{}, fmt.Errorf("notifications are disabled; set notifications.enabled: true in your config")
+	}
+	return s.deliver(ctx, event, true)
+}
+
+func (s Service) deliver(ctx context.Context, event domain.NotificationEvent, testPush bool) (domain.NotificationDelivery, error) {
 	var record domain.NotificationDelivery
 	if event.Version == 0 {
 		event.Version = 1
@@ -66,6 +76,19 @@ func (s Service) deliver(ctx context.Context, event domain.NotificationEvent) (d
 	)
 	if err != nil {
 		return record, err
+	}
+	var pushResult *domain.PushResult
+	if s.Push != nil {
+		kind := event.Type
+		if testPush {
+			kind = "test"
+		}
+		result := s.Push.Dispatch(context.WithoutCancel(ctx), deliveryID, kind, testPush)
+		if testPush {
+			pushResult = &result
+		}
+	} else if testPush {
+		pushResult = &domain.PushResult{}
 	}
 	timeout := s.Timeout
 	if timeout <= 0 {
@@ -87,7 +110,7 @@ func (s Service) deliver(ctx context.Context, event domain.NotificationEvent) (d
 	if completionErr != nil {
 		return record, errors.Join(deliveryErr, completionErr)
 	}
-	record = domain.NotificationDelivery{ID: deliveryID, EventType: event.Type, Status: status, Payload: payload, Attempts: 1, LastError: lastError, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	record = domain.NotificationDelivery{Push: pushResult, ID: deliveryID, EventType: event.Type, Status: status, Payload: payload, Attempts: 1, LastError: lastError, CreatedAt: createdAt, UpdatedAt: updatedAt}
 	return record, deliveryErr
 }
 

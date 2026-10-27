@@ -638,6 +638,73 @@ ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
 			return fmt.Errorf("record reset announcements migration: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS reset_signal_firesales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    announcement_key TEXT NOT NULL,
+    provider_account_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    end_reason TEXT NOT NULL DEFAULT '',
+    announcement_json BLOB NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_firesales(provider_account_id) WHERE ended_at IS NULL;`); err != nil {
+		return fmt.Errorf("create reset signal firesales: %w", err)
+	}
+	if version < 39 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (39)`); err != nil {
+			return fmt.Errorf("record reset signal firesales migration: %w", err)
+		}
+	}
+	// Repair stamped schemas too: version alone does not prove columns exist.
+	for _, column := range []struct{ name, definition string }{
+		{"baseline_weekly_remaining", "REAL"},
+		{"baseline_weekly_resets_at", "TEXT"},
+		{"baseline_observed_at", "TEXT"},
+	} {
+		if err := addColumnIfMissing(ctx, tx, "reset_signal_firesales", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if version < 40 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (40)`); err != nil {
+			return fmt.Errorf("record reset signal firesale baseline migration: %w", err)
+		}
+	}
+	// Migration 41. Repair by table existence, not version alone.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS device_sessions (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('browser', 'mobile')),
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    revoked_at TEXT,
+    issuer TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+		return fmt.Errorf("create device sessions: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, tx, "device_sessions", "issuer", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 41 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=41)`); err != nil {
+		return fmt.Errorf("record device sessions migration: %w", err)
+	}
+	// Migration 42. Repair even when another branch has already stamped it.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS push_registrations (
+    device_session_id TEXT PRIMARY KEY REFERENCES device_sessions(id),
+    platform TEXT NOT NULL CHECK(platform IN ('android','ios')),
+    provider TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("create push registrations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 42 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=42)`); err != nil {
+		return fmt.Errorf("record push registrations migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

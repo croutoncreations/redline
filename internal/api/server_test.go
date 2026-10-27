@@ -433,7 +433,7 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	redeemRequest.RemoteAddr = "127.0.0.1:54321"
 	handler.ServeHTTP(redeem, redeemRequest)
 	cookies := redeem.Result().Cookies()
-	if redeem.Code != http.StatusNoContent || len(cookies) != 1 || cookies[0].Name != "redline_api_session" ||
+	if redeem.Code != http.StatusNoContent || len(cookies) != 1 || cookies[0].Name != "redline_api_session" || cookies[0].Value == cfg.APIToken ||
 		!cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("redeem status=%d cookies=%#v body=%s", redeem.Code, cookies, redeem.Body.String())
 	}
@@ -516,7 +516,7 @@ func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T)
 		t.Fatalf("bootstrap status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	cookies := resp.Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || !cookies[0].HttpOnly ||
+	if len(cookies) != 1 || cookies[0].Name != "redline_api_session" || cookies[0].Value == cfg.APIToken || !cookies[0].HttpOnly ||
 		cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("bootstrap cookies = %#v", cookies)
 	}

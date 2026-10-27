@@ -79,17 +79,20 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|devices|version>")
 		return 1
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
 	// before constructing the service client so it never reads a local token.
-	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals")) {
+	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals" && remaining[1] != "firesale")) {
 		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
 	case "reset":
+		if remaining[1] == "firesale" {
+			return runResetFiresale(client, remaining[2:], stdout, stderr)
+		}
 		if remaining[1] == "signals" {
 			if len(remaining) != 2 {
 				fmt.Fprintln(stderr, "usage: redline reset signals")
@@ -157,6 +160,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	case "pair":
 		return runPair(client, remaining[1:], *configPath, stdout, stderr)
+	case "devices":
+		return runDevices(client, remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -170,7 +175,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, version")
+	fmt.Fprintln(output, "          pair, devices, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
@@ -454,14 +459,16 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "Re-run with --yes to confirm.")
 		return 1
 	}
-	// The new token is intentionally not printed: it stays in the protected
-	// file, and `pair --qr` is the supported way to hand it to a device.
+	// Device sessions are bound to the master token that issued them, so
+	// replacing the token file is the whole rotation: no database to find,
+	// and nothing left half done if it fails. The new token is intentionally
+	// not printed; `pair --qr` is the supported way to hand it to a device.
 	if _, err := apiauth.RotateToken(resolvedPath); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Rotated the Redline API token at %s\n", tokenPath)
-	fmt.Fprintln(stdout, "Restart Redline to load it, then run `redline pair --qr` to pair devices again.")
+	fmt.Fprintln(stdout, "Restart Redline to apply it: every paired device, including legacy pairings, is signed out. Then run `redline pair --qr` to pair devices again.")
 	return 0
 }
 
@@ -897,7 +904,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	}
 	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
 	renderTerminalQR(stdout, code.Bitmap())
-	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
+	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants device control. Keep it private; revoke the device session or rotate the API token if exposed.")
 	return 0
 }
 

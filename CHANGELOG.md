@@ -6,13 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- paired devices no longer receive the master API token. New pairings and local dashboard
+  sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
+  upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
+  Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
+  job/run/provider and firesale control remains available. Pairing creation, device management,
+  and notification tests require the owner. Device sessions are bound to the issuing master
+  token, so rotating it and restarting signs out every device and legacy pairing.
+- Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
+  `redline devices list|revoke ID`; lists never expose token hashes.
+
 ### Added
 
+- Provider-neutral paired-device push registrations and content-free wake-ups for recorded
+  notification deliveries. Optional `push.relay_url`/`push.auth_token_file` transport, disabled
+  by default; no built-in push provider. Owner lists expose token suffixes and queue counters.
+  `redline notification test --push` reports wake counts or unconfigured status.
+- Announcement firesales end when their own provider's fresh usage shows a weekly refill or
+  weekly rollover, using a persisted low-water mark and `completion_source: usage_refill`.
+- Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
+  `notify` when monitoring is enabled), owner/device `POST /v1/reset-signals/firesale`, and
+  `redline reset firesale start|stop`. Only viable promises/schedules with a future announced
+  deadline qualify; predictions and completed resets never start one. Persistent opt-ins and
+  lifecycle claims survive restarts, force the firesale/pacing gate without bypassing safety
+  limits, and expose state in cached API/CLI/dashboard JSON.
+- Reset monitoring retains each feed's last successful snapshot through failed/deferred polls,
+  while still applying TTL, source age, and deadline expiry checks.
 - Off-by-default public Codex reset-signal monitoring (`reset_signals`) and opt-in
   `reset.announced` alerts for fresh linked promises, schedules, and completions only, never
   odds-only predictions. Persistent deduplication allows escalation and one matching retraction
   follow-up. Cached state is available through `redline reset signals`, `GET /v1/reset-signals`,
-  and additive dashboard JSON. Scheduling and firesale behavior are unchanged.
+  and additive dashboard JSON.
 - Readable reset/firesale notification titles and messages, UTC deadlines, and verified weekly
   refill percentages. Event payloads add optional `title` without changing existing data keys.
 - `redline notification test [--event TYPE|all] [--provider ID] [--json]` and bearer-only

@@ -27,6 +27,7 @@ type Config struct {
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
 	ResetSignals    ResetSignals        `yaml:"reset_signals"`
 	Notifications   Notifications       `yaml:"notifications"`
+	Push            Push                `yaml:"push"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	APIToken        string              `yaml:"-"`
@@ -76,7 +77,12 @@ func (c Config) NotificationEvents() map[string]bool {
 }
 
 type API struct {
-	TrustedHosts []string `yaml:"trusted_hosts"`
+	TrustedHosts  []string      `yaml:"trusted_hosts"`
+	PairedDevices PairedDevices `yaml:"paired_devices"`
+}
+
+type PairedDevices struct {
+	AllowResetRedemption bool `yaml:"allow_reset_redemption"`
 }
 
 type Scheduler struct {
@@ -88,6 +94,17 @@ type ResetSignals struct {
 	Enabled      bool   `yaml:"enabled"`
 	PollInterval string `yaml:"poll_interval"`
 	Notify       *bool  `yaml:"notify"`
+	Firesale     string `yaml:"firesale"`
+}
+
+func (c Config) ResetSignalsFiresale() string {
+	if !c.ResetSignals.Enabled {
+		return "off"
+	}
+	if c.ResetSignals.Firesale == "" {
+		return "notify"
+	}
+	return c.ResetSignals.Firesale
 }
 
 func (c Config) ResetSignalsNotify() bool {
@@ -456,6 +473,15 @@ func (cfg *Config) validate() error {
 	if _, err := cfg.ResetSignalsInterval(); err != nil {
 		return err
 	}
+	switch cfg.ResetSignals.Firesale {
+	case "", "off":
+	case "notify", "auto":
+		if !cfg.ResetSignals.Enabled {
+			return fmt.Errorf("reset_signals firesale requires reset_signals.enabled")
+		}
+	default:
+		return fmt.Errorf("reset_signals firesale must be off, notify, or auto")
+	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
 		return err
 	}
@@ -469,7 +495,7 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
-	return nil
+	return cfg.Push.Validate()
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {

@@ -300,11 +300,11 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				remaining["five_hour_remaining"] = strconv.FormatFloat(post.Short.Remaining, 'f', -1, 64)
 			}
 		}
-		refilled := post.Weekly.Remaining > pre.Weekly.Remaining || post.Weekly.ResetsAt.After(pre.Weekly.ResetsAt)
+		refilled := usageWindowRefilled(pre.Weekly, post.Weekly, 0)
 		clearsWeekly := slices.Contains(result.Cleared, "weekly")
 		clearsShort := slices.Contains(result.Cleared, "five_hour")
 		if clearsShort && !clearsWeekly {
-			refilled = pre.Short != nil && post.Short != nil && (post.Short.Remaining > pre.Short.Remaining || post.Short.ResetsAt.After(pre.Short.ResetsAt))
+			refilled = pre.Short != nil && post.Short != nil && usageWindowRefilled(*pre.Short, *post.Short, 0)
 		}
 		result.Verified = refreshErr == nil && post.ObservedAt.After(completedAt) && refilled
 		if !result.Verified {
@@ -375,8 +375,14 @@ func (s *Server) notifyRedemption(ctx context.Context, providerID string, result
 }
 
 func (s *Server) redeemBankedReset(w http.ResponseWriter, r *http.Request) {
-	if authorized, viaCookie := s.authorized(r); !authorized || viaCookie {
-		writeJSON(w, http.StatusForbidden, problem{Error: "redeeming banked resets requires the local API token"})
+	// Demo mode never redeems and has no API token, so report that first
+	// rather than an authorization error no demo request could pass.
+	if s.redemptionDisabled {
+		writeError(w, fmt.Errorf("%w: banked reset redemption is disabled in demo mode", store.ErrConflict))
+		return
+	}
+	if p := requestPrincipal(r); !p.owner && (!p.valid() || !s.config.API.PairedDevices.AllowResetRedemption) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "paired device reset redemption requires api.paired_devices.allow_reset_redemption: true"})
 		return
 	}
 	var body *struct {

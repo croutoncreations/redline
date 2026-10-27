@@ -1,7 +1,8 @@
 # HTTP API
 
 Redline's service exposes a local HTTP API on `http://127.0.0.1:7436` by default. The dashboard,
-native app, CLI, and MCP server are all clients of this API; only `redline serve` opens SQLite.
+native app, CLI, and MCP server are all clients of this API. The service owns operational SQLite
+access.
 
 ## Authentication
 
@@ -32,6 +33,52 @@ curl -H "Authorization: Bearer $REDLINE_API_TOKEN" \
 Do not copy the credential into logs. On Windows the file is created with an owner-only ACL; on
 other platforms it is mode `0600`.
 
+### Principals and permissions
+
+The master API token sent as `Authorization: Bearer` is the **owner** credential. Pairing redeem
+and local dashboard bootstrap instead issue fresh **device** tokens in the HttpOnly
+`redline_api_session` cookie (the redeem response remains `204` with `Set-Cookie`). Native pairing
+clients can extract that cookie value and send it as a bearer token. Only a SHA-256 hash is stored;
+active device sessions survive restarts, and `last_used_at` updates at most once per minute.
+
+| Action | Owner bearer | Paired device (bearer or cookie) / legacy master cookie |
+| --- | --- | --- |
+| View data; create/edit/manage jobs and profiles; start runs | Allowed | Allowed |
+| Pause/resume providers; start/stop firesales | Allowed | Allowed |
+| Redeem banked resets (including dry runs) | Allowed | Only with `api.paired_devices.allow_reset_redemption: true` (default false) |
+| Create pairing tokens (`POST /v1/pairing`) | Allowed | Forbidden |
+| List/revoke devices | Allowed | Forbidden |
+| List push registrations | Allowed | Forbidden |
+| Register/remove own push token | Forbidden | Allowed (device session required) |
+| Test notifications (`POST /v1/notifications/test`) | Allowed | Forbidden |
+| Rotate API token | Local owner CLI only | No HTTP endpoint |
+
+Existing pairings keep working. A legacy cookie equal to the master token has device permissions
+and upgrades transparently to a fresh device cookie on its next request. A legacy master-token
+**bearer** cannot be distinguished from CLI/Mac/MCP owner use and remains owner-authorized.
+Re-pairing gives that phone a properly scoped device token. Each device session is bound to the
+master token that issued it (an HMAC fingerprint, never the token itself), so local
+`redline token rotate --yes` followed by a restart signs out every device session, legacy pairing
+and old master token at once, including any session the old process issued after the rotation.
+The CLI never needs to locate the service database. Existing sessions are not revoked merely by
+upgrading.
+
+`GET /v1/devices` returns an array of `id`, `name`, `kind` (`browser` or `mobile`), `created_at`,
+`last_used_at`, and optional `revoked_at`; neither raw tokens nor hashes are returned.
+`DELETE /v1/devices/{id}` revokes a session (`204`, or `404` for an unknown ID). Revoked credentials
+receive `401`. Pairing redeem optionally accepts `name` and `kind` (default `browser`).
+
+## Push registrations
+
+See [push notifications](push-notifications.md) for configuration, privacy, validation, and examples.
+`PUT /v1/push/registration` and `DELETE /v1/push/registration` require a device session and
+return 204; the owner bearer gets 403. Owner-only `GET /v1/push/registrations` returns
+`{registrations: [...], dropped: N, coalesced: N}` with device id/name, platform, provider,
+a token suffix (never the full token), and updated_at. Revoked/rotated sessions are excluded.
+`POST /v1/notifications/test` accepts `"push": true` to await test wakes and adds
+`"push": {"configured": false, "woken": 0}` to its delivery response when push is disabled.
+The global notifications enabled switch still applies (409 when off).
+
 ## Remote access
 
 Cross-origin requests and untrusted Host headers are rejected independently. Exact Tailscale
@@ -61,6 +108,8 @@ GET  /v1/dashboard
 GET  /v1/dashboard/events
 POST /v1/pairing
 POST /v1/pairing/redeem
+GET  /v1/devices
+DELETE /v1/devices/{id}
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status
 GET  /v1/providers/{account}/candidates
@@ -126,7 +175,9 @@ provider usage was evaluated, independently of model-pool tier unlocks.
 
 ## Banked reset redemption
 
-Redemption POSTs require the bearer API token; mobile pairing session cookies alone receive **403** (including dry runs). The GET history route still accepts session cookie authentication.
+Redemption POSTs require the owner, or a device when `api.paired_devices.allow_reset_redemption`
+is `true`. Otherwise devices receive **403** naming that setting (including dry runs). The GET
+history route accepts both owner and device authentication.
 
 - `POST /v1/providers/{id}/banked-resets/redeem` with `{"dry_run": true}` validates the provider
   request using a nonexistent reset ID. `{"dry_run": false}` spends the selected one-time reset.
@@ -160,6 +211,25 @@ Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger
 `created_at`, and optional `completed_at`. Transport failures remain pending with failure details
 so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
 sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
+
+## Reset signals and firesales
+
+- `GET /v1/reset-signals` reads the cached report, viable announcement, errors, and last poll
+  time without fetching trackers. It adds `firesale: {active, mode, announcement_key, deadline,
+  started_at, providers}`; times are RFC3339 UTC or null when inactive. Dashboard JSON includes
+  this same state under `reset_signal` when monitoring is enabled.
+- `POST /v1/reset-signals/firesale` accepts `{"announcement_key":"announcement:123","action":"start"}`
+  or `"action":"stop"`, returning the firesale object. Both owner and device principals may
+  start/stop firesales (bearer or cookie); demo mode refuses with **409**. Both actions are idempotent.
+  Start returns **409** for a missing/mismatched current viable announcement, a missing/past
+  deadline, or firesale off. Only source-backed PROMISED/SCHEDULED announcements qualify, for
+  Codex providers. A different active key also returns **409** naming its key/deadline and telling
+  the user to stop it first. Stop needs no current tracker announcement: omit the key to stop
+  the active sale. An explicit key conflicting with an active sale returns **409** naming it.
+  No active sale (including firesale off) is a **200** no-op with `active: false`.
+
+See [announcement firesales](reset-signal-preview.md#announcement-firesales) for modes,
+persistence, lifecycle, and notification data.
 
 ## Related
 

@@ -6,6 +6,10 @@ max_snapshot_age: 15m
 # Optional HTTPS hostnames accepted through a trusted reverse proxy such as
 # Tailscale Serve. Exact matches only; do not include schemes, ports, or wildcards.
 api:
+  # Paired devices retain job/run/provider/firesale control. Spending banked
+  # resets (including dry runs) requires this explicit opt-in; owner is unaffected.
+  paired_devices:
+    allow_reset_redemption: false
   trusted_hosts: []
   # trusted_hosts:
   #   - macbook-pro.example.ts.net
@@ -25,12 +29,15 @@ usage_monitor:
   poll_interval: 5m
 
 # Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
-# Alerts are announced-only, never odds-based, and do not affect scheduling.
-# Also enable notifications and add reset.announced to notifications.events.
+# Alerts and firesales are announcement-only, never odds-based.
+# Also enable notifications and list reset.announced/firesale.started/firesale.ended.
 # reset_signals:
 #   enabled: false
 #   poll_interval: 10m # minimum 5m
-#   notify: true      # default when enabled; false keeps monitoring read-only
+#   notify: true      # default when enabled; controls announcement alerts only
+#   firesale: notify  # off | notify | auto; default notify when enabled
+#                     # requires enabled unless off; PROMISED/SCHEDULED need WindowEnd
+#                     # notify needs: redline reset firesale start
 
 # Set enabled: true to record notifications. Use command: "" (or omit it) for
 # native Mac alerts without an external hook; authorize notifications in the app.
@@ -41,6 +48,12 @@ notifications:
   command: ./scripts/redline-notify
   timeout: 30s
   events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
+
+# Optional provider-neutral push wake-ups; no push provider is built in.
+# Requires notifications.enabled. See docs/push-notifications.md.
+# push:
+#   relay_url: "" # HTTPS; HTTP only for loopback. Empty disables push.
+#   auth_token_file: "" # Existing 0600 file containing the relay shared secret.
 
 providers:
   codex-main:
