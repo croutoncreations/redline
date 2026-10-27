@@ -224,14 +224,34 @@ func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFir
 		}
 	}
 	if state.Report != nil {
-		if completion := resetsignal.SelectedCompletion(*state.Report); completion != nil && completion.PublishedAt.After(announcedAt) {
-			if completion.AnnouncementID != "" || completion.ClaimedOriginalURL != "" {
+		if completion := resetsignal.SelectedCompletion(*state.Report); completion != nil {
+			// The sale's own post marked completed may keep its original
+			// publication time; only other or unlinked completions must be newer.
+			if completionKey(*completion) == sale.AnnouncementKey {
 				return "announcement"
 			}
-			return "tracker_reset"
+			if completion.PublishedAt.After(announcedAt) {
+				if completion.AnnouncementID != "" || completion.ClaimedOriginalURL != "" {
+					return "announcement"
+				}
+				return "tracker_reset"
+			}
 		}
 	}
 	return ""
+}
+
+// completionKey is the announcement key a completion record refers to, in the
+// same announcement:<status id> form ViableAnnouncement uses, or "".
+func completionKey(s resetsignal.Signal) string {
+	id := strings.TrimSpace(s.AnnouncementID)
+	if url := strings.TrimSpace(s.ClaimedOriginalURL); url != "" {
+		id = url[strings.LastIndex(url, "/")+1:]
+	}
+	if id == "" {
+		return ""
+	}
+	return "announcement:" + id
 }
 
 // stopResetFiresale ends every matching sale before reporting any error, so a

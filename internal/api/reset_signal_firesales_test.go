@@ -572,6 +572,34 @@ func TestResetSignalFiresaleUnlinkedCompletionOnlyEndsWhenNewerAndFresh(t *testi
 	}
 }
 
+// A tracker that marks the sale's own post completed keeps its publication
+// time. The report's selected completion must still end the sale, even if a
+// better-mirrored promise occupies the alert-ranked announcement.
+func TestResetSignalFiresaleSameKeyCompletionEndsWithoutNewerTime(t *testing.T) {
+	s, signal, n := firesaleFixture(t, "auto")
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	state := s.ResetSignalState()
+	if !state.Firesale.Active || state.Report == nil {
+		t.Fatalf("auto start=%+v", state.Firesale)
+	}
+	signal.Kind = resetsignal.KindCompleted
+	sale, err := s.store.ActiveResetSignalFiresales(t.Context())
+	if err != nil || len(sale) != 1 {
+		t.Fatalf("sales=%d err=%v", len(sale), err)
+	}
+	completion := *signal
+	got := firesaleCompletionSource(resetsignal.State{Report: state.Report}, sale[0])
+	if got != "" {
+		t.Fatalf("pre-completion source=%q", got)
+	}
+	report := resetsignal.BuildReport(s.now(), []resetsignal.SourceResult{{Signal: &completion}})
+	if got := firesaleCompletionSource(resetsignal.State{Report: &report}, sale[0]); got != "announcement" {
+		t.Fatalf("same-key completion with unchanged time: source=%q, want announcement (events=%d)", got, len(n.events))
+	}
+}
+
 type failingFiresaleNotifier struct{ calls int }
 
 func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {
