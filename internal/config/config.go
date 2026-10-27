@@ -27,6 +27,7 @@ type Config struct {
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
 	ResetSignals    ResetSignals        `yaml:"reset_signals"`
 	Notifications   Notifications       `yaml:"notifications"`
+	Push            Push                `yaml:"push"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	APIToken        string              `yaml:"-"`
@@ -494,7 +495,7 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
-	return nil
+	return cfg.Push.Validate()
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {

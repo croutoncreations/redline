@@ -49,6 +49,12 @@ notifications:
   timeout: 30s
   events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
 
+# Optional provider-neutral push wake-ups; no push provider is built in.
+# Requires notifications.enabled. See docs/push-notifications.md.
+# push:
+#   relay_url: "" # HTTPS; HTTP only for loopback. Empty disables push.
+#   auth_token_file: "" # Existing 0600 file containing the relay shared secret.
+
 providers:
   codex-main:
     provider: codex

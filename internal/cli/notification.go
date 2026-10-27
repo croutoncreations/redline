@@ -20,11 +20,12 @@ func runNotificationTest(client apiclient.Client, args []string, stdout, stderr 
 	event := flags.String("event", domain.EventResetExpiring, "event type, or all")
 	provider := flags.String("provider", "", "provider account ID")
 	jsonOutput := flags.Bool("json", false, "print delivery JSON")
+	pushTest := flags.Bool("push", false, "await a content-free test wake")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: redline notification test [--event TYPE|all] [--provider ID] [--json]")
+		fmt.Fprintln(stderr, "usage: redline notification test [--event TYPE|all] [--provider ID] [--push] [--json]")
 		return 1
 	}
 	events := []string{*event}
@@ -38,7 +39,11 @@ func runNotificationTest(client apiclient.Client, args []string, stdout, stderr 
 			time.Sleep(time.Second)
 		}
 		var delivery domain.NotificationDelivery
-		if err := client.Do(context.Background(), http.MethodPost, "/v1/notifications/test", map[string]string{"event": kind, "provider": *provider}, &delivery); err != nil {
+		body := map[string]any{"event": kind, "provider": *provider}
+		if *pushTest {
+			body["push"] = true
+		}
+		if err := client.Do(context.Background(), http.MethodPost, "/v1/notifications/test", body, &delivery); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -54,6 +59,13 @@ func runNotificationTest(client apiclient.Client, args []string, stdout, stderr 
 				fmt.Fprintf(stdout, " (%s)", delivery.LastError)
 			}
 			fmt.Fprintln(stdout)
+			if *pushTest && delivery.Push != nil {
+				if !delivery.Push.Configured {
+					fmt.Fprintln(stdout, "push not configured")
+				} else {
+					fmt.Fprintf(stdout, "Push: %d devices woken\n", delivery.Push.Woken)
+				}
+			}
 		}
 	}
 	if *jsonOutput {

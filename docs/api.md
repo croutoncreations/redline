@@ -42,6 +42,8 @@ active device sessions survive restarts, and `last_used_at` updates at most once
 | Redeem banked resets (including dry runs) | Allowed | Only with `api.paired_devices.allow_reset_redemption: true` (default false) |
 | Create pairing tokens (`POST /v1/pairing`) | Allowed | Forbidden |
 | List/revoke devices | Allowed | Forbidden |
+| List push registrations | Allowed | Forbidden |
+| Register/remove own push token | Forbidden | Allowed (device session required) |
 | Test notifications (`POST /v1/notifications/test`) | Allowed | Forbidden |
 | Rotate API token | Local owner CLI only | No HTTP endpoint |
 
@@ -59,6 +61,17 @@ upgrading.
 `last_used_at`, and optional `revoked_at`; neither raw tokens nor hashes are returned.
 `DELETE /v1/devices/{id}` revokes a session (`204`, or `404` for an unknown ID). Revoked credentials
 receive `401`. Pairing redeem optionally accepts `name` and `kind` (default `browser`).
+
+## Push registrations
+
+See [push notifications](push-notifications.md) for configuration, privacy, validation, and examples.
+`PUT /v1/push/registration` and `DELETE /v1/push/registration` require a device session and
+return 204; the owner bearer gets 403. Owner-only `GET /v1/push/registrations` returns
+`{registrations: [...], dropped: N, coalesced: N}` with device id/name, platform, provider,
+a token suffix (never the full token), and updated_at. Revoked/rotated sessions are excluded.
+`POST /v1/notifications/test` accepts `"push": true` to await test wakes and adds
+`"push": {"configured": false, "woken": 0}` to its delivery response when push is disabled.
+The global notifications enabled switch still applies (409 when off).
 
 ## Remote access
 

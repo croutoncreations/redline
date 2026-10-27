@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Provider-neutral paired-device push registrations and content-free wake-ups for recorded
+  notification deliveries. Optional `push.relay_url`/`push.auth_token_file` transport, disabled
+  by default; no built-in push provider. Owner lists expose token suffixes and queue counters.
+  `redline notification test --push` reports wake counts or unconfigured status.
 - Announcement firesales end when their own provider's fresh usage shows a weekly refill or
   weekly rollover, using a persisted low-water mark and `completion_source: usage_refill`.
 - Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
