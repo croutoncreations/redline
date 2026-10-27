@@ -89,14 +89,20 @@ func TestTokenRotateRevokesDeviceSessions(t *testing.T) {
 		t.Fatalf("before rotation=%d", code)
 	}
 	var stdout, stderr bytes.Buffer
+	// Rotate from another working directory: the CLI must not need to find
+	// the service's database for revocation to take effect.
+	t.Chdir(t.TempDir())
 	if exit := cli.Run([]string{"--config", configPath, "token", "rotate", "--yes"}, &stdout, &stderr, time.Now); exit != 0 {
 		t.Fatalf("exit=%d stderr=%s", exit, &stderr)
-	}
-	if code := call(); code != 401 {
-		t.Fatalf("after rotation=%d", code)
 	}
 	current, err := apiauth.ReadToken(configPath)
 	if err != nil || current == owner {
 		t.Fatalf("token not rotated: %v", err)
+	}
+	// Restart the service with the rotated token, as the output instructs.
+	cfg.APIToken = current
+	s = api.NewServer(cfg, db, time.Now)
+	if code := call(); code != 401 {
+		t.Fatalf("after rotation and restart=%d", code)
 	}
 }

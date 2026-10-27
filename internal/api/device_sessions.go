@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -62,6 +63,15 @@ func deviceTokenHash(token string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 }
 
+// sessionIssuer fingerprints the current master token. Sessions record it at
+// creation and only match while the same master token is loaded, so rotation
+// revokes them all. An HMAC keeps the master token unrecoverable from the DB.
+func (s *Server) sessionIssuer() string {
+	mac := hmac.New(sha256.New, []byte(s.config.APIToken))
+	mac.Write([]byte("redline device session issuer v1"))
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
 func (s *Server) newDeviceSession(r *http.Request, name, kind string) (string, string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -70,7 +80,7 @@ func (s *Server) newDeviceSession(r *http.Request, name, kind string) (string, s
 	token := base64.RawURLEncoding.EncodeToString(bytes)
 	at := s.now().UTC()
 	session := store.DeviceSession{ID: uuid.NewString(), Name: name, Kind: kind, CreatedAt: at, LastUsedAt: at}
-	if err := s.store.CreateDeviceSession(r.Context(), session, deviceTokenHash(token)); err != nil {
+	if err := s.store.CreateDeviceSession(r.Context(), session, deviceTokenHash(token), s.sessionIssuer()); err != nil {
 		return "", "", err
 	}
 	return token, session.ID, nil
@@ -84,7 +94,7 @@ func (s *Server) legacyDeviceSession(r *http.Request) (string, string, error) {
 	s.legacyDeviceMu.Lock()
 	defer s.legacyDeviceMu.Unlock()
 	if s.legacyDeviceToken != "" {
-		if _, err := s.store.AuthenticateDeviceSession(r.Context(), deviceTokenHash(s.legacyDeviceToken), s.now().UTC()); err == nil {
+		if _, err := s.store.AuthenticateDeviceSession(r.Context(), deviceTokenHash(s.legacyDeviceToken), s.sessionIssuer(), s.now().UTC()); err == nil {
 			return s.legacyDeviceToken, s.legacyDeviceID, nil
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return "", "", err
@@ -115,7 +125,7 @@ func (s *Server) authorized(r *http.Request) (principal, error) {
 	if secureTokenEqual(token, s.config.APIToken) {
 		return principal{owner: !viaCookie, legacy: viaCookie, viaCookie: viaCookie, token: token}, nil
 	}
-	id, err := s.store.AuthenticateDeviceSession(r.Context(), deviceTokenHash(token), s.now().UTC())
+	id, err := s.store.AuthenticateDeviceSession(r.Context(), deviceTokenHash(token), s.sessionIssuer(), s.now().UTC())
 	if errors.Is(err, store.ErrNotFound) {
 		return principal{}, nil
 	}

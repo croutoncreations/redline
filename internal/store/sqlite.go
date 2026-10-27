@@ -665,9 +665,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_
     kind TEXT NOT NULL CHECK(kind IN ('browser', 'mobile')),
     created_at TEXT NOT NULL,
     last_used_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    issuer TEXT NOT NULL DEFAULT ''
 )`); err != nil {
 		return fmt.Errorf("create device sessions: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, tx, "device_sessions", "issuer", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 40 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=40)`); err != nil {
 		return fmt.Errorf("record device sessions migration: %w", err)

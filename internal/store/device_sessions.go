@@ -17,15 +17,20 @@ type DeviceSession struct {
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
-func (d *DB) CreateDeviceSession(ctx context.Context, session DeviceSession, tokenHash string) error {
-	_, err := d.db.ExecContext(ctx, `INSERT INTO device_sessions(id,token_hash,name,kind,created_at,last_used_at) VALUES(?,?,?,?,?,?)`, session.ID, tokenHash, session.Name, session.Kind, formatTime(session.CreatedAt), formatTime(session.LastUsedAt))
+// CreateDeviceSession stores a session issued under the master token whose
+// fingerprint is issuer; see AuthenticateDeviceSession.
+func (d *DB) CreateDeviceSession(ctx context.Context, session DeviceSession, tokenHash, issuer string) error {
+	_, err := d.db.ExecContext(ctx, `INSERT INTO device_sessions(id,token_hash,name,kind,created_at,last_used_at,issuer) VALUES(?,?,?,?,?,?,?)`, session.ID, tokenHash, session.Name, session.Kind, formatTime(session.CreatedAt), formatTime(session.LastUsedAt), issuer)
 	return err
 }
 
-// AuthenticateDeviceSession throttles writes in SQL, including concurrent requests.
-func (d *DB) AuthenticateDeviceSession(ctx context.Context, tokenHash string, at time.Time) (string, error) {
+// AuthenticateDeviceSession accepts only unrevoked sessions issued under the
+// current master token (issuer), so rotating that token invalidates every
+// session, including any minted after the rotation by the old process.
+// It throttles last_used_at writes in SQL, including concurrent requests.
+func (d *DB) AuthenticateDeviceSession(ctx context.Context, tokenHash, issuer string, at time.Time) (string, error) {
 	var id string
-	err := d.db.QueryRowContext(ctx, `SELECT id FROM device_sessions WHERE token_hash=? AND revoked_at IS NULL`, tokenHash).Scan(&id)
+	err := d.db.QueryRowContext(ctx, `SELECT id FROM device_sessions WHERE token_hash=? AND issuer=? AND revoked_at IS NULL`, tokenHash, issuer).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -91,10 +96,5 @@ func (d *DB) RevokeDeviceSession(ctx context.Context, id string, at time.Time) e
 	if err == nil && n == 0 {
 		return ErrNotFound
 	}
-	return err
-}
-
-func (d *DB) RevokeAllDeviceSessions(ctx context.Context, at time.Time) error {
-	_, err := d.db.ExecContext(ctx, `UPDATE device_sessions SET revoked_at=? WHERE revoked_at IS NULL`, formatTime(at))
 	return err
 }

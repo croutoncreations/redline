@@ -459,31 +459,16 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "Re-run with --yes to confirm.")
 		return 1
 	}
-	cfg, err := config.Load(resolvedPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	database, err := store.Open(cfg.Database)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	defer database.Close()
-	// Revoke scoped sessions before replacing the master credential. Failure
-	// must never report a successful rotation while devices retain access.
-	if err := database.RevokeAllDeviceSessions(context.Background(), time.Now().UTC()); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	// The new token is intentionally not printed: it stays in the protected
-	// file, and `pair --qr` is the supported way to hand it to a device.
+	// Device sessions are bound to the master token that issued them, so
+	// replacing the token file is the whole rotation: no database to find,
+	// and nothing left half done if it fails. The new token is intentionally
+	// not printed; `pair --qr` is the supported way to hand it to a device.
 	if _, err := apiauth.RotateToken(resolvedPath); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Rotated the Redline API token at %s\n", tokenPath)
-	fmt.Fprintln(stdout, "Revoked all device sessions. Restart Redline to invalidate the old master token and legacy pairings, then run `redline pair --qr` to pair devices again.")
+	fmt.Fprintln(stdout, "Restart Redline to apply it: every paired device, including legacy pairings, is signed out. Then run `redline pair --qr` to pair devices again.")
 	return 0
 }
 

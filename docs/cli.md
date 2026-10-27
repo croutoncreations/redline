@@ -57,7 +57,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
-redline --config redline.yaml token rotate --yes          # revokes all device sessions and replaces the master token; restart to invalidate legacy pairings
+redline --config redline.yaml token rotate --yes          # replaces the master token; after a restart every device session and legacy pairing is signed out
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```

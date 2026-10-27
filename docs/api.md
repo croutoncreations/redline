@@ -2,7 +2,7 @@
 
 Redline's service exposes a local HTTP API on `http://127.0.0.1:7436` by default. The dashboard,
 native app, CLI, and MCP server are all clients of this API. The service owns operational SQLite
-access; local `redline token rotate` also opens it to revoke device sessions.
+access.
 
 ## Authentication
 
@@ -48,9 +48,12 @@ active device sessions survive restarts, and `last_used_at` updates at most once
 Existing pairings keep working. A legacy cookie equal to the master token has device permissions
 and upgrades transparently to a fresh device cookie on its next request. A legacy master-token
 **bearer** cannot be distinguished from CLI/Mac/MCP owner use and remains owner-authorized.
-Re-pairing gives that phone a properly scoped device token. Local `redline token rotate --yes`
-revokes all device sessions immediately; restart Redline to invalidate the old master token and
-legacy pairings, then pair devices again. Existing sessions are not revoked merely by upgrading.
+Re-pairing gives that phone a properly scoped device token. Each device session is bound to the
+master token that issued it (an HMAC fingerprint, never the token itself), so local
+`redline token rotate --yes` followed by a restart signs out every device session, legacy pairing
+and old master token at once, including any session the old process issued after the rotation.
+The CLI never needs to locate the service database. Existing sessions are not revoked merely by
+upgrading.
 
 `GET /v1/devices` returns an array of `id`, `name`, `kind` (`browser` or `mobile`), `created_at`,
 `last_used_at`, and optional `revoked_at`; neither raw tokens nor hashes are returned.

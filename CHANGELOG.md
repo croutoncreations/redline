@@ -13,8 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
   Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
   job/run/provider and firesale control remains available. Pairing creation, device management,
-  and notification tests require the owner. Token rotation revokes all device sessions and,
-  after restart, the old master token and legacy pairings.
+  and notification tests require the owner. Device sessions are bound to the issuing master
+  token, so rotating it and restarting signs out every device and legacy pairing.
 - Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
   `redline devices list|revoke ID`; lists never expose token hashes.
 
