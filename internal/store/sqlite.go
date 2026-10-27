@@ -705,6 +705,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 42 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=42)`); err != nil {
 		return fmt.Errorf("record push registrations migration: %w", err)
 	}
+	// Migration 43 repairs branch collisions by checking the schema itself.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS manual_firesales (
+    id INTEGER PRIMARY KEY,
+    provider_account_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    started_by TEXT NOT NULL,
+    ended_at TEXT,
+    end_reason TEXT,
+    baseline_weekly_resets_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(provider_account_id) WHERE ended_at IS NULL;`); err != nil {
+		return fmt.Errorf("create manual firesales: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, tx, "manual_firesales", "baseline_weekly_resets_at", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
+		return fmt.Errorf("record manual firesales migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

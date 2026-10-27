@@ -169,7 +169,7 @@ func (s *Server) startResetFiresale(ctx context.Context, a resetsignal.Announcem
 // event ends it. Claims precede notification delivery (at most once).
 func (s *Server) reconcileResetSignalFiresales(ctx context.Context) error {
 	notices, err := s.reconcileResetSignalFiresalesLocked(ctx)
-	return errors.Join(err, s.deliverFiresaleNotices(ctx, notices))
+	return errors.Join(err, s.deliverFiresaleNotices(ctx, notices), s.reconcileManualFiresales(ctx))
 }
 
 func (s *Server) reconcileResetSignalFiresalesLocked(ctx context.Context) ([]firesaleNotice, error) {

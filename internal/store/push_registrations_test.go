@@ -22,7 +22,7 @@ func TestPushRegistrationsMigrationAndActiveSessions(t *testing.T) {
 		}
 	}
 	var version, stamps int
-	if err := db.db.QueryRow(`SELECT MAX(version), COUNT(CASE WHEN version=42 THEN 1 END) FROM schema_migrations`).Scan(&version, &stamps); err != nil || version != 42 || stamps != 1 {
+	if err := db.db.QueryRow(`SELECT MAX(version), COUNT(CASE WHEN version=42 THEN 1 END) FROM schema_migrations`).Scan(&version, &stamps); err != nil || version != 43 || stamps != 1 {
 		t.Fatalf("version=%d stamps=%d err=%v", version, stamps, err)
 	}
 	at := time.Now().UTC()

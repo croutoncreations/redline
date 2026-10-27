@@ -102,6 +102,7 @@ type Server struct {
 	catalog                 discovery.Catalog
 	catalogAt               time.Time
 	mux                     *http.ServeMux
+	manualFiresaleMu        sync.Mutex
 	workers                 sync.WaitGroup
 	loopWorkers             sync.WaitGroup
 	startMu                 sync.Mutex
@@ -270,6 +271,9 @@ func newServer(
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/reset-signals", server.resetSignals)
 	mux.HandleFunc("POST /v1/reset-signals/firesale", server.resetSignalFiresale)
+	mux.HandleFunc("GET /v1/firesales", server.manualFiresales)
+	mux.HandleFunc("POST /v1/firesales", server.startManualFiresale)
+	mux.HandleFunc("DELETE /v1/firesales/{account}", server.stopManualFiresale)
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
@@ -974,7 +978,7 @@ func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 		}
 	}
 	_, tokenErr := s.syncTokens(ctx, providerID)
-	return errors.Join(usageErr, tokenErr)
+	return errors.Join(usageErr, tokenErr, s.reconcileManualFiresales(ctx))
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {
@@ -1733,6 +1737,9 @@ func (s *Server) dispatchTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
+	if err := s.reconcileManualFiresales(ctx); err != nil {
+		log.Printf("redline manual firesale reconciliation: %v", err)
+	}
 	concurrency, err := s.effectiveProviderConcurrency(ctx, provider)
 	if err != nil {
 		return err
@@ -2254,7 +2261,7 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		record.SelectedTaskID = response.SelectedTask.ID
 	}
 	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
-	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && response.Result.FiresaleTrigger != "reset_announcement" && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
+	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && response.Result.FiresaleTrigger != "reset_announcement" && response.Result.FiresaleTrigger != "manual" && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
 		eventType := domain.EventFiresaleEnded
 		if *response.ProviderFiresale {
 			eventType = domain.EventFiresaleStarted
@@ -2665,14 +2672,23 @@ func (s *Server) providerDecisionInput(
 	if err != nil {
 		return decision.Input{}, err
 	}
+	manual, err := s.manualFiresaleActive(ctx, providerID)
+	if err != nil {
+		return decision.Input{}, err
+	}
+	forcedTrigger := ""
+	if manual {
+		forcedTrigger = "manual"
+	}
 	return decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
 		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
-		ForceFiresale:  s.hasResetAnnouncementEvent(events),
-		ResetEvents:    events,
-		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+		ForceFiresale:        manual || s.hasResetAnnouncementEvent(events),
+		ForceFiresaleTrigger: forcedTrigger,
+		ResetEvents:          events,
+		PaceThresholds:       thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, nil
 }
 

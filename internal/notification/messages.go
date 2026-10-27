@@ -21,6 +21,9 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		name = "Claude"
 	}
 	d := event.Data
+	if d["trigger"] == "manual" && provider != "" {
+		name = provider
+	}
 	switch event.Type {
 	case domain.EventResetExpiring:
 		event.Title = name + " banked reset expiring"
@@ -72,6 +75,15 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		}
 	case domain.EventFiresaleStarted:
 		event.Title = name + " firesale started"
+		if d["trigger"] == "manual" {
+			deadline, _ := time.Parse(time.RFC3339Nano, d["deadline"])
+			who := strings.TrimPrefix(d["started_by"], "device:")
+			if d["started_by"] == "owner" {
+				who = "you"
+			}
+			event.Message = name + " firesale started by " + who + " until " + deadline.UTC().Format("Mon 15:04 UTC") + ". Running queued work."
+			break
+		}
 		if d["trigger"] == "reset_announcement" {
 			deadline, _ := time.Parse(time.RFC3339Nano, d["deadline"])
 			who := "Public trackers"
@@ -100,6 +112,11 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		event.Message += " All job tiers unlocked."
 	case domain.EventFiresaleEnded:
 		event.Title = name + " firesale ended"
+		if d["trigger"] == "manual" {
+			reason := map[string]string{"deadline_passed": "the deadline passed", "completed": "the weekly window reset", "stopped": "stopped by you"}[d["reason"]]
+			event.Message = "Firesale ended: " + reason + ". Back to normal pacing."
+			break
+		}
 		event.Message = "Back to normal pacing."
 		if d["trigger"] == "reset_announcement" {
 			reason := map[string]string{

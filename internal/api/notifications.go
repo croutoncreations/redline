@@ -29,6 +29,7 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 	if body.Event == "" {
 		body.Event = domain.EventResetExpiring
 	}
+	explicitProvider := body.Provider != ""
 	if body.Provider == "" {
 		ids := make([]string, 0, len(s.config.Providers))
 		for id := range s.config.Providers {
@@ -50,7 +51,11 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider is not configured"})
 		return
 	}
-	event, err := notification.Sample(body.Event, body.Provider, provider.Provider, s.now())
+	sampleAccount := body.Provider
+	if body.Event == domain.EventResetAnnounced && !explicitProvider {
+		sampleAccount = ""
+	}
+	event, err := notification.Sample(body.Event, sampleAccount, provider.Provider, s.now())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
