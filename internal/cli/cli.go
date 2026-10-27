@@ -86,12 +86,15 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
 	// before constructing the service client so it never reads a local token.
-	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals")) {
+	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals" && remaining[1] != "firesale")) {
 		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
 	case "reset":
+		if remaining[1] == "firesale" {
+			return runResetFiresale(client, remaining[2:], stdout, stderr)
+		}
 		if remaining[1] == "signals" {
 			if len(remaining) != 2 {
 				fmt.Fprintln(stderr, "usage: redline reset signals")

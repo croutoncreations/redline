@@ -380,6 +380,7 @@ func effectiveReset(in Input) ResetEvent {
 }
 
 type Input struct {
+	ForceFiresale          bool
 	ResetEvents            []ResetEvent
 	FiresaleTrigger        *float64
 	Snapshot               UsageSnapshot
@@ -416,6 +417,7 @@ type CandidateRejection struct {
 }
 
 type Result struct {
+	FiresaleTrigger        string               `json:"firesale_trigger,omitempty"`
 	Firesale               bool                 `json:"firesale"`
 	EffectiveResetAt       time.Time            `json:"effective_reset_at"`
 	EffectiveResetSource   ResetSource          `json:"effective_reset_source"`
@@ -483,6 +485,17 @@ func Evaluate(in Input) Result {
 		result = unknown("short-window reset is not in the future")
 	} else {
 		result = evaluateSlots(in)
+	}
+	if in.ForceFiresale {
+		result.FiresaleTrigger = "reset_announcement"
+	}
+	// Forcing overrides pacing only. An empty weekly allowance (or no rolling
+	// room in the 5-hour window) still blocks: there is nothing left to spend.
+	if in.ForceFiresale && result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0) {
+		result.Decision = Admit
+		result.Firesale = true
+		result.UnlockedTier = domain.DispatchFiresale
+		result.Reason = "reset announcement firesale; running queued work before the deadline"
 	}
 	pressure := result.PaceGap
 	if in.Snapshot.Short != nil {
@@ -600,7 +613,7 @@ func evaluateSlots(in Input) Result {
 }
 
 func evaluatePace(in Input) Result {
-	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil {
+	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil && !in.ForceFiresale {
 		return unknown("unrestricted provider has no pace thresholds")
 	}
 	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)

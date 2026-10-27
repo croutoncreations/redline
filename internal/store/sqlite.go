@@ -714,6 +714,25 @@ ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
 			return fmt.Errorf("record reset announcements migration: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS reset_signal_firesales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    announcement_key TEXT NOT NULL,
+    provider_account_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    end_reason TEXT NOT NULL DEFAULT '',
+    announcement_json BLOB NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_firesales(provider_account_id) WHERE ended_at IS NULL;`); err != nil {
+		return fmt.Errorf("create reset signal firesales: %w", err)
+	}
+	if version < 39 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (39)`); err != nil {
+			return fmt.Errorf("record reset signal firesales migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

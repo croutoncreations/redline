@@ -90,6 +90,20 @@ func TestViableAnnouncement(t *testing.T) {
 	})
 }
 
+func TestAnnouncementKeyMatchesGroupKeys(t *testing.T) {
+	for _, tc := range []struct{ url, id, want string }{
+		{"https://x.com/thsottiaux/status/123", "", "announcement:123"},
+		{"https://x.com/thsottiaux/status/123/", "", "announcement:123"},
+		{"", "123", "announcement:123"},
+		{"https://x.com/thsottiaux/status/123", "999", "announcement:123"},
+		{"", " ", ""},
+	} {
+		if got := AnnouncementKey(tc.url, tc.id); got != tc.want {
+			t.Errorf("AnnouncementKey(%q, %q)=%q want %q", tc.url, tc.id, got, tc.want)
+		}
+	}
+}
+
 func TestAnnouncementMessagesAndCandidate(t *testing.T) {
 	end := time.Date(2026, 10, 13, 7, 59, 0, 0, time.UTC)
 	a := Announcement{Key: "key", Kind: KindPromised, Account: "thsottiaux", Quote: "Global\n reset\x00   landing", QuoteSource: "original_post", URL: "https://x.com/thsottiaux/status/123", WindowEnd: &end, WindowCertainty: WindowMirrorInterpretation, Feeds: []string{"codex-reset", "resetbeacon"}}

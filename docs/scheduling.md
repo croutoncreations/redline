@@ -131,15 +131,17 @@ auto-redeemable reset that clears the weekly allowance before that boundary. Thi
 `banked_resets.on_expiry: redeem` and automatic redemption to be able to run: usage monitoring
 enabled, a single account of that provider type, and not demo mode. The event is timed at the
 earliest permitted attempt, respecting redeem lead, provider throttling, retry deadlines,
-cooldowns, and provider lockouts. Predicted global resets are not implemented yet.
+cooldowns, and provider lockouts. An active announcement firesale also supplies a
+`predicted_global` event with confidence `announced` at the announced deadline (not a probability).
 Slots, overflow, pace thresholds, and projections use this horizon; pace gap still measures time
 remaining as a fraction of a seven-day week. Model-specific weekly pools retain their own resets.
 
 A policy's optional `firesale_trigger` (0–1) upgrades an admitted decision to `firesale: true`
 and unlocks the highest tier when `max(pace_gap, overflow) >= firesale_trigger`. Overflow is used
 only when a five-hour window exists. The bundled early policy uses `0.35`, standard uses `0.45`,
-and late omits it (disabled). Firesale never changes WAIT or UNKNOWN into RUN, bypasses the
-rolling reserve, or relaxes pause, enable, repository-change, or exhausted-pool gates.
+and late omits it (disabled). This pressure-triggered firesale never changes WAIT or UNKNOWN into
+RUN. No firesale bypasses the rolling reserve, pause, enable, repository-change, or exhausted-pool
+gates.
 
 ```yaml
 policies:
@@ -162,8 +164,29 @@ Automatic dispatch emits `firesale.started` and `firesale.ended` once per provid
 when notifications are enabled and the event is listed in `notifications.events` (neither is in
 the default list, so existing hooks do not receive new event types after upgrading). Events
 include string-valued `pace_gap`, `overflow`, `effective_reset_at`, and `unlocked_tier` data.
-Manual evaluations do not emit transitions; decisions without a provider usage evaluation do not
-change the recorded state.
+Manual evaluations do not emit pressure transitions; decisions without a provider usage evaluation
+do not change the recorded pressure state.
+
+### Announcement-triggered Codex firesales
+
+`reset_signals.firesale: off|notify|auto` is independent of `firesale_trigger`. It defaults to
+`notify` when reset monitoring is enabled, otherwise `off`; explicit `notify` or `auto` requires
+`reset_signals.enabled: true`. Only viable source-backed promises/schedules with a future
+`WindowEnd` qualify. Promises without a deadline, odds/predictions, and already-completed resets
+never start one. Notify mode needs `redline reset firesale start` (or the bearer API opt-in);
+auto starts without a separate opt-in or notification delivery.
+
+While active, the provider's firesale/pacing gate is forced even with zero/negative pace gap or
+no overflow, unlocking the firesale tier and its task intervals. The deadline shortens the weekly
+horizon, never extends it. There is no additional cap on backlog burning. Provider pauses, auth
+circuit breaker, five-hour window/reserve, all concurrency limits, model budgets, and normal job
+eligibility rules remain in force. Unknown or stale usage is not treated as capacity.
+
+The sale ends at its deadline, explicit retraction, completion, stop, or disable. Active sales
+persist across restart and tracker outages. A same-key fresh deadline revision is stored/logged;
+a different key waits rather than replacing an existing opt-in. Start/end notifications are
+claimed independently of scheduler decision flips, so the scheduler cannot double-announce them.
+See [reset-signal modes and lifecycle](reset-signal-preview.md#announcement-firesales) for details.
 
 ## Automatic dispatch
 

@@ -71,7 +71,9 @@ possibly non-idempotent hook.
 require `notifications.enabled` and explicitly listing `reset.announced` in `notifications.events`.
 This global event has no provider account ID. It alerts only on the selected fresh, linked,
 unretracted promise, schedule, or completion published within 72 hours. Odds-only predictions
-never alert, however high. It does not change scheduler or firesale decisions.
+never alert, however high. With `reset_signals.firesale: notify` (the enabled default), a promise
+or schedule with a future deadline offers a firesale, but does not start one until opt-in.
+`auto` starts automatically; `off` leaves scheduling unchanged. Completion alerts never start one.
 
 Data fields are strings: `key` (`announcement:<status id>`, stable across mirrors), `kind`, `url`,
 `account`, `quote`, `quote_source` (`original_post` or `tracker_summary`), `published_at`,
@@ -90,6 +92,22 @@ do not claim delivery. See [public reset signals](reset-signal-preview.md#option
 for cached API/CLI access and interpretation limits.
 
 ### Firesale transitions
+
+Announcement-triggered sales emit these same events once per provider episode, using durable
+atomic start/end claims rather than scheduler flips. Data includes `trigger: reset_announcement`,
+`announcement_key`, `deadline` (RFC3339 UTC), `mode` (`notify`/`auto`), and `reason` on end:
+`deadline_passed`, `retracted`, `completed`, `stopped`, or `disabled`. A completed end also adds
+`completion_source`: `announcement` for linked source evidence, or `tracker_reset` for a fresh,
+report-selected unlinked completion newer than the sale's announcement. For example:
+
+- **Codex firesale started:** Tibo announced a reset by Sun 08:15 UTC. Running queued work before it lands.
+- **Codex firesale ended:** The reset announcement was retracted. Back to normal pacing.
+
+`reset.announced` adds string-valued `firesale_mode` and `firesale_action`: `start` for a notify
+mode offer with a usable deadline, `active` when auto has started that announcement, otherwise
+an empty action. The Mac app continues to display notifications only; no Mac action UI is added.
+Stopping/starting uses the bearer API or `redline reset firesale start|stop`.
+
 
 Automatic dispatch emits `firesale.started` and `firesale.ended` on provider state transitions,
 using the previous recorded automatic usage decision. Manual evaluations and skipped usage checks

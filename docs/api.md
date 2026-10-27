@@ -165,6 +165,25 @@ Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger
 so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
 sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
 
+## Reset signals and firesales
+
+- `GET /v1/reset-signals` reads the cached report, viable announcement, errors, and last poll
+  time without fetching trackers. It adds `firesale: {active, mode, announcement_key, deadline,
+  started_at, providers}`; times are RFC3339 UTC or null when inactive. Dashboard JSON includes
+  this same state under `reset_signal` when monitoring is enabled.
+- `POST /v1/reset-signals/firesale` accepts `{"announcement_key":"announcement:123","action":"start"}`
+  or `"action":"stop"`, returning the firesale object. It requires the **bearer token**; pairing
+  cookies receive **403**, and demo mode refuses with **409**. Both actions are idempotent.
+  Start returns **409** for a missing/mismatched current viable announcement, a missing/past
+  deadline, or firesale off. Only source-backed PROMISED/SCHEDULED announcements qualify, for
+  Codex providers. A different active key also returns **409** naming its key/deadline and telling
+  the user to stop it first. Stop needs no current tracker announcement: omit the key to stop
+  the active sale. An explicit key conflicting with an active sale returns **409** naming it.
+  No active sale (including firesale off) is a **200** no-op with `active: false`.
+
+See [announcement firesales](reset-signal-preview.md#announcement-firesales) for modes,
+persistence, lifecycle, and notification data.
+
 ## Related
 
 - [MCP and agent interface](mcp.md)

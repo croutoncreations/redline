@@ -72,6 +72,15 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		}
 	case domain.EventFiresaleStarted:
 		event.Title = name + " firesale started"
+		if d["trigger"] == "reset_announcement" {
+			deadline, _ := time.Parse(time.RFC3339Nano, d["deadline"])
+			who := "Public trackers"
+			if d["account"] == "thsottiaux" {
+				who = "Tibo"
+			}
+			event.Message = who + " announced a reset by " + deadline.UTC().Format("Mon 15:04 UTC") + ". Running queued work before it lands."
+			break
+		}
 		reset, _ := time.Parse(time.RFC3339, d["effective_reset_at"])
 		deadline := reset.UTC().Format("Mon 15:04 UTC")
 		if source := d["effective_reset_source"]; source != "" && source != "weekly" {
@@ -92,6 +101,16 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 	case domain.EventFiresaleEnded:
 		event.Title = name + " firesale ended"
 		event.Message = "Back to normal pacing."
+		if d["trigger"] == "reset_announcement" {
+			reason := map[string]string{
+				"deadline_passed": "The announced reset deadline passed.",
+				"retracted":       "The reset announcement was retracted.",
+				"completed":       "The reset was reported complete.",
+				"stopped":         "Stopped by you.",
+				"disabled":        "Reset announcement firesales are disabled.",
+			}[d["reason"]]
+			event.Message = reason + " " + event.Message
+		}
 	}
 	return event
 }

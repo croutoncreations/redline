@@ -93,11 +93,13 @@ type Server struct {
 	resetSignalFetcher resetsignal.Fetcher
 	resetSignalSleep   func(context.Context, time.Duration) error
 	resetSignalSources []resetsignal.Source
+	resetFiresaleMu    sync.Mutex
 	resetSignalMu      sync.Mutex
 	resetPollMu        sync.Mutex
 	resetSignalState   resetsignal.State
 	resetNextRead      map[string]time.Time
 	resetDeferred      map[string]resetsignal.SourceError
+	resetLastResults   map[string]resetsignal.SourceResult
 	discovery          HarnessDiscoverer
 	// cursorAccounts confirms the Cursor CLI and app share one account
 	// before a Cursor account's usage is read.
@@ -387,6 +389,7 @@ func newServer(
 	server.resetSignalLoop = autoscheduler.NewLoop(cfg.ResetSignals.Enabled, resetInterval, []string{"global"}, server.pollResetSignals)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/reset-signals", server.resetSignals)
+	mux.HandleFunc("POST /v1/reset-signals/firesale", server.resetSignalFiresale)
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
@@ -1046,6 +1049,9 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		return
 	}
 	s.started = true
+	if err := s.reconcileResetSignalFiresales(ctx); err != nil {
+		log.Printf("redline reset firesale startup reconciliation: %v", err)
+	}
 	s.loopWorkers.Add(1)
 	go func() {
 		defer s.loopWorkers.Done()
@@ -2771,7 +2777,7 @@ func decorateBudgetResult(
 func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, response schedulerResponse) error {
 	previousFiresale := false
 	if response.Trigger == "automatic" && response.ProviderFiresale != nil {
-		previous, err := s.store.LatestAutomaticFiresale(ctx, provider)
+		previous, err := s.store.LatestAutomaticPressureFiresale(ctx, provider)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -2786,7 +2792,7 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		record.SelectedTaskID = response.SelectedTask.ID
 	}
 	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
-	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
+	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && response.Result.FiresaleTrigger != "reset_announcement" && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
 		eventType := domain.EventFiresaleEnded
 		if *response.ProviderFiresale {
 			eventType = domain.EventFiresaleStarted
@@ -3202,6 +3208,7 @@ func (s *Server) providerDecisionInput(
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
 		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
+		ForceFiresale:  s.hasResetAnnouncementEvent(events),
 		ResetEvents:    events,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, nil

@@ -39,6 +39,27 @@ func TestLatestAutomaticFiresaleSkipsUnevaluatedAndManualDecisions(t *testing.T)
 	}
 }
 
+// An announcement sale announces its own start and end. Afterwards the pressure
+// lookup must read "not in a pressure firesale", so a pressure firesale that
+// still holds is announced again instead of continuing after an "ended" alert.
+func TestLatestAutomaticPressureFiresaleTreatsAnnouncementSalesAsEnded(t *testing.T) {
+	db := openTaskDB(t)
+	for _, raw := range []string{
+		`{"trigger":"automatic","provider_firesale":true}`,
+		`{"trigger":"automatic","provider_firesale":true,"result":{"firesale_trigger":"reset_announcement"}}`,
+	} {
+		if _, err := db.RecordSchedulerDecision(t.Context(), domain.SchedulerDecision{ProviderAccountID: "p", DecisionJSON: []byte(raw)}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := db.LatestAutomaticPressureFiresale(t.Context(), "p"); err != nil || got {
+		t.Fatalf("pressure state after announcement sale=%v err=%v, want false", got, err)
+	}
+	if got, err := db.LatestAutomaticFiresale(t.Context(), "p"); err != nil || !got {
+		t.Fatalf("overall firesale state=%v err=%v, want true", got, err)
+	}
+}
+
 func TestTaskFiresaleIntervalRoundTrip(t *testing.T) {
 	db := openTaskDB(t)
 	now := time.Now().UTC()
@@ -120,7 +141,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 				rows.Close()
 			}
 			var version int
-			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 38 {
+			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 39 {
 				t.Fatalf("version=%d err=%v", version, err)
 			}
 			db, err = store.Open(path)

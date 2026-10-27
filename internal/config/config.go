@@ -176,6 +176,17 @@ type ResetSignals struct {
 	Enabled      bool   `yaml:"enabled"`
 	PollInterval string `yaml:"poll_interval"`
 	Notify       *bool  `yaml:"notify"`
+	Firesale     string `yaml:"firesale"`
+}
+
+func (c Config) ResetSignalsFiresale() string {
+	if !c.ResetSignals.Enabled {
+		return "off"
+	}
+	if c.ResetSignals.Firesale == "" {
+		return "notify"
+	}
+	return c.ResetSignals.Firesale
 }
 
 func (c Config) ResetSignalsNotify() bool {
@@ -776,6 +787,15 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 	}
 	if _, err := cfg.ResetSignalsInterval(); err != nil {
 		return err
+	}
+	switch cfg.ResetSignals.Firesale {
+	case "", "off":
+	case "notify", "auto":
+		if !cfg.ResetSignals.Enabled {
+			return fmt.Errorf("reset_signals firesale requires reset_signals.enabled")
+		}
+	default:
+		return fmt.Errorf("reset_signals firesale must be off, notify, or auto")
 	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
 		return err

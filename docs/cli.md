@@ -55,6 +55,23 @@ report. It does not read Redline account state, poll, notify, select jobs, chang
 or start anything. Tracker percentages remain separately attributed; Redline does not combine
 them into its own probability. See [Public reset-signal preview](reset-signal-preview.md).
 
+### Cached reset signals and firesales
+
+```bash
+redline reset signals
+redline reset firesale start
+redline reset firesale stop
+redline reset firesale start --announcement announcement:123
+redline reset firesale stop --announcement announcement:123
+```
+
+These authenticated service commands print JSON. `signals` reads cached evidence and firesale
+state without a live fetch. Start defaults to the current viable announcement; stop defaults to
+the active sale's key (and succeeds as a no-op if there is none). Start requires a future announced
+deadline and `reset_signals.firesale: notify|auto`. Stop works during tracker outages and does not
+require firesale mode to remain enabled. Both use the bearer-only firesale API and refuse demo
+mode. See [modes and lifecycle](reset-signal-preview.md#announcement-firesales).
+
 ### Redeem a banked reset
 
 ```bash
@@ -162,7 +179,8 @@ in memory, so restarting a watcher begins at the latest completion, not the prev
 ## Machine-readable output
 
 `task list`, `profile list`, `run list`, `run show`, `run events`, `health`, `candidates`,
-`calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`, and the
+`calibration`, `capacity`, `metrics launch`, `token sync`, `notification list`, `reset preview`,
+`reset signals`, `reset firesale start|stop`, and the
 `scheduler status|history|attempts` commands print JSON on success. `status`, `decision`,
 `usage refresh`, `task add`, `later`, `reset redeem`, `notification test`, `scheduler evaluate|execute`, and `run logs` print JSON with
 `--json`. Usage, validation, and API errors print a plain-text error to stderr and exit non-zero.

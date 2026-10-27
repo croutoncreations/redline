@@ -71,6 +71,30 @@ func BuildReport(now time.Time, sources []SourceResult) Report {
 	return report
 }
 
+// SelectedCompletion returns the report-selected fresh, dated completion. Unlike
+// ViableAnnouncement it may be unlinked: it can end a firesale, never start one.
+func SelectedCompletion(report Report) *Signal {
+	var selected []Signal
+	kind, _ := summarizeCurrentSelection(report.GeneratedAt, report.Sources, &selected)
+	if kind != KindCompleted {
+		return nil
+	}
+	var completion *Signal
+	for _, signal := range selected {
+		if signal.Kind != KindCompleted || signal.Freshness != Fresh || signal.Withdrawn || signal.Corrected || signal.PublishedAt == nil || signal.PublishedAt.After(report.GeneratedAt) {
+			continue
+		}
+		if signal.ExpiresAt != nil && !signal.ExpiresAt.After(report.GeneratedAt) {
+			continue
+		}
+		if completion == nil || signal.PublishedAt.After(*completion.PublishedAt) {
+			copy := signal
+			completion = &copy
+		}
+	}
+	return completion
+}
+
 func summarizeCurrent(now time.Time, results []SourceResult) (Kind, string) {
 	return summarizeCurrentSelection(now, results, nil)
 }
