@@ -14,7 +14,7 @@ import (
 
 type Store interface {
 	ActivePushRegistrations(context.Context, string) ([]store.PushRegistration, error)
-	PushRegistrationActive(ctx context.Context, issuer, id, token string) (bool, error)
+	ActivePushRegistration(ctx context.Context, issuer, id string) (store.PushRegistration, bool, error)
 	DeletePushRegistrationToken(context.Context, string, string) error
 }
 type Stats struct {
@@ -172,10 +172,10 @@ func (d *Dispatcher) worker() {
 		configured := true
 		if d.ctx.Err() == nil {
 			ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
-			// Recheck at send time: queued registrations may be revoked, rotated,
-			// deleted, or replaced while waiting behind a slow transport.
-			r := item.registration
-			active, err := d.store.PushRegistrationActive(ctx, d.issuer, r.DeviceSessionID, r.Token)
+			// Re-resolve at send time: while queued, the session may have been
+			// revoked or rotated out (skip), or the device may have refreshed
+			// its token (send to the current one; wakes are coalesced per device).
+			r, active, err := d.store.ActivePushRegistration(ctx, d.issuer, item.registration.DeviceSessionID)
 			switch {
 			case err != nil:
 				d.logger.Print("push registration lookup failed")

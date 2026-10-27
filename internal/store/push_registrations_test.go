@@ -48,20 +48,19 @@ func TestPushRegistrationsMigrationAndActiveSessions(t *testing.T) {
 	if err != nil || len(registrations) != 1 || registrations[0].Token != "replacement-token" {
 		t.Fatalf("active count=%d err=%v", len(registrations), err)
 	}
-	// The send-time recheck is a point lookup with the same filters.
+	// The send-time lookup returns the device's current token with the same filters.
 	for _, c := range []struct {
 		id, token string
 		want      bool
 	}{
-		{"active", "replacement-token", true},
-		{"active", "original-token", false},  // replaced while queued
-		{"revoked", "original-token", false}, // session revoked
-		{"rotated", "original-token", false}, // issued under an old master token
-		{"missing", "original-token", false},
+		{"active", "replacement-token", true}, // follows a refresh made while queued
+		{"revoked", "", false},                // session revoked
+		{"rotated", "", false},                // issued under an old master token
+		{"missing", "", false},
 	} {
-		got, err := db.PushRegistrationActive(ctx, "current", c.id, c.token)
-		if err != nil || got != c.want {
-			t.Fatalf("%s/%s active=%v want=%v err=%v", c.id, c.token, got, c.want, err)
+		got, found, err := db.ActivePushRegistration(ctx, "current", c.id)
+		if err != nil || found != c.want || got.Token != c.token || (found && (got.Platform != "ios" || got.Provider != "example")) {
+			t.Fatalf("%s: got=%+v found=%v err=%v", c.id, got, found, err)
 		}
 	}
 	if err := db.DeletePushRegistrationToken(ctx, "active", "original-token"); err != nil {

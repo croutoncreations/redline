@@ -26,15 +26,15 @@ func (s *memoryStore) ActivePushRegistrations(context.Context, string) ([]store.
 	defer s.mu.Unlock()
 	return append([]store.PushRegistration(nil), s.registrations...), nil
 }
-func (s *memoryStore) PushRegistrationActive(_ context.Context, _, id, token string) (bool, error) {
+func (s *memoryStore) ActivePushRegistration(_ context.Context, _, id string) (store.PushRegistration, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range s.registrations {
-		if r.DeviceSessionID == id && r.Token == token {
-			return true, nil
+		if r.DeviceSessionID == id {
+			return r, true, nil
 		}
 	}
-	return false, nil
+	return store.PushRegistration{}, false, nil
 }
 func (s *memoryStore) DeletePushRegistrationToken(_ context.Context, id, token string) error {
 	s.mu.Lock()
@@ -195,4 +195,63 @@ func TestDispatcherCoalescesQueuedDevices(t *testing.T) {
 		t.Fatalf("stats=%+v", d.Stats())
 	}
 	close(b.release)
+}
+
+type recordingTransport struct {
+	mu     sync.Mutex
+	tokens []string
+	gate   chan struct{}
+}
+
+func (r *recordingTransport) Wake(_ context.Context, w Wake) error {
+	<-r.gate
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens = append(r.tokens, w.Token)
+	return nil
+}
+
+// A device that refreshes its push token while a wake is queued must still be
+// woken, at the new token, rather than losing both the queued and the
+// coalesced wake to the stale-token check.
+func TestQueuedWakeFollowsTokenRefresh(t *testing.T) {
+	transport := &recordingTransport{gate: make(chan struct{})}
+	data := &memoryStore{registrations: []store.PushRegistration{
+		{DeviceSessionID: "busy-1", Token: "b1"}, {DeviceSessionID: "busy-2", Token: "b2"},
+		{DeviceSessionID: "busy-3", Token: "b3"}, {DeviceSessionID: "busy-4", Token: "b4"},
+		{DeviceSessionID: "phone", Token: "old"},
+	}}
+	d := NewDispatcher(data, "", transport, log.New(&bytes.Buffer{}, "", 0))
+	defer d.Close()
+	// Workers block on the four busy devices; the phone's wake waits queued.
+	d.Dispatch(t.Context(), 1, "reset.announced", false)
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.mu.Lock()
+		queued := len(d.queue)
+		d.mu.Unlock()
+		if queued == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	data.mu.Lock()
+	data.registrations[4].Token = "new"
+	data.mu.Unlock()
+	d.Dispatch(t.Context(), 2, "reset.announced", false)
+	close(transport.gate)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		transport.mu.Lock()
+		got := strings.Join(transport.tokens, ",")
+		transport.mu.Unlock()
+		if strings.Contains(got, "new") {
+			if strings.Contains(got, "old") {
+				t.Fatalf("stale token woken: %s", got)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("refreshed device was never woken")
 }

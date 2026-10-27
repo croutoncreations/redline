@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -31,12 +33,19 @@ func (d *DB) DeletePushRegistrationToken(ctx context.Context, id, token string) 
 	return err
 }
 
-// PushRegistrationActive reports whether this exact token is still registered
-// for an unrevoked device session issued under the current master token.
-func (d *DB) PushRegistrationActive(ctx context.Context, issuer, id, token string) (bool, error) {
-	var found int
-	err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM push_registrations p JOIN device_sessions d ON d.id=p.device_session_id WHERE p.device_session_id=? AND p.token=? AND d.revoked_at IS NULL AND d.issuer=?`, id, token, issuer).Scan(&found)
-	return found > 0, err
+// ActivePushRegistration returns a device's current registration if its
+// session is unrevoked and was issued under the current master token. Senders
+// use it at send time so a queued wake follows a token refresh.
+func (d *DB) ActivePushRegistration(ctx context.Context, issuer, id string) (PushRegistration, bool, error) {
+	r := PushRegistration{DeviceSessionID: id}
+	err := d.db.QueryRowContext(ctx, `SELECT p.platform,p.provider,p.token FROM push_registrations p JOIN device_sessions d ON d.id=p.device_session_id WHERE p.device_session_id=? AND d.revoked_at IS NULL AND d.issuer=?`, id, issuer).Scan(&r.Platform, &r.Provider, &r.Token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PushRegistration{}, false, nil
+	}
+	if err != nil {
+		return PushRegistration{}, false, err
+	}
+	return r, true, nil
 }
 
 func (d *DB) ActivePushRegistrations(ctx context.Context, issuer string) ([]PushRegistration, error) {
