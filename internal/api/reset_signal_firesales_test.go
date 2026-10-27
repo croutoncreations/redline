@@ -603,6 +603,30 @@ func TestResetSignalFiresaleLifecycleSurvivesNotificationFailures(t *testing.T) 
 	}
 }
 
+// A delivery failure while reconciling ahead of a stop must not skip the stop:
+// in auto mode that reconcile can itself start a sale the user means to stop.
+func TestResetSignalFiresaleStopRunsDespiteReconcileDeliveryFailure(t *testing.T) {
+	s, _, _ := firesaleFixture(t, "auto")
+	n := &failingFiresaleNotifier{}
+	s.notifier = n
+	_ = s.pollResetSignals(t.Context(), "")
+	sales, err := s.store.ActiveResetSignalFiresales(t.Context())
+	if err != nil || len(sales) != 1 {
+		t.Fatalf("auto start=%d err=%v", len(sales), err)
+	}
+	if _, err := s.store.EndResetSignalFiresale(t.Context(), sales[0].ID, "disabled", s.now()); err != nil {
+		t.Fatal(err)
+	}
+	// The stop's own reconcile restarts the auto sale, and that alert fails.
+	w := firesaleAction(t, s, "", "stop")
+	if w.Code == http.StatusOK {
+		t.Fatalf("delivery failure hidden: %d %s", w.Code, w.Body.String())
+	}
+	if sales, err := s.store.ActiveResetSignalFiresales(t.Context()); err != nil || len(sales) != 0 {
+		t.Fatalf("stop skipped after reconcile delivery failure: %d active, err=%v", len(sales), err)
+	}
+}
+
 func TestResetSignalFiresaleNotifyStartStop(t *testing.T) {
 	s, signal, n := firesaleFixture(t, "notify")
 	enableResetSignalNotifications(s)

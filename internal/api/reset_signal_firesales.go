@@ -286,10 +286,9 @@ func (s *Server) resetSignalFiresale(w http.ResponseWriter, r *http.Request) {
 	// was just replaced by a completion or retraction.
 	s.resetPollMu.Lock()
 	defer s.resetPollMu.Unlock()
-	if err := s.reconcileResetSignalFiresales(r.Context()); err != nil {
-		writeError(w, err)
-		return
-	}
+	// A reconcile failure (e.g. an undeliverable alert) is reported, but never
+	// skips the requested action: a stop must always take effect.
+	reconcileErr := s.reconcileResetSignalFiresales(r.Context())
 	s.resetFiresaleMu.Lock()
 	var err error
 	var notices []firesaleNotice
@@ -306,7 +305,7 @@ func (s *Server) resetSignalFiresale(w http.ResponseWriter, r *http.Request) {
 	s.resetFiresaleMu.Unlock()
 	// The lifecycle change is already persisted; a delivery failure is still
 	// reported to the caller, who asked for this change directly.
-	err = errors.Join(err, s.deliverFiresaleNotices(r.Context(), notices))
+	err = errors.Join(err, s.deliverFiresaleNotices(r.Context(), notices), reconcileErr)
 	if err != nil {
 		writeError(w, err)
 		return
