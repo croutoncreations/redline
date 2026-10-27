@@ -153,7 +153,7 @@ func (s *Server) startResetFiresale(ctx context.Context, a resetsignal.Announcem
 		if !strings.EqualFold(strings.TrimSpace(provider.Provider), "codex") {
 			continue
 		}
-		claimed, err := s.store.StartResetSignalFiresale(ctx, id, mode, a, s.now(), manual)
+		claimed, err := s.store.StartResetSignalFiresale(ctx, id, provider.Provider, mode, a, s.now(), manual)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -247,7 +247,8 @@ func (s *Server) resetFiresaleUsageRefilled(ctx context.Context, sale store.Rese
 	if sale.BaselineWeeklyRemaining == nil || sale.BaselineWeeklyResetsAt == nil || sale.BaselineObservedAt == nil {
 		return false, nil
 	}
-	snapshot, _, err := s.store.LatestSnapshot(ctx, sale.ProviderAccountID)
+	// Snapshots are keyed by the configured usage provider, not the account ID.
+	snapshot, _, err := s.store.LatestSnapshot(ctx, s.config.Providers[sale.ProviderAccountID].Provider)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}

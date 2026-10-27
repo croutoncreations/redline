@@ -25,12 +25,14 @@ type ResetSignalFiresale struct {
 
 // StartResetSignalFiresale claims before delivery, like reset announcements.
 // Only a manual start can override a terminal sale, except a config disable.
-func (d *DB) StartResetSignalFiresale(ctx context.Context, provider, mode string, a resetsignal.Announcement, now time.Time, manual bool) (bool, error) {
+// provider is the account ID the sale belongs to; usageProvider is the key its
+// usage snapshots are stored under (the configured provider type, e.g. codex).
+func (d *DB) StartResetSignalFiresale(ctx context.Context, provider, usageProvider, mode string, a resetsignal.Announcement, now time.Time, manual bool) (bool, error) {
 	payload, err := json.Marshal(a)
 	if err != nil {
 		return false, err
 	}
-	snapshot, _, err := d.LatestSnapshot(ctx, provider)
+	snapshot, _, err := d.LatestSnapshot(ctx, usageProvider)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return false, err
 	}

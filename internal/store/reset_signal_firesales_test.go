@@ -30,7 +30,7 @@ func TestResetSignalFiresaleBaseline(t *testing.T) {
 				}
 			}
 			a := resetsignal.Announcement{Key: "announcement:123", WindowEnd: &deadline}
-			if ok, err := db.StartResetSignalFiresale(t.Context(), "main", "auto", a, now, false); err != nil || !ok {
+			if ok, err := db.StartResetSignalFiresale(t.Context(), "main", "main", "auto", a, now, false); err != nil || !ok {
 				t.Fatalf("start=%v err=%v", ok, err)
 			}
 			db.Close()
@@ -120,7 +120,9 @@ func TestResetSignalFiresaleClaimsAreAtomic(t *testing.T) {
 			t.Fatalf("claims=%d", claimed.Load())
 		}
 	}
-	claimConcurrently(func() (bool, error) { return db.StartResetSignalFiresale(t.Context(), "main", "auto", a, now, false) })
+	claimConcurrently(func() (bool, error) {
+		return db.StartResetSignalFiresale(t.Context(), "main", "main", "auto", a, now, false)
+	})
 	rows, err := db.ActiveResetSignalFiresales(t.Context())
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
@@ -172,7 +174,7 @@ func TestResetSignalFiresaleClaimsPersist(t *testing.T) {
 	a := resetsignal.Announcement{Key: "announcement:123", Kind: resetsignal.KindPromised, WindowEnd: &deadline}
 	claim := func(manual bool, want bool) {
 		t.Helper()
-		ok, err := db.StartResetSignalFiresale(t.Context(), "main", "auto", a, now, manual)
+		ok, err := db.StartResetSignalFiresale(t.Context(), "main", "main", "auto", a, now, manual)
 		if err != nil || ok != want {
 			t.Fatalf("start=%v err=%v want=%v", ok, err, want)
 		}

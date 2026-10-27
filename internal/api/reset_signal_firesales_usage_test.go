@@ -9,6 +9,31 @@ import (
 	"github.com/croutoncreations/redline/internal/resetsignal"
 )
 
+// Accounts are named in config (e.g. codex-main) while usage sources store
+// snapshots under the provider type (codex). The baseline must use the latter.
+func TestResetSignalFiresaleBaselineUsesConfiguredUsageProvider(t *testing.T) {
+	s, _, _ := firesaleFixture(t, "auto")
+	provider := s.config.Providers["main"]
+	delete(s.config.Providers, "main")
+	s.config.Providers["codex-main"] = provider
+	at := s.now().Add(time.Second)
+	s.now = func() time.Time { return at }
+	snapshot := decision.UsageSnapshot{Provider: "codex", Source: "native", ObservedAt: at, Weekly: decision.UsageWindow{Remaining: .37, ResetsAt: at.Add(24 * time.Hour)}}
+	if err := s.store.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	sales, err := s.store.ActiveResetSignalFiresales(t.Context())
+	if err != nil || len(sales) != 1 || sales[0].ProviderAccountID != "codex-main" {
+		t.Fatalf("sales=%+v err=%v", sales, err)
+	}
+	if sales[0].BaselineWeeklyRemaining == nil || *sales[0].BaselineWeeklyRemaining != .37 {
+		t.Fatalf("baseline not captured from the codex snapshot: %v", sales[0].BaselineWeeklyRemaining)
+	}
+}
+
 func TestResetSignalFiresaleUsageRefill(t *testing.T) {
 	for _, tc := range []struct {
 		name                                                                             string
@@ -33,20 +58,31 @@ func TestResetSignalFiresaleUsageRefill(t *testing.T) {
 		{name: "retraction takes precedence", remaining: []float64{.6}, endReason: "retracted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Snapshots are stored under the provider type ("codex"), as the
+			// real usage sources do, while the sale belongs to account "main".
 			s, signal, n := firesaleFixture(t, "auto")
-			now := s.now()
-			baseline := decision.UsageSnapshot{Provider: "main", ObservedAt: now.Add(-2 * time.Minute), Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: now.Add(24 * time.Hour)}}
-			if !tc.noBaseline {
-				if err := s.store.SaveSnapshot(t.Context(), baseline, nil); err != nil {
-					t.Fatal(err)
-				}
+			// The fixture already saved a codex snapshot at s.now(); start a
+			// little later so this test's baseline is the latest one.
+			start := s.now().Add(time.Second)
+			s.now = func() time.Time { return start }
+			usageProvider := "codex"
+			if tc.noBaseline {
+				// Store telemetry under another key so the sale starts with no
+				// usage snapshot for its account.
+				usageProvider = "unrelated"
+			}
+			baseline := decision.UsageSnapshot{Provider: usageProvider, Source: "native", ObservedAt: start, Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: start.Add(24 * time.Hour)}}
+			if err := s.store.SaveSnapshot(t.Context(), baseline, nil); err != nil {
+				t.Fatal(err)
 			}
 			if err := s.pollResetSignals(t.Context(), ""); err != nil {
 				t.Fatal(err)
 			}
+			now := start.Add(2 * time.Minute)
+			s.now = func() time.Time { return now }
 			for i, remaining := range tc.remaining {
 				post := baseline
-				post.ObservedAt = now.Add(time.Duration(i)*time.Second - time.Minute)
+				post.ObservedAt = start.Add(time.Duration(i+1) * time.Second)
 				post.Weekly.Remaining = remaining
 				if tc.advanceWindow {
 					post.Weekly.ResetsAt = post.Weekly.ResetsAt.Add(7 * 24 * time.Hour)
