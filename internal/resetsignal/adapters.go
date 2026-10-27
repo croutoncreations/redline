@@ -19,17 +19,18 @@ const (
 )
 
 type Source struct {
-	Name        string
-	Endpoint    string
-	Attribution string
-	Normalize   func([]byte, http.Header, time.Time) (Signal, error)
+	Name           string
+	Endpoint       string
+	Attribution    string
+	AttributionURL string
+	Normalize      func([]byte, http.Header, time.Time) (Signal, error)
 }
 
 func DefaultSources() []Source {
 	return []Source{
-		{Name: "resetbeacon", Endpoint: ResetBeaconURL, Attribution: "Data: resetbeacon.com", Normalize: normalizeResetBeacon},
-		{Name: "willreset", Endpoint: WillResetURL, Attribution: "Data: willreset.com", Normalize: normalizeWillReset},
-		{Name: "codex-reset", Endpoint: CodexResetURL, Attribution: "Data: codex-reset.com", Normalize: normalizeCodexReset},
+		{Name: "resetbeacon", Endpoint: ResetBeaconURL, Attribution: "Data: resetbeacon.com", AttributionURL: "https://resetbeacon.com/", Normalize: normalizeResetBeacon},
+		{Name: "willreset", Endpoint: WillResetURL, Attribution: "Data: willreset.com", AttributionURL: "https://willreset.com/", Normalize: normalizeWillReset},
+		{Name: "codex-reset", Endpoint: CodexResetURL, Attribution: "Data: codex-reset.com", AttributionURL: "https://codex-reset.com/", Normalize: normalizeCodexReset},
 	}
 }
 
@@ -63,6 +64,7 @@ func FetchAll(ctx context.Context, fetcher Fetcher, sources []Source) []SourceRe
 			signal.Feed = source.Name
 			signal.FeedURL = source.Endpoint
 			signal.Attribution = source.Attribution
+			signal.AttributionURL = source.AttributionURL
 			results[index] = SourceResult{Signal: &signal, Metadata: document.Metadata}
 		}(index)
 	}
@@ -137,7 +139,8 @@ func normalizeResetBeacon(body []byte, _ http.Header, now time.Time) (Signal, er
 		post := payload.Answer.Posts[0]
 		signal.AnnouncementID = post.PostID
 		signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(post.SourceURL)
-		signal.Quote = post.Quote
+		signal.Quote = stripTrailingPostLinks(post.Quote)
+		signal.QuoteSource = "original_post"
 		published, parseErr := requiredTime(post.PublishedAt, "answer.posts[0].publishedAt")
 		if parseErr != nil {
 			return Signal{}, parseErr
@@ -237,6 +240,11 @@ func normalizeWillReset(body []byte, _ http.Header, now time.Time) (Signal, erro
 		Prediction24Percent: payload.Probability24,
 		Prediction48Percent: payload.Probability48,
 	}
+	signal.QuoteSource = "tracker_summary"
+	if strings.TrimSpace(payload.PromiseQuote) != "" {
+		signal.QuoteSource = "original_post"
+		signal.Quote = stripTrailingPostLinks(signal.Quote)
+	}
 	signal.Withdrawn = strings.EqualFold(payload.Status, "withdrawn") || strings.EqualFold(payload.Status, "superseded")
 	signal.Corrected = strings.EqualFold(payload.Status, "corrected")
 	signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(payload.LastResetURL)
@@ -308,6 +316,7 @@ func normalizeCodexReset(body []byte, header http.Header, now time.Time) (Signal
 		signal.Kind = kindFromState(item.SignalType)
 		signal.AnnouncementID = item.TweetID
 		signal.Quote = item.Summary
+		signal.QuoteSource = "tracker_summary"
 		signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(item.URL)
 		published, parseErr := requiredTime(item.At, "official_signal.at")
 		if parseErr != nil {
@@ -428,6 +437,7 @@ func applyCodexLatestAlert(signal *Signal, alert *codexLatestAlert, documentedRe
 		}
 		signal.AnnouncementID = alert.ID
 		signal.Quote = alert.Summary
+		signal.QuoteSource = "tracker_summary"
 		signal.ClaimedOriginalURL, signal.OriginalAccount = canonicalOriginal(alert.URL)
 		signal.PublishedAt = &published
 	}
@@ -637,6 +647,20 @@ func kindFromState(value string) Kind {
 	default:
 		return KindUnknown
 	}
+}
+
+// stripTrailingPostLinks removes only trailing t.co URLs, not links embedded
+// in the post or links to other hosts.
+func stripTrailingPostLinks(text string) string {
+	words := strings.Fields(text)
+	for len(words) > 0 {
+		link, err := url.Parse(words[len(words)-1])
+		if err != nil || (link.Scheme != "https" && link.Scheme != "http") || !strings.EqualFold(link.Host, "t.co") || link.User != nil || link.Path == "" {
+			break
+		}
+		words = words[:len(words)-1]
+	}
+	return strings.Join(words, " ")
 }
 
 func firstNonEmpty(values ...string) string {

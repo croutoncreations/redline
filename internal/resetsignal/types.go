@@ -1,6 +1,5 @@
-// Package resetsignal provides a read-only, fail-closed preview of public
-// Codex reset announcements. It is deliberately independent of the scheduler
-// and notification service.
+// Package resetsignal provides fail-closed, read-only public Codex reset
+// evidence and announcement messages. It never invokes the scheduler.
 package resetsignal
 
 import "time"
@@ -51,11 +50,13 @@ type Signal struct {
 	Feed                 string     `json:"feed"`
 	FeedURL              string     `json:"feed_url"`
 	Attribution          string     `json:"attribution"`
+	AttributionURL       string     `json:"attribution_url,omitempty"`
 	Kind                 Kind       `json:"kind"`
 	AnnouncementID       string     `json:"announcement_id,omitempty"`
 	ClaimedOriginalURL   string     `json:"claimed_original_source_url,omitempty"`
 	OriginalAccount      string     `json:"original_account,omitempty"`
 	Quote                string     `json:"quote,omitempty"`
+	QuoteSource          string     `json:"quote_source,omitempty"`
 	PublishedAt          *time.Time `json:"published_at,omitempty"`
 	CheckedAt            *time.Time `json:"checked_at,omitempty"`
 	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
@@ -121,6 +122,14 @@ type AttributedPrediction struct {
 	Percent48 *float64  `json:"percent_48h,omitempty"`
 	Freshness Freshness `json:"freshness"`
 	Current   bool      `json:"current"`
+}
+
+type State struct {
+	Enabled      bool          `json:"enabled"`
+	Report       *Report       `json:"report,omitempty"`
+	Announcement *Announcement `json:"announcement,omitempty"`
+	LastPollAt   *time.Time    `json:"last_poll_at,omitempty"`
+	Errors       []string      `json:"errors"`
 }
 
 type Report struct {

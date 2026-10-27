@@ -5,14 +5,35 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 )
 
 func EventTypes() []string {
-	return []string{domain.EventRunStarted, domain.EventRunCompleted, domain.EventRunFailed, domain.EventSchedulerError, domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed, domain.EventFiresaleStarted, domain.EventFiresaleEnded}
+	return []string{domain.EventRunStarted, domain.EventRunCompleted, domain.EventRunFailed, domain.EventSchedulerError, domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed, domain.EventFiresaleStarted, domain.EventFiresaleEnded, domain.EventResetAnnounced}
+}
+
+// sampleAnnouncement uses the real announcement builder with a fake post, so
+// the sample shows exactly what a live reset.announced alert looks like.
+func sampleAnnouncement(now time.Time) domain.NotificationEvent {
+	published := now.Add(-10 * time.Minute)
+	a := resetsignal.Announcement{
+		Key: "test-announcement", Kind: resetsignal.KindCompleted, Account: "thsottiaux",
+		Quote: "Sample announcement. No real reset happened.", QuoteSource: "original_post",
+		URL: "https://x.com/thsottiaux/status/0", PublishedAt: &published, Feeds: []string{"resetbeacon"},
+		Attribution: "Data: resetbeacon.com", AttributionURLs: "https://resetbeacon.com/",
+	}
+	e := a.Notification(now, false)
+	e.Data["test"] = "true"
+	e.Title = "Test: " + e.Title
+	return e
 }
 
 // Sample is entirely synthetic: it never fetches usage or redeems a reset.
 func Sample(kind, accountID, provider string, now time.Time) (domain.NotificationEvent, error) {
+	if kind == domain.EventResetAnnounced {
+		// Announcements are global, not tied to a provider account.
+		return sampleAnnouncement(now), nil
+	}
 	e := domain.NotificationEvent{Version: 1, Type: kind, ProviderAccountID: accountID, OccurredAt: now.UTC(), Data: map[string]string{"test": "true"}}
 	switch kind {
 	case domain.EventResetExpiring:
