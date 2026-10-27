@@ -57,16 +57,21 @@ func TestManualFiresaleNoticesPersistedOutsideLocks(t *testing.T) {
 		}
 		return errors.New("hook failed")
 	})
-	if w := manualAction(s, "POST", "/v1/firesales", `{"account":"main","until":"15m"}`, "secret"); w.Code != 500 {
+	// A failing hook is logged; it never turns a committed start or stop into
+	// an error the client would retry against changed state.
+	if w := manualAction(s, "POST", "/v1/firesales", `{"account":"main","until":"15m"}`, "secret"); w.Code != 201 {
 		t.Fatalf("start=%d %s", w.Code, w.Body)
+	}
+	if w := manualAction(s, "GET", "/v1/firesales", "", "secret"); w.Code != 200 {
+		t.Fatalf("list=%d %s", w.Code, w.Body)
 	}
 	if w := manualAction(s, "POST", "/v1/firesales", `{"account":"main","until":"15m"}`, "secret"); w.Code != 200 {
 		t.Fatalf("extend=%d %s", w.Code, w.Body)
 	}
-	if w := manualAction(s, "DELETE", "/v1/firesales/main", "", "secret"); w.Code != 500 {
+	if w := manualAction(s, "DELETE", "/v1/firesales/main", "", "secret"); w.Code != 204 {
 		t.Fatalf("stop=%d %s", w.Code, w.Body)
 	}
-	if err := s.reconcileManualFiresales(t.Context()); err != nil {
+	if _, err := s.reconcileManualFiresalesLocked(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {

@@ -47,9 +47,22 @@ func (s *Server) deliverManualFiresaleNotices(ctx context.Context, notices []man
 	return errors.Join(errs...)
 }
 
+// reconcileManualFiresales ends expired or completed sales and returns only
+// storage errors. Notices for committed endings are always delivered; a hook
+// failure is logged, since the state change has already happened.
 func (s *Server) reconcileManualFiresales(ctx context.Context) error {
 	notices, err := s.reconcileManualFiresalesLocked(ctx)
-	return errors.Join(err, s.deliverManualFiresaleNotices(ctx, notices))
+	s.notifyManualFiresales(ctx, notices)
+	return err
+}
+
+// notifyManualFiresales delivers lifecycle notices after the change is
+// persisted, logging rather than returning failures: a client must never see
+// an error for a start or stop that took effect, then retry against changed state.
+func (s *Server) notifyManualFiresales(ctx context.Context, notices []manualFiresaleNotice) {
+	if err := s.deliverManualFiresaleNotices(ctx, notices); err != nil {
+		log.Printf("redline manual firesale notification: %v", err)
+	}
 }
 
 func (s *Server) reconcileManualFiresalesLocked(ctx context.Context) ([]manualFiresaleNotice, error) {
@@ -233,10 +246,7 @@ func (s *Server) startManualFiresale(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if claimed {
 		status = http.StatusCreated
-		if err := s.deliverManualFiresaleNotices(r.Context(), []manualFiresaleNotice{{sale: sale}}); err != nil {
-			writeError(w, err)
-			return
-		}
+		s.notifyManualFiresales(r.Context(), []manualFiresaleNotice{{sale: sale}})
 	}
 	writeJSON(w, status, sale)
 }
@@ -266,20 +276,13 @@ func (s *Server) stopManualFiresale(w http.ResponseWriter, r *http.Request) {
 		writeError(w, store.ErrNotFound)
 		return
 	}
-	if err := s.deliverManualFiresaleNotices(r.Context(), []manualFiresaleNotice{{sale: sale, reason: "stopped"}}); err != nil {
-		writeError(w, err)
-		return
-	}
+	s.notifyManualFiresales(r.Context(), []manualFiresaleNotice{{sale: sale, reason: "stopped"}})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) manualFiresaleActive(ctx context.Context, account string) (bool, error) {
-	notices, err := s.reconcileManualFiresalesLocked(ctx)
-	if err != nil {
+	if err := s.reconcileManualFiresales(ctx); err != nil {
 		return false, err
-	}
-	if err := s.deliverManualFiresaleNotices(ctx, notices); err != nil {
-		log.Printf("redline manual firesale alert: %v", err)
 	}
 	sale, err := s.store.ActiveManualFiresaleFor(ctx, account)
 	if errors.Is(err, store.ErrNotFound) {
