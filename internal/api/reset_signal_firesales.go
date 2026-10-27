@@ -183,7 +183,13 @@ func (s *Server) reconcileResetSignalFiresalesLocked(ctx context.Context) ([]fir
 	var notices []firesaleNotice
 	var errs []error
 	for _, sale := range sales {
-		if a := state.Announcement; usableFiresaleAnnouncement(a, s.now()) && a.Key == sale.AnnouncementKey && !a.WindowEnd.Equal(sale.Deadline) {
+		// Look the sale's own announcement up by identity: a better-mirrored
+		// announcement may win the alert ranking while this one is still viable.
+		var own *resetsignal.Announcement
+		if state.Report != nil {
+			own = resetsignal.ViableAnnouncementByKey(*state.Report, sale.AnnouncementKey)
+		}
+		if a := own; usableFiresaleAnnouncement(a, s.now()) && !a.WindowEnd.Equal(sale.Deadline) {
 			changed, err := s.store.UpdateResetSignalFiresaleDeadline(ctx, sale.ID, *a)
 			if err != nil {
 				errs = append(errs, err)

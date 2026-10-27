@@ -656,6 +656,39 @@ func TestResetSignalFiresaleAlertFailureDoesNotFailScheduling(t *testing.T) {
 	}
 }
 
+// A better-mirrored announcement B can win the alert ranking while the active
+// sale's announcement A is still viable; A's deadline revisions must apply.
+func TestResetSignalFiresaleTracksActiveAnnouncementDeadlineByIdentity(t *testing.T) {
+	s, signal, _ := firesaleFixture(t, "notify")
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if w := firesaleAction(t, s, "announcement:123", "start"); w.Code != http.StatusOK {
+		t.Fatalf("start=%d %s", w.Code, w.Body.String())
+	}
+	extended := signal.Window.End.Add(2 * time.Hour)
+	a := *signal
+	a.Feed, a.Window.End = "resetbeacon", &extended
+	otherEnd := s.now().Add(3 * time.Hour)
+	b := resetsignal.Signal{Feed: "willreset", Kind: resetsignal.KindPromised, Freshness: resetsignal.Fresh, AnnouncementID: "456", OriginalAccount: "thsottiaux", PublishedAt: signal.PublishedAt, Window: resetsignal.Window{End: &otherEnd, Certainty: resetsignal.WindowExplicitPrimary}}
+	bMirror := b
+	bMirror.Feed = "codex-reset"
+	report := resetsignal.BuildReport(s.now(), []resetsignal.SourceResult{{Signal: &a}, {Signal: &b}, {Signal: &bMirror}})
+	if top := resetsignal.ViableAnnouncement(report); top == nil || top.Key != "announcement:456" {
+		t.Fatalf("fixture: alert-ranked=%+v, want B", top)
+	}
+	s.resetSignalMu.Lock()
+	s.resetSignalState = resetsignal.State{Enabled: true, Report: &report}
+	s.resetSignalMu.Unlock()
+	if err := s.reconcileResetSignalFiresales(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sales, err := s.store.ActiveResetSignalFiresales(t.Context())
+	if err != nil || len(sales) != 1 || sales[0].AnnouncementKey != "announcement:123" || !sales[0].Deadline.Equal(extended) {
+		t.Fatalf("active sale=%+v err=%v, want A with deadline %s", sales, err, extended)
+	}
+}
+
 type failingFiresaleNotifier struct{ calls int }
 
 func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {

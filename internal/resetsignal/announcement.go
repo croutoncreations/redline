@@ -32,6 +32,26 @@ type Announcement struct {
 // unlinked completions), then prefers the best-backed viable linked group.
 // This alert-only ranking does not change the report's state or selection.
 func ViableAnnouncement(report Report) *Announcement {
+	candidates := viableAnnouncements(report)
+	if len(candidates) == 0 {
+		return nil
+	}
+	return &candidates[0]
+}
+
+// ViableAnnouncementByKey returns the viable announcement with this key under
+// the same rules as ViableAnnouncement, even when another one ranks higher.
+func ViableAnnouncementByKey(report Report, key string) *Announcement {
+	for _, a := range viableAnnouncements(report) {
+		if a.Key == key {
+			return &a
+		}
+	}
+	return nil
+}
+
+// viableAnnouncements lists every viable linked group, best-backed first.
+func viableAnnouncements(report Report) []Announcement {
 	var selected []Signal
 	kind, _ := summarizeCurrentSelection(report.GeneratedAt, report.Sources, &selected)
 	if announcementKindRank(kind) == 0 {
@@ -147,10 +167,11 @@ func ViableAnnouncement(report Report) *Announcement {
 		}
 		return a.Key < b.Key
 	})
-	if len(candidates) == 0 {
-		return nil
+	result := make([]Announcement, len(candidates))
+	for i, c := range candidates {
+		result[i] = c.announcement
 	}
-	return &candidates[0].announcement
+	return result
 }
 
 func hasOriginalQuote(s Signal) bool {
