@@ -147,6 +147,7 @@ const (
 	EventRunCompleted      = "run.completed"
 	EventRunFailed         = "run.failed"
 	EventSchedulerError    = "scheduler.error"
+	EventResetAnnounced    = "reset.announced"
 	EventResetExpiring     = "reset.expiring"
 	EventResetRedeemed     = "reset.redeemed"
 	EventResetRedeemFailed = "reset.redeem_failed"

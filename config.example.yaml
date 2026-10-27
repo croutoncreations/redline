@@ -35,6 +35,14 @@ usage_monitor:
   enabled: true
   poll_interval: 5m
 
+# Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
+# Alerts are announced-only, never odds-based, and do not affect scheduling.
+# Also enable notifications and add reset.announced to notifications.events.
+# reset_signals:
+#   enabled: false
+#   poll_interval: 10m # minimum 5m
+#   notify: true      # default when enabled; false keeps monitoring read-only
+
 # Set enabled: true to record notifications. Use command: "" (or omit it) for
 # native Mac alerts without an external hook; authorize notifications in the app.
 # When set, command is a trusted local hook receiving event JSON on stdin.

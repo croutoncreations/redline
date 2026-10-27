@@ -3,6 +3,7 @@ package notification
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,9 +46,17 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		event.Title = name + " reset redeemed"
 		event.Message = "Redeemed; the refill isn't visible yet. Check again in a few minutes."
 		if d["verified"] == "true" {
-			event.Message = "Weekly allowance refilled."
-			if remaining, err := strconv.ParseFloat(d["weekly_remaining"], 64); err == nil {
-				event.Message = fmt.Sprintf("Weekly allowance refilled (now %.0f%% remaining).", remaining*100)
+			label, window := "Allowance", ""
+			cleared := strings.Split(d["cleared"], ",")
+			switch {
+			case slices.Contains(cleared, "weekly"):
+				label, window = "Weekly allowance", "weekly_remaining"
+			case slices.Contains(cleared, "five_hour"):
+				label, window = "5-hour window", "five_hour_remaining"
+			}
+			event.Message = label + " refilled."
+			if remaining, err := strconv.ParseFloat(d[window], 64); window != "" && err == nil {
+				event.Message = fmt.Sprintf("%s refilled (now %.0f%% remaining).", label, remaining*100)
 			}
 		}
 	case domain.EventResetRedeemFailed:

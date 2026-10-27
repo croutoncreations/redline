@@ -284,6 +284,9 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	req.RequestID = attempt.RequestID
 	result, err = s.redeemer.Redeem(ctx, provider, req)
 	result.ResetID, result.RequestID = req.ResetID, req.RequestID
+	if len(result.Cleared) == 0 {
+		result.Cleared = selected.Clears
+	}
 	if err != nil {
 		// Keep pending on ambiguous transport failures/429s. The next attempt
 		// must reuse the persisted request ID, even if the response was lost.
@@ -299,18 +302,21 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		return result, err
 	}
 	completedAt := s.now().UTC()
-	var weeklyRemaining *float64
+	remaining := make(map[string]string)
 	if result.Outcome == "redeemed" && !dryRun {
 		post, raw, refreshErr := s.usageSources.FetchFresh(ctx, providerID, provider)
 		if refreshErr == nil {
 			refreshErr = s.store.SaveSnapshot(ctx, post, raw)
 		}
 		if refreshErr == nil {
-			weeklyRemaining = &post.Weekly.Remaining
+			remaining["weekly_remaining"] = strconv.FormatFloat(post.Weekly.Remaining, 'f', -1, 64)
+			if post.Short != nil {
+				remaining["five_hour_remaining"] = strconv.FormatFloat(post.Short.Remaining, 'f', -1, 64)
+			}
 		}
 		refilled := post.Weekly.Remaining > pre.Weekly.Remaining || post.Weekly.ResetsAt.After(pre.Weekly.ResetsAt)
-		clearsWeekly := slices.Contains(result.Cleared, "weekly") || slices.Contains(selected.Clears, "weekly")
-		clearsShort := slices.Contains(result.Cleared, "five_hour") || slices.Contains(selected.Clears, "five_hour")
+		clearsWeekly := slices.Contains(result.Cleared, "weekly")
+		clearsShort := slices.Contains(result.Cleared, "five_hour")
 		if clearsShort && !clearsWeekly {
 			refilled = pre.Short != nil && post.Short != nil && (post.Short.Remaining > pre.Short.Remaining || post.Short.ResetsAt.After(pre.Short.ResetsAt))
 		}
@@ -326,7 +332,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		return result, err
 	}
 	if !dryRun {
-		s.notifyRedemption(ctx, providerID, result, weeklyRemaining)
+		s.notifyRedemption(ctx, providerID, result, remaining)
 	}
 	return result, nil
 }
@@ -364,7 +370,7 @@ func replayedRedemption(a store.BankedResetRedemption) nativeusage.RedeemResult 
 	return nativeusage.RedeemResult{Outcome: a.Outcome, Code: a.Code, Reason: a.Reason, ResetID: a.ResetID, RequestID: a.RequestID, CompletedAt: a.CompletedAt, Replayed: true}
 }
 
-func (s *Server) notifyRedemption(ctx context.Context, providerID string, result nativeusage.RedeemResult, weeklyRemaining *float64) {
+func (s *Server) notifyRedemption(ctx context.Context, providerID string, result nativeusage.RedeemResult, remaining map[string]string) {
 	if s.notifier == nil || result.Replayed || result.Outcome == "nothing_to_reset" || result.Outcome == "dry_run_ok" {
 		return
 	}
@@ -373,8 +379,9 @@ func (s *Server) notifyRedemption(ctx context.Context, providerID string, result
 		event = domain.EventResetRedeemed
 	}
 	data := map[string]string{"reset_id": result.ResetID, "request_id": result.RequestID, "outcome": result.Outcome, "code": result.Code, "reason": result.Reason, "verified": strconv.FormatBool(result.Verified)}
-	if weeklyRemaining != nil {
-		data["weekly_remaining"] = strconv.FormatFloat(*weeklyRemaining, 'f', -1, 64)
+	data["cleared"] = strings.Join(result.Cleared, ",")
+	for window, value := range remaining {
+		data[window] = value
 	}
 	if err := s.notifier.Notify(ctx, notification.WithMessage(domain.NotificationEvent{Version: 1, Type: event, OccurredAt: s.now().UTC(), ProviderAccountID: providerID, Data: data}, s.config.Providers[providerID].Provider)); err != nil {
 		log.Printf("redline %s redemption notification failed: %v", providerID, err)

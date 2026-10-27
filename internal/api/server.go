@@ -42,6 +42,7 @@ import (
 	"github.com/croutoncreations/redline/internal/pairing"
 	"github.com/croutoncreations/redline/internal/relay"
 	"github.com/croutoncreations/redline/internal/resetreminder"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/tasktemplate"
@@ -79,16 +80,25 @@ type HermesDiscoverer interface {
 }
 
 type Server struct {
-	config       config.Config
-	store        *store.DB
-	now          func() time.Time
-	executor     Executor
-	notifier     Notifier
-	revision     workspace.RevisionResolver
-	artifacts    artifacts.Reader
-	scheduler    *autoscheduler.Loop
-	usageMonitor *autoscheduler.Loop
-	discovery    HarnessDiscoverer
+	config             config.Config
+	store              *store.DB
+	now                func() time.Time
+	executor           Executor
+	notifier           Notifier
+	revision           workspace.RevisionResolver
+	artifacts          artifacts.Reader
+	scheduler          *autoscheduler.Loop
+	usageMonitor       *autoscheduler.Loop
+	resetSignalLoop    *autoscheduler.Loop
+	resetSignalFetcher resetsignal.Fetcher
+	resetSignalSleep   func(context.Context, time.Duration) error
+	resetSignalSources []resetsignal.Source
+	resetSignalMu      sync.Mutex
+	resetPollMu        sync.Mutex
+	resetSignalState   resetsignal.State
+	resetNextRead      map[string]time.Time
+	resetDeferred      map[string]resetsignal.SourceError
+	discovery          HarnessDiscoverer
 	// cursorAccounts confirms the Cursor CLI and app share one account
 	// before a Cursor account's usage is read.
 	cursorAccounts cursorusage.AccountCheck
@@ -371,7 +381,12 @@ func newServer(
 	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
 	monitorInterval, _ := cfg.UsageMonitorInterval()
 	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider)
+	resetInterval, _ := cfg.ResetSignalsInterval()
+	server.resetSignalFetcher = resetsignal.Fetcher{Now: now}
+	server.resetSignalSleep = waitResetSignalStartup
+	server.resetSignalLoop = autoscheduler.NewLoop(cfg.ResetSignals.Enabled, resetInterval, []string{"global"}, server.pollResetSignals)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/reset-signals", server.resetSignals)
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
@@ -1048,6 +1063,10 @@ func (s *Server) StartScheduler(ctx context.Context) {
 			s.cursorUsage.Run(ctx)
 		}()
 	}
+	if s.config.ResetSignals.Enabled {
+		s.loopWorkers.Add(1)
+		go func() { defer s.loopWorkers.Done(); s.runResetSignals(ctx) }()
+	}
 }
 
 func (s *Server) Wait() {
@@ -1087,7 +1106,18 @@ func (s *Server) healthDetails(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	deliveries, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	var deliveries []domain.NotificationDelivery
+	var err error
+	if r.URL.Query().Has("after_id") {
+		afterID, parseErr := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be an int64"})
+			return
+		}
+		deliveries, err = s.store.ListNotificationDeliveriesAfter(r.Context(), afterID, limit)
+	} else {
+		deliveries, err = s.store.ListNotificationDeliveries(r.Context(), limit)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

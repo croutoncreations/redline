@@ -18,6 +18,7 @@ import (
 	"github.com/croutoncreations/redline/internal/cursorusage"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 	"github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/usage"
@@ -27,6 +28,7 @@ import (
 var dashboardFiles embed.FS
 
 type dashboardResponse struct {
+	ResetSignal   *resetsignal.State       `json:"reset_signal,omitempty"`
 	ListenAddress string                   `json:"listen_address,omitempty"`
 	HostOS        string                   `json:"host_os"`
 	ConfigPath    string                   `json:"config_path,omitempty"`
@@ -390,6 +392,10 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		Scheduler: s.scheduler.Status(), UsageMonitor: s.usageMonitor.Status(),
 		Providers: make([]dashboardProvider, 0, len(s.config.Providers)),
 		Tasks:     make([]dashboardTask, 0), Runs: make([]domain.Run, 0), Attempts: make([]domain.DispatchAttempt, 0),
+	}
+	if s.config.ResetSignals.Enabled {
+		state := s.ResetSignalState()
+		result.ResetSignal = &state
 	}
 	if s.config.DemoScenario != "" {
 		result.Demo = &dashboardDemo{Scenario: s.config.DemoScenario, Synthetic: true}

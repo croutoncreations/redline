@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/cli"
+	"github.com/croutoncreations/redline/internal/notification"
 )
 
 func TestNotificationTestCommand(t *testing.T) {
@@ -55,7 +56,7 @@ func TestNotificationTestAll(t *testing.T) {
 	defer s.Close()
 	var out, errOut bytes.Buffer
 	code := cli.RunWithInput([]string{"--api", s.URL, "notification", "test", "--event", "all", "--json"}, strings.NewReader(""), &out, &errOut, time.Now)
-	if code != 0 || len(events) != 9 {
+	if code != 0 || len(events) != len(notification.EventTypes()) || len(events) != 10 {
 		t.Fatalf("code=%d events=%v err=%s", code, events, &errOut)
 	}
 	for i := 1; i < len(times); i++ {
@@ -64,7 +65,7 @@ func TestNotificationTestAll(t *testing.T) {
 		}
 	}
 	var deliveries []map[string]any
-	if err := json.Unmarshal(out.Bytes(), &deliveries); err != nil || len(deliveries) != 9 {
+	if err := json.Unmarshal(out.Bytes(), &deliveries); err != nil || len(deliveries) != len(events) {
 		t.Fatalf("out=%s err=%v", &out, err)
 	}
 }

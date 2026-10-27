@@ -696,6 +696,24 @@ ON banked_reset_redemptions(provider_account_id, id DESC);`); err != nil {
 			return fmt.Errorf("record redemption observed count migration: %w", err)
 		}
 	}
+	// Guard the schema itself as well as the version for branch collisions.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS reset_announcements (
+    announcement_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    notified_at TEXT,
+    retracted_at TEXT,
+    payload_json BLOB NOT NULL,
+    PRIMARY KEY (announcement_key, kind)
+)`); err != nil {
+		return fmt.Errorf("create reset announcements: %w", err)
+	}
+	if version < 38 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (38)`); err != nil {
+			return fmt.Errorf("record reset announcements migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
