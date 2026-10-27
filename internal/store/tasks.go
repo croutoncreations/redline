@@ -496,10 +496,10 @@ func (d *DB) LatestAutomaticFiresale(ctx context.Context, provider string) (bool
 	return d.latestAutomaticFiresale(ctx, provider, false)
 }
 
-// LatestAutomaticPressureFiresale excludes announcement sales, whose lifecycle
-// notifications are claimed separately in reset_signal_firesales. An
-// announcement decision reads as "not in a pressure firesale" on purpose: when
-// the announcement sale ends (with its own firesale.ended) while pace pressure
+// LatestAutomaticPressureFiresale excludes announcement and manual sales, whose
+// lifecycle notifications are claimed separately. A forced decision reads as
+// "not in a pressure firesale" on purpose: when
+// the forced sale ends (with its own firesale.ended) while pace pressure
 // still holds, the next decision announces a pressure firesale.started, so the
 // user is never told a firesale ended while one silently continues.
 func (d *DB) LatestAutomaticPressureFiresale(ctx context.Context, provider string) (bool, error) {
@@ -508,7 +508,7 @@ func (d *DB) LatestAutomaticPressureFiresale(ctx context.Context, provider strin
 
 func (d *DB) latestAutomaticFiresale(ctx context.Context, provider string, pressureOnly bool) (bool, error) {
 	var firesale bool
-	err := d.db.QueryRowContext(ctx, `SELECT CASE WHEN ? AND COALESCE(json_extract(decision_json, '$.result.firesale_trigger'), '') = 'reset_announcement' THEN 0 ELSE json_extract(decision_json, '$.provider_firesale') END
+	err := d.db.QueryRowContext(ctx, `SELECT CASE WHEN ? AND COALESCE(json_extract(decision_json, '$.result.firesale_trigger'), '') IN ('reset_announcement', 'manual') THEN 0 ELSE json_extract(decision_json, '$.provider_firesale') END
 FROM scheduler_decisions WHERE provider_account_id = ?
 AND json_extract(decision_json, '$.trigger') = 'automatic'
 AND COALESCE(json_extract(decision_json, '$.result.decision'), '') != 'UNKNOWN'

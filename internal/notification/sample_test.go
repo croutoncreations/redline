@@ -10,6 +10,46 @@ import (
 	"github.com/croutoncreations/redline/internal/notification"
 )
 
+func TestResetAnnouncedManualSample(t *testing.T) {
+	now := time.Now().UTC()
+	for _, account := range []string{"", "claude-main"} {
+		e, err := notification.Sample(domain.EventResetAnnounced, account, "claude", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if account == "" {
+			if e.Data["kind"] != "COMPLETED" || e.Data["manual_account"] != "" {
+				t.Fatalf("event=%+v", e)
+			}
+		} else {
+			if e.Data["kind"] != "PROMISED" || e.Data["manual_account"] != account || e.Data["manual_for"] != "15m" {
+				t.Fatalf("event=%+v", e)
+			}
+			end, err := time.Parse(time.RFC3339Nano, e.Data["window_end"])
+			if err != nil || !end.Equal(now.Add(2*time.Hour)) {
+				t.Fatalf("window_end=%s err=%v", e.Data["window_end"], err)
+			}
+		}
+	}
+}
+
+func TestManualFiresaleMessages(t *testing.T) {
+	for _, by := range []string{"owner", "device:My phone"} {
+		e := notification.WithMessage(domain.NotificationEvent{Type: domain.EventFiresaleStarted, Data: map[string]string{"trigger": "manual", "started_by": by, "deadline": "2026-10-26T15:04:00Z"}}, "Claude main")
+		who := "you"
+		if by != "owner" {
+			who = "My phone"
+		}
+		if e.Message != "Claude main firesale started by "+who+" until Mon 15:04 UTC. Running queued work." {
+			t.Fatal(e.Message)
+		}
+	}
+	e := notification.WithMessage(domain.NotificationEvent{Type: domain.EventFiresaleEnded, Data: map[string]string{"trigger": "manual", "reason": "completed"}}, "Claude")
+	if e.Message != "Firesale ended: the weekly window reset. Back to normal pacing." {
+		t.Fatal(e.Message)
+	}
+}
+
 func TestSamplesUseReadableBuilders(t *testing.T) {
 	now := time.Date(2026, 7, 15, 19, 19, 0, 0, time.UTC)
 	for _, kind := range notification.EventTypes() {

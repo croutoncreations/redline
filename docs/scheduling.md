@@ -16,6 +16,37 @@ redline decision --provider codex-main
 redline decision --provider claude-main --json
 ```
 
+## Manual firesales
+
+Start an on-demand firesale for **any configured provider account**, not just Codex:
+
+```bash
+redline firesale start --provider claude-main --for 15m
+redline firesale start --provider codex-main --until-reset
+redline firesale status
+redline firesale stop --provider claude-main
+```
+
+A duration must be 5 minutes to 7 days (Go duration syntax, e.g. `15m`, `2h`, `168h`).
+`--until-reset` uses the latest cached weekly reset and refuses an unknown or past reset.
+Starting again replaces the deadline; one manual sale can be active per account.
+Manual sales are independent of public announcements and `reset_signals.firesale` mode.
+They persist across restarts and end at the deadline, when stopped, or when the account's
+weekly reset moves later by at least one hour. Remaining allowance increasing alone does not
+end a manual sale; without usage at start, only stop or the deadline ends it.
+
+Manual forcing overrides **pacing only** and unlocks the `firesale` tier. It does not change the
+effective reset horizon or overflow math, create allowance, spend a banked reset, bypass the
+five-hour reserve, stale/missing telemetry, provider pause, exhausted model budgets, concurrency,
+or job eligibility gates. Missing weekly telemetry stays `UNKNOWN`; zero weekly allowance stays
+held. A paused account may start a sale but cannot dispatch until resumed. The status API warns
+when starting is pointless without refusing it; demo mode refuses starts.
+
+The scheduler, usage monitor, startup reconciliation, and firesale API reconcile lifecycle changes.
+Start/end notices use `firesale.started`/`firesale.ended` with `trigger: manual`, the account,
+deadline, original actor, and end reason. Enable those events in `notifications.events` to receive
+them. See the [API reference](api.md#manual-firesales-any-provider).
+
 ## Redeeming banked resets
 
 Start with a dry run for each provider, then perform the first real redemption manually:

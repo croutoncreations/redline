@@ -81,7 +81,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|devices|relay|account|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|firesale|candidates|pause|resume|pair|devices|relay|account|version>")
 		return 1
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
@@ -91,6 +91,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "firesale":
+		return runManualFiresale(client, remaining[1:], stdout, stderr)
 	case "reset":
 		if remaining[1] == "firesale" {
 			return runResetFiresale(client, remaining[2:], stdout, stderr)
@@ -188,11 +190,13 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, devices, relay, account, version")
+	fmt.Fprintln(output, "          firesale, pair, devices, relay, account, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
+	fmt.Fprintln(output, "firesale start       --provider ACCOUNT (--for DURATION | --until-reset)")
+	fmt.Fprintln(output, "firesale stop        --provider ACCOUNT; firesale status prints JSON")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")

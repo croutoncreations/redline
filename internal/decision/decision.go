@@ -381,6 +381,7 @@ func effectiveReset(in Input) ResetEvent {
 
 type Input struct {
 	ForceFiresale          bool
+	ForceFiresaleTrigger   string
 	ResetEvents            []ResetEvent
 	FiresaleTrigger        *float64
 	Snapshot               UsageSnapshot
@@ -487,7 +488,10 @@ func Evaluate(in Input) Result {
 		result = evaluateSlots(in)
 	}
 	if in.ForceFiresale {
-		result.FiresaleTrigger = "reset_announcement"
+		result.FiresaleTrigger = in.ForceFiresaleTrigger
+		if result.FiresaleTrigger == "" {
+			result.FiresaleTrigger = "reset_announcement"
+		}
 	}
 	// Forcing overrides pacing only. An empty weekly allowance (or no rolling
 	// room in the 5-hour window) still blocks: there is nothing left to spend.
@@ -496,6 +500,9 @@ func Evaluate(in Input) Result {
 		result.Firesale = true
 		result.UnlockedTier = domain.DispatchFiresale
 		result.Reason = "reset announcement firesale; running queued work before the deadline"
+		if in.ForceFiresaleTrigger == "manual" {
+			result.Reason = "manual firesale; running queued work before the deadline"
+		}
 	}
 	pressure := result.PaceGap
 	if in.Snapshot.Short != nil {

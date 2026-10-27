@@ -14,7 +14,7 @@ func EventTypes() []string {
 
 // sampleAnnouncement uses the real announcement builder with a fake post, so
 // the sample shows exactly what a live reset.announced alert looks like.
-func sampleAnnouncement(now time.Time) domain.NotificationEvent {
+func sampleAnnouncement(now time.Time, account string) domain.NotificationEvent {
 	published := now.Add(-10 * time.Minute)
 	a := resetsignal.Announcement{
 		Key: "test-announcement", Kind: resetsignal.KindCompleted, Account: "thsottiaux",
@@ -22,7 +22,14 @@ func sampleAnnouncement(now time.Time) domain.NotificationEvent {
 		URL: "https://x.com/thsottiaux/status/0", PublishedAt: &published, Feeds: []string{"resetbeacon"},
 		Attribution: "Data: resetbeacon.com", AttributionURLs: "https://resetbeacon.com/",
 	}
+	if account != "" {
+		end := now.Add(2 * time.Hour)
+		a.Kind, a.WindowEnd = resetsignal.KindPromised, &end
+	}
 	e := a.Notification(now, false)
+	if account != "" {
+		e.Data["manual_account"], e.Data["manual_for"] = account, "15m"
+	}
 	e.Data["test"] = "true"
 	e.Title = "Test: " + e.Title
 	return e
@@ -32,7 +39,7 @@ func sampleAnnouncement(now time.Time) domain.NotificationEvent {
 func Sample(kind, accountID, provider string, now time.Time) (domain.NotificationEvent, error) {
 	if kind == domain.EventResetAnnounced {
 		// Announcements are global, not tied to a provider account.
-		return sampleAnnouncement(now), nil
+		return sampleAnnouncement(now, accountID), nil
 	}
 	e := domain.NotificationEvent{Version: 1, Type: kind, ProviderAccountID: accountID, OccurredAt: now.UTC(), Data: map[string]string{"test": "true"}}
 	switch kind {
