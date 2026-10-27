@@ -263,7 +263,9 @@ redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port
 ```
 
 `--qr` is required. `pair` reads the service configuration from `--config`, so point it at the file
-the service uses (for the macOS app, `~/Library/Application Support/Redline/redline.yaml`). Without
+the service uses. The macOS app uses `REDLINE_CONFIG_PATH` or the path it remembered from an earlier
+launch, then the config of a legacy LaunchAgent install, and otherwise
+`~/Library/Application Support/Redline/redline.yaml`. Without
 `--host`, the Tailscale MagicDNS name is discovered automatically; either way the host must be listed
 in `api.trusted_hosts`. `--port` defaults to 443.
 
