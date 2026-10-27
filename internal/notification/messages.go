@@ -109,6 +109,9 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 				"stopped":         "Stopped by you.",
 				"disabled":        "Reset announcement firesales are disabled.",
 			}[d["reason"]]
+			if d["reason"] == "completed" && d["completion_source"] == "usage_refill" {
+				reason = "Your weekly allowance refilled, so the reset has landed."
+			}
 			event.Message = reason + " " + event.Message
 		}
 	}

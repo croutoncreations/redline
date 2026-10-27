@@ -300,11 +300,11 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				remaining["five_hour_remaining"] = strconv.FormatFloat(post.Short.Remaining, 'f', -1, 64)
 			}
 		}
-		refilled := post.Weekly.Remaining > pre.Weekly.Remaining || post.Weekly.ResetsAt.After(pre.Weekly.ResetsAt)
+		refilled := usageWindowRefilled(pre.Weekly, post.Weekly, 0)
 		clearsWeekly := slices.Contains(result.Cleared, "weekly")
 		clearsShort := slices.Contains(result.Cleared, "five_hour")
 		if clearsShort && !clearsWeekly {
-			refilled = pre.Short != nil && post.Short != nil && (post.Short.Remaining > pre.Short.Remaining || post.Short.ResetsAt.After(pre.Short.ResetsAt))
+			refilled = pre.Short != nil && post.Short != nil && usageWindowRefilled(*pre.Short, *post.Short, 0)
 		}
 		result.Verified = refreshErr == nil && post.ObservedAt.After(completedAt) && refilled
 		if !result.Verified {
