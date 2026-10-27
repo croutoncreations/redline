@@ -124,7 +124,17 @@ type AttributedPrediction struct {
 	Current   bool      `json:"current"`
 }
 
+type FiresaleState struct {
+	Active          bool       `json:"active"`
+	Mode            string     `json:"mode"`
+	AnnouncementKey string     `json:"announcement_key"`
+	Deadline        *time.Time `json:"deadline"`
+	StartedAt       *time.Time `json:"started_at"`
+	Providers       []string   `json:"providers"`
+}
+
 type State struct {
+	Firesale     FiresaleState `json:"firesale"`
 	Enabled      bool          `json:"enabled"`
 	Report       *Report       `json:"report,omitempty"`
 	Announcement *Announcement `json:"announcement,omitempty"`

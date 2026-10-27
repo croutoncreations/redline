@@ -25,12 +25,15 @@ usage_monitor:
   poll_interval: 5m
 
 # Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
-# Alerts are announced-only, never odds-based, and do not affect scheduling.
-# Also enable notifications and add reset.announced to notifications.events.
+# Alerts and firesales are announcement-only, never odds-based.
+# Also enable notifications and list reset.announced/firesale.started/firesale.ended.
 # reset_signals:
 #   enabled: false
 #   poll_interval: 10m # minimum 5m
-#   notify: true      # default when enabled; false keeps monitoring read-only
+#   notify: true      # default when enabled; controls announcement alerts only
+#   firesale: notify  # off | notify | auto; default notify when enabled
+#                     # requires enabled unless off; PROMISED/SCHEDULED need WindowEnd
+#                     # notify needs: redline reset firesale start
 
 # Set enabled: true to record notifications. Use command: "" (or omit it) for
 # native Mac alerts without an external hook; authorize notifications in the app.
