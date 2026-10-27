@@ -15,8 +15,8 @@ func TestDeviceSessionsMigrationAndUsage(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := t.Context()
-	// Simulate a different branch already having recorded migration 40.
-	if _, err := db.db.Exec(`DROP TABLE device_sessions; INSERT OR IGNORE INTO schema_migrations(version) VALUES(40)`); err != nil {
+	// Simulate a stamped schema: migration 41 recorded but the table missing.
+	if _, err := db.db.Exec(`DROP TABLE device_sessions; INSERT OR IGNORE INTO schema_migrations(version) VALUES(41)`); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {

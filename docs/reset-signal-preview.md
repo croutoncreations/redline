@@ -267,6 +267,17 @@ A fresh, report-selected unlinked completion (such as `last_reset_at`) is also a
 under that strict time ordering. Stale/MissingTTL, corrected, or withdrawn records cannot end it;
 unlinked completions still never trigger an announcement alert or start.
 
+Each sale stores its provider's latest weekly remaining, weekly reset time, and observation time
+at start. Later observations lower the persisted remaining baseline as allowance is consumed.
+Fresh usage (within `max_snapshot_age`) observed strictly after the original baseline ends that
+provider's sale if weekly remaining exceeds this low-water mark by more than 0.02 (two percentage
+points), or weekly `resets_at` advances. Both a global refill and the regular weekly rollover
+return Redline to normal pacing. No snapshot at start means no usage-based check for that episode;
+stale or pre-baseline observations cannot complete it. Disable, deadline, and retraction take
+precedence, followed by announcement/tracker completion, then usage refill. A usage-based end is
+`reason: completed` with `completion_source: usage_refill`; its message says the weekly allowance
+refilled and the reset has landed.
+
 Starts and ends are claimed atomically in SQLite before notification delivery. Repeated polls,
 API retries, and restarts never duplicate an episode's alerts; failed hooks are not retried.
 Stopping is terminal for auto mode for that announcement/provider, including across restart.
