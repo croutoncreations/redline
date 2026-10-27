@@ -2638,7 +2638,11 @@ func (s *Server) evaluateCandidateBudget(
 	if snapshot.Short != nil {
 		required = append([]string{"session"}, required...)
 	}
-	if snapshot.WeeklyUnavailable {
+	sessionOnly := configured.SessionOnlyApplies(snapshot.WeeklyUnavailable)
+	if sessionOnly {
+		required = []string{"session"}
+	}
+	if snapshot.WeeklyUnavailable && !sessionOnly {
 		// No weekly number exists, so none is reported -- a weekly pool row
 		// with Remaining 0 would read as exhausted. Held, whatever base says.
 		held := base
@@ -2649,24 +2653,35 @@ func (s *Server) evaluateCandidateBudget(
 		return decorateBudgetResult(held, profile.Model, routing, required, nil, nil), false,
 			"weekly limit not reported; dispatch holds until a policy exists for this account type"
 	}
+	basePool, remaining := "weekly", snapshot.Weekly.Remaining
+	if sessionOnly {
+		basePool, remaining = "session", 1
+		if snapshot.Short != nil {
+			remaining = snapshot.Short.Remaining
+		}
+	}
 	poolResults := []decision.PoolResult{{
-		Pool: "weekly", Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
-		Remaining: snapshot.Weekly.Remaining, UnlockedTier: base.UnlockedTier,
+		Pool: basePool, Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
+		Remaining: remaining, UnlockedTier: base.UnlockedTier,
 	}}
 	triggering := make([]string, 0, 2)
 	if base.Decision == decision.Admit {
-		triggering = append(triggering, "weekly")
+		triggering = append(triggering, basePool)
 	}
 	if base.Decision == decision.Unknown {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared allowance decision is unknown: " + base.Reason
 	}
 	policy := s.config.Policies[base.Policy]
-	if snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
+	// A model's weekly headroom must never spend the session-only reserve.
+	if sessionOnly && base.Decision != decision.Admit {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false, base.Reason
+	}
+	if !sessionOnly && snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared session reserve is protected"
 	}
-	if snapshot.Weekly.Remaining <= 0 {
+	if !sessionOnly && snapshot.Weekly.Remaining <= 0 {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared weekly allowance is exhausted"
 	}
@@ -2790,7 +2805,7 @@ func (s *Server) evaluateCandidateBudget(
 		result.Reason = "model-specific allowance meets pace threshold"
 	}
 	for _, pool := range poolResults {
-		if dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
+		if !sessionOnly && dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
 			result.UnlockedTier = pool.UnlockedTier
 		}
 	}
@@ -3274,7 +3289,9 @@ func (s *Server) providerDecisionInput(
 	if manual {
 		forcedTrigger = "manual"
 	}
+	configured := s.config.Providers[providerID]
 	return decision.Input{
+		SessionOnly: configured.WeeklyPolicy == "session_only", SessionReserve: configured.EffectiveSessionReserve(),
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,

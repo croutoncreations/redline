@@ -281,7 +281,7 @@ type claudeLimit struct {
 }
 type claudePayload struct {
 	FiveHour   *claudeWindow      `json:"five_hour"`
-	SevenDay   *claudeWindow      `json:"seven_day"`
+	SevenDay   json.RawMessage    `json:"seven_day"`
 	Limits     []claudeLimit      `json:"limits"`
 	CedarEmber *claudeResetStatus `json:"cedar_ember"`
 }
@@ -392,15 +392,30 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		snapshot.Short = &window
 		snapshot.Allowances = append(snapshot.Allowances, allowance)
 	}
-	if payload.SevenDay == nil {
+	if len(payload.SevenDay) == 0 {
 		return decision.UsageSnapshot{}, fmt.Errorf("native claude usage is missing weekly window")
 	}
-	weekly, allowance, err := payload.SevenDay.normalized("weekly", "Weekly", "weekly", 7*24*time.Hour)
-	if err != nil {
-		return decision.UsageSnapshot{}, err
+	if bytes.Equal(bytes.TrimSpace(payload.SevenDay), []byte("null")) {
+		for _, limit := range payload.Limits {
+			if limit.Kind == "weekly_all" {
+				return decision.UsageSnapshot{}, fmt.Errorf("native claude usage has weekly_all but no readable weekly window")
+			}
+		}
+		// Team seats can report session and model limits without disclosing
+		// their account-wide weekly cap. Never infer that cap from a model.
+		snapshot.WeeklyUnavailable = true
+	} else {
+		var window claudeWindow
+		if err := json.Unmarshal(payload.SevenDay, &window); err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("decode native claude weekly window: %w", err)
+		}
+		weekly, allowance, err := window.normalized("weekly", "Weekly", "weekly", 7*24*time.Hour)
+		if err != nil {
+			return decision.UsageSnapshot{}, err
+		}
+		snapshot.Weekly = weekly
+		snapshot.Allowances = append(snapshot.Allowances, allowance)
 	}
-	snapshot.Weekly = weekly
-	snapshot.Allowances = append(snapshot.Allowances, allowance)
 	for _, limit := range payload.Limits {
 		if limit.Kind != "weekly_scoped" || !strings.EqualFold(limit.Scope.Model.DisplayName, "Fable") {
 			continue
@@ -408,7 +423,10 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		resetText := limit.ResetsAt
 		resetInferred := false
 		if strings.TrimSpace(resetText) == "" {
-			resetText = weekly.ResetsAt.Format(time.RFC3339Nano)
+			if snapshot.WeeklyUnavailable {
+				continue // There is no account reset from which to infer this model's reset.
+			}
+			resetText = snapshot.Weekly.ResetsAt.Format(time.RFC3339Nano)
 			resetInferred = true
 			snapshot.Confidence = "medium"
 		}

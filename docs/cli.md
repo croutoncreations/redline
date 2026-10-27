@@ -30,6 +30,18 @@ The command requires a local desktop browser and an HTTP loopback API URL. For a
 use `redline pair` instead. Opening the bare dashboard URL in a browser shows these sign-in
 instructions; API requests continue to require authentication.
 
+## Managed accounts
+
+`redline account add <id> --provider claude`, `redline account add-profile <id> --dir <path>`,
+and `redline account edit <id>` accept
+`--weekly-policy session_only` and `--session-reserve 0.50` for Claude seats without
+a reported weekly cap. The reserve protects that fraction of every 5-hour window
+(`[0,1)`, default 0.50); it requires `session_only`. Other policy values are rejected;
+`--weekly-policy ''` restores the default hold and clears a saved session reserve.
+Changes require a service restart. Main-config accounts must be edited in YAML.
+See [session-only scheduling](scheduling.md#claude-team-seats-without-a-reported-weekly-cap)
+for the hidden-weekly-cap risk and model-budget gates.
+
 ## Device sessions (owner only)
 
 ```bash

@@ -27,12 +27,14 @@ import (
 var accountsMu sync.Mutex
 
 type accountView struct {
-	ID            string `json:"id"`
-	Provider      string `json:"provider"`
-	Label         string `json:"label,omitempty"`
-	UsageSource   string `json:"usage_source"`
-	OpenUsageURL  string `json:"openusage_url,omitempty"`
-	OpenUsageCard string `json:"openusage_card,omitempty"`
+	WeeklyPolicy   string   `json:"weekly_policy,omitempty"`
+	SessionReserve *float64 `json:"session_reserve,omitempty"`
+	ID             string   `json:"id"`
+	Provider       string   `json:"provider"`
+	Label          string   `json:"label,omitempty"`
+	UsageSource    string   `json:"usage_source"`
+	OpenUsageURL   string   `json:"openusage_url,omitempty"`
+	OpenUsageCard  string   `json:"openusage_card,omitempty"`
 	// ClaudeConfigDir is the account's Claude Code profile directory, with
 	// the home folder shown as "~".
 	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
@@ -61,12 +63,14 @@ type accountsResponse struct {
 }
 
 type accountRequest struct {
-	ID            string  `json:"id"`
-	Provider      string  `json:"provider"`
-	Label         *string `json:"label,omitempty"`
-	UsageSource   *string `json:"usage_source,omitempty"`
-	OpenUsageURL  *string `json:"openusage_url,omitempty"`
-	OpenUsageCard *string `json:"openusage_card,omitempty"`
+	WeeklyPolicy   *string  `json:"weekly_policy,omitempty"`
+	SessionReserve *float64 `json:"session_reserve,omitempty"`
+	ID             string   `json:"id"`
+	Provider       string   `json:"provider"`
+	Label          *string  `json:"label,omitempty"`
+	UsageSource    *string  `json:"usage_source,omitempty"`
+	OpenUsageURL   *string  `json:"openusage_url,omitempty"`
+	OpenUsageCard  *string  `json:"openusage_card,omitempty"`
 	// ClaudeConfigDir is refused over HTTP. A profile directory decides
 	// which local login the service reads and which login dispatched runs
 	// use, and phones reach this API through Tailscale Serve and the relay,
@@ -143,7 +147,8 @@ func (s *Server) accountsSnapshot() (accountsResponse, error) {
 		view := accountView{ID: id, Provider: provider.Provider, Label: provider.Label, UsageSource: provider.EffectiveUsageSource(),
 			OpenUsageURL: provider.OpenUsageURL, OpenUsageCard: provider.OpenUsageCard, Origin: "config", Running: true,
 			ClaudeConfigDir: displayProfileDir(provider.ClaudeConfigDir),
-			SignIn:          signInGuidance(provider.Provider, provider.OpenUsageCard, provider.ClaudeConfigDir)}
+			WeeklyPolicy:    provider.WeeklyPolicy, SessionReserve: provider.SessionReserve,
+			SignIn: signInGuidance(provider.Provider, provider.OpenUsageCard, provider.ClaudeConfigDir)}
 		if s.config.ManagedAccounts[id] {
 			view.Origin = "managed"
 			account, stillSaved := savedByID[id]
@@ -169,7 +174,8 @@ func (s *Server) accountsSnapshot() (accountsResponse, error) {
 		view := accountView{ID: account.ID, Provider: provider.Provider, Label: account.Label, UsageSource: provider.EffectiveUsageSource(),
 			OpenUsageURL: account.OpenUsageURL, OpenUsageCard: account.OpenUsageCard, Origin: "managed", Disabled: account.Disabled,
 			ClaudeConfigDir: displayProfileDir(account.ClaudeConfigDir),
-			SignIn:          signInGuidance(provider.Provider, account.OpenUsageCard, account.ClaudeConfigDir)}
+			WeeklyPolicy:    account.WeeklyPolicy, SessionReserve: account.SessionReserve,
+			SignIn: signInGuidance(provider.Provider, account.OpenUsageCard, account.ClaudeConfigDir)}
 		_, wasDisabledAtStart := s.config.DisabledAccounts[account.ID]
 		switch {
 		case !account.Disabled && wasDisabledAtStart:
@@ -200,7 +206,8 @@ func sameManagedFields(saved, running config.Provider) bool {
 	return saved.Provider == running.Provider && saved.Label == running.Label && saved.UsageSource == running.UsageSource &&
 		saved.OpenUsageURL == running.OpenUsageURL && saved.OpenUsageCard == running.OpenUsageCard &&
 		config.NormalizeClaudeConfigDir(saved.ClaudeConfigDir) == config.NormalizeClaudeConfigDir(running.ClaudeConfigDir) &&
-		saved.WindowWeeklyCost == running.WindowWeeklyCost && saved.Policy == running.Policy
+		saved.WindowWeeklyCost == running.WindowWeeklyCost && saved.Policy == running.Policy &&
+		saved.WeeklyPolicy == running.WeeklyPolicy && saved.EffectiveSessionReserve() == running.EffectiveSessionReserve()
 }
 
 func (s *Server) liveAccountStatus(id string, provider config.Provider, reason, lastError string) string {
@@ -260,6 +267,15 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyAccountRequest(account *config.ManagedAccount, request accountRequest) {
+	if request.WeeklyPolicy != nil {
+		account.WeeklyPolicy = *request.WeeklyPolicy
+		if account.WeeklyPolicy == "" {
+			account.SessionReserve = nil
+		}
+	}
+	if request.SessionReserve != nil {
+		account.SessionReserve = request.SessionReserve
+	}
 	if request.Label != nil {
 		account.Label = strings.TrimSpace(*request.Label)
 	}

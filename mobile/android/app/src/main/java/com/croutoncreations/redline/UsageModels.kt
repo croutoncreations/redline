@@ -161,6 +161,8 @@ data class ProviderUsage(
      * reported" and shows nothing in its place.
      */
     @SerialName("weekly_not_reported") val weeklyNotReported: Boolean = false,
+    @SerialName("weekly_policy") val weeklyPolicy: String = "",
+    @SerialName("session_reserve") val sessionReserve: Double = 0.0,
     /**
      * "Weekly allowance", or "Monthly allowance" for Cursor. Empty from an
      * older desktop, where every account window was weekly.
@@ -249,6 +251,7 @@ fun accountDispatchState(account: ProviderUsage): String = when {
     account.paused -> "paused"
     account.stale || account.accountStatus == "stale" -> "out of date, dispatch held"
     account.accountStatus == "error" -> "usage unavailable, dispatch held"
+    account.weeklyNotReported && account.weeklyPolicy == "session_only" -> "weekly not reported, session-only scheduling"
     account.weeklyNotReported && !account.dispatching -> "dispatch held, weekly not reported"
     account.accountStatus == "no_data" || account.weekly == null -> "no usage yet"
     account.dispatching -> "dispatching"

@@ -198,7 +198,11 @@ public struct AccountTrayRow: Sendable, Equatable, Identifiable {
                 case "UNKNOWN": "Dispatch held"
                 default: "No scheduler decision yet"
                 }
-                stateLine = snapshot?.weeklyUnavailable == true && !dispatching ? "Dispatch held · weekly not reported" : decided
+                if snapshot?.weeklyUnavailable == true && account.weeklyPolicy == "session_only" {
+                    stateLine = "Weekly not reported · session-only scheduling"
+                } else {
+                    stateLine = snapshot?.weeklyUnavailable == true && !dispatching ? "Dispatch held · weekly not reported" : decided
+                }
             case .stale: stateLine = "Out of date · dispatch held"
             case .signedOut:
                 stateLine = ProviderRecovery.loginCommand(for: account.provider).map { "Signed out · run \($0)" } ?? "Signed out"
@@ -210,7 +214,8 @@ public struct AccountTrayRow: Sendable, Equatable, Identifiable {
         let pausedPrefix = account.paused && status != .ok ? "Paused · " : ""
 
         compactState = status != .ok ? pausedPrefix + status.word
-            : stateLine == "Dispatch held · weekly not reported" ? "Dispatch held" : stateLine
+            : stateLine == "Dispatch held · weekly not reported" ? "Dispatch held"
+            : stateLine.hasPrefix("Weekly not reported · session-only") ? "Session-only" : stateLine
 
         var spokenParts = [title]
         if let plan { spokenParts.append("\(plan) plan") }

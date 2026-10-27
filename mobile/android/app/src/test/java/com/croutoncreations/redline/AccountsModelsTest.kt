@@ -221,5 +221,9 @@ class AccountsModelsTest {
             """{"id":"x","provider":"claude","account_status":"ok","weekly_not_reported":true}""")
         assertTrue(decoded.weeklyNotReported)
         assertEquals(null, decoded.weekly)
+        val optedIn = redlineJson.decodeFromString(ProviderUsage.serializer(),
+            """{"id":"x","provider":"claude","account_status":"ok","weekly_not_reported":true,"weekly_policy":"session_only","session_reserve":0.5}""")
+        assertEquals("weekly not reported, session-only scheduling", accountDispatchState(optedIn))
+        assertEquals(null, optedIn.weekly)
     }
 }

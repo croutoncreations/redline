@@ -117,6 +117,12 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Team seats with no reported weekly cap hold by default (weekly_policy: "").
+    # Explicitly opt in to scheduling only the 5-hour window and model limits.
+    # The real weekly cap is hidden and may still stop runs.
+    # weekly_policy: session_only  # Claude only
+    # session_reserve: 0.50       # protected fraction, 0 <= value < 1; default 0.50
+    # session_reserve is only valid with weekly_policy: session_only.
     # Optional name shown in the apps instead of the ID (never an email).
     # label: Personal
     # More Claude accounts: sign in to each in OpenUsage on this Mac, list the

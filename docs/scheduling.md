@@ -16,6 +16,30 @@ redline decision --provider codex-main
 redline decision --provider claude-main --json
 ```
 
+## Claude Team seats without a reported weekly cap
+
+Such seats display weekly usage as **Not reported** and hold dispatch by default.
+Opt in per account in the main config's provider entry or managed `accounts.yaml`:
+
+```yaml
+weekly_policy: session_only
+session_reserve: 0.50
+```
+
+`weekly_policy` accepts only `""` (default hold) or `session_only` (Claude only).
+`session_reserve` is the fraction of each 5-hour window Redline never spends: it
+must be in `[0, 1)`, is valid only with `session_only`, and defaults to **0.50**.
+An explicit zero is allowed but removes that protection. This policy applies only
+when the weekly limit is not reported; normal weekly scheduling is unchanged.
+
+Fresh session room above the reserve admits only `behind`-tier work. An unstarted
+session is full (100% remaining); missing/stale telemetry still holds. Model budgets
+such as Fable still gate their tasks. There is no weekly pace, overflow or automatic
+pressure firesale: the real weekly cap is invisible and Anthropic may still stop runs.
+Manual or announcement firesales can unlock the firesale tier but cannot spend the
+session reserve. Use duration-based manual firesales; `--until-reset` requires a
+reported weekly reset. Calibration never invents a weekly number for these seats.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:
@@ -38,9 +62,11 @@ end a manual sale; without usage at start, only stop or the deadline ends it.
 Manual forcing overrides **pacing only** and unlocks the `firesale` tier. It does not change the
 effective reset horizon or overflow math, create allowance, spend a banked reset, bypass the
 five-hour reserve, stale/missing telemetry, provider pause, exhausted model budgets, concurrency,
-or job eligibility gates. Missing weekly telemetry stays `UNKNOWN`; zero weekly allowance stays
-held. A paused account may start a sale but cannot dispatch until resumed. The status API warns
-when starting is pointless without refusing it; demo mode refuses starts.
+or job eligibility gates. Missing weekly telemetry stays `UNKNOWN` unless the account explicitly
+uses the session-only policy above; zero reported weekly allowance stays held.
+
+A paused account may start a sale but cannot dispatch until resumed. The status API warns when
+starting is pointless without refusing it; demo mode refuses starts.
 
 The scheduler, usage monitor, startup reconciliation, and firesale API reconcile lifecycle changes.
 Start/end notices use `firesale.started`/`firesale.ended` with `trigger: manual`, the account,

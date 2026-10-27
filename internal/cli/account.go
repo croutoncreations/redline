@@ -26,24 +26,29 @@ const accountUsage = `usage: redline account <list|add|edit|disable|enable|remov
   disable <id> | enable <id>             keep an account on file but stop or restart watching it
   remove <id>                            forget a Redline-managed account (refused while profiles use it)
 
+add, edit and add-profile also accept --weekly-policy session_only and --session-reserve 0.50
+(Claude seats without reported weekly usage only; the reserve must be in [0,1)).
+
 Accounts in the main config file are listed but are changed by editing that file.
 Redline never signs in for you and stores no passwords or tokens. Changes apply
 when the Redline service restarts.`
 
 type cliAccount struct {
-	ID            string `json:"id"`
-	Provider      string `json:"provider"`
-	Label         string `json:"label"`
-	UsageSource   string `json:"usage_source"`
-	OpenUsageCard string `json:"openusage_card"`
-	ClaudeDir     string `json:"claude_config_dir"`
-	Origin        string `json:"origin"`
-	Disabled      bool   `json:"disabled"`
-	Running       bool   `json:"running"`
-	Pending       string `json:"pending"`
-	Status        string `json:"status"`
-	LastError     string `json:"last_error"`
-	SignIn        string `json:"sign_in"`
+	WeeklyPolicy   string   `json:"weekly_policy,omitempty"`
+	SessionReserve *float64 `json:"session_reserve,omitempty"`
+	ID             string   `json:"id"`
+	Provider       string   `json:"provider"`
+	Label          string   `json:"label"`
+	UsageSource    string   `json:"usage_source"`
+	OpenUsageCard  string   `json:"openusage_card"`
+	ClaudeDir      string   `json:"claude_config_dir"`
+	Origin         string   `json:"origin"`
+	Disabled       bool     `json:"disabled"`
+	Running        bool     `json:"running"`
+	Pending        string   `json:"pending"`
+	Status         string   `json:"status"`
+	LastError      string   `json:"last_error"`
+	SignIn         string   `json:"sign_in"`
 }
 
 type cliAccounts struct {
@@ -151,6 +156,8 @@ func runAccount(client apiclient.Client, args []string, stdout, stderr io.Writer
 		card := flags.String("card", "", "OpenUsage card id, e.g. claude@ab12cd34 (see `redline account discover`)")
 		openUsageURL := flags.String("openusage-url", "", "OpenUsage local API URL")
 		source := flags.String("source", "", "usage source: openusage, auto or native")
+		weeklyPolicy := flags.String("weekly-policy", "", "weekly policy: session_only for Claude seats without a weekly limit; empty holds")
+		sessionReserve := flags.Float64("session-reserve", 0.50, "fraction of each 5-hour window protected by session_only (0 <= reserve < 1)")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
@@ -173,6 +180,12 @@ func runAccount(client apiclient.Client, args []string, stdout, stderr io.Writer
 			if set[flagName] {
 				body[name] = *value
 			}
+		}
+		if set["weekly-policy"] {
+			body["weekly_policy"] = *weeklyPolicy
+		}
+		if set["session-reserve"] {
+			body["session_reserve"] = *sessionReserve
 		}
 		if *card != "" && !set["source"] && args[0] == "add" {
 			body["usage_source"] = "openusage"

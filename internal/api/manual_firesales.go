@@ -150,6 +150,8 @@ func (s *Server) manualFiresales(w http.ResponseWriter, r *http.Request) {
 		}
 		reason := ""
 		switch {
+		case err == nil && provider.SessionOnlyApplies(snapshot.WeeklyUnavailable):
+			// A duration-based firesale can spend session room, never the reserve.
 		case errors.Is(err, store.ErrNotFound) || snapshot.Weekly.ResetsAt.IsZero():
 			reason = "weekly usage not reported"
 		case snapshot.Weekly.Remaining <= 0:
@@ -232,6 +234,11 @@ func (s *Server) startManualFiresale(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.manualFiresaleMu.Unlock()
 		writeError(w, err)
+		return
+	}
+	if err == nil && snapshot.WeeklyUnavailable && !s.config.Providers[body.Account].SessionOnlyApplies(true) {
+		s.manualFiresaleMu.Unlock()
+		writeError(w, fmt.Errorf("%w: weekly usage not reported", store.ErrConflict))
 		return
 	}
 	var baseline *time.Time

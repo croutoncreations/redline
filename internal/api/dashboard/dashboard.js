@@ -369,6 +369,7 @@ function providerPressure(item) {
 }
 function basePressure(item) {
   if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && item.weekly_policy === 'session_only') return {label:'Weekly not reported · session-only scheduling',detail:item.latest_decision?.reason || 'Scheduling uses the 5-hour window above its protected reserve; the hidden weekly cap is not reported.',tone:'neutral'};
   if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && !['RUN','ADMIT'].includes(item.latest_decision?.decision)) return {label:'Dispatch held · weekly not reported',detail:'This account does not report a weekly limit, so Redline holds dispatch until a policy exists for it.',tone:'neutral'};
   if (accountMismatch(item)) return {
     label:'Accounts differ',
@@ -482,7 +483,7 @@ function providerCompact(item) {
     else if (snap.short_window_not_started) windows.push(notStartedMeter(`${lastKnown}5-hour window`));
     else if (snap.short_window_unavailable) windows.push('<div data-testid="short-window-unavailable"><div class="meter-head"><span>5-hour window</span><b>unavailable</b></div><div class="reset">Reset time unavailable · dispatch holds until readable</div></div>');
     if (snap.weekly) windows.push(meter(`${lastKnown}${monthly ? 'monthly subscription' : 'weekly allowance'}`,snap.weekly.remaining,snap.weekly.resets_at));
-    else if (snap.weekly_unavailable) windows.push(`<div data-testid="weekly-not-reported"><div class="meter-head"><span>weekly allowance</span><b>not reported</b></div><div class="reset">Weekly limit not reported for this account · dispatch holds</div></div>`);
+    else if (snap.weekly_unavailable) windows.push(`<div data-testid="weekly-not-reported"><div class="meter-head"><span>weekly allowance</span><b>not reported</b></div><div class="reset">Weekly limit not reported for this account · ${item.weekly_policy === 'session_only' ? 'session-only scheduling' : 'dispatch holds'}</div></div>`);
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => {
       const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));

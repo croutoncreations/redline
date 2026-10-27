@@ -238,6 +238,9 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
+	WeeklyPolicy string `yaml:"weekly_policy"`
+	// A pointer distinguishes an explicit zero from the conservative default.
+	SessionReserve            *float64     `yaml:"session_reserve"`
 	FiresaleMaxConcurrentRuns int          `yaml:"firesale_max_concurrent_runs"`
 	BankedResets              BankedResets `yaml:"banked_resets"`
 	Provider                  string       `yaml:"provider"`
@@ -294,6 +297,43 @@ func (p Provider) BankedResetRedeemLead() time.Duration {
 	}
 	lead, _ := time.ParseDuration(p.BankedResets.RedeemLead)
 	return lead
+}
+
+// SessionOnlyApplies reports whether this account schedules on its 5-hour
+// window alone: it opted in and its latest usage reports no weekly limit.
+func (p Provider) SessionOnlyApplies(weeklyUnavailable bool) bool {
+	return weeklyUnavailable && p.WeeklyPolicy == "session_only"
+}
+
+func (p Provider) EffectiveSessionReserve() float64 {
+	if p.SessionReserve != nil {
+		return *p.SessionReserve
+	}
+	if p.WeeklyPolicy == "session_only" {
+		return 0.50
+	}
+	return 0
+}
+
+func (p Provider) validateWeeklyPolicy() error {
+	if p.WeeklyPolicy != "" && p.WeeklyPolicy != "session_only" {
+		return fmt.Errorf("weekly_policy must be empty or session_only")
+	}
+	if p.WeeklyPolicy == "session_only" && !strings.EqualFold(p.Provider, "claude") {
+		return fmt.Errorf("weekly_policy session_only is only for claude accounts")
+	}
+	if p.SessionReserve != nil {
+		if p.WeeklyPolicy != "session_only" {
+			return fmt.Errorf("session_reserve requires weekly_policy session_only")
+		}
+		if err := fraction("session_reserve", *p.SessionReserve); err != nil {
+			return err
+		}
+		if *p.SessionReserve == 1 {
+			return fmt.Errorf("session_reserve must be less than 1")
+		}
+	}
+	return nil
 }
 
 func (p Provider) EffectiveMaxConcurrentRuns() int {
@@ -656,6 +696,9 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 		// Checked first: a profile directory explains its own source rules
 		// better than the generic source errors below.
 		if err := validateClaudeConfigDir(provider); err != nil {
+			return fmt.Errorf("provider %q: %w", name, err)
+		}
+		if err := provider.validateWeeklyPolicy(); err != nil {
 			return fmt.Errorf("provider %q: %w", name, err)
 		}
 		source := provider.EffectiveUsageSource()

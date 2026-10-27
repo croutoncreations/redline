@@ -252,6 +252,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let accountStatus: String?
     /// The scheduler's latest decision for this account (RUN, WAIT, UNKNOWN).
     public let latestDecision: String?
+    public let weeklyPolicy: String?
 
     public init(
         id: String,
@@ -263,7 +264,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         usageSourceReason: String? = nil,
         label: String? = nil,
         accountStatus: String? = nil,
-        latestDecision: String? = nil
+        latestDecision: String? = nil,
+        weeklyPolicy: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -275,6 +277,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.label = label
         self.accountStatus = accountStatus
         self.latestDecision = latestDecision
+        self.weeklyPolicy = weeklyPolicy
     }
 
     enum CodingKeys: String, CodingKey {
@@ -283,6 +286,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         case usageSource = "usage_source"
         case accountStatus = "account_status"
         case latestDecision = "latest_decision"
+        case weeklyPolicy = "weekly_policy"
     }
 
     private struct LatestDecision: Codable {
@@ -306,6 +310,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         label = (try? container.decodeIfPresent(String.self, forKey: .label)).flatMap { $0 }
         accountStatus = (try? container.decodeIfPresent(String.self, forKey: .accountStatus)).flatMap { $0 }
         latestDecision = (try? container.decodeIfPresent(LatestDecision.self, forKey: .latestDecision))?.flatMap { $0 }?.decision
+        weeklyPolicy = try container.decodeIfPresent(String.self, forKey: .weeklyPolicy)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -321,6 +326,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         }
         try container.encodeIfPresent(label, forKey: .label)
         try container.encodeIfPresent(accountStatus, forKey: .accountStatus)
+        try container.encodeIfPresent(weeklyPolicy, forKey: .weeklyPolicy)
         if let latestDecision {
             try container.encode(LatestDecision(decision: latestDecision), forKey: .latestDecision)
         }

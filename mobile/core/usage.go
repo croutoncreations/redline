@@ -64,8 +64,10 @@ type Pool struct {
 
 // ProviderUsage is one provider's capacity as the app renders it.
 type ProviderUsage struct {
-	ID       string `json:"id"`
-	Provider string `json:"provider"`
+	WeeklyPolicy   string  `json:"weekly_policy,omitempty"`
+	SessionReserve float64 `json:"session_reserve,omitempty"`
+	ID             string  `json:"id"`
+	Provider       string  `json:"provider"`
 	// Label is the owner's name for the account, falling back to the ID, so
 	// the screen always has something to call it. Never an email.
 	Label string `json:"label"`
@@ -252,14 +254,16 @@ type dashboardPayload struct {
 	Health      *healthPayload `json:"health,omitempty"`
 	CursorUsage *cursorReport  `json:"cursor_usage,omitempty"`
 	Providers   []struct {
-		ID            string `json:"id"`
-		Provider      string `json:"provider"`
-		Label         string `json:"label"`
-		OpenUsageCard string `json:"openusage_card"`
-		AccountStatus string `json:"account_status"`
-		Paused        bool   `json:"paused"`
-		SnapshotStale bool   `json:"snapshot_stale"`
-		Error         string `json:"error,omitempty"`
+		WeeklyPolicy   string  `json:"weekly_policy"`
+		SessionReserve float64 `json:"session_reserve"`
+		ID             string  `json:"id"`
+		Provider       string  `json:"provider"`
+		Label          string  `json:"label"`
+		OpenUsageCard  string  `json:"openusage_card"`
+		AccountStatus  string  `json:"account_status"`
+		Paused         bool    `json:"paused"`
+		SnapshotStale  bool    `json:"snapshot_stale"`
+		Error          string  `json:"error,omitempty"`
 		// usage_source is an object describing the collector in use, not a
 		// bare name: it also records when the collector last changed and how
 		// many times it has failed in a row.
@@ -309,6 +313,7 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 	view.Cursor = renderCursorUsage(payload.CursorUsage, cursorScheduled, now)
 	for _, item := range payload.Providers {
 		provider := ProviderUsage{
+			WeeklyPolicy: item.WeeklyPolicy, SessionReserve: item.SessionReserve,
 			ID:            item.ID,
 			Provider:      item.Provider,
 			Label:         item.Label,

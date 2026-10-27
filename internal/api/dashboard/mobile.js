@@ -527,6 +527,7 @@ function accountStateLine(item) {
     case 'no_data': return {text: 'No usage yet · dispatch held', tone: 'near'};
   }
   const d = item.latest_decision?.decision;
+  if (item.snapshot?.weekly_unavailable && item.weekly_policy === 'session_only') return {text: 'Weekly not reported · session-only scheduling', tone: 'neutral'};
   if (item.snapshot?.weekly_unavailable && d !== 'RUN' && d !== 'ADMIT') return {text: 'Dispatch held · weekly not reported', tone: 'neutral'};
   if (d === 'RUN' || d === 'ADMIT') return {text: 'Dispatching', tone: 'healthy'};
   if (d === 'WAIT') return {text: 'Waiting', tone: 'neutral'};

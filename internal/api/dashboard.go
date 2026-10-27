@@ -55,8 +55,10 @@ type dashboardDemo struct {
 }
 
 type dashboardProvider struct {
-	ID       string `json:"id"`
-	Provider string `json:"provider"`
+	WeeklyPolicy   string  `json:"weekly_policy,omitempty"`
+	SessionReserve float64 `json:"session_reserve,omitempty"`
+	ID             string  `json:"id"`
+	Provider       string  `json:"provider"`
 	// Label is the owner's name for this account ("Personal", "Client"). It
 	// is never an email; clients fall back to the ID when it is empty.
 	Label string `json:"label,omitempty"`
@@ -428,7 +430,8 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
 		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id),
-			Label: configured.Label, OpenUsageCard: configured.OpenUsageCard}
+			Label: configured.Label, OpenUsageCard: configured.OpenUsageCard,
+			WeeklyPolicy: configured.WeeklyPolicy, SessionReserve: configured.EffectiveSessionReserve()}
 		selection, selectionErr := s.effectiveProviderPolicy(ctx, id)
 		if selectionErr != nil {
 			return dashboardResponse{}, selectionErr
@@ -487,6 +490,11 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			}
 		} else {
 			item.Snapshot = &snapshot
+			if configured.SessionOnlyApplies(snapshot.WeeklyUnavailable) && item.Scheduling != nil {
+				item.Scheduling.RollingReserve = configured.EffectiveSessionReserve()
+				item.Scheduling.PaceGapTrigger = nil
+				item.Scheduling.PaceThresholds = []dashboardPaceThreshold{}
+			}
 			age := s.now().Sub(snapshot.ObservedAt)
 			// A Cursor account whose CLI and app disagree is not scheduled
 			// from the moment that is found, so its last numbers are not

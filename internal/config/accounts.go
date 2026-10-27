@@ -28,12 +28,14 @@ const AccountsFileVersion = 1
 // authentication stays with the provider's own CLI or app (and with OpenUsage,
 // which reads those logins), and Redline only names which account to watch.
 type ManagedAccount struct {
-	ID            string `yaml:"id" json:"id"`
-	Provider      string `yaml:"provider" json:"provider"`
-	Label         string `yaml:"label,omitempty" json:"label,omitempty"`
-	UsageSource   string `yaml:"usage_source,omitempty" json:"usage_source,omitempty"`
-	OpenUsageURL  string `yaml:"openusage_url,omitempty" json:"openusage_url,omitempty"`
-	OpenUsageCard string `yaml:"openusage_card,omitempty" json:"openusage_card,omitempty"`
+	WeeklyPolicy   string   `yaml:"weekly_policy,omitempty" json:"weekly_policy,omitempty"`
+	SessionReserve *float64 `yaml:"session_reserve,omitempty" json:"session_reserve,omitempty"`
+	ID             string   `yaml:"id" json:"id"`
+	Provider       string   `yaml:"provider" json:"provider"`
+	Label          string   `yaml:"label,omitempty" json:"label,omitempty"`
+	UsageSource    string   `yaml:"usage_source,omitempty" json:"usage_source,omitempty"`
+	OpenUsageURL   string   `yaml:"openusage_url,omitempty" json:"openusage_url,omitempty"`
+	OpenUsageCard  string   `yaml:"openusage_card,omitempty" json:"openusage_card,omitempty"`
 	// ClaudeConfigDir is a Claude Code profile directory (CLAUDE_CONFIG_DIR).
 	// Only the directory's path is stored: the login stays in Claude Code's
 	// own keychain item for that directory and is read, never copied.
@@ -365,6 +367,7 @@ func (a ManagedAccount) ProviderConfig() Provider {
 		Provider: strings.ToLower(strings.TrimSpace(a.Provider)), UsageSource: a.UsageSource,
 		OpenUsageURL: openUsageURL, OpenUsageCard: a.OpenUsageCard, ClaudeConfigDir: a.ClaudeConfigDir, Label: a.Label,
 		WindowWeeklyCost: cost, Policy: a.Policy,
+		WeeklyPolicy: a.WeeklyPolicy, SessionReserve: a.SessionReserve,
 	}
 }
 
@@ -466,6 +469,9 @@ func (c *Config) applyManagedAccounts(accounts []ManagedAccount) error {
 		seen[account.ID] = true
 		if _, defined := c.Providers[account.ID]; defined {
 			return fmt.Errorf("accounts file: %w: account %q is already defined in the config file", ErrAccountConflict, account.ID)
+		}
+		if err := account.ProviderConfig().validateWeeklyPolicy(); err != nil {
+			return fmt.Errorf("account %q: %w", account.ID, err)
 		}
 		if account.Disabled {
 			c.DisabledAccounts[account.ID] = account

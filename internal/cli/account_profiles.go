@@ -140,6 +140,8 @@ func runAccountAddProfile(args []string, configPath string, stdout, stderr io.Wr
 	flags.SetOutput(stderr)
 	dir := flags.String("dir", "", "Claude Code profile directory (its CLAUDE_CONFIG_DIR)")
 	label := flags.String("label", "", "display name, e.g. Alpha (no email addresses)")
+	weeklyPolicy := flags.String("weekly-policy", "", "weekly policy: session_only for seats without a weekly limit; empty holds")
+	sessionReserve := flags.Float64("session-reserve", 0.50, "fraction of each 5-hour window protected by session_only (0 <= reserve < 1)")
 	dryRun := flags.Bool("dry-run", false, "check everything and show the change without saving it")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -160,7 +162,12 @@ func runAccountAddProfile(args []string, configPath string, stdout, stderr io.Wr
 		return 1
 	}
 	account := config.ManagedAccount{ID: id, Provider: "claude", Label: strings.TrimSpace(*label),
-		UsageSource: "native", ClaudeConfigDir: config.NormalizeClaudeConfigDir(*dir)}
+		UsageSource: "native", ClaudeConfigDir: config.NormalizeClaudeConfigDir(*dir), WeeklyPolicy: *weeklyPolicy}
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "session-reserve" {
+			account.SessionReserve = sessionReserve
+		}
+	})
 	path := cfg.AccountsFilePath()
 	saved, err := config.ReadManagedAccounts(path)
 	if err != nil {

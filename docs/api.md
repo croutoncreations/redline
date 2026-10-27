@@ -225,12 +225,30 @@ Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger
 so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
 sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
 
+## Managed account weekly policy
+
+`POST /v1/accounts` and `PATCH /v1/accounts/{account}` accept `weekly_policy`
+(`""` for default hold, or `"session_only"` for Claude only) and `session_reserve`
+(a fraction in `[0,1)`, default 0.50 with `session_only`). A reserve without
+`session_only`, an unknown policy, or session-only on another provider is rejected.
+Both fields persist in `accounts.yaml` and appear in account responses; restart the
+service to apply changes. Setting `weekly_policy` to `""` clears a saved reserve.
+Main-config accounts remain read-only through this API.
+
+Dashboard providers include `weekly_policy` and the effective `session_reserve`.
+For opted-in accounts whose snapshot has `weekly_unavailable`, scheduling uses the
+session pool (plus required model pools), mode `session_only`, with no weekly number.
+See [scheduling](scheduling.md#claude-team-seats-without-a-reported-weekly-cap).
+
 ## Manual firesales (any provider)
 
 Owner and paired-device principals may use all three routes; unauthenticated calls receive **401**.
 
 - `GET /v1/firesales` returns `{"manual":[{"account":"claude-main","started_at":"2026-10-27T12:00:00Z","deadline":"2026-10-27T12:15:00Z","started_by":"owner"}],"eligible":[{"account":"claude-main","label":"claude-main","provider":"claude","weekly_resets_at":null,"reason_unavailable":"weekly usage not reported"}]}`.
-  All configured accounts are eligible, including paused accounts. `weekly_resets_at` and
+  All configured accounts are listed, including paused accounts. Seats without a reported
+  weekly cap are unavailable unless they opt into `weekly_policy: session_only`; these
+  seats can start duration-based firesales, never spend the session reserve, and still
+  have a null `weekly_resets_at`. `weekly_resets_at` and
   `reason_unavailable` are nullable. Reasons include `weekly usage not reported`,
   `weekly allowance used up`, and `provider paused`; these warnings do not prevent a start.
 - `POST /v1/firesales` accepts `{"account":"claude-main","until":"15m"}` or

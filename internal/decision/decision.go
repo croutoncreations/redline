@@ -20,10 +20,11 @@ const (
 	Wait    Decision = "WAIT"
 	Unknown Decision = "UNKNOWN"
 
-	ModeSlots  Mode = "window_slots"
-	ModePace   Mode = "pace_threshold"
-	ModePaused Mode = "paused"
-	ModeActive Mode = "active_run"
+	ModeSessionOnly Mode = "session_only"
+	ModeSlots       Mode = "window_slots"
+	ModePace        Mode = "pace_threshold"
+	ModePaused      Mode = "paused"
+	ModeActive      Mode = "active_run"
 )
 
 type UsageWindow struct {
@@ -97,7 +98,8 @@ type UsageSnapshot struct {
 	// account-wide weekly limit at all -- OpenUsage's Team seats report only
 	// the 5-hour window, model windows and reset credits. Weekly is then the
 	// zero window: never a number to show, never something to schedule
-	// against. Nothing is inferred from the 5-hour or model windows.
+	// against. Dispatch holds unless the account opts into session-only
+	// scheduling; no weekly number is inferred from other windows.
 	WeeklyUnavailable bool `json:"weekly_unavailable,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand to
 	// refill an exhausted window. Nil means the provider did not report it,
@@ -349,7 +351,10 @@ type PaceThreshold struct {
 type ResetSource string
 
 const (
-	ResetWeekly          ResetSource = "weekly"
+	ResetWeekly ResetSource = "weekly"
+	// ResetSession is the 5-hour window's reset, the only horizon a
+	// session-only account has.
+	ResetSession         ResetSource = "session"
 	ResetBankedReset     ResetSource = "banked_reset"
 	ResetPredictedGlobal ResetSource = "predicted_global"
 )
@@ -380,6 +385,8 @@ func effectiveReset(in Input) ResetEvent {
 }
 
 type Input struct {
+	SessionOnly            bool
+	SessionReserve         float64
 	ForceFiresale          bool
 	ForceFiresaleTrigger   string
 	ResetEvents            []ResetEvent
@@ -466,9 +473,11 @@ func Evaluate(in Input) Result {
 		return unknown("usage snapshot is from the future")
 	}
 	if in.Snapshot.WeeklyUnavailable {
-		// Every dispatch rule here is paced against the weekly allowance.
-		// Without one there is nothing safe to pace against, so dispatch
-		// holds until a policy exists for accounts without a weekly limit.
+		// The hidden weekly cap cannot be paced. Only an explicit per-account
+		// opt-in permits spending the session window above its own reserve.
+		if in.SessionOnly {
+			return evaluateSessionOnly(in)
+		}
 		return unknown("weekly limit not reported; dispatch holds until a policy exists for this account type")
 	}
 	if !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
@@ -487,23 +496,10 @@ func Evaluate(in Input) Result {
 	} else {
 		result = evaluateSlots(in)
 	}
-	if in.ForceFiresale {
-		result.FiresaleTrigger = in.ForceFiresaleTrigger
-		if result.FiresaleTrigger == "" {
-			result.FiresaleTrigger = "reset_announcement"
-		}
-	}
 	// Forcing overrides pacing only. An empty weekly allowance (or no rolling
 	// room in the 5-hour window) still blocks: there is nothing left to spend.
-	if in.ForceFiresale && result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0) {
-		result.Decision = Admit
-		result.Firesale = true
-		result.UnlockedTier = domain.DispatchFiresale
-		result.Reason = "reset announcement firesale; running queued work before the deadline"
-		if in.ForceFiresaleTrigger == "manual" {
-			result.Reason = "manual firesale; running queued work before the deadline"
-		}
-	}
+	result = applyForcedFiresale(in, result,
+		result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0))
 	pressure := result.PaceGap
 	if in.Snapshot.Short != nil {
 		pressure = math.Max(pressure, result.Overflow)
@@ -557,6 +553,54 @@ func projectInput(in Input, at time.Time) Input {
 	}
 	future.Snapshot.Short = &short
 	return future
+}
+
+func evaluateSessionOnly(in Input) Result {
+	if in.Snapshot.ShortWindowUnavailable {
+		return unknown("five-hour window is active but its reset time is unavailable; dispatch holds until it is readable")
+	}
+	remaining := 1.0
+	result := Result{Mode: ModeSessionOnly, EffectiveResetSource: ResetSession}
+	if in.Snapshot.Short != nil {
+		if !in.Snapshot.Short.ResetsAt.After(in.Now) {
+			return unknown("short-window reset is not in the future")
+		}
+		remaining = in.Snapshot.Short.Remaining
+		result.EffectiveResetAt = in.Snapshot.Short.ResetsAt
+	}
+	result.RollingDispatchable = remaining - in.SessionReserve
+	if result.RollingDispatchable <= 0 {
+		result.Decision = Wait
+		result.Reason = "5-hour reserve protected (weekly limit not reported; session-only policy)"
+		return applyForcedFiresale(in, result, false)
+	}
+	result.Decision = Admit
+	result.UnlockedTier = domain.DispatchBehind
+	result.Reason = "session-only: 5-hour window has room above the reserve; weekly limit not reported"
+	return applyForcedFiresale(in, result, true)
+}
+
+// applyForcedFiresale records a forced (manual or announcement) firesale
+// and, when there is room to spend, unlocks the firesale tier.
+func applyForcedFiresale(in Input, result Result, room bool) Result {
+	if !in.ForceFiresale {
+		return result
+	}
+	result.FiresaleTrigger = in.ForceFiresaleTrigger
+	if result.FiresaleTrigger == "" {
+		result.FiresaleTrigger = "reset_announcement"
+	}
+	if !room {
+		return result
+	}
+	result.Decision = Admit
+	result.Firesale = true
+	result.UnlockedTier = domain.DispatchFiresale
+	result.Reason = "reset announcement firesale; running queued work before the deadline"
+	if in.ForceFiresaleTrigger == "manual" {
+		result.Reason = "manual firesale; running queued work before the deadline"
+	}
+	return result
 }
 
 func evaluateSlots(in Input) Result {
@@ -697,6 +741,9 @@ func buildSlots(now time.Time, short UsageWindow, weeklyReset time.Time) []Slot 
 }
 
 func validateInput(in Input) error {
+	if err := unitFraction("session reserve", in.SessionReserve); err != nil {
+		return err
+	}
 	if err := unitFraction("window weekly cost", in.WindowWeeklyCost); err != nil {
 		return err
 	}
