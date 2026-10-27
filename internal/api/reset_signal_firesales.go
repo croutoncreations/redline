@@ -212,6 +212,16 @@ func (s *Server) reconcileResetSignalFiresalesLocked(ctx context.Context) ([]fir
 		case completionSource != "":
 			reason = "completed"
 		}
+		if reason == "" {
+			refilled, err := s.resetFiresaleUsageRefilled(ctx, sale)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if refilled {
+				reason, completionSource = "completed", "usage_refill"
+			}
+		}
 		if reason != "" {
 			claimed, err := s.store.EndResetSignalFiresale(ctx, sale.ID, reason, s.now())
 			if err != nil {
@@ -229,6 +239,37 @@ func (s *Server) reconcileResetSignalFiresalesLocked(ctx context.Context) ([]fir
 		errs = append(errs, err)
 	}
 	return notices, errors.Join(errs...)
+}
+
+// resetFiresaleUsageRefilled compares only this account's telemetry against its
+// persisted low-water mark. Sales started without telemetry cannot use this check.
+func (s *Server) resetFiresaleUsageRefilled(ctx context.Context, sale store.ResetSignalFiresale) (bool, error) {
+	if sale.BaselineWeeklyRemaining == nil || sale.BaselineWeeklyResetsAt == nil || sale.BaselineObservedAt == nil {
+		return false, nil
+	}
+	snapshot, _, err := s.store.LatestSnapshot(ctx, sale.ProviderAccountID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !snapshot.ObservedAt.After(*sale.BaselineObservedAt) {
+		return false, nil
+	}
+	maxAge, err := s.config.SnapshotAge()
+	if err != nil {
+		return false, err
+	}
+	baseline := decision.UsageWindow{Remaining: *sale.BaselineWeeklyRemaining, ResetsAt: *sale.BaselineWeeklyResetsAt}
+	age := s.now().Sub(snapshot.ObservedAt)
+	if age >= 0 && age <= maxAge && usageWindowRefilled(baseline, snapshot.Weekly, .02) {
+		return true, nil
+	}
+	if snapshot.Weekly.Remaining < baseline.Remaining {
+		return false, s.store.LowerResetSignalFiresaleBaseline(ctx, sale.ID, snapshot.Weekly.Remaining)
+	}
+	return false, nil
 }
 
 func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFiresale) string {

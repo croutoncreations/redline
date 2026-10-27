@@ -35,6 +35,7 @@ func TestReadableMessages(t *testing.T) {
 		{"pace mode", domain.EventFiresaleStarted, "codex", "Codex firesale started", "38% behind weekly pace before Fri 17:41 UTC. All job tiers unlocked.", map[string]string{"overflow": "0", "overflow_available": "false", "pace_gap": "0.38", "effective_reset_at": "2026-07-17T17:41:00Z"}},
 		{"predicted", domain.EventFiresaleStarted, "codex", "Codex firesale started", "38% of weekly capacity would go unused before the predicted global reset at Fri 17:41 UTC. All job tiers unlocked.", map[string]string{"overflow": "0.38", "effective_reset_at": "2026-07-17T17:41:00Z", "effective_reset_source": "predicted_global"}},
 		{"ended", domain.EventFiresaleEnded, "codex", "Codex firesale ended", "Back to normal pacing.", nil},
+		{"usage refill", domain.EventFiresaleEnded, "codex", "Codex firesale ended", "Your weekly allowance refilled, so the reset has landed. Back to normal pacing.", map[string]string{"trigger": "reset_announcement", "reason": "completed", "completion_source": "usage_refill"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			e := notification.WithMessage(domain.NotificationEvent{Type: tt.kind, ProviderAccountID: "codex-main", OccurredAt: now, Data: tt.data}, tt.provider)

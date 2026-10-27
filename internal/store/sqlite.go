@@ -657,6 +657,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_
 			return fmt.Errorf("record reset signal firesales migration: %w", err)
 		}
 	}
+	// Repair stamped schemas too: version alone does not prove columns exist.
+	for _, column := range []struct{ name, definition string }{
+		{"baseline_weekly_remaining", "REAL"},
+		{"baseline_weekly_resets_at", "TEXT"},
+		{"baseline_observed_at", "TEXT"},
+	} {
+		if err := addColumnIfMissing(ctx, tx, "reset_signal_firesales", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if version < 40 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (40)`); err != nil {
+			return fmt.Errorf("record reset signal firesale baseline migration: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

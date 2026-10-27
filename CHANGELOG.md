@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Announcement firesales end when their own provider's fresh usage shows a weekly refill or
+  weekly rollover, using a persisted low-water mark and `completion_source: usage_refill`.
 - Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
   `notify` when monitoring is enabled), bearer-only `POST /v1/reset-signals/firesale`, and
   `redline reset firesale start|stop`. Only viable promises/schedules with a future announced

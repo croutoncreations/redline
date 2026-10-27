@@ -38,7 +38,7 @@ func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 39 {
+	if version != 40 {
 		t.Fatalf("version=%d", version)
 	}
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)

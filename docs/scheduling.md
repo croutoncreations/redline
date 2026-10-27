@@ -182,7 +182,12 @@ horizon, never extends it. There is no additional cap on backlog burning. Provid
 circuit breaker, five-hour window/reserve, all concurrency limits, model budgets, and normal job
 eligibility rules remain in force. Unknown or stale usage is not treated as capacity.
 
-The sale ends at its deadline, explicit retraction, completion, stop, or disable. Active sales
+The sale ends at its deadline, explicit retraction, completion, stop, or disable. Each provider's
+latest usage at start is persisted as a baseline. Fresh telemetry observed after that baseline also
+ends its sale when weekly remaining rises more than 0.02 (two percentage points) above its stored
+low-water mark, or weekly `resets_at` moves forward (including the regular weekly rollover).
+This reports `completed` with `completion_source: usage_refill` and returns to normal pacing.
+Without a snapshot at start, that sale skips usage-based completion. Active sales
 persist across restart and tracker outages. A same-key fresh deadline revision is stored/logged;
 a different key waits rather than replacing an existing opt-in. Start/end notifications are
 claimed independently of scheduler decision flips, so the scheduler cannot double-announce them.
