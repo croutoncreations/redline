@@ -140,11 +140,93 @@ upgrades the report from an attributed promise to `SCHEDULED`. Because the sourc
 ambiguous, expiry follows the tracker's reading (for example midnight Pacific daylight time), so a
 promise may be treated as historical up to an hour before a literal-PST reading would expire it.
 
+## Optional monitoring and announcement alerts
+
+The service can poll these same feeds independently of `scheduler.enabled`. Monitoring is off by
+default and never changes scheduling or firesale decisions. Opt in with:
+
+```yaml
+reset_signals:
+  enabled: true
+  poll_interval: 10m # minimum 5m; default 10m
+  notify: true      # default when enabled; false monitors without alerts
+notifications:
+  enabled: true
+  command: ./scripts/redline-notify
+  events: [reset.announced] # explicitly opt in; not a default event
+```
+
+An alert requires the report's selected current state to be `PROMISED`, `SCHEDULED`, or
+`COMPLETED`, backed by a fresh, unretracted announcement published within 72 hours and linked by
+original URL or announcement ID. Predictions (even 100%), intent, banked resets, historical
+claims, and unlinked `last_reset_at` completions never alert. Scheduled reports without an
+explicit primary window remain promises. Mirrors are deduplicated, not independent confirmation;
+`direct_source_verified` remains false.
+
+The report keeps its existing newest-first selection and state. Only when that selected group
+passes the alert rules does monitoring choose among all current, linked, viable groups, preferring
+more distinct mirror feeds, then an original-post quote, then the stronger kind (`COMPLETED` >
+`SCHEDULED` > `PROMISED`), then the newer viable source publication time, then the group key in
+ascending order. Every group must independently pass the same freshness, source dating, window,
+and retraction rules. A selected nonviable record, matching retraction, or overriding unlinked
+completion still blocks an alert; monitoring does not fall back around it. All mirror feeds count
+and appear in `feeds`, including mirrors without a usable TTL; they do not independently verify
+the post. The group's kind is the strongest viable member's kind, while its quote and account
+come from the best viable member: an original-post quote first, then the newest publication time.
+Noncurrent mirrors cannot supply the kind or account. One exception for the quote only: when no
+viable member has an original-post quote, an unretracted mirror of the same post that does (for
+example willreset, which has no TTL) supplies the post's words. This never makes a non-viable
+mirror alert on its own or change the kind.
+
+Quotes are untrusted text, stripped of control characters, whitespace-collapsed, and capped at
+280 characters. `quote_source` distinguishes `original_post` (Reset Beacon `post.Quote` and
+willreset `promise_quote`) from `tracker_summary` (codex-reset `official_signal.summary` and
+`latest_alert.summary`, and willreset's fallback `last_reset_text`). The official signal schema
+calls its text a summary, not a verbatim post; Redline does not attribute it to the post's author.
+Trailing t.co links are removed from original-post quotes. Only `original_post` text is quoted as
+the account's words. Other text is explicitly attributed to the supplying tracker (`quote_feed`),
+with the claimed source post linked separately. Terminal punctuation inside an original quote is
+not followed by a second period. Notification Data includes `quote_source` and the comma-joined
+tracker `attribution` strings and comma-joined homepage `attribution_urls`; each source record
+also includes its `attribution_url`. The cached API/CLI state retains these URLs so clients can
+link the data credits on the same surface. Messages end with the feeds' data credits; when
+codex-reset is the only feed, its credit is the explicit link `https://codex-reset.com/`.
+
+For example, the October 25 smoke fixture has a Reset Beacon completion and willreset promise
+naming post `2114237083652882932`, versus a newer codex-reset operator-observed completion naming
+`2114200291319124163`. The report still selects the newer codex-reset record, but monitoring
+chooses the two-mirror group, reports `COMPLETED`, and quotes the original text, not the operator's
+note. This preference does not make the mirrors independent evidence.
+
+Announcements are persisted by evidence-group key (canonical URL, otherwise announcement ID)
+and kind. A different post has a different key and may alert separately, including when the
+best-backed group changes. A new kind alerts only on escalation, not on repeated polls or restart. A fresh matching
+withdrawal, correction, or carried retraction produces one follow-up. Missing posts and failed
+polls do not imply retraction. Delivery attempts are claimed before sending and failed hooks are
+not retried. Retry-After is honoured for the life of the process: delays also defer later polling
+cycles and are never shortened. Feed retry deadlines are not persisted across restarts. Startup
+waits a random 30–90 seconds before the first poll to avoid immediate requests in restart loops.
+
+Read the cached state without contacting trackers:
+
+```bash
+redline reset signals
+# or GET /v1/reset-signals on the authenticated service API
+```
+
+The response includes the report, current viable announcement (if any), last poll time, and errors.
+The dashboard JSON includes an optional `reset_signal` with the same state when monitoring is
+enabled; there is no dashboard UI yet. Before the first poll, no report or poll timestamp is
+present. Cache contents are process-local; announcement delivery deduplication survives restarts.
+`redline reset preview` remains a standalone, live, read-only fetch.
+
 ## Deliberate non-goals
 
-This command has no account-awareness or action path. It does not poll, persist feed state, send
-notifications, inspect or select queued jobs, assess reserves or concurrency, mutate configuration,
-call the scheduler, or start a run. Applicability to any individual account remains unknown.
+Neither preview nor monitoring has account-awareness or an action path. Monitoring and announced-only
+alerts now exist, off by default, but never inspect or select queued jobs, assess reserves or
+concurrency, mutate configuration, call the scheduler, or start a run. A read-only unverified reset
+event candidate is available for future integration but is not consumed by scheduling or firesale.
+Applicability to any individual account remains unknown.
 
 Any later advisory experiment should be a separate, off-by-default design: it would accept only
 validated, deduplicated normalized evidence and return a bounded explanation with original links,

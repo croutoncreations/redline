@@ -25,6 +25,7 @@ type Config struct {
 	Scheduler       Scheduler           `yaml:"scheduler"`
 	API             API                 `yaml:"api"`
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
+	ResetSignals    ResetSignals        `yaml:"reset_signals"`
 	Notifications   Notifications       `yaml:"notifications"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
@@ -47,7 +48,8 @@ type Notifications struct {
 }
 
 var knownNotificationEvents = map[string]bool{
-	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
+	"reset.announced": true,
+	"run.started":     true, "run.completed": true, "run.failed": true, "scheduler.error": true,
 	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
 }
 
@@ -80,6 +82,27 @@ type API struct {
 type Scheduler struct {
 	Enabled      bool   `yaml:"enabled"`
 	PollInterval string `yaml:"poll_interval"`
+}
+
+type ResetSignals struct {
+	Enabled      bool   `yaml:"enabled"`
+	PollInterval string `yaml:"poll_interval"`
+	Notify       *bool  `yaml:"notify"`
+}
+
+func (c Config) ResetSignalsNotify() bool {
+	return c.ResetSignals.Enabled && (c.ResetSignals.Notify == nil || *c.ResetSignals.Notify)
+}
+
+func (c Config) ResetSignalsInterval() (time.Duration, error) {
+	if c.ResetSignals.PollInterval == "" {
+		return 10 * time.Minute, nil
+	}
+	interval, err := time.ParseDuration(c.ResetSignals.PollInterval)
+	if err != nil || interval < 5*time.Minute {
+		return 0, fmt.Errorf("reset_signals poll_interval must be at least 5m")
+	}
+	return interval, nil
 }
 
 type UsageMonitor struct {
@@ -430,6 +453,9 @@ func (cfg *Config) validate() error {
 	if _, err := cfg.SchedulerInterval(); err != nil {
 		return err
 	}
+	if _, err := cfg.ResetSignalsInterval(); err != nil {
+		return err
+	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
 		return err
 	}
@@ -440,7 +466,7 @@ func (cfg *Config) validate() error {
 	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
 	return nil

@@ -46,7 +46,7 @@ When `command` is set, Redline also invokes that trusted local command with a ve
 document on stdin. Reset/firesale payloads include an optional, human-readable `title` plus
 `message`; existing consumers can continue using the unchanged data fields. Supported events are `run.started`,
 `run.completed`, `run.failed`, `scheduler.error`, `reset.expiring`, `reset.redeemed`,
-`reset.redeem_failed`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
+`reset.redeem_failed`, `reset.announced`, `firesale.started`, and `firesale.ended`. When `events` is omitted or
 empty, only `run.started`, `run.completed`, `run.failed`, and `scheduler.error` are sent; list the
 `reset.*` and `firesale.*` events explicitly to receive them. Hooks should ignore event types they
 do not recognize.
@@ -63,6 +63,31 @@ The hook also receives `REDLINE_EVENT_TYPE`, `REDLINE_PROVIDER_ACCOUNT_ID`, `RED
 `REDLINE_RUN_ID`. Delivery failures are persisted but never alter the associated run or scheduler
 outcome. A service restart marks an indeterminate pending delivery failed instead of retrying a
 possibly non-idempotent hook.
+
+### Public reset announcements
+
+`reset_signals.enabled: true` opts into independent public-feed monitoring (default poll interval
+10m, minimum 5m). `reset_signals.notify` defaults to true when enabled, but notifications also
+require `notifications.enabled` and explicitly listing `reset.announced` in `notifications.events`.
+This global event has no provider account ID. It alerts only on the selected fresh, linked,
+unretracted promise, schedule, or completion published within 72 hours. Odds-only predictions
+never alert, however high. It does not change scheduler or firesale decisions.
+
+Data fields are strings: `key` (`announcement:<status id>`, stable across mirrors), `kind`, `url`,
+`account`, `quote`, `quote_source` (`original_post` or `tracker_summary`), `published_at`,
+`window_end`, `window_certainty`, `feeds` (comma-separated), `attribution` and `attribution_urls`
+(comma-separated tracker credits and homepage links), `direct_source_verified` (`false`), and
+`retracted`. Missing values are empty strings. The original post is not fetched. Quotes are untrusted
+plain text, control-stripped, whitespace-collapsed, and capped at 280 characters. Tracker-interpreted
+deadlines are explicitly attributed in messages.
+
+Like `reset.expiring`, delivery is claimed persistently **before** calling the hook: at most one
+attempt per announcement key and kind, with another only when the kind escalates (promise to
+schedule or completion). A fresh matching withdrawal, correction, or retraction gets one follow-up
+per key, with `retracted: "true"`. Restarts and repeated polls do not duplicate attempts; failed
+hooks are recorded by the notification service but not retried. Disabled/filtered notifications
+do not claim delivery. See [public reset signals](reset-signal-preview.md#optional-monitoring-and-announcement-alerts)
+for cached API/CLI access and interpretation limits.
 
 ### Firesale transitions
 
@@ -133,14 +158,15 @@ redline notification test --event all --json
 `notification test` records and delivers a synthetic event through the same service and message
 builders without contacting providers or redeeming anything. It defaults to `reset.expiring` and
 the first Codex account (otherwise the first account, sorted by ID). `--event all` sends each of
-the nine supported event types about one second apart. Titles start with `Test: ` and data includes
+the ten supported event types about one second apart. Titles start with `Test: ` and data includes
 `test: "true"`. Tests bypass the event subscription list, but disabled notifications return HTTP
 409 with instructions to enable them. The API is `POST /v1/notifications/test` with optional
 `event` and `provider` fields; it requires the bearer API token, not a pairing/browser cookie.
 It returns the delivery record, including `id`, `status`, and `last_error` on failure. Human CLI
 output includes the sent title/message and delivery status; `--json` prints the record (an array
 for `all`). A failed delivery exits non-zero. Native run alerts still use real run transitions;
-only reset/firesale test deliveries are displayed by the app.
+only reset/firesale test deliveries are displayed by the app. The `reset.announced` sample is a
+fake post with a placeholder link; it is global and ignores `--provider`.
 
 ## Health
 
