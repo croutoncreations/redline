@@ -259,17 +259,10 @@ func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFir
 	return ""
 }
 
-// completionKey is the announcement key a completion record refers to, in the
-// same announcement:<status id> form ViableAnnouncement uses, or "".
+// completionKey is the announcement key a completion record refers to, derived
+// exactly as ViableAnnouncement derives keys, or "".
 func completionKey(s resetsignal.Signal) string {
-	id := strings.TrimSpace(s.AnnouncementID)
-	if url := strings.TrimSpace(s.ClaimedOriginalURL); url != "" {
-		id = url[strings.LastIndex(url, "/")+1:]
-	}
-	if id == "" {
-		return ""
-	}
-	return "announcement:" + id
+	return resetsignal.AnnouncementKey(s.ClaimedOriginalURL, s.AnnouncementID)
 }
 
 // stopResetFiresale ends every matching sale before reporting any error, so a

@@ -124,11 +124,8 @@ func viableAnnouncements(report Report) []Announcement {
 		url, id := groupIdentity(members)
 		// Deduplicate on the post's status ID, not the group's display key,
 		// so a mirror dropping its URL (or adding one) cannot re-alert.
-		if url != "" {
-			id = statusID(url)
-		}
-		if id != "" {
-			key = "announcement:" + id
+		if k := AnnouncementKey(url, id); k != "" {
+			key = k
 		}
 		account := backing.OriginalAccount
 		if account == "" {
@@ -172,6 +169,18 @@ func viableAnnouncements(report Report) []Announcement {
 		result[i] = c.announcement
 	}
 	return result
+}
+
+// AnnouncementKey is the stable dedup key for a post: announcement:<status id>,
+// taken from the canonical URL when present, otherwise the ID. "" if neither.
+func AnnouncementKey(url, id string) string {
+	if url = strings.TrimSpace(url); url != "" {
+		id = statusID(url)
+	}
+	if id = strings.TrimSpace(id); id == "" {
+		return ""
+	}
+	return "announcement:" + id
 }
 
 func hasOriginalQuote(s Signal) bool {
