@@ -449,6 +449,7 @@ private fun OverviewRow(account: ProviderUsage, onOpen: () -> Unit) {
             Spacer(Modifier.width(6.dp))
             Text(state.replaceFirstChar { it.uppercase() }, color = TextMuted, fontSize = 11.sp)
         }
+        FiresaleMarker(account.id)
         val problem = providerProblem(account)
         if (problem.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))

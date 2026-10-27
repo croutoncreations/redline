@@ -42,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,7 +68,23 @@ fun UsageScreen(
     onOpenAccounts: (() -> Unit)? = null,
     accountSelection: AccountSelection? = null,
     onOpenSettings: (() -> Unit)? = null,
-    firesaleContent: @Composable () -> Unit = {},
+    firesale: FiresaleControls? = null,
+) {
+    CompositionLocalProvider(LocalFiresale provides firesale) {
+        UsageScreenContent(state, onRetry, onUnpair, onControlProvider, onViewQueue, onOpenAccounts, accountSelection, onOpenSettings)
+    }
+}
+
+@Composable
+private fun UsageScreenContent(
+    state: UsageUiState,
+    onRetry: () -> Unit,
+    onUnpair: (() -> Unit)?,
+    onControlProvider: (String, String) -> Unit,
+    onViewQueue: (String) -> Unit,
+    onOpenAccounts: (() -> Unit)?,
+    accountSelection: AccountSelection?,
+    onOpenSettings: (() -> Unit)?,
 ) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -83,7 +100,6 @@ fun UsageScreen(
                     onControlProvider,
                     onViewQueue,
                     accountSelection ?: rememberAccountSelection(),
-                    firesaleContent,
                 )
                 else -> CenteredProgress()
             }
@@ -111,14 +127,13 @@ private fun RefreshableProviderList(
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
     accountSelection: AccountSelection,
-    firesaleContent: @Composable () -> Unit,
 ) {
     PullToRefreshBox(
         isRefreshing = state.loading,
         onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
     ) {
-        ProviderList(state, onControlProvider, onViewQueue, accountSelection, firesaleContent)
+        ProviderList(state, onControlProvider, onViewQueue, accountSelection)
     }
 }
 
@@ -385,14 +400,12 @@ private fun ProviderList(
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
     accountSelection: AccountSelection,
-    firesaleContent: @Composable () -> Unit,
 ) {
     val providers = state.view?.providers ?: emptyList()
     LazyColumn(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item(key = "firesale") { firesaleContent() }
         // A provider with several accounts becomes one carousel at its first
         // account's position; a lone account keeps the card it always had.
         items(usageItems(providers), key = { it.key }) { item ->
@@ -741,10 +754,19 @@ internal fun ProviderDetails(
                 )
             }
 
+            AccountFiresaleStatus(provider.id)
+
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CardAction("View queue") { onViewQueue(provider.id) }
                 Spacer(Modifier.width(8.dp))
+                // Firesale is offered on the account it would run on, and only
+                // when a start could help (weekly usage reported, not paused).
+                if (firesaleAvailable(provider.id)) {
+                    val controls = LocalFiresale.current
+                    CardAction("Firesale") { controls?.onOpen?.invoke(provider.id) }
+                    Spacer(Modifier.width(8.dp))
+                }
                 // Pause is the emergency stop for a provider that is spending
                 // capacity on the wrong thing, so it is one tap from the
                 // numbers that prompt it.

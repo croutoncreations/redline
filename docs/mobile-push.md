@@ -39,6 +39,16 @@ Every alert has **Open**. An active `reset.announced` of kind `PROMISED` or
 update the alert with success or failure. If an action times out, open Redline
 to check its result: an already-running native request may still complete.
 
+## On-demand firesale
+
+Each account (a single-account card or a page in an account carousel) has a
+**Firesale** action beside View queue when a start could help: the desktop
+lists the account, nothing is running there yet, and nothing blocks it (weekly
+usage not reported, allowance used up, paused). It opens a sheet for that
+account with 15 minutes, 2 hours or Until weekly reset. While a firesale runs,
+the account shows "Firesale on · until …" with **Stop**, and its overview row
+shows the same marker. Desktops without `/v1/firesales` show no action.
+
 ## Build and test (no device needed)
 
 With a Go toolchain, gomobile, Android SDK/NDK, and JDK 17 installed:

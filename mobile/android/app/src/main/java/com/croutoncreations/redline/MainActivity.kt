@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
                 },
             )
             val firesaleState by firesaleModel.state.collectAsState()
+            var firesaleSheetOpen by remember { mutableStateOf(false) }
 
             val usageModel: UsageViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
@@ -169,6 +170,10 @@ class MainActivity : ComponentActivity() {
                     else -> "Direct"
                 },
                 onUnpair = unpair, onClose = { settingsOpen = false })
+            if (firesaleSheetOpen) {
+                FiresaleSheet(firesaleState, firesaleModel::selectDuration, firesaleModel::start,
+                    onDismiss = { firesaleSheetOpen = false })
+            }
             val runsState by runsModel.state.collectAsState()
             val queueState by queueModel.state.collectAsState()
 
@@ -239,10 +244,11 @@ class MainActivity : ComponentActivity() {
                         Tab.CAPACITY -> UsageScreen(
                             state = usageState,
                             onRetry = { usageModel.refresh(); firesaleModel.refresh() },
-                            firesaleContent = {
-                                FiresaleCard(firesaleState, firesaleModel::refresh, firesaleModel::start,
-                                    firesaleModel::stop, firesaleModel::selectAccount, firesaleModel::selectDuration)
-                            },
+                            firesale = FiresaleControls(
+                                state = firesaleState,
+                                onOpen = { id -> firesaleModel.selectAccount(id); firesaleSheetOpen = true },
+                                onStop = firesaleModel::stop,
+                            ),
                             onControlProvider = { id, control ->
                                 usageModel.controlProvider(id, control)
                             },
