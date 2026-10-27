@@ -30,13 +30,21 @@ data class FiresaleControls(
     val state: FiresaleUiState,
     val onOpen: (String) -> Unit,
     val onStop: (String) -> Unit,
+    val now: () -> Instant = Instant::now,
 ) {
     /** Null when the desktop has no firesale endpoint or the list hasn't loaded. */
     fun account(id: String): FiresaleAccount? =
         state.takeIf { it.visible }?.view?.eligible?.find { it.account == id }
 
+    /**
+     * The list is a snapshot from the last load. A sale whose deadline has
+     * passed has already ended on the desktop, so it is not shown as running
+     * even before the next reload confirms it.
+     */
     fun activeSale(id: String): ManualFiresale? =
-        state.takeIf { it.visible }?.view?.manual?.find { it.account == id }
+        state.takeIf { it.visible }?.view?.manual?.find { sale ->
+            sale.account == id && runCatching { Instant.parse(sale.deadline).isAfter(now()) }.getOrDefault(true)
+        }
 
     /**
      * The account's Firesale action is offered only when a start could help:
@@ -60,7 +68,17 @@ internal fun firesaleDeadline(deadline: String): String =
 @Composable
 internal fun AccountFiresaleStatus(accountId: String) {
     val controls = LocalFiresale.current ?: return
+    // Recompose at the deadline so the strip disappears on time, not at the
+    // next unrelated refresh.
     val sale = controls.activeSale(accountId) ?: return
+    val deadline = remember(sale.deadline) { runCatching { Instant.parse(sale.deadline) }.getOrNull() }
+    var expired by remember(sale.deadline) { mutableStateOf(false) }
+    LaunchedEffect(deadline) {
+        val wait = deadline?.let { java.time.Duration.between(Instant.now(), it).toMillis() } ?: return@LaunchedEffect
+        if (wait > 0) kotlinx.coroutines.delay(wait)
+        expired = true
+    }
+    if (expired) return
     Spacer(Modifier.height(10.dp))
     Row(
         verticalAlignment = Alignment.CenterVertically,

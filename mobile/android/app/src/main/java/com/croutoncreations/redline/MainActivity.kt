@@ -184,6 +184,13 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(providerIds) {
                 if (providerIds.isNotEmpty()) queueModel.setProviders(providerIds)
             }
+            // Firesales change on the desktop too (deadline, weekly reset, a
+            // stop from the Mac), so reload the list whenever the usage view
+            // does rather than only on resume or after a tap here.
+            val usageView = usageState.view
+            LaunchedEffect(usageView) {
+                if (usageView != null) firesaleModel.refresh()
+            }
 
             // Refreshing on resume is the guaranteed floor: whatever background
             // work did or did not happen, the numbers are correct whenever the
