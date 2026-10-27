@@ -25,7 +25,9 @@ func TestSamplesUseReadableBuilders(t *testing.T) {
 			case domain.EventResetRedeemed, domain.EventResetRedeemFailed:
 				keys = []string{"reset_id", "request_id", "outcome", "code", "reason", "verified"}
 			case domain.EventFiresaleStarted, domain.EventFiresaleEnded:
-				keys = []string{"pace_gap", "overflow", "effective_reset_at", "unlocked_tier"}
+				// announcement_key lets a phone show its Stop action on a test
+				// alert; the sample key never matches a real sale.
+				keys = []string{"pace_gap", "overflow", "effective_reset_at", "unlocked_tier", "announcement_key", "trigger"}
 			case domain.EventResetAnnounced:
 				keys = []string{"key", "kind", "url", "quote", "quote_source", "feeds", "attribution", "attribution_urls", "direct_source_verified"}
 				if e.ProviderAccountID != "" || e.Data["url"] == "" || !strings.Contains(e.Message, "Data: ") {

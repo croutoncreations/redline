@@ -56,6 +56,13 @@ func Sample(kind, accountID, provider string, now time.Time) (domain.Notificatio
 			e.Data["unlocked_tier"] = ""
 		}
 		e.Data["effective_reset_at"], e.Data["effective_reset_source"] = now.Add(23*time.Hour).UTC().Format(time.RFC3339), "weekly"
+		// Announcement-triggered, so a phone shows its Stop action. The key
+		// matches no real sale, so tapping Stop on a test alert changes nothing.
+		e.Data["trigger"], e.Data["announcement_key"] = "reset_announcement", "test-announcement"
+		e.Data["account"], e.Data["deadline"], e.Data["mode"] = "thsottiaux", now.Add(2*time.Hour).UTC().Format(time.RFC3339), "notify"
+		if kind == domain.EventFiresaleEnded {
+			e.Data["reason"] = "stopped"
+		}
 	case domain.EventRunStarted:
 		e.Title, e.Message = "Redline job started", "Sample job started."
 	case domain.EventRunCompleted:
