@@ -689,6 +689,38 @@ func TestResetSignalFiresaleTracksActiveAnnouncementDeadlineByIdentity(t *testin
 	}
 }
 
+// The active sale's own post marked completed must end it even when a
+// better-mirrored newer promise wins both the alert ranking and the report.
+func TestResetSignalFiresaleOwnCompletionEndsDespiteRanking(t *testing.T) {
+	s, signal, _ := firesaleFixture(t, "notify")
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if w := firesaleAction(t, s, "announcement:123", "start"); w.Code != http.StatusOK {
+		t.Fatalf("start=%d %s", w.Code, w.Body.String())
+	}
+	done := *signal
+	done.Feed, done.Kind = "resetbeacon", resetsignal.KindCompleted
+	newer := s.now().Add(-time.Minute)
+	otherEnd := s.now().Add(3 * time.Hour)
+	b := resetsignal.Signal{Feed: "willreset", Kind: resetsignal.KindPromised, Freshness: resetsignal.Fresh, AnnouncementID: "456", OriginalAccount: "thsottiaux", PublishedAt: &newer, Window: resetsignal.Window{End: &otherEnd, Certainty: resetsignal.WindowExplicitPrimary}}
+	bMirror := b
+	bMirror.Feed = "codex-reset"
+	report := resetsignal.BuildReport(s.now(), []resetsignal.SourceResult{{Signal: &done}, {Signal: &b}, {Signal: &bMirror}})
+	if top := resetsignal.ViableAnnouncement(report); top == nil || top.Key != "announcement:456" {
+		t.Fatalf("fixture: alert-ranked=%+v, want B", top)
+	}
+	s.resetSignalMu.Lock()
+	s.resetSignalState = resetsignal.State{Enabled: true, Report: &report}
+	s.resetSignalMu.Unlock()
+	if err := s.reconcileResetSignalFiresales(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if sales, err := s.store.ActiveResetSignalFiresales(t.Context()); err != nil || len(sales) != 0 {
+		t.Fatalf("own completion ignored: %d active, err=%v", len(sales), err)
+	}
+}
+
 type failingFiresaleNotifier struct{ calls int }
 
 func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {

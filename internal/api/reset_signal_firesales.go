@@ -242,6 +242,11 @@ func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFir
 		}
 	}
 	if state.Report != nil {
+		// The sale's own post completing counts whatever the ranking picks:
+		// a better-mirrored newer promise can outrank it in both selectors.
+		if own := resetsignal.ViableAnnouncementByKey(*state.Report, sale.AnnouncementKey); own != nil && own.Kind == resetsignal.KindCompleted {
+			return "announcement"
+		}
 		if completion := resetsignal.SelectedCompletion(*state.Report); completion != nil {
 			// The sale's own post marked completed may keep its original
 			// publication time; only other or unlinked completions must be newer.
