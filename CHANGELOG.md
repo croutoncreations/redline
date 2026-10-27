@@ -8,11 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
+  `notify` when monitoring is enabled), bearer-only `POST /v1/reset-signals/firesale`, and
+  `redline reset firesale start|stop`. Only viable promises/schedules with a future announced
+  deadline qualify; predictions and completed resets never start one. Persistent opt-ins and
+  lifecycle claims survive restarts, force the firesale/pacing gate without bypassing safety
+  limits, and expose state in cached API/CLI/dashboard JSON.
+- Reset monitoring retains each feed's last successful snapshot through failed/deferred polls,
+  while still applying TTL, source age, and deadline expiry checks.
 - Off-by-default public Codex reset-signal monitoring (`reset_signals`) and opt-in
   `reset.announced` alerts for fresh linked promises, schedules, and completions only, never
   odds-only predictions. Persistent deduplication allows escalation and one matching retraction
   follow-up. Cached state is available through `redline reset signals`, `GET /v1/reset-signals`,
-  and additive dashboard JSON. Scheduling and firesale behavior are unchanged.
+  and additive dashboard JSON.
 - Readable reset/firesale notification titles and messages, UTC deadlines, and verified weekly
   refill percentages. Event payloads add optional `title` without changing existing data keys.
 - `redline notification test [--event TYPE|all] [--provider ID] [--json]` and bearer-only

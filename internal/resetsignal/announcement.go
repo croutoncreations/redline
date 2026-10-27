@@ -318,7 +318,7 @@ func timestamp(at *time.Time) string {
 	return at.UTC().Format(time.RFC3339Nano)
 }
 
-// ResetEventCandidate is an unverified PR-3 seam only. No scheduler consumes it.
+// ResetEventCandidate is unverified evidence, not authorization to schedule work.
 func (a Announcement) ResetEventCandidate() decision.ResetEvent {
 	e := decision.ResetEvent{Source: decision.ResetPredictedGlobal, Clears: []string{"weekly"}, Confidence: "unverified", Detail: a.URL}
 	if a.WindowEnd != nil {

@@ -180,7 +180,21 @@ func (s *Server) automaticRedemptionEnabled(provider config.Provider) bool {
 
 func (s *Server) providerResetEvents(ctx context.Context, providerID string, snapshot decision.UsageSnapshot) ([]decision.ResetEvent, error) {
 	events := []decision.ResetEvent{{Source: decision.ResetWeekly, At: snapshot.Weekly.ResetsAt, Clears: []string{"weekly"}, Confidence: snapshot.Confidence}}
+	if err := s.reconcileResetSignalFiresales(ctx); err != nil {
+		return nil, err
+	}
 	provider := s.config.Providers[providerID]
+	if strings.EqualFold(strings.TrimSpace(provider.Provider), "codex") && s.config.ResetSignalsFiresale() != "off" && !s.redemptionDisabled {
+		sales, err := s.store.ActiveResetSignalFiresales(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, sale := range sales {
+			if sale.ProviderAccountID == providerID && sale.Deadline.After(s.now()) {
+				events = append(events, decision.ResetEvent{Source: decision.ResetPredictedGlobal, At: sale.Deadline, Clears: []string{"weekly"}, Confidence: "announced", Detail: sale.AnnouncementKey})
+			}
+		}
+	}
 	if !s.automaticRedemptionEnabled(provider) {
 		return events, nil
 	}

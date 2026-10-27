@@ -493,13 +493,23 @@ provider_account_id, decision_json, selected_task_id, created_at
 
 // LatestAutomaticFiresale ignores decisions that never evaluated provider usage.
 func (d *DB) LatestAutomaticFiresale(ctx context.Context, provider string) (bool, error) {
+	return d.latestAutomaticFiresale(ctx, provider, false)
+}
+
+// LatestAutomaticPressureFiresale excludes announcement sales, whose lifecycle
+// notifications are claimed separately in reset_signal_firesales.
+func (d *DB) LatestAutomaticPressureFiresale(ctx context.Context, provider string) (bool, error) {
+	return d.latestAutomaticFiresale(ctx, provider, true)
+}
+
+func (d *DB) latestAutomaticFiresale(ctx context.Context, provider string, pressureOnly bool) (bool, error) {
 	var firesale bool
-	err := d.db.QueryRowContext(ctx, `SELECT json_extract(decision_json, '$.provider_firesale')
+	err := d.db.QueryRowContext(ctx, `SELECT CASE WHEN ? AND COALESCE(json_extract(decision_json, '$.result.firesale_trigger'), '') = 'reset_announcement' THEN 0 ELSE json_extract(decision_json, '$.provider_firesale') END
 FROM scheduler_decisions WHERE provider_account_id = ?
 AND json_extract(decision_json, '$.trigger') = 'automatic'
 AND COALESCE(json_extract(decision_json, '$.result.decision'), '') != 'UNKNOWN'
 AND json_type(decision_json, '$.provider_firesale') IN ('true', 'false')
-ORDER BY created_at DESC, id DESC LIMIT 1`, provider).Scan(&firesale)
+ORDER BY created_at DESC, id DESC LIMIT 1`, pressureOnly, provider).Scan(&firesale)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrNotFound
 	}

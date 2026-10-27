@@ -143,13 +143,15 @@ promise may be treated as historical up to an hour before a literal-PST reading 
 ## Optional monitoring and announcement alerts
 
 The service can poll these same feeds independently of `scheduler.enabled`. Monitoring is off by
-default and never changes scheduling or firesale decisions. Opt in with:
+default. When enabled, the default firesale mode offers an explicit opt-in, rather than starting
+work automatically. Opt in with:
 
 ```yaml
 reset_signals:
   enabled: true
   poll_interval: 10m # minimum 5m; default 10m
-  notify: true      # default when enabled; false monitors without alerts
+  notify: true      # default when enabled; announcement alerts only
+  firesale: notify  # off | notify | auto; default notify when enabled
 notifications:
   enabled: true
   command: ./scripts/redline-notify
@@ -214,19 +216,69 @@ redline reset signals
 # or GET /v1/reset-signals on the authenticated service API
 ```
 
-The response includes the report, current viable announcement (if any), last poll time, and errors.
+The response includes the report, current viable announcement (if any), last poll time, errors,
+and `firesale: {active, mode, announcement_key, deadline, started_at, providers}`. Deadlines and
+start times are RFC3339 UTC (null when inactive).
 The dashboard JSON includes an optional `reset_signal` with the same state when monitoring is
 enabled; there is no dashboard UI yet. Before the first poll, no report or poll timestamp is
-present. Cache contents are process-local; announcement delivery deduplication survives restarts.
+present. Feed snapshots are process-local; announcement delivery deduplication and active firesales
+survive restarts. A feed's last successful snapshot is retained through failed or Retry-After-
+deferred polls and replaced on success. TTL, source-age, and window checks still apply, so a
+retained expired snapshot cannot authorize a new firesale.
 `redline reset preview` remains a standalone, live, read-only fetch.
+
+## Announcement firesales
+
+Only a viable, source-backed `PROMISED` or `SCHEDULED` announcement with a future `WindowEnd`
+can start a firesale, for configured Codex providers only. A promise without `WindowEnd` has no
+deadline: **no firesale is offered or started, and Redline does not invent a deadline**.
+`COMPLETED` means the reset already happened; it never starts a firesale. Odds, predictions,
+and intent never trigger one, regardless of probability. Trackers are not proof that an individual
+account will reset.
+
+- `off`: announcements do not affect firesale/pacing.
+- `notify` (default when `reset_signals.enabled`): a usable deadline adds a start offer to
+  `reset.announced`. Work starts only after `redline reset firesale start`, or the bearer API
+  action, opts into that announcement. Alert delivery itself is not required for an API opt-in.
+- `auto`: automatically starts on qualifying evidence, independently of notification settings.
+
+Explicit `notify`/`auto` configuration requires `reset_signals.enabled: true`. Demo mode never
+acts. An active firesale unlocks all job tiers regardless of pace gap or overflow; its announced
+deadline can shorten (never lengthen) the real weekly scheduling horizon. Pauses, auth circuit
+breakers, 5-hour reserves, concurrency and model budgets still apply. No backlog-burning cap is
+added. Existing task intervals/repository/enable gates still apply.
+
+```bash
+redline reset signals
+redline reset firesale start # defaults to the current announcement
+redline reset firesale stop  # defaults to the active sale, even during a tracker outage
+redline reset firesale start --announcement announcement:123
+```
+
+Active sales end on the deadline, matching explicit retraction, completion, user stop, or disable
+(`firesale: off` or monitoring disabled). Missing/stale feeds do not end an existing sale: it does
+not require continuous tracker uptime. A fresh viable observation of the same key can revise its
+stored deadline in either direction, with a log entry but no duplicate start alert. A different
+announcement cannot replace an active sale: manual start returns 409 naming the active key and
+deadline; stop it first. Auto mode waits for it to end, then may start the still-viable current key.
+A completion for a different key ends a sale only when its publication time is newer than the
+sale's announcement (or start time if publication is unknown), not an earlier reset's completion.
+A fresh, report-selected unlinked completion (such as `last_reset_at`) is also an end-only signal
+under that strict time ordering. Stale/MissingTTL, corrected, or withdrawn records cannot end it;
+unlinked completions still never trigger an announcement alert or start.
+
+Starts and ends are claimed atomically in SQLite before notification delivery. Repeated polls,
+API retries, and restarts never duplicate an episode's alerts; failed hooks are not retried.
+Stopping is terminal for auto mode for that announcement/provider, including across restart.
+An explicit start can override your stop. Disabling ends the episode but does not permanently
+block auto mode after re-enabling; notify mode needs a fresh opt-in. Stopping with no active sale
+is a successful no-op. Stopping never needs a current viable tracker snapshot.
 
 ## Deliberate non-goals
 
-Neither preview nor monitoring has account-awareness or an action path. Monitoring and announced-only
-alerts now exist, off by default, but never inspect or select queued jobs, assess reserves or
-concurrency, mutate configuration, call the scheduler, or start a run. A read-only unverified reset
-event candidate is available for future integration but is not consumed by scheduling or firesale.
-Applicability to any individual account remains unknown.
+The standalone preview remains read-only and unauthenticated. Neither monitoring nor a firesale
+redeems a banked reset or proves a particular account refilled; normal usage telemetry remains
+the authority for available allowance.
 
 Any later advisory experiment should be a separate, off-by-default design: it would accept only
 validated, deduplicated normalized evidence and return a bounded explanation with original links,
