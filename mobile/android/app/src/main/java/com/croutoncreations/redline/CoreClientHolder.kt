@@ -25,8 +25,14 @@ import core.Core
  */
 class CoreClientHolder(private val settings: RedlineSettings) {
 
-    private companion object {
-        const val TAG = "RedlineRelay"
+    companion object {
+        private const val TAG = "RedlineRelay"
+        private var shared: CoreClientHolder? = null
+
+        /** FCM and notification actions reuse the app's client and relay session. */
+        @Synchronized
+        fun shared(settings: RedlineSettings): CoreClientHolder =
+            shared ?: CoreClientHolder(settings).also { shared = it }
     }
 
     private var cached: Client? = null

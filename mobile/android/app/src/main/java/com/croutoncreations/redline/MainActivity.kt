@@ -1,6 +1,7 @@
 package com.croutoncreations.redline
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.mutableIntStateOf
@@ -24,6 +25,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -55,13 +58,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val settings = RedlineSettings(this)
-        val holder = CoreClientHolder(settings)
+        val holder = CoreClientHolder.shared(settings)
 
         setContent { AppRoot { Content(settings, holder) } }
     }
 
     @Composable
     private fun Content(settings: RedlineSettings, holder: CoreClientHolder) {
+            val push = remember { PushClient(this, settings, holder) }
+            val scope = rememberCoroutineScope()
+            var settingsOpen by remember { mutableStateOf(false) }
+            var unpairing by remember { mutableStateOf(false) }
             val pairingModel: PairingViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
@@ -86,6 +93,10 @@ class MainActivity : ComponentActivity() {
             if (!paired) {
                 PairingScreen(state = pairingState, onScanned = pairingModel::pair)
                 return
+            }
+
+            if (BuildConfig.PUSH_ENABLED) {
+                PushSettings(push, pairingState.isPaired, settingsOpen) { settingsOpen = false }
             }
 
             val usageModel: UsageViewModel = viewModel(
@@ -211,16 +222,20 @@ class MainActivity : ComponentActivity() {
                                 accountsOpen = true
                             },
                             accountSelection = accountSelection,
+                            onOpenSettings = if (BuildConfig.PUSH_ENABLED) ({ settingsOpen = true }) else null,
                             onUnpair = {
-                                // Drop the relayed session too: it was
-                                // authenticated with the credential being
-                                // forgotten, so holding it open would leave a
-                                // live tunnel to a desktop this phone is no
-                                // longer paired with.
-                                holder.dropRelay()
-                                settings.clear()
-                                pairingModel.forget()
-                                pairingGeneration++
+                                if (!unpairing) scope.launch {
+                                    unpairing = true
+                                    try {
+                                        push.unpair()
+                                    } catch (_: Exception) {
+                                        Toast.makeText(this@MainActivity, "Unpaired locally; registration removal failed. Revoke this device on the desktop.", Toast.LENGTH_LONG).show()
+                                    } finally {
+                                        pairingModel.forget()
+                                        pairingGeneration++
+                                        unpairing = false
+                                    }
+                                }
                             },
                         )
 

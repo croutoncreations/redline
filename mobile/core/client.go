@@ -14,6 +14,11 @@ import (
 
 const defaultTimeout = 20 * time.Second
 
+// Only time-boxed push calls set this key. Their direct attempt must leave
+// enough of the overall deadline for a relay fallback; other callers keep the
+// existing timeout and synchronous bridge path.
+type directAttemptTimeoutKey struct{}
+
 // Client talks to a Redline service.
 //
 // It is the gomobile entry point, so it is constructed by function rather than
@@ -279,7 +284,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		if c.relay == nil {
 			return nil, errors.New("no direct endpoint and no relay configured")
 		}
-		relayed, err := c.relayRequest(method, path, body)
+		relayed, err := c.relayRequestWithContext(ctx, method, path, body)
 		if err != nil {
 			return nil, err
 		}
@@ -314,7 +319,16 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		request.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
-	response, err := c.httpClient.Do(request)
+	httpClient := c.httpClient
+	if timeout, ok := ctx.Value(directAttemptTimeoutKey{}).(time.Duration); ok {
+		// A per-request copy preserves the shared transport without changing
+		// timeouts for concurrent screen refreshes. net/http keeps this timer
+		// alive until the response body is closed, not just until headers arrive.
+		timed := *httpClient
+		timed.Timeout = timeout
+		httpClient = &timed
+	}
+	response, err := httpClient.Do(request)
 	if err != nil {
 		// The direct route is unreachable. If a relay is configured, try it
 		// before giving up: this is the whole point of having one, and it is
@@ -324,7 +338,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		// desktop answered, so the relay would only reach the same desktop and
 		// get the same answer more slowly.
 		if c.relay != nil {
-			if relayed, relayErr := c.relayRequest(method, path, body); relayErr == nil {
+			if relayed, relayErr := c.relayRequestWithContext(ctx, method, path, body); relayErr == nil {
 				markRelayed(ctx)
 				return relayed, nil
 			} else {
@@ -339,6 +353,39 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		return nil, fmt.Errorf("reach redline at %s: %w", c.baseURL, err)
 	}
 	return response, nil
+}
+
+// relayRequestWithContext bounds time-boxed push calls by their original
+// deadline. The gomobile callback cannot be cancelled, so a late result is
+// dropped. Buffering lets its goroutine exit even after the caller has left.
+func (c *Client) relayRequestWithContext(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	if ctx.Value(directAttemptTimeoutKey{}) == nil {
+		return c.relayRequest(method, path, body)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	answer := make(chan result, 1)
+	go func() {
+		response, err := c.relayRequest(method, path, body)
+		answer <- result{response, err}
+	}()
+	select {
+	case got := <-answer:
+		if err := ctx.Err(); err != nil {
+			if got.response != nil {
+				got.response.Body.Close()
+			}
+			return nil, err
+		}
+		return got.response, got.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // relayRequest replays one request through the relay and shapes the answer

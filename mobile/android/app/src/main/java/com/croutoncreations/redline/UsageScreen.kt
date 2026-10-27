@@ -66,10 +66,11 @@ fun UsageScreen(
     onViewQueue: (String) -> Unit = {},
     onOpenAccounts: (() -> Unit)? = null,
     accountSelection: AccountSelection? = null,
+    onOpenSettings: (() -> Unit)? = null,
 ) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Header(state, onUnpair, onOpenAccounts)
+            Header(state, onUnpair, onOpenAccounts, onOpenSettings)
             when {
                 // Only show a spinner with nothing behind it on a cold start;
                 // a refresh over existing data should not blank the screen.
@@ -119,7 +120,7 @@ private fun RefreshableProviderList(
 }
 
 @Composable
-private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null, onOpenAccounts: (() -> Unit)? = null) {
+private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null, onOpenAccounts: (() -> Unit)? = null, onOpenSettings: (() -> Unit)? = null) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -152,9 +153,9 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null, onOpenAc
             ConnectionPill(state.connection, state.view?.sampledAgeSeconds ?: 0)
             // Unpairing lives behind the overflow rather than on the surface:
             // it is rare, destructive, and next to controls people press often.
-            if (onUnpair != null || onOpenAccounts != null) {
+            if (onUnpair != null || onOpenAccounts != null || onOpenSettings != null) {
                 Spacer(Modifier.width(4.dp))
-                UnpairMenu(onUnpair = onUnpair, onOpenAccounts = onOpenAccounts)
+                UnpairMenu(onUnpair = onUnpair, onOpenAccounts = onOpenAccounts, onOpenSettings = onOpenSettings)
             }
         }
         Spacer(Modifier.height(2.dp))
@@ -191,7 +192,7 @@ private fun Header(state: UsageUiState, onUnpair: (() -> Unit)? = null, onOpenAc
  * they can weigh.
  */
 @Composable
-private fun UnpairMenu(onUnpair: (() -> Unit)?, onOpenAccounts: (() -> Unit)? = null) {
+private fun UnpairMenu(onUnpair: (() -> Unit)?, onOpenAccounts: (() -> Unit)? = null, onOpenSettings: (() -> Unit)? = null) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf(false) }
 
@@ -216,6 +217,12 @@ private fun UnpairMenu(onUnpair: (() -> Unit)?, onOpenAccounts: (() -> Unit)? = 
                         menuOpen = false
                         open()
                     },
+                )
+            }
+            onOpenSettings?.let { open ->
+                DropdownMenuItem(
+                    text = { Text("Settings", color = TextPrimary, fontSize = 14.sp) },
+                    onClick = { menuOpen = false; open() },
                 )
             }
             if (onUnpair != null) {

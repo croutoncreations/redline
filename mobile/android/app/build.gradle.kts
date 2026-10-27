@@ -6,6 +6,23 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// The environment path is consumed in place: the owner's client config never
+// needs to be copied into this checkout, even temporarily.
+val externalGoogleServices = System.getenv("REDLINE_GOOGLE_SERVICES_JSON")?.takeIf { it.isNotBlank() }
+val googleServicesFile = externalGoogleServices?.let { file(it) } ?: file("google-services.json")
+if (externalGoogleServices != null && !googleServicesFile.isFile) {
+    throw GradleException("REDLINE_GOOGLE_SERVICES_JSON must point to an existing client config")
+}
+val pushEnabled = googleServicesFile.isFile
+if (pushEnabled) {
+    apply(plugin = "com.google.gms.google-services")
+    afterEvaluate {
+        tasks.withType<com.google.gms.googleservices.GoogleServicesTask>().configureEach {
+            googleServicesJsonFiles.set(listOf(googleServicesFile))
+        }
+    }
+}
+
 android {
     namespace = "com.croutoncreations.redline"
     compileSdk = 36
@@ -27,6 +44,8 @@ android {
         // scripts/build-macos-app.sh): the git tag drives both.
         versionName = System.getenv("REDLINE_VERSION") ?: "0.1.0-dev"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("boolean", "PUSH_ENABLED", pushEnabled.toString())
+        manifestPlaceholders["pushEnabled"] = pushEnabled.toString()
     }
 
     // Populated only when every credential is present, so an unsigned local
@@ -78,6 +97,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -114,6 +134,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     // Keystore-backed storage for the API token, which grants full access.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
