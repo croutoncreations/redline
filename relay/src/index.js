@@ -1,7 +1,9 @@
 /**
- * Redline relay request boundary. Payloads remain Noise-encrypted end to end;
- * this worker only authorizes hosts and selects a Durable Object by session.
+ * Redline relay request boundary. Session payloads remain Noise-encrypted end
+ * to end. Push is a separate authenticated, content-free wake-hint endpoint.
  */
+
+import { handlePush } from "./push.js";
 
 export { RelaySession } from "./session.js";
 
@@ -18,6 +20,8 @@ export default {
     if (url.pathname === "/health") {
       return new Response("ok", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
+
+    if (url.pathname === "/v1/push") return handlePush(request, env);
 
     const refreshMatch = url.pathname.match(/^\/v1\/session\/([^/]+)\/entitlement$/);
     const socketMatch = url.pathname.match(/^\/v1\/session\/([^/]+)$/);
