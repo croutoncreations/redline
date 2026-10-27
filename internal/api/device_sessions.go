@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/google/uuid"
@@ -36,6 +37,25 @@ func requireOwner(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// maxDeviceNameRunes bounds the unauthenticated, owner-visible device name.
+const maxDeviceNameRunes = 100
+
+// cleanDeviceName strips control and format characters, collapses whitespace,
+// and caps the length of a name supplied by a pairing device.
+func cleanDeviceName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, name)
+	runes := []rune(strings.Join(strings.Fields(name), " "))
+	if len(runes) > maxDeviceNameRunes {
+		runes = runes[:maxDeviceNameRunes]
+	}
+	return string(runes)
 }
 
 func deviceTokenHash(token string) string {

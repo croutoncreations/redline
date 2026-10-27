@@ -469,6 +469,7 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be browser or mobile"})
 		return
 	}
+	request.Name = cleanDeviceName(request.Name)
 	if request.Name == "" {
 		request.Name = "Paired device"
 	}
