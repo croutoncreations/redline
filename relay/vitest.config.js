@@ -39,6 +39,10 @@ export default defineConfig({
         ],
       },
       {
+        test: { name: "push", include: ["test/push.spec.js"] },
+        plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.toml" } })],
+      },
+      {
         test: {
           name: "configuration",
           environment: "node",

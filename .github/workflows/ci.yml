@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check for tracked Firebase secrets
+        run: bash scripts/check-no-firebase-secrets.sh
       - name: Download actionlint
         run: |
           bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
