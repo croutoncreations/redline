@@ -167,7 +167,13 @@ type NotificationEvent struct {
 	Data              map[string]string `json:"data,omitempty"`
 }
 
+type PushResult struct {
+	Configured bool `json:"configured"`
+	Woken      int  `json:"woken"`
+}
+
 type NotificationDelivery struct {
+	Push      *PushResult     `json:"push,omitempty"`
 	ID        int64           `json:"id"`
 	EventType string          `json:"event_type"`
 	Status    string          `json:"status"`

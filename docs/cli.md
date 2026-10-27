@@ -30,6 +30,25 @@ The command requires a local desktop browser and an HTTP loopback API URL. For a
 use `redline pair` instead. Opening the bare dashboard URL in a browser shows these sign-in
 instructions; API requests continue to require authentication.
 
+## Device sessions (owner only)
+
+```bash
+redline --config redline.yaml devices list
+redline --config redline.yaml devices revoke DEVICE_ID
+```
+
+Lists show session IDs, names, kind, creation/last-use times and optional revocation time, never
+credentials or hashes. Revocation takes effect on the device's next API request. Paired devices
+retain job/run/provider/firesale control; banked reset spending requires
+`api.paired_devices.allow_reset_redemption: true` (default false). They cannot create pairings,
+manage devices or test notifications. See the [API permission table](api.md#principals-and-permissions).
+
+`token rotate` is a local owner action, requires `--yes`, opens the configured database to revoke
+**all** device sessions, and replaces the master token. Restart Redline to invalidate the old
+master token and legacy pairings, then pair devices again. Re-pair legacy phones to replace their
+old master-token bearer credential with a properly scoped device token; existing browser cookies
+upgrade transparently without interrupting access.
+
 ## Usage and decisions
 
 ```bash
@@ -38,7 +57,7 @@ redline status --provider codex-main
 redline decision --provider codex-main
 redline calibration --provider claude-main
 redline token sync --provider claude-main
-redline --config redline.yaml token rotate --yes          # without --yes only warns; with it, replaces the token file; restart Redline before old browser sessions and tokens stop working (see mobile.md)
+redline --config redline.yaml token rotate --yes          # replaces the master token; after a restart every device session and legacy pairing is signed out
 redline capacity --provider claude-main
 redline metrics launch --days 21
 ```
@@ -69,7 +88,7 @@ These authenticated service commands print JSON. `signals` reads cached evidence
 state without a live fetch. Start defaults to the current viable announcement; stop defaults to
 the active sale's key (and succeeds as a no-op if there is none). Start requires a future announced
 deadline and `reset_signals.firesale: notify|auto`. Stop works during tracker outages and does not
-require firesale mode to remain enabled. Both use the bearer-only firesale API and refuse demo
+require firesale mode to remain enabled. Both use the owner/device firesale API and refuse demo
 mode. See [modes and lifecycle](reset-signal-preview.md#announcement-firesales).
 
 ### Redeem a banked reset
@@ -192,7 +211,7 @@ Some results are reported as JSON instead: `decision --json` exits 2 when the de
 
 ```bash
 redline notification list
-redline notification test [--event TYPE] [--provider ID] [--json]
+redline notification test [--event TYPE] [--provider ID] [--push] [--json]
 redline notification test --event all
 ```
 
@@ -205,6 +224,11 @@ status; `--json` returns the delivery record (an array for `all`). Failed delive
 Explicit tests bypass `notifications.events`, but require `notifications.enabled: true` and the
 local bearer API token. An empty `command` records deliveries for native Mac alerts without an
 external hook. See [notifications](runs-and-notifications.md#notifications).
+
+Add `--push` to await content-free test wakes through the configured transport. It still
+records one delivery and runs the normal hook, respects the global enabled flag, and reports
+`Push: N devices woken` or `push not configured`. JSON adds `push: {configured, woken}`.
+The desktop has no built-in push provider. See [push notifications](push-notifications.md).
 
 ## Mobile pairing
 

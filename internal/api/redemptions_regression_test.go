@@ -19,7 +19,7 @@ import (
 	"github.com/croutoncreations/redline/internal/usage"
 )
 
-func TestRedeemRequiresBearerTokenNotPairingCookie(t *testing.T) {
+func TestRedeemLegacyCookieRequiresResetRedemptionSetting(t *testing.T) {
 	s, db, _ := redemptionServer(t, "claude")
 	calls := 0
 	s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
@@ -33,7 +33,7 @@ func TestRedeemRequiresBearerTokenNotPairingCookie(t *testing.T) {
 		r.AddCookie(&http.Cookie{Name: apiSessionCookie, Value: "secret"})
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, r)
-		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "redeeming banked resets requires the local API token") {
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "api.paired_devices.allow_reset_redemption") {
 			t.Fatalf("%d %s", w.Code, w.Body)
 		}
 	}
@@ -55,6 +55,38 @@ func TestRedeemRequiresBearerTokenNotPairingCookie(t *testing.T) {
 	s.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || calls != 1 {
 		t.Fatalf("bearer: %d %s calls=%d", w.Code, w.Body, calls)
+	}
+}
+
+func TestPairedDeviceResetRedemptionSetting(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		for _, dry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("allow=%t/dry=%t", allow, dry), func(t *testing.T) {
+				s, _, _ := redemptionServer(t, "claude")
+				s.config.API.PairedDevices.AllowResetRedemption = allow
+				calls := 0
+				s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+					return nativeusage.RedeemRequest{ResetID: "reset", RequestID: "key", DryRun: dry}
+				}, redeem: func(nativeusage.RedeemRequest) (nativeusage.RedeemResult, error) {
+					calls++
+					return nativeusage.RedeemResult{Outcome: "nothing_to_reset"}, nil
+				}}
+				token, _, err := s.newDeviceSession(httptest.NewRequest("GET", "http://localhost", nil), "Phone", "mobile")
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := httptest.NewRequest("POST", "http://localhost/v1/providers/main/banked-resets/redeem", strings.NewReader(fmt.Sprintf(`{"dry_run":%t}`, dry)))
+				r.Header.Set("Authorization", "Bearer "+token)
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				if !allow && (w.Code != 403 || calls != 0) {
+					t.Fatalf("blocked=%d calls=%d %s", w.Code, calls, w.Body)
+				}
+				if allow && (w.Code != 200 || calls != 1) {
+					t.Fatalf("allowed=%d calls=%d %s", w.Code, calls, w.Body)
+				}
+			})
+		}
 	}
 }
 

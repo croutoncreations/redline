@@ -30,6 +30,7 @@ type Config struct {
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
 	ResetSignals    ResetSignals        `yaml:"reset_signals"`
 	Notifications   Notifications       `yaml:"notifications"`
+	Push            Push                `yaml:"push"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	Relay           RelayBootstrap      `yaml:"relay"`
@@ -148,7 +149,12 @@ func (c Config) CursorOpenUsageURL() string {
 }
 
 type API struct {
-	TrustedHosts []string `yaml:"trusted_hosts"`
+	TrustedHosts  []string      `yaml:"trusted_hosts"`
+	PairedDevices PairedDevices `yaml:"paired_devices"`
+}
+
+type PairedDevices struct {
+	AllowResetRedemption bool `yaml:"allow_reset_redemption"`
 }
 
 // RelayBootstrap is the YAML-only input used when no managed relay state
@@ -818,7 +824,7 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
-	return nil
+	return cfg.Push.Validate()
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {

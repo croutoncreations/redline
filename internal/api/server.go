@@ -40,6 +40,7 @@ import (
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
 	"github.com/croutoncreations/redline/internal/pairing"
+	"github.com/croutoncreations/redline/internal/push"
 	"github.com/croutoncreations/redline/internal/relay"
 	"github.com/croutoncreations/redline/internal/resetreminder"
 	"github.com/croutoncreations/redline/internal/resetsignal"
@@ -85,6 +86,7 @@ type Server struct {
 	now                func() time.Time
 	executor           Executor
 	notifier           Notifier
+	push               *push.Dispatcher
 	revision           workspace.RevisionResolver
 	artifacts          artifacts.Reader
 	scheduler          *autoscheduler.Loop
@@ -94,13 +96,20 @@ type Server struct {
 	resetSignalSleep   func(context.Context, time.Duration) error
 	resetSignalSources []resetsignal.Source
 	resetFiresaleMu    sync.Mutex
-	resetSignalMu      sync.Mutex
-	resetPollMu        sync.Mutex
-	resetSignalState   resetsignal.State
-	resetNextRead      map[string]time.Time
-	resetDeferred      map[string]resetsignal.SourceError
-	resetLastResults   map[string]resetsignal.SourceResult
-	discovery          HarnessDiscoverer
+	// legacyDevice* is the shared session that legacy master-token cookies
+	// migrate to; see legacyDeviceSession.
+	// dashboardStreamInterval overrides the event-stream tick (tests only).
+	dashboardStreamInterval time.Duration
+	legacyDeviceMu          sync.Mutex
+	legacyDeviceToken       string
+	legacyDeviceID          string
+	resetSignalMu           sync.Mutex
+	resetPollMu             sync.Mutex
+	resetSignalState        resetsignal.State
+	resetNextRead           map[string]time.Time
+	resetDeferred           map[string]resetsignal.SourceError
+	resetLastResults        map[string]resetsignal.SourceResult
+	discovery               HarnessDiscoverer
 	// cursorAccounts confirms the Cursor CLI and app share one account
 	// before a Cursor account's usage is read.
 	cursorAccounts cursorusage.AccountCheck
@@ -324,6 +333,9 @@ func newServer(
 		discovery:        discovery.Service{Now: now},
 		hermes:           hermes.Client{},
 	}
+	if service, ok := notifier.(notification.Service); ok {
+		server.push = service.Push
+	}
 	credentials := nativeusage.NewDefaultCredentials()
 	server.redeemer = nativeusage.NewRedeemer(credentials)
 	nativeSource := nativeusage.Client{Credentials: credentials, Now: now}
@@ -401,14 +413,16 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("GET /v1/cursor-usage", server.cursorUsageReport)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
-	mux.HandleFunc("GET /v1/pairing/status", server.pairingStatus)
+	mux.HandleFunc("GET /v1/pairing/status", ownerOnly(server.pairingStatus))
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
-	mux.HandleFunc("GET /v1/relay/status", server.relayStatus)
-	mux.HandleFunc("POST /v1/relay/configure", server.configureRelay)
-	mux.HandleFunc("GET /v1/relay/devices", server.relayDevices)
-	mux.HandleFunc("DELETE /v1/relay/devices/{id}", server.deactivateRelayDevice)
-	mux.HandleFunc("POST /v1/relay/portal", server.relayPortal)
-	mux.HandleFunc("POST /v1/relay/deactivate", server.deactivateRelay)
+	mux.HandleFunc("GET /v1/relay/status", ownerOnly(server.relayStatus))
+	mux.HandleFunc("POST /v1/relay/configure", ownerOnly(server.configureRelay))
+	mux.HandleFunc("GET /v1/relay/devices", ownerOnly(server.relayDevices))
+	mux.HandleFunc("DELETE /v1/relay/devices/{id}", ownerOnly(server.deactivateRelayDevice))
+	mux.HandleFunc("POST /v1/relay/portal", ownerOnly(server.relayPortal))
+	mux.HandleFunc("POST /v1/relay/deactivate", ownerOnly(server.deactivateRelay))
+	mux.HandleFunc("GET /v1/devices", server.listDevices)
+	mux.HandleFunc("DELETE /v1/devices/{id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
 	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
@@ -463,6 +477,9 @@ func newServer(
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
 	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
+	mux.HandleFunc("PUT /v1/push/registration", server.putPushRegistration)
+	mux.HandleFunc("DELETE /v1/push/registration", server.deletePushRegistration)
+	mux.HandleFunc("GET /v1/push/registrations", server.listPushRegistrations)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	mux.HandleFunc("POST /v1/notifications/test", server.testNotification)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
@@ -477,7 +494,17 @@ func newServer(
 }
 
 func configuredNotifier(cfg config.Config, database *store.DB, now func() time.Time) notification.Service {
+	var transport push.Transport = push.Disabled{}
+	if cfg.Push.RelayURL != "" {
+		token, err := cfg.Push.ReadAuthToken()
+		if err != nil {
+			log.Print("push configuration unavailable")
+		} else {
+			transport = &push.RelayTransport{BaseURL: cfg.Push.RelayURL, AuthToken: token}
+		}
+	}
 	return notification.Service{
+		Push:    push.NewDispatcher(database, sessionIssuer(cfg.APIToken), transport, log.Default()),
 		Enabled: cfg.Notifications.Enabled, Events: cfg.NotificationEvents(), Store: database,
 		Sink:    notification.CommandSink{Command: cfg.Notifications.Command},
 		Timeout: cfg.NotificationTimeout(), Now: now,
@@ -512,8 +539,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bootstrapDashboardSession(w, r) {
 			return
 		}
-		authorized, viaCookie := s.authorized(r)
-		if !authorized {
+		principal, err := s.authorized(r)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !principal.valid() {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
 			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
 				s.serveDashboardSignIn(w, r)
@@ -522,9 +553,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
 		}
+		// Legacy cookies migrate without interrupting the current request.
+		if principal.legacy {
+			token, id, err := s.legacyDeviceSession(r)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			principal.token, principal.deviceID = token, id
+		}
+		r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
 		// Slide the expiry forward while the browser keeps using the dashboard.
-		if viaCookie {
-			s.setDashboardSessionCookie(w, r)
+		if principal.viaCookie {
+			s.setDashboardSessionCookie(w, r, principal.token)
 			// Downstream handlers set their own Cache-Control, so re-assert
 			// no-store when the headers are actually written.
 			w = &noStoreWriter{ResponseWriter: w}
@@ -691,6 +732,9 @@ func writeRelayManagementError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
+	if !requireOwner(w, r) {
+		return
+	}
 	var request struct {
 		Host      string `json:"host"`
 		Port      int    `json:"port"`
@@ -849,16 +893,35 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		Token string `json:"pairing_token"`
+		Name  string `json:"name"`
+		Kind  string `json:"kind"`
 	}
 	if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
+	if request.Kind == "" {
+		request.Kind = "browser"
+	}
+	if request.Kind != "browser" && request.Kind != "mobile" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be browser or mobile"})
+		return
+	}
+	request.Name = cleanDeviceName(request.Name)
+	if request.Name == "" {
+		request.Name = "Paired device"
+	}
 	if request.Token == "" || !s.consumePairingToken(request.Token) {
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
 		return
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, request.Name, request.Kind)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Pairing clients read the credential from Set-Cookie; preserve the 204 contract.
+	s.setDashboardSessionCookie(w, r, token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -912,14 +975,14 @@ func (w *noStoreWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	// A response carrying the session cookie must never be stored by an
-	// intermediary: the cookie value is the API token, so a shared cache could
+	// intermediary: the cookie value is a device token, so a shared cache could
 	// hand it to another client. Enforce that here rather than relying on the
 	// caller to remember, so the invariant travels with the Set-Cookie itself.
 	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
-		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		Name: apiSessionCookie, Value: token, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
 		Expires: s.now().UTC().Add(dashboardSessionTTL), MaxAge: int(dashboardSessionTTL / time.Second),
 	})
@@ -945,29 +1008,18 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
 		return true
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, "Browser", "browser")
+	if err != nil {
+		writeError(w, err)
+		return true
+	}
+	s.setDashboardSessionCookie(w, r, token)
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true
-}
-
-// authorized reports whether the request carries valid credentials, and
-// whether it authenticated via the dashboard session cookie. Cookie-
-// authenticated requests get a refreshed expiry so an actively used browser
-// never has to re-pair; bearer clients hold the token directly and need none.
-func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
-		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
-		return true, false
-	}
-	cookie, err := r.Cookie(apiSessionCookie)
-	if err == nil && secureTokenEqual(cookie.Value, s.config.APIToken) {
-		return true, true
-	}
-	return false, false
 }
 
 func secureTokenEqual(left, right string) bool {
@@ -1078,6 +1130,9 @@ func (s *Server) StartScheduler(ctx context.Context) {
 func (s *Server) Wait() {
 	s.loopWorkers.Wait()
 	s.workers.Wait()
+	if s.push != nil {
+		s.push.Close()
+	}
 }
 
 func (s *Server) schedulerStatus(w http.ResponseWriter, _ *http.Request) {
