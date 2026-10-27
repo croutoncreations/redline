@@ -62,6 +62,12 @@ upgrading.
 `DELETE /v1/devices/{id}` revokes a session (`204`, or `404` for an unknown ID). Revoked credentials
 receive `401`. Pairing redeem optionally accepts `name` and `kind` (default `browser`).
 
+`POST /v1/devices/session` (owner only) exchanges the owner credential for a new device session:
+body `{"name":"Pixel 9","kind":"mobile"}`, response `201`
+`{"token":"...","device":{"id","name","kind"}}` with `Cache-Control: no-store`. Phones paired
+before device sessions hold the owner token; they call this once to move to a scoped, revocable
+credential without re-pairing. A device session calling it gets `403`.
+
 ## Push registrations
 
 See [push notifications](push-notifications.md) for configuration, privacy, validation, and examples.
@@ -103,6 +109,7 @@ GET  /v1/dashboard/events
 POST /v1/pairing
 POST /v1/pairing/redeem
 GET  /v1/devices
+POST /v1/devices/session
 DELETE /v1/devices/{id}
 POST /v1/providers/{account}/refresh
 GET  /v1/providers/{account}/status

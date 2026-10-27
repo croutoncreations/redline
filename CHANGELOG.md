@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   token, so rotating it and restarting signs out every device and legacy pairing.
 - Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
   `redline devices list|revoke ID`; lists never expose token hashes.
+- `POST /v1/devices/session` lets a phone paired before device sessions trade its owner token
+  for its own scoped device session in place, without re-pairing.
 
 ### Added
 
