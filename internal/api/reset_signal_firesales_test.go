@@ -636,6 +636,26 @@ func TestResetSignalFiresaleDoesNotStartAnAlreadyCompletedAnnouncement(t *testin
 	}
 }
 
+// Alerts are at most once and never retried, so failing the scheduler's
+// evaluation over an undeliverable alert only loses a decision.
+func TestResetSignalFiresaleAlertFailureDoesNotFailScheduling(t *testing.T) {
+	s, _, _ := firesaleFixture(t, "off")
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	// Switch to auto with a failing hook: the scheduler's reconcile starts the
+	// sale and its alert fails.
+	s.config.ResetSignals.Firesale = "auto"
+	s.notifier = &failingFiresaleNotifier{}
+	events, err := s.providerResetEvents(t.Context(), "main", mustSnapshot(t, s))
+	if err != nil {
+		t.Fatalf("scheduler evaluation failed on an alert hook: %v", err)
+	}
+	if len(events) != 2 || events[1].Confidence != "announced" {
+		t.Fatalf("sale did not start despite failed alert: %+v", events)
+	}
+}
+
 type failingFiresaleNotifier struct{ calls int }
 
 func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {
