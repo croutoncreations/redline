@@ -241,7 +241,8 @@ persistence, delivered outside lifecycle locks, and not retried if delivery fail
 
 To test a phone's Start action without a new event type, send
 `POST /v1/notifications/test` with `{"event":"reset.announced","provider":"claude-main"}`
-(owner only). This synthetic **PROMISED** announcement has a window end two hours ahead and adds
+(owner only). This synthetic **PROMISED** announcement, titled "Test: Start a claude-main firesale?"
+and worded about that account rather than Codex, has a window end two hours ahead and adds
 `data.manual_account: "claude-main"` and `data.manual_for: "15m"`. Clients should prefer these keys
 when present: show **Start firesale (15m)** and POST `{"account":"claude-main","until":"15m"}`
 to `/v1/firesales`. Sending the sample without `provider` retains the **COMPLETED** kind, with no
