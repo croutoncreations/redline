@@ -497,7 +497,11 @@ func (d *DB) LatestAutomaticFiresale(ctx context.Context, provider string) (bool
 }
 
 // LatestAutomaticPressureFiresale excludes announcement sales, whose lifecycle
-// notifications are claimed separately in reset_signal_firesales.
+// notifications are claimed separately in reset_signal_firesales. An
+// announcement decision reads as "not in a pressure firesale" on purpose: when
+// the announcement sale ends (with its own firesale.ended) while pace pressure
+// still holds, the next decision announces a pressure firesale.started, so the
+// user is never told a firesale ended while one silently continues.
 func (d *DB) LatestAutomaticPressureFiresale(ctx context.Context, provider string) (bool, error) {
 	return d.latestAutomaticFiresale(ctx, provider, true)
 }

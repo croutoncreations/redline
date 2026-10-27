@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -568,6 +569,37 @@ func TestResetSignalFiresaleUnlinkedCompletionOnlyEndsWhenNewerAndFresh(t *testi
 				t.Fatalf("completion=%+v", n.events[2])
 			}
 		})
+	}
+}
+
+type failingFiresaleNotifier struct{ calls int }
+
+func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {
+	n.calls++
+	return errors.New("hook failed")
+}
+
+// A failing hook must not leave some accounts' sales running: every lifecycle
+// change is persisted first, and delivery errors are reported afterwards.
+func TestResetSignalFiresaleLifecycleSurvivesNotificationFailures(t *testing.T) {
+	s, _, _ := firesaleFixture(t, "notify")
+	s.config.Providers["second"] = s.config.Providers["main"]
+	n := &failingFiresaleNotifier{}
+	s.notifier = n
+	if err := s.pollResetSignals(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	firesaleAction(t, s, "announcement:123", "start")
+	if got := s.ResetSignalState().Firesale.Providers; len(got) != 2 {
+		t.Fatalf("start with failing hook reached %v, want both accounts", got)
+	}
+	firesaleAction(t, s, "", "stop")
+	sales, err := s.store.ActiveResetSignalFiresales(t.Context())
+	if err != nil || len(sales) != 0 {
+		t.Fatalf("stop with failing hook left %d sales active (err=%v)", len(sales), err)
+	}
+	if n.calls != 4 {
+		t.Fatalf("notification attempts=%d, want start and stop for both accounts", n.calls)
 	}
 }
 

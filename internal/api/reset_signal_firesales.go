@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -98,55 +99,83 @@ func (s *Server) notifyResetFiresale(ctx context.Context, sale store.ResetSignal
 	return s.notifier.Notify(ctx, notification.WithMessage(event, "codex"))
 }
 
+// firesaleNotice is a claimed lifecycle change awaiting delivery. Changes are
+// persisted under resetFiresaleMu; delivery happens after it is released, so
+// a slow or failing hook can neither hold the lock nor stop later accounts.
+type firesaleNotice struct {
+	sale             store.ResetSignalFiresale
+	reason           string
+	completionSource string
+}
+
+// deliverFiresaleNotices attempts every notice and joins the failures.
+func (s *Server) deliverFiresaleNotices(ctx context.Context, notices []firesaleNotice) error {
+	var errs []error
+	for _, n := range notices {
+		if err := s.notifyResetFiresale(ctx, n.sale, n.reason, n.completionSource); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Caller holds resetFiresaleMu. A new announcement cannot replace an existing
 // opt-in or change its identity; auto mode waits for that sale to end.
-func (s *Server) startResetFiresale(ctx context.Context, a resetsignal.Announcement, manual bool) error {
+func (s *Server) startResetFiresale(ctx context.Context, a resetsignal.Announcement, manual bool) ([]firesaleNotice, error) {
 	sales, err := s.store.ActiveResetSignalFiresales(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, sale := range sales {
 		if sale.AnnouncementKey != a.Key {
 			if manual {
-				return fmt.Errorf("%w: announcement %s already has an active firesale until %s; run redline reset firesale stop first", store.ErrConflict, sale.AnnouncementKey, sale.Deadline.UTC().Format(time.RFC3339))
+				return nil, fmt.Errorf("%w: announcement %s already has an active firesale until %s; run redline reset firesale stop first", store.ErrConflict, sale.AnnouncementKey, sale.Deadline.UTC().Format(time.RFC3339))
 			}
-			return nil
+			return nil, nil
 		}
 	}
 	mode := s.config.ResetSignalsFiresale()
+	var notices []firesaleNotice
+	var errs []error
 	for id, provider := range s.config.Providers {
 		if !strings.EqualFold(strings.TrimSpace(provider.Provider), "codex") {
 			continue
 		}
 		claimed, err := s.store.StartResetSignalFiresale(ctx, id, mode, a, s.now(), manual)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if claimed {
-			sale := store.ResetSignalFiresale{AnnouncementKey: a.Key, ProviderAccountID: id, Mode: mode, Deadline: *a.WindowEnd, Announcement: a}
-			if err := s.notifyResetFiresale(ctx, sale, "", ""); err != nil {
-				return err
-			}
+			notices = append(notices, firesaleNotice{sale: store.ResetSignalFiresale{AnnouncementKey: a.Key, ProviderAccountID: id, Mode: mode, Deadline: *a.WindowEnd, Announcement: a}})
 		}
 	}
-	return nil
+	return notices, errors.Join(errs...)
 }
 
 // A running sale survives missing/stale feeds; only an explicit lifecycle
 // event ends it. Claims precede notification delivery (at most once).
 func (s *Server) reconcileResetSignalFiresales(ctx context.Context) error {
+	notices, err := s.reconcileResetSignalFiresalesLocked(ctx)
+	return errors.Join(err, s.deliverFiresaleNotices(ctx, notices))
+}
+
+func (s *Server) reconcileResetSignalFiresalesLocked(ctx context.Context) ([]firesaleNotice, error) {
 	s.resetFiresaleMu.Lock()
 	defer s.resetFiresaleMu.Unlock()
 	state := s.ResetSignalState()
 	sales, err := s.store.ActiveResetSignalFiresales(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var notices []firesaleNotice
+	var errs []error
 	for _, sale := range sales {
 		if a := state.Announcement; usableFiresaleAnnouncement(a, s.now()) && a.Key == sale.AnnouncementKey && !a.WindowEnd.Equal(sale.Deadline) {
 			changed, err := s.store.UpdateResetSignalFiresaleDeadline(ctx, sale.ID, *a)
 			if err != nil {
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			if changed {
 				log.Printf("redline reset announcement %s firesale deadline changed: %s -> %s", a.Key, sale.Deadline.UTC().Format(time.RFC3339), a.WindowEnd.UTC().Format(time.RFC3339))
@@ -168,19 +197,20 @@ func (s *Server) reconcileResetSignalFiresales(ctx context.Context) error {
 		if reason != "" {
 			claimed, err := s.store.EndResetSignalFiresale(ctx, sale.ID, reason, s.now())
 			if err != nil {
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			if claimed {
-				if err := s.notifyResetFiresale(ctx, sale, reason, completionSource); err != nil {
-					return err
-				}
+				notices = append(notices, firesaleNotice{sale: sale, reason: reason, completionSource: completionSource})
 			}
 		}
 	}
 	if s.config.ResetSignalsFiresale() == "auto" && !s.redemptionDisabled && usableFiresaleAnnouncement(state.Announcement, s.now()) {
-		return s.startResetFiresale(ctx, *state.Announcement, false)
+		started, err := s.startResetFiresale(ctx, *state.Announcement, false)
+		notices = append(notices, started...)
+		errs = append(errs, err)
 	}
-	return nil
+	return notices, errors.Join(errs...)
 }
 
 func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFiresale) string {
@@ -204,28 +234,31 @@ func firesaleCompletionSource(state resetsignal.State, sale store.ResetSignalFir
 	return ""
 }
 
-func (s *Server) stopResetFiresale(ctx context.Context, key string) error {
+// stopResetFiresale ends every matching sale before reporting any error, so a
+// failure on one account never leaves another account's sale running.
+func (s *Server) stopResetFiresale(ctx context.Context, key string) ([]firesaleNotice, error) {
 	sales, err := s.store.ActiveResetSignalFiresales(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, sale := range sales {
 		if key != "" && sale.AnnouncementKey != key {
-			return fmt.Errorf("%w: active firesale belongs to announcement %s", store.ErrConflict, sale.AnnouncementKey)
+			return nil, fmt.Errorf("%w: active firesale belongs to announcement %s", store.ErrConflict, sale.AnnouncementKey)
 		}
 	}
+	var notices []firesaleNotice
+	var errs []error
 	for _, sale := range sales {
 		claimed, err := s.store.EndResetSignalFiresale(ctx, sale.ID, "stopped", s.now())
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if claimed {
-			if err := s.notifyResetFiresale(ctx, sale, "stopped", ""); err != nil {
-				return err
-			}
+			notices = append(notices, firesaleNotice{sale: sale, reason: "stopped"})
 		}
 	}
-	return nil
+	return notices, errors.Join(errs...)
 }
 
 func (s *Server) resetSignalFiresale(w http.ResponseWriter, r *http.Request) {
@@ -259,17 +292,21 @@ func (s *Server) resetSignalFiresale(w http.ResponseWriter, r *http.Request) {
 	}
 	s.resetFiresaleMu.Lock()
 	var err error
+	var notices []firesaleNotice
 	if body.Action == "stop" {
-		err = s.stopResetFiresale(r.Context(), body.AnnouncementKey)
+		notices, err = s.stopResetFiresale(r.Context(), body.AnnouncementKey)
 	} else {
 		state := s.ResetSignalState()
 		if s.config.ResetSignalsFiresale() == "off" || !usableFiresaleAnnouncement(state.Announcement, s.now()) || state.Announcement.Key != body.AnnouncementKey {
 			err = fmt.Errorf("%w: no matching viable announcement with a future deadline, or firesale is off", store.ErrConflict)
 		} else {
-			err = s.startResetFiresale(r.Context(), *state.Announcement, true)
+			notices, err = s.startResetFiresale(r.Context(), *state.Announcement, true)
 		}
 	}
 	s.resetFiresaleMu.Unlock()
+	// The lifecycle change is already persisted; a delivery failure is still
+	// reported to the caller, who asked for this change directly.
+	err = errors.Join(err, s.deliverFiresaleNotices(r.Context(), notices))
 	if err != nil {
 		writeError(w, err)
 		return
