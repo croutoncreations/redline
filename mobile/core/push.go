@@ -18,6 +18,26 @@ func (c *Client) RegisterPush(platform, provider, token string) error {
 	}, nil)
 }
 
+// ExchangeDeviceSession trades the owner credential a phone received from a
+// pre-device-session pairing for its own scoped device session, returning the
+// new token. The caller stores it in place of the old one. An error (including
+// 403 when the credential is already a device session) means keep the current
+// credential.
+func (c *Client) ExchangeDeviceSession(name string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+	var response struct {
+		Token string `json:"token"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/devices/session", map[string]string{"name": name, "kind": "mobile"}, &response); err != nil {
+		return "", err
+	}
+	if response.Token == "" {
+		return "", fmt.Errorf("the desktop returned no device credential")
+	}
+	return response.Token, nil
+}
+
 // UnregisterPush removes this paired device's push registration.
 func (c *Client) UnregisterPush() error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)

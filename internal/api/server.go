@@ -422,6 +422,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/relay/portal", ownerOnly(server.relayPortal))
 	mux.HandleFunc("POST /v1/relay/deactivate", ownerOnly(server.deactivateRelay))
 	mux.HandleFunc("GET /v1/devices", server.listDevices)
+	mux.HandleFunc("POST /v1/devices/session", server.exchangeDeviceSession)
 	mux.HandleFunc("DELETE /v1/devices/{id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)

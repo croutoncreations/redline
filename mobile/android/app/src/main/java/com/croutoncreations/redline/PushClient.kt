@@ -48,6 +48,7 @@ class PushClient(
         if (prefs.getBoolean("unregister_pending", false)) unregisterLocked()
         if (!enabled) return@withLock
         if (!canNotify()) return@withLock
+        upgradeLegacyCredentialLocked()
         FirebaseMessaging.getInstance().isAutoInitEnabled = true
         val currentToken = token ?: firebaseToken()
         val tokenHash = hash(currentToken)
@@ -74,6 +75,25 @@ class PushClient(
             }
         }
         if (value) refreshRegistration()
+    }
+
+    /**
+     * Phones paired before device sessions hold the desktop's owner token, and
+     * push registration needs a device session. Trade it in place, once: on
+     * success the scoped token replaces the old one; a refusal (already a
+     * device, or an older desktop) is remembered so it is not retried.
+     */
+    private suspend fun upgradeLegacyCredentialLocked() {
+        if (prefs.getString("upgraded_identity", null) == identity(settings)) return
+        val client = corePushCall { holder.client() }
+        val scoped = runCatching { corePushCall { client.exchangeDeviceSession(android.os.Build.MODEL) } }.getOrNull()
+        if (scoped != null) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                holder.dropRelay()
+                settings.update(settings.baseUrl, scoped)
+            }
+        }
+        prefs.edit().putString("upgraded_identity", identity(settings)).apply()
     }
 
     private suspend fun unregisterLocked() {
