@@ -119,9 +119,21 @@ func (s *Server) deliverFiresaleNotices(ctx context.Context, notices []firesaleN
 	return errors.Join(errs...)
 }
 
+// supersededByCompletion applies the end rules to a sale that would start now,
+// so nothing starts only to be ended as completed on the next reconcile.
+func (s *Server) supersededByCompletion(state resetsignal.State, a resetsignal.Announcement) bool {
+	return firesaleCompletionSource(state, store.ResetSignalFiresale{AnnouncementKey: a.Key, StartedAt: s.now(), Announcement: a}) != ""
+}
+
 // Caller holds resetFiresaleMu. A new announcement cannot replace an existing
 // opt-in or change its identity; auto mode waits for that sale to end.
 func (s *Server) startResetFiresale(ctx context.Context, a resetsignal.Announcement, manual bool) ([]firesaleNotice, error) {
+	if s.supersededByCompletion(s.ResetSignalState(), a) {
+		if manual {
+			return nil, fmt.Errorf("%w: a newer reset completion supersedes announcement %s", store.ErrConflict, a.Key)
+		}
+		return nil, nil
+	}
 	sales, err := s.store.ActiveResetSignalFiresales(ctx)
 	if err != nil {
 		return nil, err

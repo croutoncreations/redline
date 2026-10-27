@@ -600,6 +600,42 @@ func TestResetSignalFiresaleSameKeyCompletionEndsWithoutNewerTime(t *testing.T) 
 	}
 }
 
+// An announcement the report already shows superseded by a newer completion
+// must not start (auto or manual): the end check would end it at once.
+func TestResetSignalFiresaleDoesNotStartAnAlreadyCompletedAnnouncement(t *testing.T) {
+	s, signal, n := firesaleFixture(t, "auto")
+	enableResetSignalNotifications(s)
+	// Older promise for post 123, mirrored by two feeds; a newer linked
+	// completion for a different post 456 from one feed.
+	completedAt := s.now().Add(-time.Minute)
+	completion := &resetsignal.Signal{Feed: "codex-reset", Kind: resetsignal.KindCompleted, Freshness: resetsignal.Fresh, AnnouncementID: "456", OriginalAccount: "thsottiaux", PublishedAt: &completedAt}
+	promise := *signal
+	promise.Feed = "resetbeacon"
+	mirror := promise
+	mirror.Feed = "willreset"
+	sources := []resetsignal.SourceResult{{Signal: &promise}, {Signal: &mirror}, {Signal: completion}}
+	report := resetsignal.BuildReport(s.now(), sources)
+	if c := resetsignal.SelectedCompletion(report); c == nil || c.AnnouncementID != "456" {
+		t.Fatalf("fixture: selected completion=%+v", c)
+	}
+	if a := resetsignal.ViableAnnouncement(report); a == nil || a.Kind != resetsignal.KindPromised || a.Key != "announcement:123" {
+		t.Fatalf("fixture: alert-ranked announcement=%+v", a)
+	}
+	s.resetSignalMu.Lock()
+	s.resetSignalState = resetsignal.State{Enabled: true, Report: &report}
+	s.resetSignalMu.Unlock()
+	if err := s.reconcileResetSignalFiresales(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if sales, _ := s.store.ActiveResetSignalFiresales(t.Context()); len(sales) != 0 {
+		t.Fatalf("auto started a sale the report shows completed (events=%+v)", n.events)
+	}
+	s.config.ResetSignals.Firesale = "notify"
+	if w := firesaleAction(t, s, "announcement:123", "start"); w.Code != http.StatusConflict {
+		t.Fatalf("manual start of a completed announcement=%d %s", w.Code, w.Body.String())
+	}
+}
+
 type failingFiresaleNotifier struct{ calls int }
 
 func (n *failingFiresaleNotifier) Notify(context.Context, domain.NotificationEvent) error {
