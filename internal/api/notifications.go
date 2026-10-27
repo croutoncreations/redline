@@ -10,8 +10,7 @@ import (
 )
 
 func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
-	if authorized, viaCookie := s.authorized(r); !authorized || viaCookie {
-		writeJSON(w, http.StatusForbidden, problem{Error: "testing notifications requires the local API token"})
+	if !requireOwner(w, r) {
 		return
 	}
 	var body *struct {

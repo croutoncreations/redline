@@ -79,7 +79,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|devices|version>")
 		return 1
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
@@ -160,6 +160,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	case "pair":
 		return runPair(client, remaining[1:], *configPath, stdout, stderr)
+	case "devices":
+		return runDevices(client, remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -173,7 +175,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, version")
+	fmt.Fprintln(output, "          pair, devices, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
@@ -457,6 +459,23 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "Re-run with --yes to confirm.")
 		return 1
 	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	database, err := store.Open(cfg.Database)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer database.Close()
+	// Revoke scoped sessions before replacing the master credential. Failure
+	// must never report a successful rotation while devices retain access.
+	if err := database.RevokeAllDeviceSessions(context.Background(), time.Now().UTC()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	// The new token is intentionally not printed: it stays in the protected
 	// file, and `pair --qr` is the supported way to hand it to a device.
 	if _, err := apiauth.RotateToken(resolvedPath); err != nil {
@@ -464,7 +483,7 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 		return 1
 	}
 	fmt.Fprintf(stdout, "Rotated the Redline API token at %s\n", tokenPath)
-	fmt.Fprintln(stdout, "Restart Redline to load it, then run `redline pair --qr` to pair devices again.")
+	fmt.Fprintln(stdout, "Revoked all device sessions. Restart Redline to invalidate the old master token and legacy pairings, then run `redline pair --qr` to pair devices again.")
 	return 0
 }
 
@@ -900,7 +919,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	}
 	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
 	renderTerminalQR(stdout, code.Bitmap())
-	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
+	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants device control. Keep it private; revoke the device session or rotate the API token if exposed.")
 	return 0
 }
 

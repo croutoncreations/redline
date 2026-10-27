@@ -6,10 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- paired devices no longer receive the master API token. New pairings and local dashboard
+  sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
+  upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
+  Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
+  job/run/provider and firesale control remains available. Pairing creation, device management,
+  and notification tests require the owner. Token rotation revokes all device sessions and,
+  after restart, the old master token and legacy pairings.
+- Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
+  `redline devices list|revoke ID`; lists never expose token hashes.
+
 ### Added
 
 - Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
-  `notify` when monitoring is enabled), bearer-only `POST /v1/reset-signals/firesale`, and
+  `notify` when monitoring is enabled), owner/device `POST /v1/reset-signals/firesale`, and
   `redline reset firesale start|stop`. Only viable promises/schedules with a future announced
   deadline qualify; predictions and completed resets never start one. Persistent opt-ins and
   lifecycle claims survive restarts, force the firesale/pacing gate without bypassing safety

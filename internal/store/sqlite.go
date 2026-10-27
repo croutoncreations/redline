@@ -657,6 +657,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_
 			return fmt.Errorf("record reset signal firesales migration: %w", err)
 		}
 	}
+	// Another branch may also stamp 40: repair by table existence, not version.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS device_sessions (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('browser', 'mobile')),
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    revoked_at TEXT
+)`); err != nil {
+		return fmt.Errorf("create device sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 40 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=40)`); err != nil {
+		return fmt.Errorf("record device sessions migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

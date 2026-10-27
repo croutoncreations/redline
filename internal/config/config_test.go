@@ -11,6 +11,21 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
+func TestLoadPairedDevicesResetRedemption(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.PairedDevices.AllowResetRedemption {
+		t.Fatal("paired reset redemption must default off")
+	}
+	configured := strings.Replace(validConfig, "active_policy: standard", "active_policy: standard\napi:\n  paired_devices:\n    allow_reset_redemption: true", 1)
+	cfg, err = config.Load(writeConfig(t, configured))
+	if err != nil || !cfg.API.PairedDevices.AllowResetRedemption || len(cfg.Warnings) != 0 {
+		t.Fatalf("paired config=%+v warnings=%v err=%v", cfg.API.PairedDevices, cfg.Warnings, err)
+	}
+}
+
 func TestLoadParsesTrustedAPIHosts(t *testing.T) {
 	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 api:
