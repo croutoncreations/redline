@@ -80,25 +80,32 @@ type Server struct {
 	resetSignalSleep   func(context.Context, time.Duration) error
 	resetSignalSources []resetsignal.Source
 	resetFiresaleMu    sync.Mutex
-	resetSignalMu      sync.Mutex
-	resetPollMu        sync.Mutex
-	resetSignalState   resetsignal.State
-	resetNextRead      map[string]time.Time
-	resetDeferred      map[string]resetsignal.SourceError
-	resetLastResults   map[string]resetsignal.SourceResult
-	discovery          HarnessDiscoverer
-	hermes             HermesDiscoverer
-	usageSources       *usage.Manager
-	catalogMu          sync.Mutex
-	catalog            discovery.Catalog
-	catalogAt          time.Time
-	mux                *http.ServeMux
-	workers            sync.WaitGroup
-	loopWorkers        sync.WaitGroup
-	startMu            sync.Mutex
-	started            bool
-	pairingMu          sync.Mutex
-	pairing            map[string]time.Time
+	// legacyDevice* is the shared session that legacy master-token cookies
+	// migrate to; see legacyDeviceSession.
+	// dashboardStreamInterval overrides the event-stream tick (tests only).
+	dashboardStreamInterval time.Duration
+	legacyDeviceMu          sync.Mutex
+	legacyDeviceToken       string
+	legacyDeviceID          string
+	resetSignalMu           sync.Mutex
+	resetPollMu             sync.Mutex
+	resetSignalState        resetsignal.State
+	resetNextRead           map[string]time.Time
+	resetDeferred           map[string]resetsignal.SourceError
+	resetLastResults        map[string]resetsignal.SourceResult
+	discovery               HarnessDiscoverer
+	hermes                  HermesDiscoverer
+	usageSources            *usage.Manager
+	catalogMu               sync.Mutex
+	catalog                 discovery.Catalog
+	catalogAt               time.Time
+	mux                     *http.ServeMux
+	workers                 sync.WaitGroup
+	loopWorkers             sync.WaitGroup
+	startMu                 sync.Mutex
+	started                 bool
+	pairingMu               sync.Mutex
+	pairing                 map[string]time.Time
 
 	redeemer            bankedResetRedeemer
 	redemptionDisabled  bool
@@ -264,6 +271,8 @@ func newServer(
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
+	mux.HandleFunc("GET /v1/devices", server.listDevices)
+	mux.HandleFunc("DELETE /v1/devices/{id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
 	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
@@ -364,8 +373,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bootstrapDashboardSession(w, r) {
 			return
 		}
-		authorized, viaCookie := s.authorized(r)
-		if !authorized {
+		principal, err := s.authorized(r)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !principal.valid() {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
 			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
 				s.serveDashboardSignIn(w, r)
@@ -374,9 +387,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
 		}
+		// Legacy cookies migrate without interrupting the current request.
+		if principal.legacy {
+			token, id, err := s.legacyDeviceSession(r)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			principal.token, principal.deviceID = token, id
+		}
+		r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
 		// Slide the expiry forward while the browser keeps using the dashboard.
-		if viaCookie {
-			s.setDashboardSessionCookie(w, r)
+		if principal.viaCookie {
+			s.setDashboardSessionCookie(w, r, principal.token)
 			// Downstream handlers set their own Cache-Control, so re-assert
 			// no-store when the headers are actually written.
 			w = &noStoreWriter{ResponseWriter: w}
@@ -392,7 +415,10 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
-func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
+	if !requireOwner(w, r) {
+		return
+	}
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
@@ -431,16 +457,35 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		Token string `json:"pairing_token"`
+		Name  string `json:"name"`
+		Kind  string `json:"kind"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
+	if request.Kind == "" {
+		request.Kind = "browser"
+	}
+	if request.Kind != "browser" && request.Kind != "mobile" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be browser or mobile"})
+		return
+	}
+	request.Name = cleanDeviceName(request.Name)
+	if request.Name == "" {
+		request.Name = "Paired device"
+	}
 	if request.Token == "" || !s.consumePairingToken(request.Token) {
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
 		return
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, request.Name, request.Kind)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Pairing clients read the credential from Set-Cookie; preserve the 204 contract.
+	s.setDashboardSessionCookie(w, r, token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -494,14 +539,14 @@ func (w *noStoreWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	// A response carrying the session cookie must never be stored by an
-	// intermediary: the cookie value is the API token, so a shared cache could
+	// intermediary: the cookie value is a device token, so a shared cache could
 	// hand it to another client. Enforce that here rather than relying on the
 	// caller to remember, so the invariant travels with the Set-Cookie itself.
 	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
-		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		Name: apiSessionCookie, Value: token, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
 		Expires: s.now().UTC().Add(dashboardSessionTTL), MaxAge: int(dashboardSessionTTL / time.Second),
 	})
@@ -527,29 +572,18 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
 		return true
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, "Browser", "browser")
+	if err != nil {
+		writeError(w, err)
+		return true
+	}
+	s.setDashboardSessionCookie(w, r, token)
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true
-}
-
-// authorized reports whether the request carries valid credentials, and
-// whether it authenticated via the dashboard session cookie. Cookie-
-// authenticated requests get a refreshed expiry so an actively used browser
-// never has to re-pair; bearer clients hold the token directly and need none.
-func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
-		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
-		return true, false
-	}
-	cookie, err := r.Cookie(apiSessionCookie)
-	if err == nil && secureTokenEqual(cookie.Value, s.config.APIToken) {
-		return true, true
-	}
-	return false, false
 }
 
 func secureTokenEqual(left, right string) bool {

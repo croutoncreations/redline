@@ -375,8 +375,14 @@ func (s *Server) notifyRedemption(ctx context.Context, providerID string, result
 }
 
 func (s *Server) redeemBankedReset(w http.ResponseWriter, r *http.Request) {
-	if authorized, viaCookie := s.authorized(r); !authorized || viaCookie {
-		writeJSON(w, http.StatusForbidden, problem{Error: "redeeming banked resets requires the local API token"})
+	// Demo mode never redeems and has no API token, so report that first
+	// rather than an authorization error no demo request could pass.
+	if s.redemptionDisabled {
+		writeError(w, fmt.Errorf("%w: banked reset redemption is disabled in demo mode", store.ErrConflict))
+		return
+	}
+	if p := requestPrincipal(r); !p.owner && (!p.valid() || !s.config.API.PairedDevices.AllowResetRedemption) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "paired device reset redemption requires api.paired_devices.allow_reset_redemption: true"})
 		return
 	}
 	var body *struct {

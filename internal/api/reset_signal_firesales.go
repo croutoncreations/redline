@@ -340,10 +340,6 @@ func (s *Server) stopResetFiresale(ctx context.Context, key string) ([]firesaleN
 }
 
 func (s *Server) resetSignalFiresale(w http.ResponseWriter, r *http.Request) {
-	if authorized, cookie := s.authorized(r); !authorized || cookie {
-		writeJSON(w, http.StatusForbidden, problem{Error: "reset firesales require the local API token"})
-		return
-	}
 	var body *struct {
 		AnnouncementKey string `json:"announcement_key"`
 		Action          string `json:"action"`

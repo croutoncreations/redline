@@ -279,7 +279,7 @@ func TestResetSignalFiresaleAPIAuthAndConflicts(t *testing.T) {
 		name string
 		want int
 	}{
-		{"bearer", 200}, {"cookie", 403}, {"demo", 409}, {"off", 409}, {"missing key", 409}, {"mismatched key", 409}, {"no announcement", 409},
+		{"bearer", 200}, {"cookie", 200}, {"device bearer", 200}, {"device cookie", 200}, {"demo", 409}, {"off", 409}, {"missing key", 409}, {"mismatched key", 409}, {"no announcement", 409},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _, _ := firesaleFixture(t, "notify")
@@ -300,16 +300,33 @@ func TestResetSignalFiresaleAPIAuthAndConflicts(t *testing.T) {
 				key = "announcement:other"
 			}
 			req := httptest.NewRequest("POST", "http://127.0.0.1/v1/reset-signals/firesale", strings.NewReader(`{"announcement_key":"`+key+`","action":"start"}`))
-			if tc.name == "cookie" {
-				req.AddCookie(&http.Cookie{Name: apiSessionCookie, Value: "secret"})
+			token := "secret"
+			if strings.HasPrefix(tc.name, "device") {
+				var err error
+				token, _, err = s.newDeviceSession(req, "Phone", "mobile")
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "cookie" || tc.name == "device cookie" {
+				req.AddCookie(&http.Cookie{Name: apiSessionCookie, Value: token})
 				req.Header.Set("Origin", "http://127.0.0.1")
 			} else {
-				req.Header.Set("Authorization", "Bearer secret")
+				req.Header.Set("Authorization", "Bearer "+token)
 			}
 			w := httptest.NewRecorder()
 			s.ServeHTTP(w, req)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d want=%d body=%s", w.Code, tc.want, w.Body.String())
+			}
+			if strings.HasPrefix(tc.name, "device") {
+				stop := httptest.NewRequest("POST", "http://127.0.0.1/v1/reset-signals/firesale", strings.NewReader(`{"action":"stop"}`))
+				stop.Header = req.Header.Clone()
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, stop)
+				if w.Code != 200 || !strings.Contains(w.Body.String(), `"active":false`) {
+					t.Fatalf("device stop=%d %s", w.Code, w.Body)
+				}
 			}
 		})
 	}

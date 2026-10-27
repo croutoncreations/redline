@@ -76,7 +76,12 @@ func (c Config) NotificationEvents() map[string]bool {
 }
 
 type API struct {
-	TrustedHosts []string `yaml:"trusted_hosts"`
+	TrustedHosts  []string      `yaml:"trusted_hosts"`
+	PairedDevices PairedDevices `yaml:"paired_devices"`
+}
+
+type PairedDevices struct {
+	AllowResetRedemption bool `yaml:"allow_reset_redemption"`
 }
 
 type Scheduler struct {
