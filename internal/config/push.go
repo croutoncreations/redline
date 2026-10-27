@@ -22,8 +22,8 @@ func (p Push) Validate() error {
 		return fmt.Errorf("push.relay_url must be an absolute HTTPS URL without credentials, query, or fragment")
 	}
 	ip := net.ParseIP(u.Hostname())
-	loopback := u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
-	if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
+	loopback := strings.EqualFold(u.Hostname(), "localhost") || (ip != nil && ip.IsLoopback())
+	if u.Scheme != "https" && (u.Scheme != "http" || !loopback) {
 		return fmt.Errorf("push.relay_url requires HTTPS (HTTP is allowed only on loopback)")
 	}
 	info, err := os.Stat(p.AuthTokenFile)
