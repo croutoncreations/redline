@@ -17,9 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   token, so rotating it and restarting signs out every device and legacy pairing.
 - Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
   `redline devices list|revoke ID`; lists never expose token hashes.
+- `POST /v1/devices/session` lets a phone paired before device sessions trade its owner token
+  for its own scoped device session in place, without re-pairing.
 
 ### Added
 
+- On-demand manual firesales for any configured provider account: owner/device
+  `GET|POST /v1/firesales`, `DELETE /v1/firesales/{account}`, and
+  `redline firesale start|stop|status`. Persistent sales unlock the firesale tier without
+  bypassing reserves, missing telemetry, pauses, or budgets; expiry and weekly rollover end
+  them with claimed notifications. `notification test --event reset.announced --provider ACCOUNT`
+  adds manual Start-action data to a synthetic promise.
 - Provider-neutral paired-device push registrations and content-free wake-ups for recorded
   notification deliveries. Optional `push.relay_url`/`push.auth_token_file` transport, disabled
   by default; no built-in push provider. Owner lists expose token suffixes and queue counters.

@@ -138,6 +138,52 @@ func (s *Server) authorized(r *http.Request) (principal, error) {
 	return principal{deviceID: id, viaCookie: viaCookie, token: token}, nil
 }
 
+// exchangeDeviceSession lets a client holding the owner credential (a phone
+// paired before device sessions existed) trade it for a scoped device session
+// in place, without re-pairing. The client then stores only the new token.
+func (s *Server) exchangeDeviceSession(w http.ResponseWriter, r *http.Request) {
+	if !requireOwner(w, r) {
+		return
+	}
+	var body *struct {
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+	}
+	if err := decodeJSON(r, &body); err != nil || body == nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "request body must be an object with name and kind"})
+		return
+	}
+	if body.Kind == "" {
+		body.Kind = "mobile"
+	}
+	if body.Kind != "browser" && body.Kind != "mobile" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be browser or mobile"})
+		return
+	}
+	name := cleanDeviceName(body.Name)
+	if name == "" {
+		name = "Paired device"
+	}
+	token, id, err := s.newDeviceSession(r, name, body.Kind)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusCreated, struct {
+		Token  string `json:"token"`
+		Device struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Kind string `json:"kind"`
+		} `json:"device"`
+	}{Token: token, Device: struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+	}{id, name, body.Kind}})
+}
+
 var errDeviceRevoked = errors.New("device session revoked")
 
 // deviceSessionActive reports whether a device token still authenticates

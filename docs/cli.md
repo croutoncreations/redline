@@ -91,6 +91,31 @@ deadline and `reset_signals.firesale: notify|auto`. Stop works during tracker ou
 require firesale mode to remain enabled. Both use the owner/device firesale API and refuse demo
 mode. See [modes and lifecycle](reset-signal-preview.md#announcement-firesales).
 
+### Manual firesales (any provider)
+
+```bash
+redline firesale start --provider claude-main --for 15m
+redline firesale start --provider codex-main --until-reset
+redline firesale stop --provider claude-main
+redline firesale status
+```
+
+Start requires exactly one of `--for DURATION` (5m–168h) or `--until-reset` (latest cached weekly
+reset required). Starting an active sale replaces its deadline. Start and status print JSON;
+stop succeeds silently. These owner/device API commands work for any configured account,
+independently of announcement monitoring. They override pacing only, never safety gates.
+See [manual firesales](scheduling.md#manual-firesales).
+
+To send a synthetic Start-capable notification to a phone (owner only):
+
+```bash
+redline notification test --event reset.announced --provider claude-main
+```
+
+The sample reads "Test: Start a claude-main firesale?" and includes `manual_account` and
+`manual_for: 15m` and a promised window ending in two hours. No sale starts until the action is used. Without `--provider`, the announcement sample
+remains a completed reset with no manual Start action.
+
 ### Redeem a banked reset
 
 ```bash
