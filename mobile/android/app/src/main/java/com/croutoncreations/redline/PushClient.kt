@@ -43,17 +43,44 @@ class PushClient(
             .digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
+    val lastRegistrationResult: PushRegistrationResult?
+        get() {
+            val at = prefs.getLong("registration_attempted_at", prefs.getLong("registered_at", 0))
+            return if (at == 0L) null else PushRegistrationResult(at, prefs.getString("registration_error", null))
+        }
+
+    fun observeRegistration(onChange: () -> Unit): AutoCloseable {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> onChange() }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        return AutoCloseable { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    suspend fun sendTestNotification() = corePushCall { holder.client().sendTestNotification() }
+    fun isForbidden(error: Exception): Boolean = core.Core.isForbidden(error)
+
     suspend fun refreshRegistration(token: String? = null) = lock.withLock {
-        if (!BuildConfig.PUSH_ENABLED || !settings.isPaired) return@withLock
+        try {
+            registerLocked(token)
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            prefs.edit().putLong("registration_attempted_at", System.currentTimeMillis())
+                .putString("registration_error", error.message ?: "desktop unreachable").apply()
+            throw error
+        }
+    }
+
+    private suspend fun registerLocked(token: String?) {
+        if (!BuildConfig.PUSH_ENABLED || !settings.isPaired) return
         if (prefs.getBoolean("unregister_pending", false)) unregisterLocked()
-        if (!enabled) return@withLock
-        if (!canNotify()) return@withLock
+        if (!enabled) return
+        if (!canNotify()) return
         upgradeLegacyCredentialLocked()
         FirebaseMessaging.getInstance().isAutoInitEnabled = true
         val currentToken = token ?: firebaseToken()
         val tokenHash = hash(currentToken)
         val now = System.currentTimeMillis()
-        if (!PushRegistration.isDue(tokenHash, prefs.getString("registered_hash", null), prefs.getLong("registered_at", 0), now)) return@withLock
+        if (!PushRegistration.isDue(tokenHash, prefs.getString("registered_hash", null), prefs.getLong("registered_at", 0), now) &&
+            prefs.getString("registration_error", null) == null) return
         val client = corePushCall { holder.client() }
         val cursor = cursor()
         if (cursor.lastSeenId == null) {
@@ -61,7 +88,8 @@ class PushClient(
             save(cursor)
         }
         corePushCall { client.registerPush("android", "fcm", currentToken) }
-        prefs.edit().putString("registered_hash", tokenHash).putLong("registered_at", now).apply()
+        prefs.edit().putString("registered_hash", tokenHash).putLong("registered_at", now)
+            .putLong("registration_attempted_at", now).remove("registration_error").apply()
     }
 
     suspend fun setEnabled(value: Boolean) {
@@ -99,7 +127,8 @@ class PushClient(
     private suspend fun unregisterLocked() {
         val client = corePushCall { holder.client() }
         corePushCall { client.unregisterPush() }
-        prefs.edit().remove("registered_hash").remove("registered_at").remove("unregister_pending").apply()
+        prefs.edit().remove("registered_hash").remove("registered_at").remove("unregister_pending")
+            .remove("registration_attempted_at").remove("registration_error").apply()
     }
 
     /** DELETE uses the old credential; forgetting it first would make it fail. */
@@ -143,11 +172,17 @@ class PushClient(
         } while (deliveries.size == 50 && advanced)
     }
 
-    suspend fun firesaleAction(identity: String, key: String, action: String) = lock.withLock {
+    suspend fun firesaleAction(identity: String, target: String, action: String, kind: String = "announcement", until: String = "15m") = lock.withLock {
         check(settings.isPaired && identity == PushClient.identity(settings)) { "This notification belongs to a previous pairing" }
-        require(key.isNotBlank() && action in listOf("start", "stop")) { "Invalid firesale action" }
+        require(target.isNotBlank() && action in listOf("start", "stop") && kind in listOf("announcement", "manual")) { "Invalid firesale action" }
         val client = corePushCall { holder.client() }
-        corePushCall { client.firesaleAction(key, action) }
+        corePushCall {
+            when {
+                kind == "announcement" -> client.firesaleAction(target, action)
+                action == "start" -> client.startFiresale(target, until)
+                else -> client.stopFiresale(target)
+            }
+        }
     }
 
     private suspend fun firebaseToken(): String = suspendCancellableCoroutine { continuation ->

@@ -12,7 +12,7 @@ import androidx.core.app.NotificationManagerCompat
 class PushNotifications(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
 
-    private fun channels() {
+    fun channels() {
         manager.createNotificationChannels(listOf(
             NotificationChannel("resets", "Resets", NotificationManager.IMPORTANCE_HIGH),
             NotificationChannel("firesale", "Firesale", NotificationManager.IMPORTANCE_HIGH),
@@ -32,7 +32,9 @@ class PushNotifications(private val context: Context) {
                     putExtra("id", delivery.id)
                     putExtra("channel", delivery.channel)
                     putExtra("title", delivery.displayTitle)
-                    putExtra("key", action.announcementKey)
+                    putExtra("target", action.target)
+                    putExtra("kind", action.kind)
+                    putExtra("until", action.until)
                     putExtra("action", action.action)
                     putExtra("pairing", pairingIdentity)
                 }

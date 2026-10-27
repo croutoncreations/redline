@@ -15,7 +15,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
         if (!BuildConfig.PUSH_ENABLED) return
         val id = intent.getLongExtra("id", -1)
         val action = intent.getStringExtra("action") ?: return
-        val key = intent.getStringExtra("key") ?: return
+        val target = intent.getStringExtra("target") ?: intent.getStringExtra("key") ?: return
+        val kind = intent.getStringExtra("kind") ?: "announcement"
+        val until = intent.getStringExtra("until") ?: "15m"
+        if (kind !in listOf("announcement", "manual")) return
         val pairing = intent.getStringExtra("pairing") ?: return
         if (id < 0 || action !in listOf("start", "stop")) return
         val pending = goAsync()
@@ -24,7 +27,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 val settings = RedlineSettings(context)
                 val holder = CoreClientHolder.shared(settings)
                 val text = try {
-                    withTimeout(9_000) { PushClient(context, settings, holder).firesaleAction(pairing, key, action) }
+                    withTimeout(9_000) { PushClient(context, settings, holder).firesaleAction(pairing, target, action, kind, until) }
                     if (action == "start") "Firesale started" else "Firesale stopped"
                 } catch (_: TimeoutCancellationException) {
                     "Request timed out; open Redline to check the result"

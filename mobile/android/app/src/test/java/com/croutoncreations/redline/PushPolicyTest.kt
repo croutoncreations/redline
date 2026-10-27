@@ -39,6 +39,16 @@ class PushPolicyTest {
         assertNull(delivery.copy(data = emptyMap()).firesaleAction)
     }
 
+    @Test fun manualActionsTakePrecedenceAndDefaultDuration() {
+        val delivery = PushDelivery(1, "reset.announced", "", "", mapOf("manual_account" to "main", "kind" to "PROMISED", "key" to "announcement"))
+        assertEquals(PushAction("start", "main", "Start firesale", "manual", "15m"), delivery.firesaleAction)
+        assertEquals("2h", delivery.copy(data = delivery.data + ("manual_for" to "2h")).firesaleAction?.until)
+        val stop = delivery.copy(eventType = "firesale.started", data = mapOf("trigger" to "manual", "account" to "main", "announcement_key" to "old"))
+        assertEquals(PushAction("stop", "main", "Stop firesale", "manual"), stop.firesaleAction)
+        assertNull(stop.copy(data = mapOf("trigger" to "manual")).firesaleAction)
+        assertNull(delivery.copy(data = mapOf("manual_account" to " ")).firesaleAction)
+    }
+
     @Test fun cursorInitialisesWithoutReplayingAndNeverRegresses() {
         val first = PushCursor(null)
         assertFalse(first.shouldNotify(12))

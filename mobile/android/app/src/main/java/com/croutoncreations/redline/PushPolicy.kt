@@ -3,7 +3,13 @@ package com.croutoncreations.redline
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-data class PushAction(val action: String, val announcementKey: String, val label: String)
+data class PushAction(
+    val action: String,
+    val target: String,
+    val label: String,
+    val kind: String = "announcement",
+    val until: String = "15m",
+)
 
 @Serializable
 data class PushDelivery(
@@ -23,6 +29,10 @@ data class PushDelivery(
         if (data["test"] == "true" && !title.startsWith("Test", ignoreCase = true)) "Test: $title" else title
 
     val firesaleAction: PushAction? get() = when {
+        eventType == "firesale.started" && data["trigger"] == "manual" ->
+            data["account"]?.takeIf { it.isNotBlank() }?.let { PushAction("stop", it, "Stop firesale", "manual") }
+        !data["manual_account"].isNullOrBlank() ->
+            PushAction("start", data.getValue("manual_account"), "Start firesale", "manual", data["manual_for"] ?: "15m")
         eventType == "reset.announced" && data["kind"] in listOf("PROMISED", "SCHEDULED") && data["retracted"] != "true" ->
             data["key"]?.takeIf { it.isNotBlank() }?.let { PushAction("start", it, "Start firesale") }
         eventType == "firesale.started" ->

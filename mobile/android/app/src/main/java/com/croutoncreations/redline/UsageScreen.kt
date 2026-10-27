@@ -67,6 +67,7 @@ fun UsageScreen(
     onOpenAccounts: (() -> Unit)? = null,
     accountSelection: AccountSelection? = null,
     onOpenSettings: (() -> Unit)? = null,
+    firesaleContent: @Composable () -> Unit = {},
 ) {
     Surface(color = Background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -82,6 +83,7 @@ fun UsageScreen(
                     onControlProvider,
                     onViewQueue,
                     accountSelection ?: rememberAccountSelection(),
+                    firesaleContent,
                 )
                 else -> CenteredProgress()
             }
@@ -109,13 +111,14 @@ private fun RefreshableProviderList(
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
     accountSelection: AccountSelection,
+    firesaleContent: @Composable () -> Unit,
 ) {
     PullToRefreshBox(
         isRefreshing = state.loading,
         onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
     ) {
-        ProviderList(state, onControlProvider, onViewQueue, accountSelection)
+        ProviderList(state, onControlProvider, onViewQueue, accountSelection, firesaleContent)
     }
 }
 
@@ -382,12 +385,14 @@ private fun ProviderList(
     onControlProvider: (String, String) -> Unit,
     onViewQueue: (String) -> Unit,
     accountSelection: AccountSelection,
+    firesaleContent: @Composable () -> Unit,
 ) {
     val providers = state.view?.providers ?: emptyList()
     LazyColumn(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        item(key = "firesale") { firesaleContent() }
         // A provider with several accounts becomes one carousel at its first
         // account's position; a lone account keeps the card it always had.
         items(usageItems(providers), key = { it.key }) { item ->

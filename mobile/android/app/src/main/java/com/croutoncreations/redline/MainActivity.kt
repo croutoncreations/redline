@@ -95,9 +95,29 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            if (BuildConfig.PUSH_ENABLED) {
-                PushSettings(push, pairingState.isPaired, settingsOpen) { settingsOpen = false }
+            val unpair: () -> Unit = {
+                if (!unpairing) scope.launch {
+                    unpairing = true
+                    try {
+                        push.unpair()
+                    } catch (_: Exception) {
+                        Toast.makeText(this@MainActivity, "Unpaired locally; registration removal failed. Revoke this device on the desktop.", Toast.LENGTH_LONG).show()
+                    } finally {
+                        pairingModel.forget()
+                        pairingGeneration++
+                        unpairing = false
+                    }
+                }
             }
+
+            val firesaleModel: FiresaleViewModel = viewModel(
+                factory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                        FiresaleViewModel(CoreFiresaleSource(holder)) as T
+                },
+            )
+            val firesaleState by firesaleModel.state.collectAsState()
 
             val usageModel: UsageViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
@@ -140,6 +160,15 @@ class MainActivity : ComponentActivity() {
 
             var tab by remember { mutableStateOf(Tab.CAPACITY) }
             val usageState by usageModel.state.collectAsState()
+            PushSettings(push, pairingState.isPaired, settingsOpen,
+                host = android.net.Uri.parse(settings.baseUrl).host ?: "Paired Mac (relay-only)",
+                connection = when {
+                    usageState.failure != null -> "Unavailable · last route ${if (usageState.transport == Transport.Relay) "relay" else "direct"}"
+                    !usageState.hasData -> "Connecting"
+                    usageState.transport == Transport.Relay -> "Relay"
+                    else -> "Direct"
+                },
+                onUnpair = unpair, onClose = { settingsOpen = false })
             val runsState by runsModel.state.collectAsState()
             val queueState by queueModel.state.collectAsState()
 
@@ -168,7 +197,7 @@ class MainActivity : ComponentActivity() {
                     return@OnResume
                 }
                 when (tab) {
-                    Tab.CAPACITY -> usageModel.refresh()
+                    Tab.CAPACITY -> { usageModel.refresh(); firesaleModel.refresh() }
                     Tab.QUEUE -> queueModel.refresh()
                     Tab.RUNS -> runsModel.refresh()
                 }
@@ -209,7 +238,11 @@ class MainActivity : ComponentActivity() {
                     when (tab) {
                         Tab.CAPACITY -> UsageScreen(
                             state = usageState,
-                            onRetry = usageModel::refresh,
+                            onRetry = { usageModel.refresh(); firesaleModel.refresh() },
+                            firesaleContent = {
+                                FiresaleCard(firesaleState, firesaleModel::refresh, firesaleModel::start,
+                                    firesaleModel::stop, firesaleModel::selectAccount, firesaleModel::selectDuration)
+                            },
                             onControlProvider = { id, control ->
                                 usageModel.controlProvider(id, control)
                             },
@@ -222,21 +255,8 @@ class MainActivity : ComponentActivity() {
                                 accountsOpen = true
                             },
                             accountSelection = accountSelection,
-                            onOpenSettings = if (BuildConfig.PUSH_ENABLED) ({ settingsOpen = true }) else null,
-                            onUnpair = {
-                                if (!unpairing) scope.launch {
-                                    unpairing = true
-                                    try {
-                                        push.unpair()
-                                    } catch (_: Exception) {
-                                        Toast.makeText(this@MainActivity, "Unpaired locally; registration removal failed. Revoke this device on the desktop.", Toast.LENGTH_LONG).show()
-                                    } finally {
-                                        pairingModel.forget()
-                                        pairingGeneration++
-                                        unpairing = false
-                                    }
-                                }
-                            },
+                            onOpenSettings = { settingsOpen = true },
+                            onUnpair = unpair,
                         )
 
                         Tab.QUEUE -> QueueScreen(
@@ -269,7 +289,7 @@ class MainActivity : ComponentActivity() {
                         // Switching tabs should show current data, not whatever
                         // was loaded the last time this tab was open.
                         when (chosen) {
-                            Tab.CAPACITY -> usageModel.refresh()
+                            Tab.CAPACITY -> { usageModel.refresh(); firesaleModel.refresh() }
                             Tab.QUEUE -> queueModel.refresh()
                             Tab.RUNS -> {
                                 runsModel.refresh()
