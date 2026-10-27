@@ -153,6 +153,8 @@ GET  /v1/runs/{id}/logs?stream={stream}&tail_bytes={n}
 POST /v1/runs/{id}/read
 POST /v1/runs/read-all
 GET  /v1/notifications
+GET|POST /v1/firesales
+DELETE /v1/firesales/{account}
 ```
 
 `/v1/runs/completions?baseline=true` returns `{"cursor": n, "runs": []}` to start watching
@@ -212,6 +214,39 @@ Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger
 `created_at`, and optional `completed_at`. Transport failures remain pending with failure details
 so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
 sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
+
+## Manual firesales (any provider)
+
+Owner and paired-device principals may use all three routes; unauthenticated calls receive **401**.
+
+- `GET /v1/firesales` returns `{"manual":[{"account":"claude-main","started_at":"2026-10-27T12:00:00Z","deadline":"2026-10-27T12:15:00Z","started_by":"owner"}],"eligible":[{"account":"claude-main","label":"claude-main","provider":"claude","weekly_resets_at":null,"reason_unavailable":"weekly usage not reported"}]}`.
+  All configured accounts are eligible, including paused accounts. `weekly_resets_at` and
+  `reason_unavailable` are nullable. Reasons include `weekly usage not reported`,
+  `weekly allowance used up`, and `provider paused`; these warnings do not prevent a start.
+- `POST /v1/firesales` accepts `{"account":"claude-main","until":"15m"}` or
+  `{"account":"claude-main","until":"weekly_reset"}`. Durations must be **5m–168h** (seven days).
+  Returns **201** with the sale object shown in `manual`; restarting an active sale replaces its
+  deadline and returns **200**, preserving its original start time and actor. Invalid durations
+  receive **400**, unknown accounts **404**, unknown/past weekly resets **409** for `weekly_reset`,
+  and demo mode **409**. Reads use cached usage; they never fetch the provider.
+- `DELETE /v1/firesales/{account}` returns **204**, or **404** if no sale is active or the account
+  is unknown. It does not stop an announcement firesale.
+
+Sales survive restarts and end on stop (`stopped`), expiry (`deadline_passed`), or a weekly reset
+moving later by at least one hour (`completed`). Missing telemetry at start means there is no
+reset baseline: only stop or deadline can end that sale. Increasing remaining alone does not end it.
+`firesale.started` and `firesale.ended` data contain `trigger: "manual"`, `account`, `deadline`,
+`started_by` (`owner` or `device:<name>`), and `reason` (empty on start). Notices are claimed after
+persistence, delivered outside lifecycle locks, and not retried if delivery fails.
+
+To test a phone's Start action without a new event type, send
+`POST /v1/notifications/test` with `{"event":"reset.announced","provider":"claude-main"}`
+(owner only). This synthetic **PROMISED** announcement has a window end two hours ahead and adds
+`data.manual_account: "claude-main"` and `data.manual_for: "15m"`. Clients should prefer these keys
+when present: show **Start firesale (15m)** and POST `{"account":"claude-main","until":"15m"}`
+to `/v1/firesales`. Sending the sample without `provider` retains the **COMPLETED** kind, with no
+manual Start keys. Sending the test never itself starts work; using its Start action can start a
+real manual sale.
 
 ## Reset signals and firesales
 
