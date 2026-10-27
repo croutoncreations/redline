@@ -167,12 +167,17 @@ async function accessToken(env) {
   return cachedToken.token;
 }
 
+// Workers rejects redirect: "error" when the Request is built, so use manual
+// and refuse any redirect: tokens and assertions must never be re-sent.
 async function googleFetch(url, init) {
+  let response;
   try {
-    return await fetch(url, { ...init, redirect: "error" });
+    response = await fetch(url, { ...init, redirect: "manual" });
   } catch {
     throw new PushError(503, "push_upstream_unavailable");
   }
+  if (response.status >= 300 && response.status < 400) throw new PushError(502, "push_upstream_error");
+  return response;
 }
 
 async function isUnregistered(response) {

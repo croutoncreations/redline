@@ -65,7 +65,12 @@ beforeEach(async () => {
   // A new project scopes the module cache independently for each test.
   env = { FCM_PROJECT_ID: `test-project-${++sequence}`,
     FCM_SERVICE_ACCOUNT_JSON: JSON.stringify(serviceAccount), PUSH_AUTH_TOKENS: await digest(bearer) };
-  upstream = vi.fn(async (url) => url === tokenURL ? oauthOK() : Response.json({ name: "sent" }));
+  // Build a real Request from every fetch call so options the Workers runtime
+  // rejects (e.g. redirect: "error") fail here as they do in production.
+  upstream = vi.fn(async (url, init) => {
+    new Request(url, init);
+    return url === tokenURL ? oauthOK() : Response.json({ name: "sent" });
+  });
   vi.stubGlobal("fetch", upstream);
   logs = ["log", "warn", "error"].map((method) => vi.spyOn(console, method));
 });
@@ -227,12 +232,21 @@ describe("Google errors and privacy", () => {
     [400, { status: "INVALID_ARGUMENT", details: [{ fieldViolations: [{ field: "message.token", description: "Invalid value" }] }] }, 410, "unregistered"],
     [400, { status: "INVALID_ARGUMENT", message: "Invalid TTL" }, 502, "push_upstream_error"],
     [418, {}, 502, "push_upstream_error"],
+    [302, {}, 502, "push_upstream_error"],
     [429, {}, 503, "push_upstream_unavailable"],
     [500, {}, 503, "push_upstream_unavailable"],
     [503, {}, 503, "push_upstream_unavailable"],
   ])("maps FCM %i %# without exposing upstream bodies", async (status, error, expected, code) => {
-    upstream.mockImplementation(async (url) => url === tokenURL ? oauthOK() : googleError(status, error));
+    upstream.mockImplementation(async (url, init) => {
+      new Request(url, init);
+      return url === tokenURL ? oauthOK() : googleError(status, error);
+    });
     await expectResult(await send(), expected, { code });
+  });
+
+  it("never follows a redirect from Google", async () => {
+    await send();
+    for (const [, init] of upstream.mock.calls) expect(init.redirect).toBe("manual");
   });
 
   it.each([401, 403])("refreshes and retries FCM %i once", async (status) => {
