@@ -82,28 +82,30 @@ type Server struct {
 	resetFiresaleMu    sync.Mutex
 	// legacyDevice* is the shared session that legacy master-token cookies
 	// migrate to; see legacyDeviceSession.
-	legacyDeviceMu    sync.Mutex
-	legacyDeviceToken string
-	legacyDeviceID    string
-	resetSignalMu     sync.Mutex
-	resetPollMu       sync.Mutex
-	resetSignalState  resetsignal.State
-	resetNextRead     map[string]time.Time
-	resetDeferred     map[string]resetsignal.SourceError
-	resetLastResults  map[string]resetsignal.SourceResult
-	discovery         HarnessDiscoverer
-	hermes            HermesDiscoverer
-	usageSources      *usage.Manager
-	catalogMu         sync.Mutex
-	catalog           discovery.Catalog
-	catalogAt         time.Time
-	mux               *http.ServeMux
-	workers           sync.WaitGroup
-	loopWorkers       sync.WaitGroup
-	startMu           sync.Mutex
-	started           bool
-	pairingMu         sync.Mutex
-	pairing           map[string]time.Time
+	// dashboardStreamInterval overrides the event-stream tick (tests only).
+	dashboardStreamInterval time.Duration
+	legacyDeviceMu          sync.Mutex
+	legacyDeviceToken       string
+	legacyDeviceID          string
+	resetSignalMu           sync.Mutex
+	resetPollMu             sync.Mutex
+	resetSignalState        resetsignal.State
+	resetNextRead           map[string]time.Time
+	resetDeferred           map[string]resetsignal.SourceError
+	resetLastResults        map[string]resetsignal.SourceResult
+	discovery               HarnessDiscoverer
+	hermes                  HermesDiscoverer
+	usageSources            *usage.Manager
+	catalogMu               sync.Mutex
+	catalog                 discovery.Catalog
+	catalogAt               time.Time
+	mux                     *http.ServeMux
+	workers                 sync.WaitGroup
+	loopWorkers             sync.WaitGroup
+	startMu                 sync.Mutex
+	started                 bool
+	pairingMu               sync.Mutex
+	pairing                 map[string]time.Time
 
 	redeemer            bankedResetRedeemer
 	redemptionDisabled  bool

@@ -182,7 +182,13 @@ func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	principal := requestPrincipal(r)
 	send := func() error {
+		// The stream outlives the request-time check: re-validate a device
+		// session before every event so revocation or rotation ends it.
+		if principal.deviceID != "" && !s.deviceSessionActive(r.Context(), principal.token) {
+			return errDeviceRevoked
+		}
 		result, err := s.dashboardData(r.Context())
 		if err != nil {
 			return err
@@ -200,7 +206,11 @@ func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 	if err := send(); err != nil {
 		return
 	}
-	ticker := time.NewTicker(5 * time.Second)
+	interval := s.dashboardStreamInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -133,6 +134,15 @@ func (s *Server) authorized(r *http.Request) (principal, error) {
 		return principal{}, err
 	}
 	return principal{deviceID: id, viaCookie: viaCookie, token: token}, nil
+}
+
+var errDeviceRevoked = errors.New("device session revoked")
+
+// deviceSessionActive reports whether a device token still authenticates
+// under the current master token. Long-lived responses call it periodically.
+func (s *Server) deviceSessionActive(ctx context.Context, token string) bool {
+	_, err := s.store.AuthenticateDeviceSession(ctx, deviceTokenHash(token), s.sessionIssuer(), s.now().UTC())
+	return err == nil
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {

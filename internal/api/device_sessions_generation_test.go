@@ -1,11 +1,49 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// A device revoked while its dashboard stream is open must stop receiving
+// data; the stream outlives the request-time authorization check.
+func TestDashboardStreamEndsWhenDeviceIsRevoked(t *testing.T) {
+	s, _, _ := redemptionServer(t, "claude")
+	s.dashboardStreamInterval = 20 * time.Millisecond
+	token, id, err := s.newDeviceSession(httptest.NewRequest("GET", "http://localhost", nil), "Phone", "mobile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(s)
+	defer server.Close()
+	req, _ := http.NewRequestWithContext(t.Context(), "GET", server.URL+"/v1/dashboard/events", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream=%d", resp.StatusCode)
+	}
+	if err := s.store.RevokeDeviceSession(t.Context(), id, s.now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("revoked device's dashboard stream stayed open")
+	}
+}
 
 // Demo servers run without an API token, so no request has a principal. Demo
 // redemption must still report its documented conflict, not a 403.
