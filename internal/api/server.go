@@ -36,6 +36,8 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/resetreminder"
+	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/tasktemplate"
@@ -64,28 +66,51 @@ type HermesDiscoverer interface {
 }
 
 type Server struct {
-	config       config.Config
-	store        *store.DB
-	now          func() time.Time
-	executor     Executor
-	notifier     Notifier
-	revision     workspace.RevisionResolver
-	artifacts    artifacts.Reader
-	scheduler    *autoscheduler.Loop
-	usageMonitor *autoscheduler.Loop
-	discovery    HarnessDiscoverer
-	hermes       HermesDiscoverer
-	usageSources *usage.Manager
-	catalogMu    sync.Mutex
-	catalog      discovery.Catalog
-	catalogAt    time.Time
-	mux          *http.ServeMux
-	workers      sync.WaitGroup
-	loopWorkers  sync.WaitGroup
-	startMu      sync.Mutex
-	started      bool
-	pairingMu    sync.Mutex
-	pairing      map[string]time.Time
+	config             config.Config
+	store              *store.DB
+	now                func() time.Time
+	executor           Executor
+	notifier           Notifier
+	revision           workspace.RevisionResolver
+	artifacts          artifacts.Reader
+	scheduler          *autoscheduler.Loop
+	usageMonitor       *autoscheduler.Loop
+	resetSignalLoop    *autoscheduler.Loop
+	resetSignalFetcher resetsignal.Fetcher
+	resetSignalSleep   func(context.Context, time.Duration) error
+	resetSignalSources []resetsignal.Source
+	resetFiresaleMu    sync.Mutex
+	// legacyDevice* is the shared session that legacy master-token cookies
+	// migrate to; see legacyDeviceSession.
+	// dashboardStreamInterval overrides the event-stream tick (tests only).
+	dashboardStreamInterval time.Duration
+	legacyDeviceMu          sync.Mutex
+	legacyDeviceToken       string
+	legacyDeviceID          string
+	resetSignalMu           sync.Mutex
+	resetPollMu             sync.Mutex
+	resetSignalState        resetsignal.State
+	resetNextRead           map[string]time.Time
+	resetDeferred           map[string]resetsignal.SourceError
+	resetLastResults        map[string]resetsignal.SourceResult
+	discovery               HarnessDiscoverer
+	hermes                  HermesDiscoverer
+	usageSources            *usage.Manager
+	catalogMu               sync.Mutex
+	catalog                 discovery.Catalog
+	catalogAt               time.Time
+	mux                     *http.ServeMux
+	workers                 sync.WaitGroup
+	loopWorkers             sync.WaitGroup
+	startMu                 sync.Mutex
+	started                 bool
+	pairingMu               sync.Mutex
+	pairing                 map[string]time.Time
+
+	redeemer            bankedResetRedeemer
+	redemptionDisabled  bool
+	redemptionMu        sync.Mutex
+	redemptionsInFlight map[string]bool
 }
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
@@ -117,6 +142,8 @@ func NewDemoServer(
 	executor Executor,
 ) *Server {
 	server := newServer(cfg, database, now, executor, demoRevisionResolver{}, nil)
+	server.redemptionDisabled = true
+	server.redeemer = nil
 	source := staticUsageSource{snapshots: snapshots}
 	server.usageSources = usage.NewManager(source, source, now)
 	server.discovery = discoverer
@@ -194,9 +221,11 @@ func newServer(
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
 	}
+	credentials := nativeusage.NewDefaultCredentials()
+	server.redeemer = nativeusage.NewRedeemer(credentials)
 	server.usageSources = usage.NewManager(
 		openusage.Source{},
-		nativeusage.Client{Credentials: nativeusage.NewDefaultCredentials(), Now: now},
+		nativeusage.Client{Credentials: credentials, Now: now},
 		now,
 	)
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
@@ -211,17 +240,16 @@ func newServer(
 			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
 		}
 	}
-	// The banked-reset lookup reads the one local Claude Code login. With
-	// several Claude accounts configured it cannot tell which account that
-	// login belongs to, and a count shown on the wrong account is worse
-	// than none.
-	claudeAccounts := 0
+	// Supplementary lookups read one local login per provider type. Several
+	// accounts of that type make the login ambiguous, but do not affect others.
+	providerAccounts := make(map[string]int)
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(provider.Provider, "claude") {
-			claudeAccounts++
-		}
+		providerAccounts[strings.ToLower(strings.TrimSpace(provider.Provider))]++
 	}
-	server.usageSources.SkipBankedResets = claudeAccounts > 1
+	server.usageSources.SkipBankedResetProviders = map[string]bool{
+		"claude": providerAccounts["claude"] > 1,
+		"codex":  providerAccounts["codex"] > 1,
+	}
 	interval, _ := cfg.SchedulerInterval()
 	providers := make([]string, 0, len(cfg.Providers))
 	for provider := range cfg.Providers {
@@ -230,14 +258,24 @@ func newServer(
 	server.scheduler = autoscheduler.NewLoop(cfg.Scheduler.Enabled, interval, providers, server.dispatchAutomatic)
 	monitorInterval, _ := cfg.UsageMonitorInterval()
 	server.usageMonitor = autoscheduler.NewLoop(cfg.UsageMonitor.Enabled, monitorInterval, providers, server.monitorProvider)
+	resetInterval, _ := cfg.ResetSignalsInterval()
+	server.resetSignalFetcher = resetsignal.Fetcher{Now: now}
+	server.resetSignalSleep = waitResetSignalStartup
+	server.resetSignalLoop = autoscheduler.NewLoop(cfg.ResetSignals.Enabled, resetInterval, []string{"global"}, server.pollResetSignals)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/reset-signals", server.resetSignals)
+	mux.HandleFunc("POST /v1/reset-signals/firesale", server.resetSignalFiresale)
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
+	mux.HandleFunc("GET /v1/devices", server.listDevices)
+	mux.HandleFunc("DELETE /v1/devices/{id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
+	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
+	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
@@ -283,12 +321,14 @@ func newServer(
 	mux.HandleFunc("GET /v1/scheduler/attempts", server.listAttempts)
 	mux.HandleFunc("GET /v1/metrics/launch", server.launchMetrics)
 	mux.HandleFunc("GET /v1/runs", server.listRuns)
+	mux.HandleFunc("GET /v1/runs/completions", server.listRunCompletions)
 	mux.HandleFunc("GET /v1/runs/{run}/events", server.listRunEvents)
 	mux.HandleFunc("GET /v1/runs/{run}/logs", server.getRunLogs)
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
 	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
+	mux.HandleFunc("POST /v1/notifications/test", server.testNotification)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
 	mux.HandleFunc("GET /dashboard", server.dashboardPage)
 	mux.HandleFunc("GET /m", server.dashboardPage)
@@ -333,15 +373,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.bootstrapDashboardSession(w, r) {
 			return
 		}
-		authorized, viaCookie := s.authorized(r)
-		if !authorized {
+		principal, err := s.authorized(r)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !principal.valid() {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="Redline"`)
+			if r.Method == http.MethodGet && isDashboardPath(r.URL.Path) && strings.Contains(r.Header.Get("Accept"), "text/html") {
+				s.serveDashboardSignIn(w, r)
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, problem{Error: "Redline API authentication is required"})
 			return
 		}
+		// Legacy cookies migrate without interrupting the current request.
+		if principal.legacy {
+			token, id, err := s.legacyDeviceSession(r)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			principal.token, principal.deviceID = token, id
+		}
+		r = r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal))
 		// Slide the expiry forward while the browser keeps using the dashboard.
-		if viaCookie {
-			s.setDashboardSessionCookie(w, r)
+		if principal.viaCookie {
+			s.setDashboardSessionCookie(w, r, principal.token)
 			// Downstream handlers set their own Cache-Control, so re-assert
 			// no-store when the headers are actually written.
 			w = &noStoreWriter{ResponseWriter: w}
@@ -357,7 +415,10 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
-func (s *Server) createPairingToken(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
+	if !requireOwner(w, r) {
+		return
+	}
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
@@ -396,16 +457,35 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		Token string `json:"pairing_token"`
+		Name  string `json:"name"`
+		Kind  string `json:"kind"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
+	if request.Kind == "" {
+		request.Kind = "browser"
+	}
+	if request.Kind != "browser" && request.Kind != "mobile" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be browser or mobile"})
+		return
+	}
+	request.Name = cleanDeviceName(request.Name)
+	if request.Name == "" {
+		request.Name = "Paired device"
+	}
 	if request.Token == "" || !s.consumePairingToken(request.Token) {
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid or expired Redline pairing token"})
 		return
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, request.Name, request.Kind)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Pairing clients read the credential from Set-Cookie; preserve the 204 contract.
+	s.setDashboardSessionCookie(w, r, token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -459,21 +539,21 @@ func (w *noStoreWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	// A response carrying the session cookie must never be stored by an
-	// intermediary: the cookie value is the API token, so a shared cache could
+	// intermediary: the cookie value is a device token, so a shared cache could
 	// hand it to another client. Enforce that here rather than relying on the
 	// caller to remember, so the invariant travels with the Set-Cookie itself.
 	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
-		Name: apiSessionCookie, Value: s.config.APIToken, Path: "/",
+		Name: apiSessionCookie, Value: token, Path: "/",
 		HttpOnly: true, Secure: !loopbackHost(r.Host), SameSite: http.SameSiteStrictMode,
 		Expires: s.now().UTC().Add(dashboardSessionTTL), MaxAge: int(dashboardSessionTTL / time.Second),
 	})
 }
 
 func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/dashboard" && r.URL.Path != "/m") {
+	if r.Method != http.MethodGet || !isDashboardPath(r.URL.Path) {
 		return false
 	}
 	accessToken := r.URL.Query().Get("access_token")
@@ -492,29 +572,18 @@ func (s *Server) bootstrapDashboardSession(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, problem{Error: "invalid Redline dashboard token"})
 		return true
 	}
-	s.setDashboardSessionCookie(w, r)
+	token, _, err := s.newDeviceSession(r, "Browser", "browser")
+	if err != nil {
+		writeError(w, err)
+		return true
+	}
+	s.setDashboardSessionCookie(w, r, token)
 	clean := *r.URL
 	query := clean.Query()
 	query.Del("access_token")
 	clean.RawQuery = query.Encode()
 	http.Redirect(w, r, clean.String(), http.StatusSeeOther)
 	return true
-}
-
-// authorized reports whether the request carries valid credentials, and
-// whether it authenticated via the dashboard session cookie. Cookie-
-// authenticated requests get a refreshed expiry so an actively used browser
-// never has to re-pair; bearer clients hold the token directly and need none.
-func (s *Server) authorized(r *http.Request) (ok bool, viaCookie bool) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") &&
-		secureTokenEqual(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), s.config.APIToken) {
-		return true, false
-	}
-	cookie, err := r.Cookie(apiSessionCookie)
-	if err == nil && secureTokenEqual(cookie.Value, s.config.APIToken) {
-		return true, true
-	}
-	return false, false
 }
 
 func secureTokenEqual(left, right string) bool {
@@ -588,6 +657,9 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		return
 	}
 	s.started = true
+	if err := s.reconcileResetSignalFiresales(ctx); err != nil {
+		log.Printf("redline reset firesale startup reconciliation: %v", err)
+	}
 	s.loopWorkers.Add(1)
 	go func() {
 		defer s.loopWorkers.Done()
@@ -598,6 +670,10 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		defer s.loopWorkers.Done()
 		s.usageMonitor.Run(ctx)
 	}()
+	if s.config.ResetSignals.Enabled {
+		s.loopWorkers.Add(1)
+		go func() { defer s.loopWorkers.Done(); s.runResetSignals(ctx) }()
+	}
 }
 
 func (s *Server) Wait() {
@@ -637,7 +713,18 @@ func (s *Server) healthDetails(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	deliveries, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	var deliveries []domain.NotificationDelivery
+	var err error
+	if r.URL.Query().Has("after_id") {
+		afterID, parseErr := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be an int64"})
+			return
+		}
+		deliveries, err = s.store.ListNotificationDeliveriesAfter(r.Context(), afterID, limit)
+	} else {
+		deliveries, err = s.store.ListNotificationDeliveries(r.Context(), limit)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -844,7 +931,26 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 }
 
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
-	_, _, usageErr := s.fetchAndStore(ctx, providerID)
+	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
+	if usageErr == nil {
+		// Redeem mode only suppresses redeem-now for resets automatic redemption
+		// will actually attempt; on error, every reset falls back to notify.
+		handled, err := s.automaticallyRedeemable(ctx, providerID, configured, snapshot)
+		if err != nil {
+			log.Printf("redline %s automatic banked reset selection failed: %v", providerID, err)
+		}
+		reminders := resetreminder.Checker{
+			Enabled: s.config.Notifications.Enabled && s.config.NotificationEvents()[domain.EventResetExpiring],
+			Store:   s.store, Notifier: s.notifier,
+			AutoRedeems: func(reset decision.BankedReset) bool { return handled[reset.ID] },
+		}
+		if err := reminders.Check(ctx, providerID, configured, snapshot, s.now()); err != nil {
+			log.Printf("redline %s banked reset reminders failed: %v", providerID, err)
+		}
+		if err := s.redeemExpiringBankedReset(ctx, providerID, configured, snapshot); err != nil {
+			log.Printf("redline %s automatic banked reset redemption failed: %v", providerID, err)
+		}
+	}
 	_, tokenErr := s.syncTokens(ctx, providerID)
 	return errors.Join(usageErr, tokenErr)
 }
@@ -1132,6 +1238,11 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if s.config.DemoScenario == "" {
+		if err := workspace.ValidateLocalRepository(ctx, profile); err != nil {
+			return err
+		}
+	}
 	if profile.HarnessType == "hermes" && profile.AgentContextID == "" {
 		return fmt.Errorf("agent_context_id is required for a Hermes execution profile")
 	}
@@ -1170,31 +1281,33 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskRequest struct {
-	ID                 string              `json:"id"`
-	Name               string              `json:"name"`
-	Prompt             string              `json:"prompt"`
-	PromptFile         string              `json:"prompt_file"`
-	Priority           int                 `json:"priority"`
-	ExecutionProfileID string              `json:"execution_profile_id"`
-	RuntimeJobID       string              `json:"runtime_job_id"`
-	Type               domain.TaskType     `json:"type"`
-	MinInterval        string              `json:"min_interval"`
-	RequireRepoChange  bool                `json:"require_repo_change"`
-	DispatchTier       domain.DispatchTier `json:"dispatch_tier"`
-	Enabled            *bool               `json:"enabled"`
+	ID                  string              `json:"id"`
+	Name                string              `json:"name"`
+	Prompt              string              `json:"prompt"`
+	PromptFile          string              `json:"prompt_file"`
+	Priority            int                 `json:"priority"`
+	ExecutionProfileID  string              `json:"execution_profile_id"`
+	RuntimeJobID        string              `json:"runtime_job_id"`
+	Type                domain.TaskType     `json:"type"`
+	MinInterval         string              `json:"min_interval"`
+	FiresaleMinInterval string              `json:"firesale_min_interval"`
+	RequireRepoChange   bool                `json:"require_repo_change"`
+	DispatchTier        domain.DispatchTier `json:"dispatch_tier"`
+	Enabled             *bool               `json:"enabled"`
 }
 
 type taskUpdateRequest struct {
-	Name               *string              `json:"name"`
-	Prompt             *string              `json:"prompt"`
-	PromptFile         *string              `json:"prompt_file"`
-	Priority           *int                 `json:"priority"`
-	ExecutionProfileID *string              `json:"execution_profile_id"`
-	RuntimeJobID       *string              `json:"runtime_job_id"`
-	Type               *domain.TaskType     `json:"type"`
-	MinInterval        *string              `json:"min_interval"`
-	RequireRepoChange  *bool                `json:"require_repo_change"`
-	DispatchTier       *domain.DispatchTier `json:"dispatch_tier"`
+	Name                *string              `json:"name"`
+	Prompt              *string              `json:"prompt"`
+	PromptFile          *string              `json:"prompt_file"`
+	Priority            *int                 `json:"priority"`
+	ExecutionProfileID  *string              `json:"execution_profile_id"`
+	RuntimeJobID        *string              `json:"runtime_job_id"`
+	Type                *domain.TaskType     `json:"type"`
+	MinInterval         *string              `json:"min_interval"`
+	FiresaleMinInterval *string              `json:"firesale_min_interval"`
+	RequireRepoChange   *bool                `json:"require_repo_change"`
+	DispatchTier        *domain.DispatchTier `json:"dispatch_tier"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1212,6 +1325,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	firesaleInterval := time.Duration(0)
+	if request.FiresaleMinInterval != "" {
+		firesaleInterval, err = parseDuration(request.FiresaleMinInterval)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid firesale_min_interval"})
+			return
+		}
+	}
 	id := request.ID
 	if id == "" {
 		id = uuid.NewString()
@@ -1220,7 +1341,20 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		ID: id, Name: request.Name, Prompt: request.Prompt, PromptFile: request.PromptFile,
 		Priority: request.Priority, ExecutionProfileID: request.ExecutionProfileID,
 		RuntimeJobID: request.RuntimeJobID,
-		Type:         request.Type, MinInterval: interval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+		Type:         request.Type, MinInterval: interval, FiresaleMinInterval: firesaleInterval, RequireRepoChange: request.RequireRepoChange, DispatchTier: request.DispatchTier,
+	}
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
+		return
+	}
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
 	}
 	if request.Enabled != nil && !*request.Enabled {
 		task.State = domain.Disabled
@@ -1297,14 +1431,33 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if request.FiresaleMinInterval != nil {
+		task.FiresaleMinInterval = 0
+		if *request.FiresaleMinInterval != "" {
+			task.FiresaleMinInterval, err = parseDuration(*request.FiresaleMinInterval)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, problem{Error: "invalid firesale_min_interval"})
+				return
+			}
+		}
+	}
 	if request.RequireRepoChange != nil {
 		task.RequireRepoChange = *request.RequireRepoChange
 	}
 	if request.DispatchTier != nil {
 		task.DispatchTier = *request.DispatchTier
 	}
-	if _, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID); err != nil {
-		writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+	profile, err := s.store.GetProfile(r.Context(), task.ExecutionProfileID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "execution_profile_id is not configured"})
+		} else {
+			writeError(w, err)
+		}
+		return
+	}
+	if err := normalizeAndValidateTaskInput(&task, profile); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
 	if err := s.store.UpdateTask(r.Context(), task, s.now()); err != nil {
@@ -1317,6 +1470,21 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func normalizeAndValidateTaskInput(task *domain.Task, profile domain.ExecutionProfile) error {
+	// Dispatch selects raw nonempty overrides before fallbacks. Clear blank
+	// overrides so execution uses the same input that passed validation.
+	for _, input := range []*string{&task.Prompt, &task.PromptFile, &task.RuntimeJobID} {
+		if strings.TrimSpace(*input) == "" {
+			*input = ""
+		}
+	}
+	if task.Prompt != "" || task.PromptFile != "" ||
+		(profile.HarnessType == "hermes" && task.RuntimeJobID != "") {
+		return nil
+	}
+	return fmt.Errorf("prompt or prompt_file is required")
 }
 
 func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
@@ -1348,11 +1516,14 @@ type schedulerRequest struct {
 }
 
 type schedulerResponse struct {
-	Snapshot     decision.UsageSnapshot `json:"snapshot"`
-	Result       decision.Result        `json:"result"`
-	Trigger      string                 `json:"trigger,omitempty"`
-	SelectedTask *domain.Task           `json:"selected_task,omitempty"`
-	Run          *domain.Run            `json:"run,omitempty"`
+	// ProviderFiresale is captured before per-request admission denials clear Result.Firesale:
+	// it reflects the provider's state, not this attempt's outcome.
+	ProviderFiresale *bool                  `json:"provider_firesale,omitempty"`
+	Snapshot         decision.UsageSnapshot `json:"snapshot"`
+	Result           decision.Result        `json:"result"`
+	Trigger          string                 `json:"trigger,omitempty"`
+	SelectedTask     *domain.Task           `json:"selected_task,omitempty"`
+	Run              *domain.Run            `json:"run,omitempty"`
 }
 
 func (s *Server) executeScheduler(w http.ResponseWriter, r *http.Request) {
@@ -1461,9 +1632,9 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	} else if concurrency, limitErr := s.effectiveProviderConcurrency(r.Context(), providerID); limitErr != nil {
 		writeError(w, limitErr)
 		return
-	} else if active >= concurrency.MaxConcurrentRuns {
+	} else if cap := providerDispatchCap(s.config.Providers[providerID], concurrency.MaxConcurrentRuns, base); active >= cap {
 		response.DispatchAvailable = false
-		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", concurrency.MaxConcurrentRuns)
+		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", cap)
 	}
 	revisions := make(map[string]profileRevision)
 	for _, task := range tasks {
@@ -1544,8 +1715,12 @@ func (s *Server) dispatchAutomatic(ctx context.Context, provider string) error {
 	if err != nil {
 		return err
 	}
-	for range concurrency.MaxConcurrentRuns {
-		_, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+	limit := concurrency.MaxConcurrentRuns
+	for index := 0; index < limit; index++ {
+		response, admitted, err := s.dispatch(ctx, schedulerRequest{ProviderAccountID: provider}, "automatic")
+		if response.ProviderFiresale != nil && *response.ProviderFiresale {
+			limit = max(limit, s.config.Providers[provider].FiresaleMaxConcurrentRuns)
+		}
 		if err != nil {
 			return err
 		}
@@ -1657,7 +1832,7 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	maxConcurrent := concurrency.MaxConcurrentRuns
-	if active >= maxConcurrent {
+	if active >= maxConcurrent && configuredProvider.FiresaleMaxConcurrentRuns <= maxConcurrent {
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeActive,
 			Reason: fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)}
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
@@ -1665,6 +1840,18 @@ func (s *Server) dispatchCore(
 	response.Snapshot, response.Result, err = s.evaluateProvider(ctx, request.ProviderAccountID)
 	if err != nil {
 		return response, false, err
+	}
+	firesale := response.Result.Firesale
+	if response.Result.Decision != decision.Unknown {
+		response.ProviderFiresale = &firesale
+	}
+	maxConcurrent = providerDispatchCap(configuredProvider, maxConcurrent, response.Result)
+	if active >= maxConcurrent {
+		response.Result.Decision = decision.Wait
+		response.Result.Mode = decision.ModeActive
+		response.Result.Reason = fmt.Sprintf("provider concurrency limit %d reached", maxConcurrent)
+		response.Result.Firesale = false
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	task, profile, revision, selectedResult, err := s.selectTask(
 		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
@@ -1678,7 +1865,7 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	response.SelectedTask = &task
-	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency}
+	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency, ProviderFiresale: firesale}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
 		if contextErr != nil {
@@ -1700,6 +1887,7 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			response.Result.Decision = decision.Wait
+			response.Result.Firesale = false
 			response.Result.Mode = decision.ModeActive
 			response.Result.Reason = err.Error()
 			response.Result.TaskSelectionReason = "another scheduler request consumed concurrency first"
@@ -1717,8 +1905,25 @@ func (s *Server) dispatchCore(
 		if err := s.executor.Execute(context.Background(), run, task, profile); err != nil {
 			log.Printf("redline run %s execution bookkeeping failed: %v", run.ID, err)
 		}
+		s.triggerAfterRun(run)
 	}()
 	return response, true, nil
+}
+
+func (s *Server) triggerAfterRun(run domain.Run) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finished, err := s.store.GetRun(ctx, run.ID)
+	if err != nil || (finished.State != domain.RunCompleted && finished.State != domain.RunFailed) {
+		return
+	}
+	firesale, err := s.store.LatestAutomaticFiresale(ctx, run.ProviderAccountID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("redline %s firesale state lookup failed: %v", run.ProviderAccountID, err)
+	}
+	if err == nil && firesale {
+		s.scheduler.Trigger()
+	}
 }
 
 func (s *Server) selectTask(
@@ -1743,8 +1948,12 @@ func (s *Server) evaluateCandidate(
 	snapshot decision.UsageSnapshot, base decision.Result, revisions map[string]profileRevision,
 ) (candidateVerdict, error) {
 	verdict := candidateVerdict{Result: base}
-	if task.LastCompletedAt != nil && task.MinInterval > 0 {
-		eligibleAt := task.LastCompletedAt.Add(task.MinInterval)
+	interval := task.MinInterval
+	if base.Firesale && task.FiresaleMinInterval > 0 {
+		interval = task.FiresaleMinInterval
+	}
+	if task.LastCompletedAt != nil && interval > 0 {
+		eligibleAt := task.LastCompletedAt.Add(interval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
 			return verdict, nil
@@ -1933,7 +2142,7 @@ func (s *Server) evaluateCandidateBudget(
 		poolDecision := decision.Evaluate(decision.Input{
 			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
 			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger,
+			PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
 			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
 		})
 		poolResults = append(poolResults, decision.PoolResult{
@@ -1965,6 +2174,13 @@ func (s *Server) evaluateCandidateBudget(
 	return decorateBudgetResult(result, profile.Model, routing, required, triggering, poolResults), true, ""
 }
 
+func providerDispatchCap(provider config.Provider, effective int, base decision.Result) int {
+	if base.Firesale {
+		return max(effective, provider.FiresaleMaxConcurrentRuns)
+	}
+	return effective
+}
+
 func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
 	if required == "" {
 		required = domain.DispatchBehind
@@ -1974,6 +2190,8 @@ func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
 
 func dispatchTierRank(tier domain.DispatchTier) int {
 	switch tier {
+	case domain.DispatchFiresale:
+		return 4
 	case domain.DispatchExpiring:
 		return 3
 	case domain.DispatchWellBehind:
@@ -1997,6 +2215,14 @@ func decorateBudgetResult(
 }
 
 func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, response schedulerResponse) error {
+	previousFiresale := false
+	if response.Trigger == "automatic" && response.ProviderFiresale != nil {
+		previous, err := s.store.LatestAutomaticPressureFiresale(ctx, provider)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		previousFiresale = previous
+	}
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		return err
@@ -2006,7 +2232,65 @@ func (s *Server) recordSchedulerResponse(ctx context.Context, provider string, r
 		record.SelectedTaskID = response.SelectedTask.ID
 	}
 	_, err = s.store.RecordSchedulerDecision(ctx, record, s.now())
+	if err == nil && response.Trigger == "automatic" && response.ProviderFiresale != nil && response.Result.FiresaleTrigger != "reset_announcement" && previousFiresale != *response.ProviderFiresale && s.notifier != nil {
+		eventType := domain.EventFiresaleEnded
+		if *response.ProviderFiresale {
+			eventType = domain.EventFiresaleStarted
+		}
+		event := domain.NotificationEvent{
+			Version: 1, Type: eventType, OccurredAt: s.now().UTC(), ProviderAccountID: provider,
+			Data: map[string]string{
+				"pace_gap":               strconv.FormatFloat(response.Result.PaceGap, 'f', -1, 64),
+				"overflow":               strconv.FormatFloat(response.Result.Overflow, 'f', -1, 64),
+				"effective_reset_at":     response.Result.EffectiveResetAt.UTC().Format(time.RFC3339),
+				"effective_reset_source": string(response.Result.EffectiveResetSource),
+				"unlocked_tier":          string(response.Result.UnlockedTier),
+			},
+		}
+		event.Data["overflow_available"] = strconv.FormatBool(response.Result.Mode == decision.ModeSlots)
+		event = notification.WithMessage(event, s.config.Providers[provider].Provider)
+		if notifyErr := s.notifier.Notify(ctx, event); notifyErr != nil {
+			log.Printf("redline %s firesale notification failed: %v", provider, notifyErr)
+		}
+	}
 	return err
+}
+
+func (s *Server) listRunCompletions(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("baseline") == "true" {
+		cursor, err := s.store.LatestCompletedRunCursor(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cursor": cursor, "runs": []domain.Run{}})
+		return
+	}
+	limit := 100
+	if raw := query.Get("limit"); raw != "" {
+		var err error
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "limit must be between 1 and 100"})
+			return
+		}
+	}
+	cursor := int64(0)
+	if raw := query.Get("after"); raw != "" {
+		var err error
+		cursor, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cursor < 0 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after must be a nonnegative completion cursor"})
+			return
+		}
+	}
+	runs, next, err := s.store.ListCompletedRuns(r.Context(), cursor, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "cursor": next})
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -2303,6 +2587,12 @@ func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
 		Since: since, Until: until, Providers: providerIDs, Attempts: filtered,
 		Runs: runs, RunObservations: observationsByRun, Capacity: capacities,
 	})
+	runUsage, err := s.store.ListRunUsage(r.Context(), since, until)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	report.ProfileUsage = launchmetrics.BuildProfileUsage(runUsage, providerFilter)
 	writeJSON(w, http.StatusOK, report)
 }
 
@@ -2325,27 +2615,43 @@ func (s *Server) evaluateStoredProvider(
 	if err != nil {
 		return decision.Result{}, err
 	}
-	thresholds, err := selection.Definition.DecisionThresholds()
+	input, err := s.providerDecisionInput(ctx, providerID, snapshot, selection)
 	if err != nil {
 		return decision.Result{}, err
+	}
+	result := decision.Evaluate(input)
+	result.Policy = selection.Policy
+	return result, nil
+}
+
+func (s *Server) providerDecisionInput(
+	ctx context.Context, providerID string, snapshot decision.UsageSnapshot, selection providerPolicySelection,
+) (decision.Input, error) {
+	thresholds, err := selection.Definition.DecisionThresholds()
+	if err != nil {
+		return decision.Input{}, err
 	}
 	maxAge, err := s.config.SnapshotAge()
 	if err != nil {
-		return decision.Result{}, err
+		return decision.Input{}, err
 	}
 	estimate, err := s.calibration(ctx, providerID)
 	if err != nil {
-		return decision.Result{}, err
+		return decision.Input{}, err
 	}
-	result := decision.Evaluate(decision.Input{
+	events, err := s.providerResetEvents(ctx, providerID, snapshot)
+	if err != nil {
+		return decision.Input{}, err
+	}
+	return decision.Input{
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
-		PaceGapTrigger: selection.Definition.PaceGapTrigger,
+		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
+		ForceFiresale:  s.hasResetAnnouncementEvent(events),
+		ResetEvents:    events,
 		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
-	})
-	result.Policy = selection.Policy
-	return result, nil
+	}, nil
 }
 
 func (s *Server) calibration(ctx context.Context, providerID string) (calibration.Estimate, error) {

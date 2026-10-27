@@ -6,6 +6,182 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- paired devices no longer receive the master API token. New pairings and local dashboard
+  sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
+  upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
+  Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
+  job/run/provider and firesale control remains available. Pairing creation, device management,
+  and notification tests require the owner. Device sessions are bound to the issuing master
+  token, so rotating it and restarting signs out every device and legacy pairing.
+- Owner device management: `GET /v1/devices`, `DELETE /v1/devices/{id}`, and
+  `redline devices list|revoke ID`; lists never expose token hashes.
+
+### Added
+
+- Announcement firesales end when their own provider's fresh usage shows a weekly refill or
+  weekly rollover, using a persisted low-water mark and `completion_source: usage_refill`.
+- Announcement-triggered Codex firesales: `reset_signals.firesale: off|notify|auto` (default
+  `notify` when monitoring is enabled), owner/device `POST /v1/reset-signals/firesale`, and
+  `redline reset firesale start|stop`. Only viable promises/schedules with a future announced
+  deadline qualify; predictions and completed resets never start one. Persistent opt-ins and
+  lifecycle claims survive restarts, force the firesale/pacing gate without bypassing safety
+  limits, and expose state in cached API/CLI/dashboard JSON.
+- Reset monitoring retains each feed's last successful snapshot through failed/deferred polls,
+  while still applying TTL, source age, and deadline expiry checks.
+- Off-by-default public Codex reset-signal monitoring (`reset_signals`) and opt-in
+  `reset.announced` alerts for fresh linked promises, schedules, and completions only, never
+  odds-only predictions. Persistent deduplication allows escalation and one matching retraction
+  follow-up. Cached state is available through `redline reset signals`, `GET /v1/reset-signals`,
+  and additive dashboard JSON.
+- Readable reset/firesale notification titles and messages, UTC deadlines, and verified weekly
+  refill percentages. Event payloads add optional `title` without changing existing data keys.
+- `redline notification test [--event TYPE|all] [--provider ID] [--json]` and bearer-only
+  `POST /v1/notifications/test` send synthetic samples, bypassing subscriptions but respecting
+  the global enabled flag. No provider requests or real redemptions are made.
+- Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
+  alerts from recorded deliveries, with persistent deduplication and no history replay on first
+  use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+
+## [0.1.11] - 2026-10-23
+
+### Upgrade notes
+
+- The default `notifications.events` list is unchanged (`run.started`, `run.completed`,
+  `run.failed`, `scheduler.error`). To receive the new `reset.expiring`, `reset.redeemed`,
+  `reset.redeem_failed`, `firesale.started`, and `firesale.ended` events, list them explicitly.
+  Hooks should ignore event types they do not recognize.
+- Native Codex usage now also reads per-credit reset details from a separate endpoint while banked
+  resets are available (at most every 30 minutes). A rate limit on that endpoint only backs off
+  the detail lookup; usage collection continues.
+- Earlier versions ignored unknown config keys with a warning. `banked_resets`,
+  `firesale_trigger`, `firesale_max_concurrent_runs`, and related settings are now recognized, so
+  any already present take effect, and invalid values (or `on_expiry: redeem` without
+  `usage_monitor.enabled`, or with `usage_source: openusage`) stop the service from starting.
+  Before upgrading, check your current version's startup log for `ignoring unknown key` warnings.
+- After rolling back to an older daemon, reload any open dashboard tab before editing jobs.
+
+### Added
+
+- Banked resets are tracked per grant or credit (expiry, which windows they clear, usability), and
+  a `reset.expiring` notification reminds before one lapses (`banked_resets.remind_before`,
+  default 24h) and again at `redeem_lead` with `on_expiry: notify`, deduplicated per deadline.
+- Opt-in `banked_resets.on_expiry: redeem` automatically uses expiring resets from the usage
+  monitor, independently of dispatch enablement or pause. Redeemable weekly resets shorten the
+  scheduling horizon and can trigger firesale. Persisted retries respect five-minute provider
+  throttling, cooldowns, 429 lockouts, and a 30-minute `nothing_to_reset` delay; expired failed
+  resets notify once. Requires the usage monitor and native reset telemetry. Roll out with dry
+  runs, then a manual first redemption, then enable redeem.
+- Manual banked-reset redemption for Claude grants and Codex credits through authenticated API
+  routes and `redline reset redeem`, with safe dry runs, confirmation, persisted retry keys,
+  shared rate-limit lockouts, refill verification, attempt history, and redemption notifications.
+  Automatic spending is opt-in; MCP exposes no spending tool.
+- Firesale scheduling unlocks a fourth task tier under large allowance surplus, with optional
+  per-task faster intervals, higher provider concurrency, prompt re-dispatch after completion,
+  and `firesale.started` / `firesale.ended` notifications. Decisions report the effective reset
+  horizon, including opted-in banked resets. CLI, API, MCP, and dashboard support
+  the new task settings, and existing tasks migrate without changing their cooldowns.
+- `redline reset preview` performs a bounded, read-only comparison of three public Codex reset
+  trackers. It preserves source attribution and freshness, distinguishes predictions, promises,
+  scheduled reports, completions, and banked resets, and deduplicates mirrors of one announcement.
+  The preview cannot notify, select jobs, alter scheduling, or start work.
+- `redline metrics launch` and `GET /v1/metrics/launch` now include `profile_usage`: Redline-managed token totals per
+  execution profile and provider account for the report window. Each total has an input/output/cache-read/cache-creation
+  breakdown and is split by automatic, manual, and unknown trigger, with evidence coverage. Profiles without usage
+  evidence report `tokens: null` rather than zero, and interactive usage is excluded.
+
+### Changed
+
+- Tagged releases now wait for green CI on `main` and lint the generated Homebrew formula with
+  `brew style` and `brew audit --strict` before publishing. A daily workflow flags a Homebrew cask
+  that lags the latest release. The formula description was shortened to pass `brew audit`.
+- Maintenance: Go dependency updates (`modernc.org/sqlite` 1.60.1, `golang.org/x/sys` 0.49.0) and
+  new repository CI checks. Running the dashboard browser tests (`npm run test:dashboard`) now needs Node 20 or
+  newer, up from Node 18; see `CONTRIBUTING.md`.
+
+### Fixed
+
+- Document dashboard sign-in for source and headless installs, including cross-platform browser
+  commands and matching the browser URL to an alternate service port.
+- Native Claude usage accepts an explicitly unused five-hour window (`utilization: 0`,
+  `resets_at: null`) without inventing a reset time; malformed or active windows still fail closed.
+- The CLI quickstart now offers `redline dashboard` to open an authenticated local browser
+  session without printing its credential. Unauthenticated dashboard visitors receive sign-in
+  instructions; API authentication remains required.
+- Local Git-worktree execution profiles reject missing/non-Git directories and invalid base
+  branches before saving, so setup can show a correction instead of an unattended run failure.
+- The scheduler-off banner now opens instructions with the running service’s configuration path,
+  host-appropriate restart command, and the allowance implications of enabling dispatch.
+- Task creation and updates now reject jobs with no `prompt` or `prompt_file` instead of queuing
+  work that can only fail when the harness starts. Hermes tasks that select an existing runtime
+  job remain valid without a separate prompt.
+
+### Security
+
+- Builds now use Go 1.26.9, which fixes 13 standard-library vulnerabilities. Nine are reachable
+  from Redline: `net/http` HTTP/1 and HTTP/2 client/server issues (request desync, memory and CPU
+  exhaustion, an HPACK race crash), `net/textproto`/`mime/multipart` header limits, and
+  `crypto/tls` ECH parsing. `go.mod` now requires Go 1.26.9 (previously 1.26.0 with a 1.26.6
+  toolchain pin), so `go install github.com/croutoncreations/redline/cmd/redline@latest` also
+  builds with the patched standard library. With the default `GOTOOLCHAIN=auto`, older local Go
+  versions download 1.26.9 automatically.
+
+## [0.1.10] - 2026-10-01
+
+### Added
+
+- `redline demo serve --run-duration` keeps an admitted demo job in the running state for a set
+  time, and finished demo runs now carry a realistic transcript instead of a placeholder.
+- `SECURITY.md` with the supported reporting channels and scope, and a bug report issue form that
+  collects version, install method, OS, harness, and area.
+- `llms.txt` agent index linking the docs and launch post.
+
+### Fixed
+
+- The macOS app's dashboard window now shows JavaScript `confirm()` and `alert()` dialogs as
+  native sheets. Previously `WKWebView` suppressed them, so the Delete buttons for jobs, execution
+  profiles, and Hermes connections silently did nothing in the app. The web dashboard in a browser
+  was unaffected.
+- Dashboard dropdowns are now the same height as text fields; native `<select>` chrome made the
+  job and profile forms look misaligned, especially in WebKit.
+- `redline demo serve` no longer panics on startup comparing uncomparable usage sources.
+- Sparkle `appcast.xml` points each older DMG at its own release tag, so delta updates from
+  earlier versions download from the right place.
+- Relay state and usage lockout files written beside the database are ignored by git in a
+  checked-out working copy.
+
+## [0.1.9] - 2026-09-25
+
+### Added
+
+- `redline later "<text>"` queues free text as a one-off task for the repository in the current
+  directory. It matches the git top level against Claude Code execution profiles; a fallback to
+  `--default-profile` requires `--allow-default-profile`. It never dispatches: the task runs only
+  when usage is behind pace and above the reserve.
+- `redline task add` accepts flags (`--name`, `--prompt`/`--prompt -`, `--prompt-file`,
+  `--profile ID|auto`, `--type`, `--tier`, `--priority`, `--min-interval`, `--disabled`) so scripts
+  and hooks can queue work without writing YAML. `--file` keeps working as before.
+- `redline run watch --jsonl` pages through newly finished runs using the loopback service's
+  transactional completion sequence, including runs that started earlier, with the task name,
+  status, summary, and pull request URL when one was opened.
+- `redline_task_delete` MCP tool, annotated destructive, for cancelling a task that has never run.
+  Tasks with run history still have to be disabled.
+- `redline_task_create` accepts `enabled: false` to save a task as a disabled draft.
+
+### Changed
+
+- The bug-hunt starter template now checks open pull requests, including drafts, before choosing a
+  bug and again before pushing, so unattended runs skip root causes already in flight instead of
+  opening duplicate pull requests.
+
+### Fixed
+
+- Upgrading a large database no longer hangs on first start. The 0.1.8 timestamp normalization
+  migration rewrote one distinct value at a time with a full table scan each, which ran for many
+  minutes on databases with tens of thousands of snapshots; it now updates by row id and skips
+  values already normalized (a 446 MB database migrates in about two seconds).
+
 ## [0.1.8] - 2026-09-25
 
 ### Added
