@@ -124,8 +124,8 @@ To send a synthetic Start-capable notification to a phone (owner only):
 redline notification test --event reset.announced --provider claude-main
 ```
 
-The sample includes `manual_account` and `manual_for: 15m` and a promised window ending in two
-hours. No sale starts until the action is used. Without `--provider`, the announcement sample
+The sample reads "Test: Start a claude-main firesale?" and includes `manual_account` and
+`manual_for: 15m` and a promised window ending in two hours. No sale starts until the action is used. Without `--provider`, the announcement sample
 remains a completed reset with no manual Start action.
 
 ### Redeem a banked reset
