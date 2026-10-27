@@ -211,7 +211,7 @@ Some results are reported as JSON instead: `decision --json` exits 2 when the de
 
 ```bash
 redline notification list
-redline notification test [--event TYPE] [--provider ID] [--json]
+redline notification test [--event TYPE] [--provider ID] [--push] [--json]
 redline notification test --event all
 ```
 
@@ -224,6 +224,11 @@ status; `--json` returns the delivery record (an array for `all`). Failed delive
 Explicit tests bypass `notifications.events`, but require `notifications.enabled: true` and the
 local bearer API token. An empty `command` records deliveries for native Mac alerts without an
 external hook. See [notifications](runs-and-notifications.md#notifications).
+
+Add `--push` to await content-free test wakes through the configured transport. It still
+records one delivery and runs the normal hook, respects the global enabled flag, and reports
+`Push: N devices woken` or `push not configured`. JSON adds `push: {configured, woken}`.
+The desktop has no built-in push provider. See [push notifications](push-notifications.md).
 
 ## Mobile pairing
 

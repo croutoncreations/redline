@@ -67,8 +67,10 @@ func deviceTokenHash(token string) string {
 // sessionIssuer fingerprints the current master token. Sessions record it at
 // creation and only match while the same master token is loaded, so rotation
 // revokes them all. An HMAC keeps the master token unrecoverable from the DB.
-func (s *Server) sessionIssuer() string {
-	mac := hmac.New(sha256.New, []byte(s.config.APIToken))
+func (s *Server) sessionIssuer() string { return sessionIssuer(s.config.APIToken) }
+
+func sessionIssuer(token string) string {
+	mac := hmac.New(sha256.New, []byte(token))
 	mac.Write([]byte("redline device session issuer v1"))
 	return fmt.Sprintf("%x", mac.Sum(nil))
 }

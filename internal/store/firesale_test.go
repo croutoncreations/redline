@@ -141,7 +141,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 				rows.Close()
 			}
 			var version int
-			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 41 {
+			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 42 {
 				t.Fatalf("version=%d err=%v", version, err)
 			}
 			db, err = store.Open(path)

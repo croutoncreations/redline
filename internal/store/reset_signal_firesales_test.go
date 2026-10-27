@@ -82,7 +82,7 @@ func TestResetSignalFiresaleMigration40RepairsStampedSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			var version int
-			want := max(41, stamp)
+			want := max(42, stamp)
 			if err := db.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != want {
 				t.Fatalf("version=%d want=%d err=%v", version, want, err)
 			}
@@ -155,8 +155,8 @@ func TestResetSignalFiresaleMigration39RepairsStampedSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			var version int
-			if err := db.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(41, stamp) {
-				t.Fatalf("version=%d want=%d err=%v", version, max(41, stamp), err)
+			if err := db.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != max(42, stamp) {
+				t.Fatalf("version=%d want=%d err=%v", version, max(42, stamp), err)
 			}
 			db.Close()
 		}

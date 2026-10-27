@@ -691,6 +691,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS reset_signal_firesales_active ON reset_signal_
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 41 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=41)`); err != nil {
 		return fmt.Errorf("record device sessions migration: %w", err)
 	}
+	// Migration 42. Repair even when another branch has already stamped it.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS push_registrations (
+    device_session_id TEXT PRIMARY KEY REFERENCES device_sessions(id),
+    platform TEXT NOT NULL CHECK(platform IN ('android','ios')),
+    provider TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("create push registrations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 42 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=42)`); err != nil {
+		return fmt.Errorf("record push registrations migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

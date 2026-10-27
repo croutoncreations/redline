@@ -36,6 +36,7 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/push"
 	"github.com/croutoncreations/redline/internal/resetreminder"
 	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
@@ -71,6 +72,7 @@ type Server struct {
 	now                func() time.Time
 	executor           Executor
 	notifier           Notifier
+	push               *push.Dispatcher
 	revision           workspace.RevisionResolver
 	artifacts          artifacts.Reader
 	scheduler          *autoscheduler.Loop
@@ -221,6 +223,9 @@ func newServer(
 		discovery: discovery.Service{Now: now},
 		hermes:    hermes.Client{},
 	}
+	if service, ok := notifier.(notification.Service); ok {
+		server.push = service.Push
+	}
 	credentials := nativeusage.NewDefaultCredentials()
 	server.redeemer = nativeusage.NewRedeemer(credentials)
 	server.usageSources = usage.NewManager(
@@ -327,6 +332,9 @@ func newServer(
 	mux.HandleFunc("POST /v1/runs/{run}/read", server.markRunActivityRead)
 	mux.HandleFunc("POST /v1/runs/read-all", server.markAllRunActivityRead)
 	mux.HandleFunc("GET /v1/runs/{run}", server.getRun)
+	mux.HandleFunc("PUT /v1/push/registration", server.putPushRegistration)
+	mux.HandleFunc("DELETE /v1/push/registration", server.deletePushRegistration)
+	mux.HandleFunc("GET /v1/push/registrations", server.listPushRegistrations)
 	mux.HandleFunc("GET /v1/notifications", server.listNotifications)
 	mux.HandleFunc("POST /v1/notifications/test", server.testNotification)
 	mux.HandleFunc("GET /{$}", server.dashboardPage)
@@ -341,7 +349,17 @@ func newServer(
 }
 
 func configuredNotifier(cfg config.Config, database *store.DB, now func() time.Time) notification.Service {
+	var transport push.Transport = push.Disabled{}
+	if cfg.Push.RelayURL != "" {
+		token, err := cfg.Push.ReadAuthToken()
+		if err != nil {
+			log.Print("push configuration unavailable")
+		} else {
+			transport = &push.RelayTransport{BaseURL: cfg.Push.RelayURL, AuthToken: token}
+		}
+	}
 	return notification.Service{
+		Push:    push.NewDispatcher(database, sessionIssuer(cfg.APIToken), transport, log.Default()),
 		Enabled: cfg.Notifications.Enabled, Events: cfg.NotificationEvents(), Store: database,
 		Sink:    notification.CommandSink{Command: cfg.Notifications.Command},
 		Timeout: cfg.NotificationTimeout(), Now: now,
@@ -679,6 +697,9 @@ func (s *Server) StartScheduler(ctx context.Context) {
 func (s *Server) Wait() {
 	s.loopWorkers.Wait()
 	s.workers.Wait()
+	if s.push != nil {
+		s.push.Close()
+	}
 }
 
 func (s *Server) schedulerStatus(w http.ResponseWriter, _ *http.Request) {

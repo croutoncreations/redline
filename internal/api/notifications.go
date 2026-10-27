@@ -16,6 +16,7 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 	var body *struct {
 		Event    string `json:"event"`
 		Provider string `json:"provider"`
+		Push     bool   `json:"push"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
@@ -58,7 +59,17 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, problem{Error: "notifications are disabled; set notifications.enabled: true in your config (command may be empty for native Mac alerts)"})
 		return
 	}
-	delivery, err := configuredNotifier(s.config, s.store, s.now).Test(r.Context(), event)
+	service, ok := s.notifier.(notification.Service)
+	if !ok {
+		service = configuredNotifier(s.config, s.store, s.now)
+		defer service.Push.Close()
+	}
+	var delivery domain.NotificationDelivery
+	if body.Push {
+		delivery, err = service.TestPush(r.Context(), event)
+	} else {
+		delivery, err = service.Test(r.Context(), event)
+	}
 	if err != nil && delivery.ID == 0 {
 		writeError(w, err)
 		return
