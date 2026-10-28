@@ -1,0 +1,49 @@
+name: Homebrew drift
+
+# Fails when croutoncreations/homebrew-tap lags the latest GitHub release: the
+# formula immediately, the cask after a 48-hour grace period (it is pushed by
+# hand once the DMG is built). On failure it opens a tracking issue, or
+# comments on the open one, so the reminder does not depend on who last edited
+# this workflow's schedule.
+
+on:
+  schedule:
+    - cron: "17 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare tap versions with the latest release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          scripts/check-homebrew-versions.sh 2>&1 | tee drift.txt
+      - name: Open or update the drift issue
+        if: failure() && steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Homebrew tap lags the latest release"
+          fence='```'
+          body="$(printf '%s\n\n%s\n%s\n%s\n\nSee docs/releasing.md, step 4.' "${RUN_URL}" "${fence}" "$(cat drift.txt)" "${fence}")"
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi

@@ -27,6 +27,17 @@ public struct RedlineAPIClient: Sendable {
         try await request(baseURL.appending(path: "v1/dashboard"), method: "GET", as: DashboardSnapshot.self)
     }
 
+    public func notifications(afterID: Int64? = nil, limit: Int = 50) async throws -> [NotificationDelivery] {
+        var components = URLComponents(url: endpoint(["v1", "notifications"]), resolvingAgainstBaseURL: false)!
+        if let afterID {
+            components.queryItems = [
+                URLQueryItem(name: "after_id", value: String(afterID)),
+                URLQueryItem(name: "limit", value: String(limit)),
+            ]
+        }
+        return try await request(components.url!, method: "GET", as: [NotificationDelivery].self)
+    }
+
     public func run(_ runID: String) async throws -> RunSummary {
         try await request(endpoint(["v1", "runs", runID]), method: "GET", as: RunSummary.self)
     }

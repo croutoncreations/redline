@@ -221,6 +221,7 @@ func knownScenario(name string) bool {
 
 func fixtureConfig(root, scenario, provider string) config.Config {
 	pace := 0.08
+	firesale := 0.45
 	label := scenario
 	if isDecisionScenario(scenario) {
 		pace = 0.30
@@ -236,7 +237,7 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 			"codex-main":  {Provider: "codex", UsageSource: "native", WindowWeeklyCost: .10, Policy: "standard"},
 		},
 		Policies: map[string]config.Policy{
-			"standard": {TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: &pace},
+			"standard": {TriggerMargin: .02, RollingReserve: .25, PaceGapTrigger: &pace, FiresaleTrigger: &firesale},
 		},
 	}
 }
@@ -367,7 +368,7 @@ func seedDecisionScenario(ctx context.Context, env *Environment, scenario, provi
 	result := decision.Evaluate(decision.Input{
 		Snapshot: env.Snapshots[provider], WindowWeeklyCost: env.Config.Providers[provider].WindowWeeklyCost,
 		WindowWeeklyCostSource: "demo", CalibrationConfidence: "synthetic",
-		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, PaceGapTrigger: policy.PaceGapTrigger,
+		TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
 		Now: now, MaxSnapshotAge: 15 * time.Minute,
 	})
 	result.Policy = "standard"

@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 )
 
 type Config struct {
+	ListenAddress string `yaml:"-"`
+	// SourcePath identifies the config actually loaded by this service, never a YAML-supplied path.
+	SourcePath      string              `yaml:"-"`
 	Database        string              `yaml:"database"`
 	RunArtifactsDir string              `yaml:"run_artifacts_dir"`
 	ActivePolicy    string              `yaml:"active_policy"`
@@ -21,7 +25,9 @@ type Config struct {
 	Scheduler       Scheduler           `yaml:"scheduler"`
 	API             API                 `yaml:"api"`
 	UsageMonitor    UsageMonitor        `yaml:"usage_monitor"`
+	ResetSignals    ResetSignals        `yaml:"reset_signals"`
 	Notifications   Notifications       `yaml:"notifications"`
+	Push            Push                `yaml:"push"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
 	APIToken        string              `yaml:"-"`
@@ -43,7 +49,9 @@ type Notifications struct {
 }
 
 var knownNotificationEvents = map[string]bool{
-	"run.started": true, "run.completed": true, "run.failed": true, "scheduler.error": true,
+	"reset.announced": true,
+	"run.started":     true, "run.completed": true, "run.failed": true, "scheduler.error": true,
+	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -57,6 +65,8 @@ func (c Config) NotificationTimeout() time.Duration {
 func (c Config) NotificationEvents() map[string]bool {
 	events := c.Notifications.Events
 	if len(events) == 0 {
+		// Keep the pre-firesale default so upgrading never sends new event
+		// types to existing hooks. reset.* and firesale.* are opt-in.
 		events = []string{"run.started", "run.completed", "run.failed", "scheduler.error"}
 	}
 	result := make(map[string]bool, len(events))
@@ -67,12 +77,49 @@ func (c Config) NotificationEvents() map[string]bool {
 }
 
 type API struct {
-	TrustedHosts []string `yaml:"trusted_hosts"`
+	TrustedHosts  []string      `yaml:"trusted_hosts"`
+	PairedDevices PairedDevices `yaml:"paired_devices"`
+}
+
+type PairedDevices struct {
+	AllowResetRedemption bool `yaml:"allow_reset_redemption"`
 }
 
 type Scheduler struct {
 	Enabled      bool   `yaml:"enabled"`
 	PollInterval string `yaml:"poll_interval"`
+}
+
+type ResetSignals struct {
+	Enabled      bool   `yaml:"enabled"`
+	PollInterval string `yaml:"poll_interval"`
+	Notify       *bool  `yaml:"notify"`
+	Firesale     string `yaml:"firesale"`
+}
+
+func (c Config) ResetSignalsFiresale() string {
+	if !c.ResetSignals.Enabled {
+		return "off"
+	}
+	if c.ResetSignals.Firesale == "" {
+		return "notify"
+	}
+	return c.ResetSignals.Firesale
+}
+
+func (c Config) ResetSignalsNotify() bool {
+	return c.ResetSignals.Enabled && (c.ResetSignals.Notify == nil || *c.ResetSignals.Notify)
+}
+
+func (c Config) ResetSignalsInterval() (time.Duration, error) {
+	if c.ResetSignals.PollInterval == "" {
+		return 10 * time.Minute, nil
+	}
+	interval, err := time.ParseDuration(c.ResetSignals.PollInterval)
+	if err != nil || interval < 5*time.Minute {
+		return 0, fmt.Errorf("reset_signals poll_interval must be at least 5m")
+	}
+	return interval, nil
 }
 
 type UsageMonitor struct {
@@ -103,14 +150,48 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	Provider          string                `yaml:"provider"`
-	UsageSource       string                `yaml:"usage_source"`
-	OpenUsageURL      string                `yaml:"openusage_url"`
-	WindowWeeklyCost  float64               `yaml:"window_weekly_cost"`
-	Policy            string                `yaml:"policy"`
-	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
-	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
-	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
+	FiresaleMaxConcurrentRuns int                   `yaml:"firesale_max_concurrent_runs"`
+	Provider                  string                `yaml:"provider"`
+	UsageSource               string                `yaml:"usage_source"`
+	OpenUsageURL              string                `yaml:"openusage_url"`
+	WindowWeeklyCost          float64               `yaml:"window_weekly_cost"`
+	Policy                    string                `yaml:"policy"`
+	MaxConcurrentRuns         int                   `yaml:"max_concurrent_runs"`
+	PoolConcurrency           map[string]int        `yaml:"pool_concurrency"`
+	ModelGroups               map[string]ModelGroup `yaml:"model_groups"`
+	BankedResets              BankedResets          `yaml:"banked_resets"`
+}
+
+type BankedResets struct {
+	RemindBefore []string `yaml:"remind_before"`
+	OnExpiry     string   `yaml:"on_expiry"`
+	RedeemLead   string   `yaml:"redeem_lead"`
+}
+
+func (p Provider) BankedResetRemindBefore() []time.Duration {
+	if p.BankedResets.RemindBefore == nil {
+		return []time.Duration{24 * time.Hour}
+	}
+	leads := make([]time.Duration, len(p.BankedResets.RemindBefore))
+	for i, raw := range p.BankedResets.RemindBefore {
+		leads[i], _ = time.ParseDuration(raw)
+	}
+	return leads
+}
+
+func (p Provider) BankedResetOnExpiry() string {
+	if p.BankedResets.OnExpiry == "" {
+		return "notify"
+	}
+	return p.BankedResets.OnExpiry
+}
+
+func (p Provider) BankedResetRedeemLead() time.Duration {
+	if p.BankedResets.RedeemLead == "" {
+		return time.Hour
+	}
+	lead, _ := time.ParseDuration(p.BankedResets.RedeemLead)
+	return lead
 }
 
 func (p Provider) EffectiveMaxConcurrentRuns() int {
@@ -167,10 +248,11 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 }
 
 type Policy struct {
-	TriggerMargin  float64         `yaml:"trigger_margin" json:"trigger_margin"`
-	RollingReserve float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
-	PaceGapTrigger *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
-	PaceThresholds []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
+	FiresaleTrigger *float64        `yaml:"firesale_trigger,omitempty" json:"firesale_trigger,omitempty"`
+	TriggerMargin   float64         `yaml:"trigger_margin" json:"trigger_margin"`
+	RollingReserve  float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
+	PaceGapTrigger  *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
+	PaceThresholds  []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
 }
 
 type PaceThreshold struct {
@@ -210,6 +292,10 @@ func Load(path string) (Config, error) {
 	cfg, warnings, err := decode(data)
 	if err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	cfg.SourcePath, err = filepath.Abs(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve config path: %w", err)
 	}
 	cfg.Warnings = warnings
 	if err := cfg.validate(); err != nil {
@@ -301,6 +387,34 @@ func (cfg *Config) validate() error {
 				return fmt.Errorf("provider %q: policy %q is not defined under policies", name, provider.Policy)
 			}
 		}
+		for i, raw := range provider.BankedResets.RemindBefore {
+			if _, err := positiveDuration(fmt.Sprintf("banked_resets remind_before[%d]", i), raw); err != nil {
+				return fmt.Errorf("provider %q: %w", name, err)
+			}
+		}
+		if raw := provider.BankedResets.RedeemLead; raw != "" {
+			if _, err := positiveDuration("banked_resets redeem_lead", raw); err != nil {
+				return fmt.Errorf("provider %q: %w", name, err)
+			}
+		}
+		switch provider.BankedResetOnExpiry() {
+		case "off", "notify", "redeem":
+		default:
+			return fmt.Errorf("provider %q: banked_resets on_expiry must be off, notify, or redeem", name)
+		}
+		// Redeem mode replaces the redeem-now notification, so reject it where
+		// automatic redemption could never run instead of silently missing expiry.
+		if provider.BankedResetOnExpiry() == "redeem" {
+			if !cfg.UsageMonitor.Enabled {
+				return fmt.Errorf("provider %q: banked_resets on_expiry: redeem requires usage_monitor.enabled: true; use on_expiry: notify otherwise", name)
+			}
+			if provider.EffectiveUsageSource() == "openusage" {
+				return fmt.Errorf("provider %q: banked_resets on_expiry: redeem needs native reset telemetry and is unavailable with usage_source: openusage; use on_expiry: notify", name)
+			}
+		}
+		if provider.FiresaleMaxConcurrentRuns < 0 {
+			return fmt.Errorf("provider %q: firesale_max_concurrent_runs must not be negative", name)
+		}
 		if provider.MaxConcurrentRuns < 0 {
 			return fmt.Errorf("provider %q: max_concurrent_runs must not be negative, got %d", name, provider.MaxConcurrentRuns)
 		}
@@ -336,6 +450,11 @@ func (cfg *Config) validate() error {
 		if err := fraction("rolling_reserve", policy.RollingReserve); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)
 		}
+		if policy.FiresaleTrigger != nil {
+			if err := fraction("firesale_trigger", *policy.FiresaleTrigger); err != nil {
+				return fmt.Errorf("policy %q: %w", name, err)
+			}
+		}
 		if policy.PaceGapTrigger != nil {
 			if err := fraction("pace_gap_trigger", *policy.PaceGapTrigger); err != nil {
 				return fmt.Errorf("policy %q: %w", name, err)
@@ -351,6 +470,18 @@ func (cfg *Config) validate() error {
 	if _, err := cfg.SchedulerInterval(); err != nil {
 		return err
 	}
+	if _, err := cfg.ResetSignalsInterval(); err != nil {
+		return err
+	}
+	switch cfg.ResetSignals.Firesale {
+	case "", "off":
+	case "notify", "auto":
+		if !cfg.ResetSignals.Enabled {
+			return fmt.Errorf("reset_signals firesale requires reset_signals.enabled")
+		}
+	default:
+		return fmt.Errorf("reset_signals firesale must be off, notify, or auto")
+	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
 		return err
 	}
@@ -359,15 +490,12 @@ func (cfg *Config) validate() error {
 			return err
 		}
 	}
-	if cfg.Notifications.Enabled && strings.TrimSpace(cfg.Notifications.Command) == "" {
-		return fmt.Errorf("notifications are enabled but command is empty")
-	}
 	for _, event := range cfg.Notifications.Events {
 		if !knownNotificationEvents[event] {
-			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error)", event)
+			return fmt.Errorf("notifications event %q is not recognized (want one of run.started, run.completed, run.failed, scheduler.error, reset.announced, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended)", event)
 		}
 	}
-	return nil
+	return cfg.Push.Validate()
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {

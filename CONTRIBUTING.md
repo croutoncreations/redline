@@ -7,7 +7,7 @@ running the test suites, and packaging the macOS app. End-user installation is c
 ## Prerequisites
 
 - Go with automatic toolchain downloads enabled (the exact version is pinned in `go.mod`)
-- Node.js 18 or later and npm (dashboard tests only)
+- Node.js 20 or later and npm (dashboard tests only)
 - Xcode command-line tools with a recent Swift toolchain (macOS app only)
 - Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
 
@@ -25,6 +25,8 @@ when it is unavailable:
 ```bash
 cp config.example.yaml redline.yaml
 go run ./cmd/redline --config redline.yaml serve
+# In another terminal, open an authenticated dashboard session:
+go run ./cmd/redline --config redline.yaml dashboard
 ```
 
 The copy creates `redline.yaml`; starting the service adds `redline.db` and `api-token`, and task
@@ -38,12 +40,23 @@ port with `--listen`, then use the same port in the matching `--api` value for C
 
 ```bash
 go run ./cmd/redline --config redline.yaml serve --listen 127.0.0.1:17436
-go run ./cmd/redline --api http://127.0.0.1:17436 status --provider codex-main
+go run ./cmd/redline --config redline.yaml --api http://127.0.0.1:17436 dashboard
+go run ./cmd/redline --config redline.yaml --api http://127.0.0.1:17436 status --provider codex-main
 ```
 
 The status command reports live usage only when that provider's CLI is installed and signed in.
 Without provider credentials, the service and dashboard still start and explain the unavailable
 account state.
+
+To open the dashboard from a source build, sign the browser in with the `api-token` that `serve`
+created beside `redline.yaml`. Opening the bare URL in a browser returns an HTTP `401` sign-in
+page; the token exchange sets an HttpOnly session cookie and redirects to the clean URL:
+
+```bash
+open "http://127.0.0.1:17436/?access_token=$(<api-token)"   # macOS; use xdg-open on Linux
+```
+
+Use the port you passed to `--listen` (`7436` by default). This only works for loopback addresses.
 
 Only `redline serve` reads configuration and opens SQLite. Every other CLI command is a client of
 the local HTTP API. See [Architecture](docs/architecture.md) for the full picture and
