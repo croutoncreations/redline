@@ -9,6 +9,26 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
+// RecordBankedResetNotice claims a deadline notification before delivery. A false
+// result means another cycle (or process) has already claimed this notice.
+// Claims are keyed by provider, expiry, and kind; resetID is informational only.
+func (d *DB) RecordBankedResetNotice(ctx context.Context, providerID, resetID string, expiresAt time.Time, kind string, now time.Time) (bool, error) {
+	if providerID == "" || resetID == "" || expiresAt.IsZero() || kind == "" || now.IsZero() {
+		return false, fmt.Errorf("banked reset notice provider, reset, expiry, kind, and timestamp are required")
+	}
+	result, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO banked_reset_notices
+(provider_account_id, reset_id, expires_at, kind, created_at) VALUES (?, ?, ?, ?, ?)`,
+		providerID, resetID, formatTime(expiresAt), kind, formatTime(now))
+	if err != nil {
+		return false, fmt.Errorf("record banked reset notice: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read banked reset notice result: %w", err)
+	}
+	return rows == 1, nil
+}
+
 func (d *DB) CreateNotificationDelivery(
 	ctx context.Context,
 	eventType string,
@@ -57,9 +77,27 @@ func (d *DB) ListNotificationDeliveries(ctx context.Context, limit int) ([]domai
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT id, event_type, status, payload_json,
+	return d.listNotificationDeliveries(ctx, `SELECT id, event_type, status, payload_json,
 attempts, last_error, created_at, updated_at FROM notification_deliveries
 ORDER BY updated_at DESC, id DESC LIMIT ?`, limit)
+}
+
+// ListNotificationDeliveriesAfter pages new deliveries without skipping older IDs
+// whose delivery status was updated more recently.
+func (d *DB) ListNotificationDeliveriesAfter(ctx context.Context, afterID int64, limit int) ([]domain.NotificationDelivery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return d.listNotificationDeliveries(ctx, `SELECT id, event_type, status, payload_json,
+attempts, last_error, created_at, updated_at FROM notification_deliveries
+WHERE id > ? ORDER BY id ASC LIMIT ?`, afterID, limit)
+}
+
+func (d *DB) listNotificationDeliveries(ctx context.Context, query string, args ...any) ([]domain.NotificationDelivery, error) {
+	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list notification deliveries: %w", err)
 	}

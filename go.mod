@@ -1,12 +1,11 @@
 module github.com/croutoncreations/redline
 
-go 1.26.0
-
-toolchain go1.26.9
+go 1.26.9
 
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
+	github.com/mattn/go-isatty v0.0.24
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/sys v0.49.0
@@ -17,7 +16,6 @@ require (
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.2.1 // indirect

@@ -82,6 +82,11 @@ fi
 work="$(mktemp -d "${TMPDIR:-/tmp}/redline-cask.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
 
+# Refuse to push a cask that fails brew style / brew audit --strict.
+mkdir -p "${work}/lint/Casks"
+printf '%s\n' "${cask}" > "${work}/lint/Casks/redline.rb"
+"$(dirname "$0")/brew-lint.sh" "${work}/lint/Casks/redline.rb"
+
 clone_url="https://github.com/${tap_repo}.git"
 if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
   clone_url="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${tap_repo}.git"
