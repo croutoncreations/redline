@@ -3,11 +3,10 @@ package activity
 import (
 	"bufio"
 	"encoding/json"
-	"io"
-	"os"
 	"regexp"
 	"strings"
 
+	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
@@ -49,7 +48,7 @@ type manifest struct {
 func Build(input Input) Result {
 	result := Result{}
 	if input.ResultFile != "" {
-		if data, err := readTail(input.ResultFile, maxOutputBytes); err == nil {
+		if data, err := artifacts.ReadFileTail(input.ResultFile, maxOutputBytes); err == nil {
 			var value manifest
 			if json.Unmarshal(data, &value) == nil {
 				result = Result(value)
@@ -108,7 +107,7 @@ func Build(input Input) Result {
 }
 
 func outputDetails(path string) (string, []domain.RunArtifact) {
-	data, err := readTail(path, maxOutputBytes)
+	data, err := artifacts.ReadFileTail(path, maxOutputBytes)
 	if err != nil {
 		return "", nil
 	}
@@ -222,25 +221,6 @@ func links(summary string) []domain.RunArtifact {
 		result = appendUniqueArtifact(result, domain.RunArtifact{Type: artifactType, Label: label, URL: url})
 	}
 	return result
-}
-
-func readTail(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	offset := max(int64(0), info.Size()-limit)
-	data := make([]byte, info.Size()-offset)
-	_, err = file.ReadAt(data, offset)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	return data, nil
 }
 
 func appendUnique(values []string, value string) []string {

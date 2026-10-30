@@ -81,3 +81,27 @@ func TestReaderDoesNotSplitMultiByteRuneAtTailStart(t *testing.T) {
 		t.Fatalf("Content = %q, want %q", result.Content, "界xyz")
 	}
 }
+
+func TestReadFileTailReturnsLastBytesOrWholeSmallFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.stdout")
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for limit, want := range map[int64]string{4: "6789", 10: "0123456789", 64: "0123456789"} {
+		got, err := artifacts.ReadFileTail(path, limit)
+		if err != nil || string(got) != want {
+			t.Fatalf("limit %d: got %q err=%v, want %q", limit, got, err, want)
+		}
+	}
+}
+
+func TestReadFileTailSurfacesReadErrors(t *testing.T) {
+	// A directory opens and stats fine but cannot be read; the error must
+	// surface rather than yield a zero-filled buffer that looks like output.
+	if _, err := artifacts.ReadFileTail(t.TempDir(), 16); err == nil {
+		t.Fatal("expected error reading a directory")
+	}
+	if _, err := artifacts.ReadFileTail(filepath.Join(t.TempDir(), "missing"), 16); err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
