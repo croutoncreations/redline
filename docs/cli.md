@@ -43,9 +43,11 @@ retain job/run/provider/firesale control; banked reset spending requires
 `api.paired_devices.allow_reset_redemption: true` (default false). They cannot create pairings,
 manage devices or test notifications. See the [API permission table](api.md#principals-and-permissions).
 
-`token rotate` is a local owner action, requires `--yes`, opens the configured database to revoke
-**all** device sessions, and replaces the master token. Restart Redline to invalidate the old
-master token and legacy pairings, then pair devices again. Re-pair legacy phones to replace their
+`token rotate` is a local owner action and requires `--yes`. It atomically replaces the master
+`api-token` file next to `--config` and does not open the database or contact the service; each
+device session is bound to the master token that issued it, so after a restart **all** device
+sessions are signed out. Restart Redline to invalidate the old master token and legacy pairings,
+then pair devices again. Re-pair legacy phones to replace their
 old master-token bearer credential with a properly scoped device token; existing browser cookies
 upgrade transparently without interrupting access.
 
