@@ -22,6 +22,7 @@ const (
 	DispatchBehind     DispatchTier = "behind"
 	DispatchWellBehind DispatchTier = "well_behind"
 	DispatchExpiring   DispatchTier = "expiring"
+	DispatchFiresale   DispatchTier = "firesale"
 )
 
 type ExecutionProfile struct {
@@ -93,6 +94,7 @@ type Task struct {
 	Type                         TaskType      `json:"type"`
 	DispatchTier                 DispatchTier  `json:"dispatch_tier"`
 	MinInterval                  time.Duration `json:"min_interval"`
+	FiresaleMinInterval          time.Duration `json:"firesale_min_interval"`
 	RequireRepoChange            bool          `json:"require_repo_change"`
 	Enabled                      bool          `json:"enabled"`
 	State                        TaskState     `json:"state"`
@@ -137,10 +139,16 @@ type DispatchAttempt struct {
 }
 
 const (
-	EventRunStarted     = "run.started"
-	EventRunCompleted   = "run.completed"
-	EventRunFailed      = "run.failed"
-	EventSchedulerError = "scheduler.error"
+	EventRunStarted        = "run.started"
+	EventRunCompleted      = "run.completed"
+	EventRunFailed         = "run.failed"
+	EventSchedulerError    = "scheduler.error"
+	EventResetAnnounced    = "reset.announced"
+	EventResetExpiring     = "reset.expiring"
+	EventResetRedeemed     = "reset.redeemed"
+	EventResetRedeemFailed = "reset.redeem_failed"
+	EventFiresaleStarted   = "firesale.started"
+	EventFiresaleEnded     = "firesale.ended"
 )
 
 type NotificationEvent struct {
@@ -150,11 +158,18 @@ type NotificationEvent struct {
 	ProviderAccountID string            `json:"provider_account_id,omitempty"`
 	TaskID            string            `json:"task_id,omitempty"`
 	RunID             string            `json:"run_id,omitempty"`
+	Title             string            `json:"title,omitempty"`
 	Message           string            `json:"message"`
 	Data              map[string]string `json:"data,omitempty"`
 }
 
+type PushResult struct {
+	Configured bool `json:"configured"`
+	Woken      int  `json:"woken"`
+}
+
 type NotificationDelivery struct {
+	Push      *PushResult     `json:"push,omitempty"`
 	ID        int64           `json:"id"`
 	EventType string          `json:"event_type"`
 	Status    string          `json:"status"`

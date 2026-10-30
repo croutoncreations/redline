@@ -54,6 +54,16 @@ error detail. Authentication failures receive a dedicated reconnect action.
 
 If the same operational error repeats, pause that provider before changing configuration.
 
+## A banked reset redemption failed
+
+Check the reported reason. Common causes are a provider cooldown, multiple accounts of the same
+provider configured, a Claude login that needs refreshing (`claude auth login`), or a Codex
+API-key login instead of a ChatGPT subscription login. If Redline reports **outcome unknown**,
+check the provider before trying another reset: the request may have succeeded even though its
+response was lost.
+
+See [Redeeming banked resets](scheduling.md#redeeming-banked-resets) for setup and safe retries.
+
 ## Notifications are not appearing
 
 Choose **Notifications…** in the menu-bar app. If macOS previously denied access, Redline links to
