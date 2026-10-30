@@ -32,6 +32,12 @@ type bankedResetState struct {
 	nextFetch time.Time
 	inFlight  bool
 	lastError string
+	// generation advances when a redemption corrects the cache, so a lookup
+	// started before it (and answering with the old list) is discarded.
+	generation uint64
+	// failedUntil is a lookup failure's backoff; a redemption asks for a new
+	// list sooner, but never sooner than this.
+	failedUntil time.Time
 }
 
 // Anthropic's usage endpoint rate-limits per account, shared with Claude Code
@@ -181,7 +187,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 		state.inFlight = true
 		m.resetStates[key] = state
 		m.lookups.Add(1)
-		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider)
+		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider, state.generation)
 	}
 	m.mu.Unlock()
 
@@ -226,7 +232,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	}
 }
 
-func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider) {
+func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider, generation uint64) {
 	defer m.lookups.Done()
 	lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	resets, err := m.BankedResets.BankedResets(lookupCtx, provider)
@@ -236,6 +242,14 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	defer m.mu.Unlock()
 	state := m.resetStates[key]
 	state.inFlight = false
+	if err == nil && state.generation != generation {
+		// A redemption corrected the cache while this lookup ran; its answer
+		// predates that and may still list the spent credit. Drop it and ask
+		// again on the next fetch.
+		state.nextFetch = state.failedUntil
+		m.resetStates[key] = state
+		return
+	}
 	if err != nil {
 		state.lastError = redact(err.Error())
 		backoff := max(m.bankedResetInterval(key), bankedResetFailureBackoff)
@@ -244,7 +258,9 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 			backoff = limited.RetryAfter()
 		}
 		state.nextFetch = fetchedAt.Add(backoff)
+		state.failedUntil = state.nextFetch
 	} else {
+		state.failedUntil = time.Time{}
 		state.resets, state.known, state.fetchedAt, state.lastError = resets, true, fetchedAt, ""
 		state.nextFetch = fetchedAt.Add(m.bankedResetInterval(key))
 	}
@@ -294,8 +310,11 @@ func (m *Manager) ForgetBankedReset(provider config.Provider, resetID string) {
 		}
 		state.resets = &report
 	}
+	// Ask for a fresh list on the next fetch, but keep any failure backoff,
+	// and invalidate a lookup already running so it cannot undo this.
+	state.generation++
 	if !state.inFlight {
-		state.nextFetch = time.Time{}
+		state.nextFetch = state.failedUntil
 	}
 	m.resetStates[key] = state
 }
