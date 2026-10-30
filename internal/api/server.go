@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -2729,7 +2730,15 @@ type problem struct {
 }
 
 func decodeJSON(r *http.Request, target any) error {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, (1<<20)+1))
+	const maxBodyBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if len(body) > maxBodyBytes {
+		return fmt.Errorf("invalid JSON: request body exceeds %d bytes", maxBodyBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
