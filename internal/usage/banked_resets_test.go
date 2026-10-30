@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -416,6 +417,134 @@ func TestCodexResetDetailsAreCachedWithoutReplacingSourceCount(t *testing.T) {
 	fetch(t, manager, "a", provider)
 	if resets.calls != 2 {
 		t.Fatalf("calls=%d, want refresh after 30m", resets.calls)
+	}
+}
+
+// A redeemed credit must leave the cached details at once: until the next
+// lookup the cache otherwise still offers it, and the next redemption would
+// select a credit that is already spent instead of the one still available.
+func TestRedeemedCreditLeavesTheCachedDetailsAtOnce(t *testing.T) {
+	now := time.Date(2026, 10, 29, 15, 0, 0, 0, time.UTC)
+	soon, later := now.Add(4*time.Hour), now.Add(8*24*time.Hour)
+	s := snapshot("openusage", now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 2})
+	details := []decision.BankedReset{{ID: "today", ExpiresAt: &soon, ResetsLeft: 1}, {ID: "next-week", ExpiresAt: &later, ResetsLeft: 1}}
+	after := []decision.BankedReset{{ID: "next-week", ExpiresAt: &later, ResetsLeft: 1}}
+	resets := &fakeResets{results: []resetResult{
+		{resets: &decision.BankedResets{Available: 2, Details: details}},
+		{resets: &decision.BankedResets{Available: 1, Details: after}},
+	}}
+	manager := usage.NewManager(repeatSource(s, 5), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets, manager.MaxSnapshotAge = resets, time.Hour
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageURL: "http://x"}
+	fetch(t, manager, "codex-main", provider)
+
+	manager.ForgetBankedReset(provider, "today")
+	now = now.Add(time.Minute)
+	got := fetch(t, manager, "codex-main", provider)
+	if len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].ID != "next-week" {
+		t.Fatalf("spent credit still offered: %+v", got.BankedResetDetails)
+	}
+	if resets.calls != 2 {
+		t.Fatalf("calls=%d; a redemption must refresh the credit list on the next fetch, not wait 30m", resets.calls)
+	}
+}
+
+// A lookup already running when the credit is redeemed answers with the list
+// from before the redemption; it must not put the spent credit back, and a
+// fresh lookup follows on the next fetch.
+func TestLookupStartedBeforeRedemptionCannotRestoreTheSpentCredit(t *testing.T) {
+	now := time.Date(2026, 10, 29, 15, 0, 0, 0, time.UTC)
+	soon, later := now.Add(4*time.Hour), now.Add(8*24*time.Hour)
+	s := snapshot("openusage", now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 2})
+	both := &decision.BankedResets{Available: 2, Details: []decision.BankedReset{{ID: "today", ExpiresAt: &soon, ResetsLeft: 1}, {ID: "next-week", ExpiresAt: &later, ResetsLeft: 1}}}
+	after := &decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "next-week", ExpiresAt: &later, ResetsLeft: 1}}}
+	release := make(chan struct{})
+	resets := &gatedResets{results: []*decision.BankedResets{both, both, after}, gate: map[int]chan struct{}{1: release}}
+	manager := usage.NewManager(repeatSource(s, 6), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets, manager.MaxSnapshotAge = resets, time.Hour
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageURL: "http://x"}
+	fetch(t, manager, "codex-main", provider) // caches "both"
+
+	now = now.Add(31 * time.Minute) // the next fetch starts a lookup, held open
+	if _, _, err := manager.Fetch(context.Background(), "codex-main", provider); err != nil {
+		t.Fatal(err)
+	}
+	manager.ForgetBankedReset(provider, "today")
+	close(release) // the stale lookup returns the pre-redemption list
+	manager.WaitForBankedResetLookups()
+
+	got := fetch(t, manager, "codex-main", provider)
+	for _, d := range got.BankedResetDetails {
+		if d.ID == "today" {
+			t.Fatalf("stale lookup restored the spent credit: %+v", got.BankedResetDetails)
+		}
+	}
+	if resets.calls != 3 {
+		t.Fatalf("calls=%d; a fresh lookup must follow the discarded one", resets.calls)
+	}
+}
+
+// Redeeming must not cut short a lookup failure's backoff (Retry-After).
+func TestForgettingACreditKeepsTheFailureBackoff(t *testing.T) {
+	now := time.Date(2026, 10, 29, 15, 0, 0, 0, time.UTC)
+	soon := now.Add(4 * time.Hour)
+	s := snapshot("openusage", now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1})
+	resets := &fakeResets{results: []resetResult{
+		{resets: &decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "today", ExpiresAt: &soon, ResetsLeft: 1}}}},
+		{err: retryAfterError(2 * time.Hour)},
+	}}
+	manager := usage.NewManager(repeatSource(s, 5), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets, manager.MaxSnapshotAge = resets, 24*time.Hour
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageURL: "http://x"}
+	fetch(t, manager, "codex-main", provider)
+	now = now.Add(31 * time.Minute)
+	fetch(t, manager, "codex-main", provider) // 429, backs off two hours
+	manager.ForgetBankedReset(provider, "today")
+	now = now.Add(time.Minute)
+	fetch(t, manager, "codex-main", provider)
+	if resets.calls != 2 {
+		t.Fatalf("calls=%d; the Retry-After backoff must survive a redemption", resets.calls)
+	}
+}
+
+type gatedResets struct {
+	mu      sync.Mutex
+	results []*decision.BankedResets
+	gate    map[int]chan struct{}
+	calls   int
+}
+
+func (g *gatedResets) BankedResets(context.Context, config.Provider) (*decision.BankedResets, error) {
+	g.mu.Lock()
+	index := g.calls
+	g.calls++
+	gate := g.gate[index]
+	g.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	if index >= len(g.results) {
+		return nil, errors.New("unexpected lookup")
+	}
+	return g.results[index], nil
+}
+
+// A multi-use grant loses one use, not the whole grant.
+func TestRedeemingOneUseOfAGrantKeepsTheRest(t *testing.T) {
+	now := time.Date(2026, 10, 29, 15, 0, 0, 0, time.UTC)
+	expires := now.Add(48 * time.Hour)
+	resets := &fakeResets{results: []resetResult{{resets: &decision.BankedResets{Available: 2, NextExpiresAt: &expires,
+		Details: []decision.BankedReset{{ID: "grant", ExpiresAt: &expires, ResetsLeft: 2, Claimable: true}}}}}}
+	manager := usage.NewManager(repeatSource(claudeSnapshot(now), 3), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets = resets
+	fetch(t, manager, "claude-main", autoClaude())
+	manager.ForgetBankedReset(autoClaude(), "grant")
+	got := fetch(t, manager, "claude-main", autoClaude())
+	if got.BankedResets == nil || *got.BankedResets != 1 || len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].ResetsLeft != 1 {
+		t.Fatalf("snapshot=%+v details=%+v", got.BankedResets, got.BankedResetDetails)
 	}
 }
 
