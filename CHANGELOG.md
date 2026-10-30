@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Builds now use Go 1.26.10, which fixes `crypto/x509` GO-2026-6809 (certificates issued by
+  compromised intermediates were still trusted). Redline reaches it through every outbound HTTPS
+  call (provider usage APIs, reset feeds, push relay, Hermes gateways). `go.mod` now requires
+  Go 1.26.10; with the default `GOTOOLCHAIN=auto`, older local Go versions download it
+  automatically.
 - paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
