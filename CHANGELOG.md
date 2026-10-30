@@ -56,6 +56,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
 
+### Fixed
+
+- `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
+  that account ("Test: Start a claude-main firesale?") and explains what tapping Start does.
+  Before, it showed a "Codex reset promised" alert quoting the tracker while the Start action
+  targeted the account you named. The plain sample is unchanged.
+- The green-lane pilot's live-merge check now blocks on any non-empty current-head review body from
+  someone other than the PR author, including bot `COMMENTED` reviews and approvals; a positive
+  completion summary can't bypass it. Earlier review-body feedback only clears after the same
+  provider posts a full completion for the new head, and dismissing a review doesn't resolve it.
+  This deliberately defers benign review prose too.
+- The CLI reference now matches the real commands: `pair --qr` is required, and `task retry`,
+  `token rotate --yes`, and `run events --limit` are documented.
+
 ## [0.1.11] - 2026-10-23
 
 ### Upgrade notes
