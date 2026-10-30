@@ -96,6 +96,70 @@ func TestServiceBoundsDeliveryWithTimeout(t *testing.T) {
 	}
 }
 
+func TestServiceStopsBeforeDeliveryWhenCreatingRecordFails(t *testing.T) {
+	createErr := errors.New("database unavailable")
+	store := &fakeNotificationStore{createErr: createErr}
+	sink := &fakeNotificationSink{}
+	service := notification.Service{
+		Enabled: true, Events: map[string]bool{domain.EventRunFailed: true}, Store: store, Sink: sink,
+	}
+
+	err := service.Notify(context.Background(), domain.NotificationEvent{Type: domain.EventRunFailed})
+
+	if !errors.Is(err, createErr) {
+		t.Fatalf("Notify() error = %v, want create error", err)
+	}
+	if sink.calls != 0 {
+		t.Fatalf("sink calls = %d, want 0", sink.calls)
+	}
+	if store.completed {
+		t.Fatal("completed delivery record that was never created")
+	}
+}
+
+func TestServiceReturnsCompletionFailureAfterSuccessfulDelivery(t *testing.T) {
+	completionErr := errors.New("completion write failed")
+	store := &fakeNotificationStore{completionErr: completionErr}
+	sink := &fakeNotificationSink{}
+	service := notification.Service{
+		Enabled: true, Events: map[string]bool{domain.EventRunFailed: true}, Store: store, Sink: sink,
+	}
+
+	err := service.Notify(context.Background(), domain.NotificationEvent{Type: domain.EventRunFailed})
+
+	if !errors.Is(err, completionErr) {
+		t.Fatalf("Notify() error = %v, want completion error", err)
+	}
+	if sink.calls != 1 {
+		t.Fatalf("sink calls = %d, want 1", sink.calls)
+	}
+	if !store.completed || store.status != "delivered" || store.lastError != "" {
+		t.Fatalf("completion = %#v, want delivered without an error", store)
+	}
+}
+
+func TestServicePreservesDeliveryAndCompletionFailures(t *testing.T) {
+	deliveryErr := errors.New("sink offline")
+	completionErr := errors.New("completion write failed")
+	store := &fakeNotificationStore{completionErr: completionErr}
+	sink := &fakeNotificationSink{err: deliveryErr}
+	service := notification.Service{
+		Enabled: true, Events: map[string]bool{domain.EventRunFailed: true}, Store: store, Sink: sink,
+	}
+
+	err := service.Notify(context.Background(), domain.NotificationEvent{Type: domain.EventRunFailed})
+
+	if !errors.Is(err, deliveryErr) || !errors.Is(err, completionErr) {
+		t.Fatalf("Notify() error = %v, want both delivery and completion errors", err)
+	}
+	if sink.calls != 1 {
+		t.Fatalf("sink calls = %d, want 1", sink.calls)
+	}
+	if !store.completed || store.status != "failed" || store.lastError != deliveryErr.Error() {
+		t.Fatalf("completion = %#v, want failed with delivery error", store)
+	}
+}
+
 type captureNotificationRunner struct {
 	command redprocess.Command
 	stdin   string
@@ -109,19 +173,33 @@ func (r *captureNotificationRunner) Run(_ context.Context, command redprocess.Co
 }
 
 type fakeNotificationStore struct {
-	created   bool
-	status    string
-	lastError string
+	created       bool
+	completed     bool
+	status        string
+	lastError     string
+	createErr     error
+	completionErr error
 }
 
 func (s *fakeNotificationStore) CreateNotificationDelivery(_ context.Context, _ string, payload json.RawMessage, _ time.Time) (int64, error) {
 	s.created = len(payload) > 0
-	return 1, nil
+	return 1, s.createErr
 }
 
 func (s *fakeNotificationStore) CompleteNotificationDelivery(_ context.Context, _ int64, status, lastError string, _ time.Time) error {
+	s.completed = true
 	s.status, s.lastError = status, lastError
-	return nil
+	return s.completionErr
+}
+
+type fakeNotificationSink struct {
+	calls int
+	err   error
+}
+
+func (s *fakeNotificationSink) Deliver(context.Context, domain.NotificationEvent) error {
+	s.calls++
+	return s.err
 }
 
 type failingSink struct{}
