@@ -304,6 +304,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	completedAt := s.now().UTC()
 	remaining := make(map[string]string)
 	if result.Outcome == "redeemed" && !dryRun {
+		s.usageSources.ForgetBankedReset(provider, result.ResetID)
 		post, raw, refreshErr := s.usageSources.FetchFresh(ctx, providerID, provider)
 		if refreshErr == nil {
 			refreshErr = s.store.SaveSnapshot(ctx, post, raw)

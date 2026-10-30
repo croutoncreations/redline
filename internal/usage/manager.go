@@ -264,6 +264,42 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	m.saveLockoutsLocked()
 }
 
+// ForgetBankedReset takes one use of a just-redeemed reset out of the cached
+// report and asks for a fresh report on the next fetch. Until then the cache
+// would still offer the spent credit, and the next redemption would select
+// it instead of one that is still available.
+func (m *Manager) ForgetBankedReset(provider config.Provider, resetID string) {
+	key := providerKey(provider.Provider)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.resetStates[key]
+	if !ok {
+		return
+	}
+	if state.resets != nil {
+		report := *state.resets
+		report.Details, report.NextExpiresAt = nil, nil
+		for _, detail := range state.resets.Details {
+			if detail.ID == resetID {
+				detail.ResetsLeft--
+				report.Available = max(0, report.Available-1)
+				if detail.ResetsLeft <= 0 {
+					continue
+				}
+			}
+			report.Details = append(report.Details, detail)
+			if detail.ExpiresAt != nil && (report.NextExpiresAt == nil || detail.ExpiresAt.Before(*report.NextExpiresAt)) {
+				report.NextExpiresAt = detail.ExpiresAt
+			}
+		}
+		state.resets = &report
+	}
+	if !state.inFlight {
+		state.nextFetch = time.Time{}
+	}
+	m.resetStates[key] = state
+}
+
 // WaitForBankedResetLookups blocks until background reset lookups finish.
 func (m *Manager) WaitForBankedResetLookups() { m.lookups.Wait() }
 
