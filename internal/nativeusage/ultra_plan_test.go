@@ -13,6 +13,41 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 )
 
+// The first publicly reported real response from a verified Ultra account
+// (https://github.com/cortexkit/anthropic-auth/issues/572, 2026-10-30): HTTP
+// 200 with "five_hour": null, a seven_day window carrying extra dollar fields,
+// and a limits array with weekly_all/weekly_scoped entries but no session.
+func TestClaudeNativeParsesObservedVerifiedUltraResponse(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+  "five_hour": null,
+  "seven_day": {"utilization": 0, "resets_at": "2026-11-06T20:59:59.701522+00:00",
+    "limit_dollars": null, "used_dollars": null, "remaining_dollars": null, "locked_reason": null},
+  "limits": [
+    {"kind": "weekly_all", "percent": 0, "resets_at": "2026-11-06T20:59:59.701522+00:00"},
+    {"kind": "weekly_scoped", "percent": 0, "resets_at": "2026-11-06T20:59:59.701522+00:00", "scope": {"model": {"display_name": "Fable"}}}
+  ]
+}`)
+	}))
+	defer server.Close()
+	client := nativeusage.Client{HTTPClient: server.Client(), Credentials: staticCredentials{token: "t"},
+		ClaudeUsageURL: server.URL, Now: func() time.Time { return now }}
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Short != nil || got.Weekly.Remaining != 1 || !got.Weekly.ResetsAt.Equal(time.Date(2026, 11, 6, 20, 59, 59, 701522000, time.UTC)) {
+		t.Fatalf("snapshot = %#v", got)
+	}
+	if _, ok := got.Allowance("session"); ok {
+		t.Fatal("no session allowance expected")
+	}
+	if fable, ok := got.Allowance("model:fable:weekly"); !ok || fable.Remaining != 1 {
+		t.Fatalf("fable = %#v ok=%v", fable, ok)
+	}
+}
+
 // Since 2026-10-30, verified Ultra (formerly Max 20x) accounts have no 5-hour
 // limit; Max (formerly Max 5x), Pro, and unverified Ultra still have one.
 // Scheduling must follow the windows the API reports, never the plan name.
