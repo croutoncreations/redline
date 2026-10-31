@@ -116,6 +116,33 @@ can run when an account is at least 30 percentage points behind an even weekly b
 standard bundled policy uses `0.30`, early uses `0.15`, and late omits the setting so that it
 continues to require a configured time threshold or unavoidable overflow.
 
+### Accounts without a five-hour window
+
+An account that reports no five-hour window (a verified Claude Ultra account, or Codex while its
+short limit is absent) never produces slot overflow, so the weekly reset is its only clock. Policies
+may add `weekly_only_pace_thresholds`, using the same `{time_remaining, min_weekly_remaining}` rows
+as `pace_thresholds`. They are checked after the regular rules, and only when the latest usage
+snapshot has no five-hour window. They never change a decision for an account that reports one.
+
+The bundled `late` policy uses them so leftover weekly quota is filled before it expires. Each row
+asks for about 1.4 times the share of the week still to go:
+
+| Time to weekly reset | Weekly remaining needed |
+| --- | --- |
+| 72h | 60% |
+| 48h | 40% |
+| 24h | 20% |
+| 6h | 5% |
+
+`standard` and `early` already admit weekly-only accounts through `pace_gap_trigger` and their own
+thresholds, so they do not set them. Configs written before this release do not pick the rows up
+automatically. Copy the block from `config.example.yaml` into your `late` policy to use it.
+
+A policy with none of `pace_gap_trigger`, `pace_thresholds` or `weekly_only_pace_thresholds` can
+only admit work through five-hour slot overflow. Redline still loads it but logs a warning at
+startup, because a weekly-only account's decision is `UNKNOWN` under it except during a
+reset-announcement firesale.
+
 Each provider's usage detail in the dashboard includes a dispatch-policy selector. Selecting a named
 policy stores an override in SQLite; selecting **Default** returns to the provider-level YAML policy
 when present, or to `active_policy` otherwise.
@@ -262,9 +289,9 @@ Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
 temporarily absent or a verified Claude Ultra account (no five-hour limit since 2026-10-30), cannot
 produce paired calibration evidence and continue using pace rules on the weekly window alone.
 Redline decides this from the windows the provider reports, not the plan name: an unverified Ultra
-account that still reports a five-hour window is scheduled with slots like Max and Pro. A
-weekly-only provider needs `pace_gap_trigger` or `pace_thresholds` in its policy; without either,
-its decision is `UNKNOWN` (all bundled policies set one).
+account that still reports a five-hour window is scheduled with slots like Max and Pro. See
+[Accounts without a five-hour window](#accounts-without-a-five-hour-window) for the pace rules
+that apply.
 
 ## Empirical token capacity
 

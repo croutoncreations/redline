@@ -47,6 +47,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+- Policies accept `weekly_only_pace_thresholds`, which apply only while an account reports no
+  five-hour window. The bundled `late` policy uses them (72h/60%, 48h/40%, 24h/20%, 6h/5%) so a
+  verified Claude Ultra account fills leftover weekly quota before its reset. Accounts that report
+  a five-hour window are unaffected. Existing configs need the block copied from
+  `config.example.yaml`.
+- Startup warns about any policy with no `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, since it cannot run work for a weekly-only account outside an
+  announcement firesale.
 
 ### Fixed
 
