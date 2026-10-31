@@ -173,6 +173,39 @@ func TestParseAcceptsProviderWithoutShortWindow(t *testing.T) {
 	assertClose(t, got.Weekly.Remaining, 0.67)
 }
 
+// Verified Claude Ultra accounts (formerly Max 20x) have no 5-hour limit. A
+// feed may report the session with no denominator; that is "no limit", not an
+// exhausted session and not a reason to discard the weekly snapshot.
+func TestParseTreatsUnlimitedSessionAsWeeklyOnly(t *testing.T) {
+	for _, session := range []string{
+		`{"type":"progress","label":"Session","used":0,"limit":0,"periodDurationMs":18000000,"resetsAt":"2026-10-31T17:00:00Z"},`,
+		`{"type":"progress","label":"Session","used":12,"limit":0,"resetsAt":""},`,
+		``,
+	} {
+		payload := `{"providerId":"claude","plan":"Ultra","fetchedAt":"2026-10-31T12:00:00Z","lines":[` + session + `
+          {"type":"progress","label":"Weekly","used":30,"limit":100,"periodDurationMs":604800000,"resetsAt":"2026-11-05T17:00:00Z"}]}`
+		got, err := openusage.Parse([]byte(payload), "claude")
+		if err != nil {
+			t.Fatalf("session %s: %v", session, err)
+		}
+		if got.Short != nil {
+			t.Fatalf("session %s: short = %#v, want none", session, got.Short)
+		}
+		if _, ok := got.Allowance("session"); ok {
+			t.Fatalf("session %s: session allowance should be omitted", session)
+		}
+		assertClose(t, got.Weekly.Remaining, .70)
+	}
+}
+
+func TestParseStillRejectsZeroLimitWeeklyWindow(t *testing.T) {
+	payload := `{"providerId":"claude","fetchedAt":"2026-10-31T12:00:00Z","lines":[
+      {"type":"progress","label":"Weekly","used":0,"limit":0,"resetsAt":"2026-11-05T17:00:00Z"}]}`
+	if _, err := openusage.Parse([]byte(payload), "claude"); err == nil {
+		t.Fatal("a weekly window without a limit cannot be budgeted and must fail")
+	}
+}
+
 func TestParseRejectsMissingWeeklyWindow(t *testing.T) {
 	payload := `[{"providerId":"codex","fetchedAt":"2026-07-16T18:00:00Z","lines":[]}]`
 	if _, err := openusage.Parse([]byte(payload), "codex"); err == nil {
