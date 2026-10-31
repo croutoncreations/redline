@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -253,6 +254,11 @@ type Policy struct {
 	RollingReserve  float64         `yaml:"rolling_reserve" json:"rolling_reserve"`
 	PaceGapTrigger  *float64        `yaml:"pace_gap_trigger,omitempty" json:"pace_gap_trigger,omitempty"`
 	PaceThresholds  []PaceThreshold `yaml:"pace_thresholds" json:"pace_thresholds"`
+	// WeeklyOnlyPaceThresholds add thresholds that apply only while an
+	// account reports no five-hour window (for example a verified Claude Ultra
+	// account), where the weekly reset is the only clock and no slot overflow
+	// can release leftover allowance.
+	WeeklyOnlyPaceThresholds []PaceThreshold `yaml:"weekly_only_pace_thresholds,omitempty" json:"weekly_only_pace_thresholds,omitempty"`
 }
 
 type PaceThreshold struct {
@@ -301,6 +307,7 @@ func Load(path string) (Config, error) {
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
+	cfg.Warnings = append(cfg.Warnings, cfg.policyWarnings()...)
 	return cfg, nil
 }
 
@@ -463,6 +470,9 @@ func (cfg *Config) validate() error {
 		if _, err := policy.DecisionThresholds(); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)
 		}
+		if _, err := policy.WeeklyOnlyDecisionThresholds(); err != nil {
+			return fmt.Errorf("policy %q: %w", name, err)
+		}
 	}
 	if _, err := cfg.SnapshotAge(); err != nil {
 		return err
@@ -499,13 +509,42 @@ func (cfg *Config) validate() error {
 }
 
 func (p Policy) DecisionThresholds() ([]decision.PaceThreshold, error) {
-	thresholds := make([]decision.PaceThreshold, 0, len(p.PaceThresholds))
-	for index, configured := range p.PaceThresholds {
-		duration, err := positiveDuration(fmt.Sprintf("pace_thresholds[%d] time_remaining", index), configured.TimeRemaining)
+	return decisionThresholds("pace_thresholds", p.PaceThresholds)
+}
+
+// WeeklyOnlyDecisionThresholds parses weekly_only_pace_thresholds.
+func (p Policy) WeeklyOnlyDecisionThresholds() ([]decision.PaceThreshold, error) {
+	return decisionThresholds("weekly_only_pace_thresholds", p.WeeklyOnlyPaceThresholds)
+}
+
+// policyWarnings reports policies that can never admit work for an account
+// without a five-hour window outside an announcement firesale: with no pace
+// trigger of any kind, such an account's decision is UNKNOWN. Not an error, because the policy still
+// works for accounts that report a five-hour window (slot overflow).
+func (cfg Config) policyWarnings() []string {
+	names := make([]string, 0, len(cfg.Policies))
+	for name := range cfg.Policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var warnings []string
+	for _, name := range names {
+		policy := cfg.Policies[name]
+		if policy.PaceGapTrigger == nil && len(policy.PaceThresholds) == 0 && len(policy.WeeklyOnlyPaceThresholds) == 0 {
+			warnings = append(warnings, fmt.Sprintf("policy %q has no pace_gap_trigger, pace_thresholds, or weekly_only_pace_thresholds; accounts without a five-hour window (such as verified Claude Ultra or Codex without its short limit) will only run work during a reset-announcement firesale", name))
+		}
+	}
+	return warnings
+}
+
+func decisionThresholds(field string, configured []PaceThreshold) ([]decision.PaceThreshold, error) {
+	thresholds := make([]decision.PaceThreshold, 0, len(configured))
+	for index, configured := range configured {
+		duration, err := positiveDuration(fmt.Sprintf("%s[%d] time_remaining", field, index), configured.TimeRemaining)
 		if err != nil {
 			return nil, err
 		}
-		if err := fraction(fmt.Sprintf("pace_thresholds[%d] min_weekly_remaining", index), configured.MinWeeklyRemaining); err != nil {
+		if err := fraction(fmt.Sprintf("%s[%d] min_weekly_remaining", field, index), configured.MinWeeklyRemaining); err != nil {
 			return nil, err
 		}
 		thresholds = append(thresholds, decision.PaceThreshold{

@@ -2151,9 +2151,16 @@ func (s *Server) evaluateCandidateBudget(
 				poolKey + " reset is not in the future"
 		}
 		thresholds, thresholdErr := policy.DecisionThresholds()
+		weeklyOnly, weeklyOnlyErr := policy.WeeklyOnlyDecisionThresholds()
 		maxAge, ageErr := s.config.SnapshotAge()
-		if thresholdErr != nil || ageErr != nil {
+		if thresholdErr != nil || weeklyOnlyErr != nil || ageErr != nil {
 			return base, false, "model-specific pace policy is invalid"
+		}
+		if snapshot.Short != nil {
+			// The model pool is evaluated as a weekly-only snapshot, but the
+			// account still has a five-hour window; weekly-only thresholds
+			// must not loosen its admission.
+			weeklyOnly = nil
 		}
 		poolSnapshot := decision.UsageSnapshot{
 			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
@@ -2164,7 +2171,7 @@ func (s *Server) evaluateCandidateBudget(
 			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
 			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
 			PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
-			PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+			PaceThresholds: thresholds, WeeklyOnlyPaceThresholds: weeklyOnly, Now: s.now(), MaxSnapshotAge: maxAge,
 		})
 		poolResults = append(poolResults, decision.PoolResult{
 			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
@@ -2652,6 +2659,10 @@ func (s *Server) providerDecisionInput(
 	if err != nil {
 		return decision.Input{}, err
 	}
+	weeklyOnly, err := selection.Definition.WeeklyOnlyDecisionThresholds()
+	if err != nil {
+		return decision.Input{}, err
+	}
 	maxAge, err := s.config.SnapshotAge()
 	if err != nil {
 		return decision.Input{}, err
@@ -2671,7 +2682,7 @@ func (s *Server) providerDecisionInput(
 		PaceGapTrigger: selection.Definition.PaceGapTrigger, FiresaleTrigger: selection.Definition.FiresaleTrigger,
 		ForceFiresale:  s.hasResetAnnouncementEvent(events),
 		ResetEvents:    events,
-		PaceThresholds: thresholds, Now: s.now(), MaxSnapshotAge: maxAge,
+		PaceThresholds: thresholds, WeeklyOnlyPaceThresholds: weeklyOnly, Now: s.now(), MaxSnapshotAge: maxAge,
 	}, nil
 }
 

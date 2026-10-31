@@ -259,8 +259,12 @@ type Input struct {
 	RollingReserve         float64
 	PaceGapTrigger         *float64
 	PaceThresholds         []PaceThreshold
-	Now                    time.Time
-	MaxSnapshotAge         time.Duration
+	// WeeklyOnlyPaceThresholds apply only when the snapshot has no short
+	// window, where the weekly reset is the only clock (for example a verified
+	// Claude Ultra account). They never affect slot-mode decisions.
+	WeeklyOnlyPaceThresholds []PaceThreshold
+	Now                      time.Time
+	MaxSnapshotAge           time.Duration
 }
 
 type Slot struct {
@@ -467,7 +471,7 @@ func evaluateSlots(in Input) Result {
 }
 
 func evaluatePace(in Input) Result {
-	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil && !in.ForceFiresale {
+	if len(in.PaceThresholds) == 0 && len(in.WeeklyOnlyPaceThresholds) == 0 && in.PaceGapTrigger == nil && !in.ForceFiresale {
 		return unknown("unrestricted provider has no pace thresholds")
 	}
 	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
@@ -485,15 +489,26 @@ func evaluatePace(in Input) Result {
 		result.UnlockedTier = tierForPaceGap(paceGap)
 		return result
 	}
+	if threshold := firstMatchingThreshold(in, in.WeeklyOnlyPaceThresholds); threshold != nil {
+		result.Decision = Admit
+		result.Reason = "weekly remaining meets weekly-only pace threshold"
+		result.MatchedPaceThreshold = threshold
+		result.UnlockedTier = tierForPaceGap(paceGap)
+		return result
+	}
 	result.Decision = Wait
 	result.Reason = "no pace threshold matched"
 	return result
 }
 
 func matchingPaceThreshold(in Input) *PaceThreshold {
+	return firstMatchingThreshold(in, in.PaceThresholds)
+}
+
+func firstMatchingThreshold(in Input, thresholds []PaceThreshold) *PaceThreshold {
 	timeRemaining := in.Snapshot.Weekly.ResetsAt.Sub(in.Now)
-	for i := range in.PaceThresholds {
-		threshold := in.PaceThresholds[i]
+	for i := range thresholds {
+		threshold := thresholds[i]
 		if timeRemaining <= threshold.TimeRemaining && in.Snapshot.Weekly.Remaining >= threshold.MinWeeklyRemaining {
 			matched := threshold
 			return &matched
@@ -564,7 +579,7 @@ func validateInput(in Input) error {
 			return err
 		}
 	}
-	for _, threshold := range in.PaceThresholds {
+	for _, threshold := range append(append([]PaceThreshold(nil), in.PaceThresholds...), in.WeeklyOnlyPaceThresholds...) {
 		if threshold.TimeRemaining <= 0 {
 			return fmt.Errorf("pace threshold time remaining must be greater than 0")
 		}

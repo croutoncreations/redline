@@ -348,6 +348,7 @@ function providerPressure(item) {
     'weekly remaining is well behind pace':'Weekly capacity surplus is above the configured pace trigger',
     'weekly remaining is behind configured pace':'Weekly capacity surplus meets a configured pace threshold',
     'weekly remaining meets pace threshold':'Weekly capacity surplus meets a configured pace threshold',
+    'weekly remaining meets weekly-only pace threshold':'Weekly capacity left before reset meets a weekly-only pace threshold (no 5-hour limit)',
     'no pace threshold matched':'No actionable capacity surplus yet',
     'no actionable weekly overflow':'No actionable weekly surplus yet',
     'weekly remaining exceeds prorated short-window throughput':'Weekly capacity exceeds the remaining prorated 5-hour throughput',
