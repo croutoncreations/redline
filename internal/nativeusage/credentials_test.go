@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,6 +30,56 @@ func TestClaudeCredentialsRefreshAndPersistWithCompareAndSwap(t *testing.T) {
 	if err != nil || got.AccessToken != "new" || store.swaps != 1 || !bytes.Contains(store.value, []byte(`"refreshToken":"next"`)) ||
 		!bytes.Contains(store.value, []byte(`"futureField":"preserve"`)) || !bytes.Contains(store.value, []byte(`"keep":true`)) {
 		t.Fatalf("credential=%#v err=%v swaps=%d stored=%s", got, err, store.swaps, store.value)
+	}
+}
+
+// Plan identifiers never gate access: Redline reads limits from usage windows,
+// so renamed (Ultra, Max), legacy (max_20x, max_5x), unknown, or retyped plan
+// fields must all yield the token and survive a refresh untouched.
+func TestClaudeCredentialsIgnorePlanIdentifiers(t *testing.T) {
+	now := time.Date(2026, 10, 30, 18, 0, 0, 0, time.UTC)
+	for _, plan := range []string{
+		`"subscriptionType":"ultra","rateLimitTier":"default_claude_ultra"`,
+		`"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"`,
+		`"subscriptionType":"max","rateLimitTier":"default_claude_max_5x"`,
+		`"subscriptionType":"max","rateLimitTier":"default_claude_max"`,
+		`"subscriptionType":"pro","rateLimitTier":"default_claude_pro"`,
+		`"subscriptionType":"galaxy_brain","rateLimitTier":"tier_from_the_future"`,
+		`"subscriptionType":null,"rateLimitTier":null`,
+		`"subscriptionType":{"name":"Ultra"},"rateLimitTier":20`,
+	} {
+		t.Run(plan, func(t *testing.T) {
+			live := &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"live","expiresAt":1793469600000,` + plan + `}}`)}
+			credentials := &DefaultCredentials{Now: func() time.Time { return now }, ClaudeStore: live}
+			if got, err := credentials.AccessWithoutRefresh(context.Background(), "claude"); err != nil || got.AccessToken != "live" {
+				t.Fatalf("read-only credential=%#v err=%v", got, err)
+			}
+
+			expiring := &memorySecretStore{value: []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"refresh","expiresAt":1793383260000,` + plan + `}}`)}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"access_token":"new","refresh_token":"next","expires_in":3600}`))
+			}))
+			defer server.Close()
+			credentials = &DefaultCredentials{HTTPClient: server.Client(), Now: func() time.Time { return now }, ClaudeStore: expiring, ClaudeRefreshURL: server.URL}
+			if got, err := credentials.Access(context.Background(), "claude"); err != nil || got.AccessToken != "new" {
+				t.Fatalf("refreshed credential=%#v err=%v", got, err)
+			}
+			if !bytes.Contains(expiring.value, []byte(`"refreshToken":"next"`)) {
+				t.Fatalf("refresh not persisted: %s", expiring.value)
+			}
+			var stored, original map[string]map[string]any
+			if err := json.Unmarshal(expiring.value, &stored); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(`{"claudeAiOauth":{`+plan+`}}`), &original); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range original["claudeAiOauth"] {
+				if got := fmt.Sprint(stored["claudeAiOauth"][key]); got != fmt.Sprint(want) {
+					t.Fatalf("%s = %s, want %v preserved", key, got, want)
+				}
+			}
+		})
 	}
 }
 
