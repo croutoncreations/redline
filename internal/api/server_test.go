@@ -1527,6 +1527,48 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 	}
 }
 
+// Verified Claude Ultra (formerly Max 20x) reports no 5-hour window from
+// 2026-10-30; Max (formerly Max 5x) still does. The scheduler must budget the
+// former on the weekly window alone and keep protecting the latter's session.
+func TestClaudeSchedulingFollowsReportedWindowsAcrossPlans(t *testing.T) {
+	t.Parallel()
+	weeklyReset := apiNow.Add(48 * time.Hour).Format(time.RFC3339Nano)
+	shortReset := apiNow.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	for _, tt := range []struct {
+		name, plan, session, wantPools string
+		wantRun                        bool
+	}{
+		{"ultra weekly only", "Ultra", ``, "weekly", true},
+		{"ultra unlimited session", "Ultra", `{"type":"progress","label":"Session","used":0,"limit":0,"resetsAt":""},`, "weekly", true},
+		{"max with session room", "Max", `{"type":"progress","label":"Session","used":10,"limit":100,"resetsAt":"` + shortReset + `"},`, "session,weekly", true},
+		{"max session exhausted", "Max", `{"type":"progress","label":"Session","used":100,"limit":100,"resetsAt":"` + shortReset + `"},`, "", false},
+		{"unknown plan weekly only", "Galaxy", ``, "weekly", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := fmt.Sprintf(`{"providerId":"claude","plan":%q,"fetchedAt":%q,"lines":[%s
+              {"type":"progress","label":"Weekly","used":30,"limit":100,"resetsAt":%q}]}`,
+				tt.plan, apiNow.Format(time.RFC3339Nano), tt.session, weeklyReset)
+			server, db := newAPIServer(t, payload)
+			createClaudeCandidate(t, db, "opus-profile", "opus", "", "backlog", 50)
+			result := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/evaluate",
+				map[string]any{"provider_account_id": "claude-main"})
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "backlog"; ran != tt.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tt.wantRun)
+			}
+			if !tt.wantRun {
+				if result.Result.Decision != decision.Wait || result.Result.Reason != "current 5-hour reserve protected" {
+					t.Fatalf("exhausted session should wait on its reserve: %#v", result.Result)
+				}
+				return
+			}
+			if got := strings.Join(result.Result.RequiredPools, ","); got != tt.wantPools {
+				t.Fatalf("required pools = %q, want %q (result %#v)", got, tt.wantPools, result.Result)
+			}
+		})
+	}
+}
+
 func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 	t.Parallel()
 	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))

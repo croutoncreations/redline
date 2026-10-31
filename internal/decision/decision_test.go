@@ -271,6 +271,45 @@ func TestUnrestrictedProviderWithoutThresholdsFailsClosed(t *testing.T) {
 	}
 }
 
+// A weekly-only account (verified Claude Ultra, or Codex without its short
+// limit) is budgeted on the weekly window alone: leftover quota before reset
+// is filled, an empty week waits, and nothing waits on a 5-hour reset.
+func TestWeeklyOnlyAccountFillsLeftoverBeforeResetAndWaitsWhenEmpty(t *testing.T) {
+	gap, firesale := .30, .45
+	weeklyOnly := func(remaining float64, untilReset time.Duration) decision.Input {
+		s := limitedSnapshot()
+		s.Short = nil
+		s.Weekly = decision.UsageWindow{Remaining: remaining, ResetsAt: now.Add(untilReset)}
+		in := input(s)
+		in.PaceGapTrigger, in.FiresaleTrigger = &gap, &firesale
+		in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 24 * time.Hour, MinWeeklyRemaining: .20}}
+		return in
+	}
+
+	leftover := decision.Evaluate(weeklyOnly(.60, 12*time.Hour))
+	if leftover.Decision != decision.Admit || leftover.Mode != decision.ModePace || !leftover.Firesale ||
+		leftover.UnlockedTier != domain.DispatchFiresale || len(leftover.Slots) != 0 {
+		t.Fatalf("leftover weekly quota near reset should be filled: %#v", leftover)
+	}
+	forced := weeklyOnly(.05, 12*time.Hour)
+	forced.ForceFiresale = true
+	if got := decision.Evaluate(forced); got.Decision != decision.Admit || !got.Firesale {
+		t.Fatalf("announcement firesale should run a weekly-only account with quota left: %#v", got)
+	}
+	empty := weeklyOnly(0, 12*time.Hour)
+	empty.ForceFiresale = true
+	if got := decision.Evaluate(empty); got.Decision != decision.Wait {
+		t.Fatalf("an exhausted weekly window must wait: %#v", got)
+	}
+	onPace := weeklyOnly(.50, 84*time.Hour)
+	if got := decision.Evaluate(onPace); got.Decision != decision.Wait || got.Mode != decision.ModePace {
+		t.Fatalf("on-pace weekly-only account should wait: %#v", got)
+	}
+	if at := decision.ProjectTriggerAt(onPace, time.Hour); at == nil || !at.After(now) || !at.Before(now.Add(84*time.Hour)) {
+		t.Fatalf("flat usage should become eligible before the weekly reset, got %v", at)
+	}
+}
+
 func TestEvaluateFailsClosedForStaleSnapshot(t *testing.T) {
 	s := limitedSnapshot()
 	s.ObservedAt = now.Add(-16 * time.Minute)
