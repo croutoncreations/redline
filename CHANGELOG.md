@@ -48,6 +48,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
 
+### Fixed
+
+- Claude accounts with no five-hour limit (verified Ultra, formerly Max 20x, from 2026-10-30)
+  are budgeted on the weekly window alone. Native usage accepts a null session window
+  (`utilization: null`) and OpenUsage accepts a session line with no limit, instead of failing
+  the snapshot. Limits still come only from the windows the provider reports, never from plan
+  names, so Max (formerly Max 5x), unverified Ultra, and unrecognized plans keep working.
+- Claude credential reads no longer decode `subscriptionType`/`rateLimitTier`, so a plan field
+  changing shape cannot block usage access; token refreshes still preserve it unchanged.
+
 ## [0.1.11] - 2026-10-23
 
 ### Upgrade notes

@@ -259,7 +259,12 @@ redline decision --provider claude-main --json
 
 Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
 `calibration_confidence`. Providers without a five-hour window, such as Codex while that limit is
-temporarily absent, cannot produce paired calibration evidence and continue using pace rules.
+temporarily absent or a verified Claude Ultra account (no five-hour limit since 2026-10-30), cannot
+produce paired calibration evidence and continue using pace rules on the weekly window alone.
+Redline decides this from the windows the provider reports, not the plan name: an unverified Ultra
+account that still reports a five-hour window is scheduled with slots like Max and Pro. A
+weekly-only provider needs `pace_gap_trigger` or `pace_thresholds` in its policy; without either,
+its decision is `UNKNOWN` (all bundled policies set one).
 
 ## Empirical token capacity
 
