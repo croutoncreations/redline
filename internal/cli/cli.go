@@ -79,21 +79,43 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|candidates|pause|resume|pair|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|firesale|candidates|pause|resume|pair|devices|version>")
 		return 1
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
 	// before constructing the service client so it never reads a local token.
-	if remaining[0] == "reset" {
+	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals" && remaining[1] != "firesale")) {
 		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "firesale":
+		return runManualFiresale(client, remaining[1:], stdout, stderr)
+	case "reset":
+		if remaining[1] == "firesale" {
+			return runResetFiresale(client, remaining[2:], stdout, stderr)
+		}
+		if remaining[1] == "signals" {
+			if len(remaining) != 2 {
+				fmt.Fprintln(stderr, "usage: redline reset signals")
+				return 1
+			}
+			var state resetsignal.State
+			if err := client.Do(context.Background(), http.MethodGet, "/v1/reset-signals", nil, &state); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			writeJSON(stdout, state)
+			return 0
+		}
+		return runResetRedeem(client, remaining[2:], stdin, stdout, stderr, now)
 	case "version":
 		fmt.Fprintln(stdout, version.String())
 		return 0
 	case "serve":
 		return runServe(remaining[1:], *configPath, stdout, stderr, now)
+	case "dashboard":
+		return runDashboard(client, remaining[1:], stdout, stderr, openInBrowser)
 	case "demo":
 		return runDemo(remaining[1:], stdout, stderr, now)
 	case "mcp":
@@ -140,6 +162,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		return runProviderControl(client, remaining[0], remaining[1:], stdout, stderr)
 	case "pair":
 		return runPair(client, remaining[1:], *configPath, stdout, stderr)
+	case "devices":
+		return runDevices(client, remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 		return 1
@@ -151,13 +175,15 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "usage: redline [--api URL] [--config FILE] <command>")
 	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "commands: serve, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
+	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
-	fmt.Fprintln(output, "          pair, version")
+	fmt.Fprintln(output, "          firesale, pair, devices, version")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")
 	fmt.Fprintln(output, "token rotate --yes   replace the API token and sign out every paired device")
+	fmt.Fprintln(output, "firesale start       --provider ACCOUNT (--for DURATION | --until-reset)")
+	fmt.Fprintln(output, "firesale stop        --provider ACCOUNT; firesale status prints JSON")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "GitHub:  https://github.com/croutoncreations/redline")
 	fmt.Fprintln(output, "Updates: https://buttondown.com/croutoncreations?utm_source=redline&utm_medium=cli&utm_campaign=redline")
@@ -437,14 +463,16 @@ func runTokenRotate(args []string, configPath string, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "Re-run with --yes to confirm.")
 		return 1
 	}
-	// The new token is intentionally not printed: it stays in the protected
-	// file, and `pair --qr` is the supported way to hand it to a device.
+	// Device sessions are bound to the master token that issued them, so
+	// replacing the token file is the whole rotation: no database to find,
+	// and nothing left half done if it fails. The new token is intentionally
+	// not printed; `pair --qr` is the supported way to hand it to a device.
 	if _, err := apiauth.RotateToken(resolvedPath); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Rotated the Redline API token at %s\n", tokenPath)
-	fmt.Fprintln(stdout, "Restart Redline to load it, then run `redline pair --qr` to pair devices again.")
+	fmt.Fprintln(stdout, "Restart Redline to apply it: every paired device, including legacy pairings, is signed out. Then run `redline pair --qr` to pair devices again.")
 	return 0
 }
 
@@ -481,8 +509,11 @@ func runHealth(client apiclient.Client, args []string, stdout, stderr io.Writer)
 }
 
 func runNotifications(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "test" {
+		return runNotificationTest(client, args[1:], stdout, stderr)
+	}
 	if len(args) != 1 || args[0] != "list" {
-		fmt.Fprintln(stderr, "usage: redline notification list")
+		fmt.Fprintln(stderr, "usage: redline notification <list|test [--event TYPE|all] [--provider ID] [--json]>")
 		return 1
 	}
 	var deliveries []domain.NotificationDelivery
@@ -534,6 +565,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	cfg.ListenAddress = listener.Addr().String()
 	apiServer := api.NewServer(cfg, database, now)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -544,6 +576,7 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Fprintf(stdout, "Redline API listening on http://%s\n", listener.Addr())
+	fmt.Fprintf(stdout, "Open the dashboard: redline --config %s --api %s dashboard\n", shellQuote(configPath), dashboardOrigin(listener.Addr().String()))
 	errors := make(chan error, 1)
 	go func() { errors <- server.Serve(listener) }()
 	select {
@@ -875,7 +908,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	}
 	fmt.Fprintf(stdout, "Scan this QR code from a device on your tailnet to pair with %s:\n", endpoint)
 	renderTerminalQR(stdout, code.Bitmap())
-	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants full API access. Keep it private and rotate the API token if exposed.")
+	fmt.Fprintln(stdout, "WARNING: This QR contains a pairing credential that grants device control. Keep it private; revoke the device session or rotate the API token if exposed.")
 	return 0
 }
 

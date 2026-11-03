@@ -122,6 +122,10 @@ func (f Fetcher) get(ctx context.Context, feed, endpoint string) (fetchedDocumen
 			return fetchedDocument{}, sourceError(feed, code, "source retry wait was interrupted; no retry was sent", metadata)
 		}
 		if resp.StatusCode != http.StatusOK {
+			// A final attempt can extend the lockout used by later poll cycles.
+			if delay, valid := retryDelay(resp.Header.Get("Retry-After"), f.Now()); valid && delay > metadata.RetryAfter {
+				metadata.RetryAfter = delay
+			}
 			_ = resp.Body.Close()
 			code := "http_status"
 			if resp.StatusCode == http.StatusTooManyRequests {

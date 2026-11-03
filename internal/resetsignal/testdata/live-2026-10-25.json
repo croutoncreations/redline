@@ -1,0 +1,33 @@
+{
+  "resetbeacon": {
+    "calculatedAt": "2026-10-25T06:14:00Z",
+    "validUntil": "2026-10-25T06:30:00Z",
+    "publicationState": "completed",
+    "answer": {"state": "completed", "posts": [{
+      "postId": "2114237083652882932",
+      "sourceUrl": "https://x.com/thsottiaux/status/2114237083652882932",
+      "publishedAt": "2026-10-25T06:06:16Z",
+      "authorHandle": "thsottiaux",
+      "quote": "It is all propagated. Enjoy some mad codexing tomorrow. Fun week ahead too."
+    }]}
+  },
+  "willreset": {
+    "answer": "promised", "fetched_at": "2026-10-25T06:14:00Z",
+    "promise_active": true,
+    "last_reset_id": "2114237083652882932",
+    "last_reset_url": "https://x.com/thsottiaux/status/2114237083652882932",
+    "promise_quote": "It is all propagated. Enjoy some mad codexing tomorrow. Fun week ahead too. https://t.co/example"
+  },
+  "codex-reset": {
+    "mode": "model", "updated_at": "2026-10-25T06:14:00Z",
+    "probabilities": {"rounded_24h": 19, "rounded_48h": 34},
+    "latest_alert": {
+      "id": "2114200291319124163", "kind": "reset", "state": "confirmed",
+      "source_at": "2026-10-25T06:10:01Z",
+      "url": "https://x.com/thsottiaux/status/2114200291319124163",
+      "summary": "Reset observed by operator; awaiting Tibo's confirmation.",
+      "confirmation_source": "operator_observed",
+      "observation_message": "Reset observed by operator."
+    }
+  }
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -60,6 +61,91 @@ func TestBankedResetsSurviveEveryReadPath(t *testing.T) {
 	latest, _, err = db.LatestSnapshot(ctx, "codex")
 	if err != nil || latest.BankedResets == nil || *latest.BankedResets != 1 || latest.BankedResetsExpireAt == nil {
 		t.Fatalf("latest with resets: %v %v %v", latest.BankedResets, latest.BankedResetsExpireAt, err)
+	}
+}
+
+func TestBankedResetDetailsSurviveEveryReadPath(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	expires, cooldown := now.Add(time.Hour), now.Add(time.Minute)
+	usable, requires := false, true
+	s := usageSnapshot(now, .5)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 3, Details: []decision.BankedReset{
+		{ID: "g", ExpiresAt: &expires, Clears: []string{"five_hour", "weekly"}, UsableNow: &usable, RequiresLimit: &requires, CooldownUntil: &cooldown, ResetsLeft: 2, Claimable: true},
+		{ID: "no-expiry", ResetsLeft: 1},
+	}})
+	if err := db.SaveSnapshot(ctx, s, nil); err != nil {
+		t.Fatal(err)
+	}
+	latest, _, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSource, _, err := db.LatestSnapshotFromSource(ctx, "codex", s.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := db.ListSnapshots(ctx, "codex", 10)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("list: %v %v", listed, err)
+	}
+	for _, got := range []decision.UsageSnapshot{latest, fromSource, listed[0]} {
+		if !reflect.DeepEqual(got.BankedResetDetails, s.BankedResetDetails) {
+			t.Fatalf("details = %#v, want %#v", got.BankedResetDetails, s.BankedResetDetails)
+		}
+	}
+}
+
+func TestCorruptBankedResetDetailsDoNotBlockSnapshotReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for i := range 2 {
+		s := usageSnapshot(now.Add(time.Duration(i)*time.Minute), .5)
+		s.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "g", ResetsLeft: 1}}})
+		if err := db.SaveSnapshot(ctx, s, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// A type error after a valid item also tests that partially decoded details
+	// are discarded instead of being used as a trustworthy report.
+	if _, err := raw.Exec(`UPDATE usage_snapshots SET banked_reset_details = ? WHERE id = (SELECT MAX(id) FROM usage_snapshots)`, `[{"id":"partial","resets_left":1},{"id":42}]`); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := db.ListSnapshots(ctx, "codex", 10)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("list: rows=%d err=%v", len(listed), err)
+	}
+	if len(listed[0].BankedResetDetails) != 1 || listed[0].BankedResetDetails[0].ID != "g" {
+		t.Fatalf("uncorrupted details lost: %#v", listed[0])
+	}
+	latest, _, err := db.LatestSnapshot(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSource, _, err := db.LatestSnapshotFromSource(ctx, "codex", latest.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []decision.UsageSnapshot{listed[1], latest, fromSource} {
+		if got.BankedResetDetails != nil || got.BankedResets == nil || *got.BankedResets != 1 || got.Weekly.Remaining != .5 || !got.ObservedAt.Equal(now.Add(time.Minute)) {
+			t.Fatalf("corrupt details must not affect usage or aggregate: %#v", got)
+		}
 	}
 }
 

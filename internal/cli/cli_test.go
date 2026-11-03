@@ -78,7 +78,7 @@ func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net", "--port", "8443"}, &stdout, &stderr, time.Now)
 	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net:8443") ||
-		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "full API access") ||
+		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "device control") ||
 		strings.Contains(stdout.String(), "pairing_token") || strings.Contains(stdout.String(), pairingToken) || strings.Contains(stdout.String(), token) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
@@ -791,7 +791,8 @@ func TestTokenRotateRequiresConfirmation(t *testing.T) {
 func TestTokenRotateReplacesTokenWithConfirmation(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "redline.yaml")
-	if err := os.WriteFile(configPath, []byte("database: unused\n"), 0o600); err != nil {
+	contents := fmt.Sprintf("database: %s\nactive_policy: standard\nproviders:\n  main:\n    provider: codex\n    window_weekly_cost: 0.1\npolicies:\n  standard:\n    trigger_margin: 0.02\n    rolling_reserve: 0.25\n", filepath.Join(directory, "redline.db"))
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	original, err := apiauth.EnsureToken(configPath)

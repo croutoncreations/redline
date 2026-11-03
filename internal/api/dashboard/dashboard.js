@@ -18,7 +18,7 @@ const duration = (nanos) => {
   return hours >= 1 ? `${Math.round(hours)}h minimum` : `${Math.round(nanos/6e10)}m minimum`;
 };
 const title = (value) => String(value || "").replace(/[_-]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
-const dispatchTierLabel = (value) => ({behind:'Standard surplus',well_behind:'High surplus',expiring:'Near expiry'}[value] || title(value));
+const dispatchTierLabel = (value) => ({behind:'Standard surplus',well_behind:'High surplus',expiring:'Near expiry',firesale:'Firesale (lots expiring)'}[value] || title(value));
 const percent = (remaining) => Math.max(0,Math.min(100,Math.round((remaining || 0)*100)));
 const compactNumber = (value) => new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value || 0);
 const tokenNumber = (value) => new Intl.NumberFormat().format(value || 0);
@@ -356,7 +356,8 @@ function providerPressure(item) {
     const pressure = {
       behind: {label:'Run now · surplus',detail:'Standard background jobs are eligible.'},
       well_behind: {label:'Run now · surplus',detail:'More discretionary background jobs are eligible.'},
-      expiring: {label:'Run now · high surplus',detail:'All job tiers are eligible because weekly allowance is at risk of expiring unused.'},
+      expiring: {label:'Run now · high surplus',detail:'Jobs through the near-expiry tier are eligible because weekly allowance is at risk of expiring unused.'},
+      firesale: {label:'Run now · firesale',detail:'All job tiers are eligible; firesale intervals and the provider\'s firesale concurrency limit are in effect.'},
     }[current.unlocked_tier] || {label:'Run now',detail:'Background work is eligible.'};
     const weekly = item.snapshot?.weekly;
     if (current.unlocked_tier === 'expiring' && weekly) {
@@ -554,9 +555,13 @@ function renderTasks(tasks) {
   $('#task-count').classList.toggle('count-attention', failed > 0);
   $('#tasks-body').innerHTML = tasks.length ? tasks.map(task => {
     const schedulerOff = !latestDashboard?.scheduler?.enabled && task.enabled && task.state === 'queued';
-    const recurrence = schedulerOff ? 'Waiting for global scheduling' : duration(task.min_interval);
+    const firesaleInterval = task.type === 'recurring' && task.firesale_min_interval > 0
+      ? ` · ${duration(task.firesale_min_interval).replace(' minimum','')} in firesale` : '';
+    // One-off jobs never re-run after success, so an interval has no effect on them.
+    const interval = task.type === 'recurring' ? duration(task.min_interval) : 'Runs once';
+    const recurrence = (schedulerOff ? 'Waiting for global scheduling' : interval) + firesaleInterval;
     const status = schedulerOff ? 'Ready · scheduler off' : task.state;
-    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(task.type === 'one_off' ? 'One-off' : title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
@@ -941,13 +946,28 @@ async function deleteRuntimeConnection() {
     $('#profile-hermes-status').textContent='Choose or import a connection to discover profiles, projects, and models.';
   } catch(error) { showRuntimeError(error.message); }
 }
-function showTaskError(message) {
+function showTaskError(message, field) {
   $('#task-form-error').hidden = !message; $('#task-form-error').textContent = message || '';
+  for (const input of document.querySelectorAll('#task-form [aria-invalid="true"]')) input.removeAttribute('aria-invalid');
+  if (message && field) field.setAttribute('aria-invalid', 'true');
 }
 function syncIntervalField() {
   const recurring = $('#task-type').value === 'recurring';
   $('#task-interval').disabled = !recurring;
-  $('#task-interval-note').hidden = recurring;
+  $('#task-firesale-interval').disabled = !recurring;
+  // One-off jobs never re-run after success, so neither interval applies.
+  // Values stay in the inputs so switching back to recurring keeps them.
+  $('#task-interval-field').hidden = !recurring;
+  $('#task-firesale-interval-field').hidden = !recurring;
+  // An interval error no longer applies once the fields are disabled.
+  const invalid = document.querySelector('#task-form [aria-invalid="true"]');
+  if (!recurring && invalid && (invalid.id === 'task-interval' || invalid.id === 'task-firesale-interval')) showTaskError('');
+}
+function syncFiresaleWarning() {
+  const profile = profiles.find(item => item.id === $('#task-profile').value);
+  const provider = latestDashboard?.providers.find(item => item.id === profile?.provider_account_id);
+  const policy = policyCatalog[provider?.policy];
+  $('#task-firesale-warning').hidden = $('#task-tier').value !== 'firesale' || policy?.firesale_trigger != null;
 }
 function syncNewTaskActivation() {
   const creating = !$('#task-id').value;
@@ -1000,7 +1020,10 @@ async function openTask(id='') {
     $('#task-tier').value = task?.dispatch_tier || 'behind';
     $('#task-type').value = task?.type || 'one_off';
     $('#task-interval').value = durationInput(task?.min_interval || 0);
+    $('#task-firesale-interval').value = durationInput(task?.firesale_min_interval || 0);
+    $('#task-firesale-interval').dataset.hadValue = task?.firesale_min_interval > 0 ? 'true' : '';
     syncIntervalField();
+    syncFiresaleWarning();
     $('#task-prompt').value = task?.prompt || '';
     $('#task-prompt-file').value = task?.prompt_file || '';
     $('#task-repo-change').checked = !!task?.require_repo_change;
@@ -1024,12 +1047,42 @@ function applyTaskTemplate() {
   $('#task-tier').value = template.dispatch_tier || 'behind';
   $('#task-type').value = template.type || 'recurring';
   $('#task-interval').value = durationInput(template.min_interval || 0);
+  $('#task-firesale-interval').value = durationInput(template.firesale_min_interval || 0);
   syncIntervalField();
+  syncFiresaleWarning();
   $('#task-prompt').value = template.prompt || '';
   $('#task-prompt-file').value = '';
   $('#task-repo-change').checked = !!template.require_repo_change;
   const requirements = (template.requirements || []).join(' · ');
   $('#task-template-description').textContent = `${template.description || 'Editable starter prompt.'}${requirements ? ` Requires: ${requirements}.` : ''}`;
+}
+function validTaskDuration(value) {
+  if (!value) return true;
+  const maxNanos = 9223372036854775807n;
+  if (value.endsWith('d')) {
+    // The server's day suffix uses strconv.ParseFloat, including exponent and hex forms.
+    const digits = '[0-9](?:_?[0-9])*', hex = '[0-9a-fA-F](?:_?[0-9a-fA-F])*';
+    const decimal = new RegExp(`^\\+?(?:${digits}(?:\\.(?:${digits})?)?|\\.${digits})(?:[eE][+-]?${digits})?d$`);
+    const hexadecimal = new RegExp(`^\\+?0[xX]_?(${hex}(?:\\.(?:${hex})?)?|\\.${hex})[pP]([+-]?${digits})d$`);
+    let days = NaN;
+    if (decimal.test(value)) days = Number(value.slice(0,-1).replaceAll('_',''));
+    const parts = value.match(hexadecimal);
+    if (parts) {
+      const [whole, fraction=''] = parts[1].replaceAll('_','').split('.');
+      days = (parseInt(whole || '0',16) + parseInt(fraction || '0',16) / 16 ** fraction.length) * 2 ** Number(parts[2].replaceAll('_',''));
+    }
+    return days > 0 && days <= Number(maxNanos) / 8.64e13;
+  }
+  const units = {ns:1n,us:1000n,'µs':1000n,'μs':1000n,ms:1000000n,s:1000000000n,m:60000000000n,h:3600000000000n};
+  let rest = value.replace(/^\+/,''), nanos = 0n;
+  while (rest) {
+    const part = rest.match(/^(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/);
+    if (!part) return false;
+    const [whole, fraction=''] = part[1].split('.'), unit = units[part[2]];
+    nanos += BigInt(whole || '0') * unit + BigInt(fraction || '0') * unit / (10n ** BigInt(fraction.length));
+    rest = rest.slice(part[0].length);
+  }
+  return nanos > 0n && nanos <= maxNanos;
 }
 async function saveTask(event) {
   event.preventDefault(); showTaskError('');
@@ -1037,14 +1090,25 @@ async function saveTask(event) {
   if (!$('#task-profile').value) { showTaskError('Create or choose an execution profile before saving this job.'); $('#task-profile').focus(); return; }
   const priorityInput = $('#task-priority').value.trim(), priority = Number(priorityInput);
   if (!priorityInput || !Number.isInteger(priority) || priority < 0 || priority > 100) { showTaskError('Priority must be a whole number between 0 and 100.'); $('#task-priority').focus(); return; }
+  const recurring = $('#task-type').value === 'recurring';
+  for (const [selector, label] of [['#task-interval','Minimum interval'],['#task-firesale-interval','Firesale interval']]) {
+    if (recurring && !validTaskDuration($(selector).value.trim())) {
+      showTaskError(`${label} must be a duration like 10m, 2h or 1d, or blank.`, $(selector));
+      $(selector).focus(); return;
+    }
+  }
   const id = $('#task-id').value, payload = {
     name:$('#task-name').value.trim(), execution_profile_id:$('#task-profile').value,
     runtime_job_id:$('#task-runtime-job-field').hidden ? '' : $('#task-runtime-job').value,
     priority, type:$('#task-type').value,
     dispatch_tier:$('#task-tier').value,
-    min_interval:$('#task-interval').value.trim(), prompt:$('#task-prompt').value,
+    min_interval:recurring ? $('#task-interval').value.trim() : '', prompt:$('#task-prompt').value,
     prompt_file:$('#task-prompt-file').value.trim(), require_repo_change:$('#task-repo-change').checked
   };
+  // Send the firesale interval only when set, or to clear an existing one, so
+  // ordinary saves still work against daemons that predate the field.
+  const firesaleInterval = recurring ? $('#task-firesale-interval').value.trim() : '';
+  if (firesaleInterval || $('#task-firesale-interval').dataset.hadValue) payload.firesale_min_interval = firesaleInterval;
   if (!id) payload.enabled = $('#task-enabled').checked;
   const save = $('#save-task'); save.disabled = true;
   try {
@@ -1270,7 +1334,8 @@ $('#mark-runs-read').addEventListener('click',async event => {
   finally { button.disabled = false; }
 });
 $('#task-form').addEventListener('submit',saveTask);
-$('#task-profile').addEventListener('change',() => updateTaskRuntimeJobs());
+$('#task-profile').addEventListener('change',() => { syncFiresaleWarning(); updateTaskRuntimeJobs(); });
+$('#task-tier').addEventListener('change',syncFiresaleWarning);
 $('#task-template').addEventListener('change',applyTaskTemplate);
 $('#task-type').addEventListener('change',syncIntervalField);
 $('#task-enabled').addEventListener('change',syncNewTaskActivation);
@@ -1307,4 +1372,18 @@ document.addEventListener('keydown',event => {
   document.querySelectorAll('.provider-compact.open').forEach(card => card.classList.remove('open'));
   if (document.activeElement?.closest('.provider-compact')) document.activeElement.blur();
 });
+$('#scheduler-setup').addEventListener('click', () => {
+  const configPath = latestDashboard?.config_path;
+  $('#scheduler-config-path').textContent = configPath || 'Configuration path unavailable';
+  $('#scheduler-config-fallback').hidden = Boolean(configPath);
+  // Quote for the host shell, not the browser OS. This dialog never executes commands.
+  const quote = value => "'" + String(value).replaceAll("'", latestDashboard?.host_os === 'windows' ? "''" : "'\"'\"'") + "'";
+  const listen = latestDashboard?.listen_address;
+  $('#scheduler-restart-command').textContent = configPath
+    ? `redline --config ${quote(configPath)} serve${listen ? ` --listen ${quote(listen)}` : ''}`
+    : 'redline --config /path/to/redline.yaml serve';
+  $('#scheduler-setup-dialog').showModal();
+});
+$('#close-scheduler-setup').addEventListener('click', () => $('#scheduler-setup-dialog').close());
+
 refresh(); connectLive();

@@ -140,11 +140,156 @@ upgrades the report from an attributed promise to `SCHEDULED`. Because the sourc
 ambiguous, expiry follows the tracker's reading (for example midnight Pacific daylight time), so a
 promise may be treated as historical up to an hour before a literal-PST reading would expire it.
 
+## Optional monitoring and announcement alerts
+
+The service can poll these same feeds independently of `scheduler.enabled`. Monitoring is off by
+default. When enabled, the default firesale mode offers an explicit opt-in, rather than starting
+work automatically. Opt in with:
+
+```yaml
+reset_signals:
+  enabled: true
+  poll_interval: 10m # minimum 5m; default 10m
+  notify: true      # default when enabled; announcement alerts only
+  firesale: notify  # off | notify | auto; default notify when enabled
+notifications:
+  enabled: true
+  command: ./scripts/redline-notify
+  events: [reset.announced] # explicitly opt in; not a default event
+```
+
+An alert requires the report's selected current state to be `PROMISED`, `SCHEDULED`, or
+`COMPLETED`, backed by a fresh, unretracted announcement published within 72 hours and linked by
+original URL or announcement ID. Predictions (even 100%), intent, banked resets, historical
+claims, and unlinked `last_reset_at` completions never alert. Scheduled reports without an
+explicit primary window remain promises. Mirrors are deduplicated, not independent confirmation;
+`direct_source_verified` remains false.
+
+The report keeps its existing newest-first selection and state. Only when that selected group
+passes the alert rules does monitoring choose among all current, linked, viable groups, preferring
+more distinct mirror feeds, then an original-post quote, then the stronger kind (`COMPLETED` >
+`SCHEDULED` > `PROMISED`), then the newer viable source publication time, then the group key in
+ascending order. Every group must independently pass the same freshness, source dating, window,
+and retraction rules. A selected nonviable record, matching retraction, or overriding unlinked
+completion still blocks an alert; monitoring does not fall back around it. All mirror feeds count
+and appear in `feeds`, including mirrors without a usable TTL; they do not independently verify
+the post. The group's kind is the strongest viable member's kind, while its quote and account
+come from the best viable member: an original-post quote first, then the newest publication time.
+Noncurrent mirrors cannot supply the kind or account. One exception for the quote only: when no
+viable member has an original-post quote, an unretracted mirror of the same post that does (for
+example willreset, which has no TTL) supplies the post's words. This never makes a non-viable
+mirror alert on its own or change the kind.
+
+Quotes are untrusted text, stripped of control characters, whitespace-collapsed, and capped at
+280 characters. `quote_source` distinguishes `original_post` (Reset Beacon `post.Quote` and
+willreset `promise_quote`) from `tracker_summary` (codex-reset `official_signal.summary` and
+`latest_alert.summary`, and willreset's fallback `last_reset_text`). The official signal schema
+calls its text a summary, not a verbatim post; Redline does not attribute it to the post's author.
+Trailing t.co links are removed from original-post quotes. Only `original_post` text is quoted as
+the account's words. Other text is explicitly attributed to the supplying tracker (`quote_feed`),
+with the claimed source post linked separately. Terminal punctuation inside an original quote is
+not followed by a second period. Notification Data includes `quote_source` and the comma-joined
+tracker `attribution` strings and comma-joined homepage `attribution_urls`; each source record
+also includes its `attribution_url`. The cached API/CLI state retains these URLs so clients can
+link the data credits on the same surface. Messages end with the feeds' data credits; when
+codex-reset is the only feed, its credit is the explicit link `https://codex-reset.com/`.
+
+For example, the October 25 smoke fixture has a Reset Beacon completion and willreset promise
+naming post `2114237083652882932`, versus a newer codex-reset operator-observed completion naming
+`2114200291319124163`. The report still selects the newer codex-reset record, but monitoring
+chooses the two-mirror group, reports `COMPLETED`, and quotes the original text, not the operator's
+note. This preference does not make the mirrors independent evidence.
+
+Announcements are persisted by evidence-group key (canonical URL, otherwise announcement ID)
+and kind. A different post has a different key and may alert separately, including when the
+best-backed group changes. A new kind alerts only on escalation, not on repeated polls or restart. A fresh matching
+withdrawal, correction, or carried retraction produces one follow-up. Missing posts and failed
+polls do not imply retraction. Delivery attempts are claimed before sending and failed hooks are
+not retried. Retry-After is honoured for the life of the process: delays also defer later polling
+cycles and are never shortened. Feed retry deadlines are not persisted across restarts. Startup
+waits a random 30–90 seconds before the first poll to avoid immediate requests in restart loops.
+
+Read the cached state without contacting trackers:
+
+```bash
+redline reset signals
+# or GET /v1/reset-signals on the authenticated service API
+```
+
+The response includes the report, current viable announcement (if any), last poll time, errors,
+and `firesale: {active, mode, announcement_key, deadline, started_at, providers}`. Deadlines and
+start times are RFC3339 UTC (null when inactive).
+The dashboard JSON includes an optional `reset_signal` with the same state when monitoring is
+enabled; there is no dashboard UI yet. Before the first poll, no report or poll timestamp is
+present. Feed snapshots are process-local; announcement delivery deduplication and active firesales
+survive restarts. A feed's last successful snapshot is retained through failed or Retry-After-
+deferred polls and replaced on success. TTL, source-age, and window checks still apply, so a
+retained expired snapshot cannot authorize a new firesale.
+`redline reset preview` remains a standalone, live, read-only fetch.
+
+## Announcement firesales
+
+Only a viable, source-backed `PROMISED` or `SCHEDULED` announcement with a future `WindowEnd`
+can start a firesale, for configured Codex providers only. A promise without `WindowEnd` has no
+deadline: **no firesale is offered or started, and Redline does not invent a deadline**.
+`COMPLETED` means the reset already happened; it never starts a firesale. Odds, predictions,
+and intent never trigger one, regardless of probability. Trackers are not proof that an individual
+account will reset.
+
+- `off`: announcements do not affect firesale/pacing.
+- `notify` (default when `reset_signals.enabled`): a usable deadline adds a start offer to
+  `reset.announced`. Work starts only after `redline reset firesale start`, or the bearer API
+  action, opts into that announcement. Alert delivery itself is not required for an API opt-in.
+- `auto`: automatically starts on qualifying evidence, independently of notification settings.
+
+Explicit `notify`/`auto` configuration requires `reset_signals.enabled: true`. Demo mode never
+acts. An active firesale unlocks all job tiers regardless of pace gap or overflow; its announced
+deadline can shorten (never lengthen) the real weekly scheduling horizon. Pauses, auth circuit
+breakers, 5-hour reserves, concurrency and model budgets still apply. No backlog-burning cap is
+added. Existing task intervals/repository/enable gates still apply.
+
+```bash
+redline reset signals
+redline reset firesale start # defaults to the current announcement
+redline reset firesale stop  # defaults to the active sale, even during a tracker outage
+redline reset firesale start --announcement announcement:123
+```
+
+Active sales end on the deadline, matching explicit retraction, completion, user stop, or disable
+(`firesale: off` or monitoring disabled). Missing/stale feeds do not end an existing sale: it does
+not require continuous tracker uptime. A fresh viable observation of the same key can revise its
+stored deadline in either direction, with a log entry but no duplicate start alert. A different
+announcement cannot replace an active sale: manual start returns 409 naming the active key and
+deadline; stop it first. Auto mode waits for it to end, then may start the still-viable current key.
+A completion for a different key ends a sale only when its publication time is newer than the
+sale's announcement (or start time if publication is unknown), not an earlier reset's completion.
+A fresh, report-selected unlinked completion (such as `last_reset_at`) is also an end-only signal
+under that strict time ordering. Stale/MissingTTL, corrected, or withdrawn records cannot end it;
+unlinked completions still never trigger an announcement alert or start.
+
+Each sale stores its provider's latest weekly remaining, weekly reset time, and observation time
+at start. Later observations lower the persisted remaining baseline as allowance is consumed.
+Fresh usage (within `max_snapshot_age`) observed strictly after the original baseline ends that
+provider's sale if weekly remaining exceeds this low-water mark by more than 0.02 (two percentage
+points), or weekly `resets_at` advances. Both a global refill and the regular weekly rollover
+return Redline to normal pacing. No snapshot at start means no usage-based check for that episode;
+stale or pre-baseline observations cannot complete it. Disable, deadline, and retraction take
+precedence, followed by announcement/tracker completion, then usage refill. A usage-based end is
+`reason: completed` with `completion_source: usage_refill`; its message says the weekly allowance
+refilled and the reset has landed.
+
+Starts and ends are claimed atomically in SQLite before notification delivery. Repeated polls,
+API retries, and restarts never duplicate an episode's alerts; failed hooks are not retried.
+Stopping is terminal for auto mode for that announcement/provider, including across restart.
+An explicit start can override your stop. Disabling ends the episode but does not permanently
+block auto mode after re-enabling; notify mode needs a fresh opt-in. Stopping with no active sale
+is a successful no-op. Stopping never needs a current viable tracker snapshot.
+
 ## Deliberate non-goals
 
-This command has no account-awareness or action path. It does not poll, persist feed state, send
-notifications, inspect or select queued jobs, assess reserves or concurrency, mutate configuration,
-call the scheduler, or start a run. Applicability to any individual account remains unknown.
+The standalone preview remains read-only and unauthenticated. Neither monitoring nor a firesale
+redeems a banked reset or proves a particular account refilled; normal usage telemetry remains
+the authority for available allowance.
 
 Any later advisory experiment should be a separate, off-by-default design: it would accept only
 validated, deduplicated normalized evidence and return a bounded explanation with original links,
