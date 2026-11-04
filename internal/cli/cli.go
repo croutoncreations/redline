@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -87,7 +88,8 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	if remaining[0] == "reset" && (len(remaining) < 2 || (remaining[1] != "redeem" && remaining[1] != "signals" && remaining[1] != "firesale")) {
 		return runResetPreview(remaining[1:], stdout, stderr, now)
 	}
-	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
+	token, tokenProblem := clientToken(*configPath)
+	client := apiclient.Client{BaseURL: *apiURL, Token: token, TokenProblem: tokenProblem}
 	switch remaining[0] {
 	case "firesale":
 		return runManualFiresale(client, remaining[1:], stdout, stderr)
@@ -289,14 +291,14 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	select {
 	case err := <-errors:
 		if err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "redline serve: API server on %s stopped: %v\n", listener.Addr(), err)
 			return 1
 		}
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "redline serve: shut down API server on %s within 10s: %v\n", listener.Addr(), err)
 			return 1
 		}
 	}
@@ -534,7 +536,11 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		hint := ""
+		if errors.Is(err, fs.ErrNotExist) {
+			hint = "; pass --config FILE or copy config.example.yaml to redline.yaml"
+		}
+		fmt.Fprintf(stderr, "redline serve: load config: %v%s\n", err, hint)
 		return 1
 	}
 	for _, warning := range cfg.Warnings {
@@ -542,27 +548,40 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	}
 	cfg.APIToken, err = apiauth.EnsureToken(configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintf(stderr, "redline serve: prepare API token: %v\n", err)
 		return 1
 	}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		hint := ""
+		if errors.Is(err, syscall.EADDRINUSE) {
+			hint = "; another `redline serve` may already own this address, so stop it or pass --listen with a free address"
+		}
+		// net.OpError already repeats "listen tcp ADDR"; keep only the cause.
+		var opErr *net.OpError
+		if errors.As(err, &opErr) {
+			err = opErr.Err
+		}
+		fmt.Fprintf(stderr, "redline serve: listen on %s: %v%s\n", *listen, err, hint)
 		return 1
 	}
 	defer listener.Close()
 	database, err := store.Open(cfg.Database)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		hint := ""
+		if errors.Is(err, fs.ErrNotExist) {
+			hint = fmt.Sprintf("; create directory %q or change database in the config", filepath.Dir(cfg.Database))
+		}
+		fmt.Fprintf(stderr, "redline serve: open database %q (config %s database): %v%s\n", cfg.Database, configPath, err, hint)
 		return 1
 	}
 	defer database.Close()
 	if err := database.RecoverInterruptedRuns(context.Background(), now()); err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintf(stderr, "redline serve: recover interrupted runs in database %q: %v\n", cfg.Database, err)
 		return 1
 	}
 	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintf(stderr, "redline serve: recover pending notification deliveries in database %q: %v\n", cfg.Database, err)
 		return 1
 	}
 	cfg.ListenAddress = listener.Addr().String()
@@ -584,14 +603,14 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		stop()
 		apiServer.Wait()
 		if err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "redline serve: API server on %s stopped: %v\n", listener.Addr(), err)
 			return 1
 		}
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
-			fmt.Fprintln(stderr, err)
+			fmt.Fprintf(stderr, "redline serve: shut down API server on %s within 10s: %v\n", listener.Addr(), err)
 			return 1
 		}
 		apiServer.Wait()
@@ -623,14 +642,19 @@ func resolveTokenConfigPath(configPath string) string {
 	return standard
 }
 
-func clientToken(configPath string) string {
+// clientToken returns the bearer token for service calls. When none can be
+// found it returns the reason, so a later 401 can say why no token was sent
+// rather than leaving the caller to guess (an over-permissioned token file is
+// otherwise indistinguishable from a missing one).
+func clientToken(configPath string) (token, problem string) {
 	if token := strings.TrimSpace(os.Getenv("REDLINE_API_TOKEN")); token != "" {
-		return token
+		return token, ""
 	}
-	if token, err := apiauth.ReadToken(resolveTokenConfigPath(configPath)); err == nil {
-		return token
+	token, err := apiauth.ReadToken(resolveTokenConfigPath(configPath))
+	if err != nil {
+		return "", err.Error()
 	}
-	return ""
+	return token, ""
 }
 
 func runDecision(client apiclient.Client, args []string, stdout, stderr io.Writer) int {
@@ -862,7 +886,7 @@ func runPair(client apiclient.Client, args []string, configPath string, stdout, 
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintf(stderr, "redline pair: load config: %v\n", err)
 		return 1
 	}
 	selectedHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(*host), "."))

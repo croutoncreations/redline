@@ -4,17 +4,24 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
 type Client struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
+	BaseURL string
+	Token   string
+	// TokenProblem explains why Token is empty (for example an unreadable or
+	// over-permissioned token file) so a 401 can name the real cause instead
+	// of leaving the caller to guess.
+	TokenProblem string
+	HTTPClient   *http.Client
 }
 
 func (c Client) Do(ctx context.Context, method, path string, body, output any) error {
@@ -44,7 +51,7 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return c.transportError(method, path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -55,7 +62,11 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		if problem.Error == "" {
 			problem.Error = resp.Status
 		}
-		return fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, problem.Error)
+		message := fmt.Sprintf("%s %s: %d %s", method, path, resp.StatusCode, problem.Error)
+		if resp.StatusCode == http.StatusUnauthorized {
+			message += "; " + c.tokenHint()
+		}
+		return errors.New(message)
 	}
 	if output != nil {
 		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
@@ -63,4 +74,30 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		}
 	}
 	return nil
+}
+
+// transportError reports a request that never produced a response. net/http
+// wraps these in a *url.Error that repeats the method and full URL, which the
+// message already carries, so unwrap it and name the service that was dialed.
+func (c Client) transportError(method, path string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	hint := ""
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		hint = "; start the service with `redline serve` or point --api at the address it is listening on"
+	}
+	return fmt.Errorf("%s %s: cannot reach Redline at %s: %w%s", method, path, c.BaseURL, err, hint)
+}
+
+func (c Client) tokenHint() string {
+	switch {
+	case c.TokenProblem != "":
+		return "no API token was sent: " + c.TokenProblem
+	case c.Token == "":
+		return "no API token was sent; set REDLINE_API_TOKEN or pass --config pointing beside the service's api-token file"
+	default:
+		return "the service rejected the API token; check REDLINE_API_TOKEN, or run with the --config the service was started with (it may have been rotated)"
+	}
 }

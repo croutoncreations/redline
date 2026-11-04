@@ -3,6 +3,7 @@ package apiauth_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,8 +38,16 @@ func TestReadTokenRejectsBroadPermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apiauth.ReadToken(configPath); err == nil {
+	_, err := apiauth.ReadToken(configPath)
+	if err == nil {
 		t.Fatal("expected insecure permission error")
+	}
+	if runtime.GOOS != "windows" {
+		for _, want := range []string{path, "0644", "chmod 600"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+			}
+		}
 	}
 }
 
