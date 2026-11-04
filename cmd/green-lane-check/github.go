@@ -368,61 +368,6 @@ func (c *GitHubClient) threads(ctx context.Context, n int, head, base string) ([
 	return nil, fmt.Errorf("review-thread pagination did not finish")
 }
 
-func (c *GitHubClient) GetOpenPRs(ctx context.Context, exclude ...int) ([]greenlane.PRSummary, error) {
-	var all []greenlane.PRSummary
-	for page := 1; page <= 100; page++ {
-		data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=100&page=%d", c.apiBase, c.owner, c.repo, page))
-		if err != nil {
-			return nil, err
-		}
-		var rows []struct {
-			Number int    `json:"number"`
-			Body   string `json:"body"`
-		}
-		if err := json.Unmarshal(data, &rows); err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			if len(exclude) > 0 && row.Number == exclude[0] {
-				continue
-			}
-			if row.Number <= 0 {
-				return nil, fmt.Errorf("invalid open PR number")
-			}
-			meta, err := c.metadata(ctx, row.Number)
-			if err != nil {
-				return nil, err
-			}
-			files, err := c.files(ctx, row.Number, meta.ChangedFiles)
-			if err != nil {
-				return nil, err
-			}
-			summary := greenlane.PRSummary{Number: row.Number}
-			for _, line := range strings.Split(meta.Body, "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "Root-Cause:") {
-					summary.RootCause = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Root-Cause:"))
-					break
-				}
-			}
-			for _, file := range files {
-				summary.Files = append(summary.Files, file.Paths()...)
-			}
-			after, err := c.metadata(ctx, row.Number)
-			if err != nil {
-				return nil, err
-			}
-			if meta.Number != after.Number || meta.Body != after.Body || meta.State != after.State || meta.ChangedFiles != after.ChangedFiles || meta.Head != after.Head || meta.Base != after.Base {
-				return nil, fmt.Errorf("duplicate PR snapshot changed")
-			}
-			all = append(all, summary)
-		}
-		if len(rows) < 100 {
-			return all, nil
-		}
-	}
-	return nil, fmt.Errorf("open-PR pagination did not finish")
-}
-
 // The reporter's own check is excluded during collection, so its progress
 // cannot invalidate the evidence snapshot. Sort API lists before comparing.
 func sameEvidence(a, b greenlane.PRInfo) bool {
