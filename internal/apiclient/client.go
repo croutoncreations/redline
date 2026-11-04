@@ -88,7 +88,17 @@ func (c Client) transportError(method, path string, err error) error {
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		hint = "; start the service with `redline serve` or point --api at the address it is listening on"
 	}
-	return fmt.Errorf("%s %s: cannot reach Redline at %s: %w%s", method, path, c.BaseURL, err, hint)
+	return fmt.Errorf("%s %s: cannot reach Redline at %s: %w%s", method, path, c.redactedBaseURL(), err, hint)
+}
+
+// redactedBaseURL hides any password embedded in --api (for example
+// http://user:password@host) so it does not reach stderr or copied error reports.
+func (c Client) redactedBaseURL() string {
+	parsed, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return "the configured API address"
+	}
+	return parsed.Redacted()
 }
 
 func (c Client) tokenHint() string {

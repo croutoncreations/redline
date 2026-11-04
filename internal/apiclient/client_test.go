@@ -109,6 +109,24 @@ func TestClientTransportErrorNamesServiceAndHint(t *testing.T) {
 	}
 }
 
+func TestClientTransportErrorRedactsURLPassword(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	unreachable := strings.Replace(server.URL, "http://", "http://alice:hunter2-password@", 1)
+	server.Close()
+	client := apiclient.Client{BaseURL: unreachable}
+	err := client.Do(context.Background(), http.MethodGet, "/v1/tasks", nil, nil)
+	if err == nil {
+		t.Fatal("error = nil, want non-nil")
+	}
+	message := err.Error()
+	if strings.Contains(message, "hunter2-password") {
+		t.Fatalf("error = %q leaks the URL password", message)
+	}
+	if !strings.Contains(message, "cannot reach Redline at http://alice:xxxxx@") {
+		t.Fatalf("error = %q, want the redacted address", message)
+	}
+}
+
 func TestClientTransportErrorPreservesCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
