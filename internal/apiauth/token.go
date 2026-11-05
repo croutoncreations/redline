@@ -114,6 +114,12 @@ func generateToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+// shellQuote single-quotes value for a POSIX shell so a path containing $(...),
+// backticks or quotes stays literal when the user pastes a hint into a terminal.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
 func ReadToken(configPath string) (string, error) {
 	path := TokenPath(configPath)
 	info, err := os.Stat(path)
@@ -124,7 +130,7 @@ func ReadToken(configPath string) (string, error) {
 	// (typically 0666/0444) regardless of ACLs, so this check would always
 	// fail there. Skip it on Windows rather than rejecting every token.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("API token %q has mode %04o but must not be accessible by group or other users; run chmod 600 %q", path, info.Mode().Perm(), path)
+		return "", fmt.Errorf("API token %q has mode %04o but must not be accessible by group or other users; run chmod 600 %s", path, info.Mode().Perm(), shellQuote(path))
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

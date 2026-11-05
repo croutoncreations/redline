@@ -137,6 +137,30 @@ func TestClientTransportErrorPreservesCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want it to wrap context.Canceled", err)
 	}
+	if strings.Contains(err.Error(), "cannot reach") {
+		t.Fatalf("error = %q reports a canceled request as an unreachable service", err.Error())
+	}
+}
+
+func TestClientBuildRequestErrorRedactsURLPassword(t *testing.T) {
+	for _, base := range []string{
+		"http://alice:hunter2-password@127.0.0.1:badport",
+		"http://alice:hunter2%ss@127.0.0.1",
+	} {
+		client := apiclient.Client{BaseURL: base}
+		err := client.Do(context.Background(), http.MethodGet, "/v1/tasks", nil, nil)
+		if err == nil {
+			t.Fatalf("%s: error = nil, want non-nil", base)
+		}
+		for _, leaked := range []string{"hunter2", "%ss"} {
+			if strings.Contains(err.Error(), leaked) {
+				t.Fatalf("%s: error = %q leaks %q", base, err.Error(), leaked)
+			}
+		}
+		if !strings.Contains(err.Error(), "GET /v1/tasks: build request") {
+			t.Fatalf("%s: error = %q, want the method, path and build-request stage", base, err.Error())
+		}
+	}
 }
 
 func TestClientUnauthorizedExplainsTokenState(t *testing.T) {

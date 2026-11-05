@@ -37,6 +37,13 @@ func (c Client) Do(ctx context.Context, method, path string, body, output any) e
 		ctx, method, strings.TrimRight(c.BaseURL, "/")+path, reader,
 	)
 	if err != nil {
+		// The parser's error repeats the URL, or part of its userinfo
+		// (for example `invalid URL escape "%ss"`), which can leak a password
+		// embedded in --api. Report only the redacted address.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return fmt.Errorf("%s %s: build request: invalid URL for %s", method, path, c.redactedBaseURL())
+		}
 		return fmt.Errorf("%s %s: build request: %w", method, path, err)
 	}
 	if body != nil {
@@ -83,6 +90,11 @@ func (c Client) transportError(method, path string, err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		err = urlErr.Err
+	}
+	// A canceled context (for example Ctrl-C) is the caller's doing, not an
+	// unreachable service.
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	hint := ""
 	if errors.Is(err, syscall.ECONNREFUSED) {

@@ -922,6 +922,11 @@ policies:
 	if err := os.WriteFile(tokenPath, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile applies the umask; set the mode explicitly so the test does
+	// not depend on it.
+	if err := os.Chmod(tokenPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not enforced on Windows")
 	}
@@ -952,6 +957,11 @@ func TestClientCommandExplainsWhySavedTokenWasNotSent(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile applies the umask; set the mode explicitly so the test does
+	// not depend on it.
+	if err := os.Chmod(tokenPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--config", configPath, "--api", server.URL, "task", "list"}, &stdout, &stderr, time.Now)
 	if exit != 1 {
@@ -961,5 +971,28 @@ func TestClientCommandExplainsWhySavedTokenWasNotSent(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestClientCommandKeepsGenericTokenHintWhenTokenFileIsMissing(t *testing.T) {
+	t.Setenv("REDLINE_API_TOKEN", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"Redline API authentication is required"}`)
+	}))
+	defer server.Close()
+	configPath := filepath.Join(t.TempDir(), "redline.yaml")
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "--api", server.URL, "task", "list"}, &stdout, &stderr, time.Now)
+	if exit != 1 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	for _, want := range []string{"401", "no API token was sent", "REDLINE_API_TOKEN", "--config"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "no such file") {
+		t.Fatalf("stderr = %q, want no raw stat error for a missing token file", stderr.String())
 	}
 }

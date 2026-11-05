@@ -291,14 +291,14 @@ func runDemo(args []string, stdout, stderr io.Writer, now func() time.Time) int 
 	select {
 	case err := <-errors:
 		if err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(stderr, "redline serve: API server on %s stopped: %v\n", listener.Addr(), err)
+			fmt.Fprintf(stderr, "redline demo serve: API server on %s stopped: %v\n", listener.Addr(), err)
 			return 1
 		}
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
-			fmt.Fprintf(stderr, "redline serve: shut down API server on %s within 10s: %v\n", listener.Addr(), err)
+			fmt.Fprintf(stderr, "redline demo serve: shut down API server on %s within 5s: %v\n", listener.Addr(), err)
 			return 1
 		}
 	}
@@ -652,6 +652,11 @@ func clientToken(configPath string) (token, problem string) {
 	}
 	token, err := apiauth.ReadToken(resolveTokenConfigPath(configPath))
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// A missing token file has no specific problem to report; the
+			// generic hint names REDLINE_API_TOKEN and --config.
+			return "", ""
+		}
 		return "", err.Error()
 	}
 	return token, ""
