@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,19 +89,40 @@ const (
 	defaultKeepaliveTimeout  = 10 * time.Second
 )
 
-// maxWriteStall bounds how long an in-flight data write may excuse failed
-// pings. coder/websocket sends a ping under the same write lock as data and
-// gives up on that lock after five seconds, so a 1 MiB response on a slow
-// uplink would otherwise fail pings and tear down a working connection. A
-// write into a path that has vanished never finishes either, so the excuse
-// expires: a minute covers 1 MiB at about 140 kbit/s.
+// maxWriteStall bounds how long sending data may excuse failed pings.
+//
+// A large response on a slow uplink delays a ping in two ways. While the
+// write is in flight it holds the write lock the ping needs. After Write
+// returns, its bytes still sit in the kernel send buffer ahead of the ping,
+// so the pong is late. Either way the connection is busy, not dead. A write
+// into a path that has vanished never finishes either, so the excuse expires
+// a minute after the write began, which covers 1 MiB at about 140 kbit/s.
+//
+// coder/websocket also caps each control-frame write at five seconds and
+// closes the connection itself when that expires. That close surfaces through
+// readLoop rather than here; this excuse covers the lock wait and the
+// late-pong cases.
 const maxWriteStall = time.Minute
 
+// writeActivity is a snapshot of data writes on one connection.
+type writeActivity struct {
+	inFlightSince time.Time // start of the current write; zero when idle
+	lastStart     time.Time // start of the most recent completed write
+	lastEnd       time.Time // end of the most recent completed write
+}
+
 // pingFailureIsFatal reports whether a failed ping means the connection is
-// dead. writeStarted is when the current data write began, zero when none is
-// in flight.
-func pingFailureIsFatal(writeStarted, now time.Time, limit time.Duration) bool {
-	return writeStarted.IsZero() || now.Sub(writeStarted) > limit
+// dead, given the writes around it. It is excused if a write is in flight, or
+// one completed after the ping started (its bytes were queued ahead of the
+// ping), as long as that write began within limit.
+func pingFailureIsFatal(w writeActivity, pingStarted, now time.Time, limit time.Duration) bool {
+	if !w.inFlightSince.IsZero() {
+		return now.Sub(w.inFlightSince) > limit
+	}
+	if !w.lastEnd.IsZero() && w.lastEnd.After(pingStarted) {
+		return now.Sub(w.lastStart) > limit
+	}
+	return true
 }
 
 // stableConnection is how long a connection must have stayed up for its loss
@@ -114,17 +136,31 @@ func resetIfStable(b *backoff, lasted time.Duration) {
 	}
 }
 
-// writeTracker records when the in-flight data write started. The multiplexer
-// already serializes writes, so at most one is in flight per connection.
-type writeTracker struct{ started atomic.Int64 }
+// writeTracker records data writes for the keepalive. The multiplexer already
+// serializes writes, so at most one is in flight per connection.
+type writeTracker struct {
+	mu       sync.Mutex
+	activity writeActivity
+}
 
-func (w *writeTracker) begin() { w.started.Store(time.Now().UnixNano()) }
-func (w *writeTracker) end()   { w.started.Store(0) }
-func (w *writeTracker) since() time.Time {
-	if n := w.started.Load(); n != 0 {
-		return time.Unix(0, n)
-	}
-	return time.Time{}
+func (w *writeTracker) begin() {
+	w.mu.Lock()
+	w.activity.inFlightSince = time.Now()
+	w.mu.Unlock()
+}
+
+func (w *writeTracker) end() {
+	w.mu.Lock()
+	w.activity.lastStart = w.activity.inFlightSince
+	w.activity.lastEnd = time.Now()
+	w.activity.inFlightSince = time.Time{}
+	w.mu.Unlock()
+}
+
+func (w *writeTracker) snapshot() writeActivity {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.activity
 }
 
 func (d *Dialer) keepalive() (interval, timeout time.Duration) {
@@ -159,6 +195,12 @@ var errKeepaliveTimeout = errors.New("relay stopped answering keepalive pings")
 // 4409 or 1008, or a write failed -- is left to readLoop, which reports the
 // specific reason.
 func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, writes *writeTracker, failed func()) {
+	d.runKeepaliveWithStall(ctx, conn, writes, maxWriteStall, failed)
+}
+
+// runKeepaliveWithStall is runKeepalive with an explicit stall bound, so a
+// test can observe the excuse expiring without waiting a minute.
+func (d *Dialer) runKeepaliveWithStall(ctx context.Context, conn *websocket.Conn, writes *writeTracker, stall time.Duration, failed func()) {
 	interval, timeout := d.keepalive()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -168,6 +210,7 @@ func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, writes 
 			return
 		case <-ticker.C:
 		}
+		pingStarted := time.Now()
 		pingCtx, cancel := context.WithTimeout(ctx, timeout)
 		err := conn.Ping(pingCtx)
 		cancel()
@@ -177,7 +220,7 @@ func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, writes 
 		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 			return
 		}
-		if !pingFailureIsFatal(writes.since(), time.Now(), maxWriteStall) {
+		if !pingFailureIsFatal(writes.snapshot(), pingStarted, time.Now(), stall) {
 			continue
 		}
 		failed()

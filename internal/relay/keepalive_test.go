@@ -145,29 +145,116 @@ func TestDialerReportsWhenAnotherHostReplacedIt(t *testing.T) {
 	}
 }
 
-// coder/websocket sends a ping through the same write lock as data frames and
-// gives up on the lock after five seconds. A 1 MiB response on a slow uplink
-// holds that lock far longer, so a failed ping while a data write is still
-// draining is a busy connection, not a dead one -- up to a bound, because a
-// write into a vanished path also never finishes.
-func TestKeepaliveForgivesAPingBlockedBehindAnInFlightWrite(t *testing.T) {
+// A failed ping is excused when data was being sent during it: either a write
+// was still in flight (holding the shared write lock), or one finished after
+// the ping started (its bytes were queued in the kernel send buffer ahead of
+// the ping, so the pong was legitimately late). Neither excuse lasts past the
+// stall bound, because a write into a vanished path also never finishes.
+func TestKeepaliveForgivesAPingDelayedBySending(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
+	pingStarted := now.Add(-10 * time.Second)
 	const limit = time.Minute
 	for _, tc := range []struct {
-		name         string
-		writeStarted time.Time
-		wantDead     bool
+		name     string
+		activity writeActivity
+		wantDead bool
 	}{
-		{"no write in flight", time.Time{}, true},
-		{"write just started", now.Add(-2 * time.Second), false},
-		{"write draining within the limit", now.Add(-limit + time.Second), false},
-		{"write stalled past the limit", now.Add(-limit - time.Second), true},
+		{"no writes at all", writeActivity{}, true},
+		{"last write ended before the ping", writeActivity{lastEnd: pingStarted.Add(-time.Second)}, true},
+		{"write in flight", writeActivity{inFlightSince: now.Add(-2 * time.Second)}, false},
+		{"write ended during the ping (buffer draining)", writeActivity{lastStart: pingStarted.Add(-5 * time.Second), lastEnd: pingStarted.Add(time.Second)}, false},
+		{"write in flight past the stall bound", writeActivity{inFlightSince: now.Add(-limit - time.Second)}, true},
+		{"write ended during the ping but long stalled", writeActivity{lastEnd: pingStarted.Add(time.Second), lastStart: now.Add(-limit - time.Second)}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pingFailureIsFatal(tc.writeStarted, now, limit); got != tc.wantDead {
+			if got := pingFailureIsFatal(tc.activity, pingStarted, now, limit); got != tc.wantDead {
 				t.Fatalf("pingFailureIsFatal = %v, want %v", got, tc.wantDead)
 			}
 		})
+	}
+}
+
+// The wiring, not just the predicate: a relay that accepts a large frame and
+// then stops reading wedges the desktop's write. Pings fail behind it, but the
+// connection must not be torn down while the write is excused, and must be
+// once the stall bound passes.
+func TestKeepaliveExcusesAWedgedWriteOnlyUntilTheStallBound(t *testing.T) {
+	var mu sync.Mutex
+	var dials int
+	release := make(chan struct{})
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-release // never reads: pings go unanswered and the send buffer fills
+	}))
+	defer relay.Close()
+	defer close(release)
+
+	writes := &writeTracker{}
+	conn, _, err := websocket.Dial(context.Background(), relay.URL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Wedge a write: far more than any socket buffer, into a peer that never reads.
+	go func() {
+		writes.begin()
+		_ = conn.Write(context.Background(), websocket.MessageBinary, make([]byte, 64<<20))
+		writes.end()
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	dialer := NewDialer(DialerOptions{KeepaliveInterval: 20 * time.Millisecond, KeepaliveTimeout: 50 * time.Millisecond})
+	failed := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go dialer.runKeepaliveWithStall(ctx, conn, writes, 600*time.Millisecond, func() { close(failed) })
+
+	select {
+	case <-failed:
+		t.Fatal("keepalive gave up on a connection whose write was still excused")
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case <-failed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("keepalive never gave up after the stall bound")
+	}
+}
+
+// A ping that fails because the socket was already closed is left to readLoop
+// so the specific reason (4409, 1008, a write error) is what gets reported.
+// Calls runKeepalive directly on a closed conn: through Run the race is too
+// narrow to catch reliably.
+func TestKeepaliveDoesNotClaimAClosedSocket(t *testing.T) {
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	})
+	defer relay.Close()
+	conn, _, err := websocket.Dial(context.Background(), relay.URL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.CloseNow()
+
+	dialer := NewDialer(DialerOptions{KeepaliveInterval: 5 * time.Millisecond, KeepaliveTimeout: 50 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	failedCalled := false
+	dialer.runKeepalive(ctx, conn, &writeTracker{}, func() { failedCalled = true })
+	if failedCalled {
+		t.Fatal("a ping on an already-closed socket was reported as a keepalive timeout")
 	}
 }
 
@@ -305,8 +392,9 @@ func TestDialerRetriesPromptlyAfterAStableConnectionDrops(t *testing.T) {
 		mu.Unlock()
 		if n >= 5 {
 			// Fourth dial lasted stableConnection+0.2s; a reset retry adds at
-			// most initialBackoff*1.25 = 2.5s. The grown backoff would add ~8s+.
-			if limit := stableConnection + 200*time.Millisecond + 3*time.Second; gap > limit {
+			// most initialBackoff*1.25 = 2.5s. Without the reset the gap
+			// measured 22s, so a 4s allowance keeps margin for loaded CI.
+			if limit := stableConnection + 200*time.Millisecond + 4*time.Second; gap > limit {
 				t.Fatalf("retry after a stable connection took %v, want under %v", gap, limit)
 			}
 			return
