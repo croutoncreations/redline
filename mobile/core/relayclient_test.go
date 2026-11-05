@@ -10,6 +10,8 @@ import (
 	"github.com/coder/websocket"
 
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -348,6 +350,23 @@ func TestEntitlementRefusalSurvivesAStringOnlyFFIBoundary(t *testing.T) {
 	}
 }
 
+// The relay fallback runs in Kotlin: it calls DialRelay, catches the
+// exception, and rethrows into Go, so the error reaching FetchUsage is text
+// only. A silent host must still read as offline after that round trip and
+// after send() joins it with the direct failure.
+func TestDirectFailurePreservesASilentHostAsOffline(t *testing.T) {
+	silent := fmt.Errorf("dial relay: %w: %w", errNoHandshakeReply, ErrHostOffline)
+	client := NewClient("http://127.0.0.1:1", "token")
+	client.SetRelayFallback(RelayFallbackRaw(func(_, _, _ string) (string, error) {
+		return "", errors.New(silent.Error())
+	}))
+
+	_, err := client.FetchUsage()
+	if err == nil || !IsHostOffline(err) {
+		t.Fatalf("a silent host behind a failed direct route must read as offline: %v", err)
+	}
+}
+
 func TestDirectFailurePreservesRelayEntitlementRefusal(t *testing.T) {
 	client := NewClient("http://127.0.0.1:1", "token")
 	client.SetRelayFallback(RelayFallbackRaw(func(_, _, _ string) (string, error) {
@@ -509,6 +528,127 @@ func TestDialRelayReportsHostOfflineAs423(t *testing.T) {
 	}
 	if IsTooManyPhones(err) {
 		t.Errorf("423 no_host is not too-many-phones: %v", err)
+	}
+}
+
+// The relay admitted the phone (101), but nothing answered the Noise
+// handshake on any attempt. In production that was a dead host socket the
+// relay still had registered -- the desktop's network path had vanished --
+// and it lasted up to 100 minutes. From the phone's side it is the same
+// situation as 423 no_host: the relay and the phone are fine, and the Mac is
+// not reachable through it. It must read that way, not as a generic failure
+// that sends the user to check their own network.
+func TestDialRelayReportsASilentHostAsOffline(t *testing.T) {
+	var attempts int32
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		// Swallow the handshake and never reply; returns when the phone gives
+		// up and closes.
+		_, _, _ = conn.Read(context.Background())
+		_, _, _ = conn.Read(context.Background())
+	}))
+	defer relay.Close()
+
+	desktopKey, _ := NewDesktopKeypair()
+	_, err := DialRelay(
+		"ws"+strings.TrimPrefix(relay.URL, "http"),
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DesktopPublicKey(desktopKey),
+	)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if !IsHostOffline(err) {
+		t.Errorf("a host that never answers the handshake must read as offline, got: %v", err)
+	}
+	// It must also survive gomobile, which may rebuild the error from text.
+	if !IsHostOffline(errors.New(err.Error())) {
+		t.Errorf("host-offline classification must survive a string-only FFI boundary: %v", err)
+	}
+	if IsEntitlementRefused(err) || IsTooManyPhones(err) {
+		t.Errorf("a silent host is neither an entitlement refusal nor too many phones: %v", err)
+	}
+	// Still retried: the usual cause is a desktop mid-reconnect.
+	if got := atomic.LoadInt32(&attempts); got != dialAttempts {
+		t.Errorf("dial attempts = %d, want %d", got, dialAttempts)
+	}
+}
+
+// A reply that arrives but fails Noise authentication is an impostor, not an
+// offline Mac. Folding it into host-offline would hide a security signal
+// behind a "check your Mac" message.
+//
+// (A responder holding the wrong static key cannot even decrypt the IK
+// initiator message, so it cannot reply at all; that case is
+// indistinguishable from a silent host, and reporting it as offline leaks
+// nothing -- no credential is sent before the handshake completes. The
+// distinguishable case is a reply that arrives and fails authentication.)
+func TestDialRelayDoesNotReportAnImpostorAsOffline(t *testing.T) {
+	realKey, _ := NewDesktopKeypair()
+	start := time.Now()
+	server := relayPair(t, func(send func([]byte), recv func() []byte) {
+		for {
+			recv()
+			// A handshake-sized reply that no genuine desktop produced.
+			send(make([]byte, 48))
+		}
+	})
+	defer server.Close()
+
+	_, err := DialRelay(
+		strings.Replace(server.URL, "http://", "ws://", 1),
+		"phone-session-0123456789abc",
+		DesktopPublicKey(realKey),
+	)
+	if err == nil {
+		t.Fatal("an impostor desktop must not produce a session")
+	}
+	if IsHostOffline(err) {
+		t.Errorf("an impostor must not be reported as an offline Mac: %v", err)
+	}
+	// It failed on authentication, not by waiting out the handshake timeout.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("impostor reply took %v: the test reached the timeout path, not the authentication path", elapsed)
+	}
+}
+
+// A relay that accepts the TCP connection and never completes the WebSocket
+// upgrade must not block the caller forever.
+func TestDialRelayBoundsAStalledUpgrade(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open and say nothing.
+			defer conn.Close()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialRelayOnce("ws://"+listener.Addr().String(), "phone-session-0123456789abc",
+			base64.StdEncoding.EncodeToString(make([]byte, 32)))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a stalled upgrade must fail")
+		}
+	case <-time.After(relayClientDialTimeout + 5*time.Second):
+		t.Fatal("a stalled upgrade blocked past the dial timeout")
 	}
 }
 

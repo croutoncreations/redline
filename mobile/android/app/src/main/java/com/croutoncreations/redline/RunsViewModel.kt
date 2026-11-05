@@ -126,18 +126,17 @@ class RunsViewModel(
                 )
             }
 
+            // Bounded per call: each pays its own direct attempt before any
+            // relay fallback, so one shared budget could cut off a slow but
+            // working second call.
             val result = runCatching {
-                withContext(ioDispatcher) {
-                    val runs = redlineJson.decodeFromString(
-                        RunListView.serializer(),
-                        source.fetchRunsJson(),
-                    )
-                    val tasks = redlineJson.decodeFromString(
-                        TaskListView.serializer(),
-                        source.fetchTasksJson(),
-                    )
-                    runs to tasks
+                val runs = boundedLoad(ioDispatcher) {
+                    redlineJson.decodeFromString(RunListView.serializer(), source.fetchRunsJson())
                 }
+                val tasks = boundedLoad(ioDispatcher) {
+                    redlineJson.decodeFromString(TaskListView.serializer(), source.fetchTasksJson())
+                }
+                runs to tasks
             }
             coroutineContext.ensureActive()
 

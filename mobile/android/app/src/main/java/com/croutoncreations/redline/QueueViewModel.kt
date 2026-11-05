@@ -146,7 +146,7 @@ class QueueViewModel(
             _state.update { it.copy(loading = true, refreshing = refreshing) }
 
             val result = runCatching {
-                withContext(ioDispatcher) {
+                boundedLoad(ioDispatcher) {
                     redlineJson.decodeFromString(
                         QueueView.serializer(),
                         source.fetchQueueJson(provider),
