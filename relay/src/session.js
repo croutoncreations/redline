@@ -239,10 +239,6 @@ export class RelaySession extends DurableObject {
     return this.ctx.getWebSockets(`host:${generation}`)[0];
   }
 
-  clients() {
-    return this.ctx.getWebSockets("client");
-  }
-
   clientsForGeneration(generation) {
     return this.ctx.getWebSockets(`generation:${generation}`);
   }

@@ -65,7 +65,7 @@ func TestDialerReconnectsWhenTheRelayStopsAnsweringPings(t *testing.T) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if !strings.Contains(rec.all(), "keepalive") {
+	if !strings.Contains(rec.all(), errKeepaliveTimeout.Error()) {
 		t.Errorf("the dead connection was not reported as a keepalive failure; log was:\n%s", rec.all())
 	}
 }
@@ -141,6 +141,180 @@ func TestDialerReportsWhenAnotherHostReplacedIt(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("replacement was not reported; log was:\n%s", rec.all())
 		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// coder/websocket sends a ping through the same write lock as data frames and
+// gives up on the lock after five seconds. A 1 MiB response on a slow uplink
+// holds that lock far longer, so a failed ping while a data write is still
+// draining is a busy connection, not a dead one -- up to a bound, because a
+// write into a vanished path also never finishes.
+func TestKeepaliveForgivesAPingBlockedBehindAnInFlightWrite(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	const limit = time.Minute
+	for _, tc := range []struct {
+		name         string
+		writeStarted time.Time
+		wantDead     bool
+	}{
+		{"no write in flight", time.Time{}, true},
+		{"write just started", now.Add(-2 * time.Second), false},
+		{"write draining within the limit", now.Add(-limit + time.Second), false},
+		{"write stalled past the limit", now.Add(-limit - time.Second), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pingFailureIsFatal(tc.writeStarted, now, limit); got != tc.wantDead {
+				t.Fatalf("pingFailureIsFatal = %v, want %v", got, tc.wantDead)
+			}
+		})
+	}
+}
+
+// A ping that fails because the relay closed the socket is not a keepalive
+// timeout. Reporting it as one would hide a 4409 replacement or a 1008
+// entitlement close -- the lines an operator needs.
+func TestKeepaliveIgnoresAPingFailedByAClosedSocket(t *testing.T) {
+	relay := fakeRelay(t, func(conn *websocket.Conn) {
+		// Keep reading so pings are answered and the close handshake can
+		// complete, then close with 4409 while pings are in flight. (A read
+		// whose context expires tears the socket down, so the close must come
+		// from a separate goroutine rather than after a timed-out read.)
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_ = conn.Close(websocket.StatusCode(4409), "replaced by a newer host connection")
+		}()
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	})
+	defer relay.Close()
+
+	rec := &recordingLog{}
+	dialer := NewDialer(DialerOptions{
+		RelayURL:          relay.URL,
+		SessionID:         "test-session-keepalive-03",
+		Keypair:           mustTestKeypair(t),
+		Forwarder:         NewForwarder("http://127.0.0.1:1", nil),
+		Logf:              rec.log,
+		KeepaliveInterval: 10 * time.Millisecond,
+		KeepaliveTimeout:  time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go dialer.Run(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(rec.all(), "another desktop") {
+		select {
+		case <-deadline:
+			t.Fatalf("4409 was not reported as a replacement; log was:\n%s", rec.all())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if strings.Contains(rec.all(), errKeepaliveTimeout.Error()) {
+		t.Fatalf("a relay-initiated close was misreported as a keepalive timeout; log was:\n%s", rec.all())
+	}
+}
+
+// A connection that stayed up must not inherit the backoff an earlier outage
+// grew to. In production every reconnect after a working connection waited
+// ~23s on average (681 of 876 at 20s or more), stacked on top of detection.
+// A connection that drops immediately must still back off, or a relay that
+// accepts and instantly closes would be redialled in a hot loop.
+func TestBackoffResetsOnlyAfterAConnectionThatLasted(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lasted    time.Duration
+		wantReset bool
+	}{
+		{"never connected", 0, false},
+		{"dropped at once", 100 * time.Millisecond, false},
+		{"stayed up", stableConnection + time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBackoff()
+			for i := 0; i < 8; i++ {
+				b.next()
+			}
+			grown := b.current
+			resetIfStable(b, tc.lasted)
+			if reset := b.current < grown; reset != tc.wantReset {
+				t.Fatalf("reset=%v after a connection that lasted %v, want %v", reset, tc.lasted, tc.wantReset)
+			}
+		})
+	}
+}
+
+// End to end through Run: after a connection that stayed up, the first retry
+// uses the initial backoff even though earlier failures had grown it.
+func TestDialerRetriesPromptlyAfterAStableConnectionDrops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out real backoff and stability windows (~25s)")
+	}
+	var mu sync.Mutex
+	var dials []time.Time
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		dials = append(dials, time.Now())
+		n := len(dials)
+		mu.Unlock()
+		if n <= 3 {
+			// Three refusals grow the backoff to ~8s.
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		if n == 4 {
+			// Stay up past the stability threshold, then drop.
+			go func() {
+				time.Sleep(stableConnection + 200*time.Millisecond)
+				conn.CloseNow()
+			}()
+		}
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}))
+	defer relay.Close()
+
+	dialer := NewDialer(DialerOptions{
+		RelayURL:  relay.URL,
+		SessionID: "test-session-backoff-reset-01",
+		Keypair:   mustTestKeypair(t),
+		Forwarder: NewForwarder("http://127.0.0.1:1", nil),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	go dialer.Run(ctx)
+
+	for {
+		mu.Lock()
+		n := len(dials)
+		var gap time.Duration
+		if n >= 5 {
+			gap = dials[4].Sub(dials[3])
+		}
+		mu.Unlock()
+		if n >= 5 {
+			// Fourth dial lasted stableConnection+0.2s; a reset retry adds at
+			// most initialBackoff*1.25 = 2.5s. The grown backoff would add ~8s+.
+			if limit := stableConnection + 200*time.Millisecond + 3*time.Second; gap > limit {
+				t.Fatalf("retry after a stable connection took %v, want under %v", gap, limit)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("only %d dials before timeout", n)
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }

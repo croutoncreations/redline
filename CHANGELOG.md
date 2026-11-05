@@ -61,7 +61,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Phones no longer hang on a blank screen for up to 100 minutes after the Mac's relay connection
   drops silently. The relay now replaces an attached host with a newly entitled one (closing the
   old socket with `4409`) instead of refusing it with `409 role_already_connected`, and the Mac
-  pings the relay every 25 seconds, redialling when a ping goes unanswered for 10 seconds.
+  pings the relay every 25 seconds, redialling when a ping goes unanswered for 10 seconds (a
+  large response still draining on a slow uplink does not count, for up to a minute). After a
+  connection that stayed up at least 10 seconds, the Mac's first redial is now prompt instead of
+  waiting out backoff grown during an earlier outage.
 
 ## [0.1.11] - 2026-10-23
 

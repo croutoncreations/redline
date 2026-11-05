@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -79,13 +80,52 @@ type DialerOptions struct {
 // handshook into a socket nobody answered. Pinging bounds that window to
 // roughly interval+timeout.
 //
-// Pings are WebSocket control frames, so they wake a hibernated Durable Object
-// only to have the runtime auto-answer; they carry no application data and do
-// not touch per-channel idle tracking.
+// Pings are WebSocket protocol control frames. Cloudflare answers them without
+// waking a hibernated Durable Object, so they add no duration billing, and they
+// never reach the multiplexer, so per-channel idle eviction is unaffected.
 const (
 	defaultKeepaliveInterval = 25 * time.Second
 	defaultKeepaliveTimeout  = 10 * time.Second
 )
+
+// maxWriteStall bounds how long an in-flight data write may excuse failed
+// pings. coder/websocket sends a ping under the same write lock as data and
+// gives up on that lock after five seconds, so a 1 MiB response on a slow
+// uplink would otherwise fail pings and tear down a working connection. A
+// write into a path that has vanished never finishes either, so the excuse
+// expires: a minute covers 1 MiB at about 140 kbit/s.
+const maxWriteStall = time.Minute
+
+// pingFailureIsFatal reports whether a failed ping means the connection is
+// dead. writeStarted is when the current data write began, zero when none is
+// in flight.
+func pingFailureIsFatal(writeStarted, now time.Time, limit time.Duration) bool {
+	return writeStarted.IsZero() || now.Sub(writeStarted) > limit
+}
+
+// stableConnection is how long a connection must have stayed up for its loss
+// to restart the backoff. Shorter-lived connections keep growing it, so a
+// relay that accepts and immediately closes cannot cause a hot redial loop.
+const stableConnection = 10 * time.Second
+
+func resetIfStable(b *backoff, lasted time.Duration) {
+	if lasted >= stableConnection {
+		b.reset()
+	}
+}
+
+// writeTracker records when the in-flight data write started. The multiplexer
+// already serializes writes, so at most one is in flight per connection.
+type writeTracker struct{ started atomic.Int64 }
+
+func (w *writeTracker) begin() { w.started.Store(time.Now().UnixNano()) }
+func (w *writeTracker) end()   { w.started.Store(0) }
+func (w *writeTracker) since() time.Time {
+	if n := w.started.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
 
 func (d *Dialer) keepalive() (interval, timeout time.Duration) {
 	interval, timeout = d.opts.KeepaliveInterval, d.opts.KeepaliveTimeout
@@ -114,7 +154,11 @@ var errKeepaliveTimeout = errors.New("relay stopped answering keepalive pings")
 // runKeepalive pings until ctx ends. On an unanswered ping it records the
 // cause and closes the socket, which unblocks readLoop's Read and sends the
 // dialer through its normal backoff-and-redial path.
-func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, failed func()) {
+//
+// A ping that fails because the socket is already closed -- the relay sent
+// 4409 or 1008, or a write failed -- is left to readLoop, which reports the
+// specific reason.
+func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, writes *writeTracker, failed func()) {
 	interval, timeout := d.keepalive()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -130,8 +174,11 @@ func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, failed 
 		if err == nil {
 			continue
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 			return
+		}
+		if !pingFailureIsFatal(writes.since(), time.Now(), maxWriteStall) {
+			continue
 		}
 		failed()
 		_ = conn.CloseNow()
@@ -208,11 +255,15 @@ func (d *Dialer) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := d.connect(ctx); err != nil {
+		lasted, err := d.connect(ctx)
+		if err != nil {
 			// connect returns nil only when ctx is done.
 			if ctx.Err() != nil {
 				return
 			}
+			// A connection that stayed up retries promptly instead of at the
+			// cap an earlier outage ground the backoff up to.
+			resetIfStable(bo, lasted)
 			// Every connection-level failure, including an untrusted malformed
 			// envelope, sleeps the bounded backoff before trying again.
 			wait := bo.next()
@@ -228,16 +279,16 @@ func (d *Dialer) Run(ctx context.Context) {
 			continue
 		}
 		// A nil return from connect means ctx was cancelled inside the read loop.
-		bo.reset()
 		return
 	}
 }
 
 // connect dials the relay once, runs the frame loop until a fatal error, and
-// returns that error. It returns nil if and only if ctx was cancelled.
-func (d *Dialer) connect(ctx context.Context) error {
+// returns that error with how long the socket stayed up (zero if it never
+// opened). The error is nil if and only if ctx was cancelled.
+func (d *Dialer) connect(ctx context.Context) (lasted time.Duration, err error) {
 	if err := ValidateSessionID(d.opts.SessionID); err != nil {
-		return fmt.Errorf("dial relay: %w", err)
+		return 0, fmt.Errorf("dial relay: %w", err)
 	}
 	target := d.sessionURL()
 	client := d.handshakeClient()
@@ -251,19 +302,21 @@ func (d *Dialer) connect(ctx context.Context) error {
 			_ = response.Body.Close()
 		}
 		if ctx.Err() != nil {
-			return nil
+			return 0, nil
 		}
 		if response != nil && response.StatusCode == http.StatusPaymentRequired {
 			d.signal(EntitlementHandshakeRequired)
-			return &EntitlementSignalError{Signal: EntitlementHandshakeRequired}
+			return 0, &EntitlementSignalError{Signal: EntitlementHandshakeRequired}
 		}
 		// Library errors may echo handshake request details. Nothing logs this
 		// today, and that is exactly why the token is stripped here: the leak
 		// stays invisible until someone adds a log line, and then it is a
 		// credential in a file. Redacting at the source is cheap defense in
 		// depth even though the token travels only in a header.
-		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
+		return 0, fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
 	}
+	opened := time.Now()
+	defer func() { lasted = time.Since(opened) }()
 	defer conn.CloseNow()
 	if d.opts.ConnectionState != nil {
 		d.opts.ConnectionState(true)
@@ -286,10 +339,11 @@ func (d *Dialer) connect(ctx context.Context) error {
 	// readLoop always has outstanding, so the keepalive can run alongside it.
 	keepaliveCtx, stopKeepalive := context.WithCancel(ctx)
 	var keepaliveFailed atomic.Bool
+	var writes writeTracker
 	keepaliveDone := make(chan struct{})
 	go func() {
 		defer close(keepaliveDone)
-		d.runKeepalive(keepaliveCtx, conn, func() { keepaliveFailed.Store(true) })
+		d.runKeepalive(keepaliveCtx, conn, &writes, func() { keepaliveFailed.Store(true) })
 	}()
 	defer func() {
 		stopKeepalive()
@@ -299,16 +353,16 @@ func (d *Dialer) connect(ctx context.Context) error {
 	// readLoop creates a fresh channel map for this connection. No Noise state
 	// survives a reconnect, even when the relay assigns a phone the same
 	// channel bytes again.
-	if err := d.readLoop(ctx, conn); err != nil {
+	if err := d.readLoop(ctx, conn, &writes); err != nil {
 		if ctx.Err() != nil {
-			return nil
+			return 0, nil
 		}
 		if keepaliveFailed.Load() {
-			return errKeepaliveTimeout
+			return 0, errKeepaliveTimeout
 		}
-		return err
+		return 0, err
 	}
-	return nil
+	return 0, nil
 }
 
 // readLoop demultiplexes frames from one host socket. Each channel owns a
@@ -316,9 +370,12 @@ func (d *Dialer) connect(ctx context.Context) error {
 // coder/websocket permits only one active writer. Channel-level protocol or
 // authentication failures delete that channel, while malformed host envelopes
 // reconnect the whole host because their channel cannot be identified safely.
-func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
+func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, writes *writeTracker) error {
 	mux := newSessionMultiplexer(ctx, d.opts.Keypair, d.opts.Forwarder, func(writeCtx context.Context, frame []byte) error {
-		if err := conn.Write(writeCtx, websocket.MessageBinary, frame); err != nil {
+		writes.begin()
+		err := conn.Write(writeCtx, websocket.MessageBinary, frame)
+		writes.end()
+		if err != nil {
 			// Unblock the sole reader so connect can discard every channel and
 			// enter the normal reconnect path.
 			_ = conn.CloseNow()

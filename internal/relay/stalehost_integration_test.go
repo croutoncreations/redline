@@ -20,14 +20,17 @@ import (
 // will never answer (its network path vanished). Before the fix the real
 // desktop got 409 for as long as that socket lived, and a phone was admitted
 // and handshook into silence. Now the desktop's dial must replace the stale
-// host and a phone must complete a handshake promptly.
+// host and a phone must complete a handshake promptly. This proves relay-side
+// replacement; keepalive detection is covered by the unit tests.
 //
 //	wrangler dev --port 8788 --local --var ALLOW_UNENTITLED:true
 //	go test ./internal/relay/ -tags integration -run TestDesktopRecoversFromAStaleHostSocket
 func TestDesktopRecoversFromAStaleHostSocket(t *testing.T) {
-	if _, err := http.Get("http://127.0.0.1:8788/health"); err != nil {
+	health, err := http.Get("http://127.0.0.1:8788/health")
+	if err != nil {
 		t.Skip("no relay on :8788; start wrangler dev to run this")
 	}
+	health.Body.Close()
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

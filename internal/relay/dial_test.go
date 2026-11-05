@@ -539,7 +539,7 @@ func TestDialErrorsDoNotCarryTheEntitlementToken(t *testing.T) {
 		Forwarder:              NewForwarder("http://127.0.0.1:1", http.DefaultClient),
 	})
 
-	dialErr := dialer.connect(context.Background())
+	_, dialErr := dialer.connect(context.Background())
 	if dialErr == nil {
 		t.Fatal("dialling a closed port should fail")
 	}
@@ -1048,7 +1048,7 @@ func TestDialerRejectsRedirectWithoutForwardingEntitlement(t *testing.T) {
 		RelayURL: source.URL, SessionID: "session-no-redirect-1234", Keypair: mustTestKeypair(t),
 		Forwarder: NewForwarder("http://127.0.0.1:1", nil), EntitlementTokenSource: func() string { return secret },
 	})
-	if err := dialer.connect(context.Background()); err == nil {
+	if _, err := dialer.connect(context.Background()); err == nil {
 		t.Fatal("redirecting WebSocket handshake was accepted")
 	}
 	select {
@@ -1067,7 +1067,7 @@ func TestDialerRejectsHostileSessionBeforeNetwork(t *testing.T) {
 	defer server.Close()
 	for _, sessionID := range []string{"../admin-session-1234", "slash/session-1234", "dot%2Fescape-session", ".", "short"} {
 		dialer := NewDialer(DialerOptions{RelayURL: server.URL, SessionID: sessionID})
-		if err := dialer.connect(context.Background()); err == nil {
+		if _, err := dialer.connect(context.Background()); err == nil {
 			t.Fatalf("session %q was accepted", sessionID)
 		}
 	}
