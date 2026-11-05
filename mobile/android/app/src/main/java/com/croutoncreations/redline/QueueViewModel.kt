@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** Where queue data and provider controls come from. */
 interface QueueSource {
@@ -109,7 +108,7 @@ class QueueViewModel(
         _state.update { it.copy(refreshing = true) }
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.controlProvider(provider, "refresh") }
+                boundedLoad(ioDispatcher) { source.controlProvider(provider, "refresh") }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -125,7 +124,7 @@ class QueueViewModel(
         if (provider.isBlank()) return
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.controlProvider(provider, control) }
+                boundedLoad(ioDispatcher) { source.controlProvider(provider, control) }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -146,7 +145,7 @@ class QueueViewModel(
             _state.update { it.copy(loading = true, refreshing = refreshing) }
 
             val result = runCatching {
-                withContext(ioDispatcher) {
+                boundedLoad(ioDispatcher) {
                     redlineJson.decodeFromString(
                         QueueView.serializer(),
                         source.fetchQueueJson(provider),

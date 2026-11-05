@@ -530,6 +530,31 @@ describe("entitlements: durable session lifecycle and refresh", () => {
     });
   });
 
+  it("an unentitled host cannot displace an attached entitled host", async () => {
+    const sessionId = "ent-no-evict-relaytestpadding";
+    const { socket: host } = await entitledSocket(sessionId, 2);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    const before = await stub.debugStorageDump();
+    let closed = false;
+    host.addEventListener("close", () => { closed = true; });
+
+    const intruder = await connectAsHost(sessionId, undefined);
+    expect(intruder.status).toBe(402);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(false);
+    expect(await stub.debugStorageDump()).toEqual(before);
+  });
+
+  it("a newly entitled host replaces the attached one with fresh claims", async () => {
+    const sessionId = "ent-replace-relaytestpadding";
+    const { socket: stale } = await entitledSocket(sessionId, 2);
+    const staleClose = closeEvent(stale);
+    const { exp } = await entitledSocket(sessionId, 4, Math.floor(Date.now() / 1000) + 7200);
+    expect((await staleClose).code).toBe(4409);
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(sessionId));
+    expect(await stub.debugStorageDump()).toMatchObject({ exp, maxClients: 4 });
+  });
+
   it("enforces max_clients from the verified host token", async () => {
     const sessionId = "ent-client-cap-relaytestpadding";
     await entitledSocket(sessionId, 1);

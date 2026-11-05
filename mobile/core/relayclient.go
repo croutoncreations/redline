@@ -47,6 +47,11 @@ const relayClientRequestTimeout = 30 * time.Second
 // whole wait.
 const relayClientHandshakeTimeout = 3 * time.Second
 
+// relayClientDialTimeout bounds the WebSocket upgrade and the first handshake
+// write. Without it a relay that accepts TCP and never completes the upgrade
+// blocks the caller forever, and the app's screens sat on a spinner.
+const relayClientDialTimeout = 10 * time.Second
+
 // tunnelRequest is the wire format for a request going phone → desktop.
 // Must match internal/relay.TunnelRequest.
 type tunnelRequest struct {
@@ -126,7 +131,11 @@ func DialRelay(relayURL, sessionID, desktopPublicKey string) (*RelayClient, erro
 		if err == nil {
 			return client, nil
 		}
-		if errors.Is(err, ErrHostOffline) || errors.Is(err, ErrTooManyPhones) || errors.Is(err, ErrEntitlementRefused) {
+		// A relay refusal is an answer, not a race. A silent host also
+		// classifies as ErrHostOffline but came from an admitted socket, so it
+		// keeps the retry: the commonest cause is a desktop mid-reconnect.
+		if errors.Is(err, ErrTooManyPhones) || errors.Is(err, ErrEntitlementRefused) ||
+			(errors.Is(err, ErrHostOffline) && !errors.Is(err, errNoHandshakeReply)) {
 			return nil, err
 		}
 		if attempt < dialAttempts-1 {
@@ -183,6 +192,11 @@ func IsEntitlementRefused(err error) bool {
 // now -- asleep, offline, or between reconnect attempts -- and the remedy is
 // to check the Mac, not the phone's own network or its subscription.
 var ErrHostOffline = errors.New("your Mac is not connected to the relay")
+
+// errNoHandshakeReply marks a host-offline that came from an admitted socket
+// nobody answered, as opposed to the relay's own 423. DialRelay retries the
+// former and returns the latter at once.
+var errNoHandshakeReply = errors.New("no handshake reply")
 
 // IsHostOffline reports whether the relay refused the connection because no
 // entitled host is attached to this session.
@@ -270,7 +284,9 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, 
 	target := buildSessionURL(relayURL, sessionID)
 	// role=client never presents a credential (docs/relay-entitlement.md):
 	// admission is host-gated, not token-gated, so no header is sent here.
-	conn, handshake, err := websocket.Dial(context.Background(), target, &websocket.DialOptions{})
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), relayClientDialTimeout)
+	defer cancelDial()
+	conn, handshake, err := websocket.Dial(dialCtx, target, &websocket.DialOptions{})
 	if err != nil {
 		// A 402 is a billing answer, not a network one. Discarding the
 		// handshake response made an expired subscription read as "check that
@@ -323,7 +339,7 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, 
 		return nil, fmt.Errorf("dial relay: start handshake: %w", err)
 	}
 
-	if err := conn.Write(context.Background(), websocket.MessageBinary, handshakeMsg); err != nil {
+	if err := conn.Write(dialCtx, websocket.MessageBinary, handshakeMsg); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("dial relay: write handshake: %w", err)
 	}
@@ -338,6 +354,15 @@ func dialRelayOnce(relayURL, sessionID, desktopPublicKey string) (*RelayClient, 
 	_, reply, err := conn.Read(readCtx)
 	if err != nil {
 		conn.CloseNow()
+		// The relay admitted this phone, which it does only while a host
+		// socket is registered, but nothing answered. That is a desktop the
+		// relay still believes in and cannot reach -- typically one whose
+		// network path vanished without a close -- so it means the same
+		// thing to the user as 423 no_host. DialRelay retries this, since
+		// the commonest cause is a desktop between reconnects.
+		if readCtx.Err() != nil {
+			return nil, fmt.Errorf("dial relay: %w: %w", errNoHandshakeReply, ErrHostOffline)
+		}
 		return nil, fmt.Errorf("dial relay: read handshake reply: %w", err)
 	}
 	// FinishHandshake authenticates the far end. If the far end holds a

@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -96,7 +95,7 @@ class AccountsViewModel(
     fun discover(provider: String) {
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { redlineJson.decodeFromString(DiscoverView.serializer(), source.discoverJson(provider)) }
+                boundedLoad(ioDispatcher) { redlineJson.decodeFromString(DiscoverView.serializer(), source.discoverJson(provider)) }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -123,7 +122,7 @@ class AccountsViewModel(
         viewModelScope.launch {
             _state.update { it.copy(loading = true, message = if (clearMessage) "" else it.message) }
             val result = runCatching {
-                withContext(ioDispatcher) { redlineJson.decodeFromString(AccountsView.serializer(), call()) }
+                boundedLoad(ioDispatcher) { redlineJson.decodeFromString(AccountsView.serializer(), call()) }
             }
             coroutineContext.ensureActive()
             result.fold(

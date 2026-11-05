@@ -34,6 +34,15 @@ A missing or invalid value falls back to the explicit five-client self-host
 default; it never makes the cap unlimited. Keep `ALLOW_UNENTITLED = "true"`
 and `ENTITLEMENT_PUBLIC_KEY = ""` for an open self-hosted deployment.
 
+In an open deployment the session id is the only thing guarding the host
+slot: a newer host connection for a session replaces the attached one (so a
+desktop recovers immediately after a silent network drop). Anyone who learns
+the session id -- it is in the pairing QR -- can therefore displace your
+desktop, as they could already occupy the slot while it was free. Treat the
+QR as private, and if the desktop log shows `another desktop connected to
+this relay session`, rotate the session by re-pairing. Two desktops must never
+share one session id; they will keep replacing each other.
+
 ## Optional custom domain
 
 A `workers.dev` address is enough. To use your own hostname, create the DNS

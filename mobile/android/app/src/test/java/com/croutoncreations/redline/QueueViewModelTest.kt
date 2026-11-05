@@ -59,6 +59,30 @@ class QueueViewModelTest {
         assertEquals("Fix docs", model.state.value.queue?.nextUpName)
     }
 
+    /** A hung queue load must end in a retryable failure, not an endless spinner. */
+    @Test
+    fun aHungLoadBecomesARetryableFailure() = runTest(dispatcher) {
+        val release = java.util.concurrent.CountDownLatch(1)
+        try {
+            val model = QueueViewModel(
+                source(queue = { release.await(); queueJson }),
+                Dispatchers.IO, // a blocked thread, as on the phone
+            )
+
+            model.setProviders(listOf("claude-main"))
+            dispatcher.scheduler.runCurrent()
+            assertTrue("the load should start", model.state.value.loading)
+
+            dispatcher.scheduler.advanceTimeBy(LOAD_TIMEOUT_MILLIS + 1)
+            dispatcher.scheduler.runCurrent()
+
+            assertTrue("the spinner must stop", !model.state.value.loading)
+            assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+        } finally {
+            release.countDown()
+        }
+    }
+
     /** Switching providers must load that provider's queue, not reuse the old one. */
     @Test
     fun switchingProviderReloads() = runTest(dispatcher) {

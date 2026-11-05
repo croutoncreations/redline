@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Turns a scanned QR code into a stored credential.
@@ -85,8 +84,10 @@ class PairingViewModel(
         pairingJob = viewModelScope.launch {
             _state.update { it.copy(working = true, error = null) }
 
+            // Redeeming may dial the relay and then make a relayed request, so
+            // it is one core call with the same worst case as any screen load.
             val result = runCatching {
-                withContext(ioDispatcher) {
+                boundedLoad(ioDispatcher) {
                     val request = redlineJson.decodeFromString(
                         PairingRequest.serializer(),
                         source.parsePairingUrl(scanned),

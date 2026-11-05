@@ -709,3 +709,109 @@ class RelayedScreenStaysCurrentTest {
         dispatcher.scheduler.runCurrent()
     }
 }
+
+/**
+ * The first load must end in an answer, never an endless spinner.
+ *
+ * Reported from a real phone as "hangs on a blank screen". A Go call that does
+ * not return cannot be cancelled from Kotlin, so withContext(io) alone waits on
+ * it forever and the screen shows nothing but a progress indicator.
+ */
+class FirstLoadIsBoundedTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    /** A fetch that never returns: the Go call is stuck and cannot be cancelled. */
+    private class HungSource : UsageSource {
+        val release = java.util.concurrent.CountDownLatch(1)
+        override fun fetchUsageJson(): String {
+            release.await()
+            throw RuntimeException("released")
+        }
+        override fun controlProvider(providerAccountId: String, control: String) = Unit
+        override fun isUnauthorized(error: Throwable): Boolean = false
+    }
+
+    @Test
+    fun `a hung first load becomes a retryable failure`() = runTest(dispatcher) {
+        val source = HungSource()
+        try {
+            // A real IO dispatcher: the hang is a blocked thread, as on the phone.
+            val model = UsageViewModel(source, ioDispatcher = Dispatchers.IO)
+
+            model.refresh()
+            dispatcher.scheduler.runCurrent()
+            assertTrue("the first load should start", model.state.value.loading)
+
+            dispatcher.scheduler.advanceTimeBy(LOAD_TIMEOUT_MILLIS + 1)
+            dispatcher.scheduler.runCurrent()
+
+            assertFalse("the spinner must stop", model.state.value.loading)
+            assertEquals(UsageUiState.Failure.UNREACHABLE, model.state.value.failure)
+            model.stopLive()
+            dispatcher.scheduler.runCurrent()
+        } finally {
+            source.release.countDown()
+        }
+    }
+
+    @Test
+    fun `the per-call bound outlasts the slowest healthy single call`() {
+        // Direct attempt against a blackholed tailnet address (20s), a relay
+        // dial needing one retry (two 3s handshake waits, 0.4s apart), then a
+        // relayed request bounded by the core at 30s.
+        val slowestHealthyCall = 20_000L + 2 * 3_000L + 400L + 30_000L
+        assertTrue(
+            "LOAD_TIMEOUT_MILLIS=$LOAD_TIMEOUT_MILLIS would cut off a call that takes " +
+                "${slowestHealthyCall}ms",
+            LOAD_TIMEOUT_MILLIS > slowestHealthyCall,
+        )
+    }
+}
+
+/**
+ * A Mac not (yet) attached to the relay usually is between reconnects, which
+ * now takes seconds. The screen must keep trying on its own, as it does for
+ * unreachable -- otherwise the commonest case of the error sits there until
+ * someone taps retry.
+ */
+class HostOfflineRecoversTest {
+
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private class OfflineThenBackSource : UsageSource {
+        var fetches = 0
+        override fun fetchUsageJson(): String {
+            fetches += 1
+            if (fetches == 1) throw RuntimeException("your Mac is not connected to the relay")
+            return """{"providers":[],"health":{"scheduler_enabled":false},"relayed":true}"""
+        }
+        override fun controlProvider(providerAccountId: String, control: String) = Unit
+        override fun isUnauthorized(error: Throwable): Boolean = false
+        override fun isHostOffline(error: Throwable): Boolean = true
+    }
+
+    @Test
+    fun `a host-offline screen retries on its own and recovers`() = runTest(dispatcher) {
+        val model = UsageViewModel(OfflineThenBackSource(), ioDispatcher = dispatcher)
+
+        model.refresh()
+        dispatcher.scheduler.runCurrent()
+        assertEquals(UsageUiState.Failure.HOST_OFFLINE, model.state.value.failure)
+
+        dispatcher.scheduler.advanceTimeBy(35_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertNull("the Mac came back; the screen must notice without a tap", model.state.value.failure)
+        model.stopLive()
+        dispatcher.scheduler.runCurrent()
+    }
+}

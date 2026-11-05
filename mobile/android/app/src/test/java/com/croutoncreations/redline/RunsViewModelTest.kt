@@ -78,6 +78,65 @@ class RunsViewModelTest {
         assertEquals("release-notes", state.runs?.runs?.get(0)?.taskId)
     }
 
+    /**
+     * Runs and tasks are two core calls, each paying its own direct attempt
+     * before any relay fallback. Two slow but healthy calls together exceed one
+     * call's budget, so they must be bounded separately, not share one.
+     */
+    @Test
+    fun eachCallGetsItsOwnTimeBudget() = runTest(dispatcher) {
+        // Each call blocks a real IO thread until the test releases it, so the
+        // test controls exactly how much virtual time each one takes.
+        val runsGate = java.util.concurrent.CountDownLatch(1)
+        val tasksGate = java.util.concurrent.CountDownLatch(1)
+        val tasksStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        try {
+            val model = RunsViewModel(
+                source(
+                    runs = { runsGate.await(); runsJson },
+                    tasks = { tasksStarted.set(true); tasksGate.await(); tasksJson },
+                ),
+                Dispatchers.IO,
+            )
+            model.refresh()
+            dispatcher.scheduler.runCurrent()
+
+            // Runs takes two thirds of a budget, then answers.
+            dispatcher.scheduler.advanceTimeBy(LOAD_TIMEOUT_MILLIS * 2 / 3)
+            runsGate.countDown()
+            awaitIo { tasksStarted.get() }
+
+            // Tasks takes another two thirds. A shared budget would have
+            // expired by now; a per-call one has not.
+            dispatcher.scheduler.advanceTimeBy(LOAD_TIMEOUT_MILLIS * 2 / 3)
+            dispatcher.scheduler.runCurrent()
+            assertNull(
+                "the second call must not be cut off by time the first one spent",
+                model.state.value.failure,
+            )
+            tasksGate.countDown()
+            awaitIo { !model.state.value.loading }
+
+            assertNull(model.state.value.failure)
+            assertEquals(2, model.state.value.runs?.runs?.size)
+        } finally {
+            runsGate.countDown()
+            tasksGate.countDown()
+        }
+    }
+
+    // The released IO thread resumes the view model on the test dispatcher;
+    // pump it until the condition holds or a real-time deadline passes.
+    private fun awaitIo(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (!condition() && System.nanoTime() < deadline) {
+            dispatcher.scheduler.runCurrent()
+            Thread.sleep(5)
+        }
+        dispatcher.scheduler.runCurrent()
+        assertTrue("timed out waiting for the view model", condition())
+    }
+
     /** A transport failure must not be reported as a credential problem. */
     @Test
     fun reportsUnreachableSeparatelyFromUnauthorized() = runTest(dispatcher) {

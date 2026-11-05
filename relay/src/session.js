@@ -6,6 +6,9 @@ export const CHANNEL_BYTES = 8;
 // a frame that was valid before multiplexing.
 export const MAX_PAYLOAD_BYTES = 1024 * 1024;
 export const MAX_HOST_FRAME_BYTES = MAX_PAYLOAD_BYTES + CHANNEL_BYTES;
+// Application close code sent to a host displaced by a newer connection for
+// the same session. 4409 mirrors the HTTP 409 this used to be.
+export const HOST_REPLACED_CLOSE_CODE = 4409;
 
 export class RelaySession extends DurableObject {
   constructor(ctx, env) {
@@ -27,10 +30,19 @@ export class RelaySession extends DurableObject {
   }
 
   async connectHost(request) {
-    if (this.host()) return jsonError(409, "role_already_connected");
-
     const claims = this.claimsFromTrustedHeaders(request);
     if (!claims) return jsonError(402, "not_entitled");
+
+    // A new host replaces any attached one rather than being refused. A host
+    // whose network path vanished without a close frame stays registered
+    // until the runtime notices -- observed at 30 to 100 minutes -- and
+    // refusing the real desktop's reconnect for that window left phones
+    // handshaking into a socket nobody answers. The desktop only redials
+    // after its own socket has failed, so a live host is not displaced in
+    // normal operation. Claims are checked first so an unentitled caller
+    // cannot evict an entitled host.
+    this.evictHosts();
+
     const previousGeneration = await this.ctx.storage.get("hostGeneration");
     const generation = bytesToHex(allocateChannelId(new Set(previousGeneration ? [previousGeneration] : [])));
     await this.storeClaims(claims, generation);
@@ -38,6 +50,22 @@ export class RelaySession extends DurableObject {
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, ["host", `host:${generation}`]);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Close every attached host and its phones. Storage is rewritten by the
+  // caller's storeClaims with a fresh generation, so the evicted sockets'
+  // delayed close callbacks fail clearClaims' generation check and leave the
+  // replacement untouched.
+  evictHosts() {
+    for (const host of this.ctx.getWebSockets("host")) {
+      const generation = hostGenerationFromSocket(this.ctx, host);
+      if (generation) {
+        for (const client of this.clientsForGeneration(generation)) {
+          safeClose(client, 1000, "peer disconnected");
+        }
+      }
+      safeClose(host, HOST_REPLACED_CLOSE_CODE, "replaced by a newer host connection");
+    }
   }
 
   async connectClient() {
@@ -207,16 +235,8 @@ export class RelaySession extends DurableObject {
     return true;
   }
 
-  host() {
-    return this.ctx.getWebSockets("host")[0];
-  }
-
   hostForGeneration(generation) {
     return this.ctx.getWebSockets(`host:${generation}`)[0];
-  }
-
-  clients() {
-    return this.ctx.getWebSockets("client");
   }
 
   clientsForGeneration(generation) {

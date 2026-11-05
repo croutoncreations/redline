@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -62,6 +65,168 @@ type DialerOptions struct {
 	// relay answered 409. Every line written here passes through redactToken
 	// first as defense in depth against a library echoing handshake headers.
 	Logf func(format string, args ...any)
+
+	// KeepaliveInterval is how often the desktop pings the relay while the
+	// host socket is up; KeepaliveTimeout is how long a ping may go
+	// unanswered before the socket is treated as dead. Zero selects the
+	// defaults. Tests shorten both.
+	KeepaliveInterval time.Duration
+	KeepaliveTimeout  time.Duration
+}
+
+// A host socket whose network path vanished without a FIN looks idle to the
+// reader: Read blocks, nothing errors, and the relay keeps the dead socket
+// registered as this session's host. Before the keepalive that lasted 30 to
+// 100 minutes in production, and every phone that connected in the meantime
+// handshook into a socket nobody answered. Pinging bounds that window to
+// roughly interval+timeout.
+//
+// Pings are WebSocket protocol control frames. Cloudflare answers them without
+// waking a hibernated Durable Object, so they add no duration billing, and they
+// never reach the multiplexer, so per-channel idle eviction is unaffected.
+const (
+	defaultKeepaliveInterval = 25 * time.Second
+	defaultKeepaliveTimeout  = 10 * time.Second
+)
+
+// maxWriteStall bounds how long sending data may excuse failed pings.
+//
+// A large response on a slow uplink delays a ping in two ways. While the
+// write is in flight it holds the write lock the ping needs. After Write
+// returns, its bytes still sit in the kernel send buffer ahead of the ping,
+// so the pong is late. Either way the connection is busy, not dead. A write
+// into a path that has vanished never finishes either, so the excuse expires
+// a minute after the write began, which covers 1 MiB at about 140 kbit/s.
+//
+// coder/websocket also caps each control-frame write at five seconds and
+// closes the connection itself when that expires. That close surfaces through
+// readLoop rather than here; this excuse covers the lock wait and the
+// late-pong cases.
+const maxWriteStall = time.Minute
+
+// writeActivity is a snapshot of data writes on one connection.
+type writeActivity struct {
+	inFlightSince time.Time // start of the current write; zero when idle
+	lastStart     time.Time // start of the most recent completed write
+	lastEnd       time.Time // end of the most recent completed write
+}
+
+// pingFailureIsFatal reports whether a failed ping means the connection is
+// dead, given the writes around it. It is excused if a write is in flight, or
+// one completed after the ping started (its bytes were queued ahead of the
+// ping), as long as that write began within limit.
+func pingFailureIsFatal(w writeActivity, pingStarted, now time.Time, limit time.Duration) bool {
+	if !w.inFlightSince.IsZero() {
+		return now.Sub(w.inFlightSince) > limit
+	}
+	if !w.lastEnd.IsZero() && w.lastEnd.After(pingStarted) {
+		return now.Sub(w.lastStart) > limit
+	}
+	return true
+}
+
+// stableConnection is how long a connection must have stayed up for its loss
+// to restart the backoff. Shorter-lived connections keep growing it, so a
+// relay that accepts and immediately closes cannot cause a hot redial loop.
+const stableConnection = 10 * time.Second
+
+func resetIfStable(b *backoff, lasted time.Duration) {
+	if lasted >= stableConnection {
+		b.reset()
+	}
+}
+
+// writeTracker records data writes for the keepalive. The multiplexer already
+// serializes writes, so at most one is in flight per connection.
+type writeTracker struct {
+	mu       sync.Mutex
+	activity writeActivity
+}
+
+func (w *writeTracker) begin() {
+	w.mu.Lock()
+	w.activity.inFlightSince = time.Now()
+	w.mu.Unlock()
+}
+
+func (w *writeTracker) end() {
+	w.mu.Lock()
+	w.activity.lastStart = w.activity.inFlightSince
+	w.activity.lastEnd = time.Now()
+	w.activity.inFlightSince = time.Time{}
+	w.mu.Unlock()
+}
+
+func (w *writeTracker) snapshot() writeActivity {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.activity
+}
+
+func (d *Dialer) keepalive() (interval, timeout time.Duration) {
+	interval, timeout = d.opts.KeepaliveInterval, d.opts.KeepaliveTimeout
+	if interval <= 0 {
+		interval = defaultKeepaliveInterval
+	}
+	if timeout <= 0 {
+		timeout = defaultKeepaliveTimeout
+	}
+	return interval, timeout
+}
+
+// statusHostReplaced is the relay's close code for a host displaced by a newer
+// connection to the same session. After a silent network drop that newer
+// connection is normally this desktop's own redial, which never sees it; seen
+// on a live socket it means another desktop is using the same session id, and
+// the two will keep displacing each other.
+const statusHostReplaced websocket.StatusCode = 4409
+
+var errHostReplaced = errors.New("another desktop connected to this relay session and replaced this one")
+
+// errKeepaliveTimeout marks a host socket closed because the relay stopped
+// answering pings.
+var errKeepaliveTimeout = errors.New("relay stopped answering keepalive pings")
+
+// runKeepalive pings until ctx ends. On an unanswered ping it records the
+// cause and closes the socket, which unblocks readLoop's Read and sends the
+// dialer through its normal backoff-and-redial path.
+//
+// A ping that fails because the socket is already closed -- the relay sent
+// 4409 or 1008, or a write failed -- is left to readLoop, which reports the
+// specific reason.
+func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, writes *writeTracker, failed func()) {
+	d.runKeepaliveWithStall(ctx, conn, writes, maxWriteStall, failed)
+}
+
+// runKeepaliveWithStall is runKeepalive with an explicit stall bound, so a
+// test can observe the excuse expiring without waiting a minute.
+func (d *Dialer) runKeepaliveWithStall(ctx context.Context, conn *websocket.Conn, writes *writeTracker, stall time.Duration, failed func()) {
+	interval, timeout := d.keepalive()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pingStarted := time.Now()
+		pingCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if !pingFailureIsFatal(writes.snapshot(), pingStarted, time.Now(), stall) {
+			continue
+		}
+		failed()
+		_ = conn.CloseNow()
+		return
+	}
 }
 
 // Dialer is the desktop's outbound relay connection manager.
@@ -133,11 +298,15 @@ func (d *Dialer) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := d.connect(ctx); err != nil {
+		lasted, err := d.connect(ctx)
+		if err != nil {
 			// connect returns nil only when ctx is done.
 			if ctx.Err() != nil {
 				return
 			}
+			// A connection that stayed up retries promptly instead of at the
+			// cap an earlier outage ground the backoff up to.
+			resetIfStable(bo, lasted)
 			// Every connection-level failure, including an untrusted malformed
 			// envelope, sleeps the bounded backoff before trying again.
 			wait := bo.next()
@@ -153,16 +322,16 @@ func (d *Dialer) Run(ctx context.Context) {
 			continue
 		}
 		// A nil return from connect means ctx was cancelled inside the read loop.
-		bo.reset()
 		return
 	}
 }
 
 // connect dials the relay once, runs the frame loop until a fatal error, and
-// returns that error. It returns nil if and only if ctx was cancelled.
-func (d *Dialer) connect(ctx context.Context) error {
+// returns that error with how long the socket stayed up (zero if it never
+// opened). The error is nil if and only if ctx was cancelled.
+func (d *Dialer) connect(ctx context.Context) (lasted time.Duration, err error) {
 	if err := ValidateSessionID(d.opts.SessionID); err != nil {
-		return fmt.Errorf("dial relay: %w", err)
+		return 0, fmt.Errorf("dial relay: %w", err)
 	}
 	target := d.sessionURL()
 	client := d.handshakeClient()
@@ -176,19 +345,21 @@ func (d *Dialer) connect(ctx context.Context) error {
 			_ = response.Body.Close()
 		}
 		if ctx.Err() != nil {
-			return nil
+			return 0, nil
 		}
 		if response != nil && response.StatusCode == http.StatusPaymentRequired {
 			d.signal(EntitlementHandshakeRequired)
-			return &EntitlementSignalError{Signal: EntitlementHandshakeRequired}
+			return 0, &EntitlementSignalError{Signal: EntitlementHandshakeRequired}
 		}
 		// Library errors may echo handshake request details. Nothing logs this
 		// today, and that is exactly why the token is stripped here: the leak
 		// stays invisible until someone adds a log line, and then it is a
 		// credential in a file. Redacting at the source is cheap defense in
 		// depth even though the token travels only in a header.
-		return fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
+		return 0, fmt.Errorf("dial relay: %s", redactToken(err.Error(), token, d.currentToken()))
 	}
+	opened := time.Now()
+	defer func() { lasted = time.Since(opened) }()
 	defer conn.CloseNow()
 	if d.opts.ConnectionState != nil {
 		d.opts.ConnectionState(true)
@@ -207,16 +378,34 @@ func (d *Dialer) connect(ctx context.Context) error {
 	// dispatching the payload to its per-channel Noise handler.
 	conn.SetReadLimit(maxHostWireFrame)
 
+	// coder/websocket delivers pong frames only through an active Read, which
+	// readLoop always has outstanding, so the keepalive can run alongside it.
+	keepaliveCtx, stopKeepalive := context.WithCancel(ctx)
+	var keepaliveFailed atomic.Bool
+	var writes writeTracker
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		d.runKeepalive(keepaliveCtx, conn, &writes, func() { keepaliveFailed.Store(true) })
+	}()
+	defer func() {
+		stopKeepalive()
+		<-keepaliveDone
+	}()
+
 	// readLoop creates a fresh channel map for this connection. No Noise state
 	// survives a reconnect, even when the relay assigns a phone the same
 	// channel bytes again.
-	if err := d.readLoop(ctx, conn); err != nil {
+	if err := d.readLoop(ctx, conn, &writes); err != nil {
 		if ctx.Err() != nil {
-			return nil
+			return 0, nil
 		}
-		return err
+		if keepaliveFailed.Load() {
+			return 0, errKeepaliveTimeout
+		}
+		return 0, err
 	}
-	return nil
+	return 0, nil
 }
 
 // readLoop demultiplexes frames from one host socket. Each channel owns a
@@ -224,9 +413,12 @@ func (d *Dialer) connect(ctx context.Context) error {
 // coder/websocket permits only one active writer. Channel-level protocol or
 // authentication failures delete that channel, while malformed host envelopes
 // reconnect the whole host because their channel cannot be identified safely.
-func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
+func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn, writes *writeTracker) error {
 	mux := newSessionMultiplexer(ctx, d.opts.Keypair, d.opts.Forwarder, func(writeCtx context.Context, frame []byte) error {
-		if err := conn.Write(writeCtx, websocket.MessageBinary, frame); err != nil {
+		writes.begin()
+		err := conn.Write(writeCtx, websocket.MessageBinary, frame)
+		writes.end()
+		if err != nil {
 			// Unblock the sole reader so connect can discard every channel and
 			// enter the normal reconnect path.
 			_ = conn.CloseNow()
@@ -253,6 +445,9 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if ctx.Err() != nil {
 				_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 				return nil
+			}
+			if websocket.CloseStatus(err) == statusHostReplaced {
+				return errHostReplaced
 			}
 			if websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
 				return fmt.Errorf("%w: host frame exceeds %d bytes", errBadFrame, maxHostWireFrame)

@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * What the capacity screen is currently showing.
@@ -353,7 +352,7 @@ class UsageViewModel(
     fun controlProvider(providerAccountId: String, control: String) {
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.controlProvider(providerAccountId, control) }
+                boundedLoad(ioDispatcher) { source.controlProvider(providerAccountId, control) }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -374,7 +373,7 @@ class UsageViewModel(
                     // Not for auth or entitlement: neither is fixed by waiting,
                     // and retrying would hammer the desktop while telling the
                     // user nothing new.
-                    if (failure == UsageUiState.Failure.UNREACHABLE) {
+                    if (failure.recoversByWaiting()) {
                         startRecoveryPolling()
                     }
                 },
@@ -398,6 +397,15 @@ class UsageViewModel(
         else -> UsageUiState.Failure.UNREACHABLE
     }
 
+    /**
+     * Failures that commonly clear on their own: the desktop unreachable, or
+     * not (yet) attached to the relay -- usually because it is between
+     * reconnects, which now takes seconds. Auth, entitlement, and the phone
+     * cap are not fixed by waiting, so retrying would only hammer the desktop.
+     */
+    private fun UsageUiState.Failure.recoversByWaiting(): Boolean =
+        this == UsageUiState.Failure.UNREACHABLE || this == UsageUiState.Failure.HOST_OFFLINE
+
     fun refresh() = refresh(armRecovery = true)
 
     /**
@@ -413,7 +421,7 @@ class UsageViewModel(
         refreshJob = viewModelScope.launch {
             _state.update { it.copy(loading = true) }
 
-            val result = runCatching { withContext(ioDispatcher) { source.fetchUsageJson() } }
+            val result = runCatching { boundedLoad(ioDispatcher) { source.fetchUsageJson() } }
 
             // A cancelled refresh was superseded, so it must leave the state to
             // its replacement rather than reporting a failure.
@@ -469,7 +477,7 @@ class UsageViewModel(
                     // Not for auth or entitlement: neither is fixed by waiting,
                     // and retrying would hammer the desktop while telling the
                     // user nothing new.
-                    if (armRecovery && failure == UsageUiState.Failure.UNREACHABLE) {
+                    if (armRecovery && failure.recoversByWaiting()) {
                         startRecoveryPolling()
                     }
                 },
