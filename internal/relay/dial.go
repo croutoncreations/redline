@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -62,6 +63,80 @@ type DialerOptions struct {
 	// relay answered 409. Every line written here passes through redactToken
 	// first as defense in depth against a library echoing handshake headers.
 	Logf func(format string, args ...any)
+
+	// KeepaliveInterval is how often the desktop pings the relay while the
+	// host socket is up; KeepaliveTimeout is how long a ping may go
+	// unanswered before the socket is treated as dead. Zero selects the
+	// defaults. Tests shorten both.
+	KeepaliveInterval time.Duration
+	KeepaliveTimeout  time.Duration
+}
+
+// A host socket whose network path vanished without a FIN looks idle to the
+// reader: Read blocks, nothing errors, and the relay keeps the dead socket
+// registered as this session's host. Before the keepalive that lasted 30 to
+// 100 minutes in production, and every phone that connected in the meantime
+// handshook into a socket nobody answered. Pinging bounds that window to
+// roughly interval+timeout.
+//
+// Pings are WebSocket control frames, so they wake a hibernated Durable Object
+// only to have the runtime auto-answer; they carry no application data and do
+// not touch per-channel idle tracking.
+const (
+	defaultKeepaliveInterval = 25 * time.Second
+	defaultKeepaliveTimeout  = 10 * time.Second
+)
+
+func (d *Dialer) keepalive() (interval, timeout time.Duration) {
+	interval, timeout = d.opts.KeepaliveInterval, d.opts.KeepaliveTimeout
+	if interval <= 0 {
+		interval = defaultKeepaliveInterval
+	}
+	if timeout <= 0 {
+		timeout = defaultKeepaliveTimeout
+	}
+	return interval, timeout
+}
+
+// statusHostReplaced is the relay's close code for a host displaced by a newer
+// connection to the same session. After a silent network drop that newer
+// connection is normally this desktop's own redial, which never sees it; seen
+// on a live socket it means another desktop is using the same session id, and
+// the two will keep displacing each other.
+const statusHostReplaced websocket.StatusCode = 4409
+
+var errHostReplaced = errors.New("another desktop connected to this relay session and replaced this one")
+
+// errKeepaliveTimeout marks a host socket closed because the relay stopped
+// answering pings.
+var errKeepaliveTimeout = errors.New("relay stopped answering keepalive pings")
+
+// runKeepalive pings until ctx ends. On an unanswered ping it records the
+// cause and closes the socket, which unblocks readLoop's Read and sends the
+// dialer through its normal backoff-and-redial path.
+func (d *Dialer) runKeepalive(ctx context.Context, conn *websocket.Conn, failed func()) {
+	interval, timeout := d.keepalive()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		failed()
+		_ = conn.CloseNow()
+		return
+	}
 }
 
 // Dialer is the desktop's outbound relay connection manager.
@@ -207,12 +282,29 @@ func (d *Dialer) connect(ctx context.Context) error {
 	// dispatching the payload to its per-channel Noise handler.
 	conn.SetReadLimit(maxHostWireFrame)
 
+	// coder/websocket delivers pong frames only through an active Read, which
+	// readLoop always has outstanding, so the keepalive can run alongside it.
+	keepaliveCtx, stopKeepalive := context.WithCancel(ctx)
+	var keepaliveFailed atomic.Bool
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		d.runKeepalive(keepaliveCtx, conn, func() { keepaliveFailed.Store(true) })
+	}()
+	defer func() {
+		stopKeepalive()
+		<-keepaliveDone
+	}()
+
 	// readLoop creates a fresh channel map for this connection. No Noise state
 	// survives a reconnect, even when the relay assigns a phone the same
 	// channel bytes again.
 	if err := d.readLoop(ctx, conn); err != nil {
 		if ctx.Err() != nil {
 			return nil
+		}
+		if keepaliveFailed.Load() {
+			return errKeepaliveTimeout
 		}
 		return err
 	}
@@ -253,6 +345,9 @@ func (d *Dialer) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if ctx.Err() != nil {
 				_ = conn.Close(websocket.StatusNormalClosure, "context cancelled")
 				return nil
+			}
+			if websocket.CloseStatus(err) == statusHostReplaced {
+				return errHostReplaced
 			}
 			if websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
 				return fmt.Errorf("%w: host frame exceeds %d bytes", errBadFrame, maxHostWireFrame)

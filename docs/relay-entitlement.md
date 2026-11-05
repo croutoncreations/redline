@@ -116,7 +116,19 @@ bodies:
 | 423    | `no_host`          | `role=client` when no host is attached to the session. |
 | 503    | `session_unavailable` | `role=client` when persisted admission state is missing or invalid; admission fails closed. |
 
-A duplicate host receives `409 {"code":"role_already_connected"}`.
+A new host connection that passes the entitlement check **replaces** any host
+already attached to the session: the old host is closed with `4409 replaced by
+a newer host connection`, its phones are closed with `1000 peer disconnected`,
+and the new host's claims and generation are stored. An unentitled attempt is
+refused with `402` before anything is replaced, so it cannot evict an entitled
+host. (Earlier relays answered `409 {"code":"role_already_connected"}` here.
+That refused the real desktop for as long as a half-open socket from its
+previous connection stayed registered -- observed at 30 to 100 minutes --
+while phones were admitted and handshook into silence.)
+
+The desktop pings the relay every 25 seconds while connected and redials if a
+ping goes unanswered for 10 seconds, so a dead host socket is noticed from the
+desktop side within about 35 seconds.
 
 Close code `1008` with reason `entitlement expired` is sent to the host and
 every attached client when a Durable Object alarm fires at the stored `exp`.

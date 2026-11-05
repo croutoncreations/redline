@@ -71,11 +71,58 @@ describe("host-gated relay session", () => {
     expect(await res.json()).toEqual({ code: "no_host" });
   });
 
-  it("keeps duplicate host rejection structured", async () => {
-    await connectSocket("session-dup-relaytestpadding", "host");
-    const second = await connect("session-dup-relaytestpadding", "host");
-    expect(second.status).toBe(409);
-    expect(await second.json()).toEqual({ code: "role_already_connected" });
+  // A host whose network path vanished without a close frame (NAT rebinding,
+  // Wi-Fi handoff, sleep) stays registered until the runtime notices, which
+  // was observed to take 30-100 minutes. Refusing the real desktop's
+  // reconnect with 409 for that whole window stranded every phone on a
+  // socket nobody answers, so a new host replaces the old one instead.
+  it("replaces a stale host instead of refusing the reconnect", async () => {
+    const session = "session-dup-relaytestpadding";
+    const stale = await connectSocket(session, "host");
+    const staleClose = nextClose(stale);
+    const replacement = await connect(session, "host");
+    expect(replacement.status).toBe(101);
+    replacement.webSocket.accept();
+    const event = await staleClose;
+    expect([event.code, event.reason]).toEqual([4409, "replaced by a newer host connection"]);
+  });
+
+  it("disconnects the stale host's phones and routes new phones to the replacement", async () => {
+    const session = "session-replace-routing-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    await connectSocket(session, "host");
+    const strandedPhone = await connectSocket(session, "client");
+    const { hostGeneration: staleGeneration } = await stub.debugStorageDump();
+    const strandedClose = nextClose(strandedPhone);
+
+    const replacement = await connectSocket(session, "host");
+    const strandedEvent = await strandedClose;
+    expect([strandedEvent.code, strandedEvent.reason]).toEqual([1000, "peer disconnected"]);
+
+    const { hostGeneration } = await stub.debugStorageDump();
+    expect(hostGeneration).not.toEqual(staleGeneration);
+    const phone = await connectSocket(session, "client");
+    phone.send(bytes("after-replacement"));
+    expect(Array.from(payload(await nextMessage(replacement)))).toEqual(Array.from(bytes("after-replacement")));
+  });
+
+  it("keeps replacement claims when the stale host's close callback lands late", async () => {
+    const session = "session-replace-late-close-relaytest";
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(session));
+    await connectSocket(session, "host");
+    let staleServer;
+    await runInDurableObject(stub, async (_instance, state) => {
+      [staleServer] = state.getWebSockets("host");
+    });
+    const replacement = await connectSocket(session, "host");
+    const before = await stub.debugStorageDump();
+
+    await runInDurableObject(stub, async (instance) => instance.releaseSocket(staleServer));
+
+    expect(await stub.debugStorageDump()).toEqual(before);
+    const phone = await connectSocket(session, "client");
+    phone.send(bytes("still-routed"));
+    expect(Array.from(payload(await nextMessage(replacement)))).toEqual(Array.from(bytes("still-routed")));
   });
 
   it("uses MAX_CLIENTS_DEFAULT in open mode and rejects the sixth client", async () => {
