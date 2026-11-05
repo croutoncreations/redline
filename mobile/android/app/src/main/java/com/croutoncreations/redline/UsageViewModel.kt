@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * What the capacity screen is currently showing.
@@ -353,7 +352,7 @@ class UsageViewModel(
     fun controlProvider(providerAccountId: String, control: String) {
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.controlProvider(providerAccountId, control) }
+                boundedLoad(ioDispatcher) { source.controlProvider(providerAccountId, control) }
             }
             coroutineContext.ensureActive()
             result.fold(

@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Where run and task data comes from.
@@ -175,19 +174,21 @@ class RunsViewModel(
             _state.update {
                 it.copy(logsLoading = true, logs = null, logStream = stream, events = null)
             }
+            // Bounded per call, like the list: two core calls must not share
+            // one budget.
             val result = runCatching {
-                withContext(ioDispatcher) {
-                    val logs = source.fetchRunLogs(runId, stream)
-                    // The timeline is a nicety beside the logs, so a failure
-                    // to load it must not cost the logs themselves.
-                    val events = runCatching {
+                val logs = boundedLoad(ioDispatcher) { source.fetchRunLogs(runId, stream) }
+                // The timeline is a nicety beside the logs, so a failure -- or
+                // a timeout -- loading it must not cost the logs themselves.
+                val events = runCatching {
+                    boundedLoad(ioDispatcher) {
                         redlineJson.decodeFromString(
                             RunEventsView.serializer(),
                             source.fetchRunEvents(runId),
                         )
-                    }.getOrNull()
-                    logs to events
-                }
+                    }
+                }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+                logs to events
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -212,7 +213,7 @@ class RunsViewModel(
     fun controlTask(taskId: String, control: String) {
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.controlTask(taskId, control) }
+                boundedLoad(ioDispatcher) { source.controlTask(taskId, control) }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -231,7 +232,7 @@ class RunsViewModel(
     fun markAllRead() {
         viewModelScope.launch {
             val result = runCatching {
-                withContext(ioDispatcher) { source.markAllRunsRead() }
+                boundedLoad(ioDispatcher) { source.markAllRunsRead() }
             }
             coroutineContext.ensureActive()
             result.fold(
@@ -259,7 +260,7 @@ class RunsViewModel(
         dispatchJob = viewModelScope.launch {
             _state.update { it.copy(dispatching = true, lastDispatch = null) }
             val result = runCatching {
-                withContext(ioDispatcher) {
+                boundedLoad(ioDispatcher) {
                     redlineJson.decodeFromString(
                         DispatchView.serializer(),
                         source.dispatchTask(taskId),

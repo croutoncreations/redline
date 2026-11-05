@@ -10,7 +10,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -92,10 +91,10 @@ class FiresaleViewModel(private val source: FiresaleSource, private val ioDispat
         mutableState.value = state.value.copy(working = true, error = null)
         job = viewModelScope.launch {
             try {
-                if (action != null) withContext(ioDispatcher) { action() }
+                if (action != null) boundedLoad(ioDispatcher) { action() }
                 // Only GET 404 means an old desktop. An action's 404 is an inline error.
                 val view = try {
-                    withContext(ioDispatcher) { redlineJson.decodeFromString<FiresalesView>(source.list()) }
+                    boundedLoad(ioDispatcher) { redlineJson.decodeFromString<FiresalesView>(source.list()) }
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
                     if (source.isNotFound(error)) {
