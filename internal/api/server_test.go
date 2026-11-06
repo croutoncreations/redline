@@ -653,14 +653,14 @@ func TestTaskTemplatesAreEditableStarters(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&templates); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || len(templates) != 10 {
+	if resp.StatusCode != http.StatusOK || len(templates) != 16 {
 		t.Fatalf("status=%d templates=%#v", resp.StatusCode, templates)
 	}
 	if templates[0].ID != "bug-hunt" || templates[0].Prompt == "" ||
 		templates[0].MinInterval != 3*24*time.Hour || templates[0].Type != domain.Recurring {
 		t.Fatalf("first template = %#v", templates[0])
 	}
-	for _, id := range []string{"documentation-drift", "ci-warning-cleanup", "release-readiness", "accessibility-repair"} {
+	for _, id := range []string{"documentation-drift", "ci-warning-cleanup", "release-readiness", "accessibility-repair", "api-contract-drift", "flaky-test-investigation", "incident-runbook", "build-reproducibility", "migration-compatibility", "performance-regression"} {
 		found := false
 		for _, template := range templates {
 			if template.ID == id && template.Prompt != "" {

@@ -52,6 +52,102 @@ Measure coverage when tooling exists, then rank gaps by risk: persistence, concu
 Make one cohesive, reviewable change. If no worthwhile gap exists, make no changes and explain what you examined.`,
 		},
 		{
+			ID: "api-contract-drift", Name: "Resolve one API contract mismatch",
+			Description: "Keep clients working by aligning one public API contract with verified, intended behavior.",
+			Priority:    65, Type: domain.Recurring, DispatchTier: domain.DispatchBehind,
+			MinInterval: 7 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "API contract and implementation", "API test tools"},
+			Prompt: `Find and resolve ONE consequential mismatch between this repository's public API contract and its implementation.
+
+Compare an API schema, documented request/response example, or generated client contract with executable behavior. Reproduce one mismatch in a focused contract test, prioritizing callers that would fail or misinterpret data. Establish the intended supported behavior from compatibility commitments and repository evidence before choosing whether to fix the implementation or contract. Preserve supported clients; do not normalize a bug in the documentation or introduce a breaking API redesign. Add or update a regression test and rerun the affected API suite.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If there is no public API or no meaningful mismatch can be verified, make no changes and summarize what you checked.`,
+		},
+		{
+			ID: "flaky-test-investigation", Name: "Stabilize one flaky test",
+			Description: "Remove one demonstrated source of nondeterminism without weakening the test.",
+			Priority:    65, Type: domain.Recurring, DispatchTier: domain.DispatchBehind,
+			MinInterval: 7 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "Test failure history", "Tools to repeat the affected test"},
+			Prompt: `Find and fix ONE demonstrably flaky test in this repository.
+
+Use recent test logs or an existing failure report to choose a test that passes and fails without a relevant code change. Bound reproduction attempts and use repeated local runs, a controlled seed, or explicit scheduling to establish the cause. Fix one source of nondeterminism, such as shared state, timing, cleanup, or ordering; preserve the behavior and assertions the test protects. Do not disable the test, add blind retries or sleeps, broadly inflate timeouts, or weaken assertions to hide the failure. Repeat the reproduction under the same conditions and run the affected suite.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If the failure cannot be reproduced or no root cause can be established within a bounded investigation, make no changes and report the evidence and remaining uncertainty.`,
+		},
+		{
+			ID: "incident-runbook", Name: "Repair one incident-response instruction",
+			Description: "Make recovery more reliable by correcting one runbook gap supported by incident evidence.",
+			Priority:    60, Type: domain.Recurring, DispatchTier: domain.DispatchWellBehind,
+			MinInterval: 14 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "Incident report or verified failure evidence", "Safe local recovery simulation"},
+			Prompt: `Repair ONE consequential gap in this repository's incident-response or recovery instructions.
+
+Start from an incident report, postmortem, or verified failure evidence and identify one missing, incorrect, or ambiguous diagnostic or recovery step. Prefer a gap that delayed recovery or could cause data loss. Confirm the relevant behavior in code and rehearse the corrected step with an isolated local fixture or non-production simulation. Update one cohesive runbook section with prerequisites, expected results, and any required rollback or escalation step. Do not invent an incident or operate on a live incident to validate the instructions.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If incident evidence or a safe rehearsal is unavailable, or no meaningful gap is verified, make no changes and summarize what you checked.`,
+		},
+		{
+			ID: "build-reproducibility", Name: "Fix one source of build variation",
+			Description: "Make a release or development artifact reproducible by removing one verified source of variation.",
+			Priority:    55, Type: domain.Recurring, DispatchTier: domain.DispatchWellBehind,
+			MinInterval: 14 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "Build tools and isolated temporary directories", "Ability to compare build artifacts"},
+			Prompt: `Fix ONE verified source of unintended variation in this repository's build output.
+
+Follow the documented build in two clean temporary directories using the same source revision, pinned inputs, toolchain, and environment. Compare the same distributable or intermediate artifact and record the differing content or hashes. Distinguish meaningful variation from intentionally variable signatures or documented metadata; do not remove required signing or security properties to make hashes match. Trace one unintended difference to its source, apply a minimal fix, rebuild twice under comparable conditions, and run the affected build checks. Do not replace the build system or hide differences with broad exclusions.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If the builds already agree, the difference is intentional, or the required environment is unavailable, make no changes and report the comparison and its limits.`,
+		},
+		{
+			ID: "migration-compatibility", Name: "Fix one supported upgrade path",
+			Description: "Prevent upgrade failures or data loss with one verified migration repair and regression test.",
+			Priority:    70, Type: domain.Recurring, DispatchTier: domain.DispatchBehind,
+			MinInterval: 14 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "Supported version and migration history", "Isolated representative upgrade fixtures"},
+			Prompt: `Find and fix ONE verified compatibility defect in a supported migration or upgrade path.
+
+Establish supported source and target versions from repository policy. Use disposable local fixtures representing an older supported schema, configuration, or data format, and reproduce an upgrade failure or incorrect result before editing code. Check representative records, invariants, and compatibility expectations after the migration, including rollback only when it is explicitly supported. Make the smallest compatible repair, add a regression test for that path, and run the affected migration and application suites. Never run migrations against production or user data, invent support for an undocumented downgrade, or bundle a schema redesign.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If no supported path can be established, no defect is reproducible, or fixtures cannot be created safely, make no changes and explain the evidence gap.`,
+		},
+		{
+			ID: "performance-regression", Name: "Repair one measured performance regression",
+			Description: "Restore a user-relevant workload with one evidence-backed performance fix.",
+			Priority:    60, Type: domain.Recurring, DispatchTier: domain.DispatchWellBehind,
+			MinInterval: 14 * 24 * time.Hour, RequireRepoChange: true,
+			Requirements: []string{"Repository access", "Comparable known-good baseline", "Repeatable representative workload and profiling tools"},
+			Prompt: `Find and repair ONE measured performance regression affecting a meaningful user workload.
+
+Choose a reported slow path or repository benchmark with a comparable known-good baseline. Reproduce the regression using the same representative inputs, environment, and repeated measurements; record the baseline, current latency, throughput, or resource use, and measurement variability. Profile the affected path and fix one confirmed cause while preserving correctness and compatibility. Rerun comparable measurements, report the improvement and variability, and run correctness tests for the affected path. Add a stable benchmark or regression check where practical; do not add flaky wall-clock assertions, substitute a toy workload, or trade away correctness for a faster number.
+
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make one cohesive, reviewable change. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
+
+Inspect verification commands and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the problem, and do not modify production systems or data. If verification cannot avoid these side effects, stop and summarize the limitation.
+
+If there is no trustworthy baseline, the regression cannot be reproduced, or the measured benefit is indistinguishable from noise, make no changes and summarize what you measured.`,
+		},
+		{
 			ID: "quickstart", Name: "Verify the quickstart from scratch",
 			Description: "Follow the documented setup as a newcomer and repair one confirmed break or ambiguity.",
 			Priority:    50, Type: domain.Recurring, DispatchTier: domain.DispatchWellBehind,
