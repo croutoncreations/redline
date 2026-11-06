@@ -150,7 +150,7 @@ echo "Add table tests for the parser." | redline task add --name "Parser tests" 
 redline task list
 redline task enable add-tests
 redline task disable add-tests
-redline task retry add-tests
+redline task retry add-tests                               # only for a failed task
 redline task dispatch add-tests
 redline candidates --provider codex-main
 ```
@@ -262,8 +262,12 @@ redline --config redline.yaml pair --qr
 redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
 ```
 
-`--qr` is required. Without `--host`, the Tailscale MagicDNS name is discovered automatically; either
-way the host must be listed in `api.trusted_hosts`. `--port` defaults to 443.
+`--qr` is required. `pair` reads the service configuration from `--config`, so point it at the file
+the service uses. The macOS app uses `REDLINE_CONFIG_PATH` or the path it remembered from an earlier
+launch, then the config of a legacy LaunchAgent install, and otherwise
+`~/Library/Application Support/Redline/redline.yaml`. Without
+`--host`, the Tailscale MagicDNS name is discovered automatically; either way the host must be listed
+in `api.trusted_hosts`. `--port` defaults to 443.
 
 See [Mobile dashboard setup](mobile.md).
 
