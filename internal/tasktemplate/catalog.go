@@ -109,7 +109,7 @@ Do not perform a scattershot cleanup. If nothing is safely removable, make no ch
 
 Check user-facing configuration, commands, API examples, or operational guides against the implementation and focused executable checks. Prefer a mismatch that could cause a user to fail a task or misunderstand a supported feature. Verify the current behavior is intended before documenting it; do not normalize a bug or describe aspirational behavior. Leave quickstart walkthroughs to the quickstart task.
 
-Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Correct one cohesive documentation area, cite the implementation or command output that establishes the mismatch, and rerun the corrected example or relevant documentation checks. Recheck open pull requests before pushing or opening a pull request to avoid duplicate work.
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Correct one cohesive documentation area, cite the implementation or command output that establishes the mismatch, and rerun the corrected example or relevant documentation checks. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
 
 Make one cohesive, reviewable change. If no meaningful mismatch can be verified, make no changes and summarize what you checked.`,
 		},
@@ -121,9 +121,9 @@ Make one cohesive, reviewable change. If no meaningful mismatch can be verified,
 			Requirements: []string{"Repository access", "Recent CI logs", "Tools to reproduce the affected CI step"},
 			Prompt: `Resolve ONE recurring, actionable warning in this repository's CI.
 
-Inspect recent CI logs and confirm the same warning occurs across multiple runs. Prefer deprecations, compatibility warnings, or configuration problems that threaten future builds or obscure useful failures. Trace the warning to its source and reproduce it with the affected command. Skip transient infrastructure noise; if logs or a reproduction are unavailable, report that limitation instead of guessing.
+Inspect recent CI logs and confirm the same warning occurs across multiple runs. For GitHub Actions, use gh run list --limit 10, then gh run view RUN_ID --log or gh run view RUN_ID --job JOB_ID --log; use equivalent run or job logs for other CI systems. Prefer deprecations, compatibility warnings, or configuration problems that threaten future builds or obscure useful failures. Trace the warning to its source and reproduce it with the affected command. Skip transient infrastructure noise; if logs or a reproduction are unavailable, report that limitation instead of guessing.
 
-Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make the smallest cohesive fix, then rerun the affected CI step and relevant tests or linters. Preserve assertions, failure detection, and warning visibility; do not silence the warning by disabling checks, filtering output, or broadly suppressing diagnostics. Recheck open pull requests before pushing or opening a pull request to avoid duplicate work.
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Make the smallest cohesive fix, then rerun the affected CI step and relevant tests or linters. Inspect the command and scripts before running them. Do not publish, deploy, or release anything as a side effect of reproducing or verifying the warning; if the affected step cannot run without those side effects, stop and summarize the limitation. Preserve assertions, failure detection, and warning visibility; do not silence the warning by disabling checks, filtering output, or broadly suppressing diagnostics. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
 
 Make one cohesive, reviewable change. If no worthwhile warning can be reproduced and fixed, make no changes and explain what you examined.`,
 		},
@@ -132,7 +132,7 @@ Make one cohesive, reviewable change. If no worthwhile warning can be reproduced
 			Description: "Give maintainers one evidence-backed release blocker and a concrete next step, without changing the repository.",
 			Priority:    50, Type: domain.Recurring, DispatchTier: domain.DispatchWellBehind,
 			MinInterval:  7 * 24 * time.Hour,
-			Requirements: []string{"Repository access", "Release instructions and relevant CI or build evidence"},
+			Requirements: []string{"Repository access", "Release instructions and relevant CI or build evidence", "Execution profile without repository-writing or publishing lifecycle hooks"},
 			Prompt: `Produce a read-only report of ONE consequential blocker to this repository's next release.
 
 Read the release instructions and inspect relevant evidence such as required checks, version consistency, release notes, packaging, or migration compatibility. Use only non-publishing verification commands; inspect release scripts before running anything and skip commands with release side effects. Prioritize a problem that would prevent installation, break an upgrade, or leave a required release check failing. Check open issues and pull requests, including drafts, and cite existing work rather than proposing duplicate work.
@@ -151,7 +151,7 @@ Return the report in the run summary. Make no repository changes, commits, pushe
 
 Choose an important user journey in the project's web, desktop, mobile, or terminal interface. Reproduce a concrete obstacle involving keyboard navigation, focus, accessible names or semantics, screen-reader output, or contrast using tools appropriate to that interface. Prioritize something that blocks or confuses completing the task, and record the affected interaction before changing code. Automated audit findings are leads; confirm the user impact. If there is no runnable interface or the necessary tools are unavailable, make no changes and explain the limitation.
 
-Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Apply the smallest cohesive repair using the project's existing UI conventions. Repeat the affected interaction, verify nearby behavior still works, and add or update a focused regression test where practical. Run the affected suite. Do not turn this into a visual redesign or claim a full accessibility audit. Recheck open pull requests before pushing or opening a pull request to avoid duplicate work.
+Check open issues and pull requests, including drafts, before choosing work; skip anything already being addressed. Apply the smallest cohesive repair using the project's existing UI conventions. Repeat the affected interaction, verify nearby behavior still works, and add or update a focused regression test where practical. Run the affected suite. Do not turn this into a visual redesign or claim a full accessibility audit. Immediately before pushing or opening a pull request, list open pull requests again, including drafts. If an open pull request already addresses the selected issue, stop; do not push or open a pull request, and summarize your findings with a link to the existing pull request.
 
 Make one cohesive, reviewable change. If no meaningful barrier can be verified, make no changes and summarize what you checked.`,
 		},

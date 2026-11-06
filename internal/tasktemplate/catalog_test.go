@@ -89,6 +89,9 @@ func TestReleaseReadinessStaysReportOnly(t *testing.T) {
 		if template.RequireRepoChange {
 			t.Fatal("release report must not require repository changes")
 		}
+		if !strings.Contains(strings.Join(template.Requirements, " "), "Execution profile without repository-writing or publishing lifecycle hooks") {
+			t.Error("release report must explain its execution-profile prerequisite")
+		}
 		for _, required := range []string{
 			"ONE consequential blocker",
 			"Use only non-publishing verification commands",
@@ -104,4 +107,44 @@ func TestReleaseReadinessStaysReportOnly(t *testing.T) {
 		return
 	}
 	t.Fatal("release-readiness template missing")
+}
+
+func TestCIWarningCleanupForbidsPublishingDuringVerification(t *testing.T) {
+	for _, template := range tasktemplate.Catalog() {
+		if template.ID != "ci-warning-cleanup" {
+			continue
+		}
+		for _, required := range []string{
+			"Inspect the command and scripts before running them",
+			"Do not publish, deploy, or release anything as a side effect of reproducing or verifying the warning",
+			"if the affected step cannot run without those side effects, stop and summarize the limitation",
+		} {
+			if !strings.Contains(template.Prompt, required) {
+				t.Errorf("ci-warning-cleanup prompt is missing boundary %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("ci-warning-cleanup template missing")
+}
+
+func TestMaintenanceRepairsStopWhenAnOpenPullRequestDuplicatesTheIssue(t *testing.T) {
+	catalog := map[string]tasktemplate.Template{}
+	for _, template := range tasktemplate.Catalog() {
+		catalog[template.ID] = template
+	}
+	for _, id := range []string{"documentation-drift", "ci-warning-cleanup", "accessibility-repair"} {
+		t.Run(id, func(t *testing.T) {
+			prompt := catalog[id].Prompt
+			for _, required := range []string{
+				"Immediately before pushing or opening a pull request, list open pull requests again, including drafts",
+				"If an open pull request already addresses the selected issue, stop; do not push or open a pull request",
+				"summarize your findings with a link to the existing pull request",
+			} {
+				if !strings.Contains(prompt, required) {
+					t.Errorf("repair prompt is missing duplicate-work boundary %q", required)
+				}
+			}
+		})
+	}
 }
