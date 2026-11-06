@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestBankedResetRedemptionsMigration35SchemaGuardAndLimit(t *testing.T) {
 	for _, stamp := range []int{34, 35, 99} {
 		t.Run(fmt.Sprint(stamp), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "schema.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -33,7 +34,7 @@ func TestBankedResetRedemptionsMigration35SchemaGuardAndLimit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			db, err = store.Open(path)
+			db, err = storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +65,7 @@ func TestBankedResetRedemptionsMigration37SchemaGuard(t *testing.T) {
 	for _, stamp := range []int{36, 37, 99} {
 		t.Run(fmt.Sprint(stamp), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "migration37.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +96,7 @@ func TestBankedResetRedemptionsMigration37SchemaGuard(t *testing.T) {
 				}
 			}
 			for range 2 {
-				db, err = store.Open(path)
+				db, err = storetest.Open(path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -122,7 +123,7 @@ func TestBankedResetRedemptionsMigration37SchemaGuard(t *testing.T) {
 
 func TestBankedResetRedemptionsPersistPendingRetryAndHistory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redemptions.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +135,7 @@ func TestBankedResetRedemptionsPersistPendingRetryAndHistory(t *testing.T) {
 		t.Fatalf("%+v %v", a, err)
 	}
 	_ = db.Close()
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

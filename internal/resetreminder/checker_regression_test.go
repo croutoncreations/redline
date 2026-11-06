@@ -8,11 +8,11 @@ import (
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/resetreminder"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestCheckerLateFirstObservationOnlySendsExpiryAction(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestCheckerRedeemModeNotifiesResetsAutomaticRedemptionSkips(t *testing.T) {
 		{"one of two at same deadline skipped", func(r decision.BankedReset) bool { return r.ID == "a" }, []string{"a", "b"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,7 +74,7 @@ func TestCheckerRedeemModeNotifiesResetsAutomaticRedemptionSkips(t *testing.T) {
 func TestCheckerDeduplicatesAggregateAndItemizedDeadlines(t *testing.T) {
 	for _, itemizedFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate-first", true: "itemized-first"}[itemizedFirst], func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -115,7 +115,7 @@ func TestCheckerDeduplicatesAggregateAndItemizedDeadlines(t *testing.T) {
 
 func TestCheckerIgnoresStaleAndSpentDetails(t *testing.T) {
 	for _, spentCount := range []int{1, 0, -1} {
-		db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+		db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 		if err != nil {
 			t.Fatal(err)
 		}

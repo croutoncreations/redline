@@ -17,11 +17,11 @@ import (
 
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestUnauthenticatedDashboardExplainsLocalSignInWithoutExposingSecrets(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestLocalWorktreeProfileRejectsInvalidRepositoryBeforeSaving(t *testing.T) 
 }
 
 func TestDashboardReportsLoadedServiceSetupMetadata(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
