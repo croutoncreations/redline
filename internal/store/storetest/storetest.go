@@ -22,41 +22,51 @@ import (
 )
 
 var (
-	templateOnce  sync.Once
+	templateMu    sync.Mutex
 	templateImage []byte
 )
 
 // migratedImage returns the bytes of a database freshly migrated by the real
-// store.Open, or nil if that could not be produced.
+// store.Open, or nil if that could not be produced. A successful image is kept
+// for the rest of the test binary; a failed attempt is not remembered, so a
+// later call retries once whatever broke (a full temp directory, say) recovers.
 func migratedImage() []byte {
-	templateOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "redline-storetest-")
-		if err != nil {
-			return
-		}
-		defer os.RemoveAll(dir)
-		path := filepath.Join(dir, "template.db")
-		db, err := store.Open(path)
-		if err != nil {
-			return
-		}
-		// Closing the last connection checkpoints the WAL into the main file,
-		// so the image alone is a complete database.
-		if err := db.Close(); err != nil {
-			return
-		}
-		for _, suffix := range []string{"-wal", "-shm"} {
-			if info, err := os.Stat(path + suffix); err == nil && info.Size() > 0 {
-				return
-			}
-		}
-		image, err := os.ReadFile(path)
-		if err != nil {
-			return
-		}
-		templateImage = image
-	})
+	templateMu.Lock()
+	defer templateMu.Unlock()
+	if templateImage == nil {
+		templateImage = buildMigratedImage()
+	}
 	return templateImage
+}
+
+// buildMigratedImage migrates a scratch database through the real store.Open
+// and returns its file image, or nil on any failure.
+func buildMigratedImage() []byte {
+	dir, err := os.MkdirTemp("", "redline-storetest-")
+	if err != nil {
+		return nil
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "template.db")
+	db, err := store.Open(path)
+	if err != nil {
+		return nil
+	}
+	// Closing the last connection checkpoints the WAL into the main file,
+	// so the image alone is a complete database.
+	if err := db.Close(); err != nil {
+		return nil
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, err := os.Stat(path + suffix); err == nil && info.Size() > 0 {
+			return nil
+		}
+	}
+	image, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return image
 }
 
 // Open behaves like store.Open. When path does not exist yet it first seeds
