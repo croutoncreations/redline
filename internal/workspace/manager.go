@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,18 +50,18 @@ func (m Manager) Prepare(
 ) (domain.Workspace, error) {
 	if profile.WorkspaceProvider == "runtime-owned" {
 		if profile.Repository == "" {
-			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace directory is required")
+			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace requires repository to be set to the workspace directory, got empty value")
 		}
 		if profile.PrepareCommand != "" {
-			return domain.Workspace{}, fmt.Errorf("runtime-owned workspaces do not support local prepare commands")
+			return domain.Workspace{}, fmt.Errorf("runtime-owned workspace %s does not support prepare_command; remove prepare_command or use another workspace_provider", profile.Repository)
 		}
 		return domain.Workspace{Directory: profile.Repository}, nil
 	}
 	if profile.Repository == "" {
-		return domain.Workspace{}, fmt.Errorf("workspace repository is required")
+		return domain.Workspace{}, fmt.Errorf("workspace_provider %q requires repository to be set, got empty value", profile.WorkspaceProvider)
 	}
-	if info, err := os.Stat(profile.Repository); err != nil || !info.IsDir() {
-		return domain.Workspace{}, fmt.Errorf("workspace repository is not a directory: %s", profile.Repository)
+	if err := statDirectory(profile.Repository); err != nil {
+		return domain.Workspace{}, fmt.Errorf("workspace_provider %q repository: %w", profile.WorkspaceProvider, err)
 	}
 	var prepared domain.Workspace
 	var err error
@@ -78,7 +80,7 @@ func (m Manager) Prepare(
 	case "command":
 		return m.prepareCommand(ctx, runID, taskName, profile)
 	default:
-		return domain.Workspace{}, fmt.Errorf("unsupported workspace provider %q", profile.WorkspaceProvider)
+		return domain.Workspace{}, fmt.Errorf("unsupported workspace_provider %q (want one of existing-directory, git-worktree, devx, command, runtime-owned)", profile.WorkspaceProvider)
 	}
 	if err != nil {
 		return domain.Workspace{}, err
@@ -100,6 +102,7 @@ func (m Manager) Finalize(ctx context.Context, request FinalizeRequest) error {
 		return err
 	}
 	defer closeArtifacts()
+	logs := m.hookLogHint(request.RunID, "finalize")
 	shellName, shellArgs := redprocess.ShellCommand(request.Profile.FinalizeCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: shellName, Args: shellArgs,
@@ -107,10 +110,11 @@ func (m Manager) Finalize(ctx context.Context, request FinalizeRequest) error {
 		Stdout: stdout, Stderr: stderr,
 	})
 	if err != nil {
-		return fmt.Errorf("run finalize hook: %w", err)
+		return fmt.Errorf("run finalize hook in %s: %w", request.Workspace.Directory, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("finalize hook exited with code %d", exitCode)
+		return fmt.Errorf("finalize hook exited with code %d in %s (run %s, status %s)%s",
+			exitCode, request.Workspace.Directory, request.RunID, request.Status, logs)
 	}
 	return nil
 }
@@ -121,14 +125,14 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 		return nil
 	}
 	if policy != "always" && policy != "on_success" {
-		return fmt.Errorf("unsupported cleanup policy %q", policy)
+		return fmt.Errorf("unsupported cleanup_policy %q (want one of never, on_success, always)", policy)
 	}
 	var command redprocess.Command
 	var stderr bytes.Buffer
 	switch request.Profile.WorkspaceProvider {
 	case "devx":
 		if request.Workspace.SessionID == "" {
-			return fmt.Errorf("cannot clean DevX workspace without session id")
+			return fmt.Errorf("cannot clean DevX workspace %s: run has no recorded DevX session id", request.Workspace.Directory)
 		}
 		command = redprocess.Command{
 			Name: "devx", Args: []string{"session", "rm", request.Workspace.SessionID, "--force"},
@@ -147,7 +151,7 @@ func (m Manager) Cleanup(ctx context.Context, request CleanupRequest) error {
 	case "existing-directory", "command", "runtime-owned":
 		return nil
 	default:
-		return fmt.Errorf("unsupported workspace provider %q", request.Profile.WorkspaceProvider)
+		return fmt.Errorf("cannot clean workspace %s: unsupported workspace_provider %q", request.Workspace.Directory, request.Profile.WorkspaceProvider)
 	}
 	exitCode, err := m.runner().Run(ctx, command)
 	if err != nil {
@@ -172,6 +176,7 @@ func (m Manager) runSetupHook(
 		return err
 	}
 	defer closeArtifacts()
+	logs := m.hookLogHint(runID, "prepare")
 	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: shellName, Args: shellArgs, Dir: prepared.Directory,
@@ -186,10 +191,11 @@ func (m Manager) runSetupHook(
 		Stdout: stdout, Stderr: stderr,
 	})
 	if err != nil {
-		return fmt.Errorf("run workspace setup hook: %w", err)
+		return fmt.Errorf("run workspace setup hook in %s: %w", prepared.Directory, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("workspace setup hook exited with code %d", exitCode)
+		return fmt.Errorf("workspace setup hook exited with code %d in %s (run %s)%s",
+			exitCode, prepared.Directory, runID, logs)
 	}
 	return nil
 }
@@ -202,7 +208,7 @@ func (m Manager) prepareGitWorktree(
 	name := safeName(runID)
 	directory := filepath.Join(profile.Repository, ".redline", "worktrees", name)
 	if err := os.MkdirAll(filepath.Dir(directory), 0o755); err != nil {
-		return domain.Workspace{}, fmt.Errorf("create worktree parent: %w", err)
+		return domain.Workspace{}, fmt.Errorf("create worktree parent directory %s: %w", filepath.Dir(directory), err)
 	}
 	branch := "redline/" + name
 	base := profile.BaseBranch
@@ -222,7 +228,7 @@ func (m Manager) prepareGitWorktree(
 			directory, branch, base, profile.Repository, exitCode, strings.TrimSpace(stderr.String()))
 	}
 	if err := requireDirectory(directory); err != nil {
-		return domain.Workspace{}, err
+		return domain.Workspace{}, fmt.Errorf("git worktree add reported success for branch %s but: %w", branch, err)
 	}
 	return domain.Workspace{Directory: directory, Branch: branch}, nil
 }
@@ -249,7 +255,7 @@ func (m Manager) prepareDevX(
 	}
 	directory := filepath.Join(profile.Repository, ".worktrees", session)
 	if err := requireDirectory(directory); err != nil {
-		return domain.Workspace{}, err
+		return domain.Workspace{}, fmt.Errorf("devx session create %s reported success but: %w", session, err)
 	}
 	return domain.Workspace{Directory: directory, SessionID: session}, nil
 }
@@ -261,7 +267,7 @@ func (m Manager) prepareCommand(
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
 	if profile.PrepareCommand == "" {
-		return domain.Workspace{}, fmt.Errorf("command workspace requires prepare_command")
+		return domain.Workspace{}, fmt.Errorf("workspace_provider \"command\" requires prepare_command to be set, got empty value")
 	}
 	var stdout, stderr bytes.Buffer
 	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
@@ -276,10 +282,11 @@ func (m Manager) prepareCommand(
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
-		return domain.Workspace{}, fmt.Errorf("prepare command workspace: %w", err)
+		return domain.Workspace{}, fmt.Errorf("run prepare command in %s: %w", profile.Repository, err)
 	}
 	if exitCode != 0 {
-		return domain.Workspace{}, fmt.Errorf("prepare command exited with code %d: %s", exitCode, strings.TrimSpace(stderr.String()))
+		return domain.Workspace{}, fmt.Errorf("prepare command exited with code %d in %s (stderr %s; contents are not echoed because they may hold secrets)",
+			exitCode, profile.Repository, describeOutput(stderr.String()))
 	}
 	var result struct {
 		WorkingDirectory string            `json:"working_directory"`
@@ -288,10 +295,11 @@ func (m Manager) prepareCommand(
 		Metadata         map[string]string `json:"metadata"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return domain.Workspace{}, fmt.Errorf("decode prepare command output: %w", err)
+		return domain.Workspace{}, fmt.Errorf("decode prepare command output as JSON with working_directory (%s; contents are not echoed because they may hold secrets): %w",
+			describeOutput(stdout.String()), err)
 	}
 	if err := requireDirectory(result.WorkingDirectory); err != nil {
-		return domain.Workspace{}, err
+		return domain.Workspace{}, fmt.Errorf("prepare command returned an unusable working_directory: %w", err)
 	}
 	return domain.Workspace{
 		Directory: result.WorkingDirectory, Branch: result.Branch,
@@ -333,16 +341,16 @@ func (m Manager) artifactWriters(runID, phase string) (io.Writer, io.Writer, fun
 		return io.Discard, io.Discard, func() {}, nil
 	}
 	if err := os.MkdirAll(m.OutputDirectory, 0o700); err != nil {
-		return nil, nil, nil, fmt.Errorf("create lifecycle artifact directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("create lifecycle artifact directory %s: %w", m.OutputDirectory, err)
 	}
 	stdout, err := os.OpenFile(ArtifactPath(m.OutputDirectory, runID, phase, "stdout"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create %s stdout artifact: %w", phase, err)
+		return nil, nil, nil, fmt.Errorf("create %s stdout artifact (output directory %s): %w", phase, m.OutputDirectory, err)
 	}
 	stderr, err := os.OpenFile(ArtifactPath(m.OutputDirectory, runID, phase, "stderr"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		_ = stdout.Close()
-		return nil, nil, nil, fmt.Errorf("create %s stderr artifact: %w", phase, err)
+		return nil, nil, nil, fmt.Errorf("create %s stderr artifact (output directory %s): %w", phase, m.OutputDirectory, err)
 	}
 	return stdout, stderr, func() {
 		_ = stdout.Close()
@@ -367,11 +375,47 @@ func requireDirectory(path string) error {
 	if path == "" {
 		return fmt.Errorf("workspace command did not return working_directory")
 	}
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("prepared workspace is not a directory: %s", path)
+	if err := statDirectory(path); err != nil {
+		return fmt.Errorf("prepared workspace: %w", err)
 	}
 	return nil
+}
+
+// statDirectory distinguishes a missing path, an unreadable path, and a path
+// that exists but is not a directory, since each needs a different fix.
+func statDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err // the message already names the path
+		}
+		return fmt.Errorf("cannot stat %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory (mode %s)", path, info.Mode())
+	}
+	return nil
+}
+
+// hookLogHint names the captured hook output files. Hook stderr is not copied
+// into the error: hooks run with the full process environment and their logs
+// are deliberately 0600, while errors are stored on the run and shown in the
+// dashboard.
+func (m Manager) hookLogHint(runID, phase string) string {
+	if m.OutputDirectory == "" {
+		return "; hook output was not captured because no output directory is configured"
+	}
+	return "; see " + ArtifactPath(m.OutputDirectory, runID, phase, "stderr") +
+		" and " + ArtifactPath(m.OutputDirectory, runID, phase, "stdout")
+}
+
+func describeOutput(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "got empty output"
+	}
+	return "got " + strconv.Itoa(len(value)) + " bytes of output"
 }
 
 func safeName(value string) string {
