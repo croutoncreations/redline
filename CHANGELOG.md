@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Four editable task starters for one documentation mismatch, recurring CI warning,
+  release-readiness blocker report, or accessibility barrier. Release readiness is
+  report-only and does not require repository changes.
+
 - On-demand manual firesales for any configured provider account: owner/device
   `GET|POST /v1/firesales`, `DELETE /v1/firesales/{account}`, and
   `redline firesale start|stop|status`. Persistent sales unlock the firesale tier without
