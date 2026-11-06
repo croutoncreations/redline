@@ -101,6 +101,8 @@ Start-Process "http://127.0.0.1:7436/?access_token=$((Get-Content api-token -Raw
 If port `7436` is already taken (for example by the macOS app), start `serve` with
 `--listen 127.0.0.1:17436` and pass `--api http://127.0.0.1:17436` to the other commands.
 Also replace `7436` with `17436` in the browser sign-in commands above.
+Treat a URL containing `access_token` as a secret, since browser history can retain it. See
+[HTTP API](docs/api.md#authentication).
 
 → [CLI reference](docs/cli.md) · [Run as a launchd service](docs/launchd.md)
 
