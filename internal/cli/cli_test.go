@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +259,11 @@ policies:
 	)
 	if exit != 1 || !strings.Contains(stderr.String(), "address already in use") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"redline serve: listen on " + occupied.Addr().String() + ": bind: address already in use", "--listen with a free address"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
 	if _, err := os.Stat(database); !os.IsNotExist(err) {
 		t.Fatalf("database was touched before listener ownership was established: %v", err)
@@ -826,5 +833,166 @@ func TestTokenUsageMentionsRotate(t *testing.T) {
 	exit := cli.Run([]string{"token"}, &stdout, &stderr, time.Now)
 	if exit != 1 || !strings.Contains(stderr.String(), "rotate") {
 		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+}
+
+func TestServeStartupFailuresNameTheStageAndValues(t *testing.T) {
+	root := t.TempDir()
+	writeConfig := func(name, database string) string {
+		path := filepath.Join(root, name)
+		body := fmt.Sprintf(`
+database: %s
+active_policy: standard
+scheduler:
+  enabled: false
+usage_monitor:
+  enabled: false
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.10
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+`, database)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	missingDir := filepath.Join(root, "no-such-dir", "redline.db")
+	badDatabase := writeConfig("bad-db.yaml", missingDir)
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			"missing config",
+			[]string{"--config", filepath.Join(root, "absent.yaml"), "serve"},
+			[]string{"redline serve: load config:", "absent.yaml", "pass --config FILE", "config.example.yaml"},
+		},
+		{
+			"database directory missing",
+			[]string{"--config", badDatabase, "serve", "--listen", "127.0.0.1:0"},
+			[]string{"redline serve: open database", missingDir, "(config " + badDatabase + " database)", "create directory " + strconv.Quote(filepath.Dir(missingDir))},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if exit := cli.Run(test.args, &stdout, &stderr, time.Now); exit != 1 {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+			}
+			for _, want := range test.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestServeRejectsOverPermissionedTokenWithFix(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "redline.yaml")
+	body := fmt.Sprintf(`
+database: %s
+active_policy: standard
+scheduler:
+  enabled: false
+usage_monitor:
+  enabled: false
+providers:
+  codex-main:
+    provider: codex
+    usage_source: native
+    window_weekly_cost: 0.10
+policies:
+  standard:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+`, filepath.Join(root, "redline.db"))
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := apiauth.TokenPath(configPath)
+	if err := os.WriteFile(tokenPath, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile applies the umask; set the mode explicitly so the test does
+	// not depend on it.
+	if err := os.Chmod(tokenPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "serve", "--listen", "127.0.0.1:0"}, &stdout, &stderr, time.Now)
+	if exit != 1 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	for _, want := range []string{"redline serve: prepare API token", tokenPath, "chmod 600"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestClientCommandExplainsWhySavedTokenWasNotSent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	t.Setenv("REDLINE_API_TOKEN", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"Redline API authentication is required"}`)
+	}))
+	defer server.Close()
+	configPath := filepath.Join(t.TempDir(), "redline.yaml")
+	tokenPath := apiauth.TokenPath(configPath)
+	if err := os.WriteFile(tokenPath, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile applies the umask; set the mode explicitly so the test does
+	// not depend on it.
+	if err := os.Chmod(tokenPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "--api", server.URL, "task", "list"}, &stdout, &stderr, time.Now)
+	if exit != 1 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	for _, want := range []string{"401", "no API token was sent", tokenPath, "chmod 600"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestClientCommandKeepsGenericTokenHintWhenTokenFileIsMissing(t *testing.T) {
+	t.Setenv("REDLINE_API_TOKEN", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"Redline API authentication is required"}`)
+	}))
+	defer server.Close()
+	configPath := filepath.Join(t.TempDir(), "redline.yaml")
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--config", configPath, "--api", server.URL, "task", "list"}, &stdout, &stderr, time.Now)
+	if exit != 1 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	for _, want := range []string{"401", "no API token was sent", "REDLINE_API_TOKEN", "--config"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "no such file") {
+		t.Fatalf("stderr = %q, want no raw stat error for a missing token file", stderr.String())
 	}
 }
