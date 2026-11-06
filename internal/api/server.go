@@ -2032,7 +2032,7 @@ func (s *Server) evaluateCandidate(
 		verdict.Reason = reason
 		return verdict, nil
 	}
-	if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
+	if !result.UnlockedTier.Unlocks(task.DispatchTier) {
 		verdict.Reason = fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)
 		return verdict, nil
 	}
@@ -2196,7 +2196,7 @@ func (s *Server) evaluateCandidateBudget(
 		result.Reason = "model-specific allowance meets pace threshold"
 	}
 	for _, pool := range poolResults {
-		if dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
+		if pool.UnlockedTier.Rank() > result.UnlockedTier.Rank() {
 			result.UnlockedTier = pool.UnlockedTier
 		}
 	}
@@ -2208,28 +2208,6 @@ func providerDispatchCap(provider config.Provider, effective int, base decision.
 		return max(effective, provider.FiresaleMaxConcurrentRuns)
 	}
 	return effective
-}
-
-func dispatchTierEligible(required, unlocked domain.DispatchTier) bool {
-	if required == "" {
-		required = domain.DispatchBehind
-	}
-	return dispatchTierRank(unlocked) >= dispatchTierRank(required)
-}
-
-func dispatchTierRank(tier domain.DispatchTier) int {
-	switch tier {
-	case domain.DispatchFiresale:
-		return 4
-	case domain.DispatchExpiring:
-		return 3
-	case domain.DispatchWellBehind:
-		return 2
-	case domain.DispatchBehind:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func decorateBudgetResult(
