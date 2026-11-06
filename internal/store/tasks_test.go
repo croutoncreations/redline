@@ -13,6 +13,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestDispatchCandidatesOrdersByPriorityThenQueueSequence(t *testing.T) {
@@ -765,7 +766,7 @@ func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "redline.db")
 	now := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
-	db, err := store.Open(databasePath)
+	db, err := storetest.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +794,7 @@ func TestRestartRecoveryPreservesWorkspaceAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err = store.Open(databasePath)
+	db, err = storetest.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1015,7 +1016,7 @@ func TestCreateTaskRejectsInvalidDefinitions(t *testing.T) {
 
 func openTaskDB(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

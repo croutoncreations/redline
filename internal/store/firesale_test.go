@@ -10,6 +10,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestLatestAutomaticFiresaleSkipsUnevaluatedAndManualDecisions(t *testing.T) {
@@ -93,7 +94,7 @@ func TestMigration34RepairsSiblingSchemaVersions(t *testing.T) {
 	for _, stamp := range []int{30, 31, 34} {
 		t.Run(fmt.Sprint(stamp), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "sibling.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +119,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 			}
 			raw.Close()
 			for range 2 {
-				db, err := store.Open(path)
+				db, err := storetest.Open(path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -144,7 +145,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 			if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 43 {
 				t.Fatalf("version=%d err=%v", version, err)
 			}
-			db, err = store.Open(path)
+			db, err = storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +162,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 				t.Fatal(err)
 			}
 			db.Close()
-			db, err = store.Open(path)
+			db, err = storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -179,7 +180,7 @@ DELETE FROM schema_migrations WHERE version > 27;`)
 
 func TestMigration34PreservesV29TasksAndReferences(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "migration.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +211,7 @@ func TestMigration34PreservesV29TasksAndReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw.Close()
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

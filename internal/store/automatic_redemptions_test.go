@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestAutomaticBankedResetRedemptionsMigration36AndPersistence(t *testing.T) {
 	for _, stamp := range []int{35, 36, 99} {
 		t.Run(fmt.Sprint(stamp), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "auto.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -34,7 +35,7 @@ func TestAutomaticBankedResetRedemptionsMigration36AndPersistence(t *testing.T) 
 					t.Fatal(err)
 				}
 			}
-			db, err = store.Open(path)
+			db, err = storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,7 +51,7 @@ func TestAutomaticBankedResetRedemptionsMigration36AndPersistence(t *testing.T) 
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			db, err = store.Open(path)
+			db, err = storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}

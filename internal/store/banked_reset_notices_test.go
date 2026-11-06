@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 	if _, err := raw.Exec(`DROP TABLE banked_reset_notices; DELETE FROM schema_migrations WHERE version >= 33`); err != nil {
 		t.Fatal(err)
 	}
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,12 +58,12 @@ func TestBankedResetNoticesMigrationUpgradesV28(t *testing.T) {
 
 func TestRecordBankedResetNoticeConcurrentClaims(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
-	first, err := store.Open(path)
+	first, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	second, err := store.Open(path)
+	second, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
