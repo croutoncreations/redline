@@ -59,7 +59,7 @@ redline calibration --provider claude-main
 redline token sync --provider claude-main
 redline --config redline.yaml token rotate --yes          # replaces the master token; after a restart every device session and legacy pairing is signed out
 redline capacity --provider claude-main
-redline metrics launch --days 21
+redline metrics launch --days 21 --provider claude-main
 ```
 
 ### Public reset-signal preview
