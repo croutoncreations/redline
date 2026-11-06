@@ -49,6 +49,29 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	}
 }
 
+func TestGitWorktreeParentDirectoryIsPrivate(t *testing.T) {
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".redline", filepath.Join(".redline", "worktrees")} {
+		path := filepath.Join(repo, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Fatalf("%s mode = %o, want 0700 (worktrees hold a checkout plus anything the agent or hooks write, and must not be world-traversable)", path, mode)
+		}
+	}
+}
+
 func TestGitWorktreeWorkspaceFailureIncludesGitStderr(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {

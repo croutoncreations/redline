@@ -201,7 +201,11 @@ func (m Manager) prepareGitWorktree(
 ) (domain.Workspace, error) {
 	name := safeName(runID)
 	directory := filepath.Join(profile.Repository, ".redline", "worktrees", name)
-	if err := os.MkdirAll(filepath.Dir(directory), 0o755); err != nil {
+	// Owner-only: the worktree git creates under here holds a checkout of the
+	// repository plus anything the agent or prepare/finalize hooks write
+	// during the run (.env files, credentials, build output). A traversable
+	// parent would let any other local account read it.
+	if err := os.MkdirAll(filepath.Dir(directory), 0o700); err != nil {
 		return domain.Workspace{}, fmt.Errorf("create worktree parent: %w", err)
 	}
 	branch := "redline/" + name
