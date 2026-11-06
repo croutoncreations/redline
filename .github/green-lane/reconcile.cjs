@@ -19,7 +19,7 @@ module.exports = async ({github, context, core, run=execFileSync, publishReport=
       if (!Number.isSafeInteger(pr.number) || pr.number <= 0) throw new Error('Invalid PR number');
       const raw = run(`${process.env.RUNNER_TEMP}/green-lane-check`, [], {
         encoding:'utf8', timeout:180000, maxBuffer:2*1024*1024,
-        env:{...process.env, PR_NUMBER:String(pr.number), EXPECTED_HEAD_SHA:pr.head.sha, EXPECTED_BASE_SHA:pr.base.sha, REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
+        env:{...process.env, PR_NUMBER:String(pr.number), EXPECTED_HEAD_SHA:pr.head.sha, EXPECTED_BASE_SHA:pr.base.sha}
       });
       await publishReport({github,context,result:JSON.parse(raw),expectedHead:pr.head.sha,writeResult:r=>fs.writeFileSync(`evaluation-${pr.number}.json`,JSON.stringify(r,null,2))});
     } catch (err) {

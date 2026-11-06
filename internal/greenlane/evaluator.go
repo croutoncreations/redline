@@ -15,9 +15,8 @@ func NewEvaluator(config Config) *Evaluator {
 	return &Evaluator{config: config}
 }
 
-// Evaluate runs the simple policy. The legacy repro/duplicate arguments are
-// retained for callers but no longer affect eligibility.
-func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSummary) EvaluationResult {
+// Evaluate runs the simple policy.
+func (e *Evaluator) Evaluate(pr PRInfo) EvaluationResult {
 	result := EvaluationResult{
 		ReviewSnapshot: ReviewSnapshot(pr),
 		CheckSnapshot:  CheckSnapshot(pr.CheckEvidence), CheckSources: e.config.CheckSources,
@@ -92,35 +91,4 @@ func join(items []string, sep string) string {
 		result += sep + items[i]
 	}
 	return result
-}
-
-// ReproResult represents the outcome of the test repro job
-type ReproResult struct {
-	HeadSHA      string
-	BaseSHA      string
-	Pass         bool
-	Inconclusive bool
-	Message      string
-	TestIDs      []string
-	BaseRun      *TestRunResult
-	HeadRun      *TestRunResult
-}
-
-// TestRunResult represents the result of running tests
-type TestRunResult struct {
-	TestResults map[string]TestStatus
-	CompileOK   bool
-}
-
-// TestStatus represents the status of a single test
-type TestStatus struct {
-	Executed bool
-	Passed   bool
-}
-
-// PRSummary contains minimal information about an open PR for duplicate detection
-type PRSummary struct {
-	Number    int
-	RootCause string
-	Files     []string
 }
