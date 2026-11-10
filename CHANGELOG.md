@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
+  intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
+  `go.mod` requires Go 1.26.10.
 - paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
@@ -21,6 +24,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   for its own scoped device session in place, without re-pairing.
 
 ### Added
+
+- Six editable task starters for one API contract mismatch, flaky test, incident
+  runbook gap, source of build variation, supported migration defect, or measured
+  performance regression. Each requires evidence and keeps verification free of
+  unintended publishing, deployment, or release actions.
+
+- Four editable task starters for one documentation mismatch, recurring CI warning,
+  release-readiness blocker report, or accessibility barrier. Release readiness is
+  report-only and does not require repository changes.
 
 - On-demand manual firesales for any configured provider account: owner/device
   `GET|POST /v1/firesales`, `DELETE /v1/firesales/{account}`, and
