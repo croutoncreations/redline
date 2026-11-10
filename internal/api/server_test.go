@@ -1579,6 +1579,99 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 	}
 }
 
+// Verified Claude Ultra (formerly Max 20x) reports no 5-hour window from
+// 2026-10-30; Max (formerly Max 5x) still does. The scheduler must budget the
+// former on the weekly window alone and keep protecting the latter's session.
+func TestClaudeSchedulingFollowsReportedWindowsAcrossPlans(t *testing.T) {
+	t.Parallel()
+	weeklyReset := apiNow.Add(48 * time.Hour).Format(time.RFC3339Nano)
+	shortReset := apiNow.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	for _, tt := range []struct {
+		name, plan, session, wantPools string
+		wantRun                        bool
+	}{
+		{"ultra weekly only", "Ultra", ``, "weekly", true},
+		{"ultra unlimited session", "Ultra", `{"type":"progress","label":"Session","used":0,"limit":0,"resetsAt":""},`, "weekly", true},
+		{"max with session room", "Max", `{"type":"progress","label":"Session","used":10,"limit":100,"resetsAt":"` + shortReset + `"},`, "session,weekly", true},
+		{"max session exhausted", "Max", `{"type":"progress","label":"Session","used":100,"limit":100,"resetsAt":"` + shortReset + `"},`, "", false},
+		{"unknown plan weekly only", "Galaxy", ``, "weekly", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := fmt.Sprintf(`{"providerId":"claude","plan":%q,"fetchedAt":%q,"lines":[%s
+              {"type":"progress","label":"Weekly","used":30,"limit":100,"resetsAt":%q}]}`,
+				tt.plan, apiNow.Format(time.RFC3339Nano), tt.session, weeklyReset)
+			server, db := newAPIServer(t, payload)
+			createClaudeCandidate(t, db, "opus-profile", "opus", "", "backlog", 50)
+			result := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/evaluate",
+				map[string]any{"provider_account_id": "claude-main"})
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "backlog"; ran != tt.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tt.wantRun)
+			}
+			if !tt.wantRun {
+				if result.Result.Decision != decision.Wait || result.Result.Reason != "current 5-hour reserve protected" {
+					t.Fatalf("exhausted session should wait on its reserve: %#v", result.Result)
+				}
+				return
+			}
+			if got := strings.Join(result.Result.RequiredPools, ","); got != tt.wantPools {
+				t.Fatalf("required pools = %q, want %q (result %#v)", got, tt.wantPools, result.Result)
+			}
+		})
+	}
+}
+
+// The shipped late policy fills leftover weekly quota on a weekly-only account
+// near its reset, and leaves a five-hour account's decision unchanged.
+func TestShippedLatePolicyFillsWeeklyOnlyAccountsNearReset(t *testing.T) {
+	t.Parallel()
+	example, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	weeklyReset := apiNow.Add(30 * time.Hour).Format(time.RFC3339Nano)
+	shortReset := apiNow.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	for _, tt := range []struct {
+		name, session string
+		wantRun       bool
+		wantMode      decision.Mode
+	}{
+		// 45% left with 30h to go: the late base threshold (24h, 50%) does
+		// not match, but the weekly-only 48h/40% row does. A Max account with
+		// a session window in the same spot keeps its slot decision (WAIT).
+		{"ultra weekly only", ``, true, decision.ModePace},
+		{"max with session", `{"type":"progress","label":"Session","used":10,"limit":100,"resetsAt":"` + shortReset + `"},`, false, decision.ModeSlots},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := fmt.Sprintf(`{"providerId":"claude","fetchedAt":%q,"lines":[%s
+              {"type":"progress","label":"Weekly","used":55,"limit":100,"resetsAt":%q}]}`,
+				apiNow.Format(time.RFC3339Nano), tt.session, weeklyReset)
+			usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, payload) }))
+			t.Cleanup(usage.Close)
+			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			cfg := testConfig(usage.URL)
+			cfg.Policies = example.Policies
+			cfg.ActivePolicy = "late"
+			server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+			t.Cleanup(server.Close)
+			createClaudeCandidate(t, db, "opus-profile", "opus", "", "backlog", 50)
+			result := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/evaluate",
+				map[string]any{"provider_account_id": "claude-main"})
+			if result.Result.Mode != tt.wantMode || result.Result.Policy != "late" {
+				t.Fatalf("mode/policy = %s/%s, want %s/late: %#v", result.Result.Mode, result.Result.Policy, tt.wantMode, result.Result)
+			}
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "backlog"; ran != tt.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tt.wantRun)
+			}
+		})
+	}
+}
+
 func TestFablePaceSignalSelectsOnlyFableTask(t *testing.T) {
 	t.Parallel()
 	server, db := newAPIServer(t, claudeAllowancePayload(.60, .40, 48*time.Hour))

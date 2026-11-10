@@ -326,6 +326,72 @@ func TestLoadParsesPaceThresholds(t *testing.T) {
 	}
 }
 
+func TestLoadWarnsWhenPolicyCannotRunWeeklyOnlyAccounts(t *testing.T) {
+	configured := validConfig + `  overflow-only:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+  gap-only:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+    pace_gap_trigger: 0.30
+  weekly-only:
+    trigger_margin: 0.02
+    rolling_reserve: 0.25
+    weekly_only_pace_thresholds:
+      - { time_remaining: 6h, min_weekly_remaining: 0.05 }
+`
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatalf("a policy without pace triggers must load, not fail: %v", err)
+	}
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], `policy "overflow-only"`) ||
+		!strings.Contains(cfg.Warnings[0], "five-hour window") {
+		t.Fatalf("warnings = %q, want one for overflow-only", cfg.Warnings)
+	}
+	got, err := cfg.Policies["weekly-only"].WeeklyOnlyDecisionThresholds()
+	if err != nil || len(got) != 1 || got[0].TimeRemaining != 6*time.Hour || got[0].MinWeeklyRemaining != .05 {
+		t.Fatalf("weekly-only thresholds = %#v err=%v", got, err)
+	}
+}
+
+func TestLoadRejectsInvalidWeeklyOnlyPaceThreshold(t *testing.T) {
+	configured := strings.Replace(validConfig, "time_remaining: 6h", "time_remaining: 0s", 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil || !strings.Contains(err.Error(), "weekly_only_pace_thresholds[0]") {
+		t.Fatalf("err = %v, want weekly_only_pace_thresholds error", err)
+	}
+}
+
+// The shipped example config must load cleanly, with no policy warnings, and
+// give the late policy weekly-only thresholds that scale with time left.
+func TestExampleConfigLateWeeklyOnlyThresholds(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("example config warnings = %q", cfg.Warnings)
+	}
+	late, err := cfg.Policies["late"].WeeklyOnlyDecisionThresholds()
+	if err != nil || len(late) == 0 {
+		t.Fatalf("late weekly-only thresholds = %#v err=%v", late, err)
+	}
+	week := (7 * 24 * time.Hour).Seconds()
+	for i, threshold := range late {
+		ratio := threshold.MinWeeklyRemaining / (threshold.TimeRemaining.Seconds() / week)
+		if ratio < 1 || ratio > 2 {
+			t.Fatalf("threshold %d %#v asks for %.2fx the share of the week left; keep it between 1x and 2x", i, threshold, ratio)
+		}
+		if i > 0 && (threshold.TimeRemaining >= late[i-1].TimeRemaining || threshold.MinWeeklyRemaining >= late[i-1].MinWeeklyRemaining) {
+			t.Fatalf("thresholds must narrow toward the reset: %#v", late)
+		}
+	}
+	for name, policy := range cfg.Policies {
+		if name != "late" && len(policy.WeeklyOnlyPaceThresholds) != 0 {
+			t.Fatalf("only late needs weekly-only thresholds; %q has %#v", name, policy.WeeklyOnlyPaceThresholds)
+		}
+	}
+}
+
 func TestLoadParsesPolicyPaceGapTrigger(t *testing.T) {
 	withTrigger := strings.Replace(validConfig, "    rolling_reserve: 0.25", `    rolling_reserve: 0.25
     pace_gap_trigger: 0.30`, 1)
@@ -511,6 +577,8 @@ policies:
   standard:
     trigger_margin: 0.02
     rolling_reserve: 0.25
+    weekly_only_pace_thresholds:
+      - { time_remaining: 6h, min_weekly_remaining: 0.05 }
 `
 
 func writeConfig(t *testing.T, contents string) string {
