@@ -67,6 +67,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+- Policies accept `weekly_only_pace_thresholds`, which apply only while an account reports no
+  five-hour window. The bundled `late` policy uses them (72h/60%, 48h/40%, 24h/20%, 6h/5%) so a
+  verified Claude Ultra account fills leftover weekly quota before its reset. Accounts that report
+  a five-hour window are unaffected. Existing configs need the block copied from
+  `config.example.yaml`.
+- Startup warns about any policy with no `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, since it cannot run work for a weekly-only account outside an
+  announcement firesale.
+
+### Fixed
+
+- Claude accounts with no five-hour limit (verified Ultra, formerly Max 20x, from 2026-10-30)
+  are budgeted on the weekly window alone. Native usage accepts a null session window
+  (`utilization: null`) and OpenUsage accepts a session line with no limit, instead of failing
+  the snapshot. Limits still come only from the windows the provider reports, never from plan
+  names, so Max (formerly Max 5x), unverified Ultra, and unrecognized plans keep working.
+- Claude credential reads no longer decode `subscriptionType`/`rateLimitTier`, so a plan field
+  changing shape cannot block usage access; token refreshes still preserve it unchanged.
 
 ### Fixed
 

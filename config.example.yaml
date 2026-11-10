@@ -107,6 +107,15 @@ policies:
     rolling_reserve: 0.40
     pace_thresholds:
       - { time_remaining: 24h, min_weekly_remaining: 0.50 }
+    # Used only by accounts that report no five-hour window (verified Claude
+    # Ultra, Codex without its short limit). Those never get 5-hour slot
+    # overflow, so the weekly reset is the only clock: run when what is left
+    # is at least ~1.4x the share of the week still to go.
+    weekly_only_pace_thresholds:
+      - { time_remaining: 72h, min_weekly_remaining: 0.60 }
+      - { time_remaining: 48h, min_weekly_remaining: 0.40 }
+      - { time_remaining: 24h, min_weekly_remaining: 0.20 }
+      - { time_remaining: 6h, min_weekly_remaining: 0.05 }
   standard:
     trigger_margin: 0.02
     rolling_reserve: 0.25

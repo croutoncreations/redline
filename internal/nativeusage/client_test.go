@@ -103,6 +103,10 @@ func TestClaudeNativeAcceptsOnlyAnExplicitlyInactiveShortWindow(t *testing.T) {
 		wantError    bool
 	}{
 		{"inactive", `{"utilization":0,"resets_at":null}`, false},
+		{"no session limit", `{"utilization":null,"resets_at":null}`, false},
+		{"no session limit with stale reset", `{"utilization":null,"resets_at":"2026-10-23T12:00:00Z"}`, false},
+		{"null window", `null`, false},
+		{"non-numeric utilization", `{"utilization":"unlimited","resets_at":null}`, true},
 		{"active missing reset", `{"utilization":20,"resets_at":null}`, true},
 		{"missing reset field", `{"utilization":0}`, true},
 		{"empty reset", `{"utilization":0,"resets_at":""}`, true},
