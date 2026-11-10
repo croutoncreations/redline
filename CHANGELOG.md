@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
   intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
   `go.mod` requires Go 1.26.10.
+- API JSON requests now enforce the 1 MiB body limit before decoding, preventing oversized
+  requests from hiding additional JSON content beyond the decoder's previous read boundary.
 - paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
