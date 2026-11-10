@@ -75,6 +75,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- API authentication accepts the `Bearer` scheme in any letter case, as HTTP requires, so clients
+  that send `Authorization: bearer TOKEN` no longer get a false `401 Unauthorized`.
 - `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
   that account ("Test: Start a claude-main firesale?") and explains what tapping Start does.
   Before, it showed a "Codex reset promised" alert quoting the tracker while the Start action
