@@ -156,6 +156,7 @@ redline task enable add-tests
 redline task disable add-tests
 redline task retry add-tests
 redline task dispatch add-tests
+redline task delete add-tests
 redline candidates --provider codex-main
 ```
 
@@ -167,6 +168,8 @@ A non-matching `--default-profile` requires `--allow-default-profile`. Other fla
 `--priority` (50 default), `--min-interval`, `--firesale-interval` (optional positive provider-firesale
 cooldown), and `--disabled` to save a draft. YAML uses `firesale_min_interval` for that cooldown.
 Task updates are available through the API, MCP, or dashboard, not a CLI update command.
+`task delete <id>` permanently deletes a task; a running task cannot be deleted (the API returns
+`409 Conflict`). Wait for the run to finish or cancel it first.
 
 ### Queue work for later
 

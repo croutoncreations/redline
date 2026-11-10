@@ -21,9 +21,12 @@ redline task disable add-tests
 redline task enable add-tests
 redline candidates --provider codex-main
 redline task dispatch add-tests
+redline task delete add-tests
 ```
 
 See the [`examples/`](../examples) directory for the full set of starter profiles and tasks.
+`redline task delete <id>` permanently removes a task. Running tasks cannot be deleted; wait for
+the run to finish or cancel it first.
 
 ## Task prompts
 
@@ -110,7 +113,11 @@ claude: 5-hour 100.0% remaining, 73.0% weekly remaining (...)
 
 Redline supports these workspace providers:
 
-- **Git worktree** - an isolated checkout per run. The recommended default for code-changing jobs.
+- **Git worktree** - an isolated checkout per run under `.redline/worktrees` in the profile's
+  repository. The recommended default for code-changing jobs. Redline adds `/.redline/` to the
+  repository's local `$GIT_COMMON_DIR/info/exclude` if no equivalent entry exists, keeping run
+  worktrees out of `git status` without changing your tracked `.gitignore`. Linked worktrees
+  share this local exclude file.
 - **DevX** - an isolated [DevX](https://github.com/jfox85/devx) session. Creation
   arguments are configurable, e.g. `workspace_args: [--target, host]`.
 - **Existing directory** - runs directly in a checkout. Only use this when you explicitly accept

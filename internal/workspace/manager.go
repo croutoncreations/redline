@@ -213,6 +213,9 @@ func (m Manager) prepareGitWorktree(
 	runID string,
 	profile domain.ExecutionProfile,
 ) (domain.Workspace, error) {
+	if err := m.excludeRedlineDirectory(ctx, profile.Repository); err != nil {
+		return domain.Workspace{}, err
+	}
 	name := safeName(runID)
 	directory := filepath.Join(profile.Repository, ".redline", "worktrees", name)
 	// Owner-only: the worktree git creates under here holds a checkout of the
@@ -250,6 +253,61 @@ func (m Manager) prepareGitWorktree(
 		return domain.Workspace{}, err
 	}
 	return domain.Workspace{Directory: directory, Branch: branch}, nil
+}
+
+// excludeRedlineDirectory keeps managed worktrees out of the user's status without
+// changing tracked ignore rules. Linked worktrees share info/exclude in the common
+// Git directory, not the per-worktree Git directory.
+func (m Manager) excludeRedlineDirectory(ctx context.Context, repository string) error {
+	var stdout, stderr bytes.Buffer
+	exitCode, err := m.runner().Run(ctx, redprocess.Command{
+		Name: "git", Args: []string{"-C", repository, "rev-parse", "--git-common-dir"},
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		return fmt.Errorf("resolve git common directory in %s: %w", repository, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("resolve git common directory in %s exited with code %d: %s", repository, exitCode, strings.TrimSpace(stderr.String()))
+	}
+	commonDirectory := strings.TrimSpace(stdout.String())
+	if commonDirectory == "" {
+		return fmt.Errorf("resolve git common directory in %s: git returned an empty path", repository)
+	}
+	if !filepath.IsAbs(commonDirectory) {
+		commonDirectory = filepath.Join(repository, commonDirectory)
+	}
+	exclude := filepath.Join(commonDirectory, "info", "exclude")
+	contents, err := os.ReadFile(exclude)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read git exclude %s: %w", exclude, err)
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		switch strings.TrimSpace(line) {
+		case "/.redline/", ".redline/", "/.redline", ".redline":
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(exclude), 0o755); err != nil {
+		return fmt.Errorf("create git exclude directory: %w", err)
+	}
+	file, err := os.OpenFile(exclude, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open git exclude %s: %w", exclude, err)
+	}
+	entry := "/.redline/\n"
+	if len(contents) > 0 && contents[len(contents)-1] != '\n' {
+		entry = "\n" + entry
+	}
+	_, writeErr := io.WriteString(file, entry)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("append git exclude %s: %w", exclude, writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close git exclude %s: %w", exclude, closeErr)
+	}
+	return nil
 }
 
 func (m Manager) prepareDevX(
