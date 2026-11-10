@@ -38,7 +38,7 @@
     </section>
 
     <section id="scheduler-banner" class="scheduler-banner" aria-live="polite" hidden>
-      <strong>Scheduler off</strong><span>Jobs can be configured now, but nothing will run until <code>scheduler.enabled</code> is set to <code>true</code> in Redline’s configuration and the app is restarted.</span>
+      <strong>Scheduler off</strong><span>Automatic dispatch is off. Configure jobs now, then review how to enable scheduling.</span><button id="scheduler-setup" class="quiet-button" type="button">Enable scheduling…</button>
     </section>
 
     <section class="summary-rail" aria-label="Current capacity">
@@ -88,6 +88,21 @@
       </span>
     </footer>
   </main>
+
+  <dialog id="scheduler-setup-dialog" class="onboarding-dialog" aria-labelledby="scheduler-setup-title">
+    <div class="dialog-head"><h2 id="scheduler-setup-title">Enable automatic scheduling</h2><button id="close-scheduler-setup" type="button" aria-label="Close">×</button></div>
+    <div class="onboarding-body">
+      <p>Review your enabled jobs, execution profiles, and provider reserves first. Enabling scheduling lets Redline spend spare subscription allowance on eligible jobs.</p>
+      <ol>
+        <li>Open the configuration used by this running service:<pre id="scheduler-config-path"></pre><p id="scheduler-config-fallback" hidden>The service did not report its configuration path. For the macOS app, use <code>~/Library/Application Support/Redline/redline.yaml</code>; for a CLI service, use the file passed to <code>--config</code>.</p></li>
+        <li>Change only <code>scheduler.enabled</code> and save:<pre>scheduler:
+  enabled: true</pre></li>
+        <li>For the macOS app, quit Redline from its menu bar and reopen it. For a CLI service, stop its terminal process with Ctrl+C, then restart it with:<pre id="scheduler-restart-command"></pre><p>For a managed background service, restart it with your service manager instead of starting a second process.</p></li>
+      </ol>
+      <p>After restart, the Scheduler off banner disappears. Jobs still wait for fresh usage data and your policy’s allowance reserves. Set <code>scheduler.enabled: false</code> and restart to turn automatic dispatch off again.</p>
+      <p><a href="https://github.com/croutoncreations/redline/blob/main/docs/getting-started.md#5-enable-dispatch-deliberately" target="_blank" rel="noopener noreferrer">Read the scheduling setup guide</a></p>
+    </div>
+  </dialog>
 
   <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title">
     <form id="onboarding-form">
@@ -161,9 +176,10 @@
         <label class="field"><span>Execution profile</span><select id="task-profile" required></select></label>
         <label id="task-runtime-job-field" class="field" hidden><span>Existing Hermes job <i class="help" tabindex="0" data-help="Choose an existing job discovered from the Hermes connection. Redline will trigger that job instead of sending this prompt to a new Hermes session.">?</i></span><select id="task-runtime-job"><option value="">New Hermes session from prompt</option></select><small id="task-runtime-job-status" class="field-note"></small></label>
         <label class="field"><span>Priority <i class="help" tabindex="0" data-help="When several jobs are eligible at the same time, the one with the highest priority is dispatched first.">?</i></span><input id="task-priority" type="number" min="0" max="100" value="50" required></label>
-        <label class="field"><span>Run when <i class="help" tabindex="0" data-help="How much capacity surplus must build up before this job runs. Standard surplus runs earliest; Near expiry waits until allowance is close to resetting unused.">?</i></span><select id="task-tier"><option value="behind">Standard surplus</option><option value="well_behind">High surplus</option><option value="expiring">Near expiry</option></select></label>
+        <label class="field"><span>Run when <i class="help" tabindex="0" data-help="How much capacity surplus must build up before this job runs. Standard surplus runs earliest; Near expiry waits until allowance is close to resetting unused. Firesale runs only when the policy's firesale trigger fires (a large surplus about to expire).">?</i></span><select id="task-tier"><option value="behind">Standard surplus</option><option value="well_behind">High surplus</option><option value="expiring">Near expiry</option><option value="firesale">Firesale (lots expiring)</option></select><small id="task-firesale-warning" class="field-note" hidden>This provider's effective policy has no firesale trigger. This job will stay queued until a policy with a firesale trigger is enabled.</small></label>
         <label class="field"><span>Type</span><select id="task-type"><option value="one_off">One-off</option><option value="recurring">Recurring</option></select></label>
-        <label class="field"><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"><small id="task-interval-note" class="field-note" hidden>Applies to recurring jobs only.</small></label>
+<label id="task-interval-field" class="field" hidden><span>Minimum interval</span><input id="task-interval" autocomplete="off" placeholder="7d or 12h"></label>
+        <label id="task-firesale-interval-field" class="field" hidden><span>Firesale interval <i class="help" tabindex="0" data-help="Optional. Used instead of the minimum interval for recurring jobs while this provider is in a firesale (any tier). Leave blank to keep the normal interval.">?</i></span><input id="task-firesale-interval" autocomplete="off" placeholder="10m" aria-describedby="task-firesale-interval-note"><small id="task-firesale-interval-note" class="field-note">Optional. Used instead of the minimum interval for recurring jobs while this provider is in a firesale (any tier). Leave blank to keep the normal interval.</small></label>
         <label class="field field-wide"><span>Prompt</span><textarea id="task-prompt" rows="6" placeholder="Give the agent a bounded, concrete objective."></textarea></label>
         <label class="field field-wide"><span>Prompt file <small>optional</small></span><input id="task-prompt-file" autocomplete="off" placeholder="e.g. tasks/review-auth.md"></label>
         <label class="check-field field-wide"><input id="task-repo-change" type="checkbox"><span>Only rerun after the repository changes</span></label>

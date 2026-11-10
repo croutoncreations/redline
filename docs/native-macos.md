@@ -64,8 +64,15 @@ the app.
   tasks, the latest dispatch decision, and a link to the full dashboard.
 - Per-provider pause/resume controls and direct native access to recent stdout/stderr and lifecycle
   hook logs.
-- User-enabled macOS notifications when a run completes or fails. Existing run history is treated
-  as a baseline, so enabling notifications does not replay stale alerts.
+- User-enabled macOS notifications when a run starts, completes, or fails, for banked-reset
+  expiry reminders and redemption successes/failures, and for firesale starts/ends. Reset and
+  firesale alerts read recorded API deliveries using the local bearer token every 20 seconds;
+  no external notifier is needed. Enable `notifications.enabled`, list the reset/firesale events,
+  and leave `command` empty for record-only mode. Existing history is seeded silently on first
+  use, with the highest delivery ID saved across restarts. Clicking an event opens the dashboard.
+  Redeem-now reminders and failed redemptions play a sound; other reset/firesale alerts are silent.
+  Use `redline notification test` or `redline notification test --event all` to send samples after
+  the app has completed its first refresh. See [notifications](runs-and-notifications.md#notifications).
 - Sparkle-backed automatic update checks in configured release builds, plus a manual
   **Check for Updates…** action.
 - Show Dashboard, update and notification setup, refresh, and quit actions.

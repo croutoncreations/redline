@@ -54,21 +54,52 @@ type UsageSnapshot struct {
 	BankedResets *int `json:"banked_resets,omitempty"`
 	// BankedResetsExpireAt is when the soonest-expiring banked reset lapses.
 	// Nil when there are none or the provider did not say.
-	BankedResetsExpireAt *time.Time `json:"banked_resets_expire_at,omitempty"`
+	BankedResetsExpireAt *time.Time    `json:"banked_resets_expire_at,omitempty"`
+	BankedResetDetails   []BankedReset `json:"banked_reset_details,omitempty"`
+}
+
+// BankedReset describes one grant or credit, not additional scheduling capacity.
+type BankedReset struct {
+	ID            string     `json:"id"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	Clears        []string   `json:"clears,omitempty"`
+	UsableNow     *bool      `json:"usable_now,omitempty"`
+	RequiresLimit *bool      `json:"requires_limit,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	ResetsLeft    int        `json:"resets_left"`
+	// Only Claude's next_grant_id is claimable.
+	Claimable bool `json:"claimable,omitempty"`
 }
 
 // BankedResets is a provider's report of on-demand quota resets.
 type BankedResets struct {
 	Available     int
 	NextExpiresAt *time.Time
+	Details       []BankedReset
 }
 
 // ApplyBankedResets copies a reset report onto the snapshot. A nil report
 // leaves the snapshot saying nothing about resets.
 func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
+	s.BankedResetDetails = nil
 	if resets == nil {
 		s.BankedResets, s.BankedResetsExpireAt = nil, nil
 		return
+	}
+	for _, detail := range resets.Details {
+		var clears []string
+		seen := make(map[string]bool)
+		for _, window := range detail.Clears {
+			if window == "seven_day" || window == "seven_day_overage_included" {
+				window = "weekly"
+			}
+			if (window == "five_hour" || window == "weekly") && !seen[window] {
+				clears = append(clears, window)
+				seen[window] = true
+			}
+		}
+		detail.Clears = clears
+		s.BankedResetDetails = append(s.BankedResetDetails, detail)
 	}
 	count := resets.Available
 	s.BankedResets = &count
@@ -140,6 +171,11 @@ func (s UsageSnapshot) Validate() error {
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
 	}
+	for _, detail := range s.BankedResetDetails {
+		if detail.ID == "" || detail.ResetsLeft < 0 {
+			return fmt.Errorf("banked reset details require an id and non-negative resets left")
+		}
+	}
 	if s.Short != nil {
 		if s.Short.ResetsAt.IsZero() {
 			return fmt.Errorf("short-window reset timestamp is required")
@@ -178,7 +214,44 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64       `json:"min_weekly_remaining"`
 }
 
+type ResetSource string
+
+const (
+	ResetWeekly          ResetSource = "weekly"
+	ResetBankedReset     ResetSource = "banked_reset"
+	ResetPredictedGlobal ResetSource = "predicted_global"
+)
+
+type ResetEvent struct {
+	Source     ResetSource `json:"source"`
+	At         time.Time   `json:"at"`
+	Clears     []string    `json:"clears"`
+	Confidence string      `json:"confidence"`
+	Detail     string      `json:"detail"`
+}
+
+// effectiveReset defaults to the real weekly reset; other windows cannot shorten it.
+func effectiveReset(in Input) ResetEvent {
+	reset := ResetEvent{Source: ResetWeekly, At: in.Snapshot.Weekly.ResetsAt, Clears: []string{"weekly"}}
+	for _, event := range in.ResetEvents {
+		if !event.At.After(in.Now) || !event.At.Before(reset.At) {
+			continue
+		}
+		for _, window := range event.Clears {
+			if window == "weekly" {
+				reset = event
+				break
+			}
+		}
+	}
+	return reset
+}
+
 type Input struct {
+	ForceFiresale          bool
+	ForceFiresaleTrigger   string
+	ResetEvents            []ResetEvent
+	FiresaleTrigger        *float64
 	Snapshot               UsageSnapshot
 	WindowWeeklyCost       float64
 	WindowWeeklyCostSource string
@@ -213,6 +286,10 @@ type CandidateRejection struct {
 }
 
 type Result struct {
+	FiresaleTrigger        string               `json:"firesale_trigger,omitempty"`
+	Firesale               bool                 `json:"firesale"`
+	EffectiveResetAt       time.Time            `json:"effective_reset_at"`
+	EffectiveResetSource   ResetSource          `json:"effective_reset_source"`
 	Decision               Decision             `json:"decision"`
 	Policy                 string               `json:"policy,omitempty"`
 	Mode                   Mode                 `json:"mode"`
@@ -254,13 +331,45 @@ func Evaluate(in Input) Result {
 	if !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
 		return unknown("weekly reset is not in the future")
 	}
+	reset := effectiveReset(in)
+	in.Snapshot.Weekly.ResetsAt = reset.At
+	var result Result
 	if in.Snapshot.Short == nil {
-		return evaluatePace(in)
+		result = evaluatePace(in)
+	} else if !in.Snapshot.Short.ResetsAt.After(in.Now) {
+		result = unknown("short-window reset is not in the future")
+	} else {
+		result = evaluateSlots(in)
 	}
-	if !in.Snapshot.Short.ResetsAt.After(in.Now) {
-		return unknown("short-window reset is not in the future")
+	if in.ForceFiresale {
+		result.FiresaleTrigger = in.ForceFiresaleTrigger
+		if result.FiresaleTrigger == "" {
+			result.FiresaleTrigger = "reset_announcement"
+		}
 	}
-	return evaluateSlots(in)
+	// Forcing overrides pacing only. An empty weekly allowance (or no rolling
+	// room in the 5-hour window) still blocks: there is nothing left to spend.
+	if in.ForceFiresale && result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0) {
+		result.Decision = Admit
+		result.Firesale = true
+		result.UnlockedTier = domain.DispatchFiresale
+		result.Reason = "reset announcement firesale; running queued work before the deadline"
+		if in.ForceFiresaleTrigger == "manual" {
+			result.Reason = "manual firesale; running queued work before the deadline"
+		}
+	}
+	pressure := result.PaceGap
+	if in.Snapshot.Short != nil {
+		pressure = math.Max(pressure, result.Overflow)
+	}
+	if result.Decision == Admit && in.FiresaleTrigger != nil && pressure >= *in.FiresaleTrigger {
+		result.Firesale = true
+		result.UnlockedTier = domain.DispatchFiresale
+		result.Reason += "; firesale pressure reached"
+	}
+	result.EffectiveResetAt = reset.At
+	result.EffectiveResetSource = reset.Source
+	return result
 }
 
 // ProjectTriggerAt returns the first scheduler poll at which unchanged weekly
@@ -275,7 +384,8 @@ func ProjectTriggerAt(in Input, pollInterval time.Duration) *time.Time {
 		projected := in.Now
 		return &projected
 	}
-	for projected := in.Now.Add(pollInterval); projected.Before(in.Snapshot.Weekly.ResetsAt); projected = projected.Add(pollInterval) {
+	horizon := effectiveReset(in).At
+	for projected := in.Now.Add(pollInterval); projected.Before(horizon); projected = projected.Add(pollInterval) {
 		future := projectInput(in, projected)
 		if result := Evaluate(future); result.Decision == Admit {
 			at := projected
@@ -364,7 +474,7 @@ func evaluateSlots(in Input) Result {
 }
 
 func evaluatePace(in Input) Result {
-	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil {
+	if len(in.PaceThresholds) == 0 && in.PaceGapTrigger == nil && !in.ForceFiresale {
 		return unknown("unrestricted provider has no pace thresholds")
 	}
 	paceGap := weeklyPaceGap(in.Snapshot.Weekly, in.Now)
@@ -450,6 +560,11 @@ func validateInput(in Input) error {
 	}
 	if err := unitFraction("rolling reserve", in.RollingReserve); err != nil {
 		return err
+	}
+	if in.FiresaleTrigger != nil {
+		if err := unitFraction("firesale trigger", *in.FiresaleTrigger); err != nil {
+			return err
+		}
 	}
 	if in.PaceGapTrigger != nil {
 		if err := unitFraction("pace gap trigger", *in.PaceGapTrigger); err != nil {

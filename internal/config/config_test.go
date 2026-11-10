@@ -11,6 +11,21 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
+func TestLoadPairedDevicesResetRedemption(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.PairedDevices.AllowResetRedemption {
+		t.Fatal("paired reset redemption must default off")
+	}
+	configured := strings.Replace(validConfig, "active_policy: standard", "active_policy: standard\napi:\n  paired_devices:\n    allow_reset_redemption: true", 1)
+	cfg, err = config.Load(writeConfig(t, configured))
+	if err != nil || !cfg.API.PairedDevices.AllowResetRedemption || len(cfg.Warnings) != 0 {
+		t.Fatalf("paired config=%+v warnings=%v err=%v", cfg.API.PairedDevices, cfg.Warnings, err)
+	}
+}
+
 func TestLoadParsesTrustedAPIHosts(t *testing.T) {
 	configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 api:
@@ -207,13 +222,13 @@ notifications:
 	}
 }
 
-func TestEnabledNotificationsRequireCommandAndKnownEvents(t *testing.T) {
+func TestEnabledNotificationsAllowRecordOnlyAndRequireKnownEvents(t *testing.T) {
 	missingCommand := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 notifications:
   enabled: true
   events: [run.completed]`, 1)
-	if _, err := config.Load(writeConfig(t, missingCommand)); err == nil {
-		t.Fatal("expected missing command error")
+	if _, err := config.Load(writeConfig(t, missingCommand)); err != nil {
+		t.Fatalf("record-only notifications: %v", err)
 	}
 	unknownEvent := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
 notifications:
@@ -505,4 +520,19 @@ func writeConfig(t *testing.T, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestLoadRecordsActualConfigurationPathForSetupInstructions(t *testing.T) {
+	path := writeConfig(t, validConfig)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourcePath != expected || cfg.ListenAddress != "" {
+		t.Fatalf("source=%q listen=%q", cfg.SourcePath, cfg.ListenAddress)
+	}
 }

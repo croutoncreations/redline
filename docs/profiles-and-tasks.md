@@ -47,13 +47,29 @@ operate on.
 ## Dispatch tier and priority
 
 ```yaml
-dispatch_tier: behind # behind, well_behind, or expiring
+dispatch_tier: behind # behind, well_behind, expiring, or firesale
 priority: 60
 ```
 
 The tier controls *when* a task becomes eligible; priority only orders tasks whose tiers are
 already unlocked. See [Scheduling](scheduling.md#dispatch-tiers-and-priority) for how tiers are
 derived from allowance pace.
+
+## Firesale recurrence
+
+A recurring task may set a separate positive interval for provider-level firesales:
+
+```yaml
+min_interval: 7d
+firesale_min_interval: 10m # optional; unset uses min_interval
+```
+
+There is no ordering constraint between the intervals. Repository-change checks still apply.
+Both intervals apply only to recurring tasks: a one-off task never runs again after it succeeds,
+so the API accepts but ignores intervals on one-off tasks and the dashboard hides both fields.
+Use `--firesale-interval 10m` with `task add` or `later`, or edit the field in the dashboard,
+HTTP API, or MCP. The `firesale` tier waits for a policy's firesale trigger; see
+[effective horizon and firesale](scheduling.md#effective-horizon-and-firesale).
 
 ## Harness and model discovery
 
@@ -105,6 +121,11 @@ Optional prepare/finalize hooks run before and after the harness. Cleanup defaul
 `on_success` and `always` are also supported. Execution-profile fields, including lifecycle
 commands, are retained with each run for reproducibility, so pass secrets via the environment
 rather than embedding them in profile command strings.
+
+For report-only tasks such as release readiness, choose a profile whose prepare/finalize hooks
+and custom harness commands do not change repository files, commit, push, open pull requests,
+publish, deploy, or release. A task prompt does not disable these commands; prepare hooks run
+before the agent receives the prompt.
 
 ## Minimal profiles
 

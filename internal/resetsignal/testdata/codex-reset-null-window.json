@@ -1,0 +1,23 @@
+{
+  "mode": "announced",
+  "updated_at": "2026-10-13T04:14:42.479Z",
+  "probabilities": {"rounded_24h": 19, "rounded_48h": 34},
+  "official_signal": {
+    "tweet_id": "2109812360596865224",
+    "summary": "Global reset landing by EOD PST time. Enjoy",
+    "at": "2026-10-13T01:03:59.000Z",
+    "url": "https://x.com/thsottiaux/status/2109812360596865224",
+    "signal_type": "promise",
+    "window": null
+  },
+  "latest_alert": {
+    "id": "2109812360596865224",
+    "kind": "watch",
+    "state": "active",
+    "source_at": "2026-10-13T01:03:59.000Z",
+    "summary": "Global reset landing by EOD PST time. Enjoy",
+    "url": "https://x.com/thsottiaux/status/2109812360596865224",
+    "window": null,
+    "corrected": false
+  }
+}

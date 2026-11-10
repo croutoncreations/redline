@@ -18,9 +18,8 @@ type Source interface {
 	Fetch(context.Context, config.Provider) (decision.UsageSnapshot, []byte, error)
 }
 
-// BankedResetSource supplies banked quota resets for providers whose primary
-// usage source does not report them (OpenUsage carries Codex resets but not
-// Claude's).
+// BankedResetSource supplies supplementary quota reset reports: Claude grants
+// or Codex credit details not carried by the primary usage source.
 type BankedResetSource interface {
 	BankedResets(context.Context, config.Provider) (*decision.BankedResets, error)
 }
@@ -32,6 +31,12 @@ type bankedResetState struct {
 	nextFetch time.Time
 	inFlight  bool
 	lastError string
+	// generation advances when a redemption corrects the cache, so a lookup
+	// started before it (and answering with the old list) is discarded.
+	generation uint64
+	// failedUntil is a lookup failure's backoff; a redemption asks for a new
+	// list sooner, but never sooner than this.
+	failedUntil time.Time
 }
 
 // Anthropic's usage endpoint rate-limits per account, shared with Claude Code
@@ -66,8 +71,8 @@ type Manager struct {
 	ReprobeInterval time.Duration
 	MaxSnapshotAge  time.Duration
 	Now             func() time.Time
-	// BankedResets, when set, fills in resets for Claude snapshots that
-	// arrive without them. It is polled at most every BankedResetInterval
+	// BankedResets, when set, fills in missing Claude resets or Codex details.
+	// It is polled at most every BankedResetInterval
 	// and its last good answer is reused in between, and while it fails.
 	BankedResets        BankedResetSource
 	BankedResetInterval time.Duration
@@ -80,9 +85,9 @@ type Manager struct {
 	nativeBlockedUntil map[string]time.Time
 	lockoutPath        string
 	accountProviders   map[string]string
-	// SkipBankedResets disables the lookup, for configurations where the
-	// single local Claude login may not be the account being monitored.
-	SkipBankedResets bool
+	// SkipBankedResetProviders disables lookups by provider type when its
+	// single local login may not be the account being monitored.
+	SkipBankedResetProviders map[string]bool
 	// lookups tracks background lookups so tests can wait for them.
 	lookups sync.WaitGroup
 }
@@ -107,19 +112,32 @@ func (m *Manager) Fetch(ctx context.Context, accountID string, provider config.P
 	return snapshot, raw, err
 }
 
-// supplementBankedResets adds Claude's banked resets to a snapshot whose
-// source did not report them. It never fails the fetch: resets are
+// FetchFresh bypasses OpenUsage and supplementary caches for post-redemption
+// verification, while still honoring the provider's native rate-limit lockout.
+func (m *Manager) FetchFresh(ctx context.Context, accountID string, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	if m.Native == nil {
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("native usage source is unavailable")
+	}
+	return m.fetch(ctx, accountID, provider, m.Native, true)
+}
+
+// supplementBankedResets adds missing reset reports or details to a snapshot.
+// It never fails the fetch: resets are
 // informational, and a rate-limited or ineligible lookup must not cost the
 // scheduler its usage data.
 func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, provider config.Provider, snapshot *decision.UsageSnapshot) {
-	// A native snapshot already asked the same endpoint for resets; asking
-	// again would only double the load on a rate-limited API. An account
-	// pinned to OpenUsage opted out of native credential access entirely.
-	if m.BankedResets == nil || m.SkipBankedResets || snapshot.BankedResets != nil || snapshot.Provider != "claude" ||
-		snapshot.Source == "native" || provider.EffectiveUsageSource() == "openusage" {
+	// An account pinned to OpenUsage opted out of native credential access.
+	// Native Claude snapshots already asked for grants; Codex usage carries
+	// only a count and needs the separate credit-details endpoint.
+	if m.BankedResets == nil || m.SkipBankedResetProviders[providerKey(snapshot.Provider)] || provider.EffectiveUsageSource() == "openusage" {
 		return
 	}
-	// The native lookup reads the single local Claude login no matter which
+	codexDetails := snapshot.Provider == "codex" && snapshot.BankedResets != nil && *snapshot.BankedResets > 0 && len(snapshot.BankedResetDetails) == 0
+	claudeReport := snapshot.Provider == "claude" && snapshot.BankedResets == nil && snapshot.Source != "native"
+	if !codexDetails && !claudeReport {
+		return
+	}
+	// The native lookup reads the single local provider login no matter which
 	// account asked, so the answer is cached per provider credential rather
 	// than per account: one request serves every account, and none of them
 	// multiplies the load on a rate-limited endpoint.
@@ -140,7 +158,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 		state.inFlight = true
 		m.resetStates[key] = state
 		m.lookups.Add(1)
-		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider)
+		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider, state.generation)
 	}
 	m.mu.Unlock()
 
@@ -149,15 +167,43 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	if state.known && now.Sub(state.fetchedAt) <= 24*time.Hour {
 		report := state.resets
 		if report != nil && report.NextExpiresAt != nil && !report.NextExpiresAt.After(now) {
-			// The soonest grant lapsed since we last asked; the count is
-			// no longer trustworthy until the next lookup.
-			report = nil
+			if len(report.Details) == 0 {
+				// Without details we cannot tell how many resets remain.
+				report = nil
+			} else {
+				filtered := *report
+				filtered.Details = nil
+				filtered.NextExpiresAt = nil
+				for _, detail := range report.Details {
+					if detail.ExpiresAt != nil && !detail.ExpiresAt.After(now) {
+						filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						continue
+					}
+					filtered.Details = append(filtered.Details, detail)
+					if detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
+						filtered.NextExpiresAt = detail.ExpiresAt
+					}
+				}
+				report = &filtered
+			}
 		}
-		snapshot.ApplyBankedResets(report)
+		if codexDetails {
+			if report != nil {
+				// The primary source's count and expiry remain authoritative.
+				expiry := snapshot.BankedResetsExpireAt
+				snapshot.ApplyBankedResets(&decision.BankedResets{Available: *snapshot.BankedResets,
+					NextExpiresAt: report.NextExpiresAt, Details: report.Details})
+				if expiry != nil {
+					snapshot.BankedResetsExpireAt = expiry
+				}
+			}
+		} else {
+			snapshot.ApplyBankedResets(report)
+		}
 	}
 }
 
-func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider) {
+func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider, generation uint64) {
 	defer m.lookups.Done()
 	lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	resets, err := m.BankedResets.BankedResets(lookupCtx, provider)
@@ -167,35 +213,88 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	defer m.mu.Unlock()
 	state := m.resetStates[key]
 	state.inFlight = false
+	if err == nil && state.generation != generation {
+		// A redemption corrected the cache while this lookup ran; its answer
+		// predates that and may still list the spent credit. Drop it and ask
+		// again on the next fetch.
+		state.nextFetch = state.failedUntil
+		m.resetStates[key] = state
+		return
+	}
 	if err != nil {
 		state.lastError = err.Error()
-		backoff := max(m.bankedResetInterval(), bankedResetFailureBackoff)
+		backoff := max(m.bankedResetInterval(key), bankedResetFailureBackoff)
 		var limited interface{ RetryAfter() time.Duration }
 		if errors.As(err, &limited) && limited.RetryAfter() > backoff {
 			backoff = limited.RetryAfter()
 		}
 		state.nextFetch = fetchedAt.Add(backoff)
+		state.failedUntil = state.nextFetch
 	} else {
+		state.failedUntil = time.Time{}
 		state.resets, state.known, state.fetchedAt, state.lastError = resets, true, fetchedAt, ""
-		state.nextFetch = fetchedAt.Add(m.bankedResetInterval())
+		state.nextFetch = fetchedAt.Add(m.bankedResetInterval(key))
 	}
 	m.resetStates[key] = state
-	// A reset lookup and a native fetch hit the same endpoint, so a rate
-	// limit on either silences both.
-	if wait, limited := rateLimitWait(err); limited {
+	// Claude's report comes from the same endpoint as native usage, so its rate
+	// limit is shared. Codex credit details are a separate, per-IP limited
+	// endpoint: a 429 there backs off only further detail lookups (nextFetch
+	// above) and must not stop wham/usage collection.
+	if wait, limited := rateLimitWait(err); limited && key != "codex" {
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}
-		m.nativeBlockedUntil[key] = fetchedAt.Add(wait)
+		if until := fetchedAt.Add(wait); until.After(m.nativeBlockedUntil[key]) {
+			m.nativeBlockedUntil[key] = until
+		}
 	}
 	m.saveLockoutsLocked()
+}
+
+// ForgetBankedReset takes one use of a just-redeemed reset out of the cached
+// report and asks for a fresh report on the next fetch. Until then the cache
+// would still offer the spent credit, and the next redemption would select
+// it instead of one that is still available.
+func (m *Manager) ForgetBankedReset(provider config.Provider, resetID string) {
+	key := providerKey(provider.Provider)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.resetStates[key]
+	if !ok {
+		return
+	}
+	if state.resets != nil {
+		report := *state.resets
+		report.Details, report.NextExpiresAt = nil, nil
+		for _, detail := range state.resets.Details {
+			if detail.ID == resetID {
+				detail.ResetsLeft--
+				report.Available = max(0, report.Available-1)
+				if detail.ResetsLeft <= 0 {
+					continue
+				}
+			}
+			report.Details = append(report.Details, detail)
+			if detail.ExpiresAt != nil && (report.NextExpiresAt == nil || detail.ExpiresAt.Before(*report.NextExpiresAt)) {
+				report.NextExpiresAt = detail.ExpiresAt
+			}
+		}
+		state.resets = &report
+	}
+	// Ask for a fresh list on the next fetch, but keep any failure backoff,
+	// and invalidate a lookup already running so it cannot undo this.
+	state.generation++
+	if !state.inFlight {
+		state.nextFetch = state.failedUntil
+	}
+	m.resetStates[key] = state
 }
 
 // WaitForBankedResetLookups blocks until background reset lookups finish.
 func (m *Manager) WaitForBankedResetLookups() { m.lookups.Wait() }
 
-func (m *Manager) bankedResetInterval() time.Duration {
-	if m.BankedResetInterval <= 0 {
+func (m *Manager) bankedResetInterval(provider string) time.Duration {
+	if m.BankedResetInterval <= 0 || (provider == "codex" && m.BankedResetInterval < defaultBankedResetInterval) {
 		return defaultBankedResetInterval
 	}
 	return m.BankedResetInterval
@@ -284,16 +383,32 @@ func (m *Manager) fetchNative(ctx context.Context, provider config.Provider) (de
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("rate limited by provider; next request after %s", until.Format(time.RFC3339))
 	}
 	snapshot, raw, err := m.Native.Fetch(ctx, provider)
+	m.RecordNativeError(key, err)
+	return snapshot, raw, err
+}
+
+// NativeBlockedUntil shares the native usage lockout with reset redemptions.
+func (m *Manager) NativeBlockedUntil(provider string) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nativeBlockedUntil[providerKey(provider)]
+}
+
+// RecordNativeError applies the same persisted rate-limit backoff to a redeem
+// response as to a usage response.
+func (m *Manager) RecordNativeError(provider string, err error) {
 	if wait, limited := rateLimitWait(err); limited {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}
-		m.nativeBlockedUntil[key] = m.Now().UTC().Add(wait)
+		key := providerKey(provider)
+		if until := m.Now().UTC().Add(wait); until.After(m.nativeBlockedUntil[key]) {
+			m.nativeBlockedUntil[key] = until
+		}
 		m.saveLockoutsLocked()
-		m.mu.Unlock()
 	}
-	return snapshot, raw, err
 }
 
 // rateLimitWait reports whether err is a provider rate limit and how long to

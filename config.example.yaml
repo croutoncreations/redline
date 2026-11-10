@@ -6,6 +6,10 @@ max_snapshot_age: 15m
 # Optional HTTPS hostnames accepted through a trusted reverse proxy such as
 # Tailscale Serve. Exact matches only; do not include schemes, ports, or wildcards.
 api:
+  # Paired devices retain job/run/provider/firesale control. Spending banked
+  # resets (including dry runs) requires this explicit opt-in; owner is unaffected.
+  paired_devices:
+    allow_reset_redemption: false
   trusted_hosts: []
   # trusted_hosts:
   #   - macbook-pro.example.ts.net
@@ -24,22 +28,45 @@ usage_monitor:
   enabled: true
   poll_interval: 5m
 
-# Notification commands are trusted local hooks. Events are sent as JSON on stdin.
+# Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
+# Alerts and firesales are announcement-only, never odds-based.
+# Also enable notifications and list reset.announced/firesale.started/firesale.ended.
+# reset_signals:
+#   enabled: false
+#   poll_interval: 10m # minimum 5m
+#   notify: true      # default when enabled; controls announcement alerts only
+#   firesale: notify  # off | notify | auto; default notify when enabled
+#                     # requires enabled unless off; PROMISED/SCHEDULED need WindowEnd
+#                     # notify needs: redline reset firesale start
+
+# Set enabled: true to record notifications. Use command: "" (or omit it) for
+# native Mac alerts without an external hook; authorize notifications in the app.
+# When set, command is a trusted local hook receiving event JSON on stdin.
+# Try: redline notification test --event all (requires enabled: true).
 notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
+
+# Optional provider-neutral push wake-ups; no push provider is built in.
+# Requires notifications.enabled. See docs/push-notifications.md.
+# push:
+#   relay_url: "" # HTTPS; HTTP only for loopback. Empty disables push.
+#   auth_token_file: "" # Existing 0600 file containing the relay shared secret.
 
 providers:
   codex-main:
     provider: codex
+    # The banked_resets options shown under claude-main apply to Codex too.
     # Optional provider default. If omitted, active_policy is used. A dashboard
     # override takes precedence and is persisted in SQLite until reset.
     # policy: standard
     # Safe default is one active run. Raise this to admit independent jobs in
     # parallel; optional pool limits can be stricter than the provider cap.
     # max_concurrent_runs: 2
+    # Optional higher provider cap during firesale (pool/runtime caps still apply).
+    # firesale_max_concurrent_runs: 3
     # pool_concurrency:
     #   weekly: 2
     # auto prefers a healthy local OpenUsage API and falls back to Redline's
@@ -55,8 +82,17 @@ providers:
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Banked-reset reminders require notifications.enabled (defaults shown).
+    # banked_resets:
+    #   remind_before: [24h] # [] disables reminders, not the expiry action
+    #   on_expiry: notify   # off | notify | redeem (opt-in; needs usage_monitor.enabled)
+    #   redeem_lead: 1h
+    # Before enabling redeem: dry run, then a manual first redemption.
+    # Requires usage_monitor.enabled; redemption ignores dispatch pause to avoid losing resets.
+    # Redeemable weekly resets shorten the scheduling horizon; retries respect cooldowns/429s.
     # Example: allow two Claude runs, but never overlap two Fable runs.
     # max_concurrent_runs: 2
+    # firesale_max_concurrent_runs: 3
     # pool_concurrency:
     #   model:fable:weekly: 1
     # Optional explicit aliases. These are the built-in Claude defaults and may
@@ -75,6 +111,7 @@ policies:
     trigger_margin: 0.02
     rolling_reserve: 0.25
     pace_gap_trigger: 0.30
+    firesale_trigger: 0.45
     pace_thresholds:
       - { time_remaining: 72h, min_weekly_remaining: 0.50 }
       - { time_remaining: 24h, min_weekly_remaining: 0.20 }
@@ -82,6 +119,7 @@ policies:
     trigger_margin: 0.00
     rolling_reserve: 0.10
     pace_gap_trigger: 0.15
+    firesale_trigger: 0.35
     pace_thresholds:
       - { time_remaining: 120h, min_weekly_remaining: 0.50 }
       - { time_remaining: 72h, min_weekly_remaining: 0.30 }

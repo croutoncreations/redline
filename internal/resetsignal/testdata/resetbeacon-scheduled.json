@@ -1,0 +1,18 @@
+{
+  "calculatedAt": "2026-10-13T04:12:04.025Z",
+  "validUntil": "2026-10-13T04:57:04.025Z",
+  "staleSince": null,
+  "publicationState": "scheduled",
+  "answer": {
+    "state": "scheduled",
+    "window": "within the next 3 hours",
+    "deadline": "2026-10-13T07:00:00.000Z",
+    "posts": [{
+      "postId": "2109812360596865224",
+      "sourceUrl": "https://x.com/thsottiaux/status/2109812360596865224",
+      "quote": "Global reset landing by EOD PST time. Enjoy",
+      "publishedAt": "2026-10-13T01:03:59.000Z",
+      "authorHandle": "thsottiaux"
+    }]
+  }
+}

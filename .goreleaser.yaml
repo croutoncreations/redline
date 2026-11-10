@@ -13,6 +13,13 @@
 version: 2
 project_name: redline
 
+# Snapshots use the plain version (the tag on a tag build, the latest tag
+# otherwise) so the snapshot formula matches what a release publishes. The
+# Homebrew lint in CI and release.yml relies on that: brew audit treats
+# "0.1.10-SNAPSHOT-abc1234" differently from "0.1.10".
+snapshot:
+  version_template: "{{ .Version }}"
+
 before:
   hooks:
     - go mod tidy
@@ -75,7 +82,7 @@ brews:
   - name: redline
     ids: [redline]
     homepage: https://github.com/croutoncreations/redline
-    description: "Budget-aware dispatcher that spends spare Codex and Claude subscription quota on queued agent jobs"
+    description: "Spend spare Codex and Claude subscription quota on queued agent jobs"
     license: Apache-2.0
     directory: Formula
     commit_author:

@@ -93,12 +93,16 @@ type ProviderMetrics struct {
 }
 
 type Report struct {
-	Since       time.Time         `json:"since"`
-	Until       time.Time         `json:"until"`
-	Decisions   DecisionMetrics   `json:"decisions"`
-	Jobs        JobMetrics        `json:"jobs"`
-	Providers   []ProviderMetrics `json:"providers"`
-	Methodology []string          `json:"methodology"`
+	Since     time.Time         `json:"since"`
+	Until     time.Time         `json:"until"`
+	Decisions DecisionMetrics   `json:"decisions"`
+	Jobs      JobMetrics        `json:"jobs"`
+	Providers []ProviderMetrics `json:"providers"`
+	// ProfileUsage is filled by the caller from run-scoped evidence; Build
+	// leaves it empty because it needs every terminal run, not only
+	// automatic admissions.
+	ProfileUsage []ProfileUsage `json:"profile_usage"`
+	Methodology  []string       `json:"methodology"`
 }
 
 type providerAccumulator struct {
@@ -111,7 +115,8 @@ func Build(in Input) Report {
 		"Decision rates include automatic scheduler checks only; manual evaluations and executions are excluded.",
 		"Allowance conversion uses run-scoped token evidence and the empirical weekly bucket calibration; unavailable evidence is never imputed.",
 		"Capacity reclaimed includes completed jobs admitted by the discrete window-slots overflow rule. It is measured managed usage, not a counterfactual claim that all usage would otherwise have expired.",
-	}}
+		ProfileUsageMethodology,
+	}, ProfileUsage: []ProfileUsage{}}
 	providers := map[string]*providerAccumulator{}
 	get := func(provider string) *providerAccumulator {
 		item := providers[provider]
