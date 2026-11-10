@@ -168,8 +168,8 @@ A non-matching `--default-profile` requires `--allow-default-profile`. Other fla
 `--priority` (50 default), `--min-interval`, `--firesale-interval` (optional positive provider-firesale
 cooldown), and `--disabled` to save a draft. YAML uses `firesale_min_interval` for that cooldown.
 Task updates are available through the API, MCP, or dashboard, not a CLI update command.
-`task delete <id>` permanently deletes a task; a running task cannot be deleted (the API returns
-`409 Conflict`). Wait for the run to finish or cancel it first.
+`task delete <id>` permanently deletes a task. Running tasks and tasks with run or scheduler
+history cannot be deleted (the API returns `409 Conflict`); disable tasks with history instead.
 
 ### Queue work for later
 

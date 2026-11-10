@@ -25,8 +25,8 @@ redline task delete add-tests
 ```
 
 See the [`examples/`](../examples) directory for the full set of starter profiles and tasks.
-`redline task delete <id>` permanently removes a task. Running tasks cannot be deleted; wait for
-the run to finish or cancel it first.
+`redline task delete <id>` permanently removes a task. Running tasks and tasks with run or
+scheduler history cannot be deleted; disable tasks with history instead.
 
 ## Task prompts
 

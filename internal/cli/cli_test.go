@@ -64,7 +64,8 @@ func TestTaskDeleteReportsAPIErrors(t *testing.T) {
 		status  int
 		message string
 	}{
-		{"running", http.StatusConflict, "cannot delete running task"},
+		{"running", http.StatusConflict, `conflict: running task "review" cannot be deleted`},
+		{"history", http.StatusConflict, `conflict: task "review" has run or scheduler history; disable it instead`},
 		{"missing", http.StatusNotFound, "not found"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
