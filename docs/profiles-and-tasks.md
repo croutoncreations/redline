@@ -122,6 +122,11 @@ Optional prepare/finalize hooks run before and after the harness. Cleanup defaul
 commands, are retained with each run for reproducibility, so pass secrets via the environment
 rather than embedding them in profile command strings.
 
+For report-only tasks such as release readiness, choose a profile whose prepare/finalize hooks
+and custom harness commands do not change repository files, commit, push, open pull requests,
+publish, deploy, or release. A task prompt does not disable these commands; prepare hooks run
+before the agent receives the prompt.
+
 ## Minimal profiles
 
 For small, self-contained tasks, the minimal example profiles suppress personal hooks, plugin
