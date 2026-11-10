@@ -90,9 +90,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   names, so Max (formerly Max 5x), unverified Ultra, and unrecognized plans keep working.
 - Claude credential reads no longer decode `subscriptionType`/`rateLimitTier`, so a plan field
   changing shape cannot block usage access; token refreshes still preserve it unchanged.
-
-### Fixed
-
+- The first-run guide's **Refresh detection** button works more than once. It used to stay
+  disabled after its first use, so a newly installed or signed-in Claude Code or Codex CLI did
+  not appear until the dashboard was reloaded.
 - API authentication accepts the `Bearer` scheme in any letter case, as HTTP requires, so clients
   that send `Authorization: bearer TOKEN` no longer get a false `401 Unauthorized`.
 - `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
