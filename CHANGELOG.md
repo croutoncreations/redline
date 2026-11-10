@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline task delete <id>` permanently removes a task, with a confirmation on success and
+  a clear API conflict error if the task is running.
+
+### Fixed
+
+- Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
+  `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
+  changing existing ignore files or the checkout's tracked `.gitignore`.
+
 ## [0.1.12] - 2026-11-10
 
 ### Upgrade notes
@@ -58,8 +69,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `redline task delete <id>` permanently removes a task, with a confirmation on success and
-  a clear API conflict error if the task is running.
 - Six editable task starters for one API contract mismatch, flaky test, incident
   runbook gap, source of build variation, supported migration defect, or measured
   performance regression. Each requires evidence and keeps verification free of
@@ -113,9 +122,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
-  `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
-  changing existing ignore files or the checkout's tracked `.gitignore`.
 - Claude accounts with no five-hour limit (verified Ultra, formerly Max 20x, from 2026-10-30)
   are budgeted on the weekly window alone. Native usage accepts a null session window
   (`utilization: null`) and OpenUsage accepts a session line with no limit, instead of failing
