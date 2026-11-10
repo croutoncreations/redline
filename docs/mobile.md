@@ -78,10 +78,21 @@ Redline CLI. Keep it private.
 
 ## Revoking access
 
-Redline does not track individual devices, so revocation is all-or-nothing: rotating the
-API token signs out every paired browser and invalidates saved CLI credentials. Because
-sessions renew on use, this is the only way to end an active session before its window
-lapses.
+Each paired browser or phone is a separate device session. List them and revoke one without
+affecting the others (revocation applies on that device's next API request):
+
+```bash
+redline --config redline.yaml devices list
+redline --config redline.yaml devices revoke DEVICE_ID
+```
+
+A phone paired before device sessions existed may still hold the master API token itself. It
+does not appear in `devices list` and cannot be revoked by ID; until it upgrades to its own
+device session, the only way to cut it off (for example, if it is lost) is to rotate the token
+and restart Redline.
+
+To sign out **every** paired device and invalidate saved CLI credentials, rotate the API token
+instead:
 
 ```bash
 redline --config redline.yaml token rotate --yes
