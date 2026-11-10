@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline task delete <id>` permanently removes a task, with a confirmation on success and
+  a clear API conflict error if the task is running.
+
+### Fixed
+
+- Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
+  `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
+  changing existing ignore files or the checkout's tracked `.gitignore`.
+
 ## [0.1.12] - 2026-11-10
 
 ### Upgrade notes

@@ -718,7 +718,7 @@ func runResource(
 	if len(args) == 0 {
 		commands := "add|list"
 		if resource == "tasks" {
-			commands = "add|list|enable|disable|retry|dispatch"
+			commands = "add|list|enable|disable|retry|dispatch|delete"
 		}
 		fmt.Fprintf(stderr, "usage: redline %s <%s>\n", strings.TrimSuffix(resource, "s"), commands)
 		return 1
@@ -769,6 +769,17 @@ func runResource(
 		} else {
 			fmt.Fprintf(stdout, "created %s\n", strings.TrimSuffix(resource, "s"))
 		}
+		return 0
+	case "delete":
+		if resource != "tasks" || len(args) != 2 || args[1] == "" {
+			fmt.Fprintln(stderr, "usage: redline task delete <id>")
+			return 1
+		}
+		if err := client.Do(context.Background(), http.MethodDelete, "/v1/tasks/"+url.PathEscape(args[1]), nil, nil); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "deleted task %s\n", args[1])
 		return 0
 	case "enable", "disable", "retry", "dispatch":
 		if resource != "tasks" || len(args) < 2 {

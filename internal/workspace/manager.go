@@ -229,6 +229,9 @@ func (m Manager) prepareGitWorktree(
 			return domain.Workspace{}, fmt.Errorf("restrict worktree parent: %w", err)
 		}
 	}
+	if err := ignoreRedlineDirectory(filepath.Join(profile.Repository, ".redline")); err != nil {
+		return domain.Workspace{}, err
+	}
 	branch := "redline/" + name
 	base := profile.BaseBranch
 	if base == "" {
@@ -250,6 +253,36 @@ func (m Manager) prepareGitWorktree(
 		return domain.Workspace{}, err
 	}
 	return domain.Workspace{Directory: directory, Branch: branch}, nil
+}
+
+// ignoreRedlineDirectory makes the managed directory self-ignoring, including when
+// the profile repository is a subdirectory of a checkout. Preserve existing rules
+// and do not write through a symlink to a directory outside our control.
+func ignoreRedlineDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return fmt.Errorf("inspect managed worktree directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	path := filepath.Join(directory, ".gitignore")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create managed worktree ignore file: %w", err)
+	}
+	_, writeErr := io.WriteString(file, "*\n")
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write managed worktree ignore file: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close managed worktree ignore file: %w", closeErr)
+	}
+	return nil
 }
 
 func (m Manager) prepareDevX(
