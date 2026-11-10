@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-10
+
+### Upgrade notes
+
+- Paired phones and browsers now get their own revocable device sessions instead of the master API
+  token. Existing dashboard cookies upgrade on their own. A phone paired before this release still
+  holds the master token, is not shown in `redline devices list`, and cannot be revoked by ID.
+  Re-pairing gives it a device session, but the master token it held stays a valid owner
+  credential. To invalidate every copy, run `redline token rotate --yes` and restart Redline, then
+  re-pair your devices.
+- Paired devices can no longer redeem banked resets by default. To allow it again, set:
+
+  ```yaml
+  api:
+    paired_devices:
+      allow_reset_redemption: true
+  ```
+
+- The bundled `late` policy now adds `weekly_only_pace_thresholds`, so a Claude account with no
+  five-hour limit (verified Ultra) can run work earlier in the week to use up leftover weekly
+  quota. Without them, such an account under `late` only runs once at least 50% of its weekly
+  quota remains within 24 hours of the reset. Existing configs do not get the new rows
+  automatically: copy the `weekly_only_pace_thresholds` block from the `late` policy in
+  `config.example.yaml` into yours. `standard` and `early` need no change. The new startup warning
+  only flags a policy that has none of `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, so an existing `late` policy does not trigger it.
+- Building from source requires Go 1.26.10 or later.
+
 ### Security
 
 - Git-worktree runs now keep `.redline` and `.redline/worktrees` owner-only (0700), including
@@ -16,7 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `go.mod` requires Go 1.26.10.
 - API JSON requests now enforce the 1 MiB body limit before decoding, preventing oversized
   requests from hiding additional JSON content beyond the decoder's previous read boundary.
-- paired devices no longer receive the master API token. New pairings and local dashboard
+- Paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
   Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
