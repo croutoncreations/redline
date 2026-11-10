@@ -283,6 +283,47 @@ func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	}
 }
 
+func TestServerAcceptsCaseInsensitiveBearerScheme(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	for _, test := range []struct {
+		header     string
+		wantStatus int
+	}{
+		{header: "Bearer " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "bearer " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "BEARER " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "Basic " + cfg.APIToken, wantStatus: http.StatusUnauthorized},
+		{header: "Bearer" + cfg.APIToken, wantStatus: http.StatusUnauthorized},
+		{header: "bearer wrong-token", wantStatus: http.StatusUnauthorized},
+	} {
+		// /v1/devices is owner-only, so a 200 proves the master bearer was recognised as the owner.
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/devices", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", test.header)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		scheme, _, _ := strings.Cut(test.header, " ")
+		if response.StatusCode != test.wantStatus {
+			t.Fatalf("Authorization scheme %q: status = %d, want %d", scheme, response.StatusCode, test.wantStatus)
+		}
+	}
+}
+
 func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
 	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))

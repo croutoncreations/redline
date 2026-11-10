@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Git-worktree runs now keep `.redline` and `.redline/worktrees` owner-only (0700), including
+  directories created as 0755 by earlier versions, so other local accounts cannot read run
+  checkouts or files written there by agents and hooks.
 - Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
   intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
   `go.mod` requires Go 1.26.10.
@@ -90,6 +93,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- API authentication accepts the `Bearer` scheme in any letter case, as HTTP requires, so clients
+  that send `Authorization: bearer TOKEN` no longer get a false `401 Unauthorized`.
 - `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
   that account ("Test: Start a claude-main firesale?") and explains what tapping Start does.
   Before, it showed a "Codex reset promised" alert quoting the tracker while the Start action

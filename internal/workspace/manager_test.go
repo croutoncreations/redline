@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -46,6 +47,66 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	}
 	if got.Branch != "redline/run-1" || got.Directory != filepath.Join(repo, ".redline", "worktrees", "run-1") {
 		t.Fatalf("workspace = %#v", got)
+	}
+}
+
+func TestGitWorktreeParentDirectoryIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX permission bits")
+	}
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".redline", filepath.Join(".redline", "worktrees")} {
+		path := filepath.Join(repo, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Fatalf("%s mode = %o, want 0700 (worktrees hold a checkout plus anything the agent or hooks write, and must not be world-traversable)", path, mode)
+		}
+	}
+}
+
+func TestGitWorktreeTightensExistingPermissiveParents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX permission bits")
+	}
+	repo := t.TempDir()
+	parent := filepath.Join(repo, ".redline", "worktrees")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(repo, ".redline"), parent} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(parent, "run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(repo, ".redline"), parent} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Fatalf("%s mode = %o, want an existing 0755 parent tightened to 0700", path, mode)
+		}
 	}
 }
 
