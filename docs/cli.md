@@ -47,9 +47,11 @@ manage devices or test notifications. See the [API permission table](api.md#prin
 `api-token` file next to `--config` and does not open the database or contact the service; each
 device session is bound to the master token that issued it, so after a restart **all** device
 sessions are signed out. Restart Redline to invalidate the old master token and legacy pairings,
-then pair devices again. Re-pair legacy phones to replace their
-old master-token bearer credential with a properly scoped device token; existing browser cookies
-upgrade transparently without interrupting access.
+then pair devices again. A legacy phone that still holds the master-token bearer credential is
+not a device session: `devices list` does not show it and `devices revoke` cannot remove it, so
+rotating the token and restarting is the only way to revoke it. Re-pair legacy phones to replace
+that credential with a properly scoped device token; existing browser cookies upgrade
+transparently without interrupting access.
 
 ## Usage and decisions
 
