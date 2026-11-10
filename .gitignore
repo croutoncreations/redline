@@ -39,3 +39,4 @@ usage-lockouts.json
 .envrc
 .tmuxp.yaml
 actionlint
+.gstack/

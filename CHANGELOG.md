@@ -11,17 +11,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Upgrade notes
 
 - Paired phones and browsers now get their own revocable device sessions instead of the master API
-  token. Existing dashboard cookies upgrade on their own. A phone paired before this release keeps
-  working with the master token until it is re-paired or the token is rotated. Until then it is not
-  shown in `redline devices list` and cannot be revoked by ID, so re-pair older phones to manage
-  them individually.
-- Paired devices can no longer redeem banked resets by default. Set
-  `api.paired_devices.allow_reset_redemption: true` to allow it again.
-- Claude Ultra accounts with no five-hour limit only fill leftover weekly quota under the `late`
-  policy if it has `weekly_only_pace_thresholds`. Existing configs do not get them automatically;
-  copy the `weekly_only_pace_thresholds` block from the `late` policy in `config.example.yaml`
-  into yours. `standard` and `early` need no change. Startup now warns about any policy that cannot
-  run work for such an account.
+  token. Existing dashboard cookies upgrade on their own. A phone paired before this release still
+  holds the master token, is not shown in `redline devices list`, and cannot be revoked by ID.
+  Re-pairing gives it a device session, but the master token it held stays a valid owner
+  credential. To invalidate every copy, run `redline token rotate --yes` and restart Redline, then
+  re-pair your devices.
+- Paired devices can no longer redeem banked resets by default. To allow it again, set:
+
+  ```yaml
+  api:
+    paired_devices:
+      allow_reset_redemption: true
+  ```
+
+- The bundled `late` policy now adds `weekly_only_pace_thresholds`, so a Claude account with no
+  five-hour limit (verified Ultra) can run work earlier in the week to use up leftover weekly
+  quota. Without them, such an account under `late` only runs once at least 50% of its weekly
+  quota remains within 24 hours of the reset. Existing configs do not get the new rows
+  automatically: copy the `weekly_only_pace_thresholds` block from the `late` policy in
+  `config.example.yaml` into yours. `standard` and `early` need no change. The new startup warning
+  only flags a policy that has none of `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, so an existing `late` policy does not trigger it.
 - Building from source requires Go 1.26.10 or later.
 
 ### Security
