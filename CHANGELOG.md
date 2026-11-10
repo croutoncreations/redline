@@ -113,9 +113,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- Git-worktree runs keep `.redline/` out of the user's `git status` by adding a local ignore
-  rule to the repository's common `info/exclude`, including linked worktrees, without changing
-  the tracked `.gitignore`.
+- Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
+  `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
+  changing existing ignore files or the checkout's tracked `.gitignore`.
 - Claude accounts with no five-hour limit (verified Ultra, formerly Max 20x, from 2026-10-30)
   are budgeted on the weekly window alone. Native usage accepts a null session window
   (`utilization: null`) and OpenUsage accepts a session line with no limit, instead of failing

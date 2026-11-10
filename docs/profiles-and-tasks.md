@@ -114,10 +114,10 @@ claude: 5-hour 100.0% remaining, 73.0% weekly remaining (...)
 Redline supports these workspace providers:
 
 - **Git worktree** - an isolated checkout per run under `.redline/worktrees` in the profile's
-  repository. The recommended default for code-changing jobs. Redline adds `/.redline/` to the
-  repository's local `$GIT_COMMON_DIR/info/exclude` if no equivalent entry exists, keeping run
-  worktrees out of `git status` without changing your tracked `.gitignore`. Linked worktrees
-  share this local exclude file.
+  repository. The recommended default for code-changing jobs. Redline creates
+  `.redline/.gitignore` containing `*` if that file is absent, keeping the directory and run
+  worktrees out of `git status`, including in linked worktrees and repository subdirectories.
+  Existing ignore files are preserved; your checkout's tracked `.gitignore` is never changed.
 - **DevX** - an isolated [DevX](https://github.com/jfox85/devx) session. Creation
   arguments are configurable, e.g. `workspace_args: [--target, host]`.
 - **Existing directory** - runs directly in a checkout. Only use this when you explicitly accept

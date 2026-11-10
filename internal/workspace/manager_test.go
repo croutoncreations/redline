@@ -32,15 +32,15 @@ func TestExistingDirectoryWorkspace(t *testing.T) {
 	}
 }
 
-func TestGitWorktreeIgnoresRedlineInCommonExclude(t *testing.T) {
+func TestGitWorktreeIgnoresRedlineDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("git-worktree integration uses POSIX paths")
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	for _, linked := range []bool{false, true} {
-		for _, initial := range []string{"", "# keep this without a final newline", "/.redline/\n", ".redline/\n", "/.redline\n", ".redline\n"} {
-			t.Run(fmt.Sprintf("linked=%t/exclude=%q", linked, initial), func(t *testing.T) {
+		for _, subdirectory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("linked=%t/subdirectory=%t", linked, subdirectory), func(t *testing.T) {
 				repo := t.TempDir()
 				gitWorkspaceTest(t, repo, "init")
 				const gitignore = "# user-maintained ignore rules\n/build/\n"
@@ -49,18 +49,16 @@ func TestGitWorktreeIgnoresRedlineInCommonExclude(t *testing.T) {
 				}
 				gitWorkspaceTest(t, repo, "add", ".gitignore")
 				gitWorkspaceTest(t, repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
-				exclude := filepath.Join(repo, ".git", "info", "exclude")
-				if initial == "" {
-					if err := os.RemoveAll(filepath.Dir(exclude)); err != nil {
-						t.Fatal(err)
-					}
-				} else if err := os.WriteFile(exclude, []byte(initial), 0o600); err != nil {
-					t.Fatal(err)
-				}
 				if linked {
 					checkout := filepath.Join(t.TempDir(), "linked")
 					gitWorkspaceTest(t, repo, "worktree", "add", "-b", "linked", checkout)
 					repo = checkout
+				}
+				if subdirectory {
+					repo = filepath.Join(repo, "component")
+					if err := os.Mkdir(repo, 0o755); err != nil {
+						t.Fatal(err)
+					}
 				}
 				manager := workspace.Manager{}
 				for _, run := range []string{"run-1", "run-2"} {
@@ -74,22 +72,18 @@ func TestGitWorktreeIgnoresRedlineInCommonExclude(t *testing.T) {
 						t.Fatalf("git status = %q, want clean checkout", status)
 					}
 				}
-				got, err := os.ReadFile(exclude)
-				if err != nil {
-					t.Fatal(err)
+				ignorePath := filepath.Join(repo, ".redline", ".gitignore")
+				got, err := os.ReadFile(ignorePath)
+				if err != nil || string(got) != "*\n" {
+					t.Fatalf("managed .gitignore = %q, err=%v", got, err)
 				}
-				want := initial
-				if !strings.Contains(initial, ".redline") {
-					if want != "" && !strings.HasSuffix(want, "\n") {
-						want += "\n"
-					}
-					want += "/.redline/\n"
+				info, err := os.Stat(ignorePath)
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("managed .gitignore must have mode 0600: %v, err=%v", info, err)
 				}
-				if string(got) != want {
-					t.Fatalf("exclude = %q, want %q", got, want)
-				}
-				if got, err := os.ReadFile(filepath.Join(repo, ".gitignore")); err != nil || string(got) != gitignore {
-					t.Fatalf(".gitignore changed: %q, err=%v", got, err)
+				root := strings.TrimSpace(gitWorkspaceTest(t, repo, "rev-parse", "--show-toplevel"))
+				if got, err := os.ReadFile(filepath.Join(root, ".gitignore")); err != nil || string(got) != gitignore {
+					t.Fatalf("tracked .gitignore changed: %q, err=%v", got, err)
 				}
 			})
 		}
@@ -107,54 +101,54 @@ func gitWorkspaceTest(t *testing.T, repo string, args ...string) string {
 	return string(output)
 }
 
-func TestGitWorktreeReportsExcludeErrors(t *testing.T) {
-	for _, test := range []struct {
-		name           string
-		output         string
-		stderr         string
-		code           int
-		blockedExclude bool
-		want           string
-	}{
-		{name: "git failure", stderr: "fatal: not a git repository", code: 128, want: "code 128: fatal: not a git repository"},
-		{name: "empty path", want: "git returned an empty path"},
-		{name: "unreadable exclude", output: ".git\n", blockedExclude: true, want: "read git exclude"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			repo := t.TempDir()
-			if test.blockedExclude {
-				if err := os.MkdirAll(filepath.Join(repo, ".git", "info", "exclude"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-				if strings.Join(command.Args, " ") != "-C "+repo+" rev-parse --git-common-dir" {
-					t.Fatalf("unexpected command after exclude failure: %#v", command)
-				}
-				_, _ = io.WriteString(command.Stdout, test.output)
-				_, _ = io.WriteString(command.Stderr, test.stderr)
-				return test.code, nil
-			}}
-			_, err := (workspace.Manager{Runner: runner}).Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
-				WorkspaceProvider: "git-worktree", Repository: repo,
-			})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want %q", err, test.want)
-			}
-			if _, err := os.Stat(filepath.Join(repo, ".redline")); !os.IsNotExist(err) {
-				t.Fatalf("must not create .redline when exclude setup fails: %v", err)
-			}
-		})
+func TestGitWorktreePreservesExistingIgnoreFile(t *testing.T) {
+	repo := t.TempDir()
+	redline := filepath.Join(repo, ".redline")
+	if err := os.Mkdir(redline, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const contents = "# user rules\nworktrees/\n"
+	ignorePath := filepath.Join(redline, ".gitignore")
+	if err := os.WriteFile(ignorePath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Runner: &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(redline, "worktrees", "run-1"), 0o700)
+	}}}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(ignorePath); err != nil || string(got) != contents {
+		t.Fatalf("existing .gitignore changed: %q, err=%v", got, err)
+	}
+}
+
+func TestGitWorktreeSkipsIgnoreFileInSymlinkDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires special privileges")
+	}
+	repo, target := t.TempDir(), t.TempDir()
+	if err := os.Symlink(target, filepath.Join(repo, ".redline")); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Runner: &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o700)
+	}}}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("must not create .gitignore through a symlink: %v", err)
 	}
 }
 
 func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if strings.Join(command.Args, " ") == "-C "+repo+" rev-parse --git-common-dir" {
-			_, err := io.WriteString(command.Stdout, ".git\n")
-			return 0, err
-		}
 		if command.Name != "git" || strings.Join(command.Args, " ") != "-C "+repo+" worktree add -b redline/run-1 "+filepath.Join(repo, ".redline", "worktrees", "run-1")+" main" {
 			t.Fatalf("command = %#v", command)
 		}
@@ -178,10 +172,6 @@ func TestGitWorktreeParentDirectoryIsPrivate(t *testing.T) {
 	}
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if strings.Join(command.Args, " ") == "-C "+repo+" rev-parse --git-common-dir" {
-			_, err := io.WriteString(command.Stdout, ".git\n")
-			return 0, err
-		}
 		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o755)
 	}}
 	manager := workspace.Manager{Runner: runner}
@@ -217,10 +207,6 @@ func TestGitWorktreeTightensExistingPermissiveParents(t *testing.T) {
 		}
 	}
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if strings.Join(command.Args, " ") == "-C "+repo+" rev-parse --git-common-dir" {
-			_, err := io.WriteString(command.Stdout, ".git\n")
-			return 0, err
-		}
 		return 0, os.MkdirAll(filepath.Join(parent, "run-1"), 0o755)
 	}}
 	manager := workspace.Manager{Runner: runner}
@@ -243,10 +229,6 @@ func TestGitWorktreeTightensExistingPermissiveParents(t *testing.T) {
 func TestGitWorktreeWorkspaceFailureIncludesGitStderr(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
-		if strings.Join(command.Args, " ") == "-C "+repo+" rev-parse --git-common-dir" {
-			_, err := io.WriteString(command.Stdout, ".git\n")
-			return 0, err
-		}
 		_, _ = io.WriteString(command.Stderr, "fatal: branch 'redline/run-1' already exists\n")
 		return 128, nil
 	}}
