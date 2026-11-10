@@ -29,6 +29,11 @@ func sampleAnnouncement(now time.Time, account string) domain.NotificationEvent 
 	e := a.Notification(now, false)
 	if account != "" {
 		e.Data["manual_account"], e.Data["manual_for"] = account, "15m"
+		// The phone's Start action targets this account, so the wording is
+		// about it, not about a Codex announcement it has nothing to do with.
+		e.Title = "Start a " + account + " firesale?"
+		e.Message = "Sample alert. Start firesale runs queued firesale work on " + account +
+			" for 15 minutes. Nothing starts unless you tap it."
 	}
 	e.Data["test"] = "true"
 	e.Title = "Test: " + e.Title

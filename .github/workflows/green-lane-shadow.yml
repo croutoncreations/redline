@@ -26,7 +26,7 @@ permissions:
 jobs:
   invalidate-closed:
     if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
       checks: write
@@ -50,7 +50,7 @@ jobs:
     if: >-
       (github.event_name != 'pull_request_target' || github.event.action != 'closed') &&
       (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

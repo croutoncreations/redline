@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
+  intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
+  `go.mod` requires Go 1.26.10.
 - API JSON requests now enforce the 1 MiB body limit before decoding, preventing oversized
   requests from hiding additional JSON content beyond the decoder's previous read boundary.
 - paired devices no longer receive the master API token. New pairings and local dashboard
@@ -23,6 +26,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   for its own scoped device session in place, without re-pairing.
 
 ### Added
+
+- Six editable task starters for one API contract mismatch, flaky test, incident
+  runbook gap, source of build variation, supported migration defect, or measured
+  performance regression. Each requires evidence and keeps verification free of
+  unintended publishing, deployment, or release actions.
+
+- Four editable task starters for one documentation mismatch, recurring CI warning,
+  release-readiness blocker report, or accessibility barrier. Release readiness is
+  report-only and does not require repository changes.
 
 - On-demand manual firesales for any configured provider account: owner/device
   `GET|POST /v1/firesales`, `DELETE /v1/firesales/{account}`, and
@@ -57,6 +69,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+
+### Fixed
+
+- `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
+  that account ("Test: Start a claude-main firesale?") and explains what tapping Start does.
+  Before, it showed a "Codex reset promised" alert quoting the tracker while the Start action
+  targeted the account you named. The plain sample is unchanged.
+- The green-lane pilot's live-merge check now blocks on any non-empty current-head review body from
+  someone other than the PR author, including bot `COMMENTED` reviews and approvals; a positive
+  completion summary can't bypass it. Earlier review-body feedback only clears after the same
+  provider posts a full completion for the new head, and dismissing a review doesn't resolve it.
+  This deliberately defers benign review prose too.
+- The CLI reference now matches the real commands: `pair --qr` is required, and `task retry`,
+  `token rotate --yes`, and `run events --limit` are documented.
 
 ## [0.1.11] - 2026-10-23
 

@@ -25,6 +25,12 @@ func TestResetAnnouncedManualSample(t *testing.T) {
 			if e.Data["kind"] != "PROMISED" || e.Data["manual_account"] != account || e.Data["manual_for"] != "15m" {
 				t.Fatalf("event=%+v", e)
 			}
+			// An account's Start test is about that account, not a Codex
+			// announcement: it must not name Codex or Tibo's post.
+			if e.Title != "Test: Start a claude-main firesale?" || strings.Contains(e.Message, "Codex") || strings.Contains(e.Message, "thsottiaux") ||
+				!strings.Contains(e.Message, "15 minutes") {
+				t.Fatalf("account test reads as a Codex announcement: title=%q message=%q", e.Title, e.Message)
+			}
 			end, err := time.Parse(time.RFC3339Nano, e.Data["window_end"])
 			if err != nil || !end.Equal(now.Add(2*time.Hour)) {
 				t.Fatalf("window_end=%s err=%v", e.Data["window_end"], err)
@@ -70,8 +76,11 @@ func TestSamplesUseReadableBuilders(t *testing.T) {
 				keys = []string{"pace_gap", "overflow", "effective_reset_at", "unlocked_tier", "announcement_key", "trigger"}
 			case domain.EventResetAnnounced:
 				keys = []string{"key", "kind", "url", "quote", "quote_source", "feeds", "attribution", "attribution_urls", "direct_source_verified"}
-				if e.ProviderAccountID != "" || e.Data["url"] == "" || !strings.Contains(e.Message, "Data: ") {
-					t.Fatalf("announcement sample=%+v", e)
+				// The tracker credit belongs on the plain announcement sample;
+				// with an account the sample is that account's Start test.
+				plain, _ := notification.Sample(kind, "", "codex", now)
+				if e.ProviderAccountID != "" || e.Data["url"] == "" || !strings.Contains(plain.Message, "Data: ") {
+					t.Fatalf("announcement sample=%+v plain=%+v", e, plain)
 				}
 			}
 			for _, key := range keys {
