@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Git-worktree runs now keep `.redline` and `.redline/worktrees` owner-only (0700), including
+  directories created as 0755 by earlier versions, so other local accounts cannot read run
+  checkouts or files written there by agents and hooks.
 - Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
   intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
   `go.mod` requires Go 1.26.10.
