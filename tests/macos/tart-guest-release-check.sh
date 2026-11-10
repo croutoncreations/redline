@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# tart exec starts with a minimal PATH that omits /sbin and /usr/sbin, where
+# mount, spctl and other system tools used below live.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 application="/Applications/Redline.app"
 support_directory="${HOME}/Library/Application Support/Redline"
 config_path="${support_directory}/redline.yaml"

@@ -1304,7 +1304,9 @@ for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboar
 }
 $('#onboarding-job-type').addEventListener('change',syncOnboardingJobType);
 $('#onboarding-refresh-detection').addEventListener('click',async event => {
-  event.currentTarget.disabled = true;
+  // currentTarget is cleared once the handler yields, so keep the button for finally.
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     showOnboardingError('');
     const accountIDs = (latestDashboard?.providers || []).map(provider => provider.id);
@@ -1327,7 +1329,7 @@ $('#onboarding-refresh-detection').addEventListener('click',async event => {
     const failures = usageResults.filter(result => result.status === 'rejected');
     if (failures.length) showOnboardingError(`Could not refresh usage for ${failures.length} account${failures.length === 1 ? '' : 's'}. Check the sign-in guidance above and try again.`);
   } catch (error) { showOnboardingError(`Detection refresh failed: ${error.message}`); }
-  finally { event.currentTarget.disabled = false; }
+  finally { button.disabled = false; }
 });
 $('#mark-runs-read').addEventListener('click',async event => {
   const button = event.currentTarget; button.disabled = true;
