@@ -18,6 +18,20 @@ import (
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
+// restrictDirectory removes group and other permissions from an existing
+// directory. Symlinks and non-directories are left alone so a link cannot
+// redirect the chmod elsewhere.
+func restrictDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	return os.Chmod(path, info.Mode().Perm()&0o700)
+}
+
 type Manager struct {
 	Runner          redprocess.Runner
 	OutputDirectory string
@@ -207,6 +221,13 @@ func (m Manager) prepareGitWorktree(
 	// parent would let any other local account read it.
 	if err := os.MkdirAll(filepath.Dir(directory), 0o700); err != nil {
 		return domain.Workspace{}, fmt.Errorf("create worktree parent: %w", err)
+	}
+	// MkdirAll only applies the mode to directories it creates, so tighten
+	// parents left world-traversable by earlier versions.
+	for _, parent := range []string{filepath.Join(profile.Repository, ".redline"), filepath.Dir(directory)} {
+		if err := restrictDirectory(parent); err != nil {
+			return domain.Workspace{}, fmt.Errorf("restrict worktree parent: %w", err)
+		}
 	}
 	branch := "redline/" + name
 	base := profile.BaseBranch
