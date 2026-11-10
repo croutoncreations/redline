@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-10
+
+### Upgrade notes
+
+- Paired phones and browsers now get their own revocable device sessions instead of the master API
+  token. Existing dashboard cookies upgrade on their own. A phone paired before this release keeps
+  working with the master token until it is re-paired or the token is rotated. Until then it is not
+  shown in `redline devices list` and cannot be revoked by ID, so re-pair older phones to manage
+  them individually.
+- Paired devices can no longer redeem banked resets by default. Set
+  `api.paired_devices.allow_reset_redemption: true` to allow it again.
+- Claude Ultra accounts with no five-hour limit only fill leftover weekly quota under the `late`
+  policy if it has `weekly_only_pace_thresholds`. Existing configs do not get them automatically;
+  copy the `weekly_only_pace_thresholds` block from the `late` policy in `config.example.yaml`
+  into yours. `standard` and `early` need no change. Startup now warns about any policy that cannot
+  run work for such an account.
+- Building from source requires Go 1.26.10 or later.
+
 ### Security
 
 - Git-worktree runs now keep `.redline` and `.redline/worktrees` owner-only (0700), including
@@ -16,7 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `go.mod` requires Go 1.26.10.
 - API JSON requests now enforce the 1 MiB body limit before decoding, preventing oversized
   requests from hiding additional JSON content beyond the decoder's previous read boundary.
-- paired devices no longer receive the master API token. New pairings and local dashboard
+- Paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
   Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
