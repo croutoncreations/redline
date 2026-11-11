@@ -126,7 +126,12 @@ type UsageSnapshot struct {
 
 // BankedReset describes one grant or credit, not additional scheduling capacity.
 type BankedReset struct {
-	ID            string     `json:"id"`
+	ID string `json:"id"`
+	// Kind is what spending the reset refills, as Claude Code names it:
+	// "full", "session" (5-hour only), "weekly", or "fable" (5-hour plus the
+	// Fable allowance, giving back only what Fable used of the weekly limit).
+	// Empty when the provider does not say.
+	Kind          string     `json:"kind,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	Clears        []string   `json:"clears,omitempty"`
 	UsableNow     *bool      `json:"usable_now,omitempty"`
@@ -158,10 +163,15 @@ func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
 		var clears []string
 		seen := make(map[string]bool)
 		for _, window := range detail.Clears {
-			if window == "seven_day" || window == "seven_day_overage_included" {
+			switch window {
+			case "seven_day":
 				window = "weekly"
+			case "seven_day_overage_included":
+				// Claude's Fable allowance, not the weekly limit: a Fable
+				// reset clears it without resetting the week.
+				window = "fable"
 			}
-			if (window == "five_hour" || window == "weekly") && !seen[window] {
+			if (window == "five_hour" || window == "weekly" || window == "fable") && !seen[window] {
 				clears = append(clears, window)
 				seen[window] = true
 			}

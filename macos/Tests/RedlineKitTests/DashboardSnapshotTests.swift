@@ -38,6 +38,26 @@ import Testing
     #expect(older.shortWindowSummary == nil)
 }
 
+@Test func usageSnapshotGroupsBankedResetsByKindOnlyWhenDetailsAreComplete() throws {
+    let decoder = JSONDecoder()
+    let now = ISO8601DateFormatter().date(from: "2026-11-11T14:00:00Z")!
+    let snapshot = try decoder.decode(UsageSnapshot.self, from: Data(#"""
+    {"banked_resets":5,"banked_resets_expire_at":"2026-12-10T22:00:00Z","banked_reset_details":[
+      {"id":"fable-a","kind":"fable","expires_at":"2027-03-09T07:59:00Z","resets_left":1},
+      {"id":"full-a","kind":"full","expires_at":"2026-12-10T22:00:00Z","resets_left":1},
+      {"id":"full-b","kind":"full","expires_at":"2026-12-16T04:59:00Z","resets_left":1},
+      {"id":"fable-b","kind":"fable","expires_at":"2027-03-09T07:59:00Z","resets_left":2}]}
+    """#.utf8))
+    let kinds = snapshot.bankedResetKinds(now: now)
+    #expect(kinds.map(\.kind) == ["full", "fable"])
+    #expect(kinds.map(\.count) == [2, 3])
+
+    let partial = try decoder.decode(UsageSnapshot.self, from: Data(#"""
+    {"banked_resets":5,"banked_reset_details":[{"id":"full-a","kind":"full","resets_left":1}]}
+    """#.utf8))
+    #expect(partial.bankedResetKinds(now: now).isEmpty)
+}
+
 @Test func dashboardSnapshotDecodesProviderWindowsAndOperationalState() throws {
     let data = Data(#"""
     {

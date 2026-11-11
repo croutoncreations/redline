@@ -50,7 +50,7 @@ test('shows banked resets with their expiry, and nothing when the provider does 
   const claudeResets = page.locator('[data-provider-id="claude-main"] .banked-resets');
   await expect(claudeResets).toContainText('Banked resets');
   await expect(claudeResets).toContainText('1 available');
-  await expect(claudeResets).toContainText(/Expires in \d+ days · Oct 2[23]/);
+  await expect(claudeResets).toContainText(/Expires in 3 months · Oct 2[23]/);
   await expect(claudeResets).not.toHaveClass(/soon/);
 
   await page.getByRole('button', { name: 'Show Codex usage details' }).click();
@@ -82,6 +82,45 @@ test('an untouched five hour window reads as full and starting on first use', as
   await expect(window).toContainText('5-hour window');
   await expect(window).toContainText('100% left');
   await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
+test('splits banked resets by kind with each expiry, and falls back when details are incomplete', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // Two full resets with different expiries and three Fable resets sharing one,
+  // as Claude reports them; the fixture clock is 2026-07-20.
+  claude.snapshot.banked_resets = 5;
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-07-22T19:00:00Z', resets_left: 1 },
+    { id: 'full-b', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+    { id: 'fable-b', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+    { id: 'fable-c', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+  ];
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const resets = page.locator('[data-provider-id="claude-main"] .banked-resets');
+  await expect(resets).toContainText('5 available');
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full).toContainText('Full resets');
+  await expect(full.locator('.reset')).toHaveCount(2);
+  await expect(full.locator('.reset').nth(0)).toContainText(/Expires Jul 22, .* · in 2 days/);
+  await expect(full.locator('.reset').nth(0)).toHaveClass(/soon/);
+  await expect(full.locator('.reset').nth(1)).toContainText(/Expires Aug 1[56], .* · in 4 weeks/);
+  await expect(full.locator('.reset').nth(1)).not.toHaveClass(/soon/);
+  const fable = resets.locator('[data-reset-kind="fable"]');
+  await expect(fable).toContainText('Fable resets');
+  await expect(fable).toContainText(/All expire Mar [89], 2027/);
+  await expect(fable.locator('.reset.soon')).toHaveCount(0);
+  await expect(fable.locator('.help')).toHaveAttribute('data-help', /doesn't reset the whole week/);
+
+  // Details that do not account for the whole count are not trusted.
+  claude.snapshot.banked_reset_details = claude.snapshot.banked_reset_details.slice(0, 2);
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(resets.locator('[data-reset-kind]')).toHaveCount(0);
+  await expect(resets).toContainText('Next expires in 2 days');
 });
 
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {

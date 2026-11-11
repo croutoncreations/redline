@@ -468,6 +468,8 @@ public struct UsageSnapshot: Codable, Sendable {
     /// The source reports no account-wide weekly limit for this account
     /// (OpenUsage Team seats). `weekly` is nil then; nothing stands in for it.
     public let weeklyUnavailable: Bool
+    /// Per-grant details, when the provider reported them.
+    public let bankedResetDetails: [BankedResetDetail]
 
     public init(
         short: UsageWindow?,
@@ -481,7 +483,8 @@ public struct UsageSnapshot: Codable, Sendable {
         bankedResetsExpiries: [String] = [],
         sourceStale: Bool = false,
         observedAt: String? = nil,
-        weeklyUnavailable: Bool = false
+        weeklyUnavailable: Bool = false,
+        bankedResetDetails: [BankedResetDetail] = []
     ) {
         self.weeklyUnavailable = weeklyUnavailable
         self.plan = plan
@@ -495,6 +498,7 @@ public struct UsageSnapshot: Codable, Sendable {
         self.bankedResets = bankedResets
         self.bankedResetsExpireAt = bankedResetsExpireAt
         self.shortWindowNotStarted = shortWindowNotStarted
+        self.bankedResetDetails = bankedResetDetails
     }
 
     enum CodingKeys: String, CodingKey {
@@ -507,6 +511,25 @@ public struct UsageSnapshot: Codable, Sendable {
         case sourceStale = "source_stale"
         case observedAt = "observed_at"
         case weeklyUnavailable = "weekly_unavailable"
+        case bankedResetDetails = "banked_reset_details"
+    }
+
+    /// Counts banked resets by kind ("full", "fable", ...), in display order.
+    /// Empty unless the unexpired details account for the whole aggregate
+    /// count, so a partial or stale breakdown is never shown.
+    public func bankedResetKinds(now: Date = Date()) -> [(kind: String, count: Int)] {
+        guard let total = bankedResets, total > 0 else { return [] }
+        let live = bankedResetDetails.filter { detail in
+            guard detail.resetsLeft > 0 else { return false }
+            guard let expires = detail.expiresAt.flatMap(parseRFC3339) else { return true }
+            return expires > now
+        }
+        guard live.reduce(0, { $0 + $1.resetsLeft }) == total else { return [] }
+        var counts: [String: Int] = [:]
+        for detail in live { counts[detail.kind ?? "", default: 0] += detail.resetsLeft }
+        let order = ["full", "weekly", "session", "fable"]
+        return counts.sorted { (order.firstIndex(of: $0.key) ?? order.count) < (order.firstIndex(of: $1.key) ?? order.count) }
+            .map { (kind: $0.key, count: $0.value) }
     }
 
     public init(from decoder: Decoder) throws {
@@ -525,7 +548,36 @@ public struct UsageSnapshot: Codable, Sendable {
         weeklyUnavailable = (try? container.decodeIfPresent(Bool.self, forKey: .weeklyUnavailable)) ?? false
         // Never trust a weekly value beside "not reported".
         weekly = weeklyUnavailable ? nil : try container.decodeIfPresent(UsageWindow.self, forKey: .weekly)
+        bankedResetDetails = (try? container.decodeIfPresent([BankedResetDetail].self, forKey: .bankedResetDetails)) ?? []
     }
+}
+
+/// One banked reset grant. Kind is "full", "session", "weekly", or "fable"
+/// (refills the 5-hour limit and Fable allowance, not the whole week).
+public struct BankedResetDetail: Codable, Sendable {
+    public let id: String
+    public let kind: String?
+    public let expiresAt: String?
+    public let resetsLeft: Int
+
+    public init(id: String, kind: String? = nil, expiresAt: String? = nil, resetsLeft: Int) {
+        self.id = id
+        self.kind = kind
+        self.expiresAt = expiresAt
+        self.resetsLeft = resetsLeft
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind
+        case expiresAt = "expires_at"
+        case resetsLeft = "resets_left"
+    }
+}
+
+private func parseRFC3339(_ value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
 }
 
 public struct UsageWindow: Codable, Sendable {

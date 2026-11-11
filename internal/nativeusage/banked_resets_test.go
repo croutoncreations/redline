@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +171,79 @@ func TestClaudeNativeParsesTheOpus55LaunchGrant(t *testing.T) {
 	}
 }
 
+// Live shape from a Max account holding two full resets with different
+// expiries and three Fable resets (Claude Code 2.1.318). Fable grants still
+// say "type":"full"; gives_back_weekly is what marks them.
+func TestClaudeNativeDistinguishesFableResetsAndEachExpiry(t *testing.T) {
+	now := time.Date(2026, 11, 11, 14, 0, 0, 0, time.UTC)
+	grant := func(id, ends, clears string, fable bool) string {
+		return `{"id":"` + id + `","label":"x","resets_total":1,"resets_left":1,"starts_at":"2026-10-21T00:45:00+00:00","ends_at":"` + ends +
+			`","clears":` + clears + `,"paused":false,"usable_now":true,"use_requires_limit":false,"percent_used":{},"blocking":[],"arm":null,"type":"full",` +
+			`"unavailable_reason":null,"gives_back_weekly":` + map[bool]string{true: "true", false: "false"}[fable] + `}`
+	}
+	all := `["five_hour","seven_day","seven_day_overage_included"]`
+	fableClears := `["five_hour","seven_day_overage_included"]`
+	server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"at_limit":true,"exhausted":["seven_day"],"grants":[`+
+		grant("full-reset-2611", "2026-12-10T22:00:00+00:00", all, false)+`,`+
+		grant("free_reset_oct_2026", "2026-12-16T04:59:00+00:00", all, false)+`,`+
+		grant("launch-2610-fable", "2027-03-09T07:59:00+00:00", fableClears, true)+`,`+
+		grant("launch-2610-fable-12mo", "2027-03-09T07:59:00+00:00", fableClears, true)+`,`+
+		grant("launch-2610-fable-6mo", "2027-03-09T07:59:00+00:00", fableClears, true)+
+		`],"next_grant_id":"full-reset-2611","weekly_resets_at":"2026-11-13T17:00:00+00:00","cooldown_until":null,"paused_held":false}}`)
+	client := claudeClient(server)
+	client.Now = func() time.Time { return now }
+	got, _, err := client.Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	soonest := time.Date(2026, 12, 10, 22, 0, 0, 0, time.UTC)
+	if got.BankedResets == nil || *got.BankedResets != 5 || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(soonest) {
+		t.Fatalf("resets=%v expiry=%v", got.BankedResets, got.BankedResetsExpireAt)
+	}
+	want := []struct {
+		id, kind, expires string
+		clears            []string
+	}{
+		{"full-reset-2611", "full", "2026-12-10T22:00:00Z", []string{"five_hour", "weekly", "fable"}},
+		{"free_reset_oct_2026", "full", "2026-12-16T04:59:00Z", []string{"five_hour", "weekly", "fable"}},
+		{"launch-2610-fable", "fable", "2027-03-09T07:59:00Z", []string{"five_hour", "fable"}},
+		{"launch-2610-fable-12mo", "fable", "2027-03-09T07:59:00Z", []string{"five_hour", "fable"}},
+		{"launch-2610-fable-6mo", "fable", "2027-03-09T07:59:00Z", []string{"five_hour", "fable"}},
+	}
+	if len(got.BankedResetDetails) != len(want) {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+	for i, w := range want {
+		d := got.BankedResetDetails[i]
+		if d.ID != w.id || d.Kind != w.kind || d.ExpiresAt == nil || d.ExpiresAt.Format(time.RFC3339) != w.expires || !slices.Equal(d.Clears, w.clears) {
+			t.Fatalf("detail %d = %+v (expires %v), want %+v", i, d, d.ExpiresAt, w)
+		}
+		if d.Claimable != (i == 0) {
+			t.Fatalf("detail %d claimable = %v", i, d.Claimable)
+		}
+	}
+}
+
+// Older responses carry no type or gives_back_weekly; the kind is then read
+// from what the grant clears, and stays empty when that is unknown too.
+func TestClaudeNativeResetKindFallsBackToClears(t *testing.T) {
+	for clears, want := range map[string]string{
+		`["five_hour"]`: "session",
+		`["seven_day"]`: "weekly",
+		`["five_hour","seven_day","seven_day_overage_included"]`: "full",
+		`"unexpected"`: "",
+	} {
+		server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"grants":[{"id":"g","resets_left":1,"clears":`+clears+`}]}}`)
+		got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].Kind != want {
+			t.Fatalf("clears %s: details = %#v, want kind %q", clears, got.BankedResetDetails, want)
+		}
+	}
+}
+
 // The reset lookup is supplementary and must never refresh (and so rotate)
 // Claude Code's shared refresh token.
 func TestBankedResetLookupUsesReadOnlyCredentials(t *testing.T) {
@@ -208,7 +283,7 @@ func TestClaudeNativeResetDetails(t *testing.T) {
 		t.Fatalf("details = %#v", got.BankedResetDetails)
 	}
 	d := got.BankedResetDetails[0]
-	if d.ID != "g" || d.ResetsLeft != 2 || !d.Claimable || d.ExpiresAt == nil || d.CooldownUntil == nil || d.UsableNow == nil || *d.UsableNow || d.RequiresLimit == nil || !*d.RequiresLimit || len(d.Clears) != 2 || d.Clears[1] != "weekly" || got.BankedResetDetails[1].Claimable {
+	if d.ID != "g" || d.ResetsLeft != 2 || !d.Claimable || d.ExpiresAt == nil || d.CooldownUntil == nil || d.UsableNow == nil || *d.UsableNow || d.RequiresLimit == nil || !*d.RequiresLimit || strings.Join(d.Clears, ",") != "five_hour,weekly,fable" || got.BankedResetDetails[1].Claimable {
 		t.Fatalf("details = %#v", got.BankedResetDetails)
 	}
 }

@@ -144,8 +144,9 @@ func (m *Manager) FetchFresh(ctx context.Context, accountID string, provider con
 // scheduler its usage data.
 func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, provider config.Provider, snapshot *decision.UsageSnapshot) {
 	// An account pinned to OpenUsage opted out of native credential access.
-	// Native Claude snapshots already asked for grants; Codex usage carries
-	// only a count and needs the separate credit-details endpoint.
+	// Native Claude snapshots already asked for grants. OpenUsage carries only
+	// a count and the soonest expiry for both providers, so the per-reset
+	// details (kind, each expiry) come from the native lookup.
 	if m.BankedResets == nil || m.SkipBankedResetProviders[providerKey(snapshot.Provider)] || provider.EffectiveUsageSource() == "openusage" {
 		return
 	}
@@ -161,9 +162,13 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	if strings.TrimSpace(provider.ClaudeConfigDir) != "" {
 		return
 	}
-	codexDetails := snapshot.Provider == "codex" && snapshot.BankedResets != nil && *snapshot.BankedResets > 0 && len(snapshot.BankedResetDetails) == 0
+	if snapshot.Provider != "codex" && snapshot.Provider != "claude" {
+		return
+	}
+	needsDetails := snapshot.BankedResets != nil && *snapshot.BankedResets > 0 && len(snapshot.BankedResetDetails) == 0 &&
+		(snapshot.Provider == "codex" || snapshot.Source != "native")
 	claudeReport := snapshot.Provider == "claude" && snapshot.BankedResets == nil && snapshot.Source != "native"
-	if !codexDetails && !claudeReport {
+	if !needsDetails && !claudeReport {
 		return
 	}
 	// The native lookup reads the single local provider login no matter which
@@ -216,7 +221,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 				report = &filtered
 			}
 		}
-		if codexDetails {
+		if needsDetails {
 			if report != nil {
 				// The primary source's count and expiry remain authoritative.
 				expiry := snapshot.BankedResetsExpireAt

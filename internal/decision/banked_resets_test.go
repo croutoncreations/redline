@@ -13,7 +13,7 @@ func TestApplyBankedResetDetails(t *testing.T) {
 	s := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Weekly: decision.UsageWindow{ResetsAt: now.Add(time.Hour)}}
 	details := []decision.BankedReset{{ID: "grant", ResetsLeft: 2, Claimable: true, Clears: []string{"five_hour", "seven_day", "seven_day_overage_included", "unknown"}}}
 	s.ApplyBankedResets(&decision.BankedResets{Available: 2, Details: details})
-	if len(s.BankedResetDetails) != 1 || !s.BankedResetDetails[0].Claimable || !reflect.DeepEqual(s.BankedResetDetails[0].Clears, []string{"five_hour", "weekly"}) {
+	if len(s.BankedResetDetails) != 1 || !s.BankedResetDetails[0].Claimable || !reflect.DeepEqual(s.BankedResetDetails[0].Clears, []string{"five_hour", "weekly", "fable"}) {
 		t.Fatalf("details = %#v", s.BankedResetDetails)
 	}
 	details[0].ID = "changed"
@@ -42,6 +42,18 @@ func TestApplyBankedResetsPreservesBothDeadlineReports(t *testing.T) {
 		if snapshot.BankedResets != nil || snapshot.BankedResetsExpireAt != nil || len(snapshot.BankedResetsExpiries) != 0 || len(snapshot.BankedResetDetails) != 0 {
 			t.Fatalf("nil report left reset telemetry: %+v", snapshot)
 		}
+	}
+}
+
+// A Fable reset clears the 5-hour window and the Fable allowance
+// (seven_day_overage_included) but not the week. Mapping that allowance to
+// "weekly" would treat it as a weekly reset when scheduling and verifying.
+func TestFableResetDoesNotClearTheWeek(t *testing.T) {
+	var s decision.UsageSnapshot
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{
+		{ID: "fable", Kind: "fable", ResetsLeft: 1, Clears: []string{"five_hour", "seven_day_overage_included"}}}})
+	if got := s.BankedResetDetails[0].Clears; !reflect.DeepEqual(got, []string{"five_hour", "fable"}) {
+		t.Fatalf("clears = %v", got)
 	}
 }
 

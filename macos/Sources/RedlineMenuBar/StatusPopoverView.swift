@@ -624,8 +624,13 @@ struct StatusPopoverView: View {
     /// Only shown when at least one reset is banked; zero is not worth the
     /// space in a popover, and "not reported" must never look like zero.
     private func bankedResetSummary(_ provider: ProviderSummary) -> (text: String, expiringSoon: Bool)? {
-        guard let count = provider.snapshot?.bankedResets, count > 0 else { return nil }
-        let noun = count == 1 ? "banked reset" : "banked resets"
+        guard let snapshot = provider.snapshot, let count = snapshot.bankedResets, count > 0 else { return nil }
+        var noun = count == 1 ? "banked reset" : "banked resets"
+        let kinds = snapshot.bankedResetKinds()
+        if kinds.count > 1 || kinds.first.map({ !$0.kind.isEmpty }) == true {
+            let labels = ["full": "full", "session": "5-hour", "weekly": "weekly", "fable": "Fable"]
+            noun += " (" + kinds.map { "\($0.count) \(labels[$0.kind] ?? "other")" }.joined(separator: ", ") + ")"
+        }
         // A stored expiry can lapse while the snapshot sits unrefreshed.
         guard let expires = parseTimestamp(provider.snapshot?.bankedResetsExpireAt),
               expires.timeIntervalSinceNow > 0 else {

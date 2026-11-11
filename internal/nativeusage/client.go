@@ -315,7 +315,8 @@ type claudePayload struct {
 }
 
 // claudeResetStatus is the banked limit reset block. Field names follow
-// Claude Code 2.1.280's own schema for this undocumented response.
+// Claude Code's own schema for this undocumented response (checked against
+// 2.1.318, which added Fable resets).
 type claudeResetStatus struct {
 	Eligible      bool               `json:"eligible"`
 	Grants        []claudeResetGrant `json:"grants"`
@@ -330,6 +331,41 @@ type claudeResetGrant struct {
 	Clears        json.RawMessage `json:"clears"`
 	UsableNow     json.RawMessage `json:"usable_now"`
 	RequiresLimit json.RawMessage `json:"use_requires_limit"`
+	Type          json.RawMessage `json:"type"`
+	// GivesBackWeekly marks a Fable reset: it refills the 5-hour limit and the
+	// Fable allowance and returns only what Fable used of the weekly limit.
+	// Fable grants also say "type":"full", so this flag wins, as in Claude Code.
+	GivesBackWeekly json.RawMessage `json:"gives_back_weekly"`
+}
+
+// claudeResetKind names what a grant refills the way Claude Code does.
+func claudeResetKind(grant claudeResetGrant) string {
+	if resetDetail[bool](grant.GivesBackWeekly) {
+		return "fable"
+	}
+	switch kind := resetDetail[string](grant.Type); kind {
+	case "session", "weekly", "full":
+		return kind
+	}
+	clears := resetDetail[[]string](grant.Clears)
+	if len(clears) == 0 {
+		return ""
+	}
+	session, other := false, false
+	for _, window := range clears {
+		if window == "five_hour" {
+			session = true
+		} else {
+			other = true
+		}
+	}
+	switch {
+	case session && !other:
+		return "session"
+	case other && !session:
+		return "weekly"
+	}
+	return "full"
 }
 
 // Informational reset fields must not invalidate usage or aggregate counts.
@@ -375,7 +411,7 @@ func claudeBankedResets(status *claudeResetStatus, now time.Time) *decision.Bank
 		resets.Available += *grant.ResetsLeft
 		// A missing id must not invalidate an otherwise usable aggregate.
 		if strings.TrimSpace(grant.ID) != "" {
-			detail := decision.BankedReset{ID: grant.ID, ResetsLeft: *grant.ResetsLeft,
+			detail := decision.BankedReset{ID: grant.ID, Kind: claudeResetKind(grant), ResetsLeft: *grant.ResetsLeft,
 				Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
 				CooldownUntil: resetDetail[*time.Time](status.CooldownUntil), Claimable: grant.ID == resetDetail[string](status.NextGrantID)}
 			if !expires.IsZero() {

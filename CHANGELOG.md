@@ -10,9 +10,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - `redline task delete <id>` permanently removes a task, with a confirmation on success and
   a clear API conflict error if the task is running.
+- Banked resets are shown by kind (full, 5-hour, weekly, Fable) with each expiry on its own
+  line, capped at three per kind plus a "+N more" line. The mobile list is collapsible, and
+  the macOS popover lists counts by kind.
+- Relative times past two weeks read in weeks, months, or years instead of a day count.
 
 ### Fixed
 
+- Claude's Fable resets are recognized. They refill the 5-hour limit and the Fable allowance
+  and give back only what Fable used of the week, so they are no longer treated as clearing
+  the weekly limit when scheduling or verifying a redemption.
 - Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
   `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
   changing existing ignore files or the checkout's tracked `.gitignore`.

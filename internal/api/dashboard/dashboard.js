@@ -7,7 +7,12 @@ const relative = (value) => {
   if (abs < 60) { amount = abs; unit = "sec"; }
   else if (abs < 3600) { amount = Math.round(abs/60); unit = "min"; if (amount >= 60) { amount = 1; unit = "hr"; } }
   else if (abs < 86400) { amount = Math.round(abs/3600); unit = "hr"; if (amount >= 24) { amount = 1; unit = "day"; } }
-  else { amount = Math.round(abs/86400); unit = "day"; }
+  // Days stay exact for the first two weeks (weekly resets live there); past
+  // that, a count of days is hard to read, so step up to weeks, months, years.
+  else if (abs < 14 * 86400) { amount = Math.round(abs/86400); unit = "day"; if (amount >= 14) { amount = 2; unit = "week"; } }
+  else if (abs < 56 * 86400) { amount = Math.round(abs/(7*86400)); unit = "week"; }
+  else if (abs < 365 * 86400) { amount = Math.round(abs/(30.44*86400)); unit = "month"; if (amount >= 12) { amount = 1; unit = "year"; } }
+  else { amount = Math.round(abs/(365.25*86400)); unit = "year"; }
   return seconds >= 0 ? `in ${amount} ${unit}${amount === 1 ? "" : "s"}` : `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
 };
 const shortTime = (value) => value ? new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)) : "—";
@@ -311,17 +316,80 @@ function notStartedMeter(label) {
 // Banked resets are on-demand refills of an exhausted window. Absent means the
 // provider did not report them, which is not the same as zero, so the row is
 // only drawn when a count is known.
+const RESET_SOON_MS = 3 * 86400000;
+const RESET_KINDS = {
+  full: { label: 'Full', help: 'Refills the 5-hour and weekly limits.' },
+  session: { label: '5-hour', help: 'Refills the 5-hour limit only.' },
+  weekly: { label: 'Weekly', help: 'Refills the weekly limit.' },
+  fable: { label: 'Fable', help: "Refills the 5-hour limit and the Fable allowance, and gives back what Fable used of the weekly limit. It doesn't reset the whole week." },
+};
+const resetExpiryText = (value) => {
+  const date = new Date(value);
+  const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+};
+// bankedResetGroups splits the reset details by kind, keeping each distinct
+// expiry. It returns null unless the live details account for every reset in
+// the aggregate count, so a partial or stale breakdown is never shown.
+function bankedResetGroups(snap, count) {
+  const details = (snap?.banked_reset_details || []).filter(d => d.resets_left > 0 && (!d.expires_at || new Date(d.expires_at) > Date.now()));
+  if (!details.length || details.reduce((sum, d) => sum + d.resets_left, 0) !== count) return null;
+  const groups = new Map();
+  for (const d of details) {
+    const kind = RESET_KINDS[d.kind] ? d.kind : '';
+    const group = groups.get(kind) || { kind, count: 0, expiries: new Map(), undated: 0 };
+    group.count += d.resets_left;
+    if (d.expires_at) group.expiries.set(d.expires_at, (group.expiries.get(d.expires_at) || 0) + d.resets_left);
+    else group.undated += d.resets_left;
+    groups.set(kind, group);
+  }
+  const order = ['full', 'weekly', 'session', 'fable', ''];
+  return [...groups.values()].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)).map(group => {
+    const expiries = [...group.expiries.entries()].sort((a, b) => new Date(a[0]) - new Date(b[0]));
+    const soonest = expiries[0]?.[0];
+    return { ...group, lines: resetExpiryLines(group, expiries), soonest, soon: soonest && new Date(soonest) - Date.now() < RESET_SOON_MS };
+  });
+}
+// One line per distinct expiry, so many dates never wrap into one long run.
+// Beyond MAX_EXPIRY_LINES the rest collapse into a single "+N more" line.
+const MAX_EXPIRY_LINES = 3;
+function resetExpiryLines(group, expiries) {
+  const isSoon = at => new Date(at) - Date.now() < RESET_SOON_MS;
+  if (expiries.length === 1 && !group.undated) {
+    return [{ soon: isSoon(expiries[0][0]), text: `${group.count === 1 ? 'Expires' : 'All expire'} ${resetExpiryText(expiries[0][0])} · ${relative(expiries[0][0])}` }];
+  }
+  const lines = expiries.map(([at, n]) => ({ soon: isSoon(at), text: `Expires ${resetExpiryText(at)}${n > 1 ? ` ×${n}` : ''} · ${relative(at)}` }));
+  if (group.undated) lines.push({ soon: false, text: `No expiry reported${group.undated > 1 ? ` ×${group.undated}` : ''}` });
+  if (lines.length <= MAX_EXPIRY_LINES + 1) return lines;
+  const hidden = expiries.slice(MAX_EXPIRY_LINES);
+  const hiddenResets = hidden.reduce((sum, [, n]) => sum + n, 0) + group.undated;
+  const last = hidden.length ? `, last ${resetExpiryText(hidden[hidden.length - 1][0])}` : '';
+  return [...lines.slice(0, MAX_EXPIRY_LINES), { soon: false, text: `+${hiddenResets} more${last}` }];
+}
 function bankedResets(snap) {
   const count = snap?.banked_resets;
   if (count == null) return '';
+  const help = `<i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i>`;
+  const groups = count > 0 ? bankedResetGroups(snap, count) : null;
+  if (groups) {
+    const rows = groups.map(group => {
+      const kind = RESET_KINDS[group.kind];
+      const name = kind ? `${kind.label} reset${group.count === 1 ? '' : 's'}` : `Reset${group.count === 1 ? '' : 's'}`;
+      const groupHelp = kind ? ` <i class="help" tabindex="0" data-help="${escapeHTML(kind.help)}">?</i>` : '';
+      const lines = group.lines.map(line => `<div class="reset${line.soon ? ' soon' : ''}">${escapeHTML(line.text)}</div>`).join('');
+      return `<div class="banked-reset-kind" data-reset-kind="${escapeHTML(group.kind || 'other')}"><div class="meter-head"><span>${escapeHTML(name)}${groupHelp}</span><b>${escapeHTML(group.count)}</b></div>${lines}</div>`;
+    }).join('');
+    return `<div class="banked-resets grouped" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets ${help}</span><b>${escapeHTML(count)} available</b></div>${rows}</div>`;
+  }
   // A stored expiry can lapse while the snapshot sits unrefreshed; never
   // show "Expires … ago".
   const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
-  const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+  const soon = expires && new Date(expires) - Date.now() < RESET_SOON_MS;
   const detail = expires
     ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
     : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
-  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets <i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i></span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
+  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets ${help}</span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
 }
 function policyControl(item, provider) {
   const defaultPolicy = item.default_policy || item.policy || 'default';

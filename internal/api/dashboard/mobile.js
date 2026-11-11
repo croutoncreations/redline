@@ -14,11 +14,62 @@ function relative(value) {
   if (abs < 60) { n = abs; u = 'sec'; }
   else if (abs < 3600) { n = Math.round(abs/60); u = 'min'; if (n >= 60) { n = 1; u = 'hr'; } }
   else if (abs < 86400) { n = Math.round(abs/3600); u = 'hr'; if (n >= 24) { n = 1; u = 'day'; } }
-  else { n = Math.round(abs/86400); u = 'day'; }
+  // Days stay exact for the first two weeks (weekly resets live there); past
+  // that, a count of days is hard to read, so step up to weeks, months, years.
+  else if (abs < 14 * 86400) { n = Math.round(abs/86400); u = 'day'; if (n >= 14) { n = 2; u = 'week'; } }
+  else if (abs < 56 * 86400) { n = Math.round(abs/(7*86400)); u = 'week'; }
+  else if (abs < 365 * 86400) { n = Math.round(abs/(30.44*86400)); u = 'month'; if (n >= 12) { n = 1; u = 'year'; } }
+  else { n = Math.round(abs/(365.25*86400)); u = 'year'; }
   return secs >= 0 ? `in ${n} ${u}${n===1?'':'s'}` : `${n} ${u}${n===1?'':'s'} ago`;
 }
 function shortTime(value) {
   return value ? new Intl.DateTimeFormat(undefined, {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)) : '—';
+}
+
+// Banked resets by kind, as Claude Code names them. Null unless the live
+// details account for the whole aggregate count, so a partial or stale
+// breakdown is never shown.
+const RESET_KIND_LABELS = { full: 'Full', session: '5-hour', weekly: 'Weekly', fable: 'Fable' };
+function resetExpiryText(value) {
+  const date = new Date(value);
+  const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+}
+function bankedResetGroups(snap, count) {
+  const details = (snap.banked_reset_details || []).filter(d => d.resets_left > 0 && (!d.expires_at || new Date(d.expires_at) > Date.now()));
+  if (!details.length || details.reduce((sum, d) => sum + d.resets_left, 0) !== count) return null;
+  const groups = new Map();
+  for (const d of details) {
+    const kind = RESET_KIND_LABELS[d.kind] ? d.kind : '';
+    const group = groups.get(kind) || { kind, count: 0, expiries: new Map(), undated: 0 };
+    group.count += d.resets_left;
+    if (d.expires_at) group.expiries.set(d.expires_at, (group.expiries.get(d.expires_at) || 0) + d.resets_left);
+    else group.undated += d.resets_left;
+    groups.set(kind, group);
+  }
+  const order = ['full', 'weekly', 'session', 'fable', ''];
+  return [...groups.values()].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)).map(group => {
+    const expiries = [...group.expiries.entries()].sort((a, b) => new Date(a[0]) - new Date(b[0]));
+    const soonest = expiries[0]?.[0];
+    return { ...group, lines: resetExpiryLines(group, expiries), soonest, soon: soonest && new Date(soonest) - Date.now() < 3 * 86400000 };
+  });
+}
+// One line per distinct expiry, so many dates never wrap into one long run.
+// Beyond MAX_EXPIRY_LINES the rest collapse into a single "+N more" line.
+const MAX_EXPIRY_LINES = 3;
+function resetExpiryLines(group, expiries) {
+  const isSoon = at => new Date(at) - Date.now() < 3 * 86400000;
+  if (expiries.length === 1 && !group.undated) {
+    return [{ soon: isSoon(expiries[0][0]), text: `${group.count === 1 ? 'Expires' : 'All expire'} ${resetExpiryText(expiries[0][0])}` }];
+  }
+  const lines = expiries.map(([at, n]) => ({ soon: isSoon(at), text: `Expires ${resetExpiryText(at)}${n > 1 ? ` ×${n}` : ''}` }));
+  if (group.undated) lines.push({ soon: false, text: `No expiry reported${group.undated > 1 ? ` ×${group.undated}` : ''}` });
+  if (lines.length <= MAX_EXPIRY_LINES + 1) return lines;
+  const hidden = expiries.slice(MAX_EXPIRY_LINES);
+  const hiddenResets = hidden.reduce((sum, [, n]) => sum + n, 0) + group.undated;
+  const last = hidden.length ? `, last ${resetExpiryText(hidden[hidden.length - 1][0])}` : '';
+  return [...lines.slice(0, MAX_EXPIRY_LINES), { soon: false, text: `+${hiddenResets} more${last}` }];
 }
 
 // One global 1-second clock (avoids multiple setIntervals).
@@ -36,6 +87,7 @@ let openProviderIDs = new Set(); // independently collapsible usage cards
 // Multi-account carousel: the page shown per provider family (0 = Overview),
 // held by account id so a reorder or refresh keeps the same account.
 let accountCarouselPage = new Map(); // provider → account id, or '' for Overview
+let openBankedResetIDs = new Set(); // banked reset lists start collapsed
 let usageInitialized = false;
 let unreadRuns = 0;
 let confirmPending = null; // {providerID, taskID, taskName}
@@ -253,7 +305,34 @@ function renderUsageDetail(item, opts = {}) {
       windows.push(meter(label, a.remaining, resetLine(a, {inferred: a.reset_inferred, pool: true})));
     });
     // Banked resets: on-demand refills. Absent means not reported, not zero.
-    if (opts.accountPage && snap.banked_resets != null) {
+    // Out-of-date numbers keep the plainer account view: their per-reset
+    // details may describe resets that have since been spent.
+    const resetGroups = !outOfDate && snap.banked_resets > 0 ? bankedResetGroups(snap, snap.banked_resets) : null;
+    if (resetGroups) {
+      const rows = resetGroups.map(group => {
+        const label = RESET_KIND_LABELS[group.kind];
+        const name = label ? `${label} reset${group.count === 1 ? '' : 's'}` : `Reset${group.count === 1 ? '' : 's'}`;
+        return `<div class="m-banked-reset-kind" data-reset-kind="${esc(group.kind || 'other')}">
+          <div class="m-meter-head"><span>${esc(name)}</span><b>${esc(group.count)}</b></div>
+          ${group.lines.map(line => `<div class="m-reset${line.soon ? ' soon' : ''}">${esc(line.text)}</div>`).join('')}
+        </div>`;
+      }).join('');
+      // Collapsed by default: the summary keeps the counts by kind and the
+      // soonest expiry in view, so nothing urgent hides behind the toggle.
+      const soonest = resetGroups.map(group => group.soonest).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
+      const soon = resetGroups.some(group => group.soon);
+      const summary = [
+        resetGroups.map(group => `${group.count} ${RESET_KIND_LABELS[group.kind] || 'other'}`).join(' · '),
+        soonest ? `next ${relative(soonest)}` : '',
+      ].filter(Boolean).join(' · ');
+      windows.push(`<details class="m-banked-resets grouped${soon ? ' soon-summary' : ''}" data-testid="banked-resets" data-banked-resets-toggle="${esc(item.id)}"${openBankedResetIDs.has(item.id) ? ' open' : ''}>
+        <summary aria-label="Banked resets: ${esc(snap.banked_resets)} available. Show details">
+          <div class="m-meter-head"><span>Banked resets</span><b>${esc(snap.banked_resets)} available</b></div>
+          <div class="m-reset m-banked-summary">${esc(summary)}</div>
+        </summary>
+        ${rows}
+      </details>`);
+    } else if (opts.accountPage && snap.banked_resets != null) {
       const credits = accountCredits(snap, {outOfDate});
       const soon = !outOfDate && credits.count > 0 && credits.soonest != null && credits.soonest - Date.now() < 3 * 86400000;
       const deadlines = credits.count > 0 && credits.deadlines.length
@@ -850,6 +929,13 @@ function renderUsage(providers) {
       if (openProviderIDs.has(id)) openProviderIDs.delete(id);
       else openProviderIDs.add(id);
       renderUsage(dashboard?.providers || []);
+    });
+  });
+  // Re-renders replace the markup, so remember which reset lists are open.
+  list.querySelectorAll('[data-banked-resets-toggle]').forEach(el => {
+    el.addEventListener('toggle', () => {
+      if (el.open) openBankedResetIDs.add(el.dataset.bankedResetsToggle);
+      else openBankedResetIDs.delete(el.dataset.bankedResetsToggle);
     });
   });
   // Wire actions in detail panels

@@ -101,6 +101,22 @@ test('relative() rounds up to the next unit instead of overflowing the current o
   expect(oneDayAgo).toBe('1 day ago');
 });
 
+test('relative() steps up from days to weeks, months, and years for far-off dates', async ({ page }) => {
+  await loadMobileDashboard(page);
+  const at = days => page.evaluate(d => relative(new Date(Date.now() + d * 86400000).toISOString()), days);
+  expect(await at(6)).toBe('in 6 days');
+  expect(await at(13)).toBe('in 13 days');
+  expect(await at(13.6)).toBe('in 2 weeks');
+  expect(await at(26)).toBe('in 4 weeks');
+  expect(await at(55)).toBe('in 8 weeks');
+  expect(await at(60)).toBe('in 2 months');
+  expect(await at(143)).toBe('in 5 months');
+  expect(await at(232)).toBe('in 8 months');
+  expect(await at(360)).toBe('in 1 year');
+  expect(await at(800)).toBe('in 2 years');
+  expect(await at(-21)).toBe('3 weeks ago');
+});
+
 test('shows error-state card when provider has no snapshot', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot = undefined;
@@ -174,6 +190,66 @@ test('an untouched five hour window reads as full and starting on first use', as
   await expect(window).toContainText('5-hour window');
   await expect(window).toContainText('100% left');
   await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
+test('banked resets are split by kind with each expiry', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.snapshot.banked_resets = 5;
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-07-22T19:00:00Z', resets_left: 1 },
+    { id: 'full-b', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 3 },
+  ];
+  await loadMobileDashboard(page, { dashboard });
+  const resets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  // Collapsed by default, with counts by kind and the soonest expiry visible.
+  await expect(resets).not.toHaveAttribute('open', '');
+  await expect(resets.locator('summary')).toContainText('5 available');
+  await expect(resets.locator('.m-banked-summary')).toHaveText('2 Full · 3 Fable · next in 2 days');
+  await expect(resets).toHaveClass(/soon-summary/);
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeHidden();
+
+  await resets.locator('summary').click();
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full).toBeVisible();
+  await expect(full.locator('.m-reset')).toHaveCount(2);
+  await expect(full.locator('.m-reset').nth(0)).toContainText(/Expires Jul 22/);
+  await expect(full.locator('.m-reset').nth(0)).toHaveClass(/soon/);
+  await expect(full.locator('.m-reset').nth(1)).toContainText(/Expires Aug 1[56]/);
+  await expect(full.locator('.m-reset').nth(1)).not.toHaveClass(/soon/);
+  await expect(resets.locator('[data-reset-kind="fable"]')).toContainText(/Fable resets.*All expire Mar [89], 2027/s);
+
+  // A live dashboard update re-renders the card; the list stays open.
+  await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), dashboard);
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeVisible();
+  await resets.locator('summary').click();
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeHidden();
+});
+
+test('many banked reset expiries show one per line and fold the rest into a count', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  const days = [3, 9, 15, 21, 27, 33];
+  claude.snapshot.banked_resets = days.length + 1;
+  claude.snapshot.banked_reset_details = days.map((day, i) => ({
+    id: `full-${i}`, kind: 'full', resets_left: i === 0 ? 2 : 1,
+    expires_at: new Date(Date.UTC(2026, 7, day, 19)).toISOString(),
+  }));
+  await loadMobileDashboard(page, { dashboard });
+  const resets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  await resets.locator('summary').click();
+  const lines = resets.locator('[data-reset-kind="full"] .m-reset');
+  await expect(lines).toHaveCount(4);
+  await expect(lines.nth(0)).toContainText(/Expires Aug 3, .* ×2/);
+  await expect(lines.nth(2)).toContainText(/Expires Aug 15/);
+  await expect(lines.nth(3)).toHaveText(/^\+3 more, last Sep 2, /);
+  // One date per line: no line wraps on a phone-width card.
+  for (let i = 0; i < 4; i++) {
+    const box = await lines.nth(i).boundingBox();
+    expect(box.height).toBeLessThan(20);
+  }
 });
 
 test('account pools displayed before model pools in detail', async ({ page }) => {
@@ -862,7 +938,7 @@ test.describe('Cursor usage card', () => {
     await loadMobileDashboard(page, { dashboard: withCursor(report => {
       report.balances[0].expires_at = ['2026-07-01T00:00:00Z', '2026-08-15T07:00:00Z'];
     }) });
-    await expect(page.getByTestId('cursor-balance-credits').locator('.m-reset')).toHaveText('Next expires in 26 days · Sat, Aug 15, 12:00 AM PDT');
+    await expect(page.getByTestId('cursor-balance-credits').locator('.m-reset')).toHaveText('Next expires in 4 weeks · Sat, Aug 15, 12:00 AM PDT');
   });
 
   test('distinguishes resets on either side of the autumn DST change', async ({ page }) => {

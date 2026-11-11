@@ -394,6 +394,30 @@ func TestBankedResetLookupHonorsRetryAfter(t *testing.T) {
 	}
 }
 
+// OpenUsage now reports Claude's count and soonest expiry but not what each
+// reset refills, so the native lookup supplies the per-grant details while
+// the primary source's count stays authoritative.
+func TestClaudeOpenUsageCountIsSupplementedWithResetDetails(t *testing.T) {
+	now := time.Date(2026, 11, 11, 14, 0, 0, 0, time.UTC)
+	full, fable := now.Add(29*24*time.Hour), now.Add(118*24*time.Hour)
+	s := claudeSnapshot(now)
+	s.ApplyBankedResets(&decision.BankedResets{Available: 2, NextExpiresAt: &full})
+	resets := &fakeResets{results: []resetResult{{resets: &decision.BankedResets{Available: 2, NextExpiresAt: &full, Details: []decision.BankedReset{
+		{ID: "full", Kind: "full", ExpiresAt: &full, ResetsLeft: 1},
+		{ID: "fable", Kind: "fable", ExpiresAt: &fable, ResetsLeft: 1},
+	}}}}}
+	manager := usage.NewManager(repeatSource(s, 2), &fakeSource{name: "native"}, func() time.Time { return now })
+	manager.BankedResets = resets
+	fetch(t, manager, "claude-main", autoClaude())
+	got := fetch(t, manager, "claude-main", autoClaude())
+	if resets.calls != 1 || got.BankedResets == nil || *got.BankedResets != 2 || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(full) {
+		t.Fatalf("calls=%d count=%v expiry=%v", resets.calls, got.BankedResets, got.BankedResetsExpireAt)
+	}
+	if len(got.BankedResetDetails) != 2 || got.BankedResetDetails[1].Kind != "fable" {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+}
+
 func TestCodexResetDetailsAreCachedWithoutReplacingSourceCount(t *testing.T) {
 	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
 	expires := now.Add(24 * time.Hour)
@@ -649,16 +673,17 @@ func TestCodexResetLookupEligibility(t *testing.T) {
 
 func TestBankedResetsAreNotLookedUpForCodexOrWhenAlreadyReported(t *testing.T) {
 	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
-	reported := claudeSnapshot(now)
-	reported.ApplyBankedResets(&decision.BankedResets{Available: 3})
+	none := claudeSnapshot(now)
+	none.ApplyBankedResets(&decision.BankedResets{Available: 0})
 	native := claudeSnapshot(now)
 	native.Source = "native"
+	native.ApplyBankedResets(&decision.BankedResets{Available: 3})
 	resets := &fakeResets{}
-	for _, s := range []decision.UsageSnapshot{snapshot("openusage", now), reported, native} {
+	for _, s := range []decision.UsageSnapshot{snapshot("openusage", now), none, native} {
 		manager := usage.NewManager(repeatSource(s, 1), &fakeSource{name: "native"}, func() time.Time { return now })
 		manager.BankedResets = resets
 		got := fetch(t, manager, "a", config.Provider{Provider: s.Provider, UsageSource: "auto", OpenUsageURL: "http://x"})
-		if s.BankedResets != nil && (got.BankedResets == nil || *got.BankedResets != 3) {
+		if s.BankedResets != nil && (got.BankedResets == nil || *got.BankedResets != *s.BankedResets) {
 			t.Fatalf("reported resets were overwritten: %v", got.BankedResets)
 		}
 	}
