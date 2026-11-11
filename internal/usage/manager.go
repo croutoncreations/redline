@@ -366,12 +366,22 @@ func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider con
 	shouldProbe := active == "native" && !now.Before(state.nextProbe)
 	m.mu.Unlock()
 
+	// A report OpenUsage itself marks out of date (SourceStale) holds
+	// dispatch, so for failover it counts like a stale timestamp: try the
+	// native collector. If that fails too, the out-of-date report is still
+	// the best thing to show, and it keeps holding dispatch.
+	var sourceStale decision.UsageSnapshot
+	var sourceStaleRaw []byte
 	if active == "openusage" || shouldProbe {
 		snapshot, raw, err := m.OpenUsage.Fetch(ctx, provider)
 		fetchedAt := m.Now().UTC()
 		freshnessFailure := false
 		if err == nil {
 			err = m.snapshotError(snapshot, fetchedAt)
+			if err == nil && snapshot.SourceStale {
+				sourceStale, sourceStaleRaw = snapshot, raw
+				err = fmt.Errorf("usage source reports its data as out of date")
+			}
 			freshnessFailure = err != nil
 		}
 		if err == nil {
@@ -395,6 +405,9 @@ func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider con
 	}
 	if err != nil {
 		m.nativeFailure(accountID, err)
+		if active == "openusage" && !sourceStale.ObservedAt.IsZero() {
+			return sourceStale, sourceStaleRaw, nil
+		}
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("native usage source: %w", err)
 	}
 	m.success(accountID, "native", fetchedAt)

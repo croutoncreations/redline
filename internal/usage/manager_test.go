@@ -80,6 +80,31 @@ func TestAutoSourceImmediatelyFallsBackWhenOpenUsageSnapshotIsStale(t *testing.T
 	}
 }
 
+// A report OpenUsage marks out of date holds dispatch, so auto failover
+// treats it like a stale timestamp and reads the native collector. When
+// that fails too, the out-of-date report is kept: it still holds dispatch
+// and is better to show than nothing.
+func TestAutoSourceFallsBackWhenOpenUsageReportsItselfStale(t *testing.T) {
+	now := time.Date(2026, 7, 24, 18, 30, 0, 0, time.UTC)
+	outOfDate := snapshot("openusage", now)
+	outOfDate.SourceStale = true
+	open := &fakeSource{name: "openusage", results: []sourceResult{{snapshot: outOfDate}, {snapshot: outOfDate}}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}, {err: errors.New("native offline")}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "claude", UsageSource: "auto"}
+
+	got, _, err := manager.Fetch(context.Background(), "claude-main", provider)
+	if err != nil || got.Source != "native" || got.SourceStale || native.calls != 1 {
+		t.Fatalf("snapshot=%#v err=%v native_calls=%d", got, err, native.calls)
+	}
+
+	other := usage.NewManager(open, native, func() time.Time { return now })
+	got, _, err = other.Fetch(context.Background(), "claude-main", provider)
+	if err != nil || got.Source != "openusage" || !got.SourceStale {
+		t.Fatalf("both unusable: snapshot=%#v err=%v", got, err)
+	}
+}
+
 func TestExplicitNativeNeverCallsOpenUsage(t *testing.T) {
 	now := time.Now()
 	open := &fakeSource{name: "openusage"}
