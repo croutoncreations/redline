@@ -266,6 +266,33 @@ policies:
 	if states["claude-main"] != "config/running" || states["claude-client"] != "managed/running" || states["claude-old"] != "managed/stopped" {
 		t.Fatalf("states = %v", states)
 	}
+
+	// Switching a running account off is pending until restart, and the list
+	// says it is off, so a client's toggle offers to turn it back on, which
+	// cancels the pending change.
+	find := func(body accountsBody) (disabled bool, pending string) {
+		for _, account := range body.Accounts {
+			if account.ID == "claude-client" {
+				return account.Disabled, account.Pending
+			}
+		}
+		t.Fatalf("claude-client missing")
+		return false, ""
+	}
+	if status, _, raw := accountRequest(t, http.MethodPatch, server.URL+"/v1/accounts/claude-client", map[string]any{"disabled": true}); status != http.StatusOK {
+		t.Fatalf("disable = %d %s", status, raw)
+	}
+	_, body, _ = accountRequest(t, http.MethodGet, server.URL+"/v1/accounts", nil)
+	if disabled, pending := find(body); !disabled || pending != "disable" || !body.RestartRequired {
+		t.Fatalf("after disable: disabled=%v pending=%q restart=%v", disabled, pending, body.RestartRequired)
+	}
+	if status, _, raw := accountRequest(t, http.MethodPatch, server.URL+"/v1/accounts/claude-client", map[string]any{"disabled": false}); status != http.StatusOK {
+		t.Fatalf("enable = %d %s", status, raw)
+	}
+	_, body, _ = accountRequest(t, http.MethodGet, server.URL+"/v1/accounts", nil)
+	if disabled, pending := find(body); disabled || pending != "" || body.RestartRequired {
+		t.Fatalf("after re-enable: disabled=%v pending=%q restart=%v", disabled, pending, body.RestartRequired)
+	}
 }
 
 func TestDiscoverListsCardsWithoutIdentityAndMarksLinks(t *testing.T) {

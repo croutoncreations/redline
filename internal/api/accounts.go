@@ -41,7 +41,9 @@ type accountView struct {
 	// Origin is "config" for accounts in the main config file (edit that
 	// file to change them) and "managed" for accounts added from Redline.
 	Origin   string `json:"origin"`
-	Disabled bool   `json:"disabled"`
+	// Disabled is the saved setting; for a running account it can be true
+	// while Pending is "disable" (switched off, restart not yet applied).
+	Disabled bool `json:"disabled"`
 	// Running says the service is collecting usage for the account now.
 	Running bool `json:"running"`
 	// Pending describes a saved change the service has not applied yet:
@@ -156,7 +158,11 @@ func (s *Server) accountsSnapshot() (accountsResponse, error) {
 			case !stillSaved:
 				view.Pending = "remove"
 			case account.Disabled:
+				// Disabled is the saved setting, as for accounts that are
+				// not running, so a client's toggle can turn it back on
+				// before the restart applies it.
 				view.Pending = "disable"
+				view.Disabled = true
 			case !sameManagedFields(account.ProviderConfig(), provider):
 				view.Pending = "change"
 			}
