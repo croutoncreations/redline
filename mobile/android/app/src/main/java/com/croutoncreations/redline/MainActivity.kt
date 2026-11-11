@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -43,7 +44,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+
+/** Holds the view models of one pairing; cleared when the phone unpairs. */
+internal class PairedViewModelStore : ViewModelStoreOwner {
+    override val viewModelStore = ViewModelStore()
+}
 
 /** The screens reachable from the bottom bar. */
 private enum class Tab(val label: String) {
@@ -90,6 +99,14 @@ class MainActivity : ComponentActivity() {
             val paired = remember(pairingGeneration, pairingState.isPaired) {
                 settings.isPaired || pairingState.isPaired
             }
+            // Every desktop-scoped view model (usage, queue, runs, accounts,
+            // firesales) lives in a store owned by this pairing, not the
+            // activity. Unpairing clears it: their in-flight work is
+            // cancelled and none of the previous desktop's data, kept on
+            // failed refreshes by design, can show under a new pairing.
+            val pairedStore = remember(pairingGeneration) { PairedViewModelStore() }
+            DisposableEffect(pairedStore) { onDispose { pairedStore.viewModelStore.clear() } }
+
             if (!paired) {
                 PairingScreen(state = pairingState, onScanned = pairingModel::pair)
                 return
@@ -109,6 +126,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            CompositionLocalProvider(LocalViewModelStoreOwner provides pairedStore) {
+                PairedContent(settings, holder, push, pairingState.isPaired, unpair, settingsOpen) { settingsOpen = it }
+            }
+    }
+
+    @Composable
+    private fun PairedContent(
+        settings: RedlineSettings,
+        holder: CoreClientHolder,
+        push: PushClient,
+        isPaired: Boolean,
+        unpair: () -> Unit,
+        settingsOpen: Boolean,
+        setSettingsOpen: (Boolean) -> Unit,
+    ) {
 
             val firesaleModel: FiresaleViewModel = viewModel(
                 factory = object : ViewModelProvider.Factory {
@@ -161,7 +194,7 @@ class MainActivity : ComponentActivity() {
 
             var tab by remember { mutableStateOf(Tab.CAPACITY) }
             val usageState by usageModel.state.collectAsState()
-            PushSettings(push, pairingState.isPaired, settingsOpen,
+            PushSettings(push, isPaired, settingsOpen,
                 host = android.net.Uri.parse(settings.baseUrl).host ?: "Paired Mac (relay-only)",
                 connection = when {
                     usageState.failure != null -> "Unavailable · last route ${if (usageState.transport == Transport.Relay) "relay" else "direct"}"
@@ -169,7 +202,7 @@ class MainActivity : ComponentActivity() {
                     usageState.transport == Transport.Relay -> "Relay"
                     else -> "Direct"
                 },
-                onUnpair = unpair, onClose = { settingsOpen = false })
+                onUnpair = unpair, onClose = { setSettingsOpen(false) })
             if (firesaleSheetOpen) {
                 FiresaleSheet(firesaleState, firesaleModel::selectDuration, firesaleModel::start,
                     onDismiss = { firesaleSheetOpen = false })
@@ -268,7 +301,7 @@ class MainActivity : ComponentActivity() {
                                 accountsOpen = true
                             },
                             accountSelection = accountSelection,
-                            onOpenSettings = { settingsOpen = true },
+                            onOpenSettings = { setSettingsOpen(true) },
                             onUnpair = unpair,
                         )
 
