@@ -324,6 +324,30 @@ func TestClaudeNativeExplainsWhyAResetIsUnavailable(t *testing.T) {
 	}
 }
 
+// The at-limit read is what Claude Code's /limit-reset uses: same grants,
+// plus which limits are used up. Live shape from an account out of weekly.
+func TestClaudeResetsAtLimitReadsExhaustedLimits(t *testing.T) {
+	server, seen := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"at_limit":true,"exhausted":["seven_day"],
+		"next_grant_id":"full-reset-2611","grants":[
+		{"id":"full-reset-2611","resets_left":1,"ends_at":"2026-12-10T22:00:00+00:00","clears":["five_hour","seven_day","seven_day_overage_included"],"usable_now":true,"type":"full","gives_back_weekly":false},
+		{"id":"launch-2610-fable","resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00","clears":["five_hour","seven_day_overage_included"],"usable_now":true,"type":"full","gives_back_weekly":true}]},
+		"juniper_tide":{"eligible":false,"ineligible_reason":"not_at_wall"}}`)
+	client := claudeClient(server)
+	got, err := client.BankedResetsAtLimit(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := seen.URL.Query(); q.Get("at_wall") != "1" || q.Get("cedar_ember") != "" {
+		t.Fatalf("query = %q", seen.URL.RawQuery)
+	}
+	if !slices.Equal(got.Exhausted, []string{"weekly"}) || got.Resets == nil || got.Resets.Available != 2 || len(got.Resets.Details) != 2 || got.Resets.Details[1].Kind != "fable" {
+		t.Fatalf("got = %+v", got)
+	}
+	if _, err := client.BankedResetsAtLimit(context.Background(), config.Provider{Provider: "codex"}); err == nil {
+		t.Fatal("codex accepted")
+	}
+}
+
 // The reset lookup is supplementary and must never refresh (and so rotate)
 // Claude Code's shared refresh token.
 func TestBankedResetLookupUsesReadOnlyCredentials(t *testing.T) {

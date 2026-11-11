@@ -139,6 +139,7 @@ type Server struct {
 	manualFiresaleMu sync.Mutex
 
 	redeemer            bankedResetRedeemer
+	atLimitResets       atLimitResetReader
 	redemptionDisabled  bool
 	redemptionMu        sync.Mutex
 	redemptionsInFlight map[string]bool
@@ -351,6 +352,7 @@ func newServer(
 	server.usageSources = usage.NewManager(openUsageWithCursor, nativeWithCursor, now)
 	// Wrapping hides the native source's banked-reset lookup; keep it.
 	server.usageSources.BankedResets = nativeSource
+	server.atLimitResets = nativeSource
 
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
@@ -431,6 +433,7 @@ func newServer(
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
 	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
+	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/choice", server.bankedResetChoice)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)

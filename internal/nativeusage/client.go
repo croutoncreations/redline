@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,11 @@ const (
 	// Claude Code CLI user agent; any other agent is told it is ineligible
 	// with reason "surface". skip_spend drops the spend block we do not read.
 	claudeBankedResetsQuery = "cedar_ember=1&skip_spend=1"
-	claudeUserAgent         = "claude-cli/2.1.280 (external, cli)"
+	// claudeAtLimitQuery is what Claude Code's /limit-reset reads when the
+	// account is at a limit: the same grants, plus which limits are used up
+	// (exhausted) and the separate weekly program, juniper_tide.
+	claudeAtLimitQuery = "at_wall=1&skip_spend=1"
+	claudeUserAgent    = "claude-cli/2.1.280 (external, cli)"
 )
 
 type Credential struct {
@@ -105,6 +110,49 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 		return nil, fmt.Errorf("decode native claude banked resets: %w", err)
 	}
 	return claudeBankedResets(payload.CedarEmber, c.now()), nil
+}
+
+// ClaudeResetsAtLimit is a fresh read of Claude's resets for choosing which to
+// spend, as Claude Code does just before /limit-reset claims one.
+type ClaudeResetsAtLimit struct {
+	Resets *decision.BankedResets
+	// Exhausted lists the limits Claude reports as used up, in reset window
+	// names ("weekly", "fable", "five_hour"), broadest first.
+	Exhausted []string
+}
+
+// BankedResetsAtLimit reads Claude's resets with at_wall=1, read-only. It is
+// a single request made only when the user asks to spend a reset.
+func (c Client) BankedResetsAtLimit(ctx context.Context, provider config.Provider) (ClaudeResetsAtLimit, error) {
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if name != "claude" {
+		return ClaudeResetsAtLimit{}, fmt.Errorf("reading resets at a limit is only supported for Claude")
+	}
+	url := c.ClaudeUsageURL
+	if url == "" {
+		url = defaultClaudeUsageURL
+	}
+	body, err := c.fetchBodyURL(ctx, name, profileDir(name, provider), true, withQuery(url, claudeAtLimitQuery))
+	if err != nil {
+		return ClaudeResetsAtLimit{}, err
+	}
+	var payload struct {
+		CedarEmber *claudeResetStatus `json:"cedar_ember"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ClaudeResetsAtLimit{}, fmt.Errorf("decode native claude resets at limit: %w", err)
+	}
+	result := ClaudeResetsAtLimit{Resets: claudeBankedResets(payload.CedarEmber, c.now())}
+	if payload.CedarEmber != nil {
+		var normalized decision.UsageSnapshot
+		normalized.ApplyBankedResets(&decision.BankedResets{Details: []decision.BankedReset{{Clears: resetDetail[[]string](payload.CedarEmber.Exhausted)}}})
+		for _, limit := range []string{"weekly", "fable", "five_hour"} {
+			if slices.Contains(normalized.BankedResetDetails[0].Clears, limit) {
+				result.Exhausted = append(result.Exhausted, limit)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (c Client) now() time.Time {
@@ -322,6 +370,7 @@ type claudeResetStatus struct {
 	Grants        []claudeResetGrant `json:"grants"`
 	NextGrantID   json.RawMessage    `json:"next_grant_id"`
 	CooldownUntil json.RawMessage    `json:"cooldown_until"`
+	Exhausted     json.RawMessage    `json:"exhausted"`
 }
 
 type claudeResetGrant struct {

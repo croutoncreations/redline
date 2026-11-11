@@ -139,7 +139,17 @@ redline reset redeem --provider claude-main --dry-run
 redline reset redeem --provider codex-main --dry-run --json
 redline reset redeem --provider claude-main
 redline reset redeem --provider codex-main --yes --json
+redline reset redeem --provider claude-main --kind auto    # the kind that fits the limit you've hit
+redline reset redeem --provider claude-main --kind fable   # a specific kind
 ```
+
+`--kind` (Claude only) chooses which kind of reset to spend instead of Claude's own next one:
+`auto`, `full`, `fable`, `weekly`, `session`, `opus`, or `sonnet`. Redline reads the account's
+resets fresh at its limit (one request, the same read Claude Code's `/limit-reset` makes) and
+picks the way Claude Code does. `auto` takes the kind made for the limit you've reached: a Fable
+reset when only the Fable allowance is used up, which saves full resets, and a full reset when the
+weekly limit is used up. A Fable reset is the last choice there, because it gives back only what
+Fable used of the week. If the kind you name can't be used, the error says why and which kinds can.
 
 A dry run sends a nonexistent ID, never a real grant or credit. Run it first, then make the first
 real redemption manually. Real redemption prompts on a TTY with the provider, reset ID, expiry,

@@ -198,6 +198,12 @@ history route accepts both owner and device authentication.
   spends nothing. It is ignored for dry runs. Unresolved redemptions are retried before selecting
   another reset. Completed successes return `replayed: true` and `completed_at` without a new
   provider call or verification claim.
+- Claude only: `"kind"` in the redeem body chooses which kind of reset to spend (`auto`, `full`,
+  `fable`, `weekly`, `session`, `opus`, `sonnet`). It reads the account's resets fresh at its limit
+  (`at_wall`) and picks as Claude Code's `/limit-reset` does; `auto` fits the limit reached.
+  `GET /v1/providers/{id}/banked-resets/choice?kind=…` returns the reset that would be spent,
+  without spending it, for a confirmation to bind with `expected_reset_id`. It answers **422** with
+  the reason and the kinds that can be used when none fits. Same authorization as redeem.
 - `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
   first, including pending operations whose idempotency keys survive restarts. An ambiguous
   request finalized at expiry has outcome `unknown`; check the provider before trying another reset.

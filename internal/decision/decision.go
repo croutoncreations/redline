@@ -189,6 +189,68 @@ func ResetUnavailableText(reason string) string {
 	return "can't be used right now"
 }
 
+// ReachedLimit names the limit a snapshot shows as used up, in the window
+// names reset Clears use: "weekly", "fable" (the Fable allowance), or
+// "five_hour". The broadest one wins, since refilling it is what unblocks
+// work. Empty when no limit is used up.
+func ReachedLimit(s UsageSnapshot) string {
+	const spent = 0.005 // rounding: providers report whole percents
+	if !s.Weekly.ResetsAt.IsZero() && s.Weekly.Remaining <= spent {
+		return "weekly"
+	}
+	if fable, ok := s.Allowance("model:fable:weekly"); ok && fable.Remaining <= spent {
+		return "fable"
+	}
+	if s.Short != nil && s.Short.Remaining <= spent {
+		return "five_hour"
+	}
+	return ""
+}
+
+// ResetKindOrder is the order to try reset kinds for a reached limit, the
+// way Claude Code offers them: the kind made for that limit first, then
+// broader ones, keeping the full reset for when nothing narrower fits. At
+// the weekly limit a Fable reset comes last: it only gives back what Fable
+// used of the week.
+func ResetKindOrder(limit string) []string {
+	switch limit {
+	case "weekly":
+		return []string{"weekly", "full", "fable"}
+	case "fable":
+		return []string{"fable", "full"}
+	case "five_hour":
+		return []string{"session", "fable", "full"}
+	}
+	return nil
+}
+
+// RefillsLimit reports whether spending the reset refills the named limit.
+// Unknown clears fall back to what the kind is known to refill.
+func (r BankedReset) RefillsLimit(limit string) bool {
+	if limit == "weekly" && r.Kind == "fable" {
+		return true // gives back what Fable used of the week
+	}
+	if len(r.Clears) > 0 {
+		for _, window := range r.Clears {
+			if window == limit {
+				return true
+			}
+		}
+		return false
+	}
+	switch r.Kind {
+	case "full":
+		return limit == "five_hour" || limit == "weekly" || limit == "fable"
+	case "session":
+		return limit == "five_hour"
+	case "weekly":
+		return limit == "weekly"
+	case "fable":
+		return limit == "five_hour" || limit == "fable"
+	}
+	return false
+}
+
 // normalizeResetWindows maps provider window names onto Redline's, dropping
 // unknown and duplicate ones. Claude's seven_day_overage_included is the Fable
 // allowance, not the weekly limit: a Fable reset clears it without resetting
