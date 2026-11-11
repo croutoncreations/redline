@@ -532,6 +532,10 @@ func (s *Server) redeemBankedResetKind(ctx context.Context, providerID, trigger 
 		s.usageSources.ForgetBankedReset(provider, result.ResetID)
 		post, raw, refreshErr := s.usageSources.FetchFresh(ctx, providerID, provider)
 		if refreshErr == nil {
+			// Recorded against this account, as every collected snapshot
+			// is; unattributed, the dashboard would keep showing the
+			// account's last snapshot from before the reset.
+			post.Account = providerID
 			refreshErr = s.store.SaveSnapshot(ctx, post, raw)
 		}
 		if refreshErr == nil {

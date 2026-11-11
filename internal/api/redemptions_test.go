@@ -124,6 +124,9 @@ func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	post := pre
 	post.Weekly.Remaining = .9
 	post.ObservedAt = pre.ObservedAt.Add(time.Second)
+	// A real source does not know the account; the snapshot after a
+	// redemption must still be recorded against it.
+	post.Account = ""
 	now := pre.ObservedAt
 	s.now = func() time.Time { return now }
 	fresh := freshRedemptionSource{fetch: func() decision.UsageSnapshot {
