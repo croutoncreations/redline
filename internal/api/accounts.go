@@ -40,7 +40,7 @@ type accountView struct {
 	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
 	// Origin is "config" for accounts in the main config file (edit that
 	// file to change them) and "managed" for accounts added from Redline.
-	Origin   string `json:"origin"`
+	Origin string `json:"origin"`
 	// Disabled is the saved setting; for a running account it can be true
 	// while Pending is "disable" (switched off, restart not yet applied).
 	Disabled bool `json:"disabled"`
