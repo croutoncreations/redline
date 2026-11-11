@@ -136,3 +136,28 @@ func TestUsageSourceLabelsSnapshotWithItsOwnName(t *testing.T) {
 		t.Fatalf("source = %q, want native", snapshot.Source)
 	}
 }
+
+// An expired report holds scheduling: the snapshot says its source is stale
+// once the report's expiry and the display grace have passed.
+func TestSnapshotMarksAnExpiredReportStale(t *testing.T) {
+	report := recordedReport(t)
+	if report.ExpiresAt == nil {
+		t.Fatal("fixture has no expiry")
+	}
+	current, err := Snapshot(report, report.ExpiresAt.Add(StaleGrace-time.Second))
+	if err != nil || current.SourceStale {
+		t.Fatalf("within grace: stale=%v err=%v", current.SourceStale, err)
+	}
+	expired, err := Snapshot(report, report.ExpiresAt.Add(StaleGrace))
+	if err != nil || !expired.SourceStale {
+		t.Fatalf("past expiry: stale=%v err=%v", expired.SourceStale, err)
+	}
+	result := decision.Evaluate(decision.Input{Snapshot: expired, WindowWeeklyCost: .1, Now: report.ExpiresAt.Add(StaleGrace), MaxSnapshotAge: time.Hour})
+	if result.Decision != decision.Unknown {
+		t.Fatalf("expired report admitted work: %+v", result)
+	}
+	report.ExpiresAt = nil
+	if undated, err := Snapshot(report, time.Now()); err != nil || undated.SourceStale {
+		t.Fatalf("no expiry: stale=%v err=%v", undated.SourceStale, err)
+	}
+}

@@ -44,6 +44,14 @@ func Snapshot(report Report, now time.Time) (decision.UsageSnapshot, error) {
 	if len(report.Errors) > 0 {
 		snapshot.Confidence = "medium"
 	}
+	// The source says how long its numbers stay current. Past that (plus the
+	// grace every display uses), they are out of date however recently they
+	// were collected, and scheduling must hold rather than spend against old
+	// monthly headroom. A report without an expiry falls back to the
+	// snapshot age limit.
+	if report.ExpiresAt != nil && !now.Before(report.ExpiresAt.Add(StaleGrace)) {
+		snapshot.SourceStale = true
+	}
 	for _, pool := range []struct {
 		meter Meter
 		ok    bool
