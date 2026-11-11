@@ -699,6 +699,12 @@ func evaluateSessionOnly(in Input) Result {
 	if in.Snapshot.ShortWindowUnavailable {
 		return unknown("five-hour window is active but its reset time is unavailable; dispatch holds until it is readable")
 	}
+	// Session-only scheduling spends only the 5-hour window, so it must be
+	// reported: either read, or explicitly not started (full). A snapshot
+	// that says nothing about it is not room to spend.
+	if in.Snapshot.Short == nil && !in.Snapshot.ShortWindowNotStarted {
+		return unknown("five-hour window not reported; session-only dispatch holds until it is")
+	}
 	remaining := 1.0
 	result := Result{Mode: ModeSessionOnly, EffectiveResetSource: ResetSession}
 	if in.Snapshot.Short != nil {

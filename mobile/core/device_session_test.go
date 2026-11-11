@@ -33,7 +33,21 @@ func TestExchangeDeviceSession(t *testing.T) {
 		w.WriteHeader(403)
 	}))
 	defer refusing.Close()
-	if token, err := NewClient(refusing.URL, "scoped").ExchangeDeviceSession("Pixel 9"); err == nil || token != "" {
+	if token, err := NewClient(refusing.URL, "scoped").ExchangeDeviceSession("Pixel 9"); err == nil || token != "" || !IsExchangeRefused(err) {
 		t.Fatalf("refused exchange returned token=%q err=%v", token, err)
+	}
+	// A server error or an unreachable desktop is not a refusal: the phone
+	// must try again rather than remember the upgrade as settled.
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer failing.Close()
+	if _, err := NewClient(failing.URL, "master").ExchangeDeviceSession("Pixel 9"); err == nil || IsExchangeRefused(err) {
+		t.Fatalf("server error read as a refusal: %v", err)
+	}
+	unreachable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	unreachable.Close()
+	if _, err := NewClient(unreachable.URL, "master").ExchangeDeviceSession("Pixel 9"); err == nil || IsExchangeRefused(err) {
+		t.Fatalf("transport failure read as a refusal: %v", err)
 	}
 }

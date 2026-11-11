@@ -39,6 +39,7 @@ func TestSessionOnly(t *testing.T) {
 		{name: "stale", change: func(in *Input) { in.Snapshot.ObservedAt = now.Add(-time.Hour) }, want: Unknown, reason: "usage snapshot is stale"},
 		{name: "source stale", change: func(in *Input) { in.Snapshot.SourceStale = true }, want: Unknown},
 		{name: "future", change: func(in *Input) { in.Snapshot.ObservedAt = now.Add(time.Minute) }, want: Unknown},
+		{name: "short not reported", change: func(in *Input) { in.Snapshot.Short = nil }, want: Unknown, reason: "five-hour window not reported; session-only dispatch holds until it is"},
 		{name: "unreadable short", change: func(in *Input) { in.Snapshot.Short = nil; in.Snapshot.ShortWindowUnavailable = true }, want: Unknown},
 		{name: "expired short", change: func(in *Input) { in.Snapshot.Short.ResetsAt = now }, want: Unknown},
 		{name: "manual", change: func(in *Input) { in.ForceFiresale = true; in.ForceFiresaleTrigger = "manual" }, want: Admit, tier: domain.DispatchFiresale, firesale: true, reason: "manual firesale; running queued work before the deadline"},

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -16,6 +17,16 @@ func (c *Client) RegisterPush(platform, provider, token string) error {
 	return c.do(ctx, http.MethodPut, "/v1/push/registration", map[string]string{
 		"platform": platform, "provider": provider, "token": token,
 	}, nil)
+}
+
+// IsExchangeRefused reports that the desktop answered a device-session
+// exchange with a definitive refusal (a 4xx: the credential is already a
+// device session, or the desktop predates the endpoint). Transport failures,
+// timeouts and server errors are not refusals: the exchange should be
+// retried later rather than given up on.
+func IsExchangeRefused(err error) bool {
+	var api *apiError
+	return errors.As(err, &api) && api.StatusCode >= 400 && api.StatusCode < 500
 }
 
 // ExchangeDeviceSession trades the owner credential a phone received from a
