@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.BoxWithConstraintsScope
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -714,7 +715,11 @@ internal fun ProviderDetails(
                     }
                     ) +
                 (if (expired > 0) " · $expired since expired" else "")
-            if (credits.isNotEmpty()) {
+            val kinds = provider.resetCredits?.kinds.orEmpty()
+            if (credits.isNotEmpty() && kinds.isNotEmpty() && !staleNumbers) {
+                Spacer(Modifier.height(10.dp))
+                BankedResetKinds(provider, kinds, expanded = accountPage)
+            } else if (credits.isNotEmpty()) {
                 val count = provider.resetCredits?.available ?: provider.bankedResets
                 Spacer(Modifier.height(10.dp))
                 val creditsColor = if ((count ?: 0) > 0 && !staleNumbers) TextPrimary else TextMuted
@@ -1082,3 +1087,52 @@ private fun MinuteTick() {
     }
     @Suppress("UNUSED_EXPRESSION") minute
 }
+
+
+/**
+ * Banked resets by kind: "Full 1 · Fable 3", tappable to list each kind's
+ * deadlines and why any cannot be spent now. Starts open on an account page,
+ * where there is room, and collapsed elsewhere.
+ */
+@Composable
+private fun BankedResetKinds(provider: ProviderUsage, kinds: List<ResetKindGroup>, expanded: Boolean) {
+    var open by remember(provider.id) { mutableStateOf(expanded) }
+    val count = provider.resetCredits?.available ?: 0
+    val summary = resetKindsSummary(provider)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable { open = !open }
+            .testTag(BANKED_RESET_KINDS_TAG)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Banked quota resets: $count available. $summary. " +
+                    if (open) "Tap to hide details" else "Tap to show details"
+            },
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.weight(1f))
+            Text(
+                summary,
+                color = if (count > 0) TextPrimary else TextMuted,
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            )
+            Text(if (open) "  ▴" else "  ▾", color = TextMuted, fontSize = 11.sp)
+        }
+        if (open) {
+            kinds.filter { it.available > 0 || it.held > 0 }.forEach { group ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "${group.label} · ${group.available} available" + if (group.held > 0) " · ${group.held} held" else "",
+                    color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                )
+                resetKindLines(group).forEach { line ->
+                    Text(line, color = TextMuted, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+const val BANKED_RESET_KINDS_TAG = "banked-reset-kinds"

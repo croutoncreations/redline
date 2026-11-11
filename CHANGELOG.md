@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
+  kind's deadlines and why any can't be spent now (paused, not active yet), matching the
+  desktop and the mobile web page. A phone talking to an older desktop shows the plain count
+  as before.
+
 ## [0.1.13] - 2026-11-11
 
 ### Upgrade notes

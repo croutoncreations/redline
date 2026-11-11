@@ -137,6 +137,32 @@ type ResetCredits struct {
 	// NextExpiresInSeconds counts down to the soonest deadline; zero when
 	// none is known.
 	NextExpiresInSeconds int64 `json:"next_expires_in_seconds,omitempty"`
+	// Kinds breaks the balance down by what each reset refills (Claude's
+	// full and Fable resets, for example), in display order. Empty unless the
+	// provider's per-reset details account for the whole of Available, so a
+	// partial or stale breakdown is never shown as if it were complete.
+	Kinds []ResetKindGroup `json:"kinds,omitempty"`
+}
+
+// ResetKindGroup is the resets of one kind an account holds.
+type ResetKindGroup struct {
+	// Kind is the provider's name ("full", "fable", "session", "weekly",
+	// "opus", "sonnet"), or "" when it did not say.
+	Kind string `json:"kind"`
+	// Label names the kind for display: "Full", "Fable", "5-hour", ...;
+	// "Other" when the kind is unknown.
+	Label string `json:"label"`
+	// Available counts the resets of this kind that can be spent.
+	Available int `json:"available"`
+	// Held counts resets that are paused or not active yet: owned, but not
+	// in Available.
+	Held int `json:"held,omitempty"`
+	// Expiries are each spendable reset's deadline, soonest first, one entry
+	// per reset; fewer than Available when some had none.
+	Expiries []time.Time `json:"expiries,omitempty"`
+	// Notes say why some of these resets cannot be spent now, in Claude
+	// Code's words ("2 paused", "Isn't active yet").
+	Notes []string `json:"notes,omitempty"`
 }
 
 // SchedulingView is the scheduler's policy for one provider, interpreted for
@@ -452,7 +478,97 @@ func resetCredits(snapshot *decision.UsageSnapshot, now time.Time) *ResetCredits
 	if len(credits.Expiries) > 0 {
 		credits.NextExpiresInSeconds = secondsUntil(credits.Expiries[0], now)
 	}
+	credits.Kinds = resetKindGroups(snapshot.BankedResetDetails, credits.Available, now)
 	return credits
+}
+
+var resetKindLabels = map[string]string{
+	"full": "Full", "weekly": "Weekly", "session": "5-hour", "fable": "Fable", "opus": "Opus", "sonnet": "Sonnet",
+}
+
+var resetKindOrder = []string{"full", "weekly", "session", "fable", "opus", "sonnet", ""}
+
+// resetKindGroups groups live per-reset details by kind, matching the
+// desktop and the mobile web page. Nil unless the spendable resets add up to
+// the reported count: a breakdown that disagrees with the headline number is
+// worse than none.
+func resetKindGroups(details []decision.BankedReset, available int, now time.Time) []ResetKindGroup {
+	groups := map[string]*ResetKindGroup{}
+	reasons := map[string]map[string]int{}
+	var reasonOrder = map[string][]string{}
+	spendable := 0
+	for _, detail := range details {
+		if detail.ResetsLeft <= 0 || (detail.ExpiresAt != nil && !detail.ExpiresAt.After(now)) {
+			continue
+		}
+		kind := detail.Kind
+		if _, known := resetKindLabels[kind]; !known {
+			kind = ""
+		}
+		group := groups[kind]
+		if group == nil {
+			label := resetKindLabels[kind]
+			if label == "" {
+				label = "Other"
+			}
+			group = &ResetKindGroup{Kind: kind, Label: label}
+			groups[kind] = group
+			reasons[kind] = map[string]int{}
+		}
+		held := !detail.Spendable(now)
+		if held {
+			group.Held += detail.ResetsLeft
+		} else {
+			group.Available += detail.ResetsLeft
+			spendable += detail.ResetsLeft
+			if detail.ExpiresAt != nil {
+				for range detail.ResetsLeft {
+					group.Expiries = append(group.Expiries, detail.ExpiresAt.UTC())
+				}
+			}
+		}
+		if text := resetNoteText(detail); text != "" {
+			if reasons[kind][text] == 0 {
+				reasonOrder[kind] = append(reasonOrder[kind], text)
+			}
+			reasons[kind][text] += detail.ResetsLeft
+		}
+	}
+	if len(groups) == 0 || spendable != available {
+		return nil
+	}
+	var out []ResetKindGroup
+	for _, kind := range resetKindOrder {
+		group := groups[kind]
+		if group == nil {
+			continue
+		}
+		sort.Slice(group.Expiries, func(i, j int) bool { return group.Expiries[i].Before(group.Expiries[j]) })
+		total := group.Available + group.Held
+		for _, text := range reasonOrder[kind] {
+			if total > 1 {
+				group.Notes = append(group.Notes, fmt.Sprintf("%d %s", reasons[kind][text], text))
+			} else {
+				group.Notes = append(group.Notes, strings.ToUpper(text[:1])+text[1:])
+			}
+		}
+		out = append(out, *group)
+	}
+	return out
+}
+
+// resetNoteText is why a reset cannot be spent, in Claude Code's words, or
+// "" when it can or the provider did not say.
+func resetNoteText(detail decision.BankedReset) string {
+	switch {
+	case detail.UnavailableReason == "paused" || (detail.UnavailableReason == "" && detail.Paused):
+		return "paused"
+	case detail.UnavailableReason == "not_started":
+		return "isn't active yet"
+	case detail.UnavailableReason == "":
+		return ""
+	}
+	return decision.ResetUnavailableText(detail.UnavailableReason)
 }
 
 // FetchUsage returns the capacity screen as JSON.

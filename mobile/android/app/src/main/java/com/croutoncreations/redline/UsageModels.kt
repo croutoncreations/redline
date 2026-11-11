@@ -179,7 +179,63 @@ data class ResetCredits(
     /** Each credit's deadline, soonest first; fewer than [available] when some had none. */
     val expiries: List<String> = emptyList(),
     @SerialName("next_expires_in_seconds") val nextExpiresInSeconds: Long = 0,
+    /**
+     * The balance by kind (Claude's full and Fable resets), in display order.
+     * Empty from an older desktop, or when the desktop's per-reset details do
+     * not add up to [available]; the screen then shows the plain count.
+     */
+    val kinds: List<ResetKindGroup> = emptyList(),
 )
+
+@Serializable
+data class ResetKindGroup(
+    val kind: String = "",
+    /** "Full", "Fable", "5-hour", ...; "Other" when the provider did not say. */
+    val label: String = "",
+    val available: Int = 0,
+    /** Paused or not active yet: held, but not in [available]. */
+    val held: Int = 0,
+    /** One deadline per spendable reset, soonest first. */
+    val expiries: List<String> = emptyList(),
+    /** Why some cannot be spent now, in Claude Code's words. */
+    val notes: List<String> = emptyList(),
+)
+
+/** "Full 1 · Fable 3": the balance by kind, or "" when it is not broken down. */
+fun resetKindsSummary(provider: ProviderUsage): String =
+    provider.resetCredits?.kinds.orEmpty()
+        .filter { it.available > 0 || it.held > 0 }
+        .joinToString(" · ") { group ->
+            "${group.label} ${group.available}" + if (group.held > 0) " (+${group.held} held)" else ""
+        }
+
+/** Expiry lines beyond which the rest of a kind collapse into "+N more". */
+const val MAX_RESET_EXPIRY_LINES = 3
+
+/**
+ * One kind's lines for the expanded list: its deadlines, one line per
+ * distinct date ("Expires Mar 8 ×3"), then why any cannot be spent now. A
+ * deadline is "expires", never "resets", so it is not mistaken for a window.
+ */
+fun resetKindLines(group: ResetKindGroup, formatTime: (String) -> String = { formatResetAt(it) }): List<String> {
+    val byDate = group.expiries.groupingBy { it }.eachCount().toList()
+    val undated = group.available - group.expiries.size
+    val lines = mutableListOf<String>()
+    if (byDate.size == 1 && undated <= 0) {
+        val (at, _) = byDate.first()
+        lines += (if (group.available == 1) "Expires " else "All expire ") + formatTime(at)
+    } else {
+        val shown = if (byDate.size + (if (undated > 0) 1 else 0) > MAX_RESET_EXPIRY_LINES + 1) MAX_RESET_EXPIRY_LINES else byDate.size
+        byDate.take(shown).forEach { (at, n) -> lines += "Expires ${formatTime(at)}" + if (n > 1) " ×$n" else "" }
+        val hidden = byDate.drop(shown)
+        if (hidden.isNotEmpty()) {
+            lines += "+${hidden.sumOf { it.second } + maxOf(undated, 0)} more, last ${formatTime(hidden.last().first)}"
+        } else if (undated > 0) {
+            lines += "No expiry reported" + if (undated > 1) " ×$undated" else ""
+        }
+    }
+    return lines + group.notes
+}
 
 /** The display name for one account: its label, or its id from an older desktop. */
 val ProviderUsage.accountName: String get() = label.ifBlank { id }
