@@ -7,6 +7,7 @@ import android.os.Build
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessaging
+import core.Core
 import java.security.MessageDigest
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.Dispatchers
@@ -108,21 +109,32 @@ class PushClient(
     /**
      * Phones paired before device sessions hold the desktop's owner token, and
      * push registration needs a device session. Trade it in place, once: on
-     * success the scoped token replaces the old one; a refusal (already a
-     * device, or an older desktop) is remembered so it is not retried.
+     * success the scoped token replaces the old one; a definitive refusal
+     * (already a device, or an older desktop) is remembered so it is not
+     * retried. A timeout, an unreachable desktop or a server error is not
+     * remembered, so the next registration tries the exchange again instead
+     * of sending the owner token to an endpoint that refuses it.
      */
     private suspend fun upgradeLegacyCredentialLocked() {
         if (prefs.getString("upgraded_identity", null) == identity(settings)) return
         val client = corePushCall { holder.client() }
-        val scoped = runCatching { corePushCall { client.exchangeDeviceSession(android.os.Build.MODEL) } }.getOrNull()
+        val outcome = runCatching { corePushCall { client.exchangeDeviceSession(android.os.Build.MODEL) } }
+        val scoped = outcome.getOrNull()
         if (scoped != null) {
             withContext(NonCancellable + Dispatchers.IO) {
                 holder.dropRelay()
                 settings.update(settings.baseUrl, scoped)
             }
+        } else {
+            val error = outcome.exceptionOrNull()
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            if (!isExchangeRefused(error)) return
         }
         prefs.edit().putString("upgraded_identity", identity(settings)).apply()
     }
+
+    private fun isExchangeRefused(error: Throwable?): Boolean =
+        error is Exception && runCatching { Core.isExchangeRefused(error) }.getOrDefault(false)
 
     private suspend fun unregisterLocked() {
         val client = corePushCall { holder.client() }
