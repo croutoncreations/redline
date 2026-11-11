@@ -29,18 +29,131 @@ type bankedResetRedeemer interface {
 	Redeem(context.Context, config.Provider, nativeusage.RedeemRequest) (nativeusage.RedeemResult, error)
 }
 
+// ResetChoice narrows which reset to spend. Limit is the limit the account
+// has reached (decision.ReachedLimit); Kind is a reset kind the user asked
+// for. Both empty keeps the provider's own next reset.
+type ResetChoice struct {
+	Limit string
+	Kind  string
+}
+
 // SelectBankedReset is shared with the CLI confirmation, so the prompt describes
 // the same selection rules as the spending operation.
 func SelectBankedReset(provider string, details []decision.BankedReset, now time.Time) (decision.BankedReset, error) {
+	return SelectBankedResetFor(provider, details, now, ResetChoice{})
+}
+
+// SelectBankedResetFor picks the reset to spend. For Claude with a reached
+// limit or a requested kind it chooses by kind the way Claude Code's
+// /limit-reset does: the kind made for the reached limit first (a Fable reset
+// when only the Fable allowance is used up), broader kinds after, and at the
+// weekly limit a Fable reset last because it only gives back what Fable used.
+// Within a kind it prefers Claude's next grant, then the soonest expiry.
+func SelectBankedResetFor(provider string, details []decision.BankedReset, now time.Time, choice ResetChoice) (decision.BankedReset, error) {
+	if choice.Kind != "" && provider != "claude" {
+		return decision.BankedReset{}, fmt.Errorf("choosing a reset kind is only supported for Claude")
+	}
+	if provider != "claude" || (choice.Limit == "" && choice.Kind == "") {
+		return selectNextBankedReset(provider, details, now)
+	}
+	usable := func(d decision.BankedReset) bool {
+		return d.ID != "" && d.Spendable(now) && (d.ExpiresAt == nil || d.ExpiresAt.After(now)) &&
+			d.UsableNow != nil && *d.UsableNow && (d.CooldownUntil == nil || !d.CooldownUntil.After(now))
+	}
+	pick := func(kind string) *decision.BankedReset {
+		var best *decision.BankedReset
+		for _, d := range details {
+			if d.Kind != kind || !usable(d) || (choice.Limit != "" && !d.RefillsLimit(choice.Limit)) {
+				continue
+			}
+			better := best == nil || (d.Claimable && !best.Claimable) ||
+				(d.Claimable == best.Claimable && d.ExpiresAt != nil && (best.ExpiresAt == nil || d.ExpiresAt.Before(*best.ExpiresAt)))
+			if better {
+				copy := d
+				best = &copy
+			}
+		}
+		return best
+	}
+	order := decision.ResetKindOrder(choice.Limit)
+	if choice.Kind != "" {
+		order = []string{choice.Kind}
+	}
+	for _, kind := range order {
+		if reset := pick(kind); reset != nil {
+			return *reset, nil
+		}
+	}
+	return decision.BankedReset{}, noResetOfKindError(details, now, choice, usable)
+}
+
+// noResetOfKindError explains why the requested kind cannot be spent, and
+// which kinds could be, in the spirit of Claude Code's "you can use a …".
+func noResetOfKindError(details []decision.BankedReset, now time.Time, choice ResetChoice, usable func(decision.BankedReset) bool) error {
+	want := "a reset that refills your " + limitName(choice.Limit)
+	if choice.Kind != "" {
+		want = describeReset(decision.BankedReset{Kind: choice.Kind})
+	}
+	reason := ""
+	var offers []string
+	seen := map[string]bool{}
+	for _, d := range details {
+		if d.ResetsLeft <= 0 || (d.ExpiresAt != nil && !d.ExpiresAt.After(now)) {
+			continue
+		}
+		if choice.Kind != "" && d.Kind == choice.Kind && reason == "" {
+			switch {
+			case choice.Limit != "" && !d.RefillsLimit(choice.Limit):
+				reason = "doesn't refill your " + limitName(choice.Limit)
+			case d.UnavailableReason != "":
+				reason = decision.ResetUnavailableText(d.UnavailableReason)
+			}
+		}
+		if usable(d) && (choice.Limit == "" || d.RefillsLimit(choice.Limit)) && d.Kind != "" && !seen[d.Kind] {
+			seen[d.Kind] = true
+			offers = append(offers, describeReset(d))
+		}
+	}
+	message := "no claimable banked reset is available: " + want
+	if reason != "" {
+		message += " " + reason
+	} else {
+		message += " is not available"
+	}
+	if len(offers) > 0 {
+		message += "; you can use " + strings.Join(offers, " or ")
+	}
+	return errors.New(message)
+}
+
+func limitName(limit string) string {
+	switch limit {
+	case "five_hour":
+		return "5-hour limit"
+	case "fable":
+		return "Fable allowance"
+	case "weekly":
+		return "weekly limit"
+	}
+	return "limit"
+}
+
+// selectNextBankedReset spends Claude's next grant or Codex's soonest credit.
+func selectNextBankedReset(provider string, details []decision.BankedReset, now time.Time) (decision.BankedReset, error) {
 	var selected *decision.BankedReset
 	if provider == "codex" && len(details) == 0 {
 		return decision.BankedReset{}, fmt.Errorf("credit details not loaded yet; try again shortly")
 	}
+	var held *decision.BankedReset
 	for _, detail := range details {
 		if detail.ResetsLeft <= 0 || detail.ID == "" || (detail.ExpiresAt != nil && !detail.ExpiresAt.After(now)) {
 			continue
 		}
-		if provider == "claude" && !detail.Claimable {
+		if !detail.Spendable(now) || (provider == "claude" && !detail.Claimable) {
+			if held == nil {
+				d := detail
+				held = &d
+			}
 			continue
 		}
 		if selected == nil || (detail.ExpiresAt != nil && (selected.ExpiresAt == nil || detail.ExpiresAt.Before(*selected.ExpiresAt))) {
@@ -49,6 +162,10 @@ func SelectBankedReset(provider string, details []decision.BankedReset, now time
 		}
 	}
 	if selected == nil {
+		// Say why the resets that are held cannot be spent, when we know.
+		if held != nil && held.UnavailableReason != "" {
+			return *held, fmt.Errorf("no claimable banked reset is available: %s %s", describeReset(*held), decision.ResetUnavailableText(held.UnavailableReason))
+		}
 		return decision.BankedReset{}, fmt.Errorf("no claimable banked reset is available")
 	}
 	if provider == "claude" {
@@ -56,17 +173,132 @@ func SelectBankedReset(provider string, details []decision.BankedReset, now time
 			return *selected, fmt.Errorf("reset is in cooldown until %s", selected.CooldownUntil.Format(time.RFC3339))
 		}
 		if selected.UsableNow == nil || !*selected.UsableNow {
+			if selected.UnavailableReason != "" {
+				return *selected, fmt.Errorf("%s %s", describeReset(*selected), decision.ResetUnavailableText(selected.UnavailableReason))
+			}
 			return *selected, fmt.Errorf("Claude did not report this reset as usable now")
 		}
 	}
 	return *selected, nil
 }
 
+// redemptionAccountError refuses spending unless the login the redeemer
+// would use is certainly this account's. A Claude Code profile account
+// spends from its own profile login. Any other account spends from the
+// provider's default login, which is only certain when no other account of
+// the provider reads that login too. An OpenUsage card other than the
+// default names no local login at all. This also gates reset horizons.
+func (s *Server) redemptionAccountError(provider config.Provider) error {
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
+	if card != "" && card != name {
+		return fmt.Errorf("%w: OpenUsage card %s has no local %s login Redline can spend from; "+
+			"bind the account to its Claude Code profile (redline account add-profile) or redeem in Claude Code (/limit-reset)",
+			store.ErrConflict, card, name)
+	}
+	if name == "claude" && config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir) != "" {
+		return nil
+	}
+	// SkipBankedResetProviders is set when the default login's reset lookup
+	// is ambiguous; it stays a second, conservative signal here.
+	if s.defaultLoginAccounts(name) > 1 || s.usageSources.SkipBankedResetProviders[name] {
+		return fmt.Errorf("%w: cannot redeem %s resets with multiple accounts on the default login; use the provider CLI", store.ErrConflict, name)
+	}
+	return nil
+}
+
+// defaultLoginAccounts counts configured accounts of a provider that read
+// its default login: neither a Claude Code profile nor another OpenUsage
+// card.
+func (s *Server) defaultLoginAccounts(provider string) int {
+	count := 0
+	for _, configured := range s.config.Providers {
+		if strings.EqualFold(configured.Provider, provider) && config.MeteringIdentity(configured) == "default:"+provider {
+			count++
+		}
+	}
+	return count
+}
+
+// describeReset names a reset for messages, e.g. "the Fable reset".
+func describeReset(reset decision.BankedReset) string {
+	switch reset.Kind {
+	case "full":
+		return "the full reset"
+	case "session":
+		return "the 5-hour reset"
+	case "weekly":
+		return "the weekly reset"
+	case "fable":
+		return "the Fable reset"
+	case "opus":
+		return "the Opus reset"
+	case "sonnet":
+		return "the Sonnet reset"
+	}
+	return "the reset"
+}
+
 func (s *Server) RedeemBankedReset(ctx context.Context, providerID, trigger string, dryRun bool) (nativeusage.RedeemResult, error) {
 	return s.redeemBankedResetExpected(ctx, providerID, trigger, dryRun, "")
 }
 
+// atLimitResetReader is the fresh read used to choose a Claude reset by kind.
+type atLimitResetReader interface {
+	BankedResetsAtLimit(context.Context, config.Provider) (nativeusage.ClaudeResetsAtLimit, error)
+}
+
+// ResetKinds are the values a redemption may ask for: "auto" picks the kind
+// that fits the limit the account has reached; the rest name a kind.
+var ResetKinds = []string{"auto", "full", "weekly", "session", "fable", "opus", "sonnet"}
+
 func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trigger string, dryRun bool, expectedResetID string) (nativeusage.RedeemResult, error) {
+	return s.redeemBankedResetKind(ctx, providerID, trigger, dryRun, expectedResetID, "")
+}
+
+// resetChoiceFor turns a requested kind into a selection for Claude, reading
+// the account's resets fresh at its limit when a kind was requested. Without
+// a kind it returns the stored details and no choice: Claude's next grant.
+func (s *Server) resetChoiceFor(ctx context.Context, provider config.Provider, kind string, pre decision.UsageSnapshot) ([]decision.BankedReset, ResetChoice, error) {
+	if kind == "" {
+		return pre.BankedResetDetails, ResetChoice{}, nil
+	}
+	if !slices.Contains(ResetKinds, kind) {
+		return nil, ResetChoice{}, fmt.Errorf("reset kind must be one of %s", strings.Join(ResetKinds, ", "))
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider.Provider), "claude") {
+		return nil, ResetChoice{}, fmt.Errorf("choosing a reset kind is only supported for Claude")
+	}
+	details := pre.BankedResetDetails
+	limit := decision.ReachedLimit(pre)
+	if s.atLimitResets != nil {
+		if until := s.usageSources.LoginBlockedUntil(provider); s.now().Before(until) {
+			return nil, ResetChoice{}, fmt.Errorf("%w: Claude's usage endpoint is rate limited until %s; try again then", store.ErrConflict, until.UTC().Format(time.RFC3339))
+		}
+		fresh, err := s.atLimitResets.BankedResetsAtLimit(ctx, provider)
+		if err != nil {
+			s.usageSources.RecordLoginError(provider, err)
+			return nil, ResetChoice{}, fmt.Errorf("read Claude resets at the limit: %w", err)
+		}
+		if fresh.Resets != nil {
+			var normalized decision.UsageSnapshot
+			normalized.ApplyBankedResets(fresh.Resets)
+			details = normalized.BankedResetDetails
+		}
+		if len(fresh.Exhausted) > 0 {
+			limit = fresh.Exhausted[0]
+		}
+	}
+	choice := ResetChoice{Limit: limit}
+	if kind != "auto" {
+		choice.Kind = kind
+	} else if limit == "" {
+		return nil, ResetChoice{}, fmt.Errorf("you're not at a usage limit, so there is no reset to pick for it; name a kind instead")
+	}
+	return details, choice, nil
+}
+
+func (s *Server) redeemBankedResetKind(ctx context.Context, providerID, trigger string, dryRun bool, expectedResetID, kind string) (nativeusage.RedeemResult, error) {
 	result := nativeusage.RedeemResult{Outcome: "failed"}
 	if s.redemptionDisabled {
 		return result, fmt.Errorf("%w: banked reset redemption is disabled in demo mode", store.ErrConflict)
@@ -96,8 +328,8 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	s.redemptionsInFlight[providerID] = true
 	s.redemptionMu.Unlock()
 	defer func() { s.redemptionMu.Lock(); delete(s.redemptionsInFlight, providerID); s.redemptionMu.Unlock() }()
-	if s.usageSources.SkipBankedResetProviders[name] {
-		return result, fmt.Errorf("%w: cannot redeem %s resets with multiple accounts configured; use the provider CLI", store.ErrConflict, name)
+	if err := s.redemptionAccountError(provider); err != nil {
+		return result, err
 	}
 	// Replay confirmed retries before lockouts unless stored telemetry shows
 	// a remaining use after the latest successful redemption of this grant.
@@ -115,7 +347,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				if attempt.ResetID != expectedResetID {
 					continue
 				}
-				snapshot, _, err := s.store.LatestSnapshot(ctx, name)
+				snapshot, _, err := s.store.LatestSnapshot(ctx, providerID, name)
 				if err != nil && !errors.Is(err, store.ErrNotFound) {
 					return result, err
 				}
@@ -126,7 +358,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 			}
 		}
 	}
-	if until := s.usageSources.NativeBlockedUntil(name); s.now().Before(until) {
+	if until := s.usageSources.LoginBlockedUntil(provider); s.now().Before(until) {
 		result.Outcome = "cooldown"
 		result.CooldownUntil = &until
 		result.Reason = "provider rate-limit lockout is active"
@@ -150,7 +382,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	}
 	if !dryRun {
 		var err error
-		pre, _, err = s.store.LatestSnapshot(ctx, name)
+		pre, _, err = s.store.LatestSnapshot(ctx, providerID, name)
 		if err != nil {
 			return result, err
 		}
@@ -163,7 +395,10 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				}
 			}
 		} else {
-			details := pre.BankedResetDetails
+			details, choice, choiceErr := s.resetChoiceFor(ctx, provider, kind, pre)
+			if errors.Is(choiceErr, store.ErrConflict) {
+				return result, choiceErr
+			}
 			if trigger == "automatic" {
 				details, err = s.automaticBankedResets(ctx, providerID, name, details, pre.ObservedAt)
 				if err != nil {
@@ -216,7 +451,11 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 				}
 				return replayedRedemption(*replay), nil
 			}
-			selected, err = SelectBankedReset(name, details, s.now())
+			if choiceErr != nil {
+				err = choiceErr
+			} else {
+				selected, err = SelectBankedResetFor(name, details, s.now(), choice)
+			}
 		}
 		if err != nil {
 			result.Outcome = "unavailable"
@@ -276,7 +515,7 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 	if err != nil {
 		// Keep pending on ambiguous transport failures/429s. The next attempt
 		// must reuse the persisted request ID, even if the response was lost.
-		s.usageSources.RecordNativeError(name, err)
+		s.usageSources.RecordLoginError(provider, err)
 		result.Outcome = "failed"
 		result.Reason = err.Error()
 		if recordErr := s.store.RecordBankedResetRedemptionError(context.WithoutCancel(ctx), attempt.ID, result.Reason); recordErr != nil {
@@ -293,6 +532,10 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		s.usageSources.ForgetBankedReset(provider, result.ResetID)
 		post, raw, refreshErr := s.usageSources.FetchFresh(ctx, providerID, provider)
 		if refreshErr == nil {
+			// Recorded against this account, as every collected snapshot
+			// is; unattributed, the dashboard would keep showing the
+			// account's last snapshot from before the reset.
+			post.Account = providerID
 			refreshErr = s.store.SaveSnapshot(ctx, post, raw)
 		}
 		if refreshErr == nil {
@@ -304,8 +547,17 @@ func (s *Server) redeemBankedResetExpected(ctx context.Context, providerID, trig
 		refilled := usageWindowRefilled(pre.Weekly, post.Weekly, 0)
 		clearsWeekly := slices.Contains(result.Cleared, "weekly")
 		clearsShort := slices.Contains(result.Cleared, "five_hour")
+		clearsFable := slices.Contains(result.Cleared, "fable")
 		if clearsShort && !clearsWeekly {
 			refilled = pre.Short != nil && post.Short != nil && usageWindowRefilled(*pre.Short, *post.Short, 0)
+		}
+		if clearsFable && !clearsWeekly {
+			// A Fable reset refills the Fable allowance and gives back only
+			// what Fable used of the week, so any of these shows it applied.
+			preFable, hadFable := pre.Allowance("model:fable:weekly")
+			postFable, hasFable := post.Allowance("model:fable:weekly")
+			refilled = refilled || usageWindowRefilled(pre.Weekly, post.Weekly, 0) ||
+				(hadFable && hasFable && postFable.Remaining > preFable.Remaining)
 		}
 		result.Verified = refreshErr == nil && post.ObservedAt.After(completedAt) && refilled
 		if !result.Verified {
@@ -389,6 +641,7 @@ func (s *Server) redeemBankedReset(w http.ResponseWriter, r *http.Request) {
 	var body *struct {
 		DryRun          bool   `json:"dry_run"`
 		ExpectedResetID string `json:"expected_reset_id,omitempty"`
+		Kind            string `json:"kind,omitempty"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
@@ -398,12 +651,65 @@ func (s *Server) redeemBankedReset(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "request body must be an object"})
 		return
 	}
-	result, err := s.redeemBankedResetExpected(r.Context(), r.PathValue("provider"), "manual", body.DryRun, body.ExpectedResetID)
+	if body.Kind != "" && !slices.Contains(ResetKinds, body.Kind) {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be one of " + strings.Join(ResetKinds, ", ")})
+		return
+	}
+	result, err := s.redeemBankedResetKind(r.Context(), r.PathValue("provider"), "manual", body.DryRun, body.ExpectedResetID, body.Kind)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// bankedResetChoice previews which reset a redemption with this kind would
+// spend, without spending it, so a confirmation can name it. Redemption then
+// binds to that ID with expected_reset_id. Choosing by kind reads Claude's
+// resets fresh, so this is one provider request.
+func (s *Server) bankedResetChoice(w http.ResponseWriter, r *http.Request) {
+	if p := requestPrincipal(r); !p.owner && (!p.valid() || !s.config.API.PairedDevices.AllowResetRedemption) {
+		writeJSON(w, http.StatusForbidden, problem{Error: "paired device reset redemption requires api.paired_devices.allow_reset_redemption: true"})
+		return
+	}
+	providerID := r.PathValue("provider")
+	provider, ok := s.config.Providers[providerID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
+		return
+	}
+	kind := r.URL.Query().Get("kind")
+	if kind != "" && !slices.Contains(ResetKinds, kind) {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "kind must be one of " + strings.Join(ResetKinds, ", ")})
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	// The same account gate as redemption: a preview must not name a reset
+	// that redeeming would then refuse, or read another login's resets.
+	if err := s.redemptionAccountError(provider); err != nil {
+		writeError(w, err)
+		return
+	}
+	// The fresh at-limit read stands on its own when a kind is asked for, so
+	// a missing stored snapshot only matters for Claude's plain next grant.
+	pre, _, err := s.store.LatestSnapshot(r.Context(), providerID, name)
+	if err != nil && (kind == "" || !errors.Is(err, store.ErrNotFound)) {
+		writeError(w, err)
+		return
+	}
+	details, choice, err := s.resetChoiceFor(r.Context(), provider, kind, pre)
+	if err == nil {
+		var selected decision.BankedReset
+		if selected, err = SelectBankedResetFor(name, details, s.now(), choice); err == nil {
+			writeJSON(w, http.StatusOK, selected)
+			return
+		}
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, problem{Error: err.Error()})
 }
 
 func (s *Server) bankedResetRedemptions(w http.ResponseWriter, r *http.Request) {

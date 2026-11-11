@@ -283,6 +283,47 @@ func TestServerRejectsDNSRebindingAndCrossOriginRequests(t *testing.T) {
 	}
 }
 
+func TestServerAcceptsCaseInsensitiveBearerScheme(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := testConfig("http://unused")
+	cfg.APIToken = "test-token-that-is-at-least-thirty-two-characters"
+	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	for _, test := range []struct {
+		header     string
+		wantStatus int
+	}{
+		{header: "Bearer " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "bearer " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "BEARER " + cfg.APIToken, wantStatus: http.StatusOK},
+		{header: "Basic " + cfg.APIToken, wantStatus: http.StatusUnauthorized},
+		{header: "Bearer" + cfg.APIToken, wantStatus: http.StatusUnauthorized},
+		{header: "bearer wrong-token", wantStatus: http.StatusUnauthorized},
+	} {
+		// /v1/devices is owner-only, so a 200 proves the master bearer was recognised as the owner.
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/devices", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", test.header)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		scheme, _, _ := strings.Cut(test.header, " ")
+		if response.StatusCode != test.wantStatus {
+			t.Fatalf("Authorization scheme %q: status = %d, want %d", scheme, response.StatusCode, test.wantStatus)
+		}
+	}
+}
+
 func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
 	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
@@ -653,12 +694,23 @@ func TestTaskTemplatesAreEditableStarters(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&templates); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || len(templates) != 6 {
+	if resp.StatusCode != http.StatusOK || len(templates) != 16 {
 		t.Fatalf("status=%d templates=%#v", resp.StatusCode, templates)
 	}
 	if templates[0].ID != "bug-hunt" || templates[0].Prompt == "" ||
 		templates[0].MinInterval != 3*24*time.Hour || templates[0].Type != domain.Recurring {
 		t.Fatalf("first template = %#v", templates[0])
+	}
+	for _, id := range []string{"documentation-drift", "ci-warning-cleanup", "release-readiness", "accessibility-repair", "api-contract-drift", "flaky-test-investigation", "incident-runbook", "build-reproducibility", "migration-compatibility", "performance-regression"} {
+		found := false
+		for _, template := range templates {
+			if template.ID == id && template.Prompt != "" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("editable starter %q is missing from API response", id)
+		}
 	}
 }
 
@@ -688,6 +740,164 @@ func TestDashboardEventsStreamAnImmediateSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: dashboard\n") || !strings.Contains(body, `"active_policy":"standard"`) {
 		t.Fatalf("unexpected event: %q", body)
+	}
+}
+
+// The dashboard read model carries every run and task, which is most of its
+// weight. A phone renders only the providers and health, so it can ask for
+// those instead of downloading the rest to discard it.
+// A blocked candidate carries its cooldown as a timestamp, not only inside a
+// sentence. Clients that want to say "cooldown for 4h 20m" should not have to
+// parse English out of the reason and re-derive the time.
+// seedCooldownTask creates a recurring task that is inside its cooldown.
+func seedCooldownTask(t *testing.T, db *store.DB) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "cooldown-profile", ProviderAccountID: "codex-main",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	lastCompleted := apiNow.Add(-time.Hour)
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "cooling-down", Name: "Cooling down", Priority: 100,
+		ExecutionProfileID: "cooldown-profile", Type: domain.Recurring,
+		MinInterval: 24 * time.Hour, LastCompletedAt: &lastCompleted,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	// Candidates are only evaluated once a snapshot exists; without one the
+	// handler short-circuits and never reaches the cooldown check.
+	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow, Source: "native",
+		Weekly: decision.UsageWindow{Remaining: 0.8, ResetsAt: apiNow.Add(48 * time.Hour)},
+	}, []byte(codexPayload)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidatesExposeCooldownAsATimestamp(t *testing.T) {
+	server, db := newAPIServer(t, codexPayload)
+	seedCooldownTask(t, db)
+
+	var response struct {
+		Candidates []struct {
+			TaskID     string     `json:"task_id"`
+			Eligible   bool       `json:"eligible"`
+			Reason     string     `json:"reason"`
+			EligibleAt *time.Time `json:"eligible_at"`
+		} `json:"candidates"`
+	}
+	getJSON(t, server.URL+"/v1/providers/codex-main/candidates", &response)
+
+	var found bool
+	for _, candidate := range response.Candidates {
+		if candidate.TaskID != "cooling-down" {
+			continue
+		}
+		found = true
+		if candidate.Eligible {
+			t.Fatal("a task inside its cooldown is not eligible")
+		}
+		if candidate.EligibleAt == nil {
+			t.Fatalf("a cooldown must be exposed as a timestamp; reason was %q", candidate.Reason)
+		}
+		// The prose stays for existing readers.
+		if !strings.Contains(candidate.Reason, "cooldown until") {
+			t.Errorf("reason = %q", candidate.Reason)
+		}
+	}
+	if !found {
+		t.Fatal("seeded task missing from the candidate list")
+	}
+}
+
+func TestDashboardFieldsSelectorTrimsTheResponse(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+
+	full := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &full)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health"} {
+		if _, ok := full[key]; !ok {
+			t.Fatalf("unfiltered response is missing %q", key)
+		}
+	}
+
+	trimmed := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard?fields=providers,health", &trimmed)
+
+	if _, ok := trimmed["providers"]; !ok {
+		t.Error("requested field providers is missing")
+	}
+	if _, ok := trimmed["health"]; !ok {
+		t.Error("requested field health is missing")
+	}
+	for _, omitted := range []string{"runs", "tasks", "attempts"} {
+		if _, ok := trimmed[omitted]; ok {
+			t.Errorf("field %q was not requested but was returned", omitted)
+		}
+	}
+
+	// generated_at identifies which snapshot this is, so it is always present:
+	// a client cannot tell stale data from fresh without it.
+	if _, ok := trimmed["generated_at"]; !ok {
+		t.Error("generated_at must always be present")
+	}
+}
+
+// An unknown field name is a client bug. Silently returning everything would
+// hide it until someone wondered why the phone was slow.
+func TestDashboardFieldsSelectorRejectsUnknownFields(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	requestStatus(t, http.MethodGet, server.URL+"/v1/dashboard?fields=providers,nonsense", "", http.StatusBadRequest)
+}
+
+// Without the parameter nothing changes, so the web dashboard keeps working.
+func TestDashboardWithoutFieldsIsUnchanged(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	body := map[string]any{}
+	getJSON(t, server.URL+"/v1/dashboard", &body)
+	for _, key := range []string{"providers", "runs", "tasks", "attempts", "health", "scheduler"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("default response lost %q", key)
+		}
+	}
+}
+
+// The stream is where the saving compounds: it re-sends the whole read model
+// every few seconds, so a phone that only renders providers should not receive
+// every run each time.
+func TestDashboardEventsHonourTheFieldsSelector(t *testing.T) {
+	server, _ := newAPIServer(t, codexPayload)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		server.URL+"/v1/dashboard/events?fields=providers,health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buffer := make([]byte, 16384)
+	n, err := resp.Body.Read(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	body := string(buffer[:n])
+	if !strings.Contains(body, "event: dashboard\n") {
+		t.Fatalf("not an SSE frame: %q", body)
+	}
+	if !strings.Contains(body, `"providers"`) {
+		t.Error("requested field providers is missing from the stream")
+	}
+	if strings.Contains(body, `"runs"`) || strings.Contains(body, `"tasks"`) {
+		t.Errorf("stream carried fields that were not requested: %q", body)
 	}
 }
 
@@ -730,7 +940,7 @@ func TestDashboardReadModelIsUsefulAndDoesNotExposePrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow, Weekly: decision.UsageWindow{Remaining: .86, ResetsAt: apiNow.Add(4 * 24 * time.Hour)}, Source: "test",
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +1023,7 @@ func TestDashboardMarksStoredUsageOlderThanConfiguredMaximumAsStale(t *testing.T
 	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
 	if err := db.SaveSnapshot(t.Context(), decision.UsageSnapshot{
-		Provider:   "claude",
+		Provider: "claude", Account: "claude-main",
 		ObservedAt: apiNow.Add(-time.Hour),
 		Short: &decision.UsageWindow{
 			Remaining: .75, ResetsAt: apiNow.Add(4 * time.Hour),
@@ -926,7 +1136,7 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	defer db.Close()
 	shortReset, weeklyReset := apiNow.Add(5*time.Hour), apiNow.Add(5*24*time.Hour)
 	for index, remaining := range []float64{1, .98, .95} {
-		snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: apiNow.Add(time.Duration(index) * time.Minute),
+		snapshot := decision.UsageSnapshot{Provider: "claude", Account: "claude-main", ObservedAt: apiNow.Add(time.Duration(index) * time.Minute),
 			Short:  &decision.UsageWindow{Remaining: remaining, ResetsAt: shortReset},
 			Weekly: decision.UsageWindow{Remaining: .80 - float64(index)*.01, ResetsAt: weeklyReset}, Source: "test"}
 		if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
@@ -934,8 +1144,8 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 		}
 	}
 	_, err = db.SaveTokenObservations(t.Context(), []capacity.TokenObservation{
-		{Provider: "claude", Source: "gatepost", SourceID: "s:1", ObservedAt: apiNow.Add(30 * time.Second), InputTokens: 1000},
-		{Provider: "claude", Source: "gatepost", SourceID: "s:2", ObservedAt: apiNow.Add(90 * time.Second), InputTokens: 4000},
+		{Provider: "claude", Account: "claude-main", Source: "gatepost", SourceID: "s:1", ObservedAt: apiNow.Add(30 * time.Second), InputTokens: 1000},
+		{Provider: "claude", Account: "claude-main", Source: "gatepost", SourceID: "s:2", ObservedAt: apiNow.Add(90 * time.Second), InputTokens: 4000},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -990,7 +1200,7 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 	server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
 	defer server.Close()
 	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
-	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].Source != "gatepost-pi" || observations[0].CacheReadTokens != 30 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
 	}
@@ -1093,7 +1303,7 @@ CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, 
 		t.Fatalf("owned_runs_inserted = %d", result.OwnedRunsInserted)
 	}
 	postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
-	observations, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].Source != "redline-run" || observations[0].CacheReadTokens != 4 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
 	}
@@ -1524,6 +1734,181 @@ func TestSchedulerSkipsExhaustedFableAndSelectsOpus(t *testing.T) {
 	}
 	if strings.Join(result.Result.RequiredPools, ",") != "session,weekly" {
 		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
+// A Spark task consumes Spark's own pair of allowances. Its short window is
+// not Codex's account short window, but the configured rolling reserve means
+// the same thing there: background work must leave that fraction for the
+// person using Spark interactively.
+func TestSparkTaskWaitsAtItsModelShortReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.25, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil {
+		t.Fatalf("selected Spark task inside reserve: %#v", result.SelectedTask)
+	}
+	if len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short reserve is protected") {
+		t.Fatalf("rejections = %#v", result.Result.CandidateRejections)
+	}
+}
+
+func TestSparkTaskFailsClosedWhenItsShortAllowanceIsMissing(t *testing.T) {
+	payload := fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":20,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
+	server, db := newAPIServer(t, payload)
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask != nil || len(result.Result.CandidateRejections) != 1 ||
+		!strings.Contains(result.Result.CandidateRejections[0].Reason, "model:spark:short allowance is missing") {
+		t.Fatalf("selected=%#v rejections=%#v", result.SelectedTask, result.Result.CandidateRejections)
+	}
+}
+
+func TestModelGroupWithOnlyShortRoleDoesNotInventAWeeklyRequirement(t *testing.T) {
+	server, db := newAPIServerConfigured(t, codexSparkAllowancePayload(.80, .80, .80), func(cfg *config.Config) {
+		provider := cfg.Providers["codex-main"]
+		provider.ModelGroups = map[string]config.ModelGroup{
+			"spark": {Aliases: []string{"spark"}, RequiredAllowanceRoles: []string{" Short "}},
+		}
+		cfg.Providers["codex-main"] = provider
+	})
+	createCodexCandidate(t, db, "spark-profile", "spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short" {
+		t.Fatalf("selected=%#v required=%#v", result.SelectedTask, result.Result.RequiredPools)
+	}
+}
+
+func TestSparkTaskRequiresBothSparkAllowancesAboveReserve(t *testing.T) {
+	server, db := newAPIServer(t, codexSparkAllowancePayload(.26, .80, .80))
+	createCodexCandidate(t, db, "spark-profile", "gpt-5.3-codex-spark", "spark-task")
+
+	result := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+
+	if result.SelectedTask == nil || result.SelectedTask.ID != "spark-task" {
+		t.Fatalf("selected=%#v result=%#v", result.SelectedTask, result.Result)
+	}
+	if strings.Join(result.Result.RequiredPools, ",") != "weekly,model:spark:short,model:spark:weekly" {
+		t.Fatalf("required pools = %#v", result.Result.RequiredPools)
+	}
+}
+
+// Verified Claude Ultra (formerly Max 20x) reports no 5-hour window from
+// 2026-10-30; Max (formerly Max 5x) still does. The scheduler must budget the
+// former on the weekly window alone and keep protecting the latter's session.
+func TestClaudeSchedulingFollowsReportedWindowsAcrossPlans(t *testing.T) {
+	t.Parallel()
+	weeklyReset := apiNow.Add(48 * time.Hour).Format(time.RFC3339Nano)
+	shortReset := apiNow.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	for _, tt := range []struct {
+		name, plan, session, wantPools string
+		wantRun                        bool
+	}{
+		{"ultra weekly only", "Ultra", ``, "weekly", true},
+		{"ultra unlimited session", "Ultra", `{"type":"progress","label":"Session","used":0,"limit":0,"resetsAt":""},`, "weekly", true},
+		{"max with session room", "Max", `{"type":"progress","label":"Session","used":10,"limit":100,"resetsAt":"` + shortReset + `"},`, "session,weekly", true},
+		{"max session exhausted", "Max", `{"type":"progress","label":"Session","used":100,"limit":100,"resetsAt":"` + shortReset + `"},`, "", false},
+		{"unknown plan weekly only", "Galaxy", ``, "weekly", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := fmt.Sprintf(`{"providerId":"claude","plan":%q,"fetchedAt":%q,"lines":[%s
+              {"type":"progress","label":"Weekly","used":30,"limit":100,"resetsAt":%q}]}`,
+				tt.plan, apiNow.Format(time.RFC3339Nano), tt.session, weeklyReset)
+			server, db := newAPIServer(t, payload)
+			createClaudeCandidate(t, db, "opus-profile", "opus", "", "backlog", 50)
+			result := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/evaluate",
+				map[string]any{"provider_account_id": "claude-main"})
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "backlog"; ran != tt.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tt.wantRun)
+			}
+			if !tt.wantRun {
+				if result.Result.Decision != decision.Wait || result.Result.Reason != "current 5-hour reserve protected" {
+					t.Fatalf("exhausted session should wait on its reserve: %#v", result.Result)
+				}
+				return
+			}
+			if got := strings.Join(result.Result.RequiredPools, ","); got != tt.wantPools {
+				t.Fatalf("required pools = %q, want %q (result %#v)", got, tt.wantPools, result.Result)
+			}
+		})
+	}
+}
+
+// The shipped late policy fills leftover weekly quota on a weekly-only account
+// near its reset, and leaves a five-hour account's decision unchanged.
+func TestShippedLatePolicyFillsWeeklyOnlyAccountsNearReset(t *testing.T) {
+	t.Parallel()
+	example, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	weeklyReset := apiNow.Add(30 * time.Hour).Format(time.RFC3339Nano)
+	shortReset := apiNow.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	for _, tt := range []struct {
+		name, session string
+		wantRun       bool
+		wantMode      decision.Mode
+	}{
+		// 45% left with 30h to go: the late base threshold (24h, 50%) does
+		// not match, but the weekly-only 48h/40% row does. A Max account with
+		// a session window in the same spot keeps its slot decision (WAIT).
+		{"ultra weekly only", ``, true, decision.ModePace},
+		{"max with session", `{"type":"progress","label":"Session","used":10,"limit":100,"resetsAt":"` + shortReset + `"},`, false, decision.ModeSlots},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := fmt.Sprintf(`{"providerId":"claude","fetchedAt":%q,"lines":[%s
+              {"type":"progress","label":"Weekly","used":55,"limit":100,"resetsAt":%q}]}`,
+				apiNow.Format(time.RFC3339Nano), tt.session, weeklyReset)
+			usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, payload) }))
+			t.Cleanup(usage.Close)
+			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			cfg := testConfig(usage.URL)
+			cfg.Policies = example.Policies
+			cfg.ActivePolicy = "late"
+			server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+			t.Cleanup(server.Close)
+			createClaudeCandidate(t, db, "opus-profile", "opus", "", "backlog", 50)
+			result := postJSON[schedulerResponseForTest](t, server.URL+"/v1/scheduler/evaluate",
+				map[string]any{"provider_account_id": "claude-main"})
+			if result.Result.Mode != tt.wantMode || result.Result.Policy != "late" {
+				t.Fatalf("mode/policy = %s/%s, want %s/late: %#v", result.Result.Mode, result.Result.Policy, tt.wantMode, result.Result)
+			}
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "backlog"; ran != tt.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tt.wantRun)
+			}
+		})
 	}
 }
 
@@ -2037,7 +2422,7 @@ func TestAutomaticSchedulerCompletesHermesRemoteRunAndRecordsUsage(t *testing.T)
 	if err != nil || task.State != domain.Completed {
 		t.Fatalf("task=%#v err=%v", task, err)
 	}
-	observations, err := db.ListTokenObservations(t.Context(), "codex", time.Time{}, time.Time{})
+	observations, err := db.ListTokenObservations(t.Context(), "codex-main", "codex", time.Time{}, time.Time{})
 	if err != nil || len(observations) != 1 || observations[0].SourceID != run.ID ||
 		observations[0].InputTokens != 12 || observations[0].OutputTokens != 2 {
 		t.Fatalf("observations=%#v err=%v", observations, err)
@@ -2537,7 +2922,7 @@ func TestCalibrationEndpointAndDecisionUseObservedWindowCost(t *testing.T) {
 
 func calibrationSnapshot(observed time.Time, shortRemaining, weeklyRemaining float64, shortReset, weeklyReset time.Time) decision.UsageSnapshot {
 	return decision.UsageSnapshot{
-		Provider: "claude", ObservedAt: observed,
+		Provider: "claude", Account: "claude-main", ObservedAt: observed,
 		Short:  &decision.UsageWindow{Remaining: shortRemaining, ResetsAt: shortReset},
 		Weekly: decision.UsageWindow{Remaining: weeklyRemaining, ResetsAt: weeklyReset},
 		Source: "test", Confidence: "high",
@@ -2632,7 +3017,7 @@ func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
 	}
 
 	stale := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow.Add(-time.Hour),
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow.Add(-time.Hour),
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -2667,7 +3052,7 @@ func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 	defer db.Close()
 	cfg := testConfig("http://usage.invalid")
 	snapshot := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow,
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow,
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -2708,7 +3093,7 @@ func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *
 	defer db.Close()
 	cfg := testConfig("http://usage.invalid")
 	snapshot := decision.UsageSnapshot{
-		Provider: "codex", ObservedAt: apiNow,
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow,
 		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
 		Source: "test", Confidence: "high",
 	}
@@ -3240,6 +3625,11 @@ func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
 
 func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	t.Helper()
+	return newAPIServerConfigured(t, payload, nil)
+}
+
+func newAPIServerConfigured(t *testing.T, payload string, configure func(*config.Config)) (*httptest.Server, *store.DB) {
+	t.Helper()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, payload)
 	}))
@@ -3250,6 +3640,9 @@ func newAPIServer(t *testing.T, payload string) (*httptest.Server, *store.DB) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := testConfig(usage.URL)
+	if configure != nil {
+		configure(&cfg)
+	}
 	handler := api.NewServer(cfg, db, func() time.Time { return apiNow })
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -3419,6 +3812,34 @@ func createClaudeCandidate(
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func createCodexCandidate(t *testing.T, db *store.DB, profileID, model, taskID string) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: profileID, ProviderAccountID: "codex-main", HarnessType: "codex-cli",
+		Model: model, WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: taskID, Name: taskID, Priority: 100, ExecutionProfileID: profileID, Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func codexSparkAllowancePayload(short, sparkWeekly, accountWeekly float64) string {
+	return fmt.Sprintf(`{
+  "providerId":"codex", "fetchedAt":%q,
+  "lines":[
+    {"type":"progress","label":"Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q},
+    {"type":"progress","label":"Spark","used":%f,"limit":100,"periodDurationMs":18000000,"resetsAt":%q},
+    {"type":"progress","label":"Spark Weekly","used":%f,"limit":100,"periodDurationMs":604800000,"resetsAt":%q}
+  ]}`,
+		apiNow.Format(time.RFC3339Nano), (1-accountWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano),
+		(1-short)*100, apiNow.Add(4*time.Hour).Format(time.RFC3339Nano),
+		(1-sparkWeekly)*100, apiNow.Add(48*time.Hour).Format(time.RFC3339Nano))
 }
 
 func claudeAllowancePayload(fableRemaining, sharedRemaining float64, untilReset time.Duration) string {
@@ -3628,8 +4049,8 @@ func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 // wantFingerprint below.
 func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
 	t.Parallel()
-	const wantCacheName = "redline-mobile-v5"
-	const wantFingerprint = "55ff307decca57ab"
+	const wantCacheName = "redline-mobile-v19"
+	const wantFingerprint = "c6aee6b936c6ba7d"
 
 	worker, err := os.ReadFile(filepath.Join("dashboard", "sw.js"))
 	if err != nil {
@@ -3713,5 +4134,69 @@ func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "event: dashboard") {
 		t.Fatal("event stream produced no events through the wrapper")
+	}
+}
+
+// Gatepost logs which provider spent tokens, not which login. Only the
+// provider's single account on the default login takes them: a profile or
+// OpenUsage-card account, or one beside a switched-off sibling, must not
+// absorb tokens another login may have spent.
+func TestTokenSyncAttributesGatepostOnlyToTheDefaultLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*config.Config)
+		want   int
+	}{
+		{"default login", nil, 1},
+		{"profile account", func(cfg *config.Config) {
+			p := cfg.Providers["claude-main"]
+			p.UsageSource, p.ClaudeConfigDir = "native", "/p/.claude-cc-frank"
+			cfg.Providers["claude-main"] = p
+		}, 0},
+		{"card account", func(cfg *config.Config) {
+			p := cfg.Providers["claude-main"]
+			p.UsageSource, p.OpenUsageCard = "openusage", "claude@ab12cd34"
+			cfg.Providers["claude-main"] = p
+		}, 0},
+		{"disabled sibling", func(cfg *config.Config) {
+			cfg.DisabledAccounts = map[string]config.ManagedAccount{"claude-old": {ID: "claude-old", Provider: "claude", Disabled: true}}
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			viewerPath := filepath.Join(directory, "viewer.db")
+			piPath := filepath.Join(directory, "pi.jsonl")
+			if err := os.WriteFile(piPath, []byte(`{"type":"message","id":"m1","timestamp":"2026-07-16T18:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":30,"cacheWrite":4}}}
+`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			viewer, err := sql.Open("sqlite", viewerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := viewer.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, model TEXT, context_tokens INTEGER, output_tokens INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, piPath); err != nil {
+				t.Fatal(err)
+			}
+			_ = viewer.Close()
+			db, err := store.Open(filepath.Join(directory, "redline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := testConfig("http://127.0.0.1:1")
+			cfg.UsageMonitor.GatepostDatabase = viewerPath
+			if tc.change != nil {
+				tc.change(&cfg)
+			}
+			server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+			defer server.Close()
+			postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+			observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
+			if err != nil || len(observations) != tc.want {
+				t.Fatalf("observations=%d want %d err=%v", len(observations), tc.want, err)
+			}
+		})
 	}
 }

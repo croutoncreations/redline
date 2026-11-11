@@ -117,8 +117,9 @@ func (s *Server) legacyDeviceSession(r *http.Request) (string, string, error) {
 func (s *Server) authorized(r *http.Request) (principal, error) {
 	token := ""
 	viaCookie := false
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") {
-		token = strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
+	// HTTP authentication schemes are case-insensitive (RFC 9110 §11.1).
+	if scheme, credential, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+		token = strings.TrimSpace(credential)
 	} else if cookie, err := r.Cookie(apiSessionCookie); err == nil {
 		token, viaCookie = cookie.Value, true
 	}
@@ -214,4 +215,14 @@ func (s *Server) revokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ownerOnly wraps device- and relay-management handlers: paired devices keep
+// job control but cannot manage pairing, other devices, or the relay.
+func ownerOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireOwner(w, r) {
+			next(w, r)
+		}
+	}
 }

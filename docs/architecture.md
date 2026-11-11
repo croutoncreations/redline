@@ -49,7 +49,9 @@ Agent instructions and lifecycle hooks remain responsible for commit, push, and 
   fall back to native Codex and Claude collectors after repeated failures.
 - Model-specific Claude allowance ingestion and scheduling; Fable tasks require both shared Claude
   capacity and the Fable weekly pool, while Haiku, Sonnet, and Opus use shared pools only.
-- Optional 5-hour limits: Codex works when its temporary short limit is absent.
+- Optional 5-hour limits: Codex works when its temporary short limit is absent, and Claude
+  accounts without one (verified Ultra) are budgeted on the weekly window alone. Limits come from
+  the windows each provider reports, never from plan names.
 - Prorated current and final 5-hour slots for limited providers.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
 - Empirical 5-hour and weekly processed-token capacity estimates from Codex, Claude Code, and

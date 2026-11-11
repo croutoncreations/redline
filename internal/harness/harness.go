@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -53,7 +54,8 @@ type Result struct {
 
 func IsAuthenticationFailure(failure string) bool {
 	return strings.HasPrefix(failure, "Claude Code is signed out.") ||
-		strings.HasPrefix(failure, "Codex CLI is signed out.")
+		strings.HasPrefix(failure, "Codex CLI is signed out.") ||
+		strings.HasPrefix(failure, "Cursor CLI is signed out.")
 }
 
 func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
@@ -109,11 +111,24 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		_ = stdout.Sync()
 		_ = stderr.Sync()
 		result.Failure = diagnoseFailure(request.Profile.HarnessType, result.OutputFile, result.ErrorFile)
+		// A profile run's sign-in is that profile's, not the default one.
+		// The "Claude Code is signed out." prefix stays, so the run still
+		// pauses its account.
+		if dir := request.Profile.ClaudeConfigDir; dir != "" && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
+			result.Failure = "Claude Code is signed out. Run `CLAUDE_CONFIG_DIR=" + displayHome(dir) + " claude auth login`, then retry this job."
+		}
 	}
 	return result, nil
 }
 
 func diagnoseFailure(harnessType string, paths ...string) string {
+	if harnessType == "cursor-agent" && len(paths) == 2 {
+		// The Cursor CLI's stdout is the stream-json transcript, which carries
+		// the task's own tool output. A task whose `git push` hit a 401 must
+		// not read as Cursor being signed out and pause the provider, so only
+		// the CLI's stderr is consulted.
+		paths = paths[1:]
+	}
 	var evidence strings.Builder
 	for _, path := range paths {
 		data, err := readTail(path, 64*1024)
@@ -133,6 +148,13 @@ func diagnoseFailure(harnessType string, paths ...string) string {
 		if strings.Contains(normalized, "not logged in") ||
 			strings.Contains(normalized, "login required") {
 			return "Codex CLI is signed out. Run `codex login`, then retry this job."
+		}
+	case "cursor-agent":
+		// The CLI's own message names its login command; generic phrases
+		// such as "authentication required" also come from other tools.
+		if strings.Contains(normalized, "run 'agent login'") ||
+			strings.Contains(normalized, "run `agent login`") {
+			return "Cursor CLI is signed out. Run `agent login`, then retry this job."
 		}
 	}
 	return ""
@@ -265,6 +287,26 @@ func (a Adapter) runHermes(
 	return result, nil
 }
 
+// displayHome shows a path under the home folder as "~/…".
+func displayHome(dir string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if rest, ok := strings.CutPrefix(dir, filepath.Clean(home)+string(filepath.Separator)); ok {
+			return "~/" + rest
+		}
+	}
+	return dir
+}
+
+func withoutVariable(environment []string, name string) []string {
+	kept := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if key, _, _ := strings.Cut(entry, "="); key != name {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
 func splitHermesModel(value string) (provider, model string) {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "default" {
@@ -304,12 +346,53 @@ func buildCommand(
 		base.Stdin = strings.NewReader(prompt)
 	case "claude-code":
 		base.Name = "claude"
+		// The account's Claude Code profile, for this run only. Any
+		// CLAUDE_CONFIG_DIR inherited from the service is dropped first, so
+		// a default-login account never runs on a profile by accident.
+		base.Env = withoutVariable(base.Env, "CLAUDE_CONFIG_DIR")
+		if dir := request.Profile.ClaudeConfigDir; dir != "" {
+			// Variables that would sign Claude Code in as someone else
+			// take precedence over the profile's login; drop them so the
+			// run spends only this profile's allowance.
+			// The routing variables would send the profile's token to
+			// another host or bill another cloud account.
+			for _, name := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+				"ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
+				base.Env = withoutVariable(base.Env, name)
+			}
+			base.Env = append(base.Env, "CLAUDE_CONFIG_DIR="+dir)
+		}
 		base.Args = []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto"}
 		if request.Profile.Model != "" && request.Profile.Model != "default" {
 			base.Args = append(base.Args, "--model", request.Profile.Model)
 		}
 		base.Args = append(base.Args, request.Profile.HarnessArgs...)
 		base.Args = append(base.Args, "--append-system-prompt", claudeWorkspaceBoundary(request.Workspace.Directory))
+		base.Stdin = strings.NewReader(prompt)
+	case "cursor-agent":
+		// Cursor's headless CLI, run sandboxed. Measured against CLI
+		// 2026.10.01: with --sandbox enabled and without --force, the agent
+		// edits files and runs commands inside the workspace, while writes
+		// elsewhere and network access are refused. --force overrides the
+		// sandbox and lets every command run, so it is never passed here; a
+		// profile that needs it must say so in harness_args. --trust skips
+		// the workspace-trust prompt, which would otherwise block a
+		// non-interactive run in Redline's own workspace.
+		//
+		// The binary is cursor-agent rather than agent: the installer
+		// provides both, and "agent" is a common name for unrelated tools.
+		// The model is always passed so the run draws on the pool it was
+		// scheduled against: "default" would otherwise follow the CLI's own
+		// setting, which can be a model in the other pool.
+		base.Name = "cursor-agent"
+		base.Env = redprocess.WithoutCursorCredentials(base.Env)
+		model := request.Profile.Model
+		if model == "" || model == "default" {
+			model = "auto"
+		}
+		base.Args = []string{"--print", "--output-format", "stream-json", "--trust",
+			"--sandbox", "enabled", "--workspace", request.Workspace.Directory, "--model", model}
+		base.Args = append(base.Args, request.Profile.HarnessArgs...)
 		base.Stdin = strings.NewReader(prompt)
 	case "pi":
 		base.Name = "pi"
@@ -329,6 +412,26 @@ func buildCommand(
 		return redprocess.Command{}, fmt.Errorf("unsupported harness %q", request.Profile.HarnessType)
 	}
 	return base, nil
+}
+
+// cursorReservedArgs are flags Redline owns for a Cursor run. A profile that
+// set them could move the run out of its workspace, or authenticate it as
+// another account with a key that would then be stored with the profile.
+var cursorReservedArgs = []string{"--api-key", "--endpoint", "-e", "--workspace", "--add-dir"}
+
+// ValidateHarnessArgs rejects harness arguments that would override what
+// Redline relies on for a harness.
+func ValidateHarnessArgs(harnessType string, args []string) error {
+	if harnessType != "cursor-agent" {
+		return nil
+	}
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		if slices.Contains(cursorReservedArgs, name) {
+			return fmt.Errorf("harness_args may not set %s for cursor-agent: Redline sets the workspace, and the CLI uses its own `agent login`", name)
+		}
+	}
+	return nil
 }
 
 func claudeWorkspaceBoundary(directory string) string {

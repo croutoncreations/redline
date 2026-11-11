@@ -9,6 +9,9 @@ public struct DashboardSnapshot: Codable, Sendable {
     public let runs: [RunSummary]
     public let attempts: [AttemptSummary]
     public let unreadRuns: Int
+    /// Display-only Cursor and Grok Bot usage; nil when tracking is off. Kept
+    /// out of `providers` so it never reaches tray state or scheduling.
+    public let cursorUsage: CursorUsageReport?
 
     public init(
 		demo: DemoSummary? = nil,
@@ -18,9 +21,11 @@ public struct DashboardSnapshot: Codable, Sendable {
         tasks: [TaskSummary] = [],
         runs: [RunSummary] = [],
         attempts: [AttemptSummary] = [],
-        unreadRuns: Int = 0
+        unreadRuns: Int = 0,
+        cursorUsage: CursorUsageReport? = nil
     ) {
 		self.demo = demo
+        self.cursorUsage = cursorUsage
         self.health = health
         self.scheduler = scheduler
         self.providers = providers
@@ -54,11 +59,14 @@ public struct DashboardSnapshot: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
 		case demo, health, scheduler, providers, tasks, runs, attempts
         case unreadRuns = "unread_runs"
+        case cursorUsage = "cursor_usage"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 		demo = try container.decodeIfPresent(DemoSummary.self, forKey: .demo)
+        // A malformed Cursor report must never take the whole tray offline.
+        cursorUsage = try? container.decodeIfPresent(CursorUsageReport.self, forKey: .cursorUsage)
 		health = try container.decode(HealthSummary.self, forKey: .health)
         scheduler = try container.decode(SchedulerSummary.self, forKey: .scheduler)
         providers = try container.decodeIfPresent([ProviderSummary].self, forKey: .providers) ?? []
@@ -233,6 +241,18 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let snapshot: UsageSnapshot?
     public let snapshotStale: Bool
     public let error: String?
+    /// Machine-readable cause of failing collection, when the service knows
+    /// one a person can fix ("signed_out"); nil otherwise.
+    public let usageSourceReason: String?
+    /// The owner's name for this account ("Personal"); nil when unset. Never
+    /// an email: the service never sends one.
+    public let label: String?
+    /// The service's one-word collection state: ok, stale, no_data,
+    /// signed_out or error. Nil from an older service that does not send it.
+    public let accountStatus: String?
+    /// The scheduler's latest decision for this account (RUN, WAIT, UNKNOWN).
+    public let latestDecision: String?
+    public let weeklyPolicy: String?
 
     public init(
         id: String,
@@ -240,7 +260,12 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         paused: Bool = false,
         snapshot: UsageSnapshot?,
         snapshotStale: Bool = false,
-        error: String? = nil
+        error: String? = nil,
+        usageSourceReason: String? = nil,
+        label: String? = nil,
+        accountStatus: String? = nil,
+        latestDecision: String? = nil,
+        weeklyPolicy: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -248,11 +273,28 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.snapshot = snapshot
         self.snapshotStale = snapshotStale
         self.error = error
+        self.usageSourceReason = usageSourceReason
+        self.label = label
+        self.accountStatus = accountStatus
+        self.latestDecision = latestDecision
+        self.weeklyPolicy = weeklyPolicy
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, provider, paused, snapshot, error
+        case id, provider, paused, snapshot, error, label
         case snapshotStale = "snapshot_stale"
+        case usageSource = "usage_source"
+        case accountStatus = "account_status"
+        case latestDecision = "latest_decision"
+        case weeklyPolicy = "weekly_policy"
+    }
+
+    private struct LatestDecision: Codable {
+        let decision: String?
+    }
+
+    private struct UsageSourceStatus: Codable {
+        let reason: String?
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,18 +305,87 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         snapshot = try container.decodeIfPresent(UsageSnapshot.self, forKey: .snapshot)
         snapshotStale = try container.decodeIfPresent(Bool.self, forKey: .snapshotStale) ?? false
         error = try container.decodeIfPresent(String.self, forKey: .error)
+        usageSourceReason = try container.decodeIfPresent(UsageSourceStatus.self, forKey: .usageSource)?.reason
+        // Additive fields: absent from an older service, and never fatal.
+        label = (try? container.decodeIfPresent(String.self, forKey: .label)).flatMap { $0 }
+        accountStatus = (try? container.decodeIfPresent(String.self, forKey: .accountStatus)).flatMap { $0 }
+        latestDecision = (try? container.decodeIfPresent(LatestDecision.self, forKey: .latestDecision))?.flatMap { $0 }?.decision
+        weeklyPolicy = try container.decodeIfPresent(String.self, forKey: .weeklyPolicy)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(paused, forKey: .paused)
+        try container.encodeIfPresent(snapshot, forKey: .snapshot)
+        try container.encode(snapshotStale, forKey: .snapshotStale)
+        try container.encodeIfPresent(error, forKey: .error)
+        if let usageSourceReason {
+            try container.encode(UsageSourceStatus(reason: usageSourceReason), forKey: .usageSource)
+        }
+        try container.encodeIfPresent(label, forKey: .label)
+        try container.encodeIfPresent(accountStatus, forKey: .accountStatus)
+        try container.encodeIfPresent(weeklyPolicy, forKey: .weeklyPolicy)
+        if let latestDecision {
+            try container.encode(LatestDecision(decision: latestDecision), forKey: .latestDecision)
+        }
+    }
+
+    /// The provider's local login is gone; only signing in again fixes it.
+    public var signedOut: Bool { usageSourceReason == "signed_out" }
+
+    /// The Cursor CLI and the Cursor app are signed in to different
+    /// accounts, so Cursor is not scheduled until they match.
+    public var accountMismatch: Bool { usageSourceReason == "account_mismatch" }
+
+    /// The line shown on a stale provider's card. A signed-out provider says
+    /// so and names the fix, rather than leaving it in a hover tooltip.
+    public var staleSummary: String {
+        if accountMismatch {
+            return "Cursor CLI and app accounts differ · sign both in to the same account"
+        }
+        if signedOut, let login = ProviderRecovery.loginCommand(for: provider) {
+            // The CLI that holds the login, which is what signed out.
+            let tool = switch provider.lowercased() {
+            case "claude": "Claude Code"
+            case "cursor": "Cursor CLI"
+            default: displayName
+            }
+            return "\(tool) is signed out · run \(login)"
+        }
+        return "Last usage sample is stale"
     }
 
     public var displayName: String {
         switch provider.lowercased() {
         case "claude": "Claude"
         case "codex": "Codex"
+        case "cursor": "Cursor"
         default: provider.capitalized
         }
     }
 
+    /// "Monthly" for Cursor's subscription window, "Weekly" otherwise.
+    public var accountWindowLabel: String { snapshot?.weekly?.isMonthly == true ? "Monthly" : "Weekly" }
     public var weeklyPercent: Int? { snapshotStale ? nil : snapshot?.weekly.map(Self.percent) }
-    public var shortPercent: Int? { snapshotStale ? nil : snapshot?.short.map(Self.percent) }
+    /// Fresh numbers whose source reports no weekly limit.
+    public var weeklyNotReported: Bool { !snapshotStale && snapshot?.weeklyUnavailable == true }
+    public var shortPercent: Int? {
+        if snapshotStale { return nil }
+        if let short = snapshot?.short { return Self.percent(short) }
+        // An unstarted window is full; it just has no reset yet.
+        return snapshot?.shortWindowNotStarted == true ? 100 : nil
+    }
+
+    /// The popover's line for an untouched five hour window, which has no
+    /// reset to count down to. Nil otherwise: a started window is described
+    /// with its reset by the caller, and a provider with no such window has
+    /// nothing to say here.
+    public var shortWindowSummary: String? {
+        guard !snapshotStale, snapshot?.short == nil, snapshot?.shortWindowNotStarted == true else { return nil }
+        return "5h 100% · starts on first use"
+    }
     public var modelAllowances: [AllowanceSummary] {
         snapshot?.allowances.filter { $0.key.hasPrefix("model:") } ?? []
     }
@@ -341,6 +452,24 @@ public struct UsageSnapshot: Codable, Sendable {
     public let bankedResets: Int?
     /// When the soonest-expiring banked reset lapses, if known.
     public let bankedResetsExpireAt: String?
+    /// The five hour window exists and is entirely unused. The provider starts
+    /// its clock on first use, so there is no reset time yet -- the window is
+    /// full, and `short` stays nil rather than carrying an invented reset.
+    public let shortWindowNotStarted: Bool
+    /// The subscription plan as the source names it ("Max 20x"). A label
+    /// only: plans are never compared or converted into capacity.
+    public let plan: String?
+    /// Every banked reset's own deadline, soonest first when known.
+    public let bankedResetsExpiries: [String]
+    /// The usage source itself says these numbers are out of date.
+    public let sourceStale: Bool
+    /// When these numbers were read.
+    public let observedAt: String?
+    /// The source reports no account-wide weekly limit for this account
+    /// (OpenUsage Team seats). `weekly` is nil then; nothing stands in for it.
+    public let weeklyUnavailable: Bool
+    /// Per-grant details, when the provider reported them.
+    public let bankedResetDetails: [BankedResetDetail]
 
     public init(
         short: UsageWindow?,
@@ -348,56 +477,168 @@ public struct UsageSnapshot: Codable, Sendable {
         allowances: [AllowanceSummary],
         source: String?,
         bankedResets: Int? = nil,
-        bankedResetsExpireAt: String? = nil
+        bankedResetsExpireAt: String? = nil,
+        shortWindowNotStarted: Bool = false,
+        plan: String? = nil,
+        bankedResetsExpiries: [String] = [],
+        sourceStale: Bool = false,
+        observedAt: String? = nil,
+        weeklyUnavailable: Bool = false,
+        bankedResetDetails: [BankedResetDetail] = []
     ) {
+        self.weeklyUnavailable = weeklyUnavailable
+        self.plan = plan
+        self.bankedResetsExpiries = bankedResetsExpiries
+        self.sourceStale = sourceStale
+        self.observedAt = observedAt
         self.short = short
         self.weekly = weekly
         self.allowances = allowances
         self.source = source
         self.bankedResets = bankedResets
         self.bankedResetsExpireAt = bankedResetsExpireAt
+        self.shortWindowNotStarted = shortWindowNotStarted
+        self.bankedResetDetails = bankedResetDetails
     }
 
     enum CodingKeys: String, CodingKey {
         case short, weekly, allowances, source
         case bankedResets = "banked_resets"
         case bankedResetsExpireAt = "banked_resets_expire_at"
+        case shortWindowNotStarted = "short_window_not_started"
+        case plan
+        case bankedResetsExpiries = "banked_resets_expiries"
+        case sourceStale = "source_stale"
+        case observedAt = "observed_at"
+        case weeklyUnavailable = "weekly_unavailable"
+        case bankedResetDetails = "banked_reset_details"
+    }
+
+    /// Counts banked resets by kind ("full", "fable", ...), in display order.
+    /// Empty unless the unexpired details account for the whole aggregate
+    /// count, so a partial or stale breakdown is never shown.
+    public func bankedResetKinds(now: Date = Date()) -> [(kind: String, count: Int)] {
+        guard let total = bankedResets, total > 0 else { return [] }
+        let live = bankedResetDetails.filter { detail in
+            guard detail.resetsLeft > 0, !detail.paused else { return false }
+            if let starts = detail.startsAt.flatMap(parseRFC3339), starts > now { return false }
+            guard let expires = detail.expiresAt.flatMap(parseRFC3339) else { return true }
+            return expires > now
+        }
+        guard live.reduce(0, { $0 + $1.resetsLeft }) == total else { return [] }
+        var counts: [String: Int] = [:]
+        for detail in live { counts[detail.kind ?? "", default: 0] += detail.resetsLeft }
+        let order = ["full", "weekly", "session", "fable", "opus", "sonnet"]
+        return counts.sorted { (order.firstIndex(of: $0.key) ?? order.count) < (order.firstIndex(of: $1.key) ?? order.count) }
+            .map { (kind: $0.key, count: $0.value) }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         short = try container.decodeIfPresent(UsageWindow.self, forKey: .short)
-        weekly = try container.decodeIfPresent(UsageWindow.self, forKey: .weekly)
         allowances = try container.decodeIfPresent([AllowanceSummary].self, forKey: .allowances) ?? []
         source = try container.decodeIfPresent(String.self, forKey: .source)
         bankedResets = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
         bankedResetsExpireAt = try? container.decodeIfPresent(String.self, forKey: .bankedResetsExpireAt)
+        // Absent from an older desktop, which never sent the state.
+        shortWindowNotStarted = (try? container.decodeIfPresent(Bool.self, forKey: .shortWindowNotStarted)) ?? false
+        plan = (try? container.decodeIfPresent(String.self, forKey: .plan)).flatMap { $0 }
+        bankedResetsExpiries = ((try? container.decodeIfPresent([String].self, forKey: .bankedResetsExpiries)) ?? nil) ?? []
+        sourceStale = (try? container.decodeIfPresent(Bool.self, forKey: .sourceStale)) ?? false
+        observedAt = (try? container.decodeIfPresent(String.self, forKey: .observedAt)).flatMap { $0 }
+        weeklyUnavailable = (try? container.decodeIfPresent(Bool.self, forKey: .weeklyUnavailable)) ?? false
+        // Never trust a weekly value beside "not reported".
+        weekly = weeklyUnavailable ? nil : try container.decodeIfPresent(UsageWindow.self, forKey: .weekly)
+        bankedResetDetails = (try? container.decodeIfPresent([BankedResetDetail].self, forKey: .bankedResetDetails)) ?? []
     }
+}
+
+/// One banked reset grant. Kind is "full", "session", "weekly", or "fable"
+/// (refills the 5-hour limit and Fable allowance, not the whole week).
+public struct BankedResetDetail: Codable, Sendable {
+    public let id: String
+    public let kind: String?
+    public let expiresAt: String?
+    public let startsAt: String?
+    public let resetsLeft: Int
+    /// Paused resets are held but not spendable, and are not in the count.
+    public let paused: Bool
+
+    public init(id: String, kind: String? = nil, expiresAt: String? = nil, startsAt: String? = nil, resetsLeft: Int, paused: Bool = false) {
+        self.id = id
+        self.kind = kind
+        self.expiresAt = expiresAt
+        self.startsAt = startsAt
+        self.resetsLeft = resetsLeft
+        self.paused = paused
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, paused
+        case expiresAt = "expires_at"
+        case startsAt = "starts_at"
+        case resetsLeft = "resets_left"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try? container.decodeIfPresent(String.self, forKey: .kind)
+        expiresAt = try? container.decodeIfPresent(String.self, forKey: .expiresAt)
+        startsAt = try? container.decodeIfPresent(String.self, forKey: .startsAt)
+        resetsLeft = try container.decode(Int.self, forKey: .resetsLeft)
+        paused = (try? container.decodeIfPresent(Bool.self, forKey: .paused)) ?? false
+    }
+}
+
+private func parseRFC3339(_ value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
 }
 
 public struct UsageWindow: Codable, Sendable {
     public let remaining: Double
     public let resetsAt: String?
+    /// Length of the allowance period in seconds; nil means the usual week.
+    /// Cursor's subscription window is monthly.
+    public let periodSeconds: Int?
 
     enum CodingKeys: String, CodingKey {
         case remaining
         case resetsAt = "resets_at"
+        case periodSeconds = "period_seconds"
     }
 
-    public init(remaining: Double, resetsAt: String? = nil) {
+    public init(remaining: Double, resetsAt: String? = nil, periodSeconds: Int? = nil) {
         self.remaining = remaining
         self.resetsAt = resetsAt
+        self.periodSeconds = periodSeconds
     }
+
+    /// True when the window is longer than a week (Cursor's monthly pools).
+    public var isMonthly: Bool { (periodSeconds ?? 0) > 8 * 86400 }
 }
 
 public struct AllowanceSummary: Codable, Sendable {
     public let key: String
     public let sourceLabel: String
     public let remaining: Double
+    /// When this window resets. Model windows keep their own reset, which
+    /// can differ from the account's weekly reset (or stand without one).
+    public let resetsAt: String?
+
+    public init(key: String, sourceLabel: String, remaining: Double, resetsAt: String? = nil) {
+        self.key = key
+        self.sourceLabel = sourceLabel
+        self.remaining = remaining
+        self.resetsAt = resetsAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case key, remaining
         case sourceLabel = "source_label"
+        case resetsAt = "resets_at"
     }
 
     public var displayName: String { sourceLabel.isEmpty ? key : sourceLabel }
@@ -450,17 +691,49 @@ public struct TrayState: Sendable {
         case .running: "RUN"
         case .attention: "ATTN"
         }
-        providerBadges = snapshot.providers
+        // Several Claude accounts share one badge showing the account count,
+        // never a blended percentage: accounts' allowances are separate and
+        // are not averaged or summed. Other providers keep one badge per
+        // account, as their popover keeps one card per account.
+        var families: [(key: String, provider: String, accounts: [ProviderSummary])] = []
+        for provider in snapshot.providers {
+            let family = provider.provider.lowercased()
+            let key = family == "claude" ? family : "\(family)#\(provider.id)"
+            if let index = families.firstIndex(where: { $0.key == key }) {
+                families[index].accounts.append(provider)
+            } else {
+                families.append((key, family, [provider]))
+            }
+        }
+        // A stable sort: same-rank badges keep the service's order.
+        providerBadges = families.enumerated()
             .sorted { left, right in
-                let leftRank = Self.providerRank(left.provider)
-                let rightRank = Self.providerRank(right.provider)
+                let leftRank = Self.providerRank(left.element.provider)
+                let rightRank = Self.providerRank(right.element.provider)
                 if leftRank != rightRank { return leftRank < rightRank }
-                return left.displayName.localizedCaseInsensitiveCompare(right.displayName) == .orderedAscending
+                let byName = left.element.accounts[0].displayName.localizedCaseInsensitiveCompare(right.element.accounts[0].displayName)
+                if byName != .orderedSame { return byName == .orderedAscending }
+                return left.offset < right.offset
             }
-            .map { provider in
-                ProviderBadge(provider: provider.provider, displayName: provider.displayName, percent: provider.weeklyPercent)
+            .map(\.element)
+            .map { family in
+                let first = family.accounts[0]
+                return ProviderBadge(
+                    provider: first.provider,
+                    displayName: first.displayName,
+                    percent: family.accounts.count == 1 ? first.weeklyPercent : nil,
+                    accountCount: family.accounts.count,
+                    accounts: family.accounts.count == 1 ? [] : family.accounts.map {
+                        ProviderBadge.Account(
+                            name: $0.label.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 } ?? $0.id,
+                            weeklyPercent: $0.weeklyPercent,
+                            weeklyNotReported: $0.weeklyNotReported
+                        )
+                    },
+                    weeklyNotReported: family.accounts.count == 1 && first.weeklyNotReported
+                )
             }
-        let providers = providerBadges.map { "\($0.displayName) \($0.percent.map { "\($0)%" } ?? "—")" }
+        let providers = providerBadges.map(\.spoken)
         menuBarTitle = activityLabel + (providers.isEmpty ? "" : "  " + providers.joined(separator: " · "))
     }
 
@@ -474,7 +747,59 @@ public struct TrayState: Sendable {
 }
 
 public struct ProviderBadge: Sendable, Equatable {
+    public struct Account: Sendable, Equatable {
+        public let name: String
+        public let weeklyPercent: Int?
+        /// The source reports no weekly limit (Team seats): said as "weekly
+        /// not reported", never as an unknown "—".
+        public let weeklyNotReported: Bool
+
+        public init(name: String, weeklyPercent: Int?, weeklyNotReported: Bool = false) {
+            self.name = name
+            self.weeklyPercent = weeklyPercent
+            self.weeklyNotReported = weeklyNotReported
+        }
+
+        var spokenWeekly: String {
+            if let weeklyPercent { return "\(weeklyPercent)%" }
+            return weeklyNotReported ? "weekly not reported" : "—"
+        }
+    }
+
     public let provider: String
     public let displayName: String
+    /// The single account's weekly percent; nil for several accounts or
+    /// when unknown.
     public let percent: Int?
+    public let accountCount: Int
+    /// Each account's own weekly figure when there are several.
+    public let accounts: [Account]
+    /// A single account whose source reports no weekly limit.
+    public let weeklyNotReported: Bool
+
+    public init(provider: String, displayName: String, percent: Int?, accountCount: Int = 1, accounts: [Account] = [], weeklyNotReported: Bool = false) {
+        self.provider = provider
+        self.displayName = displayName
+        self.percent = percent
+        self.accountCount = accountCount
+        self.accounts = accounts
+        self.weeklyNotReported = weeklyNotReported
+    }
+
+    /// What the menu bar shows beside the provider's icon: "41%", "—", or
+    /// "×3" for several accounts.
+    public var compact: String {
+        if accountCount > 1 { return "×\(accountCount)" }
+        if let percent { return "\(percent)%" }
+        return weeklyNotReported ? "n/r" : "—"
+    }
+
+    /// "Codex 32%", "Claude 3 accounts: Personal 41%, Client 58%, Side —".
+    public var spoken: String {
+        if accountCount > 1 {
+            let each = accounts.map { "\($0.name) \($0.spokenWeekly)" }
+            return "\(displayName) \(accountCount) accounts: " + each.joined(separator: ", ")
+        }
+        return weeklyNotReported && percent == nil ? "\(displayName) weekly not reported" : "\(displayName) \(compact)"
+    }
 }
