@@ -962,3 +962,48 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		}
 	}
 }
+
+// A report collected while fresh can expire without its observation time
+// changing. Saving it again must carry the expiry onto the stored row, or
+// readers keep treating it as fresh; a fresh re-save never un-stales it.
+func TestResavedObservationKeepsItsLatestStaleness(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	observed := time.Now().UTC().Truncate(time.Second)
+	snapshot := decision.UsageSnapshot{
+		Provider: "cursor", Account: "cursor-main", ObservedAt: observed,
+		Weekly: decision.UsageWindow{Remaining: 0.5, ResetsAt: observed.Add(10 * 24 * time.Hour)},
+		Source: "openusage", Confidence: "high",
+	}
+	stale := func() bool {
+		t.Helper()
+		got, _, err := db.LatestSnapshot(t.Context(), "cursor-main", "cursor")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.SourceStale
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if stale() {
+		t.Fatal("fresh report saved as stale")
+	}
+	snapshot.SourceStale = true
+	if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !stale() {
+		t.Fatal("re-saving the expired report left the stored row fresh")
+	}
+	snapshot.SourceStale = false
+	if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !stale() {
+		t.Fatal("a fresh re-save un-staled an expired report")
+	}
+}

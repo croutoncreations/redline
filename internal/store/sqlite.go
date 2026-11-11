@@ -1349,6 +1349,16 @@ banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_det
 		return fmt.Errorf("count saved usage snapshot: %w", err)
 	}
 	if inserted == 0 {
+		// The same observation saved again can only learn that its report
+		// has since expired (a fixed fetchedAt outlives its expiresAt), so
+		// that one fact is carried onto the stored row; nothing else changes.
+		if s.SourceStale {
+			if _, err := tx.ExecContext(ctx, `UPDATE usage_snapshots SET source_stale = 1
+WHERE provider_account_id = ? AND provider = ? AND observed_at = ? AND source = ? AND source_stale = 0`,
+				s.Account, s.Provider, formatTime(s.ObservedAt), s.Source); err != nil {
+				return fmt.Errorf("mark duplicate usage snapshot stale: %w", err)
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit duplicate snapshot save: %w", err)
 		}
