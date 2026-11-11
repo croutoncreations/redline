@@ -4136,3 +4136,67 @@ func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
 		t.Fatal("event stream produced no events through the wrapper")
 	}
 }
+
+// Gatepost logs which provider spent tokens, not which login. Only the
+// provider's single account on the default login takes them: a profile or
+// OpenUsage-card account, or one beside a switched-off sibling, must not
+// absorb tokens another login may have spent.
+func TestTokenSyncAttributesGatepostOnlyToTheDefaultLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*config.Config)
+		want   int
+	}{
+		{"default login", nil, 1},
+		{"profile account", func(cfg *config.Config) {
+			p := cfg.Providers["claude-main"]
+			p.UsageSource, p.ClaudeConfigDir = "native", "/p/.claude-cc-frank"
+			cfg.Providers["claude-main"] = p
+		}, 0},
+		{"card account", func(cfg *config.Config) {
+			p := cfg.Providers["claude-main"]
+			p.UsageSource, p.OpenUsageCard = "openusage", "claude@ab12cd34"
+			cfg.Providers["claude-main"] = p
+		}, 0},
+		{"disabled sibling", func(cfg *config.Config) {
+			cfg.DisabledAccounts = map[string]config.ManagedAccount{"claude-old": {ID: "claude-old", Provider: "claude", Disabled: true}}
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			viewerPath := filepath.Join(directory, "viewer.db")
+			piPath := filepath.Join(directory, "pi.jsonl")
+			if err := os.WriteFile(piPath, []byte(`{"type":"message","id":"m1","timestamp":"2026-07-16T18:00:01Z","message":{"role":"assistant","provider":"anthropic-cli","model":"claude-opus","usage":{"input":10,"output":2,"cacheRead":30,"cacheWrite":4}}}
+`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			viewer, err := sql.Open("sqlite", viewerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := viewer.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, source_path TEXT, started_at INTEGER, ended_at INTEGER);
+CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, model TEXT, context_tokens INTEGER, output_tokens INTEGER);
+INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, piPath); err != nil {
+				t.Fatal(err)
+			}
+			_ = viewer.Close()
+			db, err := store.Open(filepath.Join(directory, "redline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := testConfig("http://127.0.0.1:1")
+			cfg.UsageMonitor.GatepostDatabase = viewerPath
+			if tc.change != nil {
+				tc.change(&cfg)
+			}
+			server := httptest.NewServer(api.NewServer(cfg, db, func() time.Time { return apiNow }))
+			defer server.Close()
+			postJSON[map[string]any](t, server.URL+"/v1/providers/claude-main/token-sync", map[string]any{})
+			observations, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
+			if err != nil || len(observations) != tc.want {
+				t.Fatalf("observations=%d want %d err=%v", len(observations), tc.want, err)
+			}
+		})
+	}
+}

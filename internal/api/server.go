@@ -1296,10 +1296,15 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if gatepostPath == "" {
 		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	}
-	// Gatepost records which provider spent tokens, not which account. With
-	// several accounts of one provider its sessions cannot be attributed, and
-	// importing them into one account would skew that account's calibration.
-	if s.accountsOfProvider(configured.Provider) > 1 {
+	// Gatepost records which provider spent tokens, not which account or
+	// login. Its sessions are attributed only to the provider's single
+	// account, and only when that account reads the default login: tokens
+	// from the default login (or another profile) must never land on a
+	// profile or OpenUsage-card account and skew its calibration. A single
+	// enabled account is not proof on its own; a disabled account or a
+	// profile may still have spent them.
+	if s.accountsOfProvider(configured.Provider) > 1 || s.hasDisabledAccountOf(configured.Provider) ||
+		config.MeteringIdentity(configured) != "default:"+strings.ToLower(strings.TrimSpace(configured.Provider)) {
 		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	}
 	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
@@ -1401,6 +1406,17 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 		inserted += count
 	}
 	return inserted, nil
+}
+
+// hasDisabledAccountOf reports a switched-off managed account of a
+// provider type: its past sessions may still be in provider-wide logs.
+func (s *Server) hasDisabledAccountOf(provider string) bool {
+	for _, account := range s.config.DisabledAccounts {
+		if strings.EqualFold(account.Provider, provider) {
+			return true
+		}
+	}
+	return false
 }
 
 // accountsOfProvider counts configured accounts of one provider type.
