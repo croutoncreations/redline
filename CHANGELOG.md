@@ -12,7 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Downgrading: older versions reject `provider: cursor` and the per-account settings below
   (`claude_config_dir`, `openusage_card`, `label`, `weekly_policy`, `session_reserve`). Remove
-  them before running an older binary; the migrated database needs no change.
+  them before running an older binary; the migrated database needs no change. Older versions
+  do not read `accounts.yaml`, so accounts added with `redline account` are not shown or
+  scheduled until you upgrade again.
 - Managed accounts live in `accounts.yaml` beside `redline.yaml`. Accounts in the main config keep
   working unchanged and are listed as read-only.
 
@@ -81,8 +83,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a hand-run prune are dropped rather than stopping Redline from opening the database), and a window
   can carry its own period so pace is no longer hard-coded to seven days. A Cursor pool keeps a
   reserve and must itself be on pace before a run starts. This is an admission check, not a
-  spending cap: a long run started near the reserve can still go past it, so set Cursor's
-  on-demand limit to $0 if that must be impossible.
+  spending cap: a long run started near the reserve can still use the reserve and then
+  on-demand spend. Setting Cursor's on-demand limit to $0 prevents the paid spend, not the
+  reserve being used.
 
 ### Fixed
 
