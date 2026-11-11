@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Check for Updates no longer opens Sparkle's update prompt behind the Redline dashboard
+  window, where it looked as though nothing happened. The app comes forward and the update
+  window is raised above the dashboard.
+
 ## [0.1.13] - 2026-11-11
 
 ### Upgrade notes

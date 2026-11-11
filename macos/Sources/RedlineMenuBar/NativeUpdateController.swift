@@ -3,18 +3,18 @@ import RedlineKit
 import Sparkle
 
 @MainActor
-final class NativeUpdateController {
-    private let updaterController: SPUStandardUpdaterController?
+final class NativeUpdateController: NSObject, SPUStandardUserDriverDelegate {
+    private var updaterController: SPUStandardUpdaterController?
 
     init(bundle: Bundle = .main) {
+        super.init()
         guard UpdateStartupPolicy.shouldStartUpdater(infoDictionary: bundle.infoDictionary ?? [:]) else {
-            updaterController = nil
             return
         }
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil
+            userDriverDelegate: self
         )
     }
 
@@ -27,6 +27,37 @@ final class NativeUpdateController {
             alert.runModal()
             return
         }
+        // Redline is a menu-bar (accessory) app, usually invoked from the
+        // popover or the dashboard. Activate first so Sparkle's windows are
+        // not ordered behind the dashboard window.
+        NSApplication.shared.activate(ignoringOtherApps: true)
         updaterController.checkForUpdates(nil)
+    }
+
+    // MARK: SPUStandardUserDriverDelegate
+
+    nonisolated func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        guard handleShowingUpdate else { return }
+        Task { @MainActor in Self.bringUpdateWindowsToFront() }
+    }
+
+    /// Sparkle orders its alert front "conditionally", which an accessory app
+    /// that is not active (or whose dashboard is key) can lose. Raise every
+    /// Sparkle-owned window once it exists.
+    private static func bringUpdateWindowsToFront() {
+        // Sparkle creates the window on this run-loop turn; look on the next.
+        DispatchQueue.main.async {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            for window in NSApplication.shared.windows where window.isVisible && UpdateWindowIdentity.isSparkleWindow(
+                windowControllerClassName: window.windowController.map { String(describing: type(of: $0)) }
+            ) {
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
+        }
     }
 }
