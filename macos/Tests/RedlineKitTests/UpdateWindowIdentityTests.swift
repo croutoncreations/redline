@@ -14,4 +14,10 @@ final class UpdateWindowIdentityTests: XCTestCase {
         }
         XCTAssertFalse(UpdateWindowIdentity.isSparkleWindow(windowControllerClassName: nil))
     }
+
+    func testRaisesOnlyForUserInitiatedChecks() {
+        XCTAssertTrue(UpdateWindowIdentity.shouldRaise(handlingShowingUpdate: true, userInitiated: true))
+        XCTAssertFalse(UpdateWindowIdentity.shouldRaise(handlingShowingUpdate: true, userInitiated: false))
+        XCTAssertFalse(UpdateWindowIdentity.shouldRaise(handlingShowingUpdate: false, userInitiated: true))
+    }
 }

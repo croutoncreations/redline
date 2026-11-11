@@ -16,4 +16,10 @@ public enum UpdateWindowIdentity {
         guard let name = windowControllerClassName else { return false }
         return sparkleControllerClassNames.contains(name)
     }
+
+    /// Raise Sparkle's windows only when Sparkle is showing the update itself
+    /// for a check the user started; scheduled checks must not steal focus.
+    public static func shouldRaise(handlingShowingUpdate: Bool, userInitiated: Bool) -> Bool {
+        handlingShowingUpdate && userInitiated
+    }
 }

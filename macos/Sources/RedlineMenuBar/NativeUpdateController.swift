@@ -41,7 +41,13 @@ final class NativeUpdateController: NSObject, SPUStandardUserDriverDelegate {
         forUpdate update: SUAppcastItem,
         state: SPUUserUpdateState
     ) {
-        guard handleShowingUpdate else { return }
+        // Only for a check the user asked for. A scheduled check that finds
+        // an update while they work in another app keeps Sparkle's own
+        // behavior (shown without taking focus), rather than stealing it.
+        guard UpdateWindowIdentity.shouldRaise(
+            handlingShowingUpdate: handleShowingUpdate,
+            userInitiated: state.userInitiated
+        ) else { return }
         Task { @MainActor in Self.bringUpdateWindowsToFront() }
     }
 
