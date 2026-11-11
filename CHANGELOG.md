@@ -80,8 +80,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   allow the role; existing rows are copied unchanged, and allowance rows left without a snapshot by
   a hand-run prune are dropped rather than stopping Redline from opening the database), and a window
   can carry its own period so pace is no longer hard-coded to seven days. A Cursor pool keeps a
-  reserve and must itself be on pace, so a run never starts on the last of a pool and spills into
-  on-demand spend.
+  reserve and must itself be on pace before a run starts. This is an admission check, not a
+  spending cap: a long run started near the reserve can still go past it, so set Cursor's
+  on-demand limit to $0 if that must be impossible.
 
 ### Fixed
 
