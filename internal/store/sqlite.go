@@ -516,76 +516,79 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
 	}
-	if version < 28 {
-		// Not nullable, like short_window_unavailable: a snapshot either saw an
-		// untouched five hour window or it did not, and older rows did not.
-		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_not_started", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (28)`); err != nil {
-			return fmt.Errorf("record short window not started migration: %w", err)
-		}
+	// short_window_unavailable came with the mobile branch's v25. Main's v26
+	// skipped it, so a database main created is past 26 without the column:
+	// add it whenever it is missing. Not nullable: a snapshot either reported
+	// the five hour window as unavailable or it did not.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
-	if version < 29 {
-		// Cursor's subscription pools reset monthly. SQLite cannot alter a
-		// CHECK constraint, so the allowance table is rebuilt with the wider
-		// role list; every existing row is copied unchanged. Nothing has a
-		// foreign key into this table, so rebuilding it is safe in place.
-		hasAllowances, err := tableExists(ctx, tx, "usage_allowance_windows")
-		if err != nil {
-			return err
+	// Migrations 28–31 came from the mobile and multi-account branches, which
+	// stamped those versions before main's own 32–43. A database created by
+	// main is already at 43 and never ran them, so, like 32–43, each body is
+	// guarded by the schema itself rather than the recorded version, and the
+	// version row is only added when missing.
+	//
+	// 28: whether a snapshot saw an untouched five hour window. Not nullable,
+	// like short_window_unavailable: older rows did not.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_not_started", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 28, "short window not started"); err != nil {
+		return err
+	}
+	// 29: Cursor's subscription pools reset monthly. SQLite cannot alter a
+	// CHECK constraint, so the allowance table is rebuilt with the wider role
+	// list when it does not already allow monthly; every existing row is
+	// copied unchanged. Nothing has a foreign key into this table, so
+	// rebuilding it is safe in place. The rebuild copies only rows whose
+	// snapshot exists, so it needs usage_snapshots; a legacy database
+	// recorded at an early version can lack it
+	// (TestOpenMigratesExistingVersionTwoDatabase), and cannot store any
+	// snapshot, so skipping the rebuild there loses nothing.
+	hasAllowances, err := tableExists(ctx, tx, "usage_allowance_windows")
+	if err != nil {
+		return err
+	}
+	hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
+	if err != nil {
+		return err
+	}
+	if hasAllowances && hasSnapshots {
+		var allowancesSQL string
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'usage_allowance_windows'`).Scan(&allowancesSQL); err != nil {
+			return fmt.Errorf("inspect allowance windows: %w", err)
 		}
-		// The rebuild copies only rows whose snapshot exists, so it needs
-		// usage_snapshots. A legacy database recorded at an early version
-		// can lack it (TestOpenMigratesExistingVersionTwoDatabase); such a
-		// database cannot store any snapshot, monthly or not, so skipping
-		// the rebuild there loses nothing that would otherwise work.
-		hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
-		if err != nil {
-			return err
-		}
-		if hasAllowances && hasSnapshots {
+		if !strings.Contains(allowancesSQL, "'monthly'") {
 			if err := rebuildAllowanceWindowsV29(ctx, tx); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (29)`); err != nil {
-			return fmt.Errorf("record monthly allowance migration: %w", err)
-		}
-		version = 29
 	}
-	if version < 30 {
-		// Usage is recorded per provider account so two accounts of one
-		// provider can never read each other's numbers. Existing rows keep
-		// an empty account: AdoptLegacyUsage hands them to the provider's
-		// only account at startup, and leaves them unowned when there are
-		// several, because nothing recorded which account they came from.
-		if err := migrateAccountUsageV30(ctx, tx); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (30)`); err != nil {
-			return fmt.Errorf("record account usage migration: %w", err)
-		}
-		version = 30
+	if err := recordMigration(ctx, tx, 29, "monthly allowance"); err != nil {
+		return err
 	}
-	if version < 31 {
-		// Accounts whose source reports no account-wide weekly limit (Team
-		// seats in OpenUsage). The weekly columns stay NOT NULL for every
-		// older reader; such rows store the zero window and this flag, and
-		// the flag is what says "not reported". Additive only.
-		hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
-		if err != nil {
-			return err
-		}
-		if hasSnapshots {
-			if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "weekly_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (31)`); err != nil {
-			return fmt.Errorf("record weekly-unavailable migration: %w", err)
-		}
-		version = 31
+	// 30: usage is recorded per provider account so two accounts of one
+	// provider can never read each other's numbers. Existing rows keep an
+	// empty account: AdoptLegacyUsage hands them to the provider's only
+	// account at startup, and leaves them unowned when there are several,
+	// because nothing recorded which account they came from. Every step is
+	// idempotent (columns added when missing, indexes recreated).
+	if err := migrateAccountUsageV30(ctx, tx); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 30, "account usage"); err != nil {
+		return err
+	}
+	// 31: accounts whose source reports no account-wide weekly limit (Team
+	// seats in OpenUsage). The weekly columns stay NOT NULL for every older
+	// reader; such rows store the zero window and this flag, and the flag is
+	// what says "not reported". Additive only.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "weekly_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 31, "weekly-unavailable"); err != nil {
+		return err
 	}
 	// Versions 32–34 rather than 28–30: unmerged mobile, Grok, and multi-account
 	// branches stamped 28–31 for unrelated migrations. Like v26, inspect the schema
@@ -1092,6 +1095,15 @@ ON usage_snapshots(provider, observed_at DESC, id DESC)`); err != nil {
 	return nil
 }
 
+// recordMigration stamps a schema-guarded migration's version unless it is
+// already recorded (by this build or a sibling branch).
+func recordMigration(ctx context.Context, tx *sql.Tx, version int, name string) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = ?)`, version, version); err != nil {
+		return fmt.Errorf("record %s migration: %w", name, err)
+	}
+	return nil
+}
+
 func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(
@@ -1150,11 +1162,22 @@ func migrateAccountUsageV30(ctx context.Context, tx *sql.Tx) error {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `
+		// The identity index gains provider_account_id. Rebuild it only
+		// while it lacks the column, so reopening a migrated database
+		// leaves the schema untouched.
+		var identitySQL sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_snapshots_identity'`).Scan(&identitySQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("inspect usage snapshot identity index: %w", err)
+		}
+		if !strings.Contains(identitySQL.String, "provider_account_id") {
+			if _, err := tx.ExecContext(ctx, `
 DROP INDEX IF EXISTS idx_usage_snapshots_identity;
 CREATE UNIQUE INDEX idx_usage_snapshots_identity
-ON usage_snapshots(provider_account_id, provider, observed_at, source);
-CREATE INDEX IF NOT EXISTS idx_usage_snapshots_account_observed
+ON usage_snapshots(provider_account_id, provider, observed_at, source);`); err != nil {
+				return fmt.Errorf("index account usage snapshots: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_usage_snapshots_account_observed
 ON usage_snapshots(provider_account_id, provider, observed_at DESC, id DESC);`); err != nil {
 			return fmt.Errorf("index account usage snapshots: %w", err)
 		}
