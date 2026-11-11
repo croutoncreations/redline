@@ -130,16 +130,92 @@ type BankedReset struct {
 	// Kind is what spending the reset refills, as Claude Code names it:
 	// "full", "session" (5-hour only), "weekly", or "fable" (5-hour plus the
 	// Fable allowance, giving back only what Fable used of the weekly limit).
-	// Empty when the provider does not say.
-	Kind          string     `json:"kind,omitempty"`
+	// "opus" or "sonnet" when an untyped grant clears only that model's
+	// weekly limit. Empty when the provider does not say.
+	Kind string `json:"kind,omitempty"`
+	// StartsAt is when the reset becomes usable, if the provider said.
+	StartsAt      *time.Time `json:"starts_at,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	Clears        []string   `json:"clears,omitempty"`
 	UsableNow     *bool      `json:"usable_now,omitempty"`
 	RequiresLimit *bool      `json:"requires_limit,omitempty"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 	ResetsLeft    int        `json:"resets_left"`
+	// Paused resets are still held but cannot be spent until resumed.
+	Paused bool `json:"paused,omitempty"`
+	// Blocking lists limits that prevent using the reset while reached,
+	// normalized like Clears.
+	Blocking []string `json:"blocking,omitempty"`
+	// UnavailableReason says why the reset cannot be spent now; empty when
+	// it can, or when the provider did not say. See ResetUnavailableText.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 	// Only Claude's next_grant_id is claimable.
 	Claimable bool `json:"claimable,omitempty"`
+}
+
+// Spendable reports whether a reset is held and not paused or yet to start.
+// Provider-specific checks (claimability, usable_now, cooldowns) still apply.
+func (r BankedReset) Spendable(now time.Time) bool {
+	return r.ResetsLeft > 0 && !r.Paused && (r.StartsAt == nil || !r.StartsAt.After(now))
+}
+
+// ResetUnavailableText explains an UnavailableReason code in the words
+// Claude Code uses, for errors and UI hints. Unknown codes read generically.
+func ResetUnavailableText(reason string) string {
+	switch reason {
+	case "":
+		return ""
+	case "paused":
+		return "it is paused"
+	case "not_started":
+		return "it isn't active yet"
+	case "cooldown":
+		return "a reset was just used; try again in a minute"
+	case "blocked_five_hour":
+		return "can't be used while you're at your 5-hour limit"
+	case "blocked_seven_day":
+		return "can't be used while you're at your weekly limit"
+	case "blocked_opus":
+		return "can't be used while you're at your Opus limit"
+	case "blocked_sonnet":
+		return "can't be used while you're at your Sonnet limit"
+	case "blocked_other":
+		return "can't be used while you're at another limit it doesn't refill"
+	case "cannot_clear":
+		return "doesn't refill the limit you've reached"
+	case "needs_limit":
+		return "usable once you reach a limit it refills"
+	}
+	return "can't be used right now"
+}
+
+// normalizeResetWindows maps provider window names onto Redline's, dropping
+// unknown and duplicate ones. Claude's seven_day_overage_included is the Fable
+// allowance, not the weekly limit: a Fable reset clears it without resetting
+// the week. Model-scoped limits keep their own names.
+func normalizeResetWindows(windows []string) []string {
+	var normalized []string
+	seen := make(map[string]bool)
+	for _, window := range windows {
+		switch window {
+		case "seven_day":
+			window = "weekly"
+		case "seven_day_overage_included":
+			window = "fable"
+		case "seven_day_opus":
+			window = "opus"
+		case "seven_day_sonnet":
+			window = "sonnet"
+		}
+		switch window {
+		case "five_hour", "weekly", "fable", "opus", "sonnet":
+			if !seen[window] {
+				normalized = append(normalized, window)
+				seen[window] = true
+			}
+		}
+	}
+	return normalized
 }
 
 // BankedResets is a provider's report of on-demand quota resets.
@@ -160,23 +236,8 @@ func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
 		return
 	}
 	for _, detail := range resets.Details {
-		var clears []string
-		seen := make(map[string]bool)
-		for _, window := range detail.Clears {
-			switch window {
-			case "seven_day":
-				window = "weekly"
-			case "seven_day_overage_included":
-				// Claude's Fable allowance, not the weekly limit: a Fable
-				// reset clears it without resetting the week.
-				window = "fable"
-			}
-			if (window == "five_hour" || window == "weekly" || window == "fable") && !seen[window] {
-				clears = append(clears, window)
-				seen[window] = true
-			}
-		}
-		detail.Clears = clears
+		detail.Clears = normalizeResetWindows(detail.Clears)
+		detail.Blocking = normalizeResetWindows(detail.Blocking)
 		s.BankedResetDetails = append(s.BankedResetDetails, detail)
 	}
 	count := resets.Available

@@ -244,6 +244,86 @@ func TestClaudeNativeResetKindFallsBackToClears(t *testing.T) {
 	}
 }
 
+// Paused grants and grants that have not started are held, not spendable:
+// Claude Code leaves them out of what can be used. They stay in the details,
+// with the reason, but not in the count or the soonest expiry.
+func TestClaudeNativeDoesNotCountPausedOrFutureGrants(t *testing.T) {
+	server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"next_grant_id":"live","grants":[
+		{"id":"paused","resets_left":2,"ends_at":"2026-09-30T00:00:00Z","paused":true,"usable_now":false},
+		{"id":"future","resets_left":1,"starts_at":"2026-10-01T00:00:00Z","ends_at":"2026-10-05T00:00:00Z","usable_now":false},
+		{"id":"live","resets_left":1,"starts_at":"2026-09-01T00:00:00Z","ends_at":"2026-10-22T00:00:00Z","usable_now":true}]}}`)
+	got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	if got.BankedResets == nil || *got.BankedResets != 1 || got.BankedResetsExpireAt == nil || !got.BankedResetsExpireAt.Equal(want) {
+		t.Fatalf("resets=%v expiry=%v, want 1 expiring %v", got.BankedResets, got.BankedResetsExpireAt, want)
+	}
+	reasons := map[string]string{}
+	for _, d := range got.BankedResetDetails {
+		reasons[d.ID] = d.UnavailableReason
+	}
+	if len(got.BankedResetDetails) != 3 || reasons["paused"] != "paused" || reasons["future"] != "not_started" || reasons["live"] != "" {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+	if !got.BankedResetDetails[0].Paused || got.BankedResetDetails[1].StartsAt == nil {
+		t.Fatalf("paused/starts_at not kept: %#v", got.BankedResetDetails)
+	}
+}
+
+// A grant that clears only one model's weekly limit is scoped to that model;
+// calling it a weekly reset would promise a refill of the whole week.
+func TestClaudeNativeModelScopedResetKinds(t *testing.T) {
+	server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true,"grants":[
+		{"id":"opus","resets_left":1,"clears":["seven_day_opus"]},
+		{"id":"sonnet","resets_left":1,"clears":["seven_day_sonnet"]},
+		{"id":"cowork","resets_left":1,"clears":["seven_day_cowork"]}]}}`)
+	got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.BankedResetDetails) != 3 {
+		t.Fatalf("details = %#v", got.BankedResetDetails)
+	}
+	opus, sonnet, cowork := got.BankedResetDetails[0], got.BankedResetDetails[1], got.BankedResetDetails[2]
+	if opus.Kind != "opus" || !slices.Equal(opus.Clears, []string{"opus"}) || sonnet.Kind != "sonnet" || !slices.Equal(sonnet.Clears, []string{"sonnet"}) {
+		t.Fatalf("opus=%+v sonnet=%+v", opus, sonnet)
+	}
+	// Product-scoped limits Redline does not track keep an honest weekly kind
+	// from Claude Code's rule but never claim to clear the account week.
+	if cowork.Kind != "weekly" || len(cowork.Clears) != 0 || slices.Contains(cowork.Clears, "weekly") {
+		t.Fatalf("cowork=%+v", cowork)
+	}
+}
+
+// Why a grant cannot be spent comes from the server when it says, otherwise
+// from what blocks it, the way Claude Code explains it.
+func TestClaudeNativeExplainsWhyAResetIsUnavailable(t *testing.T) {
+	for name, tc := range map[string]struct{ grant, status, want string }{
+		"server reason":   {grant: `,"unavailable_reason":"cannot_clear","usable_now":false`, want: "cannot_clear"},
+		"cooldown":        {status: `,"cooldown_until":"2026-09-24T15:00:00Z"`, grant: `,"usable_now":false`, want: "cooldown"},
+		"blocked weekly":  {grant: `,"blocking":["seven_day"],"usable_now":false`, want: "blocked_seven_day"},
+		"blocked opus":    {grant: `,"blocking":["seven_day_opus"],"usable_now":false`, want: "blocked_opus"},
+		"blocked other":   {grant: `,"blocking":["seven_day_cowork"],"usable_now":false`, want: "blocked_other"},
+		"needs a limit":   {grant: `,"usable_now":false,"use_requires_limit":true`, want: "needs_limit"},
+		"unexplained":     {grant: `,"usable_now":false,"use_requires_limit":false`, want: "unavailable"},
+		"usable":          {grant: `,"usable_now":true`, want: ""},
+		"malformed field": {grant: `,"unavailable_reason":5,"blocking":"x","usable_now":true`, want: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, _ := claudeServer(t, `{`+claudeWindows+`,"cedar_ember":{"eligible":true`+tc.status+`,"grants":[{"id":"g","resets_left":1`+tc.grant+`}]}}`)
+			got, _, err := claudeClient(server).Fetch(context.Background(), config.Provider{Provider: "claude"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.BankedResetDetails) != 1 || got.BankedResetDetails[0].UnavailableReason != tc.want || *got.BankedResets != 1 {
+				t.Fatalf("details = %#v, want reason %q", got.BankedResetDetails, tc.want)
+			}
+		})
+	}
+}
+
 // The reset lookup is supplementary and must never refresh (and so rotate)
 // Claude Code's shared refresh token.
 func TestBankedResetLookupUsesReadOnlyCredentials(t *testing.T) {

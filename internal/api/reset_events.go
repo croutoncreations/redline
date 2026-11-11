@@ -162,7 +162,7 @@ func (s *Server) automaticallyRedeemable(ctx context.Context, providerID string,
 }
 
 func automaticResetUsable(provider string, reset decision.BankedReset, at time.Time) bool {
-	if reset.ID == "" || reset.ResetsLeft <= 0 || reset.ExpiresAt == nil || !reset.ExpiresAt.After(at) {
+	if reset.ID == "" || !reset.Spendable(at) || reset.ExpiresAt == nil || !reset.ExpiresAt.After(at) {
 		return false
 	}
 	if provider == "claude" {

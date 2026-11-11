@@ -57,6 +57,40 @@ func TestFableResetDoesNotClearTheWeek(t *testing.T) {
 	}
 }
 
+func TestModelScopedResetWindowsKeepTheirNames(t *testing.T) {
+	var s decision.UsageSnapshot
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "g", ResetsLeft: 1,
+		Clears:   []string{"seven_day_opus", "seven_day_sonnet", "seven_day_cowork"},
+		Blocking: []string{"seven_day", "five_hour", "seven_day_oauth_apps"}}}})
+	d := s.BankedResetDetails[0]
+	if !reflect.DeepEqual(d.Clears, []string{"opus", "sonnet"}) || !reflect.DeepEqual(d.Blocking, []string{"weekly", "five_hour"}) {
+		t.Fatalf("clears=%v blocking=%v", d.Clears, d.Blocking)
+	}
+}
+
+func TestBankedResetSpendable(t *testing.T) {
+	now := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	future, past := now.Add(time.Hour), now.Add(-time.Hour)
+	for name, tc := range map[string]struct {
+		reset decision.BankedReset
+		want  bool
+	}{
+		"held":        {decision.BankedReset{ResetsLeft: 1}, true},
+		"started":     {decision.BankedReset{ResetsLeft: 1, StartsAt: &past}, true},
+		"spent":       {decision.BankedReset{ResetsLeft: 0}, false},
+		"paused":      {decision.BankedReset{ResetsLeft: 1, Paused: true}, false},
+		"not started": {decision.BankedReset{ResetsLeft: 1, StartsAt: &future}, false},
+	} {
+		if got := tc.reset.Spendable(now); got != tc.want {
+			t.Errorf("%s: spendable = %v, want %v", name, got, tc.want)
+		}
+	}
+	if decision.ResetUnavailableText("blocked_opus") != "can't be used while you're at your Opus limit" ||
+		decision.ResetUnavailableText("something_new") != "can't be used right now" || decision.ResetUnavailableText("") != "" {
+		t.Fatal("unexpected unavailable text")
+	}
+}
+
 func TestBankedResetDetailsValidation(t *testing.T) {
 	now := time.Now().UTC()
 	for _, detail := range []decision.BankedReset{{ResetsLeft: 1}, {ID: "grant", ResetsLeft: -1}} {

@@ -520,14 +520,15 @@ public struct UsageSnapshot: Codable, Sendable {
     public func bankedResetKinds(now: Date = Date()) -> [(kind: String, count: Int)] {
         guard let total = bankedResets, total > 0 else { return [] }
         let live = bankedResetDetails.filter { detail in
-            guard detail.resetsLeft > 0 else { return false }
+            guard detail.resetsLeft > 0, !detail.paused else { return false }
+            if let starts = detail.startsAt.flatMap(parseRFC3339), starts > now { return false }
             guard let expires = detail.expiresAt.flatMap(parseRFC3339) else { return true }
             return expires > now
         }
         guard live.reduce(0, { $0 + $1.resetsLeft }) == total else { return [] }
         var counts: [String: Int] = [:]
         for detail in live { counts[detail.kind ?? "", default: 0] += detail.resetsLeft }
-        let order = ["full", "weekly", "session", "fable"]
+        let order = ["full", "weekly", "session", "fable", "opus", "sonnet"]
         return counts.sorted { (order.firstIndex(of: $0.key) ?? order.count) < (order.firstIndex(of: $1.key) ?? order.count) }
             .map { (kind: $0.key, count: $0.value) }
     }
@@ -558,19 +559,35 @@ public struct BankedResetDetail: Codable, Sendable {
     public let id: String
     public let kind: String?
     public let expiresAt: String?
+    public let startsAt: String?
     public let resetsLeft: Int
+    /// Paused resets are held but not spendable, and are not in the count.
+    public let paused: Bool
 
-    public init(id: String, kind: String? = nil, expiresAt: String? = nil, resetsLeft: Int) {
+    public init(id: String, kind: String? = nil, expiresAt: String? = nil, startsAt: String? = nil, resetsLeft: Int, paused: Bool = false) {
         self.id = id
         self.kind = kind
         self.expiresAt = expiresAt
+        self.startsAt = startsAt
         self.resetsLeft = resetsLeft
+        self.paused = paused
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind
+        case id, kind, paused
         case expiresAt = "expires_at"
+        case startsAt = "starts_at"
         case resetsLeft = "resets_left"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try? container.decodeIfPresent(String.self, forKey: .kind)
+        expiresAt = try? container.decodeIfPresent(String.self, forKey: .expiresAt)
+        startsAt = try? container.decodeIfPresent(String.self, forKey: .startsAt)
+        resetsLeft = try container.decode(Int.self, forKey: .resetsLeft)
+        paused = (try? container.decodeIfPresent(Bool.self, forKey: .paused)) ?? false
     }
 }
 

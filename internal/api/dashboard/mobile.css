@@ -201,6 +201,8 @@ button { color: inherit; font: inherit; }
 .m-banked-reset-kind { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--line); }
 .m-banked-reset-kind .m-reset { margin-top: 3px; }
 .m-banked-reset-kind .m-reset.soon { color: var(--amber); }
+.m-banked-reset-kind .m-reset.hint { font-style: italic; }
+.m-banked-reset-kind .m-meter-head small { font-weight: 400; color: var(--muted); }
 .m-inline-muted { color:var(--muted); font-size:12px; margin:0 0 10px; }
 .m-inline-error, .m-source-error { color:#ff918b; font-size:12px; }
 .m-source-error { display:block; font-family:ui-monospace,monospace; }

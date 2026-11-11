@@ -14,12 +14,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   line, capped at three per kind plus a "+N more" line. The mobile list is collapsible, and
   the macOS popover lists counts by kind.
 - Relative times past two weeks read in weeks, months, or years instead of a day count.
+- Banked resets that cannot be spent now say why (paused, not active yet, cooldown, blocked by
+  a limit, or one it does not refill), on the dashboard, mobile page, and in redemption errors.
+  Resets scoped to the Opus or Sonnet weekly limit are labelled as such.
 
 ### Fixed
 
 - Claude's Fable resets are recognized. They refill the 5-hour limit and the Fable allowance
   and give back only what Fable used of the week, so they are no longer treated as clearing
   the weekly limit when scheduling or verifying a redemption.
+- Paused Claude resets and resets that have not started yet are no longer counted as available
+  or chosen for redemption.
 - Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
   `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
   changing existing ignore files or the checkout's tracked `.gitignore`.

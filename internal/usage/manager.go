@@ -210,11 +210,14 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 				filtered.NextExpiresAt = nil
 				for _, detail := range report.Details {
 					if detail.ExpiresAt != nil && !detail.ExpiresAt.After(now) {
-						filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						// Paused or not-yet-started resets were never counted.
+						if detail.Spendable(state.fetchedAt) {
+							filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						}
 						continue
 					}
 					filtered.Details = append(filtered.Details, detail)
-					if detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
+					if detail.Spendable(now) && detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
 						filtered.NextExpiresAt = detail.ExpiresAt
 					}
 				}

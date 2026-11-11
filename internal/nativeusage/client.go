@@ -335,7 +335,11 @@ type claudeResetGrant struct {
 	// GivesBackWeekly marks a Fable reset: it refills the 5-hour limit and the
 	// Fable allowance and returns only what Fable used of the weekly limit.
 	// Fable grants also say "type":"full", so this flag wins, as in Claude Code.
-	GivesBackWeekly json.RawMessage `json:"gives_back_weekly"`
+	GivesBackWeekly   json.RawMessage `json:"gives_back_weekly"`
+	StartsAt          json.RawMessage `json:"starts_at"`
+	Paused            json.RawMessage `json:"paused"`
+	Blocking          json.RawMessage `json:"blocking"`
+	UnavailableReason json.RawMessage `json:"unavailable_reason"`
 }
 
 // claudeResetKind names what a grant refills the way Claude Code does.
@@ -350,6 +354,16 @@ func claudeResetKind(grant claudeResetGrant) string {
 	clears := resetDetail[[]string](grant.Clears)
 	if len(clears) == 0 {
 		return ""
+	}
+	// A grant that clears only one model's weekly limit is model-scoped;
+	// calling it "weekly" would promise a refill of the whole week.
+	if len(clears) == 1 {
+		switch clears[0] {
+		case "seven_day_opus":
+			return "opus"
+		case "seven_day_sonnet":
+			return "sonnet"
+		}
 	}
 	session, other := false, false
 	for _, window := range clears {
@@ -368,6 +382,47 @@ func claudeResetKind(grant claudeResetGrant) string {
 	return "full"
 }
 
+// claudeUnavailableReason explains why a grant cannot be spent now, the way
+// Claude Code does: the server's own reason, then pause/start/cooldown, then
+// a limit it is blocked by. Empty when the grant reports itself usable.
+func claudeUnavailableReason(grant claudeResetGrant, paused bool, startsAt *time.Time, cooldown *time.Time, now time.Time) string {
+	if reason := strings.TrimSpace(resetDetail[string](grant.UnavailableReason)); reason != "" {
+		return reason
+	}
+	if paused {
+		return "paused"
+	}
+	if startsAt != nil && startsAt.After(now) {
+		return "not_started"
+	}
+	if cooldown != nil && cooldown.After(now) {
+		return "cooldown"
+	}
+	blocking := resetDetail[[]string](grant.Blocking)
+	for _, window := range blocking {
+		switch window {
+		case "five_hour":
+			return "blocked_five_hour"
+		case "seven_day":
+			return "blocked_seven_day"
+		case "seven_day_opus":
+			return "blocked_opus"
+		case "seven_day_sonnet":
+			return "blocked_sonnet"
+		}
+	}
+	if len(blocking) > 0 {
+		return "blocked_other"
+	}
+	if usable := resetDetail[*bool](grant.UsableNow); usable != nil && !*usable {
+		if requires := resetDetail[*bool](grant.RequiresLimit); requires != nil && *requires {
+			return "needs_limit"
+		}
+		return "unavailable"
+	}
+	return ""
+}
+
 // Informational reset fields must not invalidate usage or aggregate counts.
 func resetDetail[T any](raw json.RawMessage) T {
 	var value T
@@ -378,8 +433,10 @@ func resetDetail[T any](raw json.RawMessage) T {
 	return value
 }
 
-// claudeBankedResets totals the resets left across grants the way Claude
-// Code does, and reports the soonest expiry among grants that still hold one.
+// claudeBankedResets totals the spendable resets left across grants the way
+// Claude Code does, and reports the soonest expiry among them. Paused grants
+// and grants that have not started are kept in the details, flagged, but not
+// counted: they are held, not usable.
 //
 // Absent block, ineligible account, or a malformed grant set all report
 // nothing rather than a guess: the account may not be in the program, or the
@@ -408,19 +465,27 @@ func claudeBankedResets(status *claudeResetStatus, now time.Time) *decision.Bank
 			}
 			expires = parsed
 		}
-		resets.Available += *grant.ResetsLeft
+		paused := resetDetail[bool](grant.Paused)
+		startsAt := resetDetail[*time.Time](grant.StartsAt)
+		cooldown := resetDetail[*time.Time](status.CooldownUntil)
+		detail := decision.BankedReset{ID: grant.ID, Kind: claudeResetKind(grant), ResetsLeft: *grant.ResetsLeft,
+			Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
+			CooldownUntil: cooldown, Claimable: grant.ID == resetDetail[string](status.NextGrantID),
+			StartsAt: startsAt, Paused: paused, Blocking: resetDetail[[]string](grant.Blocking),
+			UnavailableReason: claudeUnavailableReason(grant, paused, startsAt, cooldown, now)}
+		if !expires.IsZero() {
+			detail.ExpiresAt = &expires
+		}
+		spendable := detail.Spendable(now)
+		if spendable {
+			resets.Available += *grant.ResetsLeft
+			if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
+				resets.NextExpiresAt = &expires
+			}
+		}
 		// A missing id must not invalidate an otherwise usable aggregate.
 		if strings.TrimSpace(grant.ID) != "" {
-			detail := decision.BankedReset{ID: grant.ID, Kind: claudeResetKind(grant), ResetsLeft: *grant.ResetsLeft,
-				Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
-				CooldownUntil: resetDetail[*time.Time](status.CooldownUntil), Claimable: grant.ID == resetDetail[string](status.NextGrantID)}
-			if !expires.IsZero() {
-				detail.ExpiresAt = &expires
-			}
 			resets.Details = append(resets.Details, detail)
-		}
-		if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
-			resets.NextExpiresAt = &expires
 		}
 	}
 	return &resets

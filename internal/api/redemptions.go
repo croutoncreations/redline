@@ -36,11 +36,16 @@ func SelectBankedReset(provider string, details []decision.BankedReset, now time
 	if provider == "codex" && len(details) == 0 {
 		return decision.BankedReset{}, fmt.Errorf("credit details not loaded yet; try again shortly")
 	}
+	var held *decision.BankedReset
 	for _, detail := range details {
 		if detail.ResetsLeft <= 0 || detail.ID == "" || (detail.ExpiresAt != nil && !detail.ExpiresAt.After(now)) {
 			continue
 		}
-		if provider == "claude" && !detail.Claimable {
+		if !detail.Spendable(now) || (provider == "claude" && !detail.Claimable) {
+			if held == nil {
+				d := detail
+				held = &d
+			}
 			continue
 		}
 		if selected == nil || (detail.ExpiresAt != nil && (selected.ExpiresAt == nil || detail.ExpiresAt.Before(*selected.ExpiresAt))) {
@@ -49,6 +54,10 @@ func SelectBankedReset(provider string, details []decision.BankedReset, now time
 		}
 	}
 	if selected == nil {
+		// Say why the resets that are held cannot be spent, when we know.
+		if held != nil && held.UnavailableReason != "" {
+			return *held, fmt.Errorf("no claimable banked reset is available: %s %s", describeReset(*held), decision.ResetUnavailableText(held.UnavailableReason))
+		}
 		return decision.BankedReset{}, fmt.Errorf("no claimable banked reset is available")
 	}
 	if provider == "claude" {
@@ -56,6 +65,9 @@ func SelectBankedReset(provider string, details []decision.BankedReset, now time
 			return *selected, fmt.Errorf("reset is in cooldown until %s", selected.CooldownUntil.Format(time.RFC3339))
 		}
 		if selected.UsableNow == nil || !*selected.UsableNow {
+			if selected.UnavailableReason != "" {
+				return *selected, fmt.Errorf("%s %s", describeReset(*selected), decision.ResetUnavailableText(selected.UnavailableReason))
+			}
 			return *selected, fmt.Errorf("Claude did not report this reset as usable now")
 		}
 	}
@@ -74,6 +86,25 @@ func (s *Server) redemptionAccountError(provider config.Provider) error {
 		return fmt.Errorf("%w: banked reset redemption is only supported for the default %s login", store.ErrConflict, name)
 	}
 	return nil
+}
+
+// describeReset names a reset for messages, e.g. "the Fable reset".
+func describeReset(reset decision.BankedReset) string {
+	switch reset.Kind {
+	case "full":
+		return "the full reset"
+	case "session":
+		return "the 5-hour reset"
+	case "weekly":
+		return "the weekly reset"
+	case "fable":
+		return "the Fable reset"
+	case "opus":
+		return "the Opus reset"
+	case "sonnet":
+		return "the Sonnet reset"
+	}
+	return "the reset"
 }
 
 func (s *Server) RedeemBankedReset(ctx context.Context, providerID, trigger string, dryRun bool) (nativeusage.RedeemResult, error) {

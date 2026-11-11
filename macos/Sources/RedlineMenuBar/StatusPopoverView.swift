@@ -628,7 +628,7 @@ struct StatusPopoverView: View {
         var noun = count == 1 ? "banked reset" : "banked resets"
         let kinds = snapshot.bankedResetKinds()
         if kinds.count > 1 || kinds.first.map({ !$0.kind.isEmpty }) == true {
-            let labels = ["full": "full", "session": "5-hour", "weekly": "weekly", "fable": "Fable"]
+            let labels = ["full": "full", "session": "5-hour", "weekly": "weekly", "fable": "Fable", "opus": "Opus", "sonnet": "Sonnet"]
             noun += " (" + kinds.map { "\($0.count) \(labels[$0.kind] ?? "other")" }.joined(separator: ", ") + ")"
         }
         // A stored expiry can lapse while the snapshot sits unrefreshed.

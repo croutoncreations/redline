@@ -267,6 +267,12 @@ func TestRedeemBankedResetSelectionAndSafety(t *testing.T) {
 		{"unknown usability", "claude", "Claude did not report this reset as usable now", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true}}},
 		{"not usable", "claude", "Claude did not report this reset as usable now", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true, UsableNow: &no}}},
 		{"cooldown", "claude", "cooldown", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true, CooldownUntil: &later}}},
+		{"explained", "claude", "the Fable reset can't be used while you're at your weekly limit",
+			[]decision.BankedReset{{ID: "next", Kind: "fable", ResetsLeft: 1, Claimable: true, UsableNow: &no, UnavailableReason: "blocked_seven_day"}}},
+		{"paused is skipped", "codex", "live", []decision.BankedReset{{ID: "paused", ResetsLeft: 1, ExpiresAt: &sooner, Paused: true}, {ID: "live", ResetsLeft: 1, ExpiresAt: &later}}},
+		{"not started is skipped", "codex", "live", []decision.BankedReset{{ID: "future", ResetsLeft: 1, ExpiresAt: &sooner, StartsAt: &sooner}, {ID: "live", ResetsLeft: 1, ExpiresAt: &later}}},
+		{"only paused", "claude", "no claimable banked reset is available: the full reset it is paused",
+			[]decision.BankedReset{{ID: "next", Kind: "full", ResetsLeft: 1, Claimable: true, Paused: true, UnavailableReason: "paused"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := SelectBankedReset(tc.provider, tc.details, now)

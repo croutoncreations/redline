@@ -123,6 +123,32 @@ test('splits banked resets by kind with each expiry, and falls back when details
   await expect(resets).toContainText('Next expires in 2 days');
 });
 
+test('banked resets show held resets apart from the count and say why a reset is unusable', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // Paused and not-yet-started grants are held but not in the count.
+  claude.snapshot.banked_resets = 2;
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'full-paused', kind: 'full', expires_at: '2026-08-20T04:59:00Z', resets_left: 1, paused: true, unavailable_reason: 'paused' },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1, unavailable_reason: 'blocked_seven_day' },
+    { id: 'opus-later', kind: 'opus', starts_at: '2026-08-01T00:00:00Z', expires_at: '2026-09-01T00:00:00Z', resets_left: 1, unavailable_reason: 'not_started' },
+  ];
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const resets = page.locator('[data-provider-id="claude-main"] .banked-resets');
+  await expect(resets).toContainText('2 available');
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full.locator('.meter-head b')).toHaveText('1 +1 held');
+  await expect(full.locator('.reset')).toHaveCount(2);
+  await expect(full.locator('.reset.hint')).toHaveText('1 paused');
+  await expect(resets.locator('[data-reset-kind="fable"] .reset.hint')).toHaveText("Can't be used while you're at your weekly limit");
+  const opus = resets.locator('[data-reset-kind="opus"]');
+  await expect(opus.locator('.meter-head span')).toHaveText(/^Opus reset \?/);
+  await expect(opus.locator('.meter-head b')).toHaveText('0 +1 held');
+  await expect(opus.locator('.reset.hint')).toHaveText("Isn't active yet");
+});
+
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.demo = { scenario: 'overview', synthetic: true };

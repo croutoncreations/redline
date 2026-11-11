@@ -29,36 +29,53 @@ function shortTime(value) {
 // Banked resets by kind, as Claude Code names them. Null unless the live
 // details account for the whole aggregate count, so a partial or stale
 // breakdown is never shown.
-const RESET_KIND_LABELS = { full: 'Full', session: '5-hour', weekly: 'Weekly', fable: 'Fable' };
+const RESET_KIND_LABELS = { full: 'Full', session: '5-hour', weekly: 'Weekly', fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet' };
 function resetExpiryText(value) {
   const date = new Date(value);
   const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
   if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
   return new Intl.DateTimeFormat(undefined, options).format(date);
 }
+// Why a held reset can't be spent now, in Claude Code's words.
+const RESET_UNAVAILABLE = {
+  paused: 'paused', not_started: "isn't active yet", cooldown: 'a reset was just used; try again in a minute',
+  blocked_five_hour: "can't be used while you're at your 5-hour limit", blocked_seven_day: "can't be used while you're at your weekly limit",
+  blocked_opus: "can't be used while you're at your Opus limit", blocked_sonnet: "can't be used while you're at your Sonnet limit",
+  blocked_other: "can't be used while you're at another limit it doesn't refill", cannot_clear: "doesn't refill the limit you've reached",
+  needs_limit: 'usable once you reach a limit it refills', unavailable: "can't be used right now",
+};
+const resetHeld = d => d.paused || (d.starts_at && new Date(d.starts_at) > Date.now());
+const resetReasonText = d => d.unavailable_reason ? (RESET_UNAVAILABLE[d.unavailable_reason] || RESET_UNAVAILABLE.unavailable) : '';
 function bankedResetGroups(snap, count) {
   const details = (snap.banked_reset_details || []).filter(d => d.resets_left > 0 && (!d.expires_at || new Date(d.expires_at) > Date.now()));
-  if (!details.length || details.reduce((sum, d) => sum + d.resets_left, 0) !== count) return null;
+  // Held (paused or not yet started) resets are not in the count; list them
+  // with their reason so they are not mistaken for usable ones.
+  if (!details.length || details.filter(d => !resetHeld(d)).reduce((sum, d) => sum + d.resets_left, 0) !== count) return null;
   const groups = new Map();
   for (const d of details) {
     const kind = RESET_KIND_LABELS[d.kind] ? d.kind : '';
-    const group = groups.get(kind) || { kind, count: 0, expiries: new Map(), undated: 0 };
-    group.count += d.resets_left;
+    const group = groups.get(kind) || { kind, count: 0, held: 0, expiries: new Map(), undated: 0, reasons: new Map() };
+    if (resetHeld(d)) group.held += d.resets_left;
+    else group.count += d.resets_left;
+    const reason = resetReasonText(d);
+    if (reason) group.reasons.set(reason, (group.reasons.get(reason) || 0) + d.resets_left);
+    if (resetHeld(d)) { groups.set(kind, group); continue; }
     if (d.expires_at) group.expiries.set(d.expires_at, (group.expiries.get(d.expires_at) || 0) + d.resets_left);
     else group.undated += d.resets_left;
     groups.set(kind, group);
   }
-  const order = ['full', 'weekly', 'session', 'fable', ''];
+  const order = ['full', 'weekly', 'session', 'fable', 'opus', 'sonnet', ''];
   return [...groups.values()].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)).map(group => {
     const expiries = [...group.expiries.entries()].sort((a, b) => new Date(a[0]) - new Date(b[0]));
     const soonest = expiries[0]?.[0];
-    return { ...group, lines: resetExpiryLines(group, expiries), soonest, soon: soonest && new Date(soonest) - Date.now() < 3 * 86400000 };
+    return { ...group, lines: [...resetExpiryLines(group, expiries), ...[...group.reasons.entries()].map(([text, n]) => ({ soon: false, hint: true, text: group.count + group.held > 1 ? `${n} ${text}` : text.charAt(0).toUpperCase() + text.slice(1) }))], soonest, soon: soonest && new Date(soonest) - Date.now() < 3 * 86400000 };
   });
 }
 // One line per distinct expiry, so many dates never wrap into one long run.
 // Beyond MAX_EXPIRY_LINES the rest collapse into a single "+N more" line.
 const MAX_EXPIRY_LINES = 3;
 function resetExpiryLines(group, expiries) {
+  if (!expiries.length && !group.undated) return [];
   const isSoon = at => new Date(at) - Date.now() < 3 * 86400000;
   if (expiries.length === 1 && !group.undated) {
     return [{ soon: isSoon(expiries[0][0]), text: `${group.count === 1 ? 'Expires' : 'All expire'} ${resetExpiryText(expiries[0][0])}` }];
@@ -311,10 +328,10 @@ function renderUsageDetail(item, opts = {}) {
     if (resetGroups) {
       const rows = resetGroups.map(group => {
         const label = RESET_KIND_LABELS[group.kind];
-        const name = label ? `${label} reset${group.count === 1 ? '' : 's'}` : `Reset${group.count === 1 ? '' : 's'}`;
+        const name = label ? `${label} reset${group.count + group.held === 1 ? '' : 's'}` : `Reset${group.count + group.held === 1 ? '' : 's'}`;
         return `<div class="m-banked-reset-kind" data-reset-kind="${esc(group.kind || 'other')}">
-          <div class="m-meter-head"><span>${esc(name)}</span><b>${esc(group.count)}</b></div>
-          ${group.lines.map(line => `<div class="m-reset${line.soon ? ' soon' : ''}">${esc(line.text)}</div>`).join('')}
+          <div class="m-meter-head"><span>${esc(name)}</span><b>${esc(group.count)}${group.held ? ` <small>+${esc(group.held)} held</small>` : ''}</b></div>
+          ${group.lines.map(line => `<div class="m-reset${line.soon ? ' soon' : ''}${line.hint ? ' hint' : ''}">${esc(line.text)}</div>`).join('')}
         </div>`;
       }).join('');
       // Collapsed by default: the summary keeps the counts by kind and the
@@ -322,7 +339,7 @@ function renderUsageDetail(item, opts = {}) {
       const soonest = resetGroups.map(group => group.soonest).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
       const soon = resetGroups.some(group => group.soon);
       const summary = [
-        resetGroups.map(group => `${group.count} ${RESET_KIND_LABELS[group.kind] || 'other'}`).join(' · '),
+        resetGroups.filter(group => group.count).map(group => `${group.count} ${RESET_KIND_LABELS[group.kind] || 'other'}`).join(' · '),
         soonest ? `next ${relative(soonest)}` : '',
       ].filter(Boolean).join(' · ');
       windows.push(`<details class="m-banked-resets grouped${soon ? ' soon-summary' : ''}" data-testid="banked-resets" data-banked-resets-toggle="${esc(item.id)}"${openBankedResetIDs.has(item.id) ? ' open' : ''}>
