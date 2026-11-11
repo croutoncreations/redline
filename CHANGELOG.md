@@ -6,8 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-11
+
+### Upgrade notes
+
+- Downgrading: older versions reject `provider: cursor` and the per-account settings below
+  (`claude_config_dir`, `openusage_card`, `label`, `weekly_policy`, `session_reserve`). Remove
+  them before running an older binary; the migrated database needs no change.
+- Managed accounts live in `accounts.yaml` beside `redline.yaml`. Accounts in the main config keep
+  working unchanged and are listed as read-only.
+
 ### Added
 
+- More than one Claude account. Each account reads only its own usage and is scheduled only by
+  tasks whose profile names it; Redline never moves work between accounts. The recommended way
+  to add one is a Claude Code profile: `redline account add-profile <id> --dir ~/.claude-cc-NAME`
+  watches that profile's own login (read-only, never refreshed), runs its jobs with
+  `CLAUDE_CONFIG_DIR` set to it, and redeems its banked resets from it. `redline account
+  list|discover|profiles|add|edit|disable|enable|remove` and `/v1/accounts` manage accounts; changes apply on restart. Accounts may carry a display `label` (never an email).
+  The dashboard, menu bar, mobile page and Android app show every account.
+  An account bound to another OpenUsage card (`openusage_card`) shows that card's usage but never
+  dispatches or redeems, because its runs would start as the default login; it reads
+  "Dispatch held · login unknown". Bind such seats to their Claude Code profile instead.
+- Claude Team seats whose weekly limit is not reported can opt in to scheduling on the 5-hour
+  window alone (`weekly_policy: session_only`, with `session_reserve`, default 0.50, kept
+  unspent in every window). Without the opt-in they show weekly as **Not reported** and hold.
+- Source for a native Android app: usage per account, queue, runs, firesales, pairing by QR code,
+  and content-free push wakes through Firebase. It will be distributed through Google Play only
+  and is not published yet (`docs/android-release.md`).
+- The Redline relay: phones reach the Mac from any network over an end-to-end encrypted session
+  the relay cannot read. `redline relay status|activate|devices|setup|off|deactivate`; a
+  self-hosted relay is supported (`docs/self-hosted-relay.md`). Pair a Device offers direct
+  tailnet and self-hosted routes; the hosted relay is not offered until it is live.
+- Display-only Cursor usage on the mobile dashboard: monthly Cursor Models and Other Models
+  pools, the weekly Grok Bot allowance, on-demand spend and credits, with reset dates in the
+  viewer's time zone and fresh, out-of-date, partial and not-reported states. Enable it with
+  `cursor_usage.source`: `openusage` reads OpenUsage's `openusage.limits.v1` Cursor card, `native`
+  is a built-in collector that reads the signed-in Cursor app's token without refreshing or
+  rewriting it, and `auto` prefers fresh OpenUsage data. Also available at `GET /v1/cursor-usage`.
+  The same card on the desktop dashboard (labelled usage only) and in the menu-bar dropdown, and in
+  the Android app's Usage tab. Once a `provider: cursor` account exists the card is labelled usage
+  detail and says the monthly pools schedule Cursor jobs, rather than claiming nothing does. The
+  `/v1/dashboard` `fields` selector accepts `cursor_usage`.
+- Cursor as a scheduled provider. A `provider: cursor` account runs jobs through the Cursor CLI's
+  headless mode (`cursor-agent` harness) using the CLI's own login, and is scheduled only from
+  Cursor's monthly subscription pools: Auto and Composer from Cursor Models, every other model from
+  Other Models. Pace is measured against the month. On-demand spend, credits and Grok Bot never
+  count as headroom. Models come from `cursor-agent models`, so the list follows the account. A
+  signed-out CLI fails the run with `agent login` guidance and pauses the account. Runs use the
+  CLI's sandbox (workspace writes only, no network) and never `--force` unless a profile adds it;
+  Cursor credential variables are removed from the CLI's environment. Before reading a Cursor
+  account's usage, Redline confirms the Cursor CLI and the Cursor app are signed in to the same
+  account (comparing digests, never storing either address); if not, the account shows "Accounts
+  differ" and is not scheduled.
 - `redline task delete <id>` permanently removes a task, with a confirmation on success and
   a clear API conflict error if the task is running.
 - Banked resets are shown by kind (full, 5-hour, weekly, Fable) with each expiry on its own
@@ -20,17 +71,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Banked resets that cannot be spent now say why (paused, not active yet, cooldown, blocked by
   a limit, or one it does not refill), on the dashboard, mobile page, and in redemption errors.
   Resets scoped to the Opus or Sonnet weekly limit are labelled as such.
-
 - Claude Code profile accounts (`claude_config_dir`) can redeem their own banked resets and
   choose a reset kind; each profile spends from, and is rate limited as, its own login.
 
+### Changed
+
+- Allowance windows may now be monthly (schema migration 29 rebuilds `usage_allowance_windows` to
+  allow the role; existing rows are copied unchanged, and allowance rows left without a snapshot by
+  a hand-run prune are dropped rather than stopping Redline from opening the database), and a window
+  can carry its own period so pace is no longer hard-coded to seven days. A Cursor pool keeps a
+  reserve and must itself be on pace, so a run never starts on the last of a pool and spills into
+  on-demand spend.
+
 ### Fixed
 
-- Work is no longer dispatched to an account bound to a non-default OpenUsage card. Runs start
-  as the default login, so such an account was scheduled against one seat's numbers while
-  spending another's allowance. Its usage is still shown, with "Dispatch held · login unknown"
-  and a pointer to `redline account add-profile`.
-- Pair a Device no longer offers the hosted relay, which is not live yet.
 - Claude's Fable resets are recognized. They refill the 5-hour limit and the Fable allowance
   and give back only what Fable used of the week, so they are no longer treated as clearing
   the weekly limit when scheduling or verifying a redemption.
@@ -171,16 +225,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The CLI reference now matches the real commands: `pair --qr` is required, and `task retry`,
   `token rotate --yes`, and `run events --limit` are documented.
 
-### Fixed
-
-- Phones no longer hang on a blank screen for up to 100 minutes after the Mac's relay connection
-  drops silently. The relay now replaces an attached host with a newly entitled one (closing the
-  old socket with `4409`) instead of refusing it with `409 role_already_connected`, and the Mac
-  pings the relay every 25 seconds, redialling when a ping goes unanswered for 10 seconds (a
-  large response still draining on a slow uplink does not count, for up to a minute). After a
-  connection that stayed up at least 10 seconds, the Mac's first redial is now prompt instead of
-  waiting out backoff grown during an earlier outage.
-
 ## [0.1.11] - 2026-10-23
 
 ### Upgrade notes
@@ -200,28 +244,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - After rolling back to an older daemon, reload any open dashboard tab before editing jobs.
 
 ### Added
-
-- Display-only Cursor usage on the mobile dashboard: monthly Cursor Models and Other Models
-  pools, the weekly Grok Bot allowance, on-demand spend and credits, with reset dates in the
-  viewer's time zone and fresh, out-of-date, partial and not-reported states. Enable it with
-  `cursor_usage.source`: `openusage` reads OpenUsage's `openusage.limits.v1` Cursor card, `native`
-  is a built-in collector that reads the signed-in Cursor app's token without refreshing or
-  rewriting it, and `auto` prefers fresh OpenUsage data. Also available at `GET /v1/cursor-usage`.
-  The same card on the desktop dashboard (labelled usage only) and in the menu-bar dropdown, and in
-  the Android app's Usage tab. Once a `provider: cursor` account exists the card is labelled usage
-  detail and says the monthly pools schedule Cursor jobs, rather than claiming nothing does. The
-  `/v1/dashboard` `fields` selector accepts `cursor_usage`.
-- Cursor as a scheduled provider. A `provider: cursor` account runs jobs through the Cursor CLI's
-  headless mode (`cursor-agent` harness) using the CLI's own login, and is scheduled only from
-  Cursor's monthly subscription pools: Auto and Composer from Cursor Models, every other model from
-  Other Models. Pace is measured against the month. On-demand spend, credits and Grok Bot never
-  count as headroom. Models come from `cursor-agent models`, so the list follows the account. A
-  signed-out CLI fails the run with `agent login` guidance and pauses the account. Runs use the
-  CLI's sandbox (workspace writes only, no network) and never `--force` unless a profile adds it;
-  Cursor credential variables are removed from the CLI's environment. Before reading a Cursor
-  account's usage, Redline confirms the Cursor CLI and the Cursor app are signed in to the same
-  account (comparing digests, never storing either address); if not, the account shows "Accounts
-  differ" and is not scheduled.
 
 - Banked resets are tracked per grant or credit (expiry, which windows they clear, usability), and
   a `reset.expiring` notification reminds before one lapses (`banked_resets.remind_before`,
@@ -252,14 +274,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- Allowance windows may now be monthly (schema migration 29 rebuilds `usage_allowance_windows` to
-  allow the role; existing rows are copied unchanged, and allowance rows left without a snapshot by
-  a hand-run prune are dropped rather than stopping Redline from opening the database), and a window
-  can carry its own period so pace is no longer hard-coded to seven days. A Cursor pool keeps a
-  reserve and must itself be on pace, so a run never starts on the last of a pool and spills into
-  on-demand spend.
-  **Downgrading:** older versions reject `provider: cursor`. Remove those accounts from
-  `redline.yaml` before running an older binary; the migrated database needs no change.
 - Tagged releases now wait for green CI on `main` and lint the generated Homebrew formula with
   `brew style` and `brew audit --strict` before publishing. A daily workflow flags a Homebrew cask
   that lags the latest release. The formula description was shortened to pass `brew audit`.
