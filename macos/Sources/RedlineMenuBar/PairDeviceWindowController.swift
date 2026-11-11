@@ -486,6 +486,11 @@ func pairedDescription(routes: [PairingRoute]) -> String {
 /// External links step one opens. Kept together so they are easy to audit:
 /// "Buy a license" is a link only, never in-app purchase or Stripe code.
 private enum PairingConnectionLinks {
+    /// The hosted relay is not offered yet: step one shows only tailnet and
+    /// self-hosted choices. Flip this when the hosted relay and its license
+    /// issuer are live. Existing hosted state is left to the service, which
+    /// still reports it.
+    static let offersHostedRelay = false
     static let buyLicense = URL(string: "https://redline.croutoncreations.com/relay")!
     static let selfHostedGuide = URL(string: "https://github.com/croutoncreations/redline/blob/main/docs/self-hosted-relay.md")!
 }
@@ -628,8 +633,10 @@ private struct ChooseConnectionView: View {
                     .font(.system(size: 15, weight: .semibold))
 
                 tailnetOnlySection
-                Divider()
-                hostedRelaySection
+                if PairingConnectionLinks.offersHostedRelay {
+                    Divider()
+                    hostedRelaySection
+                }
                 Divider()
                 selfHostedRelaySection
             }
