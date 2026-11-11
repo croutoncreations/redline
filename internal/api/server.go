@@ -2810,10 +2810,15 @@ func (s *Server) evaluateCandidateBudget(
 					PeriodSeconds: allowance.PeriodDurationSeconds},
 				Source: snapshot.Source, Confidence: snapshot.Confidence,
 			}
+			// A forced (manual or announcement) firesale on the account
+			// overrides pacing for its pools too; the monthly reserve above,
+			// exhaustion and freshness checks still apply.
+			forced := base.FiresaleTrigger != "" // set only by a forced firesale
 			poolDecision := decision.Evaluate(decision.Input{
 				Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
 				TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
 				PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
+				ForceFiresale: forced, ForceFiresaleTrigger: base.FiresaleTrigger,
 				PaceThresholds: thresholds, WeeklyOnlyPaceThresholds: weeklyOnly, Now: s.now(), MaxSnapshotAge: maxAge,
 			})
 			poolResults = append(poolResults, decision.PoolResult{

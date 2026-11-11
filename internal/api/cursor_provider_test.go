@@ -223,6 +223,30 @@ func TestCursorMonthlyPoolKeepsAReserve(t *testing.T) {
 	assertCursorRejection(t, result, "opus-task", "model:other_models:monthly reserve is protected")
 }
 
+// A manual firesale overrides pacing for the account's monthly pools too: a
+// pool that is only ahead of pace releases its work. Its reserve still holds.
+func TestCursorManualFiresaleOverridesMonthlyPoolPace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		otherUsed float64
+		wantRun   bool
+	}{{"ahead of pace", 70, true}, {"reserve", 95, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, db := newCursorServer(t, cursorLimitsCard(5, tc.otherUsed, 5, 15*24*time.Hour))
+			createCursorCandidate(t, db, "cursor-opus", "claude-opus-5-5-high", "opus-task", 100)
+			postJSON[map[string]any](t, server.URL+"/v1/firesales", map[string]any{"account": "cursor-main", "until": "1h"})
+
+			result := postJSON[cursorEvaluation](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "cursor-main"})
+			if ran := result.SelectedTask != nil && result.SelectedTask.ID == "opus-task"; ran != tc.wantRun {
+				t.Fatalf("selected=%#v result=%#v, want run=%v", result.SelectedTask, result.Result, tc.wantRun)
+			}
+			if !tc.wantRun {
+				assertCursorRejection(t, result, "opus-task", "model:other_models:monthly reserve is protected")
+			}
+		})
+	}
+}
+
 func assertCursorRejection(t *testing.T, result cursorEvaluation, taskID, reason string) {
 	t.Helper()
 	for _, rejection := range result.Result.CandidateRejections {
