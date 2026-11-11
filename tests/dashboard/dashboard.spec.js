@@ -24,6 +24,32 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('an OpenUsage card with no local login says dispatch is held and why', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.run_login_unknown = 'OpenUsage card claude@f48a43e1 is not tied to a Claude login on this Mac, so runs would spend the default login; usage is shown but work holds. Bind the account to its Claude Code profile with `redline account add-profile`';
+  claude.latest_decision = { decision: 'RUN', mode: 'pace_threshold', reason: 'stale' };
+  await loadDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.provider-pressure')).toHaveText('Dispatch held · login unknown');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(card).toContainText('redline account add-profile');
+});
+
+test('an unreadable active five-hour window is unavailable, never unrestricted', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  delete claude.snapshot.short;
+  claude.snapshot.short_window_unavailable = true;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  await loadDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.provider-trigger')).toContainText('5h unavailable · dispatch held');
+  await expect(card).not.toContainText('No 5h limit');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(card.locator('[data-testid="short-window-unavailable"]')).toContainText('dispatch holds until readable');
+});
+
 test('shows banked resets with their expiry, and nothing when the provider does not report them', async ({ page }) => {
   const dashboard = dashboardFixture();
   const [claude, codex] = dashboard.providers;
@@ -36,7 +62,7 @@ test('shows banked resets with their expiry, and nothing when the provider does 
   const claudeResets = page.locator('[data-provider-id="claude-main"] .banked-resets');
   await expect(claudeResets).toContainText('Banked resets');
   await expect(claudeResets).toContainText('1 available');
-  await expect(claudeResets).toContainText(/Expires in \d+ days · Oct 2[23]/);
+  await expect(claudeResets).toContainText(/Expires in 3 months · Oct 2[23]/);
   await expect(claudeResets).not.toHaveClass(/soon/);
 
   await page.getByRole('button', { name: 'Show Codex usage details' }).click();
@@ -48,6 +74,91 @@ test('shows banked resets with their expiry, and nothing when the provider does 
   await page.getByRole('button', { name: 'Show Claude usage details' }).click();
   await expect(page.locator('[data-provider-id="claude-main"] .provider-detail')).toContainText('Fable');
   await expect(page.locator('[data-provider-id="claude-main"] .banked-resets')).toHaveCount(0);
+});
+
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // The provider starts the window's clock on first use, so an unused one has
+  // no reset time. It is full -- not missing -- and no reset is invented.
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).not.toContainText('No 5h limit');
+  await expect(card).toContainText('5h 100% · starts on first use');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const window = card.locator('[data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
+test('splits banked resets by kind with each expiry, and falls back when details are incomplete', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // Two full resets with different expiries and three Fable resets sharing one,
+  // as Claude reports them; the fixture clock is 2026-07-20.
+  claude.snapshot.banked_resets = 5;
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-07-22T19:00:00Z', resets_left: 1 },
+    { id: 'full-b', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+    { id: 'fable-b', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+    { id: 'fable-c', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1 },
+  ];
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const resets = page.locator('[data-provider-id="claude-main"] .banked-resets');
+  await expect(resets).toContainText('5 available');
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full).toContainText('Full resets');
+  await expect(full.locator('.reset')).toHaveCount(2);
+  await expect(full.locator('.reset').nth(0)).toContainText(/Expires Jul 22, .* · in 2 days/);
+  await expect(full.locator('.reset').nth(0)).toHaveClass(/soon/);
+  await expect(full.locator('.reset').nth(1)).toContainText(/Expires Aug 1[56], .* · in 4 weeks/);
+  await expect(full.locator('.reset').nth(1)).not.toHaveClass(/soon/);
+  const fable = resets.locator('[data-reset-kind="fable"]');
+  await expect(fable).toContainText('Fable resets');
+  await expect(fable).toContainText(/All expire Mar [89], 2027/);
+  await expect(fable.locator('.reset.soon')).toHaveCount(0);
+  await expect(fable.locator('.help')).toHaveAttribute('data-help', /doesn't reset the whole week/);
+
+  // Details that do not account for the whole count are not trusted.
+  claude.snapshot.banked_reset_details = claude.snapshot.banked_reset_details.slice(0, 2);
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(resets.locator('[data-reset-kind]')).toHaveCount(0);
+  await expect(resets).toContainText('Next expires in 2 days');
+});
+
+test('banked resets show held resets apart from the count and say why a reset is unusable', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // Paused and not-yet-started grants are held but not in the count.
+  claude.snapshot.banked_resets = 2;
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'full-paused', kind: 'full', expires_at: '2026-08-20T04:59:00Z', resets_left: 1, paused: true, unavailable_reason: 'paused' },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 1, unavailable_reason: 'blocked_seven_day' },
+    { id: 'opus-later', kind: 'opus', starts_at: '2026-08-01T00:00:00Z', expires_at: '2026-09-01T00:00:00Z', resets_left: 1, unavailable_reason: 'not_started' },
+  ];
+  await loadDashboard(page, { dashboard });
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  const resets = page.locator('[data-provider-id="claude-main"] .banked-resets');
+  await expect(resets).toContainText('2 available');
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full.locator('.meter-head b')).toHaveText('1 +1 held');
+  await expect(full.locator('.reset')).toHaveCount(2);
+  await expect(full.locator('.reset.hint')).toHaveText('1 paused');
+  await expect(resets.locator('[data-reset-kind="fable"] .reset.hint')).toHaveText("Can't be used while you're at your weekly limit");
+  const opus = resets.locator('[data-reset-kind="opus"]');
+  await expect(opus.locator('.meter-head span')).toHaveText(/^Opus reset \?/);
+  await expect(opus.locator('.meter-head b')).toHaveText('0 +1 held');
+  await expect(opus.locator('.reset.hint')).toHaveText("Isn't active yet");
 });
 
 test('labels synthetic demo data prominently without affecting production dashboards', async ({ page }) => {
@@ -110,6 +221,20 @@ test('uses surplus-first wording for pace waits', async ({ page }) => {
   const codex = page.getByRole('button', { name: 'Show Codex usage details' });
   await expect(codex).toContainText('6% capacity surplus');
   await expect(codex).not.toContainText('behind pace');
+});
+
+// "Stale" alone sent people looking in the wrong place. A provider that is
+// stale because its CLI signed out says so, with the fix, without expanding.
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadDashboard(page, { dashboard });
+  const claude = page.getByRole('button', { name: 'Show Claude usage details' });
+  await expect(claude).toContainText('Signed out');
+  await expect(claude).toContainText('claude auth login');
+  await expect(claude).not.toContainText('53% weekly');
 });
 
 test('does not present a stale usage percentage as current', async ({ page }) => {
@@ -1229,6 +1354,30 @@ test('renders form dropdowns at the same height as text fields', async ({ page }
   const profile = await heights('#profiles-dialog', ['profile-id', 'profile-provider', 'profile-harness', 'profile-workspace', 'profile-base-branch', 'profile-cleanup', 'profile-repository-recent', 'profile-repository']);
   expect(new Set(Object.values(profile)).size, JSON.stringify(profile)).toBe(1);
 });
+
+test('a Team seat with no weekly limit renders "not reported" instead of failing', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  // OpenUsage Team seats report no account-wide weekly window.
+  delete claude.snapshot.weekly;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'weekly');
+  claude.snapshot.weekly_unavailable = true;
+  await loadDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(card.locator('[data-testid="weekly-not-reported"]')).toContainText('not reported');
+  await expect(card).not.toContainText('NaN');
+  // The compact row: no weekly bar or weekly percent. The number it has is
+  // the 5-hour window, shown and labelled as such, and it says why dispatch holds.
+  await expect(card).not.toContainText(/\d+% weekly/);
+  await expect(card.getByRole('progressbar', { name: /weekly remaining/ })).toHaveCount(0);
+  await expect(card.locator('.provider-copy-line b')).toHaveText('62% 5h');
+  await expect(card.getByRole('progressbar', { name: '62% 5-hour remaining' })).toHaveCount(1);
+  await expect(card.locator('.provider-trigger')).toContainText('5h 62% · resets');
+  await expect(card.locator('.provider-trigger')).toContainText('Weekly not reported');
+  await expect(card.locator('.provider-pressure')).toHaveText('Dispatch held · weekly not reported');
+});
+
 
 
 test('repository validation feedback keeps onboarding on the workspace step and allows correction', async ({ page }) => {

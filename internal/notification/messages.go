@@ -97,8 +97,11 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		deadline := reset.UTC().Format("Mon 15:04 UTC")
 		if source := d["effective_reset_source"]; source != "" && source != "weekly" {
 			label := strings.ReplaceAll(source, "_", " ")
-			if source == "predicted_global" {
+			switch source {
+			case "predicted_global":
 				label = "predicted global reset"
+			case "session":
+				label = "5-hour reset"
 			}
 			deadline = "the " + label + " at " + deadline
 		}

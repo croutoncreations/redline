@@ -37,6 +37,27 @@ func input(s decision.UsageSnapshot) decision.Input {
 	}
 }
 
+func TestEvaluateHoldsWhenShortWindowIsUnavailable(t *testing.T) {
+	snapshot := limitedSnapshot()
+	snapshot.Short = nil
+	snapshot.Weekly.Remaining = .95
+	snapshot.ShortWindowUnavailable = true
+	in := input(snapshot)
+	trigger := .3
+	in.PaceGapTrigger = &trigger
+	if got := decision.Evaluate(in); got.Decision != decision.Unknown {
+		t.Fatalf("unreadable active session admitted: %+v", got)
+	}
+	if at := decision.ProjectTriggerAt(in, time.Minute); at != nil {
+		t.Fatalf("projected dispatch through unreadable session: %v", at)
+	}
+	snapshot.ShortWindowUnavailable, snapshot.ShortWindowNotStarted = false, true
+	in.Snapshot = snapshot
+	if got := decision.Evaluate(in); got.Decision != decision.Admit {
+		t.Fatalf("untouched session should allow weekly pacing: %+v", got)
+	}
+}
+
 func TestEvaluateProratesCurrentAndFinalSlots(t *testing.T) {
 	got := decision.Evaluate(input(limitedSnapshot()))
 
@@ -412,6 +433,15 @@ func TestEvaluateFailsClosedForStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestEvaluateFailsClosedWhenSourceSaysStale(t *testing.T) {
+	s := limitedSnapshot()
+	s.SourceStale = true
+	got := decision.Evaluate(input(s))
+	if got.Decision != decision.Unknown {
+		t.Fatalf("got %q (%s); a source-stale snapshot must not drive dispatch", got.Decision, got.Reason)
+	}
+}
+
 func TestSnapshotExactlyAtMaximumAgeIsAccepted(t *testing.T) {
 	s := limitedSnapshot()
 	s.ObservedAt = now.Add(-15 * time.Minute)
@@ -439,6 +469,30 @@ func TestUsageSnapshotValidateRejectsFractionsOutsideUnitInterval(t *testing.T) 
 		if err := s.Validate(); err == nil {
 			t.Errorf("weekly remaining %v: expected validation error", value)
 		}
+	}
+}
+
+// Not started means untouched and full. A snapshot that also carries a timed
+// short window, or says the window is unreadable, contradicts itself, and
+// every surface would draw a full bar over whichever of those is true.
+func TestUsageSnapshotValidateRejectsAContradictoryNotStartedWindow(t *testing.T) {
+	timed := limitedSnapshot()
+	timed.ShortWindowNotStarted = true
+	if timed.Short == nil {
+		t.Fatal("fixture must carry a timed short window")
+	}
+	unavailable := limitedSnapshot()
+	unavailable.Short = nil
+	unavailable.ShortWindowNotStarted, unavailable.ShortWindowUnavailable = true, true
+	for name, s := range map[string]decision.UsageSnapshot{"timed": timed, "unavailable": unavailable} {
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+	valid := limitedSnapshot()
+	valid.Short, valid.ShortWindowNotStarted = nil, true
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("a lone not-started window is valid: %v", err)
 	}
 }
 

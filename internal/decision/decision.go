@@ -1,8 +1,10 @@
 package decision
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -18,15 +20,34 @@ const (
 	Wait    Decision = "WAIT"
 	Unknown Decision = "UNKNOWN"
 
-	ModeSlots  Mode = "window_slots"
-	ModePace   Mode = "pace_threshold"
-	ModePaused Mode = "paused"
-	ModeActive Mode = "active_run"
+	ModeSessionOnly Mode = "session_only"
+	ModeSlots       Mode = "window_slots"
+	ModePace        Mode = "pace_threshold"
+	ModePaused      Mode = "paused"
+	ModeActive      Mode = "active_run"
+	// ModeLoginUnknown holds an account whose runs could not be started as
+	// its own login (an OpenUsage card with no matching local login).
+	ModeLoginUnknown Mode = "login_unknown"
 )
 
 type UsageWindow struct {
 	Remaining float64   `json:"remaining"`
 	ResetsAt  time.Time `json:"resets_at"`
+	// PeriodSeconds is the length of the allowance period. Zero means the
+	// historical seven-day week. Cursor's subscription pools are monthly, and
+	// pace must be measured against the period that actually resets.
+	PeriodSeconds int64 `json:"period_seconds,omitempty"`
+}
+
+// WeekSeconds is the default allowance period.
+const WeekSeconds = int64((7 * 24 * time.Hour) / time.Second)
+
+// Period returns the allowance period, defaulting to one week.
+func (w UsageWindow) Period() time.Duration {
+	if w.PeriodSeconds <= 0 {
+		return time.Duration(WeekSeconds) * time.Second
+	}
+	return time.Duration(w.PeriodSeconds) * time.Second
 }
 
 type AllowanceWindow struct {
@@ -41,41 +62,234 @@ type AllowanceWindow struct {
 }
 
 type UsageSnapshot struct {
-	Provider   string            `json:"provider"`
-	ObservedAt time.Time         `json:"observed_at"`
-	Short      *UsageWindow      `json:"short,omitempty"`
+	Provider string `json:"provider"`
+	// Account is the Redline provider account (config key) the numbers were
+	// collected for. Empty only on rows written before accounts were
+	// recorded; such rows are shown for an account only when it is the sole
+	// account of its provider.
+	Account    string       `json:"account,omitempty"`
+	ObservedAt time.Time    `json:"observed_at"`
+	Short      *UsageWindow `json:"short,omitempty"`
+	// Weekly is the account-wide weekly (or monthly) allowance. It is the
+	// zero window, and must not be read, when WeeklyUnavailable is set.
 	Weekly     UsageWindow       `json:"weekly"`
 	Allowances []AllowanceWindow `json:"allowances,omitempty"`
 	Source     string            `json:"source"`
 	Confidence string            `json:"confidence,omitempty"`
+	// ShortWindowUnavailable marks a five hour window that the provider
+	// reported but that had to be dropped, which happens when it arrives with
+	// no reset time while upstream state is refreshing.
+	//
+	// Without this, a client cannot tell "this provider has no five hour
+	// limit" from "it has one and the number is missing right now", and those
+	// render very differently: the first is an absent row, the second is a row
+	// that says it does not know. Confidence cannot carry the distinction
+	// because it also drops to medium for an inferred model weekly reset.
+	ShortWindowUnavailable bool `json:"short_window_unavailable,omitempty"`
+	// ShortWindowNotStarted marks a five hour window that exists and is
+	// entirely unused. The provider starts the window's clock on first use,
+	// so until then there is no reset time -- which is not the same as the
+	// number being unreadable. The whole window is available.
+	//
+	// Short stays nil in this state on purpose: there is no reset to put in
+	// it, and inventing one (observation time plus five hours) would be a
+	// time the provider never said. The scheduler already treats a nil Short
+	// as "no short window to slot", which is correct for a window that has
+	// not begun.
+	ShortWindowNotStarted bool `json:"short_window_not_started,omitempty"`
+	// WeeklyUnavailable marks an account whose source reports no
+	// account-wide weekly limit at all -- OpenUsage's Team seats report only
+	// the 5-hour window, model windows and reset credits. Weekly is then the
+	// zero window: never a number to show, never something to schedule
+	// against. Dispatch holds unless the account opts into session-only
+	// scheduling; no weekly number is inferred from other windows.
+	WeeklyUnavailable bool `json:"weekly_unavailable,omitempty"`
 	// BankedResets counts quota resets the account can spend on demand to
 	// refill an exhausted window. Nil means the provider did not report it,
 	// which is different from zero: none banked versus not known.
 	BankedResets *int `json:"banked_resets,omitempty"`
 	// BankedResetsExpireAt is when the soonest-expiring banked reset lapses.
 	// Nil when there are none or the provider did not say.
-	BankedResetsExpireAt *time.Time    `json:"banked_resets_expire_at,omitempty"`
 	BankedResetDetails   []BankedReset `json:"banked_reset_details,omitempty"`
+	BankedResetsExpireAt *time.Time    `json:"banked_resets_expire_at,omitempty"`
+	// BankedResetsExpiries lists each banked reset's own deadline, soonest
+	// first, when the source reports them individually (OpenUsage's limits
+	// API does). Empty means not reported, not "no deadlines": a reset with
+	// no deadline is simply absent from the list.
+	BankedResetsExpiries []time.Time `json:"banked_resets_expiries,omitempty"`
+	// Plan is the subscription the source reports for this account, such as
+	// "Max 20x" or "Team". Display text only: it is never used to infer how
+	// large an allowance is.
+	Plan string `json:"plan,omitempty"`
+	// SourceStale is the source's own statement that these numbers are past
+	// their freshness interval (OpenUsage's "stale"). Redline still applies
+	// its own max snapshot age on top.
+	SourceStale bool `json:"source_stale,omitempty"`
 }
 
 // BankedReset describes one grant or credit, not additional scheduling capacity.
 type BankedReset struct {
-	ID            string     `json:"id"`
+	ID string `json:"id"`
+	// Kind is what spending the reset refills, as Claude Code names it:
+	// "full", "session" (5-hour only), "weekly", or "fable" (5-hour plus the
+	// Fable allowance, giving back only what Fable used of the weekly limit).
+	// "opus" or "sonnet" when an untyped grant clears only that model's
+	// weekly limit. Empty when the provider does not say.
+	Kind string `json:"kind,omitempty"`
+	// StartsAt is when the reset becomes usable, if the provider said.
+	StartsAt      *time.Time `json:"starts_at,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	Clears        []string   `json:"clears,omitempty"`
 	UsableNow     *bool      `json:"usable_now,omitempty"`
 	RequiresLimit *bool      `json:"requires_limit,omitempty"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 	ResetsLeft    int        `json:"resets_left"`
+	// Paused resets are still held but cannot be spent until resumed.
+	Paused bool `json:"paused,omitempty"`
+	// Blocking lists limits that prevent using the reset while reached,
+	// normalized like Clears.
+	Blocking []string `json:"blocking,omitempty"`
+	// UnavailableReason says why the reset cannot be spent now; empty when
+	// it can, or when the provider did not say. See ResetUnavailableText.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 	// Only Claude's next_grant_id is claimable.
 	Claimable bool `json:"claimable,omitempty"`
+}
+
+// Spendable reports whether a reset is held and not paused or yet to start.
+// Provider-specific checks (claimability, usable_now, cooldowns) still apply.
+func (r BankedReset) Spendable(now time.Time) bool {
+	return r.ResetsLeft > 0 && !r.Paused && (r.StartsAt == nil || !r.StartsAt.After(now))
+}
+
+// ResetUnavailableText explains an UnavailableReason code in the words
+// Claude Code uses, for errors and UI hints. Unknown codes read generically.
+func ResetUnavailableText(reason string) string {
+	switch reason {
+	case "":
+		return ""
+	case "paused":
+		return "it is paused"
+	case "not_started":
+		return "it isn't active yet"
+	case "cooldown":
+		return "a reset was just used; try again in a minute"
+	case "blocked_five_hour":
+		return "can't be used while you're at your 5-hour limit"
+	case "blocked_seven_day":
+		return "can't be used while you're at your weekly limit"
+	case "blocked_opus":
+		return "can't be used while you're at your Opus limit"
+	case "blocked_sonnet":
+		return "can't be used while you're at your Sonnet limit"
+	case "blocked_other":
+		return "can't be used while you're at another limit it doesn't refill"
+	case "cannot_clear":
+		return "doesn't refill the limit you've reached"
+	case "needs_limit":
+		return "usable once you reach a limit it refills"
+	}
+	return "can't be used right now"
+}
+
+// ReachedLimit names the limit a snapshot shows as used up, in the window
+// names reset Clears use: "weekly", "fable" (the Fable allowance), or
+// "five_hour". The broadest one wins, since refilling it is what unblocks
+// work. Empty when no limit is used up.
+func ReachedLimit(s UsageSnapshot) string {
+	const spent = 0.005 // rounding: providers report whole percents
+	if !s.Weekly.ResetsAt.IsZero() && s.Weekly.Remaining <= spent {
+		return "weekly"
+	}
+	if fable, ok := s.Allowance("model:fable:weekly"); ok && fable.Remaining <= spent {
+		return "fable"
+	}
+	if s.Short != nil && s.Short.Remaining <= spent {
+		return "five_hour"
+	}
+	return ""
+}
+
+// ResetKindOrder is the order to try reset kinds for a reached limit, the
+// way Claude Code offers them: the kind made for that limit first, then
+// broader ones, keeping the full reset for when nothing narrower fits. At
+// the weekly limit a Fable reset comes last: it only gives back what Fable
+// used of the week.
+func ResetKindOrder(limit string) []string {
+	switch limit {
+	case "weekly":
+		return []string{"weekly", "full", "fable"}
+	case "fable":
+		return []string{"fable", "full"}
+	case "five_hour":
+		return []string{"session", "fable", "full"}
+	}
+	return nil
+}
+
+// RefillsLimit reports whether spending the reset refills the named limit.
+// Unknown clears fall back to what the kind is known to refill.
+func (r BankedReset) RefillsLimit(limit string) bool {
+	if limit == "weekly" && r.Kind == "fable" {
+		return true // gives back what Fable used of the week
+	}
+	if len(r.Clears) > 0 {
+		for _, window := range r.Clears {
+			if window == limit {
+				return true
+			}
+		}
+		return false
+	}
+	switch r.Kind {
+	case "full":
+		return limit == "five_hour" || limit == "weekly" || limit == "fable"
+	case "session":
+		return limit == "five_hour"
+	case "weekly":
+		return limit == "weekly"
+	case "fable":
+		return limit == "five_hour" || limit == "fable"
+	}
+	return false
+}
+
+// normalizeResetWindows maps provider window names onto Redline's, dropping
+// unknown and duplicate ones. Claude's seven_day_overage_included is the Fable
+// allowance, not the weekly limit: a Fable reset clears it without resetting
+// the week. Model-scoped limits keep their own names.
+func normalizeResetWindows(windows []string) []string {
+	var normalized []string
+	seen := make(map[string]bool)
+	for _, window := range windows {
+		switch window {
+		case "seven_day":
+			window = "weekly"
+		case "seven_day_overage_included":
+			window = "fable"
+		case "seven_day_opus":
+			window = "opus"
+		case "seven_day_sonnet":
+			window = "sonnet"
+		}
+		switch window {
+		case "five_hour", "weekly", "fable", "opus", "sonnet":
+			if !seen[window] {
+				normalized = append(normalized, window)
+				seen[window] = true
+			}
+		}
+	}
+	return normalized
 }
 
 // BankedResets is a provider's report of on-demand quota resets.
 type BankedResets struct {
 	Available     int
 	NextExpiresAt *time.Time
-	Details       []BankedReset
+	// Expiries is every reported deadline, soonest first. Optional.
+	Expiries []time.Time
+	Details  []BankedReset
 }
 
 // ApplyBankedResets copies a reset report onto the snapshot. A nil report
@@ -83,31 +297,59 @@ type BankedResets struct {
 func (s *UsageSnapshot) ApplyBankedResets(resets *BankedResets) {
 	s.BankedResetDetails = nil
 	if resets == nil {
-		s.BankedResets, s.BankedResetsExpireAt = nil, nil
+		s.BankedResets, s.BankedResetsExpireAt, s.BankedResetsExpiries = nil, nil, nil
 		return
 	}
 	for _, detail := range resets.Details {
-		var clears []string
-		seen := make(map[string]bool)
-		for _, window := range detail.Clears {
-			if window == "seven_day" || window == "seven_day_overage_included" {
-				window = "weekly"
-			}
-			if (window == "five_hour" || window == "weekly") && !seen[window] {
-				clears = append(clears, window)
-				seen[window] = true
-			}
-		}
-		detail.Clears = clears
+		detail.Clears = normalizeResetWindows(detail.Clears)
+		detail.Blocking = normalizeResetWindows(detail.Blocking)
 		s.BankedResetDetails = append(s.BankedResetDetails, detail)
 	}
 	count := resets.Available
 	s.BankedResets = &count
 	s.BankedResetsExpireAt = nil
+	s.BankedResetsExpiries = nil
 	if count > 0 && resets.NextExpiresAt != nil && !resets.NextExpiresAt.IsZero() {
 		expires := resets.NextExpiresAt.UTC()
 		s.BankedResetsExpireAt = &expires
 	}
+	if count > 0 {
+		expiries := resets.Expiries
+		if len(expiries) == 0 {
+			for _, detail := range s.BankedResetDetails {
+				if detail.ExpiresAt != nil && detail.ResetsLeft > 0 {
+					expiries = append(expiries, *detail.ExpiresAt)
+				}
+			}
+		}
+		for _, expiry := range expiries {
+			if !expiry.IsZero() {
+				s.BankedResetsExpiries = append(s.BankedResetsExpiries, expiry.UTC())
+			}
+		}
+		sort.Slice(s.BankedResetsExpiries, func(i, j int) bool { return s.BankedResetsExpiries[i].Before(s.BankedResetsExpiries[j]) })
+		if len(s.BankedResetsExpiries) > count {
+			s.BankedResetsExpiries = s.BankedResetsExpiries[:count]
+		}
+		if s.BankedResetsExpireAt == nil && len(s.BankedResetsExpiries) > 0 {
+			soonest := s.BankedResetsExpiries[0]
+			s.BankedResetsExpireAt = &soonest
+		}
+	}
+}
+
+// MarshalJSON leaves the weekly window out entirely when the source did not
+// report one, so no client can read its zero value as "0% left". Every
+// other field is encoded as before.
+func (s UsageSnapshot) MarshalJSON() ([]byte, error) {
+	type plain UsageSnapshot
+	if !s.WeeklyUnavailable {
+		return json.Marshal(plain(s))
+	}
+	return json.Marshal(struct {
+		plain
+		Weekly *UsageWindow `json:"weekly,omitempty"`
+	}{plain: plain(s)})
 }
 
 func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {
@@ -124,10 +366,10 @@ func (s UsageSnapshot) Allowance(key string) (AllowanceWindow, bool) {
 				PeriodDurationSeconds: int64(ShortWindowDuration / time.Second)}, true
 		}
 	case "weekly":
-		if !s.Weekly.ResetsAt.IsZero() {
+		if !s.WeeklyUnavailable && !s.Weekly.ResetsAt.IsZero() {
 			return AllowanceWindow{Key: "weekly", SourceLabel: "Weekly", Scope: "account", Role: "weekly",
 				Remaining: s.Weekly.Remaining, ResetsAt: s.Weekly.ResetsAt,
-				PeriodDurationSeconds: int64((7 * 24 * time.Hour) / time.Second)}, true
+				PeriodDurationSeconds: int64(s.Weekly.Period() / time.Second)}, true
 		}
 	}
 	return AllowanceWindow{}, false
@@ -159,17 +401,45 @@ func (s UsageSnapshot) Validate() error {
 	if s.Provider == "" {
 		return fmt.Errorf("provider is required")
 	}
-	if s.ObservedAt.IsZero() || s.Weekly.ResetsAt.IsZero() {
-		return fmt.Errorf("observation and weekly reset timestamps are required")
+	if s.ObservedAt.IsZero() {
+		return fmt.Errorf("observation timestamp is required")
 	}
-	if err := unitFraction("weekly remaining", s.Weekly.Remaining); err != nil {
-		return err
+	if s.WeeklyUnavailable {
+		// Not reported is a state of its own: a weekly value beside it would
+		// be a number some surface could show.
+		if s.Weekly != (UsageWindow{}) {
+			return fmt.Errorf("an unreported weekly window cannot carry a value")
+		}
+		for _, allowance := range s.Allowances {
+			if allowance.Key == "weekly" {
+				return fmt.Errorf("an unreported weekly window cannot have a weekly allowance")
+			}
+		}
+		if s.Short == nil && !s.ShortWindowNotStarted && !s.ShortWindowUnavailable && len(s.Allowances) == 0 && s.BankedResets == nil {
+			return fmt.Errorf("a snapshot without a weekly window must report something else")
+		}
+	} else {
+		if s.Weekly.ResetsAt.IsZero() {
+			return fmt.Errorf("observation and weekly reset timestamps are required")
+		}
+		if err := unitFraction("weekly remaining", s.Weekly.Remaining); err != nil {
+			return err
+		}
+		if s.Weekly.PeriodSeconds < 0 {
+			return fmt.Errorf("allowance period cannot be negative")
+		}
 	}
 	if s.BankedResets != nil && *s.BankedResets < 0 {
 		return fmt.Errorf("banked resets cannot be negative")
 	}
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
+	}
+	if s.ShortWindowNotStarted && (s.Short != nil || s.ShortWindowUnavailable) {
+		// Not started means untouched and full; it cannot coexist with a
+		// timed window or an unreadable one, and every surface would draw a
+		// full bar over whichever of those was true.
+		return fmt.Errorf("a not-started short window cannot also be timed or unavailable")
 	}
 	for _, detail := range s.BankedResetDetails {
 		if detail.ID == "" || detail.ResetsLeft < 0 {
@@ -196,8 +466,8 @@ func (s UsageSnapshot) Validate() error {
 		if allowance.Scope != "account" && allowance.Scope != "model" {
 			return fmt.Errorf("allowance %q scope must be account or model", allowance.Key)
 		}
-		if allowance.Role != "short" && allowance.Role != "weekly" {
-			return fmt.Errorf("allowance %q role must be short or weekly", allowance.Key)
+		if allowance.Role != "short" && allowance.Role != "weekly" && allowance.Role != "monthly" {
+			return fmt.Errorf("allowance %q role must be short, weekly or monthly", allowance.Key)
 		}
 		if allowance.ResetsAt.IsZero() || allowance.PeriodDurationSeconds <= 0 {
 			return fmt.Errorf("allowance %q reset and period duration are required", allowance.Key)
@@ -217,7 +487,10 @@ type PaceThreshold struct {
 type ResetSource string
 
 const (
-	ResetWeekly          ResetSource = "weekly"
+	ResetWeekly ResetSource = "weekly"
+	// ResetSession is the 5-hour window's reset, the only horizon a
+	// session-only account has.
+	ResetSession         ResetSource = "session"
 	ResetBankedReset     ResetSource = "banked_reset"
 	ResetPredictedGlobal ResetSource = "predicted_global"
 )
@@ -248,6 +521,8 @@ func effectiveReset(in Input) ResetEvent {
 }
 
 type Input struct {
+	SessionOnly            bool
+	SessionReserve         float64
 	ForceFiresale          bool
 	ForceFiresaleTrigger   string
 	ResetEvents            []ResetEvent
@@ -329,11 +604,27 @@ func Evaluate(in Input) Result {
 	if in.Now.Sub(in.Snapshot.ObservedAt) > in.MaxSnapshotAge {
 		return unknown("usage snapshot is stale")
 	}
+	if in.Snapshot.SourceStale {
+		// The source says these numbers are old however recently we read
+		// them; spending against them would be a guess.
+		return unknown("usage source reports this account's numbers as out of date")
+	}
 	if in.Snapshot.ObservedAt.After(in.Now) {
 		return unknown("usage snapshot is from the future")
 	}
+	if in.Snapshot.WeeklyUnavailable {
+		// The hidden weekly cap cannot be paced. Only an explicit per-account
+		// opt-in permits spending the session window above its own reserve.
+		if in.SessionOnly {
+			return evaluateSessionOnly(in)
+		}
+		return unknown("weekly limit not reported; dispatch holds until a policy exists for this account type")
+	}
 	if !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
 		return unknown("weekly reset is not in the future")
+	}
+	if in.Snapshot.ShortWindowUnavailable {
+		return unknown("five-hour window is active but its reset time is unavailable; dispatch holds until it is readable")
 	}
 	reset := effectiveReset(in)
 	in.Snapshot.Weekly.ResetsAt = reset.At
@@ -345,23 +636,10 @@ func Evaluate(in Input) Result {
 	} else {
 		result = evaluateSlots(in)
 	}
-	if in.ForceFiresale {
-		result.FiresaleTrigger = in.ForceFiresaleTrigger
-		if result.FiresaleTrigger == "" {
-			result.FiresaleTrigger = "reset_announcement"
-		}
-	}
 	// Forcing overrides pacing only. An empty weekly allowance (or no rolling
 	// room in the 5-hour window) still blocks: there is nothing left to spend.
-	if in.ForceFiresale && result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0) {
-		result.Decision = Admit
-		result.Firesale = true
-		result.UnlockedTier = domain.DispatchFiresale
-		result.Reason = "reset announcement firesale; running queued work before the deadline"
-		if in.ForceFiresaleTrigger == "manual" {
-			result.Reason = "manual firesale; running queued work before the deadline"
-		}
-	}
+	result = applyForcedFiresale(in, result,
+		result.Decision != Unknown && in.Snapshot.Weekly.Remaining > 0 && (in.Snapshot.Short == nil || result.RollingDispatchable > 0))
 	pressure := result.PaceGap
 	if in.Snapshot.Short != nil {
 		pressure = math.Max(pressure, result.Overflow)
@@ -415,6 +693,60 @@ func projectInput(in Input, at time.Time) Input {
 	}
 	future.Snapshot.Short = &short
 	return future
+}
+
+func evaluateSessionOnly(in Input) Result {
+	if in.Snapshot.ShortWindowUnavailable {
+		return unknown("five-hour window is active but its reset time is unavailable; dispatch holds until it is readable")
+	}
+	// Session-only scheduling spends only the 5-hour window, so it must be
+	// reported: either read, or explicitly not started (full). A snapshot
+	// that says nothing about it is not room to spend.
+	if in.Snapshot.Short == nil && !in.Snapshot.ShortWindowNotStarted {
+		return unknown("five-hour window not reported; session-only dispatch holds until it is")
+	}
+	remaining := 1.0
+	result := Result{Mode: ModeSessionOnly, EffectiveResetSource: ResetSession}
+	if in.Snapshot.Short != nil {
+		if !in.Snapshot.Short.ResetsAt.After(in.Now) {
+			return unknown("short-window reset is not in the future")
+		}
+		remaining = in.Snapshot.Short.Remaining
+		result.EffectiveResetAt = in.Snapshot.Short.ResetsAt
+	}
+	result.RollingDispatchable = remaining - in.SessionReserve
+	if result.RollingDispatchable <= 0 {
+		result.Decision = Wait
+		result.Reason = "5-hour reserve protected (weekly limit not reported; session-only policy)"
+		return applyForcedFiresale(in, result, false)
+	}
+	result.Decision = Admit
+	result.UnlockedTier = domain.DispatchBehind
+	result.Reason = "session-only: 5-hour window has room above the reserve; weekly limit not reported"
+	return applyForcedFiresale(in, result, true)
+}
+
+// applyForcedFiresale records a forced (manual or announcement) firesale
+// and, when there is room to spend, unlocks the firesale tier.
+func applyForcedFiresale(in Input, result Result, room bool) Result {
+	if !in.ForceFiresale {
+		return result
+	}
+	result.FiresaleTrigger = in.ForceFiresaleTrigger
+	if result.FiresaleTrigger == "" {
+		result.FiresaleTrigger = "reset_announcement"
+	}
+	if !room {
+		return result
+	}
+	result.Decision = Admit
+	result.Firesale = true
+	result.UnlockedTier = domain.DispatchFiresale
+	result.Reason = "reset announcement firesale; running queued work before the deadline"
+	if in.ForceFiresaleTrigger == "manual" {
+		result.Reason = "manual firesale; running queued work before the deadline"
+	}
+	return result
 }
 
 func evaluateSlots(in Input) Result {
@@ -524,8 +856,10 @@ func firstMatchingThreshold(in Input, thresholds []PaceThreshold) *PaceThreshold
 	return nil
 }
 
+// weeklyPaceGap is allowance remaining minus period remaining, measured
+// against the window's own period (a week unless the source says otherwise).
 func weeklyPaceGap(weekly UsageWindow, now time.Time) float64 {
-	timeRemaining := weekly.ResetsAt.Sub(now).Seconds() / (7 * 24 * time.Hour).Seconds()
+	timeRemaining := weekly.ResetsAt.Sub(now).Seconds() / weekly.Period().Seconds()
 	return weekly.Remaining - clampFraction(timeRemaining)
 }
 
@@ -564,6 +898,9 @@ func buildSlots(now time.Time, short UsageWindow, weeklyReset time.Time) []Slot 
 }
 
 func validateInput(in Input) error {
+	if err := unitFraction("session reserve", in.SessionReserve); err != nil {
+		return err
+	}
 	if err := unitFraction("window weekly cost", in.WindowWeeklyCost); err != nil {
 		return err
 	}

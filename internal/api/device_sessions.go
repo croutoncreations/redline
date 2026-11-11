@@ -216,3 +216,13 @@ func (s *Server) revokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// ownerOnly wraps device- and relay-management handlers: paired devices keep
+// job control but cannot manage pairing, other devices, or the relay.
+func ownerOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireOwner(w, r) {
+			next(w, r)
+		}
+	}
+}

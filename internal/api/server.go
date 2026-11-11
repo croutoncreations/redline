@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/croutoncreations/redline/internal/calibration"
 	"github.com/croutoncreations/redline/internal/capacity"
 	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/cursorusage"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/discovery"
 	"github.com/croutoncreations/redline/internal/domain"
@@ -37,7 +39,9 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
+	"github.com/croutoncreations/redline/internal/pairing"
 	"github.com/croutoncreations/redline/internal/push"
+	"github.com/croutoncreations/redline/internal/relay"
 	"github.com/croutoncreations/redline/internal/resetreminder"
 	"github.com/croutoncreations/redline/internal/resetsignal"
 	autoscheduler "github.com/croutoncreations/redline/internal/scheduler"
@@ -59,6 +63,15 @@ type Notifier interface {
 
 type HarnessDiscoverer interface {
 	Discover(context.Context) discovery.Catalog
+}
+
+type relayManagement interface {
+	Status() config.RelayStatus
+	Configure(context.Context, config.RelayConfigureRequest) (config.RelayStatus, error)
+	Devices(context.Context) ([]relay.Activation, error)
+	DeactivateDevice(context.Context, string) error
+	Portal(context.Context) (*url.URL, error)
+	Deactivate(context.Context) (config.RelayStatus, error)
 }
 
 type HermesDiscoverer interface {
@@ -97,25 +110,61 @@ type Server struct {
 	resetDeferred           map[string]resetsignal.SourceError
 	resetLastResults        map[string]resetsignal.SourceResult
 	discovery               HarnessDiscoverer
-	hermes                  HermesDiscoverer
-	usageSources            *usage.Manager
-	catalogMu               sync.Mutex
-	catalog                 discovery.Catalog
-	catalogAt               time.Time
-	mux                     *http.ServeMux
-	manualFiresaleMu        sync.Mutex
-	workers                 sync.WaitGroup
-	loopWorkers             sync.WaitGroup
-	startMu                 sync.Mutex
-	started                 bool
-	pairingMu               sync.Mutex
-	pairing                 map[string]time.Time
+	// cursorAccounts confirms the Cursor CLI and app share one account
+	// before a Cursor account's usage is read.
+	cursorAccounts cursorusage.AccountCheck
+	hermes         HermesDiscoverer
+	usageSources   *usage.Manager
+	// cursorUsage is display-only Cursor and Grok Bot tracking. It is kept
+	// apart from usageSources so it can never reach scheduling decisions.
+	cursorUsage *cursorusage.Tracker
+	catalogMu   sync.Mutex
+	catalog     discovery.Catalog
+	catalogAt   time.Time
+	mux         *http.ServeMux
+	workers     sync.WaitGroup
+	loopWorkers sync.WaitGroup
+	startMu     sync.Mutex
+	started     bool
+	pairingMu   sync.Mutex
+	pairing     map[string]time.Time
+	// redeemed remembers a spent token for a short while after the fact, so
+	// the surface that showed the code can learn the phone got in. Without
+	// this a redeem was a deletion and nothing more: the sheet kept showing
+	// a dead code and had no way to say "paired".
+	redeemed         map[string]time.Time
+	relayRuntime     config.RelayRuntime
+	relayManager     relayManagement
+	mintPairingToken func() (string, error)
+	manualFiresaleMu sync.Mutex
 
 	redeemer            bankedResetRedeemer
+	atLimitResets       atLimitResetReader
 	redemptionDisabled  bool
 	redemptionMu        sync.Mutex
 	redemptionsInFlight map[string]bool
 }
+
+// redeemedMemory is how long a spent token stays reportable as redeemed.
+// Longer than the sheet's poll interval by a wide margin, and long enough
+// that a redeem in the token's last second is not read as an expiry by the
+// next poll; short enough that the map cannot grow without bound.
+//
+// A minute is enough only because every surface that shows a code mints a
+// fresh token each time it opens (the menu-bar sheet does so in
+// PairDeviceWindowController.show; the CLI runs once). Nothing asks about a
+// token it did not just mint, so nothing needs the answer later than this.
+// A surface that kept a token across opens would need a longer memory, and
+// this is the line to change -- together with
+// PairDeviceModel.redeemMemoryMargin in the macOS app, which must not exceed
+// it: a sheet that polls longer than the service remembers reads a real
+// redeem as expired.
+//
+// Kept in memory with the tokens themselves, so a service restart forgets a
+// redeem along with everything else: a sheet open across a restart reads
+// "expired" for a code the phone actually spent. The phone is paired either
+// way; the sheet is merely wrong about it once.
+const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
@@ -127,6 +176,40 @@ func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Ser
 	}
 	return newServer(cfg, database, now, defaultExecutor, workspace.GitRevisionResolver{}, notifier)
 }
+
+// NewServerWithRelayRuntime injects the service-owned resolved relay boundary.
+// NewServer remains compatible for relay-off callers through an explicit off
+// adapter and never infers runtime state from bootstrap fields.
+func NewServerWithRelayRuntime(cfg config.Config, database *store.DB, now func() time.Time, runtime config.RelayRuntime) *Server {
+	server := NewServer(cfg, database, now)
+	if runtime != nil {
+		server.relayRuntime = runtime
+	}
+	return server
+}
+
+// NewServerWithRelayManager installs the service-owned management boundary.
+// Handlers receive no Keychain or issuer dependency of their own.
+func NewServerWithRelayManager(cfg config.Config, database *store.DB, now func() time.Time, manager *config.RelayManager) *Server {
+	server := NewServerWithRelayRuntime(cfg, database, now, manager)
+	server.relayManager = manager
+	return server
+}
+
+// cursorAccountCheck defers to the server's current Cursor account check.
+type cursorAccountCheck struct{ server *Server }
+
+func (c cursorAccountCheck) Verify(ctx context.Context) error {
+	if c.server.cursorAccounts == nil {
+		return nil
+	}
+	return c.server.cursorAccounts.Verify(ctx)
+}
+
+// SetCursorAccountCheck replaces the check that the Cursor CLI and the
+// Cursor app are signed in to the same account. Tests use it to avoid
+// depending on this machine's Cursor sign-ins.
+func (s *Server) SetCursorAccountCheck(check cursorusage.AccountCheck) { s.cursorAccounts = check }
 
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
 	server := NewServer(cfg, database, now)
@@ -148,8 +231,10 @@ func NewDemoServer(
 	server := newServer(cfg, database, now, executor, demoRevisionResolver{}, nil)
 	server.redemptionDisabled = true
 	server.redeemer = nil
-	source := staticUsageSource{snapshots: snapshots}
+	source := staticUsageSource{snapshots: snapshots, accounts: cfg.Providers}
 	server.usageSources = usage.NewManager(source, source, now)
+	// Demo mode never reads real Cursor data.
+	server.cursorUsage = nil
 	server.discovery = discoverer
 	server.hermes = disabledDemoHermes{}
 	for accountID, provider := range cfg.Providers {
@@ -160,6 +245,10 @@ func NewDemoServer(
 
 type staticUsageSource struct {
 	snapshots map[string]decision.UsageSnapshot
+	// accounts identifies which account a Fetch is for: the Source contract
+	// passes the provider configuration, not the account id, and two demo
+	// accounts of one provider differ by their metering identity.
+	accounts map[string]config.Provider
 }
 
 type demoRevisionResolver struct{}
@@ -182,6 +271,21 @@ func (disabledDemoHermes) TriggerJob(context.Context, domain.RuntimeConnection, 
 
 func (staticUsageSource) Name() string { return "demo" }
 func (s staticUsageSource) Fetch(_ context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	identity := config.MeteringIdentity(provider)
+	for id, configured := range s.accounts {
+		if !strings.EqualFold(configured.Provider, provider.Provider) || config.MeteringIdentity(configured) != identity {
+			continue
+		}
+		if snapshot, ok := s.snapshots[id]; ok {
+			raw, _ := json.Marshal(snapshot)
+			return snapshot, raw, nil
+		}
+	}
+	if len(s.accounts) > 0 {
+		// Never another account's numbers: an account without a fixture
+		// has no data.
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("demo snapshot for this account is unavailable")
+	}
 	for _, snapshot := range s.snapshots {
 		if strings.EqualFold(snapshot.Provider, provider.Provider) {
 			raw, _ := json.Marshal(snapshot)
@@ -220,21 +324,36 @@ func newServer(
 ) *Server {
 	server := &Server{
 		config: cfg, store: database, now: now, executor: executor, revision: revision, notifier: notifier,
-		pairing:   make(map[string]time.Time),
-		artifacts: artifacts.Reader{Root: cfg.ArtifactsDirectory()},
-		discovery: discovery.Service{Now: now},
-		hermes:    hermes.Client{},
+		pairing:  make(map[string]time.Time),
+		redeemed: make(map[string]time.Time),
+		relayRuntime: config.NewRelayCoordinator(config.ResolvedRelay{
+			RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+			Readiness:         config.RelayReadinessOff,
+		}),
+		mintPairingToken: randomPairingToken,
+		artifacts:        artifacts.Reader{Root: cfg.ArtifactsDirectory()},
+		discovery:        discovery.Service{Now: now},
+		hermes:           hermes.Client{},
 	}
 	if service, ok := notifier.(notification.Service); ok {
 		server.push = service.Push
 	}
 	credentials := nativeusage.NewDefaultCredentials()
 	server.redeemer = nativeusage.NewRedeemer(credentials)
-	server.usageSources = usage.NewManager(
-		openusage.Source{},
-		nativeusage.Client{Credentials: credentials, Now: now},
-		now,
-	)
+	nativeSource := nativeusage.Client{Credentials: credentials, Now: now}
+	// provider: cursor accounts read Cursor's monthly subscription pools
+	// through these wrappers; every other provider passes straight through.
+	// The account check reads through server.cursorAccounts so tests can
+	// replace it after construction; production compares the Cursor app's
+	// and the Cursor CLI's signed-in accounts.
+	server.cursorAccounts = cursorusage.NewLocalAccountCheck(now)
+	openUsageWithCursor, nativeWithCursor := cursorusage.NewUsageSources(openusage.Source{}, nativeSource, now,
+		cursorAccountCheck{server})
+	server.usageSources = usage.NewManager(openUsageWithCursor, nativeWithCursor, now)
+	// Wrapping hides the native source's banked-reset lookup; keep it.
+	server.usageSources.BankedResets = nativeSource
+	server.atLimitResets = nativeSource
+
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
 		server.usageSources.MaxSnapshotAge = maxSnapshotAge
 	}
@@ -247,6 +366,22 @@ func newServer(
 			server.usageSources.SetLockoutPath(filepath.Join(filepath.Dir(databasePath), "usage-lockouts.json"))
 		}
 	}
+	// The banked-reset lookup reads the one local Claude Code login. With
+	// several Claude accounts configured it cannot tell which account that
+	// login belongs to, and a count shown on the wrong account is worse
+	// than none.
+	// Accounts bound to a Claude Code profile directory are not counted:
+	// they never use this lookup (their own native fetch reports their
+	// resets), so they do not make the default login ambiguous.
+	// Accounts on another OpenUsage card do not use it either (their card
+	// carries their resets), so only default-login accounts are counted.
+	claudeAccounts := 0
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Provider, "claude") && config.MeteringIdentity(provider) == "default:claude" {
+			claudeAccounts++
+		}
+	}
+	server.cursorUsage = newCursorTracker(cfg, now)
 	// Supplementary lookups read one local login per provider type. Several
 	// accounts of that type make the login ambiguous, but do not affect others.
 	providerAccounts := make(map[string]int)
@@ -254,7 +389,7 @@ func newServer(
 		providerAccounts[strings.ToLower(strings.TrimSpace(provider.Provider))]++
 	}
 	server.usageSources.SkipBankedResetProviders = map[string]bool{
-		"claude": providerAccounts["claude"] > 1,
+		"claude": claudeAccounts > 1,
 		"codex":  providerAccounts["codex"] > 1,
 	}
 	interval, _ := cfg.SchedulerInterval()
@@ -278,15 +413,29 @@ func newServer(
 	mux.HandleFunc("GET /v1/health", server.health)
 	mux.HandleFunc("GET /v1/health/details", server.healthDetails)
 	mux.HandleFunc("GET /v1/dashboard", server.dashboard)
+	mux.HandleFunc("GET /v1/accounts", server.listAccounts)
+	mux.HandleFunc("POST /v1/accounts", server.createAccount)
+	mux.HandleFunc("PATCH /v1/accounts/{account}", server.updateAccount)
+	mux.HandleFunc("DELETE /v1/accounts/{account}", server.deleteAccount)
+	mux.HandleFunc("GET /v1/accounts/discover/{provider}", server.discoverAccounts)
 	mux.HandleFunc("GET /v1/dashboard/events", server.dashboardEvents)
+	mux.HandleFunc("GET /v1/cursor-usage", server.cursorUsageReport)
 	mux.HandleFunc("POST /v1/pairing", server.createPairingToken)
+	mux.HandleFunc("GET /v1/pairing/status", ownerOnly(server.pairingStatus))
 	mux.HandleFunc("POST /v1/pairing/redeem", server.redeemPairingToken)
+	mux.HandleFunc("GET /v1/relay/status", ownerOnly(server.relayStatus))
+	mux.HandleFunc("POST /v1/relay/configure", ownerOnly(server.configureRelay))
+	mux.HandleFunc("GET /v1/relay/devices", ownerOnly(server.relayDevices))
+	mux.HandleFunc("DELETE /v1/relay/devices/{id}", ownerOnly(server.deactivateRelayDevice))
+	mux.HandleFunc("POST /v1/relay/portal", ownerOnly(server.relayPortal))
+	mux.HandleFunc("POST /v1/relay/deactivate", ownerOnly(server.deactivateRelay))
 	mux.HandleFunc("GET /v1/devices", server.listDevices)
 	mux.HandleFunc("POST /v1/devices/session", server.exchangeDeviceSession)
 	mux.HandleFunc("DELETE /v1/devices/{id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/providers/{provider}/refresh", server.refresh)
 	mux.HandleFunc("POST /v1/providers/{provider}/banked-resets/redeem", server.redeemBankedReset)
 	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/redemptions", server.bankedResetRedemptions)
+	mux.HandleFunc("GET /v1/providers/{provider}/banked-resets/choice", server.bankedResetChoice)
 	mux.HandleFunc("GET /v1/providers/{provider}/status", server.status)
 	mux.HandleFunc("GET /v1/providers/{provider}/candidates", server.providerCandidates)
 	mux.HandleFunc("GET /v1/providers/{provider}/calibration", server.providerCalibration)
@@ -377,6 +526,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	if r.URL.Path == "/v1/relay/portal" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if loopbackHost(r.Host) && strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) != "" {
 		writeJSON(w, http.StatusForbidden, problem{Error: "reverse proxies must preserve a configured trusted host"})
 		return
@@ -429,7 +581,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w = &noStoreWriter{ResponseWriter: w}
 		}
 	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.EscapedPath(), "/v1/relay/devices/") && !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+func validRelayActivationRequestPath(r *http.Request) bool {
+	if r.URL.RawQuery != "" || r.URL.Fragment != "" {
+		return false
+	}
+	const prefix = "/v1/relay/devices/"
+	escaped := r.URL.EscapedPath()
+	if strings.Contains(strings.ToLower(escaped), "%") {
+		return false
+	}
+	id := strings.TrimPrefix(escaped, prefix)
+	if id == "" || len(id) > 512 {
+		return false
+	}
+	for _, character := range id {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 const apiSessionCookie = "redline_api_session"
@@ -439,29 +617,221 @@ func publicPairingRequest(r *http.Request) bool {
 		(r.Method == http.MethodPost && r.URL.Path == "/v1/pairing/redeem")
 }
 
+func randomPairingToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func (s *Server) relayStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.relayManager.Status())
+}
+
+func (s *Server) configureRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	var request config.RelayConfigureRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: err.Error()})
+		return
+	}
+	status, err := s.relayManager.Configure(r.Context(), request)
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) relayDevices(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	devices, err := s.relayManager.Devices(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	if devices == nil {
+		devices = []relay.Activation{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Devices []relay.Activation `json:"devices"`
+	}{Devices: devices})
+}
+
+func (s *Server) deactivateRelayDevice(w http.ResponseWriter, r *http.Request) {
+	if !validRelayActivationRequestPath(r) {
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: "activation id is malformed"})
+		return
+	}
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	if err := s.relayManager.DeactivateDevice(r.Context(), r.PathValue("id")); err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) relayPortal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	portal, err := s.relayManager.Portal(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		URL string `json:"url"`
+	}{URL: portal.String()})
+}
+
+func (s *Server) deactivateRelay(w http.ResponseWriter, r *http.Request) {
+	if s.relayManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, problem{Code: "management_unavailable", Error: "relay management is unavailable"})
+		return
+	}
+	status, err := s.relayManager.Deactivate(r.Context())
+	if err != nil {
+		writeRelayManagementError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func writeRelayManagementError(w http.ResponseWriter, err error) {
+	code, status := "internal_error", http.StatusInternalServerError
+	var management *config.RelayManagementError
+	if errors.As(err, &management) {
+		code = management.Code
+		switch code {
+		case "invalid_request":
+			status = http.StatusBadRequest
+		case "invalid_key":
+			status = http.StatusUnprocessableEntity
+		case "needs_license", "lapsed", "no_seat", "not_hosted", "deactivation_pending", "license_key_required":
+			status = http.StatusConflict
+		case "activation_not_found", "not_found":
+			status = http.StatusNotFound
+		case "activation_conflict", "conflict":
+			status = http.StatusConflict
+		case "rate_limited":
+			status = http.StatusTooManyRequests
+		case "invalid_response":
+			status = http.StatusBadGateway
+		case "issuer_unavailable", "unavailable", "secure_store_unavailable", "state_unavailable", "controller_unavailable", "compensation_failed", "management_closing", "pending":
+			status = http.StatusServiceUnavailable
+		}
+	}
+	writeJSON(w, status, problem{Code: code, Error: err.Error()})
+}
+
 func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 	if !requireOwner(w, r) {
 		return
 	}
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
+	var request struct {
+		Host      string `json:"host"`
+		Port      int    `json:"port"`
+		RelayOnly bool   `json:"relay_only"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid pairing request: " + err.Error()})
+			return
+		}
+	}
+	options := pairing.Options{Host: request.Host, Port: request.Port, RelayOnly: request.RelayOnly || r.URL.Query().Get("relay_only") == "1"}
+	// Derive both the public status and the route plan from exactly one
+	// immutable snapshot. A second independent Status() call could observe a
+	// newer generation and advertise its URL/session while only the readiness
+	// happens to match, silently mixing two different configurations.
+	snapshot := s.relayRuntime.Current()
+	publicRelayState := snapshot.Readiness
+	if s.relayManager != nil {
+		publicRelayState = config.NewRelayStatus(snapshot).State
+	}
+	if publicRelayState != snapshot.Readiness {
+		snapshot.Readiness = publicRelayState
+		snapshot.Dial = false
+		snapshot.Connected = false
+	}
+	plan, planErr := pairing.PlanRoutes(s.config.API.TrustedHosts, snapshot, options)
+	noRoute := errors.Is(planErr, pairing.ErrNoRoute)
+	if planErr != nil && !noRoute {
+		var callerError *pairing.CallerError
+		if errors.As(planErr, &callerError) {
+			var unavailable *pairing.RelayUnavailableError
+			if errors.As(callerError, &unavailable) {
+				writeJSON(w, http.StatusBadRequest, problem{Code: string(unavailable.Reason), Error: callerError.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_request", Error: callerError.Error()})
+			return
+		}
+		writeError(w, fmt.Errorf("plan pairing code: %w", planErr))
+		return
+	}
+	var prepared pairing.PreparedPlan
+	if !noRoute {
+		var err error
+		prepared, err = pairing.PrepareIdentity(plan, relay.DefaultKeypairPath(s.config.Relay.KeypairPath, s.config.Database))
+		if err != nil {
+			writeError(w, fmt.Errorf("prepare pairing identity: %w", err))
+			return
+		}
+	}
+
+	token, err := s.mintPairingToken()
+	if err != nil {
 		writeError(w, fmt.Errorf("generate pairing token: %w", err))
 		return
 	}
-	token := base64.RawURLEncoding.EncodeToString(bytes)
 	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	s.pairingMu.Lock()
-	for existing, expiry := range s.pairing {
-		if !expiry.After(s.now()) {
-			delete(s.pairing, existing)
-		}
-	}
+	s.sweepPairingLocked()
 	s.pairing[token] = expiresAt
 	s.pairingMu.Unlock()
-	writeJSON(w, http.StatusCreated, struct {
-		Token     string    `json:"pairing_token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}{Token: token, ExpiresAt: expiresAt})
+
+	// The service composes the code, so the CLI, the menu bar and any later
+	// surface all show the same one. Each used to build its own, and when the
+	// format grew relay fields one of them was not told.
+	//
+	// A desktop with no route still gets its token: the web /pair page on
+	// this machine redeems it from a browser. It just gets no URL, and the
+	// empty route list says why.
+	response := struct {
+		Token        string                     `json:"pairing_token"`
+		ExpiresAt    time.Time                  `json:"expires_at"`
+		PairingURL   string                     `json:"pairing_url,omitempty"`
+		Routes       []pairing.Route            `json:"routes"`
+		Endpoint     string                     `json:"endpoint,omitempty"`
+		RelayStatus  string                     `json:"relay_status"`
+		RelayRefusal pairing.RelayRefusalReason `json:"relay_refusal,omitempty"`
+	}{Token: token, ExpiresAt: expiresAt, Routes: []pairing.Route{}, RelayStatus: string(publicRelayState), RelayRefusal: plan.RelayRefusal}
+
+	if !noRoute {
+		code := prepared.Render(token)
+		response.PairingURL = code.URL
+		response.Routes = code.Routes
+		response.Endpoint = code.Endpoint
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) consumePairingToken(token string) bool {
@@ -471,7 +841,59 @@ func (s *Server) consumePairingToken(token string) bool {
 	if ok {
 		delete(s.pairing, token)
 	}
-	return ok && expiresAt.After(s.now())
+	live := ok && expiresAt.After(s.now())
+	if live {
+		s.redeemed[token] = s.now().Add(redeemedMemory)
+	}
+	return live
+}
+
+// sweepPairingLocked forgets tokens and redeem records that are past their
+// time. Called under pairingMu wherever the maps are written.
+func (s *Server) sweepPairingLocked() {
+	now := s.now()
+	for token, expiry := range s.pairing {
+		if !expiry.After(now) {
+			delete(s.pairing, token)
+		}
+	}
+	for token, until := range s.redeemed {
+		if !until.After(now) {
+			delete(s.redeemed, token)
+		}
+	}
+}
+
+// pairingStatus reports where a pairing token is in its life: pending,
+// redeemed, or expired (which also covers "never issued" -- the two are
+// indistinguishable and the remedy is the same, a new code).
+//
+// The token travels in a header. It is a full-access credential for ten
+// minutes, and a path or query string lands in access logs. The caller must
+// also hold the API token: knowing a pairing token is meant to let a phone
+// spend it, not to unlock questions on the desktop.
+func (s *Server) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.Header.Get("X-Redline-Pairing-Token"))
+	if token == "" {
+		writeJSON(w, http.StatusBadRequest, problem{Error: "X-Redline-Pairing-Token header is required"})
+		return
+	}
+	s.pairingMu.Lock()
+	s.sweepPairingLocked()
+	_, pending := s.pairing[token]
+	_, redeemed := s.redeemed[token]
+	s.pairingMu.Unlock()
+
+	status := "expired"
+	switch {
+	case redeemed:
+		status = "redeemed"
+	case pending:
+		status = "pending"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: status})
 }
 
 func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
@@ -484,7 +906,7 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 		Name  string `json:"name"`
 		Kind  string `json:"kind"`
 	}
-	if err := decodeJSON(r, &request); err != nil {
+	if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -636,6 +1058,14 @@ func allowedHost(hostPort string, trusted []string) bool {
 	}
 	host = strings.Trim(host, "[]")
 	for _, candidate := range trusted {
+		// An entry may carry the port a phone should pair on. That is advice
+		// for composing the pairing code, not a constraint on which port a
+		// request may arrive by: Tailscale Serve terminates TLS and forwards
+		// on loopback, so the port the request names is not the one it came
+		// in on anyway.
+		if parsed, _, err := net.SplitHostPort(candidate); err == nil {
+			candidate = parsed
+		}
 		if strings.EqualFold(host, candidate) {
 			return true
 		}
@@ -694,6 +1124,13 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		defer s.loopWorkers.Done()
 		s.usageMonitor.Run(ctx)
 	}()
+	if s.cursorUsage != nil {
+		s.loopWorkers.Add(1)
+		go func() {
+			defer s.loopWorkers.Done()
+			s.cursorUsage.Run(ctx)
+		}()
+	}
 	if s.config.ResetSignals.Enabled {
 		s.loopWorkers.Add(1)
 		go func() { defer s.loopWorkers.Done(); s.runResetSignals(ctx) }()
@@ -774,7 +1211,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, problem{Error: "provider is not configured"})
 		return
 	}
-	snapshot, _, err := s.store.LatestSnapshotFromSource(r.Context(), configured.Provider, s.usageSources.Status(r.PathValue("provider")).Active)
+	snapshot, _, err := s.store.LatestSnapshotFromSource(r.Context(), r.PathValue("provider"), configured.Provider, s.usageSources.Status(r.PathValue("provider")).Active)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -810,7 +1247,7 @@ func (s *Server) capacityEstimate(ctx context.Context, providerID string) (capac
 	if !ok {
 		return capacity.EstimateResult{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 5000)
+	snapshots, err := s.store.ListSnapshots(ctx, providerID, configured.Provider, 5000)
 	if err != nil {
 		return capacity.EstimateResult{}, err
 	}
@@ -818,7 +1255,7 @@ func (s *Server) capacityEstimate(ctx context.Context, providerID string) (capac
 	if len(snapshots) > 0 {
 		after = snapshots[0].ObservedAt.Add(-time.Nanosecond)
 	}
-	observations, err := s.store.ListTokenObservations(ctx, configured.Provider, after, time.Time{})
+	observations, err := s.store.ListTokenObservations(ctx, providerID, configured.Provider, after, time.Time{})
 	if err != nil {
 		return capacity.EstimateResult{}, err
 	}
@@ -859,6 +1296,17 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if gatepostPath == "" {
 		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
 	}
+	// Gatepost records which provider spent tokens, not which account or
+	// login. Its sessions are attributed only to the provider's single
+	// account, and only when that account reads the default login: tokens
+	// from the default login (or another profile) must never land on a
+	// profile or OpenUsage-card account and skew its calibration. A single
+	// enabled account is not proof on its own; a disabled account or a
+	// profile may still have spent them.
+	if s.accountsOfProvider(configured.Provider) > 1 || s.hasDisabledAccountOf(configured.Provider) ||
+		config.MeteringIdentity(configured) != "default:"+strings.ToLower(strings.TrimSpace(configured.Provider)) {
+		return tokenSyncResult{Provider: configured.Provider, OwnedRunsInserted: ownedInserted}, nil
+	}
 	resolvedGatepostPath, err := tokenlog.ExpandHome(gatepostPath)
 	if err != nil {
 		return tokenSyncResult{}, err
@@ -872,7 +1320,7 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	} else if statErr != nil {
 		return tokenSyncResult{}, fmt.Errorf("inspect Gatepost database %q: %w", resolvedGatepostPath, statErr)
 	}
-	directCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost")
+	directCursor, err := s.store.LatestTokenObservationTime(ctx, providerID, configured.Provider, "gatepost")
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
@@ -887,7 +1335,7 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
-	piCursor, err := s.store.LatestTokenObservationTime(ctx, configured.Provider, "gatepost-pi")
+	piCursor, err := s.store.LatestTokenObservationTime(ctx, providerID, configured.Provider, "gatepost-pi")
 	if err != nil {
 		return tokenSyncResult{}, err
 	}
@@ -900,6 +1348,9 @@ func (s *Server) syncTokens(ctx context.Context, providerID string) (tokenSyncRe
 		return tokenSyncResult{}, err
 	}
 	observations = append(observations, piObservations...)
+	for index := range observations {
+		observations[index].Account = providerID
+	}
 	inserted, err := s.store.SaveTokenObservations(ctx, observations)
 	if err != nil {
 		return tokenSyncResult{}, err
@@ -957,6 +1408,28 @@ func (s *Server) syncOwnedRunTokens(ctx context.Context, providerID string) (int
 	return inserted, nil
 }
 
+// hasDisabledAccountOf reports a switched-off managed account of a
+// provider type: its past sessions may still be in provider-wide logs.
+func (s *Server) hasDisabledAccountOf(provider string) bool {
+	for _, account := range s.config.DisabledAccounts {
+		if strings.EqualFold(account.Provider, provider) {
+			return true
+		}
+	}
+	return false
+}
+
+// accountsOfProvider counts configured accounts of one provider type.
+func (s *Server) accountsOfProvider(provider string) int {
+	count := 0
+	for _, configured := range s.config.Providers {
+		if strings.EqualFold(configured.Provider, provider) {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
 	if usageErr == nil {
@@ -983,10 +1456,15 @@ func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {
-	snapshot, result, err := s.evaluateProvider(r.Context(), r.PathValue("provider"))
+	providerID := r.PathValue("provider")
+	snapshot, result, err := s.evaluateProvider(r.Context(), providerID)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	// The budget read stays visible, but the decision is what dispatch does.
+	if reason := config.RunLoginUnknown(s.config.Providers[providerID]); reason != "" {
+		result.Decision, result.Mode, result.Reason = decision.Wait, decision.ModeLoginUnknown, reason
 	}
 	writeJSON(w, http.StatusOK, decisionResponse{Snapshot: snapshot, Result: result})
 }
@@ -1149,6 +1627,14 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	// Held through the write so an account removal cannot pass its "no
+	// profile uses this" check between this one and the insert.
+	accountsMu.Lock()
+	defer accountsMu.Unlock()
+	if reason := s.accountLeaving(profile.ProviderAccountID); reason != "" {
+		writeJSON(w, http.StatusConflict, problem{Code: "account_conflict", Error: reason})
+		return
+	}
 	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
 		writeError(w, err)
 		return
@@ -1248,6 +1734,14 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
 		return
 	}
+	// Held through the write so an account removal cannot pass its "no
+	// profile uses this" check between this one and the insert.
+	accountsMu.Lock()
+	defer accountsMu.Unlock()
+	if reason := s.accountLeaving(profile.ProviderAccountID); reason != "" {
+		writeJSON(w, http.StatusConflict, problem{Code: "account_conflict", Error: reason})
+		return
+	}
 	if err := s.validateProfileRuntime(r.Context(), profile); err != nil {
 		writeError(w, err)
 		return
@@ -1265,6 +1759,12 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateProfileRuntime(ctx context.Context, profile domain.ExecutionProfile) error {
+	if err := harness.ValidateHarnessArgs(profile.HarnessType, profile.HarnessArgs); err != nil {
+		return err
+	}
+	if err := profileHarnessFitsAccount(profile, s.config.Providers[profile.ProviderAccountID]); err != nil {
+		return err
+	}
 	if s.config.DemoScenario == "" {
 		if err := workspace.ValidateLocalRepository(ctx, profile); err != nil {
 			return err
@@ -1585,6 +2085,11 @@ type candidateView struct {
 	Priority int    `json:"priority"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
+	// EligibleAt is when a cooldown lifts, so a client can render the wait in
+	// its own words and timezone. Reason states the same thing in prose;
+	// parsing a timestamp back out of that sentence would make the wording an
+	// accidental API.
+	EligibleAt *time.Time `json:"eligible_at,omitempty"`
 }
 
 type candidatesResponse struct {
@@ -1617,7 +2122,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 	response := candidatesResponse{GeneratedAt: s.now().UTC(), ProviderAccountID: providerID,
 		Candidates: make([]candidateView, 0, len(tasks))}
-	snapshot, _, err := s.store.LatestSnapshot(r.Context(), configured.Provider)
+	snapshot, _, err := s.store.LatestSnapshot(r.Context(), providerID, configured.Provider)
 	if errors.Is(err, store.ErrNotFound) {
 		response.ProviderReason = "no usage snapshot has been collected yet"
 		for _, task := range tasks {
@@ -1640,7 +2145,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	response.SnapshotObservedAt = &snapshot.ObservedAt
 	maxAge, _ := s.config.SnapshotAge()
 	age := s.now().Sub(snapshot.ObservedAt)
-	response.SnapshotStale = age > maxAge || age < 0
+	response.SnapshotStale = age > maxAge || age < 0 || snapshot.SourceStale
 	response.DispatchAvailable = base.Decision != decision.Unknown && !response.SnapshotStale
 	if !response.DispatchAvailable {
 		response.ProviderReason = base.Reason
@@ -1653,6 +2158,9 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	if paused {
 		response.DispatchAvailable = false
 		response.ProviderReason = "provider is paused"
+	} else if reason := config.RunLoginUnknown(s.config.Providers[providerID]); reason != "" {
+		response.DispatchAvailable = false
+		response.ProviderReason = reason
 	} else if active, countErr := s.store.ActiveRunCount(r.Context(), providerID); countErr != nil {
 		writeError(w, countErr)
 		return
@@ -1671,7 +2179,7 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := candidateView{TaskID: task.ID, Name: task.Name, Priority: task.Priority,
-			Eligible: verdict.Eligible, Reason: verdict.Reason}
+			Eligible: verdict.Eligible, Reason: verdict.Reason, EligibleAt: verdict.EligibleAt}
 		response.Candidates = append(response.Candidates, view)
 		if response.DispatchAvailable && response.SelectedTaskID == "" && view.Eligible {
 			response.SelectedTaskID = task.ID
@@ -1853,6 +2361,13 @@ func (s *Server) dispatchCore(
 	if !configured {
 		return response, false, fmt.Errorf("provider %q is not configured", request.ProviderAccountID)
 	}
+	// Every dispatch path (automatic, manual, a requested task) passes here.
+	// A run on an account whose login is unknown would start as the default
+	// login and spend its allowance, whatever this account's numbers say.
+	if reason := config.RunLoginUnknown(configuredProvider); reason != "" {
+		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+	}
 	active, err := s.store.ActiveRunCount(ctx, request.ProviderAccountID)
 	if err != nil {
 		return response, false, err
@@ -1894,6 +2409,11 @@ func (s *Server) dispatchCore(
 	if err != nil {
 		return response, false, err
 	}
+	// Checked again before admission: a profile saved before the account
+	// was bound to a directory must not spend another login's allowance.
+	if err := profileHarnessFitsAccount(profile, configuredProvider); err != nil {
+		return response, false, err
+	}
 	response.SelectedTask = &task
 	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency, ProviderFiresale: firesale}
 	if profile.AgentContextID != "" {
@@ -1929,6 +2449,10 @@ func (s *Server) dispatchCore(
 	if err := s.recordSchedulerResponse(ctx, request.ProviderAccountID, response); err != nil {
 		log.Printf("redline run %s decision history failed: %v", run.ID, err)
 	}
+	// A run on an account bound to a Claude Code profile directory must use
+	// that login, or it would spend the default account's allowance while
+	// being scheduled against this one's.
+	profile = profileForAccount(profile, s.config.Providers[request.ProviderAccountID])
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -1938,6 +2462,30 @@ func (s *Server) dispatchCore(
 		s.triggerAfterRun(run)
 	}()
 	return response, true, nil
+}
+
+// profileHarnessFitsAccount refuses running anything but Claude Code on an
+// account bound to a Claude Code profile directory: only Claude Code is
+// started with that profile's login, so any other harness would spend the
+// default login (or whichever one the service inherited) while being
+// scheduled against this account.
+func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.Provider) error {
+	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
+		return nil
+	}
+	return fmt.Errorf("account %q reads Claude Code profile %s, so its execution profiles must use the claude-code harness, not %q",
+		profile.ProviderAccountID, config.DisplayClaudeConfigDir(account.ClaudeConfigDir), profile.HarnessType)
+}
+
+// profileForAccount is the profile a run starts with: the stored profile
+// plus the run's account login. Only claude-code runs read the profile
+// directory; the field is ignored by every other harness.
+func profileForAccount(profile domain.ExecutionProfile, account config.Provider) domain.ExecutionProfile {
+	profile.ClaudeConfigDir = ""
+	if strings.EqualFold(strings.TrimSpace(account.Provider), "claude") {
+		profile.ClaudeConfigDir = config.NormalizeClaudeConfigDir(account.ClaudeConfigDir)
+	}
+	return profile
 }
 
 func (s *Server) triggerAfterRun(run domain.Run) {
@@ -1971,6 +2519,8 @@ type candidateVerdict struct {
 	Result   decision.Result
 	Eligible bool
 	Reason   string
+	// EligibleAt is set when the block is a cooldown with a known end.
+	EligibleAt *time.Time
 }
 
 func (s *Server) evaluateCandidate(
@@ -1986,6 +2536,8 @@ func (s *Server) evaluateCandidate(
 		eligibleAt := task.LastCompletedAt.Add(interval)
 		if s.now().Before(eligibleAt) {
 			verdict.Reason = "cooldown until " + eligibleAt.UTC().Format(time.RFC3339)
+			stamp := eligibleAt.UTC()
+			verdict.EligibleAt = &stamp
 			return verdict, nil
 		}
 	}
@@ -2122,76 +2674,173 @@ func (s *Server) evaluateCandidateBudget(
 	if snapshot.Short != nil {
 		required = append([]string{"session"}, required...)
 	}
+	sessionOnly := configured.SessionOnlyApplies(snapshot.WeeklyUnavailable)
+	if sessionOnly {
+		required = []string{"session"}
+	}
+	if snapshot.WeeklyUnavailable && !sessionOnly {
+		// No weekly number exists, so none is reported -- a weekly pool row
+		// with Remaining 0 would read as exhausted. Held, whatever base says.
+		held := base
+		if held.Decision != decision.Unknown {
+			held.Decision = decision.Unknown
+			held.Reason = "weekly limit not reported"
+		}
+		return decorateBudgetResult(held, profile.Model, routing, required, nil, nil), false,
+			"weekly limit not reported; dispatch holds until a policy exists for this account type"
+	}
+	basePool, remaining := "weekly", snapshot.Weekly.Remaining
+	if sessionOnly {
+		basePool, remaining = "session", 1
+		if snapshot.Short != nil {
+			remaining = snapshot.Short.Remaining
+		}
+	}
 	poolResults := []decision.PoolResult{{
-		Pool: "weekly", Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
-		Remaining: snapshot.Weekly.Remaining, UnlockedTier: base.UnlockedTier,
+		Pool: basePool, Decision: base.Decision, Mode: base.Mode, Reason: base.Reason,
+		Remaining: remaining, UnlockedTier: base.UnlockedTier,
 	}}
 	triggering := make([]string, 0, 2)
 	if base.Decision == decision.Admit {
-		triggering = append(triggering, "weekly")
+		triggering = append(triggering, basePool)
 	}
 	if base.Decision == decision.Unknown {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared allowance decision is unknown: " + base.Reason
 	}
 	policy := s.config.Policies[base.Policy]
-	if snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
+	// A model's weekly headroom must never spend the session-only reserve.
+	if sessionOnly && base.Decision != decision.Admit {
+		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false, base.Reason
+	}
+	if !sessionOnly && snapshot.Short != nil && snapshot.Short.Remaining <= policy.RollingReserve {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared session reserve is protected"
 	}
-	if snapshot.Weekly.Remaining <= 0 {
+	if !sessionOnly && snapshot.Weekly.Remaining <= 0 {
 		return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
 			"shared weekly allowance is exhausted"
 	}
 	if group != "" {
-		poolKey := "model:" + group + ":weekly"
-		required = append(required, poolKey)
-		allowance, found := snapshot.Allowance(poolKey)
-		if !found {
+		// Spark has a separate short window as well as a weekly one. It is not
+		// the account's short window, but a Spark task consumes it, so background
+		// work must leave the same rolling reserve for interactive Spark use.
+		// Other model groups (currently Fable) have only a weekly allowance and
+		// must not grow a made-up short-window requirement.
+		groupDefinition := configured.EffectiveModelGroups()[group]
+		requiresShort := slices.Contains(groupDefinition.RequiredAllowanceRoles, "short")
+		shortKey := "model:" + group + ":short"
+		short, hasShort := snapshot.Allowance(shortKey)
+		// A group that declares a short window fails closed when the collector
+		// cannot read it; the requirement is policy data, not a provider name
+		// embedded in the scheduler.
+		if requiresShort && !hasShort {
+			required = append(required, shortKey)
 			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is missing"
+				shortKey + " allowance is missing"
 		}
-		if allowance.Remaining <= 0 {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " allowance is exhausted"
+		if requiresShort && hasShort {
+			required = append(required, shortKey)
+			shortDecision := decision.Admit
+			shortReason := "model short reserve available"
+			if short.Remaining <= policy.RollingReserve {
+				shortDecision = decision.Wait
+				shortReason = "model short reserve is protected"
+			}
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: shortKey, Decision: shortDecision, Mode: decision.ModeSlots,
+				Reason: shortReason, Remaining: short.Remaining,
+			})
+			if shortDecision == decision.Wait {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					shortKey + " reserve is protected"
+			}
 		}
-		if !allowance.ResetsAt.After(s.now()) {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " reset is not in the future"
-		}
-		thresholds, thresholdErr := policy.DecisionThresholds()
-		weeklyOnly, weeklyOnlyErr := policy.WeeklyOnlyDecisionThresholds()
-		maxAge, ageErr := s.config.SnapshotAge()
-		if thresholdErr != nil || weeklyOnlyErr != nil || ageErr != nil {
-			return base, false, "model-specific pace policy is invalid"
-		}
-		if snapshot.Short != nil {
-			// The model pool is evaluated as a weekly-only snapshot, but the
-			// account still has a five-hour window; weekly-only thresholds
-			// must not loosen its admission.
-			weeklyOnly = nil
-		}
-		poolSnapshot := decision.UsageSnapshot{
-			Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
-			Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt},
-			Source: snapshot.Source, Confidence: snapshot.Confidence,
-		}
-		poolDecision := decision.Evaluate(decision.Input{
-			Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
-			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
-			PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
-			PaceThresholds: thresholds, WeeklyOnlyPaceThresholds: weeklyOnly, Now: s.now(), MaxSnapshotAge: maxAge,
-		})
-		poolResults = append(poolResults, decision.PoolResult{
-			Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
-			Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
-		})
-		if poolDecision.Decision == decision.Unknown {
-			return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
-				poolKey + " decision is unknown: " + poolDecision.Reason
-		}
-		if poolDecision.Decision == decision.Admit {
-			triggering = append(triggering, poolKey)
+
+		for _, role := range []string{"weekly", "monthly"} {
+			if !slices.Contains(groupDefinition.RequiredAllowanceRoles, role) {
+				continue
+			}
+			poolKey := "model:" + group + ":" + role
+			required = append(required, poolKey)
+			allowance, found := snapshot.Allowance(poolKey)
+			if !found {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is missing"
+			}
+			if allowance.Remaining <= 0 {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " allowance is exhausted"
+			}
+			// A monthly pool is a subscription allowance whose overflow is
+			// billed as on-demand spend. Starting a run on its last scrap
+			// spends past the subscription, so the pool keeps a floor: the
+			// policy's reserve for the person, or one run's estimated cost,
+			// whichever is larger.
+			if role == "monthly" {
+				floor := max(policy.RollingReserve, configured.WindowWeeklyCost)
+				if allowance.Remaining <= floor {
+					poolResults = append(poolResults, decision.PoolResult{
+						Pool: poolKey, Decision: decision.Wait, Mode: decision.ModeSlots,
+						Reason: "monthly pool reserve is protected", Remaining: allowance.Remaining,
+					})
+					return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+						poolKey + " reserve is protected"
+				}
+			}
+			if !allowance.ResetsAt.After(s.now()) {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " reset is not in the future"
+			}
+			thresholds, thresholdErr := policy.DecisionThresholds()
+			weeklyOnly, weeklyOnlyErr := policy.WeeklyOnlyDecisionThresholds()
+			maxAge, ageErr := s.config.SnapshotAge()
+			if thresholdErr != nil || weeklyOnlyErr != nil || ageErr != nil {
+				return base, false, "model-specific pace policy is invalid"
+			}
+			if snapshot.Short != nil {
+				// The model pool is evaluated as a weekly-only snapshot, but the
+				// account still has a five-hour window; weekly-only thresholds
+				// must not loosen its admission.
+				weeklyOnly = nil
+			}
+			poolSnapshot := decision.UsageSnapshot{
+				Provider: snapshot.Provider, ObservedAt: snapshot.ObservedAt,
+				Weekly: decision.UsageWindow{Remaining: allowance.Remaining, ResetsAt: allowance.ResetsAt,
+					PeriodSeconds: allowance.PeriodDurationSeconds},
+				Source: snapshot.Source, Confidence: snapshot.Confidence,
+			}
+			// A forced (manual or announcement) firesale on the account
+			// overrides pacing for its pools too; the monthly reserve above,
+			// exhaustion and freshness checks still apply.
+			forced := base.FiresaleTrigger != "" // set only by a forced firesale
+			poolDecision := decision.Evaluate(decision.Input{
+				Snapshot: poolSnapshot, WindowWeeklyCost: configured.WindowWeeklyCost,
+				TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve,
+				PaceGapTrigger: policy.PaceGapTrigger, FiresaleTrigger: policy.FiresaleTrigger,
+				ForceFiresale: forced, ForceFiresaleTrigger: base.FiresaleTrigger,
+				PaceThresholds: thresholds, WeeklyOnlyPaceThresholds: weeklyOnly, Now: s.now(), MaxSnapshotAge: maxAge,
+			})
+			poolResults = append(poolResults, decision.PoolResult{
+				Pool: poolKey, Decision: poolDecision.Decision, Mode: poolDecision.Mode,
+				Reason: poolDecision.Reason, Remaining: allowance.Remaining, UnlockedTier: poolDecision.UnlockedTier,
+			})
+			if poolDecision.Decision == decision.Unknown {
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " decision is unknown: " + poolDecision.Reason
+			}
+			if poolDecision.Decision == decision.Admit {
+				triggering = append(triggering, poolKey)
+			} else if role == "monthly" {
+				// A weekly model pool (Fable) is extra headroom on top of the
+				// account window, so either may admit. A monthly pool is the
+				// allowance the run actually draws from: when it says wait, the
+				// account window admitting must not override it, or the run
+				// spends a pool that is ahead of pace.
+				return decorateBudgetResult(base, profile.Model, routing, required, triggering, poolResults), false,
+					poolKey + " is waiting: " + poolDecision.Reason
+			}
+
 		}
 	}
 	if len(triggering) == 0 {
@@ -2204,7 +2853,7 @@ func (s *Server) evaluateCandidateBudget(
 		result.Reason = "model-specific allowance meets pace threshold"
 	}
 	for _, pool := range poolResults {
-		if dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
+		if !sessionOnly && dispatchTierRank(pool.UnlockedTier) > dispatchTierRank(result.UnlockedTier) {
 			result.UnlockedTier = pool.UnlockedTier
 		}
 	}
@@ -2455,10 +3104,15 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	held := decision.Result{Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused"}
+	if !paused {
+		if reason := config.RunLoginUnknown(s.config.Providers[request.ProviderAccountID]); reason != "" {
+			held = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
+			paused = true
+		}
+	}
 	if paused {
-		response := schedulerResponse{Result: decision.Result{
-			Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused",
-		}}
+		response := schedulerResponse{Result: held}
 		encoded, _ := json.Marshal(response)
 		_, err := s.store.RecordSchedulerDecision(r.Context(), domain.SchedulerDecision{
 			ProviderAccountID: request.ProviderAccountID, DecisionJSON: encoded,
@@ -2593,7 +3247,7 @@ func (s *Server) launchMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, providerID := range providerIDs {
 		configured := s.config.Providers[providerID]
 		observations, err := s.store.ListTokenObservationsBySource(
-			r.Context(), configured.Provider, "redline-run", since, until,
+			r.Context(), providerID, configured.Provider, "redline-run", since, until,
 		)
 		if err != nil {
 			writeError(w, err)
@@ -2692,7 +3346,9 @@ func (s *Server) providerDecisionInput(
 	if manual {
 		forcedTrigger = "manual"
 	}
+	configured := s.config.Providers[providerID]
 	return decision.Input{
+		SessionOnly: configured.WeeklyPolicy == "session_only", SessionReserve: configured.EffectiveSessionReserve(),
 		Snapshot: snapshot, WindowWeeklyCost: estimate.EffectiveCost,
 		WindowWeeklyCostSource: string(estimate.Source), CalibrationConfidence: string(estimate.Confidence),
 		TriggerMargin: selection.Definition.TriggerMargin, RollingReserve: selection.Definition.RollingReserve,
@@ -2709,7 +3365,7 @@ func (s *Server) calibration(ctx context.Context, providerID string) (calibratio
 	if !ok {
 		return calibration.Estimate{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	snapshots, err := s.store.ListSnapshots(ctx, configured.Provider, 500)
+	snapshots, err := s.store.ListSnapshots(ctx, providerID, configured.Provider, 500)
 	if err != nil {
 		return calibration.Estimate{}, err
 	}
@@ -2730,6 +3386,9 @@ func (s *Server) fetchAndStore(
 	if err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}
+	// Every snapshot is recorded against the account it was collected for,
+	// so two accounts of one provider never read each other's numbers.
+	snapshot.Account = providerID
 	if err := s.store.SaveSnapshot(ctx, snapshot, raw); err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}
@@ -2737,7 +3396,27 @@ func (s *Server) fetchAndStore(
 }
 
 type problem struct {
+	Code  string `json:"code,omitempty"`
 	Error string `json:"error"`
+}
+
+func decodeBoundedJSON(r *http.Request, target any, limit int64) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("invalid JSON: could not read request")
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("invalid JSON: request is too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("invalid JSON: request must contain one object")
+	}
+	return nil
 }
 
 func decodeJSON(r *http.Request, target any) error {

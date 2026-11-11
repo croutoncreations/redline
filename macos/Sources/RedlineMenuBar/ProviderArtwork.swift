@@ -2,6 +2,9 @@ import AppKit
 
 enum ProviderArtwork {
     static func image(for provider: String, template: Bool, size: CGFloat) -> NSImage {
+        if provider.lowercased() == "cursor" {
+            return monogram("C", provider: provider, size: size)
+        }
         if provider.lowercased() != "claude",
            let data = Data(base64Encoded: chatGPTTemplatePNG),
            let source = NSImage(data: data),
@@ -19,6 +22,26 @@ enum ProviderArtwork {
             return NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: provider) ?? NSImage()
         }
         return configured(image, provider: provider, template: template, size: size)
+    }
+
+    /// A template monogram for providers with no bundled artwork. Cursor's
+    /// mark is not redistributable, and the ChatGPT glyph would mislabel it.
+    private static func monogram(_ letter: String, provider: String, size: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            let inset = rect.insetBy(dx: 0.5, dy: 0.5)
+            let path = NSBezierPath(roundedRect: inset, xRadius: size * 0.22, yRadius: size * 0.22)
+            NSColor.black.setStroke()
+            path.lineWidth = max(1, size / 14)
+            path.stroke()
+            let font = NSFont.systemFont(ofSize: size * 0.62, weight: .bold)
+            let text = NSAttributedString(string: letter, attributes: [.font: font, .foregroundColor: NSColor.black])
+            let bounds = text.size()
+            text.draw(at: NSPoint(x: rect.midX - bounds.width / 2, y: rect.midY - bounds.height / 2))
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = provider
+        return image
     }
 
     private static func configured(

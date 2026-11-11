@@ -23,7 +23,7 @@ func TestResetSignalFiresaleBaseline(t *testing.T) {
 			}
 			now := time.Now().UTC()
 			deadline := now.Add(time.Hour)
-			snapshot := decision.UsageSnapshot{Provider: "main", ObservedAt: now.Add(-time.Minute), Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: now.Add(24 * time.Hour)}}
+			snapshot := decision.UsageSnapshot{Provider: "main", Account: "main", ObservedAt: now.Add(-time.Minute), Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: now.Add(24 * time.Hour)}}
 			if withSnapshot {
 				if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
 					t.Fatal(err)

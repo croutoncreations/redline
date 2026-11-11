@@ -248,7 +248,7 @@ func (s *Server) resetFiresaleUsageRefilled(ctx context.Context, sale store.Rese
 		return false, nil
 	}
 	// Snapshots are keyed by the configured usage provider, not the account ID.
-	snapshot, _, err := s.store.LatestSnapshot(ctx, s.config.Providers[sale.ProviderAccountID].Provider)
+	snapshot, _, err := s.store.LatestSnapshot(ctx, sale.ProviderAccountID, s.config.Providers[sale.ProviderAccountID].Provider)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}

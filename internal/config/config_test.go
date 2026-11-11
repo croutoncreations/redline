@@ -40,9 +40,105 @@ api:
 	}
 }
 
+// The .ts.net restriction exists because Tailscale was the only transport, and
+// a trusted host that anyone can resolve would otherwise be a way in. The relay
+// adds a second transport, so the restriction has to relax -- but only for a
+// user who has explicitly turned remote access on. Someone who never enables
+// the relay must be left exactly where they were.
+func TestNonTailscaleTrustedHostsRequireRemoteAccess(t *testing.T) {
+	withRelay := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - redline-relay.example.com
+relay:
+  enabled: true
+  url: https://redline-relay.example.com`, 1)
+	if _, err := config.Load(writeConfig(t, withRelay)); err != nil {
+		t.Fatalf("a non-Tailscale host should be allowed once the relay is on: %v", err)
+	}
+
+	withoutRelay := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - redline-relay.example.com`, 1)
+	if _, err := config.Load(writeConfig(t, withoutRelay)); err == nil {
+		t.Fatal("a non-Tailscale trusted host must be refused while remote access is off")
+	}
+}
+
+// Relaxing the rule must not mean abandoning it: the host still has to be a
+// plausible name, so a typo or an injected value is still caught.
+func TestRelaxedTrustedHostsAreStillValidated(t *testing.T) {
+	for _, host := range []string{
+		"*.example.com", "user@example.com",
+		"exa mple.com", "-example.com", ".example.com", "example..com",
+		"192.0.2.1", "localhost", "http://example.com",
+		// A port must be a port.
+		"example.com:", "example.com:abc", "example.com:0", "example.com:70000",
+		"example.com:443:8443",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - `+host+`
+relay:
+  enabled: true
+  url: https://redline-relay.example.com`, 1)
+		if _, err := config.Load(writeConfig(t, configured)); err == nil {
+			t.Fatalf("accepted an invalid trusted host %q even with the relay on", host)
+		}
+	}
+}
+
+// A trusted host may say which port the phone should use.
+//
+// Tailscale Serve commonly fronts on 8443 rather than 443, and the service is
+// what composes the pairing code, so it has to know. Without this the CLI
+// needed --port on every run and the menu bar quietly guessed 8443 -- a QR
+// built for the wrong port is a phone that cannot connect with nothing on
+// screen to say why. The host-matching side already ignored a port, so this
+// only widens what the validator lets through.
+func TestTrustedHostsMayCarryAPort(t *testing.T) {
+	for _, host := range []string{
+		"macbook.example.ts.net:8443",
+		"macbook.example.ts.net:443",
+		"macbook.example.ts.net",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard", `active_policy: standard
+api:
+  trusted_hosts:
+    - `+host, 1)
+		cfg, err := config.Load(writeConfig(t, configured))
+		if err != nil {
+			t.Fatalf("refused trusted host %q: %v", host, err)
+		}
+		if len(cfg.API.TrustedHosts) != 1 || cfg.API.TrustedHosts[0] != host {
+			t.Fatalf("trusted host %q was not kept verbatim: %v", host, cfg.API.TrustedHosts)
+		}
+	}
+}
+
+// Enabling the relay without a usable address, or with one that would expose
+// the connection, must fail loudly at load rather than at first use.
+func TestRelayURLIsValidated(t *testing.T) {
+	for _, relayBlock := range []string{
+		"relay:\n  enabled: true\n  url: http://relay.example.com",
+		"relay:\n  enabled: true\n  url: ws://relay.example.com",
+		"relay:\n  enabled: true\n  url: https://192.0.2.1",
+		"relay:\n  enabled: true\n  url: https://relay",
+		"relay:\n  enabled: true\n  url: not-a-url",
+	} {
+		configured := strings.Replace(validConfig, "active_policy: standard",
+			"active_policy: standard\n"+strings.ReplaceAll(relayBlock, "\\n", "\n"), 1)
+		if _, err := config.Load(writeConfig(t, configured)); err == nil {
+			t.Fatalf("accepted a bad relay config:\n%s", relayBlock)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidTrustedAPIHosts(t *testing.T) {
 	for _, host := range []string{
-		"https://macbook.example.ts.net", "*.example.ts.net", "macbook.example.ts.net:443", "",
+		"https://macbook.example.ts.net", "*.example.ts.net", "",
 		"mac book.example.ts.net", "user@example.ts.net", `macbook\\name.example.ts.net`,
 		".example.ts.net", "macbook..example.ts.net", "example.ts.net.", "-macbook.example.ts.net",
 		"100.101.102.103", "redline.example.com",
@@ -75,7 +171,7 @@ func TestSchedulerIntervalDefaultsToFiveMinutes(t *testing.T) {
 
 func TestLoadTreatsUnknownKeysAsWarnings(t *testing.T) {
 	configured := validConfig + `
-relay:
+future_section:
   enabled: true
   url: https://example.invalid
 scheduler:
@@ -91,7 +187,7 @@ scheduler:
 		t.Fatalf("warnings = %q, want one per unknown key", cfg.Warnings)
 	}
 	joined := strings.Join(cfg.Warnings, "\n")
-	for _, key := range []string{"relay", "future_option"} {
+	for _, key := range []string{"future_section", "future_option"} {
 		if !strings.Contains(joined, "field "+key+" not found") {
 			t.Fatalf("warnings %q do not mention %q", cfg.Warnings, key)
 		}
@@ -447,6 +543,20 @@ func TestClaudeModelRoutingDistinguishesFableFromAccountOnlyModels(t *testing.T)
 	}
 }
 
+// Spark has its own short and weekly allowances. A profile naming the Spark
+// model must route through that budget group without every user having to
+// repeat a model_groups stanza; otherwise Redline can see the allowance but
+// will never protect it.
+func TestCodexModelRoutingRecognisesSparkByDefault(t *testing.T) {
+	provider := config.Provider{Provider: "codex"}
+	for _, model := range []string{"spark", "gpt-5.3-codex-spark", "openai-codex/gpt-5.3-codex-spark"} {
+		group, routing, err := provider.ResolveModelGroup(model, "")
+		if err != nil || group != "spark" || routing != "alias" {
+			t.Fatalf("model %q group=%q routing=%q err=%v", model, group, routing, err)
+		}
+	}
+}
+
 func TestClaudeModelRoutingAcceptsProviderQualifiedPiModel(t *testing.T) {
 	provider := config.Provider{Provider: "claude"}
 	group, routing, err := provider.ResolveModelGroup("anthropic-cli/claude-fable-5", "")
@@ -462,6 +572,30 @@ func TestExplicitBudgetModelGroupMustExist(t *testing.T) {
 	provider := config.Provider{Provider: "claude"}
 	if _, _, err := provider.ResolveModelGroup("custom", "missing"); err == nil {
 		t.Fatal("expected unknown explicit model group error")
+	}
+}
+
+func TestEffectiveModelGroupsCanonicalizesRequiredAllowanceRoles(t *testing.T) {
+	provider := config.Provider{Provider: "codex", ModelGroups: map[string]config.ModelGroup{
+		"spark": {Aliases: []string{"spark"}, RequiredAllowanceRoles: []string{" Short ", "WEEKLY"}},
+	}}
+	roles := provider.EffectiveModelGroups()["spark"].RequiredAllowanceRoles
+	if strings.Join(roles, ",") != "short,weekly" {
+		t.Fatalf("roles = %#v, want canonical roles", roles)
+	}
+	if got := provider.ModelGroups["spark"].RequiredAllowanceRoles[0]; got != " Short " {
+		t.Fatalf("read-like accessor mutated source configuration to %q", got)
+	}
+}
+
+func TestLoadRejectsUnknownRequiredAllowanceRole(t *testing.T) {
+	configured := strings.Replace(validConfig, "    window_weekly_cost: 0.10", `    window_weekly_cost: 0.10
+    model_groups:
+      spark:
+        aliases: [spark]
+        required_allowance_roles: [short, yearly]`, 1)
+	if _, err := config.Load(writeConfig(t, configured)); err == nil || !strings.Contains(err.Error(), "yearly") {
+		t.Fatalf("expected unknown allowance role error, got %v", err)
 	}
 }
 
@@ -588,6 +722,84 @@ func writeConfig(t *testing.T, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestCursorUsageDefaultsOffAndInheritsOpenUsageURL(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, explicit := cfg.CursorUsage.EffectiveSource(); source != "off" || explicit {
+		t.Fatalf("source=%q explicit=%v", source, explicit)
+	}
+	if got := cfg.CursorOpenUsageURL(); got != "http://127.0.0.1:6736" {
+		t.Fatalf("openusage url = %q", got)
+	}
+	configured, err := config.Load(writeConfig(t, validConfig+`cursor_usage:
+  source: Auto
+  openusage_url: http://127.0.0.1:7000
+  poll_interval: 10m
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, _ := configured.CursorUsage.Interval()
+	if source, explicit := configured.CursorUsage.EffectiveSource(); source != "auto" || !explicit ||
+		configured.CursorOpenUsageURL() != "http://127.0.0.1:7000" || interval != 10*time.Minute {
+		t.Fatalf("cursor usage = %#v", configured.CursorUsage)
+	}
+}
+
+func TestCursorUsageRejectsInvalidSettings(t *testing.T) {
+	for name, extra := range map[string]string{
+		"unknown source":   "cursor_usage:\n  source: scrape\n",
+		"too frequent":     "cursor_usage:\n  source: native\n  poll_interval: 10s\n",
+		"invalid interval": "cursor_usage:\n  poll_interval: soon\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := config.Load(writeConfig(t, validConfig+extra)); err == nil {
+				t.Fatal("expected rejection")
+			}
+		})
+	}
+}
+
+// A Cursor account is scheduled from its two monthly subscription pools.
+// Every model draws from one: Auto and Composer from Cursor's own pool,
+// anything else from Other Models. There is no account-only route.
+func TestCursorProviderRoutesEveryModelToAMonthlyPool(t *testing.T) {
+	configured := strings.Replace(validConfig, "providers:\n", "providers:\n  cursor-main:\n    provider: cursor\n    window_weekly_cost: 0.10\n", 1)
+	cfg, err := config.Load(writeConfig(t, configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := cfg.Providers["cursor-main"]
+	for model, want := range map[string]string{
+		"": config.CursorModelsGroup, "auto": config.CursorModelsGroup, "default": config.CursorModelsGroup,
+		"composer-2.5": config.CursorModelsGroup, "composer-2.5-fast": config.CursorModelsGroup,
+		"claude-opus-5-5-high": config.CursorOtherModelsGroup, "gpt-5.6-sol-high": config.CursorOtherModelsGroup,
+		"grok-4.7-high": config.CursorOtherModelsGroup,
+	} {
+		group, _, err := cursor.ResolveModelGroup(model, "")
+		if err != nil || group != want {
+			t.Errorf("model %q -> %q, %v; want %q", model, group, err, want)
+		}
+	}
+	for _, group := range []string{config.CursorModelsGroup, config.CursorOtherModelsGroup} {
+		if roles := cursor.EffectiveModelGroups()[group].RequiredAllowanceRoles; len(roles) != 1 || roles[0] != "monthly" {
+			t.Errorf("%s roles = %v, want [monthly]", group, roles)
+		}
+	}
+}
+
+func TestExampleConfigKeepsCursorTrackingOff(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, _ := cfg.CursorUsage.EffectiveSource(); source != "off" {
+		t.Fatalf("example config must not read Cursor by default, source=%q", source)
+	}
 }
 
 func TestLoadRecordsActualConfigurationPathForSetupInstructions(t *testing.T) {

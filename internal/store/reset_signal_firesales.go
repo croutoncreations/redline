@@ -32,7 +32,7 @@ func (d *DB) StartResetSignalFiresale(ctx context.Context, provider, usageProvid
 	if err != nil {
 		return false, err
 	}
-	snapshot, _, err := d.LatestSnapshot(ctx, usageProvider)
+	snapshot, _, err := d.LatestSnapshot(ctx, provider, usageProvider)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return false, err
 	}

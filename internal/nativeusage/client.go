@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,11 @@ const (
 	// Claude Code CLI user agent; any other agent is told it is ineligible
 	// with reason "surface". skip_spend drops the spend block we do not read.
 	claudeBankedResetsQuery = "cedar_ember=1&skip_spend=1"
-	claudeUserAgent         = "claude-cli/2.1.280 (external, cli)"
+	// claudeAtLimitQuery is what Claude Code's /limit-reset reads when the
+	// account is at a limit: the same grants, plus which limits are used up
+	// (exhausted) and the separate weekly program, juniper_tide.
+	claudeAtLimitQuery = "at_wall=1&skip_spend=1"
+	claudeUserAgent    = "claude-cli/2.1.280 (external, cli)"
 )
 
 type Credential struct {
@@ -56,7 +61,7 @@ func (c Client) Name() string { return "native" }
 
 func (c Client) Fetch(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	body, err := c.fetchBody(ctx, name, false)
+	body, err := c.fetchBody(ctx, name, profileDir(name, provider), false)
 	if err != nil {
 		return decision.UsageSnapshot{}, body, err
 	}
@@ -84,7 +89,7 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 		if url == "" {
 			url = defaultCodexResetCreditsURL
 		}
-		body, err := c.fetchBodyURL(ctx, name, true, url)
+		body, err := c.fetchBodyURL(ctx, name, "", true, url)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +99,7 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 		return nil, fmt.Errorf("native banked resets for %q are unsupported", name)
 	}
 	// Supplementary: never refresh Claude Code's shared token for this.
-	body, err := c.fetchBody(ctx, name, true)
+	body, err := c.fetchBody(ctx, name, profileDir(name, provider), true)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +112,49 @@ func (c Client) BankedResets(ctx context.Context, provider config.Provider) (*de
 	return claudeBankedResets(payload.CedarEmber, c.now()), nil
 }
 
+// ClaudeResetsAtLimit is a fresh read of Claude's resets for choosing which to
+// spend, as Claude Code does just before /limit-reset claims one.
+type ClaudeResetsAtLimit struct {
+	Resets *decision.BankedResets
+	// Exhausted lists the limits Claude reports as used up, in reset window
+	// names ("weekly", "fable", "five_hour"), broadest first.
+	Exhausted []string
+}
+
+// BankedResetsAtLimit reads Claude's resets with at_wall=1, read-only. It is
+// a single request made only when the user asks to spend a reset.
+func (c Client) BankedResetsAtLimit(ctx context.Context, provider config.Provider) (ClaudeResetsAtLimit, error) {
+	name := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if name != "claude" {
+		return ClaudeResetsAtLimit{}, fmt.Errorf("reading resets at a limit is only supported for Claude")
+	}
+	url := c.ClaudeUsageURL
+	if url == "" {
+		url = defaultClaudeUsageURL
+	}
+	body, err := c.fetchBodyURL(ctx, name, profileDir(name, provider), true, withQuery(url, claudeAtLimitQuery))
+	if err != nil {
+		return ClaudeResetsAtLimit{}, err
+	}
+	var payload struct {
+		CedarEmber *claudeResetStatus `json:"cedar_ember"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ClaudeResetsAtLimit{}, fmt.Errorf("decode native claude resets at limit: %w", err)
+	}
+	result := ClaudeResetsAtLimit{Resets: claudeBankedResets(payload.CedarEmber, c.now())}
+	if payload.CedarEmber != nil {
+		var normalized decision.UsageSnapshot
+		normalized.ApplyBankedResets(&decision.BankedResets{Details: []decision.BankedReset{{Clears: resetDetail[[]string](payload.CedarEmber.Exhausted)}}})
+		for _, limit := range []string{"weekly", "fable", "five_hour"} {
+			if slices.Contains(normalized.BankedResetDetails[0].Clears, limit) {
+				result.Exhausted = append(result.Exhausted, limit)
+			}
+		}
+	}
+	return result, nil
+}
+
 func (c Client) now() time.Time {
 	if c.Now != nil {
 		return c.Now().UTC()
@@ -114,17 +162,34 @@ func (c Client) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (c Client) fetchBody(ctx context.Context, name string, readOnly bool) ([]byte, error) {
-	return c.fetchBodyURL(ctx, name, readOnly, "")
+// profileDir is the Claude Code profile directory an account reads, or ""
+// for the default login.
+func profileDir(name string, provider config.Provider) string {
+	if name != "claude" {
+		return ""
+	}
+	return config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir)
 }
 
-func (c Client) fetchBodyURL(ctx context.Context, name string, readOnly bool, overrideURL string) ([]byte, error) {
+func (c Client) fetchBody(ctx context.Context, name, profile string, readOnly bool) ([]byte, error) {
+	return c.fetchBodyURL(ctx, name, profile, readOnly, "")
+}
+
+func (c Client) fetchBodyURL(ctx context.Context, name, profile string, readOnly bool, overrideURL string) ([]byte, error) {
 	if c.Credentials == nil {
 		return nil, fmt.Errorf("native credentials are unavailable")
 	}
 	var credential Credential
 	var err error
-	if readOnly {
+	if profile != "" {
+		// A profile's login is always read without refreshing, for the
+		// usage fetch too: it is never the default login's to rotate.
+		reader, ok := c.Credentials.(ProfileCredentials)
+		if !ok {
+			return nil, fmt.Errorf("claude profile credentials are unavailable")
+		}
+		credential, err = reader.AccessClaudeProfile(ctx, profile)
+	} else if readOnly {
 		reader, ok := c.Credentials.(ReadOnlyCredentials)
 		if !ok {
 			return nil, fmt.Errorf("native %s credentials cannot be read without refreshing", name)
@@ -292,18 +357,20 @@ type claudeLimit struct {
 }
 type claudePayload struct {
 	FiveHour   *claudeWindow      `json:"five_hour"`
-	SevenDay   *claudeWindow      `json:"seven_day"`
+	SevenDay   json.RawMessage    `json:"seven_day"`
 	Limits     []claudeLimit      `json:"limits"`
 	CedarEmber *claudeResetStatus `json:"cedar_ember"`
 }
 
 // claudeResetStatus is the banked limit reset block. Field names follow
-// Claude Code 2.1.280's own schema for this undocumented response.
+// Claude Code's own schema for this undocumented response (checked against
+// 2.1.318, which added Fable resets).
 type claudeResetStatus struct {
 	Eligible      bool               `json:"eligible"`
 	Grants        []claudeResetGrant `json:"grants"`
 	NextGrantID   json.RawMessage    `json:"next_grant_id"`
 	CooldownUntil json.RawMessage    `json:"cooldown_until"`
+	Exhausted     json.RawMessage    `json:"exhausted"`
 }
 
 type claudeResetGrant struct {
@@ -313,6 +380,96 @@ type claudeResetGrant struct {
 	Clears        json.RawMessage `json:"clears"`
 	UsableNow     json.RawMessage `json:"usable_now"`
 	RequiresLimit json.RawMessage `json:"use_requires_limit"`
+	Type          json.RawMessage `json:"type"`
+	// GivesBackWeekly marks a Fable reset: it refills the 5-hour limit and the
+	// Fable allowance and returns only what Fable used of the weekly limit.
+	// Fable grants also say "type":"full", so this flag wins, as in Claude Code.
+	GivesBackWeekly   json.RawMessage `json:"gives_back_weekly"`
+	StartsAt          json.RawMessage `json:"starts_at"`
+	Paused            json.RawMessage `json:"paused"`
+	Blocking          json.RawMessage `json:"blocking"`
+	UnavailableReason json.RawMessage `json:"unavailable_reason"`
+}
+
+// claudeResetKind names what a grant refills the way Claude Code does.
+func claudeResetKind(grant claudeResetGrant) string {
+	if resetDetail[bool](grant.GivesBackWeekly) {
+		return "fable"
+	}
+	switch kind := resetDetail[string](grant.Type); kind {
+	case "session", "weekly", "full":
+		return kind
+	}
+	clears := resetDetail[[]string](grant.Clears)
+	if len(clears) == 0 {
+		return ""
+	}
+	// A grant that clears only one model's weekly limit is model-scoped;
+	// calling it "weekly" would promise a refill of the whole week.
+	if len(clears) == 1 {
+		switch clears[0] {
+		case "seven_day_opus":
+			return "opus"
+		case "seven_day_sonnet":
+			return "sonnet"
+		}
+	}
+	session, other := false, false
+	for _, window := range clears {
+		if window == "five_hour" {
+			session = true
+		} else {
+			other = true
+		}
+	}
+	switch {
+	case session && !other:
+		return "session"
+	case other && !session:
+		return "weekly"
+	}
+	return "full"
+}
+
+// claudeUnavailableReason explains why a grant cannot be spent now, the way
+// Claude Code does: the server's own reason, then pause/start/cooldown, then
+// a limit it is blocked by. Empty when the grant reports itself usable.
+func claudeUnavailableReason(grant claudeResetGrant, paused bool, startsAt *time.Time, cooldown *time.Time, now time.Time) string {
+	if reason := strings.TrimSpace(resetDetail[string](grant.UnavailableReason)); reason != "" {
+		return reason
+	}
+	if paused {
+		return "paused"
+	}
+	if startsAt != nil && startsAt.After(now) {
+		return "not_started"
+	}
+	if cooldown != nil && cooldown.After(now) {
+		return "cooldown"
+	}
+	blocking := resetDetail[[]string](grant.Blocking)
+	for _, window := range blocking {
+		switch window {
+		case "five_hour":
+			return "blocked_five_hour"
+		case "seven_day":
+			return "blocked_seven_day"
+		case "seven_day_opus":
+			return "blocked_opus"
+		case "seven_day_sonnet":
+			return "blocked_sonnet"
+		}
+	}
+	if len(blocking) > 0 {
+		return "blocked_other"
+	}
+	if usable := resetDetail[*bool](grant.UsableNow); usable != nil && !*usable {
+		if requires := resetDetail[*bool](grant.RequiresLimit); requires != nil && *requires {
+			return "needs_limit"
+		}
+		return "unavailable"
+	}
+	return ""
 }
 
 // Informational reset fields must not invalidate usage or aggregate counts.
@@ -325,8 +482,10 @@ func resetDetail[T any](raw json.RawMessage) T {
 	return value
 }
 
-// claudeBankedResets totals the resets left across grants the way Claude
-// Code does, and reports the soonest expiry among grants that still hold one.
+// claudeBankedResets totals the spendable resets left across grants the way
+// Claude Code does, and reports the soonest expiry among them. Paused grants
+// and grants that have not started are kept in the details, flagged, but not
+// counted: they are held, not usable.
 //
 // Absent block, ineligible account, or a malformed grant set all report
 // nothing rather than a guess: the account may not be in the program, or the
@@ -355,19 +514,27 @@ func claudeBankedResets(status *claudeResetStatus, now time.Time) *decision.Bank
 			}
 			expires = parsed
 		}
-		resets.Available += *grant.ResetsLeft
+		paused := resetDetail[bool](grant.Paused)
+		startsAt := resetDetail[*time.Time](grant.StartsAt)
+		cooldown := resetDetail[*time.Time](status.CooldownUntil)
+		detail := decision.BankedReset{ID: grant.ID, Kind: claudeResetKind(grant), ResetsLeft: *grant.ResetsLeft,
+			Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
+			CooldownUntil: cooldown, Claimable: grant.ID == resetDetail[string](status.NextGrantID),
+			StartsAt: startsAt, Paused: paused, Blocking: resetDetail[[]string](grant.Blocking),
+			UnavailableReason: claudeUnavailableReason(grant, paused, startsAt, cooldown, now)}
+		if !expires.IsZero() {
+			detail.ExpiresAt = &expires
+		}
+		spendable := detail.Spendable(now)
+		if spendable {
+			resets.Available += *grant.ResetsLeft
+			if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
+				resets.NextExpiresAt = &expires
+			}
+		}
 		// A missing id must not invalidate an otherwise usable aggregate.
 		if strings.TrimSpace(grant.ID) != "" {
-			detail := decision.BankedReset{ID: grant.ID, ResetsLeft: *grant.ResetsLeft,
-				Clears: resetDetail[[]string](grant.Clears), UsableNow: resetDetail[*bool](grant.UsableNow), RequiresLimit: resetDetail[*bool](grant.RequiresLimit),
-				CooldownUntil: resetDetail[*time.Time](status.CooldownUntil), Claimable: grant.ID == resetDetail[string](status.NextGrantID)}
-			if !expires.IsZero() {
-				detail.ExpiresAt = &expires
-			}
 			resets.Details = append(resets.Details, detail)
-		}
-		if !expires.IsZero() && (resets.NextExpiresAt == nil || expires.Before(*resets.NextExpiresAt)) {
-			resets.NextExpiresAt = &expires
 		}
 	}
 	return &resets
@@ -386,9 +553,22 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		return decision.UsageSnapshot{}, fmt.Errorf("decode native claude usage: %w", err)
 	}
 	snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native", Confidence: "high"}
-	// The session window is optional: verified Ultra accounts have none, and
-	// scheduling falls back to the weekly window alone.
-	if payload.FiveHour != nil && !payload.FiveHour.inactive() {
+	// The session window is optional. A null utilization means the account
+	// has none (verified Ultra accounts, from 2026-10-30): scheduling falls
+	// back to the weekly window alone. A zero window with no reset exists
+	// but has not started; any other window without a reset is unreadable.
+	if payload.FiveHour != nil && payload.FiveHour.utilizationNull {
+		// No session window to record.
+	} else if payload.FiveHour != nil && bytes.Equal(bytes.TrimSpace(payload.FiveHour.ResetsAt), []byte("null")) {
+		if payload.FiveHour.inactive() {
+			snapshot.ShortWindowNotStarted = true
+		} else {
+			// Preserve weekly telemetry for display, but never schedule with
+			// an unreadable active session window.
+			snapshot.ShortWindowUnavailable = true
+			snapshot.Confidence = "medium"
+		}
+	} else if payload.FiveHour != nil {
 		window, allowance, err := payload.FiveHour.normalized("session", "Session", "short", 5*time.Hour)
 		if err != nil {
 			return decision.UsageSnapshot{}, err
@@ -396,15 +576,30 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		snapshot.Short = &window
 		snapshot.Allowances = append(snapshot.Allowances, allowance)
 	}
-	if payload.SevenDay == nil {
+	if len(payload.SevenDay) == 0 {
 		return decision.UsageSnapshot{}, fmt.Errorf("native claude usage is missing weekly window")
 	}
-	weekly, allowance, err := payload.SevenDay.normalized("weekly", "Weekly", "weekly", 7*24*time.Hour)
-	if err != nil {
-		return decision.UsageSnapshot{}, err
+	if bytes.Equal(bytes.TrimSpace(payload.SevenDay), []byte("null")) {
+		for _, limit := range payload.Limits {
+			if limit.Kind == "weekly_all" {
+				return decision.UsageSnapshot{}, fmt.Errorf("native claude usage has weekly_all but no readable weekly window")
+			}
+		}
+		// Team seats can report session and model limits without disclosing
+		// their account-wide weekly cap. Never infer that cap from a model.
+		snapshot.WeeklyUnavailable = true
+	} else {
+		var window claudeWindow
+		if err := json.Unmarshal(payload.SevenDay, &window); err != nil {
+			return decision.UsageSnapshot{}, fmt.Errorf("decode native claude weekly window: %w", err)
+		}
+		weekly, allowance, err := window.normalized("weekly", "Weekly", "weekly", 7*24*time.Hour)
+		if err != nil {
+			return decision.UsageSnapshot{}, err
+		}
+		snapshot.Weekly = weekly
+		snapshot.Allowances = append(snapshot.Allowances, allowance)
 	}
-	snapshot.Weekly = weekly
-	snapshot.Allowances = append(snapshot.Allowances, allowance)
 	for _, limit := range payload.Limits {
 		if limit.Kind != "weekly_scoped" || !strings.EqualFold(limit.Scope.Model.DisplayName, "Fable") {
 			continue
@@ -412,7 +607,10 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		resetText := limit.ResetsAt
 		resetInferred := false
 		if strings.TrimSpace(resetText) == "" {
-			resetText = weekly.ResetsAt.Format(time.RFC3339Nano)
+			if snapshot.WeeklyUnavailable {
+				continue // There is no account reset from which to infer this model's reset.
+			}
+			resetText = snapshot.Weekly.ResetsAt.Format(time.RFC3339Nano)
 			resetInferred = true
 			snapshot.Confidence = "medium"
 		}

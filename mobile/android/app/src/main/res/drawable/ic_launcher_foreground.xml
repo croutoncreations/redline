@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: the gauge alone, no panel.
+
+  An adaptive icon is masked to whatever shape the launcher wants (circle,
+  squircle, rounded square), so the artwork must survive being cut. The dial is
+  drawn inside the inner 66dp safe zone of the 108dp canvas, which is why the
+  source geometry is scaled down and recentred rather than used at full size:
+  at full size a circular mask clips the ends of the arc.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+
+    <!--
+      Scale 0.62 about the dial centre (512, 650), then lift the dial to the
+      canvas centre: the source art sits low because the icon it came from had a
+      title-safe area above it, and centring keeps the mark from looking dropped
+      inside the mask.
+    -->
+    <group
+        android:pivotX="512" android:pivotY="650"
+        android:scaleX="0.62" android:scaleY="0.62"
+        android:translateY="-95">
+
+        <path
+            android:pathData="M231,519 A310,310 0 0 1 793,519"
+            android:strokeColor="#F7F7F8"
+            android:strokeWidth="64"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.95" />
+        <path
+            android:pathData="M719.4,419.6 A310,310 0 0 1 793,519"
+            android:strokeColor="#EF3F45"
+            android:strokeWidth="64"
+            android:strokeLineCap="round" />
+
+        <path
+            android:pathData="M276.9,485.4 L239.2,459"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M390.7,389.9 L371.3,348.2"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M633.3,389.9 L652.7,348.2"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M747.1,485.4 L784.8,459"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+
+        <path
+            android:pathData="M487.4,632.8 L656.5,443.6 L536.6,667.2 Z"
+            android:fillColor="#F7F7F8" />
+        <path
+            android:pathData="M512,650 m-62,0 a62,62 0 1,0 124,0 a62,62 0 1,0 -124,0"
+            android:fillColor="#F7F7F8" />
+        <path
+            android:pathData="M512,650 m-26,0 a26,26 0 1,0 52,0 a26,26 0 1,0 -52,0"
+            android:fillColor="#EF3F45" />
+
+    </group>
+</vector>
