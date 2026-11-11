@@ -136,6 +136,22 @@ test('shows paused card styling when provider is paused', async ({ page }) => {
   await expect(card.locator('.m-provider-status')).toHaveText('Paused');
 });
 
+test('an OpenUsage card with no local login shows usage but says dispatch is held', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.openusage_card = 'claude@f48a43e1';
+  claude.run_login_unknown = 'OpenUsage card claude@f48a43e1 is not tied to a Claude login on this Mac, so runs would spend the default login; usage is shown but work holds. Bind the account to its Claude Code profile with `redline account add-profile`';
+  claude.latest_decision = { decision: 'RUN', mode: 'pace_threshold', reason: 'stale decision from before the guard' };
+  await loadMobileDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.m-provider-status')).toHaveText('Held · login unknown');
+  const detail = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="decision-detail"]');
+  await expect(detail).toContainText('redline account add-profile');
+  await expect(detail).not.toContainText('stale decision');
+  // Usage is still shown.
+  await expect(page.locator('[data-testid="provider-detail-claude-main"] .m-meters')).toBeVisible();
+});
+
 test('opens every provider usage detail by default', async ({ page }) => {
   await loadMobileDashboard(page);
   const claudeDetail = page.locator('[data-testid="provider-detail-claude-main"]');

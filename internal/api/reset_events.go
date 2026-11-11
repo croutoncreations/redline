@@ -113,7 +113,7 @@ func (s *Server) automaticAttemptAt(provider config.Provider, state automaticRes
 			at = deadline
 		}
 	}
-	later(s.usageSources.NativeBlockedUntil(name))
+	later(s.usageSources.LoginBlockedUntil(provider))
 	if state.pending.ID != 0 {
 		later(state.pending.CreatedAt.Add(5 * time.Minute))
 	}

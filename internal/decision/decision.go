@@ -25,6 +25,9 @@ const (
 	ModePace        Mode = "pace_threshold"
 	ModePaused      Mode = "paused"
 	ModeActive      Mode = "active_run"
+	// ModeLoginUnknown holds an account whose runs could not be started as
+	// its own login (an OpenUsage card with no matching local login).
+	ModeLoginUnknown Mode = "login_unknown"
 )
 
 type UsageWindow struct {

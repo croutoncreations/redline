@@ -174,6 +174,7 @@ function providerLabel(provider) {
 }
 function providerPressure(item) {
   if (item.paused) return {label: 'Paused', tone: 'paused'};
+  if (item.run_login_unknown) return {label: 'Held · login unknown', tone: 'near'};
   if (accountMismatch(item)) return {label: 'Accounts differ', tone: 'near'};
   if (signedOut(item)) return {label: 'Signed out', tone: 'near'};
   if (item.snapshot_stale) return {label: 'Stale', tone: 'near'};
@@ -379,7 +380,13 @@ function renderUsageDetail(item, opts = {}) {
   // Decision block
   const d = item.latest_decision;
   let decisionHTML = '';
-  if (d && outOfDate) {
+  if (item.run_login_unknown) {
+    // Held whatever the last decision said: runs would start as another login.
+    decisionHTML = `<details class="m-provider-decision ${esc(pressure.tone)}" data-testid="decision-detail" open>
+      <summary><b>${esc(pressure.label)}</b></summary>
+      <span>${esc(item.run_login_unknown)}</span>
+    </details>`;
+  } else if (d && outOfDate) {
     decisionHTML = '';
   } else if (d) {
     const detail = d.projected_trigger_at && new Date(d.projected_trigger_at) > Date.now()
@@ -611,7 +618,7 @@ function accountState(item) {
 
 function accountDispatching(item) {
   const d = item.latest_decision?.decision;
-  return accountState(item) === 'ok' && !item.paused && (d === 'RUN' || d === 'ADMIT');
+  return accountState(item) === 'ok' && !item.paused && !item.run_login_unknown && (d === 'RUN' || d === 'ADMIT');
 }
 
 function accountStateLine(item) {
@@ -622,6 +629,7 @@ function accountStateLine(item) {
     case 'error': return {text: 'Usage unavailable · dispatch held', tone: 'danger'};
     case 'no_data': return {text: 'No usage yet · dispatch held', tone: 'near'};
   }
+  if (item.run_login_unknown) return {text: 'Dispatch held · login unknown', tone: 'near'};
   const d = item.latest_decision?.decision;
   if (item.snapshot?.weekly_unavailable && item.weekly_policy === 'session_only') return {text: 'Weekly not reported · session-only scheduling', tone: 'neutral'};
   if (item.snapshot?.weekly_unavailable && d !== 'RUN' && d !== 'ADMIT') return {text: 'Dispatch held · weekly not reported', tone: 'neutral'};

@@ -87,7 +87,28 @@ Dry runs use nonexistent IDs, not a real reset: Claude expects `ineligible` / `u
 Codex expects `no_credit`, reported as `dry_run_ok`. Real redemption spends Claude's claimable
 next grant or Codex's soonest-expiring itemized credit. A missing Codex detail list means to wait
 for collection and try again shortly. Claude eligibility and cooldowns are respected. Multiple
-configured accounts of the same provider type (including profile/card accounts) are refused because the local CLI login is ambiguous. Manual redemption, dry runs, and automatic redemption only support the default provider login: accounts with `claude_config_dir` or a non-default `openusage_card` are refused. For those accounts, use the provider CLI; reminder notifications still work and the automatic reset horizon is not shortened.
+configured accounts are handled by the login each one spends from:
+
+- A Claude Code profile account (`claude_config_dir`) redeems from its own profile login, read
+  without refreshing it. Each profile has its own rate-limit lockout.
+- An account on the default login redeems only when it is the provider's only default-login
+  account; with two, the login is ambiguous and redemption is refused.
+- An account bound to a non-default `openusage_card` is refused: OpenUsage's card names no local
+  login Redline can spend from. Bind it to its Claude Code profile instead, or use `/limit-reset`.
+
+Refused accounts still get reminder notifications, and their automatic reset horizon is not
+shortened.
+
+### OpenUsage cards and run logins
+
+Claude Code and Codex start as the default login on this Mac unless the account names a Claude
+Code profile. An account bound to a non-default OpenUsage card therefore shows that card's usage
+but never dispatches work: a run would spend the default login's allowance while Redline
+scheduled against the card's numbers. Its decision reads `login_unknown`, the dashboard and
+phone say "Dispatch held · login unknown", and the service logs a warning at start. For Claude
+team seats, bind each person to their Claude Code profile with
+`redline account add-profile <id> --dir ~/.claude-cc-<name>`; usage, runs, and reset
+redemption then all use that profile's login.
 
 Redline reads credentials without refreshing or rewriting them. If Claude's login needs refreshing,
 run `claude`, then retry or redeem in Claude Code with `/limit-reset`. Codex requires a ChatGPT

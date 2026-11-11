@@ -182,18 +182,42 @@ func selectNextBankedReset(provider string, details []decision.BankedReset, now 
 	return *selected, nil
 }
 
-// redemptionAccountError refuses spending when telemetry cannot be tied to
-// the default login the native redeemer uses. This also gates reset horizons.
+// redemptionAccountError refuses spending unless the login the redeemer
+// would use is certainly this account's. A Claude Code profile account
+// spends from its own profile login. Any other account spends from the
+// provider's default login, which is only certain when no other account of
+// the provider reads that login too. An OpenUsage card other than the
+// default names no local login at all. This also gates reset horizons.
 func (s *Server) redemptionAccountError(provider config.Provider) error {
 	name := strings.ToLower(strings.TrimSpace(provider.Provider))
-	if s.accountsOfProvider(name) > 1 || s.usageSources.SkipBankedResetProviders[name] {
-		return fmt.Errorf("%w: cannot redeem %s resets with multiple accounts configured; use the provider CLI", store.ErrConflict, name)
-	}
 	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
-	if strings.TrimSpace(provider.ClaudeConfigDir) != "" || (card != "" && card != name) {
-		return fmt.Errorf("%w: banked reset redemption is only supported for the default %s login", store.ErrConflict, name)
+	if card != "" && card != name {
+		return fmt.Errorf("%w: OpenUsage card %s has no local %s login Redline can spend from; "+
+			"bind the account to its Claude Code profile (redline account add-profile) or redeem in Claude Code (/limit-reset)",
+			store.ErrConflict, card, name)
+	}
+	if name == "claude" && config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir) != "" {
+		return nil
+	}
+	// SkipBankedResetProviders is set when the default login's reset lookup
+	// is ambiguous; it stays a second, conservative signal here.
+	if s.defaultLoginAccounts(name) > 1 || s.usageSources.SkipBankedResetProviders[name] {
+		return fmt.Errorf("%w: cannot redeem %s resets with multiple accounts on the default login; use the provider CLI", store.ErrConflict, name)
 	}
 	return nil
+}
+
+// defaultLoginAccounts counts configured accounts of a provider that read
+// its default login: neither a Claude Code profile nor another OpenUsage
+// card.
+func (s *Server) defaultLoginAccounts(provider string) int {
+	count := 0
+	for _, configured := range s.config.Providers {
+		if strings.EqualFold(configured.Provider, provider) && config.MeteringIdentity(configured) == "default:"+provider {
+			count++
+		}
+	}
+	return count
 }
 
 // describeReset names a reset for messages, e.g. "the Fable reset".
@@ -248,12 +272,12 @@ func (s *Server) resetChoiceFor(ctx context.Context, provider config.Provider, k
 	details := pre.BankedResetDetails
 	limit := decision.ReachedLimit(pre)
 	if s.atLimitResets != nil {
-		if until := s.usageSources.NativeBlockedUntil("claude"); s.now().Before(until) {
+		if until := s.usageSources.LoginBlockedUntil(provider); s.now().Before(until) {
 			return nil, ResetChoice{}, fmt.Errorf("%w: Claude's usage endpoint is rate limited until %s; try again then", store.ErrConflict, until.UTC().Format(time.RFC3339))
 		}
 		fresh, err := s.atLimitResets.BankedResetsAtLimit(ctx, provider)
 		if err != nil {
-			s.usageSources.RecordNativeError("claude", err)
+			s.usageSources.RecordLoginError(provider, err)
 			return nil, ResetChoice{}, fmt.Errorf("read Claude resets at the limit: %w", err)
 		}
 		if fresh.Resets != nil {
@@ -334,7 +358,7 @@ func (s *Server) redeemBankedResetKind(ctx context.Context, providerID, trigger 
 			}
 		}
 	}
-	if until := s.usageSources.NativeBlockedUntil(name); s.now().Before(until) {
+	if until := s.usageSources.LoginBlockedUntil(provider); s.now().Before(until) {
 		result.Outcome = "cooldown"
 		result.CooldownUntil = &until
 		result.Reason = "provider rate-limit lockout is active"
@@ -491,7 +515,7 @@ func (s *Server) redeemBankedResetKind(ctx context.Context, providerID, trigger 
 	if err != nil {
 		// Keep pending on ambiguous transport failures/429s. The next attempt
 		// must reuse the persisted request ID, even if the response was lost.
-		s.usageSources.RecordNativeError(name, err)
+		s.usageSources.RecordLoginError(provider, err)
 		result.Outcome = "failed"
 		result.Reason = err.Error()
 		if recordErr := s.store.RecordBankedResetRedemptionError(context.WithoutCancel(ctx), attempt.ID, result.Reason); recordErr != nil {

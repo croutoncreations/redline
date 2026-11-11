@@ -456,6 +456,7 @@ function providerPressure(item) {
 }
 function basePressure(item) {
   if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  if (item.run_login_unknown) return {label:'Dispatch held · login unknown',detail:item.run_login_unknown,tone:'near'};
   if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && item.weekly_policy === 'session_only') return {label:'Weekly not reported · session-only scheduling',detail:item.latest_decision?.reason || 'Scheduling uses the 5-hour window above its protected reserve; the hidden weekly cap is not reported.',tone:'neutral'};
   if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && !['RUN','ADMIT'].includes(item.latest_decision?.decision)) return {label:'Dispatch held · weekly not reported',detail:'This account does not report a weekly limit, so Redline holds dispatch until a policy exists for it.',tone:'neutral'};
   if (accountMismatch(item)) return {

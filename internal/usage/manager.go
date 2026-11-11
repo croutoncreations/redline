@@ -293,6 +293,12 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 // would still offer the spent credit, and the next redemption would select
 // it instead of one that is still available.
 func (m *Manager) ForgetBankedReset(provider config.Provider, resetID string) {
+	// The cache holds the default login's report. A profile account's
+	// resets come with its own fetch, which the caller refreshes, and its
+	// redemption must not touch another login's count.
+	if nativeLoginKey(provider) != providerKey(provider.Provider) {
+		return
+	}
 	key := providerKey(provider.Provider)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -435,6 +441,19 @@ func (m *Manager) NativeBlockedUntil(provider string) time.Time {
 	return m.nativeBlockedUntil[providerKey(provider)]
 }
 
+// LoginBlockedUntil is NativeBlockedUntil for the login an account uses: a
+// Claude Code profile has its own lockout, the default login the provider's.
+func (m *Manager) LoginBlockedUntil(provider config.Provider) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nativeBlockedUntil[nativeLoginKey(provider)]
+}
+
+// RecordLoginError is RecordNativeError for the login an account uses.
+func (m *Manager) RecordLoginError(provider config.Provider, err error) {
+	m.RecordNativeError(nativeLoginKey(provider), err)
+}
+
 // RecordNativeError applies the same persisted rate-limit backoff to a redeem
 // response as to a usage response.
 func (m *Manager) RecordNativeError(provider string, err error) {
@@ -444,7 +463,12 @@ func (m *Manager) RecordNativeError(provider string, err error) {
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}
-		key := providerKey(provider)
+		// A login key ("claude@profile:/dir") keeps its case: the directory
+		// is part of it. A bare provider name is normalized as before.
+		key := provider
+		if !strings.Contains(provider, "@profile:") {
+			key = providerKey(provider)
+		}
 		if until := m.Now().UTC().Add(wait); until.After(m.nativeBlockedUntil[key]) {
 			m.nativeBlockedUntil[key] = until
 		}

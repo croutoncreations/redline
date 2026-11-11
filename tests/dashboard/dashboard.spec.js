@@ -24,6 +24,18 @@ test('renders operational state and applies live dashboard events', async ({ pag
   await expect(page.getByText('reconnecting')).toBeVisible();
 });
 
+test('an OpenUsage card with no local login says dispatch is held and why', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.run_login_unknown = 'OpenUsage card claude@f48a43e1 is not tied to a Claude login on this Mac, so runs would spend the default login; usage is shown but work holds. Bind the account to its Claude Code profile with `redline account add-profile`';
+  claude.latest_decision = { decision: 'RUN', mode: 'pace_threshold', reason: 'stale' };
+  await loadDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.provider-pressure')).toHaveText('Dispatch held · login unknown');
+  await page.getByRole('button', { name: 'Show Claude usage details' }).click();
+  await expect(card).toContainText('redline account add-profile');
+});
+
 test('an unreadable active five-hour window is unavailable, never unrestricted', async ({ page }) => {
   const dashboard = dashboardFixture();
   const [claude] = dashboard.providers;

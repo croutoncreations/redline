@@ -65,6 +65,9 @@ type dashboardProvider struct {
 	// OpenUsageCard is the OpenUsage card this account reads, when bound
 	// to one. It is an opaque ID ("claude@ab12cd34"), not an identity.
 	OpenUsageCard string `json:"openusage_card,omitempty"`
+	// RunLoginUnknown explains why work never dispatches to this account:
+	// its runs would start as another login. Usage is still shown.
+	RunLoginUnknown string `json:"run_login_unknown,omitempty"`
 	// AccountStatus is one of ok, stale, no_data, signed_out, error. It
 	// is derived from the fields below so every client words it the same.
 	AccountStatus            string                  `json:"account_status"`
@@ -430,7 +433,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
 		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id),
-			Label: configured.Label, OpenUsageCard: configured.OpenUsageCard,
+			Label: configured.Label, OpenUsageCard: configured.OpenUsageCard, RunLoginUnknown: config.RunLoginUnknown(configured),
 			WeeklyPolicy: configured.WeeklyPolicy, SessionReserve: configured.EffectiveSessionReserve()}
 		selection, selectionErr := s.effectiveProviderPolicy(ctx, id)
 		if selectionErr != nil {

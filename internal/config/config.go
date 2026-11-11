@@ -838,6 +838,7 @@ func (cfg *Config) validate(validateBootstrapRelay bool) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, identityWarnings...)
+	cfg.Warnings = append(cfg.Warnings, loginUnknownWarnings(cfg.Providers)...)
 	for name, policy := range cfg.Policies {
 		if err := fraction("trigger_margin", policy.TriggerMargin); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)

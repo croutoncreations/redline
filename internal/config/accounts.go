@@ -139,6 +139,49 @@ func MeteringIdentity(provider Provider) string {
 	return "default:" + family
 }
 
+// RunLoginUnknown explains why work cannot be dispatched to an account whose
+// runs would use another account's login, or returns "". Usage for an
+// OpenUsage card other than the provider's default comes from that card's
+// account, but Claude Code and Codex start as the default login on this Mac:
+// scheduling against the card's numbers would spend the default login's
+// allowance. Such accounts still show usage; their work holds. A Claude Code
+// profile account runs as its own profile and is not affected. Cursor keeps
+// its own single-account guard.
+func RunLoginUnknown(provider Provider) string {
+	family := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if family == "cursor" {
+		return ""
+	}
+	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
+	if card == "" || card == family {
+		return ""
+	}
+	if family == "claude" {
+		return "OpenUsage card " + card + " is not tied to a Claude login on this Mac, so runs would spend the default login; " +
+			"usage is shown but work holds. Bind the account to its Claude Code profile with `redline account add-profile`"
+	}
+	return "OpenUsage card " + card + " is not tied to a " + family + " login on this Mac, so runs would spend the default login; " +
+		"usage is shown but work holds"
+}
+
+// loginUnknownWarnings lists accounts whose work holds because their login
+// is unknown, one line each, in ID order. Loading still succeeds: their
+// usage stays visible and nothing runs on the wrong login.
+func loginUnknownWarnings(providers map[string]Provider) []string {
+	ids := make([]string, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var warnings []string
+	for _, id := range ids {
+		if reason := RunLoginUnknown(providers[id]); reason != "" {
+			warnings = append(warnings, fmt.Sprintf("account %q: %s", id, reason))
+		}
+	}
+	return warnings
+}
+
 // ValidateAccountIdentities refuses configurations where two accounts would
 // read the same usage. Cursor is skipped: it already has its own one-account
 // guard, and this release adds multi-account support for Claude first.

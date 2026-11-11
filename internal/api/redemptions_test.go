@@ -62,19 +62,21 @@ func redemptionServer(t *testing.T, provider string) (*Server, *store.DB, decisi
 }
 
 func TestRedeemBankedResetRefusesNonDefaultAccounts(t *testing.T) {
-	for _, kind := range []string{"profile", "card", "additional profile"} {
+	// A non-default OpenUsage card names no local login, and a second
+	// account on the default login makes that login ambiguous. (Claude Code
+	// profile accounts spend from their own login: see
+	// TestProfileAccountRedeemsFromItsOwnLogin.)
+	for _, kind := range []string{"card", "second default-login account"} {
 		t.Run(kind, func(t *testing.T) {
 			s, db, snapshot := redemptionServer(t, "claude")
 			p := s.config.Providers["main"]
 			p.BankedResets = config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{}}
 			s.config.UsageMonitor.Enabled = true
 			switch kind {
-			case "profile":
-				p.ClaudeConfigDir = t.TempDir()
 			case "card":
 				p.OpenUsageCard = "claude@other"
-			case "additional profile":
-				s.config.Providers["other"] = config.Provider{Provider: "claude", ClaudeConfigDir: t.TempDir()}
+			case "second default-login account":
+				s.config.Providers["other"] = config.Provider{Provider: "claude", UsageSource: "native"}
 			}
 			s.config.Providers["main"] = p
 			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {

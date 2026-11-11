@@ -13,6 +13,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/store"
 )
 
@@ -102,14 +103,26 @@ func TestTeamSeatsWithoutAWeeklyWindowShowUsageAndHoldDispatch(t *testing.T) {
 	if seen != 2 {
 		t.Fatalf("team rows missing: %s", raw)
 	}
-	// Dispatch for a seat without a weekly window holds with a plain reason.
-	result := postJSON[struct {
+	// These seats read non-default OpenUsage cards, so dispatch holds before
+	// any budget is read: a run would start as the default login.
+	type evaluation struct {
 		Result struct {
 			Decision string `json:"decision"`
+			Mode     string `json:"mode"`
 			Reason   string `json:"reason"`
 		} `json:"result"`
-	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "claude-5ea70003"})
-	if result.Result.Decision != "UNKNOWN" || !strings.Contains(result.Result.Reason, "weekly limit not reported") {
+	}
+	result := postJSON[evaluation](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "claude-5ea70003"})
+	if result.Result.Decision != "WAIT" || result.Result.Mode != "login_unknown" {
 		t.Fatalf("decision = %+v", result.Result)
+	}
+	// The budget itself still says why it would hold without a weekly window.
+	snapshot, _, err := db.LatestSnapshot(t.Context(), "claude-5ea70003", "claude")
+	if err != nil || !snapshot.WeeklyUnavailable {
+		t.Fatalf("snapshot = %+v err=%v", snapshot, err)
+	}
+	budget := decision.Evaluate(decision.Input{Snapshot: snapshot, WindowWeeklyCost: .08, Now: now, MaxSnapshotAge: 8760 * time.Hour})
+	if budget.Decision != decision.Unknown || !strings.Contains(budget.Reason, "weekly limit not reported") {
+		t.Fatalf("budget = %+v", budget)
 	}
 }

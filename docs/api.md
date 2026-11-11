@@ -105,6 +105,11 @@ on-demand spend and credits. A separate `provider: cursor` account is scheduled 
 monthly subscription pools; see [Cursor](profiles-and-tasks.md#cursor). A monthly account window
 carries `snapshot.weekly.period_seconds` (about 2592000); clients should label it monthly.
 
+A provider with `run_login_unknown` set never dispatches work, whatever its latest decision
+says: it reads a non-default OpenUsage card, and a run would start as the default login. The
+field is the sentence to show. Its scheduler decisions have mode `login_unknown`. See
+[scheduling](scheduling.md#openusage-cards-and-run-logins).
+
 ## Endpoints
 
 ```text
@@ -204,6 +209,9 @@ history route accepts both owner and device authentication.
   `GET /v1/providers/{id}/banked-resets/choice?kind=…` returns the reset that would be spent,
   without spending it, for a confirmation to bind with `expected_reset_id`. It answers **422** with
   the reason and the kinds that can be used when none fits. Same authorization as redeem.
+- Both routes answer **409** for an account Redline cannot spend from: a non-default OpenUsage
+  card, or a second account on the provider's default login. A Claude Code profile account spends
+  from its own login ([details](scheduling.md#redeeming-banked-resets)).
 - `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
   first, including pending operations whose idempotency keys survive restarts. An ambiguous
   request finalized at expiry has outcome `unknown`; check the provider before trying another reset.
@@ -219,10 +227,8 @@ Outcomes are `redeemed`, `nothing_to_reset`, `unavailable`, `cooldown`, `gone`, 
 Refill verification compares weekly remaining allowance and the reset boundary after a usage
 refresh. Unverified redemption still returns `redeemed` with a note. HTTP errors cover invalid
 requests, unknown providers, transport/storage failures, and **409** for an in-progress redemption
-or ambiguous local login (multiple configured accounts of the same provider type, including profile/card accounts).
-Accounts with `claude_config_dir` or a non-default `openusage_card` also return **409**:
-redemption (including dry runs and automatic redemption) only supports the default provider login.
-These accounts retain reminder notifications but cannot shorten the automatic reset horizon. Demo servers
+or an account Redline cannot spend from (see above). Refused accounts retain reminder
+notifications but cannot shorten the automatic reset horizon. Demo servers
 refuse both real and dry-run redemption with **409**, without reading credentials or sending requests.
 
 Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger`

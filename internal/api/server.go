@@ -373,9 +373,11 @@ func newServer(
 	// Accounts bound to a Claude Code profile directory are not counted:
 	// they never use this lookup (their own native fetch reports their
 	// resets), so they do not make the default login ambiguous.
+	// Accounts on another OpenUsage card do not use it either (their card
+	// carries their resets), so only default-login accounts are counted.
 	claudeAccounts := 0
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(provider.Provider, "claude") && strings.TrimSpace(provider.ClaudeConfigDir) == "" {
+		if strings.EqualFold(provider.Provider, "claude") && config.MeteringIdentity(provider) == "default:claude" {
 			claudeAccounts++
 		}
 	}
@@ -1438,10 +1440,15 @@ func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 }
 
 func (s *Server) providerDecision(w http.ResponseWriter, r *http.Request) {
-	snapshot, result, err := s.evaluateProvider(r.Context(), r.PathValue("provider"))
+	providerID := r.PathValue("provider")
+	snapshot, result, err := s.evaluateProvider(r.Context(), providerID)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	// The budget read stays visible, but the decision is what dispatch does.
+	if reason := config.RunLoginUnknown(s.config.Providers[providerID]); reason != "" {
+		result.Decision, result.Mode, result.Reason = decision.Wait, decision.ModeLoginUnknown, reason
 	}
 	writeJSON(w, http.StatusOK, decisionResponse{Snapshot: snapshot, Result: result})
 }
@@ -2135,6 +2142,9 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	if paused {
 		response.DispatchAvailable = false
 		response.ProviderReason = "provider is paused"
+	} else if reason := config.RunLoginUnknown(s.config.Providers[providerID]); reason != "" {
+		response.DispatchAvailable = false
+		response.ProviderReason = reason
 	} else if active, countErr := s.store.ActiveRunCount(r.Context(), providerID); countErr != nil {
 		writeError(w, countErr)
 		return
@@ -2334,6 +2344,13 @@ func (s *Server) dispatchCore(
 	configuredProvider, configured := s.config.Providers[request.ProviderAccountID]
 	if !configured {
 		return response, false, fmt.Errorf("provider %q is not configured", request.ProviderAccountID)
+	}
+	// Every dispatch path (automatic, manual, a requested task) passes here.
+	// A run on an account whose login is unknown would start as the default
+	// login and spend its allowance, whatever this account's numbers say.
+	if reason := config.RunLoginUnknown(configuredProvider); reason != "" {
+		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
 	active, err := s.store.ActiveRunCount(ctx, request.ProviderAccountID)
 	if err != nil {
@@ -3066,10 +3083,15 @@ func (s *Server) evaluateScheduler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	held := decision.Result{Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused"}
+	if !paused {
+		if reason := config.RunLoginUnknown(s.config.Providers[request.ProviderAccountID]); reason != "" {
+			held = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
+			paused = true
+		}
+	}
 	if paused {
-		response := schedulerResponse{Result: decision.Result{
-			Decision: decision.Wait, Mode: decision.ModePaused, Reason: "provider is paused",
-		}}
+		response := schedulerResponse{Result: held}
 		encoded, _ := json.Marshal(response)
 		_, err := s.store.RecordSchedulerDecision(r.Context(), domain.SchedulerDecision{
 			ProviderAccountID: request.ProviderAccountID, DecisionJSON: encoded,

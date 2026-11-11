@@ -21,8 +21,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a limit, or one it does not refill), on the dashboard, mobile page, and in redemption errors.
   Resets scoped to the Opus or Sonnet weekly limit are labelled as such.
 
+- Claude Code profile accounts (`claude_config_dir`) can redeem their own banked resets and
+  choose a reset kind; each profile spends from, and is rate limited as, its own login.
+
 ### Fixed
 
+- Work is no longer dispatched to an account bound to a non-default OpenUsage card. Runs start
+  as the default login, so such an account was scheduled against one seat's numbers while
+  spending another's allowance. Its usage is still shown, with "Dispatch held · login unknown"
+  and a pointer to `redline account add-profile`.
+- Pair a Device no longer offers the hosted relay, which is not live yet.
 - Claude's Fable resets are recognized. They refill the 5-hour limit and the Fable allowance
   and give back only what Fable used of the week, so they are no longer treated as clearing
   the weekly limit when scheduling or verifying a redemption.
