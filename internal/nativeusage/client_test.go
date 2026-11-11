@@ -83,13 +83,15 @@ func TestClaudeNativeKeepsTheSnapshotWhenAUsedWindowHasNoReset(t *testing.T) {
 	}
 }
 
-// "Not started" needs the provider to have said zero. An empty or null
-// utilization is unknown use, and a resetless window with unknown use is
-// unavailable -- never a full bar.
+// "Not started" needs the provider to have said zero. A missing utilization
+// is unknown use, and a resetless window with unknown use is unavailable --
+// never a full bar. An explicit null utilization is different: since
+// 2026-10-30 that is how Claude reports an account with no session limit
+// (verified Ultra), which Claude Code's /usage shows as no 5-hour row. That
+// case is covered by TestClaudeNativeAcceptsOnlyAnExplicitlyInactiveShortWindow.
 func TestClaudeNativeRequiresAnExplicitZeroToCallAWindowNotStarted(t *testing.T) {
 	for name, fiveHour := range map[string]string{
 		"missing utilization": `{"resets_at":null}`,
-		"null utilization":    `{"utilization":null,"resets_at":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -180,6 +182,11 @@ func TestClaudeNativeAcceptsOnlyAnExplicitlyInactiveShortWindow(t *testing.T) {
 	}{
 		{"inactive", `{"utilization":0,"resets_at":null}`, false},
 		{"active missing reset", `{"utilization":20,"resets_at":null}`, false},
+		// Verified Ultra accounts have no session limit: no window, not held.
+		{"no session limit", `{"utilization":null,"resets_at":null}`, false},
+		{"no session limit with stale reset", `{"utilization":null,"resets_at":"2026-10-23T12:00:00Z"}`, false},
+		{"null window", `null`, false},
+		{"non-numeric utilization", `{"utilization":"unlimited","resets_at":null}`, true},
 		{"missing reset field", `{"utilization":0}`, true},
 		{"empty reset", `{"utilization":0,"resets_at":""}`, true},
 		{"missing utilization", `{"resets_at":null}`, false},
@@ -195,8 +202,9 @@ func TestClaudeNativeAcceptsOnlyAnExplicitlyInactiveShortWindow(t *testing.T) {
 			if (err != nil) != tt.wantError {
 				t.Fatalf("snapshot=%#v err=%v", got, err)
 			}
-			if !tt.wantError && tt.name != "inactive" && !got.ShortWindowUnavailable {
-				t.Fatal("unknown active session must hold dispatch", got)
+			holds := tt.name == "active missing reset" || tt.name == "missing utilization"
+			if !tt.wantError && got.ShortWindowUnavailable != holds {
+				t.Fatalf("ShortWindowUnavailable = %v, want %v: %#v", got.ShortWindowUnavailable, holds, got)
 			}
 			if !tt.wantError && (got.Short != nil || len(got.Allowances) != 1 || math.Abs(got.Weekly.Remaining-.68) > 1e-9) {
 				t.Fatalf("inactive session must not invent a reset or discard the weekly allowance: %#v", got)

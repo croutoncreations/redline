@@ -172,7 +172,13 @@ func TestConfigFileDuplicateIsAWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "same numbers") {
+	duplicates := 0
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "same numbers") {
+			duplicates++
+		}
+	}
+	if duplicates != 1 {
 		t.Fatalf("warnings = %q", cfg.Warnings)
 	}
 }

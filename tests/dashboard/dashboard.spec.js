@@ -714,6 +714,40 @@ test('refresh detection recomputes defaults from newly available capabilities', 
   await expect(page.locator('#onboarding-harness')).toHaveValue('codex-cli');
 });
 
+test('refresh detection can be used again after a harness is installed', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks = [];
+  const pageErrors = [];
+  const forcedDetections = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname === '/v1/profile-options' && url.searchParams.get('refresh') === 'true') forcedDetections.push(url.pathname);
+  });
+  const notInstalled = () => profileOptionsFixture().harnesses.map(harness => ({
+    ...harness, installed: harness.id === 'command',
+  }));
+  const state = await loadDashboard(page, {
+    dashboard, profiles: [], waitForReady: false,
+    profileOptions: { ...profileOptionsFixture(), harnesses: notInstalled() },
+  });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Set up Redline' });
+  const refreshButton = page.getByRole('button', { name: 'Refresh detection' });
+  await expect(dialog).toContainText('Install Claude Code');
+
+  await refreshButton.click();
+  await expect(refreshButton).toBeEnabled();
+
+  state.profileOptions = profileOptionsFixture();
+  await refreshButton.click();
+
+  await expect(dialog).toContainText('Claude Code · Installed');
+  await expect(refreshButton).toBeEnabled();
+  expect(forcedDetections).toHaveLength(2);
+  expect(pageErrors).toEqual([]);
+});
+
 test('prefers the provider whose compatible harness is installed', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];

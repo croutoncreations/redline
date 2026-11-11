@@ -292,6 +292,137 @@ func TestUnrestrictedProviderWithoutThresholdsFailsClosed(t *testing.T) {
 	}
 }
 
+// A weekly-only account (verified Claude Ultra, or Codex without its short
+// limit) is budgeted on the weekly window alone: leftover quota before reset
+// is filled, an empty week waits, and nothing waits on a 5-hour reset.
+func TestWeeklyOnlyAccountFillsLeftoverBeforeResetAndWaitsWhenEmpty(t *testing.T) {
+	gap, firesale := .30, .45
+	weeklyOnly := func(remaining float64, untilReset time.Duration) decision.Input {
+		s := limitedSnapshot()
+		s.Short = nil
+		s.Weekly = decision.UsageWindow{Remaining: remaining, ResetsAt: now.Add(untilReset)}
+		in := input(s)
+		in.PaceGapTrigger, in.FiresaleTrigger = &gap, &firesale
+		in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 24 * time.Hour, MinWeeklyRemaining: .20}}
+		return in
+	}
+
+	leftover := decision.Evaluate(weeklyOnly(.60, 12*time.Hour))
+	if leftover.Decision != decision.Admit || leftover.Mode != decision.ModePace || !leftover.Firesale ||
+		leftover.UnlockedTier != domain.DispatchFiresale || len(leftover.Slots) != 0 {
+		t.Fatalf("leftover weekly quota near reset should be filled: %#v", leftover)
+	}
+	forced := weeklyOnly(.05, 12*time.Hour)
+	forced.ForceFiresale = true
+	if got := decision.Evaluate(forced); got.Decision != decision.Admit || !got.Firesale {
+		t.Fatalf("announcement firesale should run a weekly-only account with quota left: %#v", got)
+	}
+	empty := weeklyOnly(0, 12*time.Hour)
+	empty.ForceFiresale = true
+	if got := decision.Evaluate(empty); got.Decision != decision.Wait {
+		t.Fatalf("an exhausted weekly window must wait: %#v", got)
+	}
+	onPace := weeklyOnly(.50, 84*time.Hour)
+	if got := decision.Evaluate(onPace); got.Decision != decision.Wait || got.Mode != decision.ModePace {
+		t.Fatalf("on-pace weekly-only account should wait: %#v", got)
+	}
+	if at := decision.ProjectTriggerAt(onPace, time.Hour); at == nil || !at.After(now) || !at.Before(now.Add(84*time.Hour)) {
+		t.Fatalf("flat usage should become eligible before the weekly reset, got %v", at)
+	}
+}
+
+// The bundled late policy's weekly-only thresholds release leftover weekly
+// quota on accounts with no five-hour window, and must not change anything
+// for accounts that have one.
+func TestWeeklyOnlyPaceThresholdsApplyOnlyWithoutShortWindow(t *testing.T) {
+	late := func(s decision.UsageSnapshot) decision.Input {
+		in := input(s)
+		in.TriggerMargin, in.RollingReserve = .05, .40
+		in.PaceThresholds = []decision.PaceThreshold{{TimeRemaining: 24 * time.Hour, MinWeeklyRemaining: .50}}
+		in.WeeklyOnlyPaceThresholds = []decision.PaceThreshold{
+			{TimeRemaining: 72 * time.Hour, MinWeeklyRemaining: .60},
+			{TimeRemaining: 48 * time.Hour, MinWeeklyRemaining: .40},
+			{TimeRemaining: 24 * time.Hour, MinWeeklyRemaining: .20},
+			{TimeRemaining: 6 * time.Hour, MinWeeklyRemaining: .05},
+		}
+		return in
+	}
+	for _, tt := range []struct {
+		name       string
+		remaining  float64
+		untilReset time.Duration
+		want       decision.Decision
+		wantReason string
+	}{
+		{"three days, 65% left", .65, 70 * time.Hour, decision.Admit, "weekly remaining meets weekly-only pace threshold"},
+		{"three days, on pace", .45, 70 * time.Hour, decision.Wait, "no pace threshold matched"},
+		{"two days, 45% left", .45, 40 * time.Hour, decision.Admit, "weekly remaining meets weekly-only pace threshold"},
+		{"one day, 30% left", .30, 20 * time.Hour, decision.Admit, "weekly remaining meets weekly-only pace threshold"},
+		{"one day, 60% left uses the base threshold", .60, 20 * time.Hour, decision.Admit, "weekly remaining meets pace threshold"},
+		{"one day, 15% left", .15, 20 * time.Hour, decision.Wait, "no pace threshold matched"},
+		{"final hours, 6% left", .06, 5 * time.Hour, decision.Admit, "weekly remaining meets weekly-only pace threshold"},
+		{"five days out", .95, 120 * time.Hour, decision.Wait, "no pace threshold matched"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := limitedSnapshot()
+			s.Short = nil
+			s.Weekly = decision.UsageWindow{Remaining: tt.remaining, ResetsAt: now.Add(tt.untilReset)}
+			got := decision.Evaluate(late(s))
+			if got.Decision != tt.want || got.Reason != tt.wantReason || got.Mode != decision.ModePace {
+				t.Fatalf("got %s/%s (%s), want %s (%s)", got.Decision, got.Mode, got.Reason, tt.want, tt.wantReason)
+			}
+		})
+	}
+
+	t.Run("short window ignores weekly-only thresholds", func(t *testing.T) {
+		s := limitedSnapshot()
+		s.Short = &decision.UsageWindow{Remaining: .90, ResetsAt: now.Add(2 * time.Hour)}
+		s.Weekly = decision.UsageWindow{Remaining: .30, ResetsAt: now.Add(20 * time.Hour)}
+		with := late(s)
+		without := late(s)
+		without.WeeklyOnlyPaceThresholds = nil
+		got, base := decision.Evaluate(with), decision.Evaluate(without)
+		if got.Decision != base.Decision || got.Reason != base.Reason || got.Mode != decision.ModeSlots {
+			t.Fatalf("with=%s (%s) without=%s (%s)", got.Decision, got.Reason, base.Decision, base.Reason)
+		}
+		if got.Decision == decision.Admit {
+			t.Fatalf("fixture should wait in slot mode so a leak would show: %#v", got)
+		}
+	})
+
+	t.Run("projection reaches the first weekly-only row", func(t *testing.T) {
+		s := limitedSnapshot()
+		s.Short = nil
+		s.Weekly = decision.UsageWindow{Remaining: .45, ResetsAt: now.Add(70 * time.Hour)}
+		in := late(s)
+		in.WeeklyOnlyPaceThresholds = in.WeeklyOnlyPaceThresholds[1:] // 48h/40% first
+		at := decision.ProjectTriggerAt(in, time.Hour)
+		if at == nil || !at.Equal(now.Add(22*time.Hour)) {
+			t.Fatalf("projected = %v, want when 48h remain (%v)", at, now.Add(22*time.Hour))
+		}
+	})
+
+	t.Run("weekly-only thresholds alone make a weekly-only decision known", func(t *testing.T) {
+		s := limitedSnapshot()
+		s.Short = nil
+		in := input(s)
+		in.WeeklyOnlyPaceThresholds = []decision.PaceThreshold{{TimeRemaining: 6 * time.Hour, MinWeeklyRemaining: .05}}
+		if got := decision.Evaluate(in); got.Decision == decision.Unknown {
+			t.Fatalf("got %#v", got)
+		}
+	})
+
+	t.Run("invalid weekly-only threshold fails closed", func(t *testing.T) {
+		s := limitedSnapshot()
+		s.Short = nil
+		in := input(s)
+		in.WeeklyOnlyPaceThresholds = []decision.PaceThreshold{{TimeRemaining: 0, MinWeeklyRemaining: .05}}
+		if got := decision.Evaluate(in); got.Decision != decision.Unknown {
+			t.Fatalf("got %#v", got)
+		}
+	})
+}
+
 func TestEvaluateFailsClosedForStaleSnapshot(t *testing.T) {
 	s := limitedSnapshot()
 	s.ObservedAt = now.Add(-16 * time.Minute)

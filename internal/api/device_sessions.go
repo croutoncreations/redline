@@ -117,8 +117,9 @@ func (s *Server) legacyDeviceSession(r *http.Request) (string, string, error) {
 func (s *Server) authorized(r *http.Request) (principal, error) {
 	token := ""
 	viaCookie := false
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") {
-		token = strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
+	// HTTP authentication schemes are case-insensitive (RFC 9110 §11.1).
+	if scheme, credential, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+		token = strings.TrimSpace(credential)
 	} else if cookie, err := r.Cookie(apiSessionCookie); err == nil {
 		token, viaCookie = cookie.Value, true
 	}

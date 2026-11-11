@@ -200,15 +200,16 @@ func readClaudeCredentials(ctx context.Context, store secretStore) (claudeCreden
 	return file, nil
 }
 
+// claudeCredentialsFile decodes only what Redline needs. Plan fields such as
+// subscriptionType and rateLimitTier are deliberately not decoded: limits come
+// from the usage windows the API reports, not from plan names (which change,
+// e.g. Max 20x became Ultra), and refreshes preserve every other field as-is.
 type claudeCredentialsFile struct {
 	raw           []byte
 	ClaudeAIOAuth struct {
-		AccessToken      string   `json:"accessToken"`
-		RefreshToken     string   `json:"refreshToken"`
-		ExpiresAt        float64  `json:"expiresAt"`
-		SubscriptionType string   `json:"subscriptionType,omitempty"`
-		RateLimitTier    string   `json:"rateLimitTier,omitempty"`
-		Scopes           []string `json:"scopes,omitempty"`
+		AccessToken  string  `json:"accessToken"`
+		RefreshToken string  `json:"refreshToken"`
+		ExpiresAt    float64 `json:"expiresAt"`
 	} `json:"claudeAiOauth"`
 }
 

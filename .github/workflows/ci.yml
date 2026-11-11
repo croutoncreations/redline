@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,7 +33,7 @@ jobs:
         run: actionlint
 
   go:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
@@ -78,6 +78,7 @@ jobs:
   # The same checks gate publishing in release.yml; running them here catches
   # .goreleaser.yaml or cask template regressions before a tag is pushed.
   homebrew:
+    # Stays GitHub-hosted: setup-homebrew hangs on Blacksmith (Linuxbrew .git/config not writable).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +108,7 @@ jobs:
         run: scripts/brew-lint.sh dist/homebrew/Formula/redline.rb dist/cask-check/Casks/redline.rb
 
   dashboard:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -158,7 +159,7 @@ jobs:
         run: ./gradlew --no-daemon --console=plain checkNoTestOnlyDeclarations checkCoreFreshness testDebugUnitTest assembleDebug
 
   linux-smoke:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6

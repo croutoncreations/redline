@@ -55,11 +55,15 @@ retain job/run/provider/firesale control; banked reset spending requires
 `api.paired_devices.allow_reset_redemption: true` (default false). They cannot create pairings,
 manage devices or test notifications. See the [API permission table](api.md#principals-and-permissions).
 
-`token rotate` is a local owner action, requires `--yes`, opens the configured database to revoke
-**all** device sessions, and replaces the master token. Restart Redline to invalidate the old
-master token and legacy pairings, then pair devices again. Re-pair legacy phones to replace their
-old master-token bearer credential with a properly scoped device token; existing browser cookies
-upgrade transparently without interrupting access.
+`token rotate` is a local owner action and requires `--yes`. It atomically replaces the master
+`api-token` file next to `--config` and does not open the database or contact the service; each
+device session is bound to the master token that issued it, so after a restart **all** device
+sessions are signed out. Restart Redline to invalidate the old master token and legacy pairings,
+then pair devices again. A legacy phone that still holds the master-token bearer credential is
+not a device session: `devices list` does not show it and `devices revoke` cannot remove it, so
+rotating the token and restarting is the only way to revoke it. Re-pair legacy phones to replace
+that credential with a properly scoped device token; existing browser cookies upgrade
+transparently without interrupting access.
 
 ## Usage and decisions
 
@@ -164,6 +168,7 @@ redline task enable add-tests
 redline task disable add-tests
 redline task retry add-tests
 redline task dispatch add-tests
+redline task delete add-tests
 redline candidates --provider codex-main
 ```
 
@@ -175,6 +180,8 @@ A non-matching `--default-profile` requires `--allow-default-profile`. Other fla
 `--priority` (50 default), `--min-interval`, `--firesale-interval` (optional positive provider-firesale
 cooldown), and `--disabled` to save a draft. YAML uses `firesale_min_interval` for that cooldown.
 Task updates are available through the API, MCP, or dashboard, not a CLI update command.
+`task delete <id>` permanently deletes a task. Running tasks and tasks with run or scheduler
+history cannot be deleted (the API returns `409 Conflict`); disable tasks with history instead.
 
 ### Queue work for later
 

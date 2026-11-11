@@ -168,6 +168,12 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if key == "" {
 			continue
 		}
+		if scope == "account" && role == "short" && line.Limit == 0 {
+			// No session limit (verified Claude Ultra): there is no
+			// denominator and no session window. Scheduling uses the weekly
+			// window alone; the session is neither exhausted nor held.
+			continue
+		}
 		remaining, err := remainingFraction(line)
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)

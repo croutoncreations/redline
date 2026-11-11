@@ -248,14 +248,42 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 }
 
 type claudeWindow struct {
-	Utilization *float64        `json:"utilization"`
-	ResetsAt    json.RawMessage `json:"resets_at"`
+	Utilization     *float64        `json:"utilization"`
+	ResetsAt        json.RawMessage `json:"resets_at"`
+	utilizationNull bool
 }
 
-// Claude returns an explicit null reset for a session window that has not started.
-// Missing fields, empty strings, and active windows with no reset remain errors.
+// Claude returns an explicit null reset for a session window that has not
+// started. An explicit null utilization means the account has no session limit
+// (verified Ultra accounts since 2026-10-30); Claude Code's /usage hides the
+// bar in that case. Missing fields, empty strings, and active windows with no
+// reset remain errors.
 func (w claudeWindow) inactive() bool {
+	if w.utilizationNull {
+		return true
+	}
 	return w.Utilization != nil && *w.Utilization == 0 && bytes.Equal(bytes.TrimSpace(w.ResetsAt), []byte("null"))
+}
+
+func (w *claudeWindow) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Utilization json.RawMessage `json:"utilization"`
+		ResetsAt    json.RawMessage `json:"resets_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*w = claudeWindow{ResetsAt: raw.ResetsAt}
+	if bytes.Equal(bytes.TrimSpace(raw.Utilization), []byte("null")) {
+		w.utilizationNull = true
+	} else if len(raw.Utilization) > 0 {
+		var utilization float64
+		if err := json.Unmarshal(raw.Utilization, &utilization); err != nil {
+			return err
+		}
+		w.Utilization = &utilization
+	}
+	return nil
 }
 
 func (w claudeWindow) normalized(key, label, role string, period time.Duration) (decision.UsageWindow, decision.AllowanceWindow, error) {
@@ -375,7 +403,13 @@ func parseClaude(body []byte, now time.Time) (decision.UsageSnapshot, error) {
 		return decision.UsageSnapshot{}, fmt.Errorf("decode native claude usage: %w", err)
 	}
 	snapshot := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Source: "native", Confidence: "high"}
-	if payload.FiveHour != nil && bytes.Equal(bytes.TrimSpace(payload.FiveHour.ResetsAt), []byte("null")) {
+	// The session window is optional. A null utilization means the account
+	// has none (verified Ultra accounts, from 2026-10-30): scheduling falls
+	// back to the weekly window alone. A zero window with no reset exists
+	// but has not started; any other window without a reset is unreadable.
+	if payload.FiveHour != nil && payload.FiveHour.utilizationNull {
+		// No session window to record.
+	} else if payload.FiveHour != nil && bytes.Equal(bytes.TrimSpace(payload.FiveHour.ResetsAt), []byte("null")) {
 		if payload.FiveHour.inactive() {
 			snapshot.ShortWindowNotStarted = true
 		} else {

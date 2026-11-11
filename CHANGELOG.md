@@ -6,9 +6,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `redline task delete <id>` permanently removes a task, with a confirmation on success and
+  a clear API conflict error if the task is running.
+
+### Fixed
+
+- Git-worktree runs keep `.redline/` out of the user's `git status` by creating a self-ignoring
+  `.redline/.gitignore`, including in linked worktrees and repository subdirectories, without
+  changing existing ignore files or the checkout's tracked `.gitignore`.
+
+## [0.1.12] - 2026-11-10
+
+### Upgrade notes
+
+- Paired phones and browsers now get their own revocable device sessions instead of the master API
+  token. Existing dashboard cookies upgrade on their own. A phone paired before this release still
+  holds the master token, is not shown in `redline devices list`, and cannot be revoked by ID.
+  Re-pairing gives it a device session, but the master token it held stays a valid owner
+  credential. To invalidate every copy, run `redline token rotate --yes` and restart Redline, then
+  re-pair your devices.
+- Paired devices can no longer redeem banked resets by default. To allow it again, set:
+
+  ```yaml
+  api:
+    paired_devices:
+      allow_reset_redemption: true
+  ```
+
+- The bundled `late` policy now adds `weekly_only_pace_thresholds`, so a Claude account with no
+  five-hour limit (verified Ultra) can run work earlier in the week to use up leftover weekly
+  quota. Without them, such an account under `late` only runs once at least 50% of its weekly
+  quota remains within 24 hours of the reset. Existing configs do not get the new rows
+  automatically: copy the `weekly_only_pace_thresholds` block from the `late` policy in
+  `config.example.yaml` into yours. `standard` and `early` need no change. The new startup warning
+  only flags a policy that has none of `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, so an existing `late` policy does not trigger it.
+- Building from source requires Go 1.26.10 or later.
+
 ### Security
 
-- paired devices no longer receive the master API token. New pairings and local dashboard
+- Git-worktree runs now keep `.redline` and `.redline/worktrees` owner-only (0700), including
+  directories created as 0755 by earlier versions, so other local accounts cannot read run
+  checkouts or files written there by agents and hooks.
+- Builds now use Go 1.26.10, which fixes GO-2026-6809 (`crypto/x509` now distrusts compromised
+  intermediate certificates); `govulncheck` reported it reachable through `x509.Certificate.Verify`.
+  `go.mod` requires Go 1.26.10.
+- API JSON requests now enforce the 1 MiB body limit before decoding, preventing oversized
+  requests from hiding additional JSON content beyond the decoder's previous read boundary.
+- Paired devices no longer receive the master API token. New pairings and local dashboard
   sign-ins use individually revocable, SHA-256-hashed device sessions. Existing browser cookies
   upgrade transparently; legacy master-token bearers remain compatible until re-paired or rotated.
   Device reset redemption defaults off (`api.paired_devices.allow_reset_redemption`); ordinary
@@ -64,6 +111,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Record-only notifications (`enabled: true`, empty `command`) and native Mac reset/firesale
   alerts from recorded deliveries, with persistent deduplication and no history replay on first
   use. Clicking opens the dashboard; redeem-now reminders and failed redemptions have sound.
+- Policies accept `weekly_only_pace_thresholds`, which apply only while an account reports no
+  five-hour window. The bundled `late` policy uses them (72h/60%, 48h/40%, 24h/20%, 6h/5%) so a
+  verified Claude Ultra account fills leftover weekly quota before its reset. Accounts that report
+  a five-hour window are unaffected. Existing configs need the block copied from
+  `config.example.yaml`.
+- Startup warns about any policy with no `pace_gap_trigger`, `pace_thresholds` or
+  `weekly_only_pace_thresholds`, since it cannot run work for a weekly-only account outside an
+  announcement firesale.
+
+### Fixed
+
+- Claude accounts with no five-hour limit (verified Ultra, formerly Max 20x, from 2026-10-30)
+  are budgeted on the weekly window alone. Native usage accepts a null session window
+  (`utilization: null`) and OpenUsage accepts a session line with no limit, instead of failing
+  the snapshot. Limits still come only from the windows the provider reports, never from plan
+  names, so Max (formerly Max 5x), unverified Ultra, and unrecognized plans keep working.
+- Claude credential reads no longer decode `subscriptionType`/`rateLimitTier`, so a plan field
+  changing shape cannot block usage access; token refreshes still preserve it unchanged.
+- The first-run guide's **Refresh detection** button works more than once. It used to stay
+  disabled after its first use, so a newly installed or signed-in Claude Code or Codex CLI did
+  not appear until the dashboard was reloaded.
+- API authentication accepts the `Bearer` scheme in any letter case, as HTTP requires, so clients
+  that send `Authorization: bearer TOKEN` no longer get a false `401 Unauthorized`.
+- `redline notification test --event reset.announced --provider ACCOUNT` now words the alert about
+  that account ("Test: Start a claude-main firesale?") and explains what tapping Start does.
+  Before, it showed a "Codex reset promised" alert quoting the tracker while the Start action
+  targeted the account you named. The plain sample is unchanged.
+- The green-lane pilot's live-merge check now blocks on any non-empty current-head review body from
+  someone other than the PR author, including bot `COMMENTED` reviews and approvals; a positive
+  completion summary can't bypass it. Earlier review-body feedback only clears after the same
+  provider posts a full completion for the new head, and dismissing a review doesn't resolve it.
+  This deliberately defers benign review prose too.
+- The CLI reference now matches the real commands: `pair --qr` is required, and `task retry`,
+  `token rotate --yes`, and `run events --limit` are documented.
 
 ### Fixed
 
