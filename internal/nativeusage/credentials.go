@@ -66,30 +66,34 @@ func (d *DefaultCredentials) Access(ctx context.Context, provider string) (Crede
 	case "claude":
 		return d.claude(ctx)
 	case "codex":
-		return d.codex(ctx)
+		return d.codex(ctx, false)
 	default:
 		return Credential{}, fmt.Errorf("native credentials for %q are unsupported", provider)
 	}
 }
 
+// claudeCredentialsFile decodes only what Redline needs. Plan fields such as
+// subscriptionType and rateLimitTier are deliberately not decoded: limits come
+// from the usage windows the API reports, not from plan names (which change,
+// e.g. Max 20x became Ultra), and refreshes preserve every other field as-is.
 type claudeCredentialsFile struct {
 	ClaudeAIOAuth struct {
-		AccessToken      string   `json:"accessToken"`
-		RefreshToken     string   `json:"refreshToken"`
-		ExpiresAt        float64  `json:"expiresAt"`
-		SubscriptionType string   `json:"subscriptionType,omitempty"`
-		RateLimitTier    string   `json:"rateLimitTier,omitempty"`
-		Scopes           []string `json:"scopes,omitempty"`
+		AccessToken  string  `json:"accessToken"`
+		RefreshToken string  `json:"refreshToken"`
+		ExpiresAt    float64 `json:"expiresAt"`
 	} `json:"claudeAiOauth"`
 }
 
 // AccessWithoutRefresh returns the current credential but never refreshes or
-// rewrites it. Used for supplementary lookups that must not rotate Claude
-// Code's shared refresh token behind its back: a token near expiry is simply
-// reported as unavailable, and the next Claude Code session will refresh it.
+// rewrites it. Supplementary lookups must not rotate Claude Code's or Codex's
+// shared refresh token: a token near expiry is reported as unavailable so the
+// provider's CLI can refresh it.
 func (d *DefaultCredentials) AccessWithoutRefresh(ctx context.Context, provider string) (Credential, error) {
+	if strings.EqualFold(provider, "codex") {
+		return d.codex(ctx, true)
+	}
 	if !strings.EqualFold(provider, "claude") {
-		return d.Access(ctx, provider)
+		return Credential{}, fmt.Errorf("native credentials for %q are unsupported", provider)
 	}
 	store := d.ClaudeStore
 	if store == nil {
@@ -186,7 +190,7 @@ type codexAuthFile struct {
 	LastRefresh string `json:"last_refresh"`
 }
 
-func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
+func (d *DefaultCredentials) codex(ctx context.Context, readOnly bool) (Credential, error) {
 	store := d.CodexStore
 	if store == nil {
 		return Credential{}, fmt.Errorf("codex credential store is unavailable")
@@ -201,6 +205,9 @@ func (d *DefaultCredentials) codex(ctx context.Context) (Credential, error) {
 	}
 	now := d.now()
 	if expiresAt, ok := jwtExpiry(file.Tokens.AccessToken); ok && expiresAt.Sub(now) <= 5*time.Minute {
+		if readOnly {
+			return Credential{}, fmt.Errorf("codex token is near expiry; skipping lookup rather than refreshing Codex's credential")
+		}
 		writable, ok := store.(writableSecretStore)
 		if !ok {
 			return Credential{}, fmt.Errorf("codex credential store is read-only")

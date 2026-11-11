@@ -39,6 +39,62 @@ func TestTaskDispatchConsumesServiceAPIWithoutBody(t *testing.T) {
 	}
 }
 
+func TestTaskDeleteConsumesServiceAPIWithoutBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.EscapedPath() != "/v1/tasks/review%2Fauth" {
+			t.Errorf("request = %s %s", r.Method, r.URL.EscapedPath())
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) != 0 {
+			t.Errorf("body = %q err=%v", body, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	exit := cli.Run([]string{"--api", server.URL, "task", "delete", "review/auth"}, &stdout, &stderr, time.Now)
+	if exit != 0 || stdout.String() != "deleted task review/auth\n" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTaskDeleteReportsAPIErrors(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		status  int
+		message string
+	}{
+		{"running", http.StatusConflict, `conflict: running task "review" cannot be deleted`},
+		{"history", http.StatusConflict, `conflict: task "review" has run or scheduler history; disable it instead`},
+		{"missing", http.StatusNotFound, "not found"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(test.status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": test.message})
+			}))
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run([]string{"--api", server.URL, "task", "delete", "review"}, &stdout, &stderr, time.Now)
+			if exit != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), fmt.Sprintf("%d %s", test.status, test.message)) {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestTaskDeleteRequiresExactlyOneID(t *testing.T) {
+	for _, args := range [][]string{
+		{"task", "delete"}, {"task", "delete", ""}, {"task", "delete", "one", "two"}, {"profile", "delete", "one"},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := cli.Run(args, &stdout, &stderr, time.Now)
+		if exit != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "usage: redline task delete <id>") {
+			t.Fatalf("args=%q exit=%d stdout=%s stderr=%s", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestCandidatesConsumesProviderAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/v1/providers/team%2Fcodex/candidates" {
@@ -57,7 +113,7 @@ func TestCandidatesConsumesProviderAPI(t *testing.T) {
 func TestTaskUsageIncludesDispatchAndControls(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"task"}, &stdout, &stderr, time.Now)
-	if exit != 1 || !strings.Contains(stderr.String(), "enable|disable|retry|dispatch") {
+	if exit != 1 || !strings.Contains(stderr.String(), "enable|disable|retry|dispatch|delete") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
 }
@@ -78,7 +134,7 @@ func TestPairQRWithExplicitTrustedHost(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run([]string{"--api", server.URL, "--config", configPath, "pair", "--qr", "--host", "redline.example.ts.net", "--port", "8443"}, &stdout, &stderr, time.Now)
 	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "redline.example.ts.net:8443") ||
-		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "full API access") ||
+		!strings.Contains(stdout.String(), "WARNING") || !strings.Contains(stdout.String(), "device control") ||
 		strings.Contains(stdout.String(), "pairing_token") || strings.Contains(stdout.String(), pairingToken) || strings.Contains(stdout.String(), token) {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, stdout.String(), stderr.String())
 	}
@@ -791,7 +847,8 @@ func TestTokenRotateRequiresConfirmation(t *testing.T) {
 func TestTokenRotateReplacesTokenWithConfirmation(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "redline.yaml")
-	if err := os.WriteFile(configPath, []byte("database: unused\n"), 0o600); err != nil {
+	contents := fmt.Sprintf("database: %s\nactive_policy: standard\nproviders:\n  main:\n    provider: codex\n    window_weekly_cost: 0.1\npolicies:\n  standard:\n    trigger_margin: 0.02\n    rolling_reserve: 0.25\n", filepath.Join(directory, "redline.db"))
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	original, err := apiauth.EnsureToken(configPath)

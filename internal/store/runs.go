@@ -13,11 +13,6 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 )
 
-func (d *DB) HasActiveRun(ctx context.Context, providerAccountID string) (bool, error) {
-	count, err := d.ActiveRunCount(ctx, providerAccountID)
-	return count > 0, err
-}
-
 func (d *DB) ActiveRunCount(ctx context.Context, providerAccountID string) (int, error) {
 	var active int
 	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs
@@ -39,6 +34,7 @@ AND r.state IN ('preparing', 'running')`, providerAccountID, pool).Scan(&active)
 }
 
 type AdmissionLimits struct {
+	ProviderFiresale    bool
 	Provider            int
 	Pools               map[string]int
 	RuntimeConnectionID string
@@ -139,7 +135,11 @@ WHERE t.id = ? AND p.provider_account_id = ?`, taskID, providerAccountID)
 	if !task.Enabled || task.State != domain.Queued {
 		return domain.Run{}, fmt.Errorf("task %q is not queued and enabled", taskID)
 	}
-	if task.LastCompletedAt != nil && task.MinInterval > 0 && now.Before(task.LastCompletedAt.Add(task.MinInterval)) {
+	interval := task.MinInterval
+	if limits.ProviderFiresale && task.FiresaleMinInterval > 0 {
+		interval = task.FiresaleMinInterval
+	}
+	if task.LastCompletedAt != nil && interval > 0 && now.Before(task.LastCompletedAt.Add(interval)) {
 		return domain.Run{}, fmt.Errorf("task %q minimum interval has not elapsed", taskID)
 	}
 	if task.RequireRepoChange &&

@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// checkSize implements Rule 1: size ≤ 150 changed lines
-func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
+// checkSize implements Rule 1: size caps for the PR's lane.
+func (e *Evaluator) checkSize(pr PRInfo, limits SizeLimits) RuleResult {
 	lockfilePatterns := []string{
 		"**/go.sum",
 		"**/package-lock.json",
@@ -47,29 +47,29 @@ func (e *Evaluator) checkSize(pr PRInfo) RuleResult {
 	}
 
 	// Check file count
-	if fileCount > e.config.MaxFiles {
+	if fileCount > limits.MaxFiles {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, e.config.MaxFiles),
+			Message: fmt.Sprintf("Too many files: %d (max %d)", fileCount, limits.MaxFiles),
 		}
 	}
 
 	// Check regular lines
-	if regularLines > e.config.MaxChangedLines {
+	if regularLines > limits.MaxChangedLines {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, e.config.MaxChangedLines),
+			Message: fmt.Sprintf("Too many changed lines: %d (max %d)", regularLines, limits.MaxChangedLines),
 		}
 	}
 
 	// Check lockfile/generated lines
-	if lockfileLines > e.config.MaxLockfileChanges {
+	if lockfileLines > limits.MaxLockfileChanges {
 		return RuleResult{
 			Name:    "Size",
 			Pass:    false,
-			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, e.config.MaxLockfileChanges),
+			Message: fmt.Sprintf("Too many lockfile/generated changes: %d (max %d)", lockfileLines, limits.MaxLockfileChanges),
 		}
 	}
 
@@ -210,6 +210,9 @@ func (e *Evaluator) checkRepro(reproResult *ReproResult) RuleResult {
 
 // checkCI implements Rule 3: CI status
 func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
+	if len(e.config.RequiredChecks) == 0 {
+		return RuleResult{Name: "CI", Inconclusive: true, Message: "No required-check policy configured"}
+	}
 	pending := []string{}
 	failed := []string{}
 	missing := []string{}
@@ -220,6 +223,10 @@ func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
 	for _, check := range pr.CheckRuns {
 		for _, required := range e.config.RequiredChecks {
 			if check.Name == required {
+				source, ok := e.config.CheckSources[required]
+				if !ok || source.AppID <= 0 || source.WorkflowID <= 0 || check.AppID != source.AppID || check.WorkflowID != source.WorkflowID || check.HeadSHA != pr.HeadSHA {
+					continue
+				}
 				seen[required] = true
 
 				if check.Status != "completed" {
@@ -269,74 +276,6 @@ func (e *Evaluator) checkCI(pr PRInfo) RuleResult {
 	}
 }
 
-// checkReviewer implements Rule 4: cross-vendor reviewer
-func (e *Evaluator) checkReviewer(pr PRInfo) RuleResult {
-	// Check for CodeRabbit review first
-	codeRabbitReview := checkCodeRabbitReview(pr)
-
-	// In shadow mode, we don't have the full provenance infrastructure yet
-	// Check for any approved review on the head SHA
-	hasApproval := false
-	hasRequestChanges := false
-
-	for _, review := range pr.Reviews {
-		if review.CommitID != pr.HeadSHA {
-			continue
-		}
-
-		// Skip CodeRabbit reviews since we handle them separately
-		if review.User == "coderabbitai[bot]" {
-			continue
-		}
-
-		if review.State == "APPROVED" {
-			hasApproval = true
-		}
-		if review.State == "CHANGES_REQUESTED" {
-			hasRequestChanges = true
-		}
-	}
-
-	// Build message with CodeRabbit status
-	var message strings.Builder
-	if codeRabbitReview.Reviewed {
-		if codeRabbitReview.Approved {
-			message.WriteString("CodeRabbit: approved with ")
-		} else if codeRabbitReview.RequestedChanges {
-			message.WriteString("CodeRabbit: requested changes with ")
-		} else {
-			message.WriteString("CodeRabbit: reviewed with ")
-		}
-		message.WriteString(fmt.Sprintf("%d findings. ", codeRabbitReview.FindingsCount))
-	} else {
-		message.WriteString("CodeRabbit: no real review on head SHA. ")
-	}
-
-	if !hasApproval {
-		message.WriteString("No human approval on current head SHA. ")
-	} else {
-		message.WriteString("Human approval found, but ")
-	}
-
-	message.WriteString("Cross-vendor provenance not verified (shadow mode: needs real Apps)")
-
-	// Either CodeRabbit or human requesting changes should fail
-	if codeRabbitReview.RequestedChanges || hasRequestChanges {
-		return RuleResult{
-			Name:    "Reviewer",
-			Pass:    false,
-			Message: message.String(),
-		}
-	}
-
-	// In shadow mode, we note that provenance checking is not yet implemented
-	return RuleResult{
-		Name:    "Reviewer",
-		Pass:    false,
-		Message: message.String(),
-	}
-}
-
 // CodeRabbitReview represents CodeRabbit's review status
 type CodeRabbitReview struct {
 	Reviewed         bool
@@ -349,41 +288,32 @@ type CodeRabbitReview struct {
 func checkCodeRabbitReview(pr PRInfo) CodeRabbitReview {
 	result := CodeRabbitReview{}
 
-	// Look for reviews from coderabbitai[bot]
-	for _, review := range pr.Reviews {
-		if review.User != "coderabbitai[bot]" {
-			continue
-		}
-
-		// Must be on the current head SHA
-		if review.CommitID != pr.HeadSHA {
-			continue
-		}
-
-		// Check for explicit approve or request changes
-		if review.State == "APPROVED" {
-			result.Reviewed = true
-			result.Approved = true
-			return result
-		}
-
-		if review.State == "CHANGES_REQUESTED" {
-			result.Reviewed = true
-			result.RequestedChanges = true
-			// Count findings from review comments
-			result.FindingsCount = countReviewComments(pr, review.ID)
-			return result
-		}
-
-		// For COMMENTED state, check if there are actual review comments (findings)
-		if review.State == "COMMENTED" {
-			findings := countReviewComments(pr, review.ID)
-			if findings > 0 {
-				result.Reviewed = true
-				result.FindingsCount = findings
-				return result
+	// A decisive review takes priority over diagnostic COMMENTED findings.
+	review, decisive := effectiveReviews(pr.Reviews)["coderabbitai[bot]"]
+	if !decisive {
+		for _, candidate := range pr.Reviews {
+			if candidate.User != "coderabbitai[bot]" || candidate.State != "COMMENTED" || candidate.CommitID != pr.HeadSHA {
+				continue
+			}
+			if !result.Reviewed || candidate.SubmittedAt.After(review.SubmittedAt) || (candidate.SubmittedAt.Equal(review.SubmittedAt) && candidate.ID > review.ID) {
+				if countReviewComments(pr, candidate.ID) > 0 {
+					review = candidate
+					result.Reviewed = true
+				}
 			}
 		}
+	}
+	if review.CommitID != pr.HeadSHA || review.State == "DISMISSED" {
+		return CodeRabbitReview{}
+	}
+	result.FindingsCount = countReviewComments(pr, review.ID)
+	switch review.State {
+	case "APPROVED":
+		result.Reviewed = true
+		result.Approved = true
+	case "CHANGES_REQUESTED":
+		result.Reviewed = true
+		result.RequestedChanges = true
 	}
 
 	return result
@@ -461,11 +391,15 @@ func (e *Evaluator) checkDuplicates(pr PRInfo, openPRs []PRSummary) RuleResult {
 func (e *Evaluator) checkDeniedPaths(pr PRInfo) RuleResult {
 	var denied []string
 
+	// A rename touches both paths: moving a denied file elsewhere edits the
+	// denied path as much as changing it in place.
 	for _, file := range pr.Files {
-		for _, pattern := range e.config.DeniedPaths {
-			if matchPattern(file.Filename, pattern) {
-				denied = append(denied, file.Filename)
-				break
+		for _, p := range file.Paths() {
+			for _, pattern := range e.config.DeniedPaths {
+				if matchPattern(p, pattern) {
+					denied = append(denied, p)
+					break
+				}
 			}
 		}
 	}
@@ -543,9 +477,14 @@ func matchPattern(path, pattern string) bool {
 		}
 	}
 
-	// Handle * wildcards
+	// Handle * wildcards. A pattern with a directory part (".github/release-notes-*")
+	// matches the full path; a bare one ("playwright.config.*") matches the base name.
 	if strings.Contains(pattern, "*") {
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
+		target := filepath.Base(path)
+		if strings.Contains(pattern, "/") {
+			target = path
+		}
+		matched, _ := filepath.Match(pattern, target)
 		return matched
 	}
 

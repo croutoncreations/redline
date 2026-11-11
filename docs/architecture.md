@@ -49,7 +49,9 @@ Agent instructions and lifecycle hooks remain responsible for commit, push, and 
   fall back to native Codex and Claude collectors after repeated failures.
 - Model-specific Claude allowance ingestion and scheduling; Fable tasks require both shared Claude
   capacity and the Fable weekly pool, while Haiku, Sonnet, and Opus use shared pools only.
-- Optional 5-hour limits: Codex works when its temporary short limit is absent.
+- Optional 5-hour limits: Codex works when its temporary short limit is absent, and Claude
+  accounts without one (verified Ultra) are budgeted on the weekly window alone. Limits come from
+  the windows each provider reports, never from plan names.
 - Prorated current and final 5-hour slots for limited providers.
 - Organic calibration of five-hour-to-weekly capacity from paired usage snapshots.
 - Empirical 5-hour and weekly processed-token capacity estimates from Codex, Claude Code, and
@@ -61,6 +63,7 @@ Agent instructions and lifecycle hooks remain responsible for commit, push, and 
 
 - Policy-configured pace thresholds for unrestricted providers.
 - Explainable `RUN`, `WAIT`, and fail-closed `UNKNOWN` decisions.
+- Firesale dispatch tier and effective reset horizon, including opt-in expiring banked resets.
 - Priority-descending, oldest-first eligible task selection.
 - Pool-aware candidate scanning so an exhausted Fable task cannot starve eligible non-Fable work.
 - `min_interval` and `require_repo_change` eligibility.
@@ -96,6 +99,7 @@ Agent instructions and lifecycle hooks remain responsible for commit, push, and 
 ### Notifications, health, and agent access
 
 - Opt-in command notifications for run completion/failure and scheduler errors.
+- Banked-reset reminders, manual/automatic redemption, and firesale start/end notifications.
 - Durable notification delivery history and 24-hour operational health summaries.
 - API-backed stdio MCP server with bounded operational reads, explicit task/provider controls,
   and a separately annotated scheduler-dispatch tool.
