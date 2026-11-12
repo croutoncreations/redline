@@ -19,9 +19,13 @@ public struct NotificationDelivery: Decodable, Sendable {
     public var title: String { payload.title.flatMap { $0.isEmpty ? nil : $0 } ?? eventType }
     public var message: String { payload.message.flatMap { $0.isEmpty ? nil : $0 } ?? eventType }
     public var identifier: String { "redline-event-\(id)" }
-    public var shouldNotify: Bool { eventType.hasPrefix("reset.") || eventType.hasPrefix("firesale.") }
+    public var shouldNotify: Bool {
+        eventType.hasPrefix("reset.") || eventType.hasPrefix("firesale.") || eventType.hasPrefix("account.")
+    }
     public var hasSound: Bool {
-        eventType == "reset.redeem_failed" || (eventType == "reset.expiring" && payload.data?["action"] == "redeem_now")
+        // A seat that needs signing in holds its work until someone acts.
+        eventType == "reset.redeem_failed" || eventType == "account.needs_login"
+            || (eventType == "reset.expiring" && payload.data?["action"] == "redeem_now")
     }
 }
 

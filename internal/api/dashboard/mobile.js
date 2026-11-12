@@ -941,6 +941,12 @@ function renderUsage(providers) {
     usageInitialized = true;
   }
   const focusKey = carouselFocusKey();
+  // A <details> fires "toggle" asynchronously, so a live update right after
+  // a tap could re-render before it ran; read the open lists from the page.
+  list.querySelectorAll('[data-banked-resets-toggle]').forEach(el => {
+    if (el.open) openBankedResetIDs.add(el.dataset.bankedResetsToggle);
+    else openBankedResetIDs.delete(el.dataset.bankedResetsToggle);
+  });
   list.innerHTML = usageGroups(providers)
     .map(group => group.kind === 'family' ? renderFamily(group) : renderUsageProvider(group.item))
     .join('') + renderCursorUsage(cursor);
