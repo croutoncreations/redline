@@ -13,6 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count
   as before.
 
+### Fixed
+
+- Claude Code profile accounts (team seats) no longer go out of date and hold their work
+  8 hours after the seat was last used. The usage monitor now asks Claude Code to renew each
+  profile's login shortly before it expires: `claude auth status` first, or a one-word haiku
+  request (at most 6 a day per seat) if that doesn't renew it. Redline still never writes a
+  login. A seat that can't be renewed sends a new `account.needs_login` notification once. Turn
+  it off with `usage_monitor.keep_profile_logins_fresh: false`.
+
 ## [0.1.13] - 2026-11-11
 
 ### Upgrade notes
