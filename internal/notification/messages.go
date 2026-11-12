@@ -25,6 +25,15 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		name = provider
 	}
 	switch event.Type {
+	case domain.EventAccountNeedsLogin:
+		label := d["label"]
+		if label == "" {
+			label = event.ProviderAccountID
+		}
+		dir := d["claude_config_dir"]
+		event.Title = label + " needs to sign in to Claude Code"
+		event.Message = "Its login can't be renewed in the background, so work is held on this account. Run CLAUDE_CONFIG_DIR=" +
+			dir + " claude and sign in with /login."
 	case domain.EventResetExpiring:
 		event.Title = name + " banked reset expiring"
 		count, _ := strconv.Atoi(d["count"])

@@ -153,6 +153,9 @@ const (
 	EventResetRedeemFailed = "reset.redeem_failed"
 	EventFiresaleStarted   = "firesale.started"
 	EventFiresaleEnded     = "firesale.ended"
+	// EventAccountNeedsLogin: a Claude Code profile's login can no longer
+	// be renewed in the background; someone has to sign in again.
+	EventAccountNeedsLogin = "account.needs_login"
 )
 
 type NotificationEvent struct {

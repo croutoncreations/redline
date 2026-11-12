@@ -38,6 +38,9 @@ scheduler:
 usage_monitor:
   enabled: true
   poll_interval: 5m
+  # Run Claude Code under each Claude Code profile account shortly before its
+  # login expires, so Claude Code renews it. Redline never writes the login.
+  keep_profile_logins_fresh: true
 
 # Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
 # Alerts and firesales are announcement-only, never odds-based.

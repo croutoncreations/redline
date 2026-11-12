@@ -140,6 +140,64 @@ func (d *DefaultCredentials) AccessClaudeProfile(ctx context.Context, dir string
 	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
 }
 
+// ProfileLogin is what the keep-alive needs to know about one profile's
+// login: when its access token expires and whether Claude Code can renew it.
+// It never includes a token.
+type ProfileLogin struct {
+	// SignedOut: no login at all (no directory, no credential, or no
+	// access token). Only signing in again fixes it.
+	SignedOut bool
+	// ExpiresAt is zero when the credential has no expiry.
+	ExpiresAt       time.Time
+	HasRefreshToken bool
+}
+
+// ProfileLoginState reads, without writing, the expiry of the Claude Code
+// profile at dir (absolute and cleaned).
+func (d *DefaultCredentials) ProfileLoginState(ctx context.Context, dir string) (ProfileLogin, error) {
+	if !filepath.IsAbs(dir) {
+		return ProfileLogin{}, fmt.Errorf("claude profile directory must be absolute")
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ProfileLogin{SignedOut: true}, nil
+	}
+	open := d.ClaudeProfileStore
+	if open == nil {
+		open = newClaudeProfileStore
+	}
+	store := open(dir)
+	if store == nil {
+		return ProfileLogin{}, fmt.Errorf("claude profile credentials are unavailable on this platform")
+	}
+	file, err := readClaudeCredentials(ctx, store)
+	if errors.Is(err, ErrSignedOut) {
+		return ProfileLogin{SignedOut: true}, nil
+	}
+	if err != nil {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return ProfileLogin{}, fmt.Errorf("read Claude Code profile %s login: %v", displayDir(dir), pathErr.Err)
+		}
+		return ProfileLogin{}, err
+	}
+	state := ProfileLogin{HasRefreshToken: file.ClaudeAIOAuth.RefreshToken != ""}
+	if file.ClaudeAIOAuth.ExpiresAt > 0 {
+		state.ExpiresAt = time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).UTC()
+	}
+	return state, nil
+}
+
+// ProfileNeedsSession is the error AccessClaudeProfile returns for an
+// expired profile token, for sources and tests outside this package.
+func ProfileNeedsSession(dir string) error { return profileNeedsSessionError{dir: displayDir(dir)} }
+
+// IsProfileNeedsSession reports whether err is a profile's access token
+// expiring with a refresh token Claude Code can still use.
+func IsProfileNeedsSession(err error) bool {
+	var target profileNeedsSessionError
+	return errors.As(err, &target)
+}
+
 // displayDir shows a path under the home folder as "~/…" in messages.
 func displayDir(dir string) string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {

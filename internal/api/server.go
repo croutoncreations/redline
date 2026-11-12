@@ -40,6 +40,7 @@ import (
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/openusage"
 	"github.com/croutoncreations/redline/internal/pairing"
+	"github.com/croutoncreations/redline/internal/profilelogin"
 	"github.com/croutoncreations/redline/internal/push"
 	"github.com/croutoncreations/redline/internal/relay"
 	"github.com/croutoncreations/redline/internal/resetreminder"
@@ -91,6 +92,7 @@ type Server struct {
 	artifacts          artifacts.Reader
 	scheduler          *autoscheduler.Loop
 	usageMonitor       *autoscheduler.Loop
+	profileLogins      *profileLogins
 	resetSignalLoop    *autoscheduler.Loop
 	resetSignalFetcher resetsignal.Fetcher
 	resetSignalSleep   func(context.Context, time.Duration) error
@@ -233,8 +235,9 @@ func NewDemoServer(
 	server.redeemer = nil
 	source := staticUsageSource{snapshots: snapshots, accounts: cfg.Providers}
 	server.usageSources = usage.NewManager(source, source, now)
-	// Demo mode never reads real Cursor data.
+	// Demo mode never reads real Cursor data, nor runs Claude Code.
 	server.cursorUsage = nil
+	server.profileLogins = nil
 	server.discovery = discoverer
 	server.hermes = disabledDemoHermes{}
 	for accountID, provider := range cfg.Providers {
@@ -352,6 +355,10 @@ func newServer(
 	server.usageSources = usage.NewManager(openUsageWithCursor, nativeWithCursor, now)
 	// Wrapping hides the native source's banked-reset lookup; keep it.
 	server.usageSources.BankedResets = nativeSource
+	server.profileLogins = newProfileLogins(cfg, credentials, profilelogin.ClaudeRenewer{}, func(ctx context.Context, account string) bool {
+		active, err := database.ActiveRunCount(ctx, account)
+		return err == nil && active > 0
+	}, now)
 	server.atLimitResets = nativeSource
 
 	if maxSnapshotAge, err := cfg.SnapshotAge(); err == nil {
@@ -1431,7 +1438,13 @@ func (s *Server) accountsOfProvider(provider string) int {
 }
 
 func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
+	// Renew a Claude Code profile's login before it lapses, so the fetch
+	// below never finds it expired.
+	s.keepProfileLoginFresh(ctx, providerID, false)
 	snapshot, configured, usageErr := s.fetchAndStore(ctx, providerID)
+	if usageErr != nil && s.renewIfExpired(ctx, providerID, usageErr) {
+		snapshot, configured, usageErr = s.fetchAndStore(ctx, providerID)
+	}
 	if usageErr == nil {
 		// Redeem mode only suppresses redeem-now for resets automatic redemption
 		// will actually attempt; on error, every reset falls back to notify.

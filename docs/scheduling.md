@@ -110,6 +110,25 @@ team seats, bind each person to their Claude Code profile with
 `redline account add-profile <id> --dir ~/.claude-cc-<name>`; usage, runs, and reset
 redemption then all use that profile's login.
 
+### Keeping profile logins fresh
+
+A Claude Code profile's access token lasts about 8 hours, and only Claude Code renews it, while
+it runs with that profile. Without help, a seat nobody used for 8 hours would go out of date and
+hold its work. So the usage monitor keeps each profile account's login fresh: within 15 minutes
+of expiry it runs `CLAUDE_CONFIG_DIR=<dir> claude auth status`, and Claude Code renews and saves
+its own login. If the expiry has not moved by the token's last 5 minutes (or the token has already
+expired), it sends the smallest real request instead: one word from haiku, with no tools, MCP
+servers or saved session. That costs a few hundred tokens on that seat about every 8 hours.
+
+Redline still never writes a credential; it only reads the expiry and checks that it moved.
+Renewals run one at a time, skip an account while a Redline run is active on it (that run renews
+the login itself), and back off for 30 minutes after one fails. The default login and Codex are
+never touched. When a profile cannot be renewed (signed out, or its refresh token was revoked),
+the account shows "Signed out" with the command to run, and an `account.needs_login`
+notification is sent once per sign-out (add it to `notifications.events`).
+
+Turn it off with `usage_monitor.keep_profile_logins_fresh: false`.
+
 Redline reads credentials without refreshing or rewriting them. If Claude's login needs refreshing,
 run `claude`, then retry or redeem in Claude Code with `/limit-reset`. Codex requires a ChatGPT
 OAuth login, not an API key. Each operation persists an idempotency key before contacting the

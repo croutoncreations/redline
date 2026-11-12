@@ -70,6 +70,7 @@ var knownNotificationEvents = map[string]bool{
 	"reset.announced": true,
 	"run.started":     true, "run.completed": true, "run.failed": true, "scheduler.error": true,
 	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
+	"account.needs_login": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -214,6 +215,16 @@ type UsageMonitor struct {
 	Enabled          bool   `yaml:"enabled"`
 	PollInterval     string `yaml:"poll_interval"`
 	GatepostDatabase string `yaml:"gatepost_database"`
+	// KeepProfileLoginsFresh runs Claude Code under each Claude Code
+	// profile account shortly before its login expires, so Claude Code
+	// renews it. Nil (unset) is on; Redline itself never writes a login.
+	KeepProfileLoginsFresh *bool `yaml:"keep_profile_logins_fresh"`
+}
+
+// KeepProfileLoginsFresh reports whether profile logins are renewed in the
+// background. On unless set to false.
+func (c Config) KeepProfileLoginsFresh() bool {
+	return c.UsageMonitor.KeepProfileLoginsFresh == nil || *c.UsageMonitor.KeepProfileLoginsFresh
 }
 
 func (c Config) UsageMonitorInterval() (time.Duration, error) {
