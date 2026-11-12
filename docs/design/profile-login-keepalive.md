@@ -1,6 +1,6 @@
 # Keeping Claude Code profile logins fresh
 
-Status: implemented (2026-11-12). See `docs/scheduling.md` "Keeping profile logins fresh"
+Status: implemented (2026-11-11). See `docs/scheduling.md` "Keeping profile logins fresh"
 for the behaviour as shipped. Differences from this plan:
 
 - No new `needs_login` account status. A signed-out seat already shows `signed_out` with its
@@ -10,6 +10,9 @@ for the behaviour as shipped. Differences from this plan:
 - Not built yet: the `login_expires_at` / `login_renewed_at` API fields and the
   `redline account status` line.
 - Every profile account is kept alive, including ones in `redline.yaml`, not only managed ones.
+- The process: 30s (status) / 90s (prompt) timeouts in its own process group, an allowlisted
+  environment (not the harness's drop list), a private work directory, output discarded.
+  Failures retry after 5 minutes twice, then every 30 minutes. Off on Windows for now.
 - The command is not chosen by the overnight test. Both run: `auth status` throughout the lead
   window, then the prompt only inside the last 5 minutes, capped at 6 prompts per seat per day.
 

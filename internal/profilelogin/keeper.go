@@ -113,6 +113,14 @@ type Keeper struct {
 	prompts  map[string][]time.Time
 }
 
+// forget clears a profile's failure history once its login is fine.
+func (k *Keeper) forget(dir string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.retryAt, dir)
+	delete(k.failures, dir)
+}
+
 // promptAllowed reports whether another prompt fits the daily budget.
 func (k *Keeper) promptAllowed(dir string) bool {
 	k.mu.Lock()
@@ -166,6 +174,7 @@ func (k *Keeper) due(state nativeusage.ProfileLogin) bool {
 // outside the lead (the collector just saw the token expire); it still
 // respects backoff, a running task, and a renewal already in progress.
 func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Result {
+	checked := k.now()
 	state, err := k.Logins.ProfileLoginState(ctx, dir)
 	if err != nil {
 		return Result{Outcome: OutcomeSkipped, Err: err}
@@ -174,8 +183,10 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 		return Result{Outcome: OutcomeSignedOut, Before: state.ExpiresAt}
 	}
 	if state.ExpiresAt.IsZero() || (!force && !k.due(state)) {
-		// Still works; a login without a refresh token is only a problem
-		// once it is due.
+		// Still works (something else may have renewed it), so earlier
+		// failures are no longer "in a row". A login without a refresh
+		// token is only a problem once it is due.
+		k.forget(dir)
 		return Result{Outcome: OutcomeFresh, Before: state.ExpiresAt}
 	}
 	if !state.HasRefreshToken {
@@ -258,7 +269,9 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 	if failures <= quickRetries && QuickRetry < wait {
 		wait = QuickRetry
 	}
-	k.retryAt[dir] = k.now().Add(wait)
+	// From when the check started, so a quick retry lands on the next
+	// monitor cycle rather than the one after.
+	k.retryAt[dir] = checked.Add(wait - time.Second)
 	k.mu.Unlock()
 	err = errors.Join(errs...)
 	if err == nil {

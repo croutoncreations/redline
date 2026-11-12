@@ -281,3 +281,52 @@ func TestOneRenewalAtATime(t *testing.T) {
 		t.Fatalf("b afterwards = %+v", got)
 	}
 }
+
+// Failures only count in a row: a login that turns out fine (renewed by
+// the person's own session) clears them, so a later single failure does
+// not report a sign-in problem.
+func TestAFreshLoginClearsEarlierFailures(t *testing.T) {
+	now := start
+	f := profile(-time.Minute)
+	k := keeper(f, &now)
+	for range NeedsLoginAfter - 1 {
+		k.Check(context.Background(), "a", "/d", true)
+		now = now.Add(QuickRetry)
+	}
+	f.mu.Lock()
+	f.state.ExpiresAt = now.Add(8 * time.Hour) // their own Claude Code renewed it
+	f.mu.Unlock()
+	if got := k.Check(context.Background(), "a", "/d", false); got.Outcome != OutcomeFresh {
+		t.Fatalf("result = %+v", got)
+	}
+	now = now.Add(8 * time.Hour)
+	if got := k.Check(context.Background(), "a", "/d", true); got.Failures != 1 || got.NeedsLogin() {
+		t.Fatalf("a later failure = %+v", got)
+	}
+}
+
+// A quick retry lands on the next 5-minute cycle even when the renewal
+// itself took a while.
+func TestQuickRetryIsTheNextCycle(t *testing.T) {
+	now := start
+	f := profile(-time.Minute)
+	slow := &slowRenewer{fakeProfile: f, now: &now, takes: 2 * time.Minute}
+	k := &Keeper{Logins: f, Renewer: slow, Now: func() time.Time { return now }}
+	cycle := now
+	k.Check(context.Background(), "a", "/d", true)
+	now = cycle.Add(QuickRetry)
+	if got := k.Check(context.Background(), "a", "/d", true); got.Outcome == OutcomeSkipped {
+		t.Fatalf("the next cycle was skipped: %+v", got)
+	}
+}
+
+type slowRenewer struct {
+	*fakeProfile
+	now   *time.Time
+	takes time.Duration
+}
+
+func (s *slowRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
+	*s.now = s.now.Add(s.takes)
+	return s.fakeProfile.Renew(ctx, dir, mode)
+}

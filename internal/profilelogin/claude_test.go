@@ -123,3 +123,12 @@ func TestAStuckClaudeIsStopped(t *testing.T) {
 		t.Fatalf("Renew took %s", elapsed)
 	}
 }
+
+// A proxy's certificate authority comes along only with the proxy.
+func TestCertificateAuthorityOnlyWithAProxy(t *testing.T) {
+	without := ProfileEnvironment([]string{"NODE_EXTRA_CA_CERTS=/ca.pem"}, "/p")
+	with := ProfileEnvironment([]string{"HTTPS_PROXY=http://p", "NODE_EXTRA_CA_CERTS=/ca.pem"}, "/p")
+	if strings.Contains(strings.Join(without, ","), "ca.pem") || !strings.Contains(strings.Join(with, ","), "NODE_EXTRA_CA_CERTS=/ca.pem") {
+		t.Fatalf("without = %v, with = %v", without, with)
+	}
+}

@@ -126,7 +126,8 @@ renewal runs with a minimal environment (no API keys, base URLs, model overrides
 secrets) in a private empty directory, and its output is discarded. Renewals run one at a time,
 skip an account while a Redline run is active on it (that run renews the login itself), and retry
 after 5 minutes, then 30. The default login and Codex are never touched. `claude` must be on the
-service's PATH; the Mac app adds `~/.local/bin`, Homebrew and `/usr/local/bin`.
+service's PATH; the Mac app adds `~/.local/bin`, Homebrew and `/usr/local/bin`. Not yet
+available on Windows.
 
 When a profile cannot be renewed (signed out, or three renewals in a row did not take, which
 usually means its refresh token was revoked), an `account.needs_login` notification is sent once

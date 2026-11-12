@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -222,8 +223,11 @@ type UsageMonitor struct {
 }
 
 // KeepProfileLoginsFresh reports whether profile logins are renewed in the
-// background. On unless set to false.
+// background. On unless set to false; not yet supported on Windows.
 func (c Config) KeepProfileLoginsFresh() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
 	return c.UsageMonitor.KeepProfileLoginsFresh == nil || *c.UsageMonitor.KeepProfileLoginsFresh
 }
 

@@ -60,11 +60,21 @@ var inherited = map[string]bool{
 // ProfileEnvironment is env for a Claude Code process renewing the profile
 // at dir: an allowlist of the service's environment plus the profile.
 func ProfileEnvironment(env []string, dir string) []string {
-	kept := make([]string, 0, len(inherited)+3)
+	kept := make([]string, 0, len(inherited)+5)
+	proxied := false
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		if inherited[key] || strings.HasPrefix(key, "LC_") {
 			kept = append(kept, entry)
+			proxied = proxied || strings.HasSuffix(strings.ToLower(key), "_proxy") && !strings.EqualFold(key, "no_proxy")
+		}
+	}
+	if proxied {
+		// A proxy that inspects TLS needs its certificate authority too.
+		for _, entry := range env {
+			if key, _, _ := strings.Cut(entry, "="); key == "NODE_EXTRA_CA_CERTS" || key == "SSL_CERT_FILE" {
+				kept = append(kept, entry)
+			}
 		}
 	}
 	// A command-capture shim in front of claude (Gatepost) must not route
@@ -81,7 +91,7 @@ func (r ClaudeRenewer) workDir() (string, error) {
 		return "", err
 	}
 	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ownedByMe(info) {
 		return "", fmt.Errorf("profile login work directory %s must be a private directory", dir)
 	}
 	return dir, nil
@@ -124,6 +134,8 @@ func (r ClaudeRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
 	ownProcessGroup(cmd)
 	// After the cancel, give it a moment, then stop waiting for any
 	// descendant still holding the output open.
+	// (Anything in the group that ignores SIGTERM is left running; only the
+	// leader is force-killed after the delay.)
 	cmd.WaitDelay = 5 * time.Second
 	// Output is discarded: auth status prints the account's email and
 	// organisation, which must not reach the service log.
