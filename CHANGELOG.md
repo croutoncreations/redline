@@ -21,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   request (at most 6 a day per seat) if that doesn't renew it. Redline still never writes a
   login. A seat that can't be renewed sends a new `account.needs_login` notification once. Turn
   it off with `usage_monitor.keep_profile_logins_fresh: false`.
+- Check for Updates no longer opens Sparkle's update prompt behind the Redline dashboard
+  window, where it looked as though nothing happened. The app comes forward and the update
+  window is raised above the dashboard.
 
 ## [0.1.13] - 2026-11-11
 
