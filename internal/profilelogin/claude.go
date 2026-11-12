@@ -141,13 +141,15 @@ func (r ClaudeRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
 	ownProcessGroup(cmd)
 	// After the cancel, give it a moment, then stop waiting for any
 	// descendant still holding the output open.
-	// (Anything in the group that ignores SIGTERM is left running; only the
-	// leader is force-killed after the delay.)
 	cmd.WaitDelay = 5 * time.Second
 	// Output is discarded: auth status prints the account's email and
 	// organisation, which must not reach the service log.
 	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	// Whatever the outcome, nothing from this run outlives it: a descendant
+	// that ignored SIGTERM, or one the leader left behind on exit.
+	killGroup(cmd)
+	if err != nil {
 		if runCtx.Err() != nil {
 			return fmt.Errorf("claude %s timed out after %s", mode, timeout)
 		}

@@ -28,6 +28,12 @@ func fakeClaude(t *testing.T, exit int) (string, string) {
 
 func TestRenewRunsClaudeOnTheProfileOnly(t *testing.T) {
 	binary, record := fakeClaude(t, 0)
+	// A proxy in the developer's own environment would (rightly) bring the
+	// CA bundle along; this test is about the variables without one.
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
 	for name, value := range map[string]string{
 		"CLAUDE_CONFIG_DIR": "/somewhere/else", "ANTHROPIC_API_KEY": "sk-x", "CLAUDE_CODE_OAUTH_TOKEN": "t",
 		"ANTHROPIC_BASE_URL": "https://proxy", "ANTHROPIC_AUTH_TOKEN": "a", "CLAUDE_CODE_USE_BEDROCK": "1",

@@ -356,8 +356,10 @@ func newServer(
 	// Wrapping hides the native source's banked-reset lookup; keep it.
 	server.usageSources.BankedResets = nativeSource
 	server.profileLogins = newProfileLogins(cfg, credentials, profilelogin.ClaudeRenewer{}, func(ctx context.Context, account string) bool {
+		// Unknown counts as busy: never start a second Claude Code on an
+		// account that might be running one.
 		active, err := database.ActiveRunCount(ctx, account)
-		return err == nil && active > 0
+		return err != nil || active > 0
 	}, now)
 	server.atLimitResets = nativeSource
 

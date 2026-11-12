@@ -158,8 +158,15 @@ func (d *DefaultCredentials) ProfileLoginState(ctx context.Context, dir string) 
 	if !filepath.IsAbs(dir) {
 		return ProfileLogin{}, fmt.Errorf("claude profile directory must be absolute")
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+	if info, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return ProfileLogin{SignedOut: true}, nil
+	} else if err != nil {
+		// Permission or I/O trouble is not a sign-out.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err
+		}
+		return ProfileLogin{}, fmt.Errorf("inspect Claude Code profile %s: %v", displayDir(dir), err)
 	}
 	open := d.ClaudeProfileStore
 	if open == nil {

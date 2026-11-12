@@ -84,7 +84,9 @@ func keepAliveServer(t *testing.T, expiresIn time.Duration, renews bool) (*Serve
 	s.usageSources = usage.NewManager(source, source, s.now)
 	notifier := &redemptionNotifier{}
 	s.notifier = notifier
-	s.profileLogins = newProfileLogins(s.config, all, all, nil, func() time.Time { return now })
+	// Built directly, not via newProfileLogins, which is off on Windows.
+	s.profileLogins = &profileLogins{keeper: &profilelogin.Keeper{Logins: all, Renewer: all, Now: func() time.Time { return now }},
+		notified: map[string]bool{}}
 	return s, frank, notifier, &reads, &now
 }
 
@@ -128,7 +130,7 @@ func TestOnlyProfileAccountsAreKeptAlive(t *testing.T) {
 	}
 	off := false
 	s.config.UsageMonitor.KeepProfileLoginsFresh = &off
-	if newProfileLogins(s.config, nil, nil, nil, s.now) != nil {
+	if newProfileLogins(s.config, nil, nil, nil, s.now) != nil { // (always nil on Windows)
 		t.Fatal("keep_profile_logins_fresh: false must turn it off")
 	}
 }
@@ -172,5 +174,26 @@ func TestASeatThatKeepsFailingToRenewNotifiesOnce(t *testing.T) {
 	}
 	if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventAccountNeedsLogin {
 		t.Fatalf("events = %+v", notifier.events)
+	}
+}
+
+type failingNotifier struct{ calls int }
+
+func (f *failingNotifier) Notify(context.Context, domain.NotificationEvent) error {
+	f.calls++
+	return context.DeadlineExceeded
+}
+
+// A sign-in alert that failed to deliver is tried again on the next check.
+func TestAFailedNeedsLoginAlertIsRetried(t *testing.T) {
+	s, frank, _, _, _ := keepAliveServer(t, time.Minute, true)
+	frank.login = nativeusage.ProfileLogin{SignedOut: true}
+	notifier := &failingNotifier{}
+	s.notifier = notifier
+	_ = s.monitorProvider(context.Background(), "frank")
+	first := notifier.calls
+	_ = s.monitorProvider(context.Background(), "frank")
+	if first < 1 || notifier.calls <= first {
+		t.Fatalf("delivery attempts = %d then %d, want a retry after the failure", first, notifier.calls)
 	}
 }

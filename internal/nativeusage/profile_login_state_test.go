@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,5 +59,26 @@ func TestNeedsSessionIsRecognisedThroughWrapping(t *testing.T) {
 	}
 	if IsProfileNeedsSession(profileSignedOutError{dir: "~/.claude-cc-a"}) || IsProfileNeedsSession(nil) {
 		t.Fatal("only needs_session counts")
+	}
+}
+
+// A profile folder Redline cannot inspect is an error, not a sign-out.
+func TestUnreadableProfileFolderIsNotASignOut(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "profile")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	credentials := &DefaultCredentials{ClaudeProfileStore: func(string) secretStore { return &missingStore{} }}
+	state, err := credentials.ProfileLoginState(context.Background(), dir)
+	if err == nil || state.SignedOut {
+		t.Fatalf("state = %+v, err = %v", state, err)
 	}
 }

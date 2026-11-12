@@ -81,6 +81,8 @@ func (p *profileLogins) noteOutcome(ctx context.Context, s *Server, providerID s
 	if s.notifier == nil {
 		return
 	}
+	// (notified is set before delivery so concurrent checks don't both send;
+	// a failed delivery clears it below.)
 	label := configured.Label
 	if label == "" {
 		label = providerID
@@ -90,6 +92,10 @@ func (p *profileLogins) noteOutcome(ctx context.Context, s *Server, providerID s
 		Data: map[string]string{"label": label, "claude_config_dir": config.DisplayClaudeConfigDir(configured.ClaudeConfigDir)},
 	}, configured.Provider)
 	if err := s.notifier.Notify(ctx, event); err != nil {
+		// Not delivered: allow the next check to try again.
+		p.mu.Lock()
+		delete(p.notified, providerID)
+		p.mu.Unlock()
 		log.Printf("redline profile_login %s needs-login notification failed: %v", providerID, err)
 	}
 }
