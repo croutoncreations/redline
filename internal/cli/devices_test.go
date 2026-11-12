@@ -15,7 +15,7 @@ import (
 	"github.com/croutoncreations/redline/internal/apiauth"
 	"github.com/croutoncreations/redline/internal/cli"
 	"github.com/croutoncreations/redline/internal/config"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestDevicesCLI(t *testing.T) {
@@ -66,7 +66,7 @@ func TestTokenRotateRevokesDeviceSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.APIToken = owner
-	db, err := store.Open(databasePath)
+	db, err := storetest.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func runReminderMonitor(t *testing.T, cfg config.Config, db *store.DB) scheduler.Status {
@@ -54,7 +55,7 @@ func TestUsageMonitorBankedResetReminderFailures(t *testing.T) {
 			}))
 			defer usage.Close()
 			path := filepath.Join(t.TempDir(), "redline.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +119,7 @@ func TestUsageMonitorBankedResetRemindersWithoutScheduler(t *testing.T) {
 			apiNow.Format(time.RFC3339), apiNow.Add(48*time.Hour).Format(time.RFC3339), apiNow.Add(2*time.Hour).Format(time.RFC3339))
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

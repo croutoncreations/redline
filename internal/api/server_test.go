@@ -35,6 +35,7 @@ import (
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/scheduler"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 	"github.com/croutoncreations/redline/internal/workspace"
 )
 
@@ -326,7 +327,7 @@ func TestServerAcceptsCaseInsensitiveBearerScheme(t *testing.T) {
 
 func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +381,7 @@ func TestServerAllowsConfiguredTrustedHostWithSameOriginAndAuthentication(t *tes
 
 func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +403,7 @@ func TestServerRejectsProxyThatRewritesRemoteHostToLoopback(t *testing.T) {
 
 func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +424,7 @@ func TestTrustedHostRejectsMobileBootstrapWithoutExternalHTTPS(t *testing.T) {
 
 func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +513,7 @@ func TestTrustedHostBootstrapsSecureMobileDashboardSession(t *testing.T) {
 
 func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +579,7 @@ func TestServerRequiresBearerOrDashboardSessionWhenTokenConfigured(t *testing.T)
 
 func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +631,7 @@ func TestDashboardSessionCookieRenewsWhileInUse(t *testing.T) {
 
 func TestDashboardSessionRenewalOnlyAppliesToValidCookies(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +904,7 @@ func TestDashboardEventsHonourTheFieldsSelector(t *testing.T) {
 
 func TestProfileOptionsExposeDiscoveredHarnessesAndCacheUntilRefresh(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1129,7 +1130,7 @@ func TestCapacityEndpointCorrelatesStoredLogsAndSnapshots(t *testing.T) {
 	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, claudePayload) }))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1190,7 +1191,7 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 		t.Fatal(err)
 	}
 	_ = viewer.Close()
-	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	db, err := storetest.Open(filepath.Join(directory, "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1208,7 +1209,7 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 
 func TestTokenSyncSkipsGatepostWhenDatabaseNotConfigured(t *testing.T) {
 	directory := t.TempDir()
-	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	db, err := storetest.Open(filepath.Join(directory, "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1227,7 +1228,7 @@ func TestTokenSyncSkipsGatepostWhenDatabaseNotConfigured(t *testing.T) {
 
 func TestTokenSyncSkipsGatepostWhenDatabaseFileMissing(t *testing.T) {
 	directory := t.TempDir()
-	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	db, err := storetest.Open(filepath.Join(directory, "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1260,7 @@ CREATE TABLE messages (session_id TEXT, ordinal INTEGER, role TEXT, ts INTEGER, 
 		t.Fatal(err)
 	}
 	_ = viewer.Close()
-	db, err := store.Open(filepath.Join(directory, "redline.db"))
+	db, err := storetest.Open(filepath.Join(directory, "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1680,7 +1681,7 @@ func TestSchedulerExplainsRepositoryRevisionFailure(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1954,7 +1955,7 @@ func TestExecutionSkipsExhaustedFableAndAdmitsOpus(t *testing.T) {
 		_, _ = fmt.Fprint(w, claudeAllowancePayload(0, 1.0, 23*time.Hour))
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1994,7 +1995,7 @@ func TestSimulatedSchedulerResolvesTaskRepositoryLikeExecution(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2148,7 +2149,7 @@ func TestAutomaticSchedulerResolvesEachTaskRepositoryAndRecordsTrigger(t *testin
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2205,7 +2206,7 @@ func TestAutomaticSchedulerFillsConfiguredProviderConcurrency(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2271,7 +2272,7 @@ func TestAutomaticSchedulerSkipsActiveProviderWithoutFetchingUsage(t *testing.T)
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2330,7 +2331,7 @@ func TestAutomaticSchedulerPersistsUsageFailureAttempt(t *testing.T) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2375,7 +2376,7 @@ func TestAutomaticSchedulerDoesNotPersistShutdownCancellationAsAnError(t *testin
 		<-r.Context().Done()
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2466,7 +2467,7 @@ func automaticHermesServer(
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	t.Cleanup(usage.Close)
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2621,7 +2622,7 @@ func TestRunLogsRejectArtifactOutsideConfiguredRoot(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2935,7 +2936,7 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2978,7 +2979,7 @@ func TestExecuteAdmitsTaskAndStartsExecutor(t *testing.T) {
 
 func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3045,7 +3046,7 @@ func TestCandidatePreviewWithoutSnapshotReturnsUnavailableState(t *testing.T) {
 
 func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3086,7 +3087,7 @@ func TestCandidatePreviewResolvesSharedProfileRevisionOnce(t *testing.T) {
 
 func TestCandidatePreviewIsReadOnlyAndTargetedDispatchCanSelectLowerPriority(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3258,7 +3259,7 @@ func TestConcurrentExecuteContentionIsWaitNotError(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3327,7 +3328,7 @@ func TestConfiguredConcurrencySkipsSaturatedPoolAndAdmitsSharedTask(t *testing.T
 		_, _ = fmt.Fprint(w, claudeAllowancePayload(1, 1, 24*time.Hour))
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3432,7 +3433,7 @@ func TestHermesContextConcurrencyConstrainsHigherProviderLimit(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3491,7 +3492,7 @@ func TestExecuteEndToEndWithRealCommandHarness(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3584,7 +3585,7 @@ func TestLifecycleLogStreamUsesManagedArtifact(t *testing.T) {
 		_, _ = fmt.Fprint(w, codexPayload)
 	}))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3634,7 +3635,7 @@ func newAPIServerConfigured(t *testing.T, payload string, configure func(*config
 		_, _ = fmt.Fprint(w, payload)
 	}))
 	t.Cleanup(usage.Close)
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3987,7 +3988,7 @@ const claudePayload = `{
 
 func TestSessionCookieResponsesAreNeverStorable(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4101,7 +4102,7 @@ func TestServiceWorkerCacheNameTracksShellAssets(t *testing.T) {
 // hardening for future streaming handlers.
 func TestSessionCookieStreamsAreNeverStorable(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

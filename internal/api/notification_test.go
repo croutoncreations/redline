@@ -12,11 +12,11 @@ import (
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestListNotificationsAfterID(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestNotificationTestEndpoint(t *testing.T) {
 		{"null", `null`, "secret", true, 400, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -140,7 +140,7 @@ func TestNotificationTestEndpoint(t *testing.T) {
 func TestNotificationTestFallbackProviderAndFailedDelivery(t *testing.T) {
 	for _, command := range []string{"", "exit 7"} {
 		t.Run(command, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 			if err != nil {
 				t.Fatal(err)
 			}

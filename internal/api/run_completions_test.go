@@ -12,12 +12,12 @@ import (
 
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestRunCompletionsEndpointAuthBaselineValidationAndPaging(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

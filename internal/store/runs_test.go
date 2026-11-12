@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 // TestUnreadRunActivityCountAndMarkAllRead exercises MarkAllRunActivityRead and
@@ -134,7 +134,7 @@ func TestCompletedRunCursorDoesNotLoseOlderOrBurstingRuns(t *testing.T) {
 
 func TestCompletionSequenceMigrationBackfillsV26AndContinuesAfterReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestCompletionSequenceMigrationBackfillsV26AndContinuesAfterReopen(t *testi
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatalf("upgrade v26 with existing runs: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestCompletionSequenceMigrationBackfillsV26AndContinuesAfterReopen(t *testi
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatalf("reopen migrated database: %v", err)
 	}
