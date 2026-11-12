@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeClaude is a shell script that records its arguments and environment.
@@ -29,7 +30,10 @@ func TestRenewRunsClaudeOnTheProfileOnly(t *testing.T) {
 	binary, record := fakeClaude(t, 0)
 	for name, value := range map[string]string{
 		"CLAUDE_CONFIG_DIR": "/somewhere/else", "ANTHROPIC_API_KEY": "sk-x", "CLAUDE_CODE_OAUTH_TOKEN": "t",
-		"ANTHROPIC_BASE_URL": "https://proxy", "ANTHROPIC_AUTH_TOKEN": "a",
+		"ANTHROPIC_BASE_URL": "https://proxy", "ANTHROPIC_AUTH_TOKEN": "a", "CLAUDE_CODE_USE_BEDROCK": "1",
+		"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_MODEL": "opus", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "opus",
+		"CLAUDE_CODE_CUSTOM_OAUTH_URL": "https://evil", "GITHUB_TOKEN": "ghp_x", "REDLINE_API_TOKEN": "rl",
+		"NODE_EXTRA_CA_CERTS": "/ca.pem",
 	} {
 		t.Setenv(name, value)
 	}
@@ -41,10 +45,13 @@ func TestRenewRunsClaudeOnTheProfileOnly(t *testing.T) {
 	if !strings.Contains(got, "args:auth status --json\n") {
 		t.Fatalf("args: %s", got)
 	}
+	if !strings.Contains(got, "GATEPOST_HOST_DISABLE=1\n") {
+		t.Fatal("a capture shim must not proxy the renewal")
+	}
 	if strings.Count(got, "CLAUDE_CONFIG_DIR=") != 1 || !strings.Contains(got, "CLAUDE_CONFIG_DIR=/Users/x/.claude-cc-frank\n") {
 		t.Fatalf("profile dir not set alone: %s", got)
 	}
-	for _, leaked := range []string{"sk-x", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"} {
+	for _, leaked := range []string{"sk-x", "ANTHROPIC_", "CLAUDE_CODE_", "GITHUB_TOKEN", "REDLINE_API_TOKEN", "NODE_EXTRA_CA_CERTS"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("%s reached Claude Code", leaked)
 		}
@@ -77,9 +84,42 @@ func TestRenewReportsAFailingRun(t *testing.T) {
 	}
 }
 
-func TestProfileEnvironmentReplacesInheritedProfile(t *testing.T) {
-	env := ProfileEnvironment([]string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/old", "ANTHROPIC_API_KEY=k", "HOME=/h"}, "/new")
-	if strings.Join(env, ",") != "PATH=/bin,HOME=/h,CLAUDE_CONFIG_DIR=/new" {
+func TestProfileEnvironmentKeepsOnlyTheBasics(t *testing.T) {
+	env := ProfileEnvironment([]string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/old", "ANTHROPIC_API_KEY=k", "HOME=/h", "LC_ALL=C", "HTTPS_PROXY=http://p", "AWS_SECRET_ACCESS_KEY=s"}, "/new")
+	if strings.Join(env, ",") != "PATH=/bin,HOME=/h,LC_ALL=C,HTTPS_PROXY=http://p,GATEPOST_HOST_DISABLE=1,CLAUDE_CONFIG_DIR=/new" {
 		t.Fatalf("env = %v", env)
+	}
+}
+
+// Under go test, the real claude is never started.
+func TestTheRealClaudeNeverRunsInTests(t *testing.T) {
+	err := (ClaudeRenewer{}).Renew(context.Background(), "/p", ModeStatus)
+	if err == nil || !strings.Contains(err.Error(), "go test") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A run that outlives its timeout is stopped with its whole process group,
+// and Renew returns promptly even if a child kept the output open.
+func TestAStuckClaudeIsStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "claude")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nsleep 600 &\nsleep 600\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	// The caller's deadline does not cut a renewal short (it might be
+	// saving a new token); the run's own timeout does. Use a short one.
+	err := (ClaudeRenewer{Binary: binary, timeout: 300 * time.Millisecond}).Renew(ctx, "/p", ModeStatus)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("Renew took %s", elapsed)
 	}
 }

@@ -1,18 +1,23 @@
 package profilelogin
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 )
 
-// RenewTimeout bounds one Claude Code run. auth status takes seconds; the
-// prompt a few more.
-const RenewTimeout = 90 * time.Second
+// Timeouts per mode. A renewal runs inside the usage monitor's cycle, so
+// these bound how long one seat can delay the others.
+const (
+	StatusTimeout = 30 * time.Second
+	PromptTimeout = 90 * time.Second
+)
 
 // ClaudeRenewer runs the claude binary under a profile. It passes no
 // credential and reads none: Claude Code finds its own login through
@@ -20,13 +25,15 @@ const RenewTimeout = 90 * time.Second
 type ClaudeRenewer struct {
 	// Binary is the claude executable; empty looks up "claude" on PATH.
 	Binary string
-	// Command builds the process; nil uses exec.CommandContext. Tests
-	// replace it.
-	Command func(ctx context.Context, name string, args ...string) *exec.Cmd
+	// WorkDir is an empty directory only this user can write; empty uses
+	// a "redline-profile-login" directory under the user's temp folder.
+	WorkDir string
+	// timeout replaces the per-mode timeout; for tests.
+	timeout time.Duration
 }
 
 // Args for each mode. The prompt is the smallest real request: haiku, no
-// tools, no MCP servers, no skills, nothing saved, one word back.
+// tools, no MCP servers, no skills or settings, nothing saved, one word back.
 func renewArgs(mode Mode) []string {
 	switch mode {
 	case ModeStatus:
@@ -38,52 +45,98 @@ func renewArgs(mode Mode) []string {
 	}
 }
 
-// ProfileEnvironment is env for a Claude Code process on the profile at dir:
-// any inherited CLAUDE_CONFIG_DIR is replaced, and variables that would sign
-// Claude Code in as someone else, or send the profile's token elsewhere, are
-// dropped.
+// inherited is what a renewal keeps from the service's environment. Only
+// what Claude Code needs to find its home, keychain and network: nothing
+// that could sign it in as someone else, send the login to another host,
+// remap the model, or leak another tool's secret.
+var inherited = map[string]bool{
+	"HOME": true, "USER": true, "LOGNAME": true, "PATH": true, "TMPDIR": true, "SHELL": true,
+	"LANG": true, "TZ": true,
+	// A proxy the person set up for their own network.
+	"HTTPS_PROXY": true, "https_proxy": true, "HTTP_PROXY": true, "http_proxy": true,
+	"NO_PROXY": true, "no_proxy": true,
+}
+
+// ProfileEnvironment is env for a Claude Code process renewing the profile
+// at dir: an allowlist of the service's environment plus the profile.
 func ProfileEnvironment(env []string, dir string) []string {
-	drop := map[string]bool{
-		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_OAUTH_TOKEN": true, "ANTHROPIC_API_KEY": true,
-		"ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_BASE_URL": true, "CLAUDE_CODE_USE_BEDROCK": true,
-		"CLAUDE_CODE_USE_VERTEX": true,
-	}
-	kept := make([]string, 0, len(env)+1)
+	kept := make([]string, 0, len(inherited)+3)
 	for _, entry := range env {
-		if key, _, _ := strings.Cut(entry, "="); !drop[key] {
+		key, _, _ := strings.Cut(entry, "=")
+		if inherited[key] || strings.HasPrefix(key, "LC_") {
 			kept = append(kept, entry)
 		}
 	}
-	return append(kept, "CLAUDE_CONFIG_DIR="+dir)
+	// A command-capture shim in front of claude (Gatepost) must not route
+	// an unattended credential renewal through its intercepting proxy.
+	return append(kept, "GATEPOST_HOST_DISABLE=1", "CLAUDE_CONFIG_DIR="+dir)
+}
+
+func (r ClaudeRenewer) workDir() (string, error) {
+	dir := r.WorkDir
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "redline-profile-login")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("profile login work directory %s must be a private directory", dir)
+	}
+	return dir, nil
 }
 
 func (r ClaudeRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
 	binary := r.Binary
 	if binary == "" {
+		if testing.Testing() {
+			// No test may start the real Claude Code on a developer's Mac.
+			return errors.New("refusing to run the real claude binary under go test")
+		}
 		found, err := exec.LookPath("claude")
 		if err != nil {
-			return fmt.Errorf("claude is not on PATH: %w", err)
+			return fmt.Errorf("claude is not on the service's PATH")
 		}
 		binary = found
 	}
-	ctx, cancel := context.WithTimeout(ctx, RenewTimeout)
-	defer cancel()
-	command := r.Command
-	if command == nil {
-		command = exec.CommandContext
+	work, err := r.workDir()
+	if err != nil {
+		return err
 	}
-	cmd := command(ctx, binary, renewArgs(mode)...)
-	cmd.Env = ProfileEnvironment(os.Environ(), dir)
-	cmd.Dir = os.TempDir()
-	cmd.Stdin = nil
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &output, &output
+	timeout := PromptTimeout
+	if mode == ModeStatus {
+		timeout = StatusTimeout
+	}
+	if r.timeout > 0 {
+		timeout = r.timeout
+	}
+	// A service shutdown must not interrupt Claude Code between receiving
+	// a new refresh token and saving it: only the timeout stops a run, and
+	// it asks politely first.
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, binary, renewArgs(mode)...)
+	cmd.Env = append(ProfileEnvironment(os.Environ(), dir), "PWD="+work)
+	cmd.Dir = work
+	// The whole process group is stopped, so nothing it started keeps
+	// running.
+	ownProcessGroup(cmd)
+	// After the cancel, give it a moment, then stop waiting for any
+	// descendant still holding the output open.
+	cmd.WaitDelay = 5 * time.Second
+	// Output is discarded: auth status prints the account's email and
+	// organisation, which must not reach the service log.
+	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Run(); err != nil {
-		text := strings.TrimSpace(output.String())
-		if len(text) > 200 {
-			text = text[:200]
+		if runCtx.Err() != nil {
+			return fmt.Errorf("claude %s timed out after %s", mode, timeout)
 		}
-		return fmt.Errorf("claude %s: %w: %s", mode, err, text)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return fmt.Errorf("claude %s exited with status %d", mode, exit.ExitCode())
+		}
+		return fmt.Errorf("claude %s could not start", mode)
 	}
 	return nil
 }

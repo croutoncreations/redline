@@ -1,6 +1,7 @@
 package notification_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -43,5 +44,19 @@ func TestReadableMessages(t *testing.T) {
 				t.Fatalf("title=%q message=%q", e.Title, e.Message)
 			}
 		})
+	}
+}
+
+func TestNeedsLoginMessageQuotesUnusualPaths(t *testing.T) {
+	for dir, want := range map[string]string{
+		"~/.claude-cc-frank":    "CLAUDE_CONFIG_DIR=~/.claude-cc-frank claude",
+		"~/Claude Profiles/a b": "CLAUDE_CONFIG_DIR=~/'Claude Profiles/a b' claude",
+		"/Volumes/x/it's":       `CLAUDE_CONFIG_DIR='/Volumes/x/it'\''s' claude`,
+	} {
+		e := notification.WithMessage(domain.NotificationEvent{Type: domain.EventAccountNeedsLogin, ProviderAccountID: "frank",
+			Data: map[string]string{"label": "Frank", "claude_config_dir": dir}}, "claude")
+		if e.Title != "Frank needs to sign in to Claude Code" || !strings.Contains(e.Message, want) {
+			t.Fatalf("%s: %q / %q", dir, e.Title, e.Message)
+		}
 	}
 }

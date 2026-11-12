@@ -114,18 +114,25 @@ redemption then all use that profile's login.
 
 A Claude Code profile's access token lasts about 8 hours, and only Claude Code renews it, while
 it runs with that profile. Without help, a seat nobody used for 8 hours would go out of date and
-hold its work. So the usage monitor keeps each profile account's login fresh: within 15 minutes
-of expiry it runs `CLAUDE_CONFIG_DIR=<dir> claude auth status`, and Claude Code renews and saves
-its own login. If the expiry has not moved by the token's last 5 minutes (or the token has already
-expired), it sends the smallest real request instead: one word from haiku, with no tools, MCP
-servers or saved session. That costs a few hundred tokens on that seat about every 8 hours.
+hold its work. So the usage monitor (`usage_monitor.enabled`) keeps each profile account's login
+fresh. From 15 minutes before expiry it runs `CLAUDE_CONFIG_DIR=<dir> claude auth status`, which
+spends no quota. If the expiry has not moved by the token's last 5 minutes, or the token has
+already expired, it sends the smallest real request instead: one word from haiku, with no tools,
+MCP servers, settings or saved session. That costs a few hundred tokens on that seat, and on an
+idle seat it starts a 5-hour window. At most 6 such requests are sent per seat per day.
 
-Redline still never writes a credential; it only reads the expiry and checks that it moved.
-Renewals run one at a time, skip an account while a Redline run is active on it (that run renews
-the login itself), and back off for 30 minutes after one fails. The default login and Codex are
-never touched. When a profile cannot be renewed (signed out, or its refresh token was revoked),
-the account shows "Signed out" with the command to run, and an `account.needs_login`
-notification is sent once per sign-out (add it to `notifications.events`).
+Redline still never writes a credential: it only reads the expiry and checks that it moved. The
+renewal runs with a minimal environment (no API keys, base URLs, model overrides or other tools'
+secrets) in a private empty directory, and its output is discarded. Renewals run one at a time,
+skip an account while a Redline run is active on it (that run renews the login itself), and retry
+after 5 minutes, then 30. The default login and Codex are never touched. `claude` must be on the
+service's PATH; the Mac app adds `~/.local/bin`, Homebrew and `/usr/local/bin`.
+
+When a profile cannot be renewed (signed out, or three renewals in a row did not take, which
+usually means its refresh token was revoked), an `account.needs_login` notification is sent once
+per sign-out with the command to run (add the event to `notifications.events`; a service restart
+repeats it once). A signed-out seat shows "Signed out"; a revoked one shows "Out of date" until
+you sign in again.
 
 Turn it off with `usage_monitor.keep_profile_logins_fresh: false`.
 

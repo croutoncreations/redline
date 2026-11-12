@@ -160,3 +160,17 @@ func TestASignedOutSeatNotifiesOncePerSignOut(t *testing.T) {
 		t.Fatalf("after recovery and a second sign-out: events = %d", len(notifier.events))
 	}
 }
+
+// A seat whose refresh token was revoked still has one in the keychain,
+// so renewals just fail; after a few in a row it is reported once as
+// needing a sign-in.
+func TestASeatThatKeepsFailingToRenewNotifiesOnce(t *testing.T) {
+	s, _, notifier, _, now := keepAliveServer(t, -time.Minute, false)
+	for range 8 {
+		_ = s.monitorProvider(context.Background(), "frank")
+		*now = now.Add(profilelogin.DefaultBackoff)
+	}
+	if len(notifier.events) != 1 || notifier.events[0].Type != domain.EventAccountNeedsLogin {
+		t.Fatalf("events = %+v", notifier.events)
+	}
+}

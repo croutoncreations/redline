@@ -122,32 +122,92 @@ func TestForcedRenewalFallsBackToThePrompt(t *testing.T) {
 	}
 }
 
-// Success is the expiry moving forward, never the exit code.
+// Success is the expiry moving forward, never the exit code. The first
+// failures retry after one monitor cycle; later ones back off longer.
 func TestExitCodeAloneIsNotSuccess(t *testing.T) {
 	now := start
 	f := profile(2 * time.Minute) // nothing renews
 	k := keeper(f, &now)
 	got := k.Check(context.Background(), "a", "/d", false)
-	if got.Outcome != OutcomeFailed || got.Err == nil {
+	if got.Outcome != OutcomeFailed || got.Err == nil || got.Failures != 1 || got.NeedsLogin() {
 		t.Fatalf("result = %+v", got)
 	}
-	// Backing off: the next cycles do not run Claude Code again.
-	now = now.Add(5 * time.Minute)
+	now = now.Add(time.Minute)
 	if got := k.Check(context.Background(), "a", "/d", true); got.Outcome != OutcomeSkipped || len(f.modes()) != 2 {
-		t.Fatalf("during backoff: %+v, calls = %v", got, f.modes())
+		t.Fatalf("inside the quick retry: %+v, calls = %v", got, f.modes())
+	}
+	now = now.Add(QuickRetry)
+	f.renews[ModeStatus] = true
+	if got := k.Check(context.Background(), "a", "/d", true); got.Outcome != OutcomeRenewed {
+		t.Fatalf("after the quick retry: %+v", got)
+	}
+}
+
+// Renewals that keep failing escalate to "needs login" and slow down.
+func TestRepeatedFailuresNeedALoginAndBackOff(t *testing.T) {
+	now := start
+	f := profile(-time.Minute) // expired, nothing renews
+	k := keeper(f, &now)
+	var got Result
+	for i := 1; i <= NeedsLoginAfter; i++ {
+		got = k.Check(context.Background(), "a", "/d", true)
+		if got.Failures != i || got.NeedsLogin() != (i >= NeedsLoginAfter) {
+			t.Fatalf("attempt %d: %+v", i, got)
+		}
+		now = now.Add(QuickRetry)
+	}
+	// After the quick retries, the wait is the full backoff.
+	if got := k.Check(context.Background(), "a", "/d", true); got.Outcome != OutcomeSkipped {
+		t.Fatalf("during long backoff: %+v", got)
 	}
 	now = now.Add(DefaultBackoff)
-	f.renews[ModeStatus] = true
-	if got := k.Check(context.Background(), "a", "/d", false); got.Outcome != OutcomeRenewed {
-		t.Fatalf("after backoff: %+v", got)
+	if got := k.Check(context.Background(), "a", "/d", true); got.Outcome != OutcomeFailed {
+		t.Fatalf("after long backoff: %+v", got)
+	}
+}
+
+// Whatever happens, renewal never spends more than a few prompts a day on
+// a seat.
+func TestPromptsAreCappedPerDay(t *testing.T) {
+	now := start
+	f := profile(-time.Minute)
+	k := keeper(f, &now)
+	k.Backoff = time.Minute
+	for range 20 {
+		k.Check(context.Background(), "a", "/d", true)
+		now = now.Add(31 * time.Minute)
+	}
+	prompts := 0
+	for _, mode := range f.modes() {
+		if mode == ModePrompt {
+			prompts++
+		}
+	}
+	if prompts != MaxPromptsPerDay {
+		t.Fatalf("prompts in ~10h = %d, want %d", prompts, MaxPromptsPerDay)
+	}
+	now = now.Add(24 * time.Hour)
+	k.Check(context.Background(), "a", "/d", true)
+	if last := f.modes()[len(f.modes())-1]; last != ModePrompt {
+		t.Fatalf("a day later the budget is back; last call = %v", last)
+	}
+}
+
+// A login without a refresh token keeps working until it is due; only
+// then is it a sign-in problem.
+func TestNoRefreshTokenIsFineUntilDue(t *testing.T) {
+	now := start
+	f := &fakeProfile{state: nativeusage.ProfileLogin{ExpiresAt: start.Add(3 * time.Hour)}}
+	if got := keeper(f, &now).Check(context.Background(), "a", "/d", false); got.Outcome != OutcomeFresh || got.NeedsLogin() {
+		t.Fatalf("result = %+v", got)
 	}
 }
 
 func TestSignedOutProfilesAreNeverRun(t *testing.T) {
 	now := start
 	for name, state := range map[string]nativeusage.ProfileLogin{
-		"signed out":       {SignedOut: true},
-		"no refresh token": {ExpiresAt: start.Add(time.Minute)},
+		"signed out":            {SignedOut: true},
+		"no refresh token, due": {ExpiresAt: start.Add(time.Minute)},
 	} {
 		f := &fakeProfile{state: state}
 		if got := keeper(f, &now).Check(context.Background(), "a", "/d", true); got.Outcome != OutcomeSignedOut || len(f.modes()) != 0 {

@@ -21,12 +21,22 @@ import (
 )
 
 const (
-	// DefaultLead renews this long before expiry: about three 5-minute
-	// usage-monitor cycles, so one failed attempt still leaves time.
+	// DefaultLead starts asking this long before expiry: about three
+	// 5-minute usage-monitor cycles of auth status before the prompt is
+	// allowed.
 	DefaultLead = 15 * time.Minute
-	// DefaultBackoff is the wait after a renewal that did not move the
-	// expiry, so a broken profile is not retried every cycle.
+	// DefaultBackoff is the longest wait after renewals that did not move
+	// the expiry. The first ones wait one monitor cycle (QuickRetry), so a
+	// network blip near expiry costs minutes, not half an hour.
 	DefaultBackoff = 30 * time.Minute
+	QuickRetry     = 5 * time.Minute
+	quickRetries   = 2
+	// NeedsLoginAfter consecutive failed renewals the seat is reported as
+	// needing a sign-in: its refresh token is most likely revoked.
+	NeedsLoginAfter = 3
+	// MaxPromptsPerDay bounds the quota renewal can spend on one seat,
+	// whatever happens. A healthy seat needs about three a day at most.
+	MaxPromptsPerDay = 6
 	// PromptWithin is when the prompt fallback becomes allowed. Claude Code
 	// renews a token inside its last few minutes; earlier, a prompt would
 	// spend quota without renewing anything, so only auth status is tried.
@@ -64,6 +74,12 @@ const (
 	OutcomeSignedOut Outcome = "signed_out" // nothing Claude Code can renew; sign in again
 )
 
+// NeedsLogin reports a result that only signing in again can fix: no login
+// to renew, or several renewals in a row that did not take.
+func (r Result) NeedsLogin() bool {
+	return r.Outcome == OutcomeSignedOut || (r.Outcome == OutcomeFailed && r.Failures >= NeedsLoginAfter)
+}
+
 // Result reports one check.
 type Result struct {
 	Outcome Outcome
@@ -71,6 +87,9 @@ type Result struct {
 	Before  time.Time
 	After   time.Time
 	Err     error
+	// Failures is the number of failed renewals in a row, this one
+	// included, when Outcome is failed.
+	Failures int
 }
 
 // Keeper decides when a profile is due and renews it. It is safe for
@@ -87,9 +106,34 @@ type Keeper struct {
 
 	renewing sync.Mutex
 	mu       sync.Mutex
-	// retryAt is per profile directory: the earliest next attempt after a
-	// failed renewal.
-	retryAt map[string]time.Time
+	// Per profile directory: the earliest next attempt after a failed
+	// renewal, failures in a row, and when prompts were sent (last 24h).
+	retryAt  map[string]time.Time
+	failures map[string]int
+	prompts  map[string][]time.Time
+}
+
+// promptAllowed reports whether another prompt fits the daily budget.
+func (k *Keeper) promptAllowed(dir string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	recent := k.prompts[dir][:0]
+	for _, at := range k.prompts[dir] {
+		if k.now().Sub(at) < 24*time.Hour {
+			recent = append(recent, at)
+		}
+	}
+	if k.prompts == nil {
+		k.prompts = map[string][]time.Time{}
+	}
+	k.prompts[dir] = recent
+	return len(recent) < MaxPromptsPerDay
+}
+
+func (k *Keeper) notePrompt(dir string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.prompts[dir] = append(k.prompts[dir], k.now())
 }
 
 func (k *Keeper) now() time.Time {
@@ -126,11 +170,16 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 	if err != nil {
 		return Result{Outcome: OutcomeSkipped, Err: err}
 	}
-	if state.SignedOut || !state.HasRefreshToken {
+	if state.SignedOut {
 		return Result{Outcome: OutcomeSignedOut, Before: state.ExpiresAt}
 	}
 	if state.ExpiresAt.IsZero() || (!force && !k.due(state)) {
+		// Still works; a login without a refresh token is only a problem
+		// once it is due.
 		return Result{Outcome: OutcomeFresh, Before: state.ExpiresAt}
+	}
+	if !state.HasRefreshToken {
+		return Result{Outcome: OutcomeSignedOut, Before: state.ExpiresAt}
 	}
 	if k.Busy != nil && k.Busy(ctx, account) {
 		return Result{Outcome: OutcomeSkipped, Before: state.ExpiresAt}
@@ -158,6 +207,13 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 	before := state.ExpiresAt
 	var errs []error
 	for _, mode := range modes {
+		if mode == ModePrompt {
+			if !k.promptAllowed(dir) {
+				errs = append(errs, fmt.Errorf("prompt skipped: %d renewal prompts already sent on this seat today", MaxPromptsPerDay))
+				break
+			}
+			k.notePrompt(dir)
+		}
 		runErr := k.Renewer.Renew(ctx, dir, mode)
 		after, readErr := k.Logins.ProfileLoginState(ctx, dir)
 		if readErr != nil {
@@ -167,6 +223,7 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 		if after.ExpiresAt.After(before) {
 			k.mu.Lock()
 			delete(k.retryAt, dir)
+			delete(k.failures, dir)
 			k.mu.Unlock()
 			log.Printf("redline profile_login %s renewed via %s: expiry %s -> %s", account, mode,
 				before.Local().Format(time.TimeOnly), after.ExpiresAt.Local().Format(time.TimeOnly))
@@ -185,18 +242,28 @@ func (k *Keeper) Check(ctx context.Context, account, dir string, force bool) Res
 	if statusOnly && ctx.Err() == nil {
 		// Not a failure: the next cycle, closer to expiry, may renew or
 		// fall back to the prompt.
-		return Result{Outcome: OutcomeWaiting, Before: before, Err: errors.Join(errs...)}
+		err := errors.Join(errs...)
+		if err != nil {
+			log.Printf("redline profile_login %s: auth status did not renew yet: %v", account, err)
+		}
+		return Result{Outcome: OutcomeWaiting, Before: before, Err: err}
 	}
 	k.mu.Lock()
 	if k.retryAt == nil {
-		k.retryAt = map[string]time.Time{}
+		k.retryAt, k.failures = map[string]time.Time{}, map[string]int{}
 	}
-	k.retryAt[dir] = k.now().Add(k.backoff())
+	k.failures[dir]++
+	failures := k.failures[dir]
+	wait := k.backoff()
+	if failures <= quickRetries && QuickRetry < wait {
+		wait = QuickRetry
+	}
+	k.retryAt[dir] = k.now().Add(wait)
 	k.mu.Unlock()
 	err = errors.Join(errs...)
 	if err == nil {
 		err = errors.New("Claude Code ran but the login's expiry did not move")
 	}
-	log.Printf("redline profile_login %s renewal failed (retry in %s): %v", account, k.backoff(), err)
-	return Result{Outcome: OutcomeFailed, Before: before, Err: err}
+	log.Printf("redline profile_login %s renewal failed (%d in a row, retry in %s): %v", account, failures, wait, err)
+	return Result{Outcome: OutcomeFailed, Before: before, Err: err, Failures: failures}
 }

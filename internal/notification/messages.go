@@ -33,7 +33,7 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		dir := d["claude_config_dir"]
 		event.Title = label + " needs to sign in to Claude Code"
 		event.Message = "Its login can't be renewed in the background, so work is held on this account. Run CLAUDE_CONFIG_DIR=" +
-			dir + " claude and sign in with /login."
+			shellPath(dir) + " claude and sign in with /login."
 	case domain.EventResetExpiring:
 		event.Title = name + " banked reset expiring"
 		count, _ := strconv.Atoi(d["count"])
@@ -145,4 +145,25 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		}
 	}
 	return event
+}
+
+// shellPath writes a path so it can be pasted into a shell: as is when it
+// is plain, otherwise single-quoted with a leading "~/" left outside the
+// quotes so the shell still expands it.
+func shellPath(path string) string {
+	plain := true
+	for _, r := range path {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("~/._-+", r)) {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return path
+	}
+	prefix := ""
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		prefix, path = "~/", rest
+	}
+	return prefix + "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }

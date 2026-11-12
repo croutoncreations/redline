@@ -57,18 +57,19 @@ func (s *Server) keepProfileLoginFresh(ctx context.Context, providerID string, f
 	return result
 }
 
-// noteOutcome sends account.needs_login once per sign-out, and forgets it
-// once the login works again so a later sign-out notifies again.
+// noteOutcome sends account.needs_login once per sign-out (per service
+// start: the memory is not persisted, so a restart repeats it once), and
+// forgets it once the login works again so a later sign-out notifies again.
 func (p *profileLogins) noteOutcome(ctx context.Context, s *Server, providerID string, configured config.Provider, result profilelogin.Result) {
 	p.mu.Lock()
-	switch result.Outcome {
-	case profilelogin.OutcomeSignedOut:
+	switch {
+	case result.NeedsLogin():
 		if p.notified[providerID] {
 			p.mu.Unlock()
 			return
 		}
 		p.notified[providerID] = true
-	case profilelogin.OutcomeFresh, profilelogin.OutcomeRenewed:
+	case result.Outcome == profilelogin.OutcomeFresh || result.Outcome == profilelogin.OutcomeRenewed:
 		delete(p.notified, providerID)
 		p.mu.Unlock()
 		return
