@@ -225,12 +225,14 @@ fun resetKindLines(group: ResetKindGroup, formatTime: (String) -> String = { for
         val (at, _) = byDate.first()
         lines += (if (group.available == 1) "Expires " else "All expire ") + formatTime(at)
     } else {
-        val shown = if (byDate.size + (if (undated > 0) 1 else 0) > MAX_RESET_EXPIRY_LINES + 1) MAX_RESET_EXPIRY_LINES else byDate.size
+        val shown = if (byDate.size > MAX_RESET_EXPIRY_LINES + 1) MAX_RESET_EXPIRY_LINES else byDate.size
         byDate.take(shown).forEach { (at, n) -> lines += "Expires ${formatTime(at)}" + if (n > 1) " ×$n" else "" }
         val hidden = byDate.drop(shown)
         if (hidden.isNotEmpty()) {
-            lines += "+${hidden.sumOf { it.second } + maxOf(undated, 0)} more, last ${formatTime(hidden.last().first)}"
-        } else if (undated > 0) {
+            lines += "+${hidden.sumOf { it.second }} more, last ${formatTime(hidden.last().first)}"
+        }
+        // Undated resets are said as such, never folded into "+N more".
+        if (undated > 0) {
             lines += "No expiry reported" + if (undated > 1) " ×$undated" else ""
         }
     }

@@ -93,3 +93,22 @@ func TestResetsWithNoKindAreNotBrokenDown(t *testing.T) {
 		t.Fatalf("credits = %+v", credits)
 	}
 }
+
+// Per-reset details without deadlines, while the aggregate has them, would
+// lose a date the count line shows: no breakdown then.
+func TestUndatedDetailsDoNotHideAggregateDeadlines(t *testing.T) {
+	server := usagePayload(t, `{"generated_at":"2026-07-20T19:00:00Z","providers":[
+		{"id":"claude-main","provider":"claude","account_status":"ok","snapshot":{"provider":"claude","observed_at":"2026-07-20T18:59:00Z","source":"native",
+		 "weekly":{"remaining":0.5,"resets_at":"2026-07-24T00:00:00Z"},"banked_resets":2,
+		 "banked_resets_expiries":["2026-08-16T04:59:00Z","2026-09-09T07:59:00Z"],
+		 "banked_reset_details":[{"id":"a","kind":"full","resets_left":1},{"id":"b","kind":"fable","expires_at":"2026-09-09T07:59:00Z","resets_left":1}]}}]}`)
+	client := core.NewClientWithClock(server.URL, "test-token", func() time.Time { return fixedNow })
+	raw, err := client.FetchUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	credits := decodeUsage(t, raw).Providers[0].ResetCredits
+	if credits == nil || credits.Kinds != nil || len(credits.Expiries) != 2 {
+		t.Fatalf("credits = %+v", credits)
+	}
+}

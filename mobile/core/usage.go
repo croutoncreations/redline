@@ -479,6 +479,16 @@ func resetCredits(snapshot *decision.UsageSnapshot, now time.Time) *ResetCredits
 		credits.NextExpiresInSeconds = secondsUntil(credits.Expiries[0], now)
 	}
 	credits.Kinds = resetKindGroups(snapshot.BankedResetDetails, credits.Available, now)
+	// A breakdown missing a deadline the aggregate knows would show "No
+	// expiry reported" where the count line shows a date; keep the count.
+	if len(credits.Expiries) > 0 {
+		for _, group := range credits.Kinds {
+			if len(group.Expiries) < group.Available {
+				credits.Kinds = nil
+				break
+			}
+		}
+	}
 	return credits
 }
 

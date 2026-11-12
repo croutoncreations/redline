@@ -716,7 +716,9 @@ internal fun ProviderDetails(
                     ) +
                 (if (expired > 0) " · $expired since expired" else "")
             val kinds = provider.resetCredits?.kinds.orEmpty()
-            if (credits.isNotEmpty() && kinds.isNotEmpty() && !staleNumbers) {
+            // By kind only from fresh numbers; out of date (on any card) keeps
+            // the count with "last known" deadlines.
+            if (credits.isNotEmpty() && kinds.isNotEmpty() && !provider.isOutOfDate) {
                 Spacer(Modifier.height(10.dp))
                 BankedResetKinds(provider, kinds, expanded = accountPage)
             } else if (credits.isNotEmpty()) {
@@ -1099,17 +1101,20 @@ private fun BankedResetKinds(provider: ProviderUsage, kinds: List<ResetKindGroup
     var open by remember(provider.id) { mutableStateOf(expanded) }
     val count = provider.resetCredits?.available ?: 0
     val summary = resetKindsSummary(provider)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clickable { open = !open }
-            .testTag(BANKED_RESET_KINDS_TAG)
-            .semantics(mergeDescendants = true) {
-                contentDescription = "Banked quota resets: $count available. $summary. " +
-                    if (open) "Tap to hide details" else "Tap to show details"
-            },
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth()) {
+        // Only the summary row toggles; the expanded lines stay separate
+        // nodes so TalkBack can read each deadline and note.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .testTag(BANKED_RESET_KINDS_TAG)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Banked quota resets: $count available. $summary. " +
+                        if (open) "Tap to hide details" else "Tap to show details"
+                },
+        ) {
             Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
             Spacer(Modifier.width(8.dp))
             Spacer(Modifier.weight(1f))

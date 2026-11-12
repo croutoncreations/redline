@@ -51,4 +51,14 @@ class ResetKindsTest {
         )
         assertEquals(listOf("Expires 2026-12-16", "No expiry reported", "2 paused"), resetKindLines(group, format))
     }
+
+    @Test
+    fun undatedResetsAreNotFoldedIntoMore() {
+        val dates = listOf("2026-12-01", "2026-12-02", "2026-12-03", "2026-12-04", "2026-12-05").map { "${it}T00:00:00Z" }
+        val group = ResetKindGroup("fable", "Fable", 6, expiries = dates)
+        assertEquals(
+            listOf("Expires 2026-12-01", "Expires 2026-12-02", "Expires 2026-12-03", "+2 more, last 2026-12-05", "No expiry reported"),
+            resetKindLines(group, format),
+        )
+    }
 }
