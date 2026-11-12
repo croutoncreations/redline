@@ -272,7 +272,7 @@ redline notification test --event all
 The test command sends synthetic data only; it never contacts providers or redeems a reset.
 Defaults: `reset.expiring`, first Codex account or otherwise first configured account (sorted by
 ID). Supported types: `run.started`, `run.completed`, `run.failed`, `scheduler.error`,
-`reset.expiring`, `reset.redeemed`, `reset.redeem_failed`, `firesale.started`, `firesale.ended`.
+`reset.expiring`, `reset.redeemed`, `reset.redeem_failed`, `firesale.started`, `firesale.ended`, `account.needs_login`.
 `all` sends one of each about a second apart. Output includes the title/message and delivery
 status; `--json` returns the delivery record (an array for `all`). Failed deliveries exit 1.
 Explicit tests bypass `notifications.events`, but require `notifications.enabled: true` and the

@@ -38,6 +38,9 @@ scheduler:
 usage_monitor:
   enabled: true
   poll_interval: 5m
+  # Run Claude Code under each Claude Code profile account shortly before its
+  # login expires, so Claude Code renews it. Redline never writes the login.
+  keep_profile_logins_fresh: true
 
 # Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
 # Alerts and firesales are announcement-only, never odds-based.
@@ -58,7 +61,7 @@ notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended, account.needs_login]
 
 # Display-only Cursor and Grok Bot usage for the dashboards. Never affects
 # scheduling. off (default), openusage (OpenUsage's cached Cursor card),
