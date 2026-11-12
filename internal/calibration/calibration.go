@@ -58,7 +58,9 @@ func EstimateWindowWeeklyCost(
 	}
 	windows := make(map[windowKey]*windowEvidence)
 	for _, snapshot := range snapshots {
-		if snapshot.Short == nil || snapshot.Provider != provider {
+		// A snapshot without a weekly limit has nothing to calibrate the
+		// 5-hour window against.
+		if snapshot.Short == nil || snapshot.Provider != provider || snapshot.WeeklyUnavailable {
 			continue
 		}
 		key := windowKey{

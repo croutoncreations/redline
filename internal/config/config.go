@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +33,22 @@ type Config struct {
 	Push            Push                `yaml:"push"`
 	Providers       map[string]Provider `yaml:"providers"`
 	Policies        map[string]Policy   `yaml:"policies"`
-	APIToken        string              `yaml:"-"`
+	Relay           RelayBootstrap      `yaml:"relay"`
+	CursorUsage     CursorUsage         `yaml:"cursor_usage"`
+	// AccountsFile holds accounts managed from Redline itself (CLI and API).
+	// Empty means accounts.yaml beside the config file. The file holds no
+	// credentials: only which account Redline meters and how to label it.
+	AccountsFile string `yaml:"accounts_file"`
+	APIToken     string `yaml:"-"`
+	// ConfigPath is the file this configuration was loaded from, so the
+	// managed accounts file can be resolved and rewritten beside it.
+	ConfigPath string `yaml:"-"`
+	// ManagedAccounts lists the provider IDs that came from the accounts file
+	// rather than the config file; only those can be edited from Redline.
+	ManagedAccounts map[string]bool `yaml:"-"`
+	// DisabledAccounts lists managed accounts kept on file but switched off.
+	// They are not scheduled, monitored, or shown as live accounts.
+	DisabledAccounts map[string]ManagedAccount `yaml:"-"`
 	// DemoScenario is set only by the isolated demo launcher. It is never loaded
 	// from user configuration and lets clients clearly label synthetic data.
 	DemoScenario string `yaml:"-"`
@@ -77,6 +94,60 @@ func (c Config) NotificationEvents() map[string]bool {
 	return result
 }
 
+// CursorUsage configures display-only tracking of Cursor's model pools and
+// Grok Bot allowance. It never affects scheduling.
+type CursorUsage struct {
+	// Source is off (the default), openusage, native or auto. openusage reads
+	// OpenUsage's cached Cursor card; native reads the signed-in Cursor app's
+	// session without refreshing it; auto prefers fresh OpenUsage data and
+	// falls back to native.
+	Source       string `yaml:"source"`
+	OpenUsageURL string `yaml:"openusage_url"`
+	PollInterval string `yaml:"poll_interval"`
+}
+
+// EffectiveSource returns the Cursor tracking mode and whether the operator
+// chose it.
+func (c CursorUsage) EffectiveSource() (string, bool) {
+	if source := strings.ToLower(strings.TrimSpace(c.Source)); source != "" {
+		return source, true
+	}
+	return "off", false
+}
+
+func (c CursorUsage) Interval() (time.Duration, error) {
+	if strings.TrimSpace(c.PollInterval) == "" {
+		return 5 * time.Minute, nil
+	}
+	interval, err := positiveDuration("cursor_usage poll_interval", c.PollInterval)
+	if err != nil {
+		return 0, err
+	}
+	if interval < time.Minute {
+		return 0, fmt.Errorf("cursor_usage poll_interval %q must be at least 1m", c.PollInterval)
+	}
+	return interval, nil
+}
+
+// CursorOpenUsageURL falls back to the first provider's OpenUsage URL and
+// then to OpenUsage's conventional loopback address.
+func (c Config) CursorOpenUsageURL() string {
+	if url := strings.TrimSpace(c.CursorUsage.OpenUsageURL); url != "" {
+		return url
+	}
+	ids := make([]string, 0, len(c.Providers))
+	for id := range c.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if url := strings.TrimSpace(c.Providers[id].OpenUsageURL); url != "" {
+			return url
+		}
+	}
+	return "http://127.0.0.1:6736"
+}
+
 type API struct {
 	TrustedHosts  []string      `yaml:"trusted_hosts"`
 	PairedDevices PairedDevices `yaml:"paired_devices"`
@@ -85,6 +156,22 @@ type API struct {
 type PairedDevices struct {
 	AllowResetRedemption bool `yaml:"allow_reset_redemption"`
 }
+
+// RelayBootstrap is the YAML-only input used when no managed relay state
+// exists. Runtime mode, readiness, session, and dialability live in
+// ResolvedRelay and must never be flattened back into this type.
+type RelayBootstrap struct {
+	Enabled   bool   `yaml:"enabled"`
+	URL       string `yaml:"url"`
+	IssuerURL string `yaml:"issuer_url"`
+	// KeypairPath holds the desktop's Noise static identity, which every paired
+	// phone trusts. Empty means a default beside the database.
+	KeypairPath string `yaml:"keypair_path"`
+}
+
+// Relay is a source-compatible name for the bootstrap-only configuration.
+// New runtime code must depend on ResolvedRelay through RelayRuntime instead.
+type Relay = RelayBootstrap
 
 type Scheduler struct {
 	Enabled      bool   `yaml:"enabled"`
@@ -151,16 +238,33 @@ func (c Config) SchedulerInterval() (time.Duration, error) {
 }
 
 type Provider struct {
-	FiresaleMaxConcurrentRuns int                   `yaml:"firesale_max_concurrent_runs"`
-	Provider                  string                `yaml:"provider"`
-	UsageSource               string                `yaml:"usage_source"`
-	OpenUsageURL              string                `yaml:"openusage_url"`
-	WindowWeeklyCost          float64               `yaml:"window_weekly_cost"`
-	Policy                    string                `yaml:"policy"`
-	MaxConcurrentRuns         int                   `yaml:"max_concurrent_runs"`
-	PoolConcurrency           map[string]int        `yaml:"pool_concurrency"`
-	ModelGroups               map[string]ModelGroup `yaml:"model_groups"`
-	BankedResets              BankedResets          `yaml:"banked_resets"`
+	WeeklyPolicy string `yaml:"weekly_policy"`
+	// A pointer distinguishes an explicit zero from the conservative default.
+	SessionReserve            *float64     `yaml:"session_reserve"`
+	FiresaleMaxConcurrentRuns int          `yaml:"firesale_max_concurrent_runs"`
+	BankedResets              BankedResets `yaml:"banked_resets"`
+	Provider                  string       `yaml:"provider"`
+	UsageSource               string       `yaml:"usage_source"`
+	OpenUsageURL              string       `yaml:"openusage_url"`
+	// OpenUsageCard selects one account card from OpenUsage's limits API,
+	// for example "claude" or "claude@ab12cd34". OpenUsage gives each signed
+	// in account and organization its own card; empty keeps the historical
+	// behaviour of reading the bare provider card from /v1/usage.
+	OpenUsageCard string `yaml:"openusage_card"`
+	// ClaudeConfigDir names a Claude Code profile directory (what Claude
+	// Code calls CLAUDE_CONFIG_DIR), for example ~/.claude-cc-work. The
+	// account reads that profile's own login, read-only, and runs dispatched
+	// on it start Claude Code with that directory. Empty is the default
+	// login. Only for claude accounts, and only with the native source.
+	ClaudeConfigDir string `yaml:"claude_config_dir"`
+	// Label is a person-chosen name shown instead of the provider ID. It is
+	// display text only and never an email or credential.
+	Label             string                `yaml:"label"`
+	WindowWeeklyCost  float64               `yaml:"window_weekly_cost"`
+	Policy            string                `yaml:"policy"`
+	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
+	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
+	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
 }
 
 type BankedResets struct {
@@ -195,6 +299,43 @@ func (p Provider) BankedResetRedeemLead() time.Duration {
 	return lead
 }
 
+// SessionOnlyApplies reports whether this account schedules on its 5-hour
+// window alone: it opted in and its latest usage reports no weekly limit.
+func (p Provider) SessionOnlyApplies(weeklyUnavailable bool) bool {
+	return weeklyUnavailable && p.WeeklyPolicy == "session_only"
+}
+
+func (p Provider) EffectiveSessionReserve() float64 {
+	if p.SessionReserve != nil {
+		return *p.SessionReserve
+	}
+	if p.WeeklyPolicy == "session_only" {
+		return 0.50
+	}
+	return 0
+}
+
+func (p Provider) validateWeeklyPolicy() error {
+	if p.WeeklyPolicy != "" && p.WeeklyPolicy != "session_only" {
+		return fmt.Errorf("weekly_policy must be empty or session_only")
+	}
+	if p.WeeklyPolicy == "session_only" && !strings.EqualFold(p.Provider, "claude") {
+		return fmt.Errorf("weekly_policy session_only is only for claude accounts")
+	}
+	if p.SessionReserve != nil {
+		if p.WeeklyPolicy != "session_only" {
+			return fmt.Errorf("session_reserve requires weekly_policy session_only")
+		}
+		if err := fraction("session_reserve", *p.SessionReserve); err != nil {
+			return err
+		}
+		if *p.SessionReserve == 1 {
+			return fmt.Errorf("session_reserve must be less than 1")
+		}
+	}
+	return nil
+}
+
 func (p Provider) EffectiveMaxConcurrentRuns() int {
 	if p.MaxConcurrentRuns <= 0 {
 		return 1
@@ -206,11 +347,19 @@ func (p Provider) EffectiveUsageSource() string {
 	if source := strings.ToLower(strings.TrimSpace(p.UsageSource)); source != "" {
 		return source
 	}
+	// A Claude Code profile is read only from its own login: "auto" would
+	// try OpenUsage's default card first, which is a different account.
+	if strings.TrimSpace(p.ClaudeConfigDir) != "" {
+		return "native"
+	}
 	return "auto"
 }
 
 type ModelGroup struct {
 	Aliases []string `yaml:"aliases"`
+	// RequiredAllowanceRoles declares which model-scoped budgets a task in
+	// this group consumes. Empty preserves the historical weekly-only shape.
+	RequiredAllowanceRoles []string `yaml:"required_allowance_roles,omitempty"`
 }
 
 func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
@@ -220,8 +369,46 @@ func (p Provider) EffectiveModelGroups() map[string]ModelGroup {
 	}
 	if strings.EqualFold(p.Provider, "claude") {
 		if _, ok := groups["fable"]; !ok {
-			groups["fable"] = ModelGroup{Aliases: []string{"fable", "claude-fable-5", "claude-fable-latest"}}
+			groups["fable"] = ModelGroup{
+				Aliases:                []string{"fable", "claude-fable-5", "claude-fable-latest"},
+				RequiredAllowanceRoles: []string{"weekly"},
+			}
 		}
+	}
+	// Spark is a distinct Codex product with its own short and weekly
+	// allowances. Recognise the provider's model name without requiring every
+	// installation to duplicate this stable mapping in YAML; an explicit
+	// model_groups.spark still wins above, just as it does for Fable.
+	// Cursor meters its subscription as two monthly pools: Cursor's own
+	// models (Auto and Composer) and everything else ("Other Models", the API
+	// pool). A task draws from exactly one, so each is a model group with a
+	// monthly allowance. On-demand spend is never a group: it is not quota.
+	if strings.EqualFold(p.Provider, "cursor") {
+		if _, ok := groups[CursorModelsGroup]; !ok {
+			groups[CursorModelsGroup] = ModelGroup{Aliases: []string{"auto"}, RequiredAllowanceRoles: []string{"monthly"}}
+		}
+		if _, ok := groups[CursorOtherModelsGroup]; !ok {
+			groups[CursorOtherModelsGroup] = ModelGroup{RequiredAllowanceRoles: []string{"monthly"}}
+		}
+	}
+	if strings.EqualFold(p.Provider, "codex") {
+		if _, ok := groups["spark"]; !ok {
+			groups["spark"] = ModelGroup{
+				Aliases:                []string{"spark", "gpt-5.3-codex-spark"},
+				RequiredAllowanceRoles: []string{"short", "weekly"},
+			}
+		}
+	}
+	for name, group := range groups {
+		if len(group.RequiredAllowanceRoles) == 0 {
+			group.RequiredAllowanceRoles = []string{"weekly"}
+		}
+		normalizedRoles := make([]string, len(group.RequiredAllowanceRoles))
+		for i, role := range group.RequiredAllowanceRoles {
+			normalizedRoles[i] = strings.ToLower(strings.TrimSpace(role))
+		}
+		group.RequiredAllowanceRoles = normalizedRoles
+		groups[name] = group
 	}
 	return groups
 }
@@ -245,8 +432,23 @@ func (p Provider) ResolveModelGroup(model, explicit string) (group, routing stri
 			}
 		}
 	}
+	if strings.EqualFold(p.Provider, "cursor") {
+		// Every Cursor model draws from one of the two pools; there is no
+		// account-only route. Auto and Composer use Cursor's own pool, and
+		// any other model (Claude, GPT, Gemini, Grok...) the API pool.
+		if normalizedModel == "" || normalizedModel == "default" || strings.HasPrefix(normalizedModel, "composer") {
+			return CursorModelsGroup, "cursor_pool", nil
+		}
+		return CursorOtherModelsGroup, "cursor_pool", nil
+	}
 	return "", "account_only_unmatched", nil
 }
+
+// Cursor's two monthly subscription pools, as model groups.
+const (
+	CursorModelsGroup      = "cursor_models"
+	CursorOtherModelsGroup = "other_models"
+)
 
 type Policy struct {
 	FiresaleTrigger *float64        `yaml:"firesale_trigger,omitempty" json:"firesale_trigger,omitempty"`
@@ -266,11 +468,49 @@ type PaceThreshold struct {
 	MinWeeklyRemaining float64 `yaml:"min_weekly_remaining" json:"min_weekly_remaining"`
 }
 
-func validTrustedHost(host string) bool {
+// validTrustedHost reports whether host may be trusted by the API.
+//
+// The .ts.net requirement predates the relay, when Tailscale was the only way
+// in and a publicly resolvable trusted host would have been an opening. With
+// the relay enabled a non-Tailscale name is legitimate, so the suffix rule
+// relaxes -- but only then, and nothing else about the check relaxes with it: a
+// bare IP, a wildcard, a port, or a malformed label is still refused either
+// way, so turning the relay on cannot be used to smuggle in a host that was
+// never a valid name to begin with.
+func validTrustedHost(host string, relayEnabled bool) bool {
 	if host == "" || strings.TrimSpace(host) != host {
 		return false
 	}
-	if net.ParseIP(host) != nil || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+	// An entry may name the port a phone should use ("name.ts.net:8443"),
+	// which is how a Tailscale Serve front end off 443 is written down. The
+	// service composes the pairing code and has to know; the request-matching
+	// side already ignored a port here. Split before the host checks so a
+	// port cannot smuggle a bad host past them.
+	//
+	// net.SplitHostPort rather than a hand-rolled split on the last colon:
+	// the pairing package splits entries the same way, and the two must agree
+	// on what an entry means or the validator admits what the composer cannot
+	// read. It also handles a bracketed IPv6 literal, which then fails the IP
+	// check below for the right reason.
+	if strings.Contains(host, ":") {
+		bare, portText, err := net.SplitHostPort(host)
+		if err != nil {
+			return false
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+		host = bare
+	}
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	if !relayEnabled && !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return false
+	}
+	// A name with no dot is a bare label, not a fully qualified host.
+	if relayEnabled && !strings.Contains(host, ".") {
 		return false
 	}
 	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
@@ -290,7 +530,15 @@ func validTrustedHost(host string) bool {
 	return true
 }
 
-func Load(path string) (Config, error) {
+func Load(path string) (Config, error) { return load(path, true) }
+
+// LoadForService structurally decodes relay bootstrap fields but defers their
+// semantic effect until managed state has been resolved. This prevents stale,
+// losing YAML from either weakening trusted-host validation or stopping a
+// service whose authoritative managed state is valid.
+func LoadForService(path string) (Config, error) { return load(path, false) }
+
+func load(path string, validateBootstrapRelay bool) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
@@ -304,7 +552,11 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("resolve config path: %w", err)
 	}
 	cfg.Warnings = warnings
-	if err := cfg.validate(); err != nil {
+	cfg.ConfigPath = path
+	if err := cfg.mergeManagedAccounts(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	if err := cfg.validate(validateBootstrapRelay); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	cfg.Warnings = append(cfg.Warnings, cfg.policyWarnings()...)
@@ -322,6 +574,9 @@ func decode(data []byte) (Config, []string, error) {
 	err := strict.Decode(&cfg)
 	if err == nil {
 		return cfg, nil, nil
+	}
+	if retired := retiredRelayFields(err); len(retired) > 0 {
+		return Config{}, nil, retiredRelayFieldsError(retired)
 	}
 	unknown, onlyUnknown := unknownFieldMessages(err)
 	if !onlyUnknown {
@@ -353,7 +608,107 @@ func unknownFieldMessages(err error) ([]string, bool) {
 	return messages, len(messages) > 0
 }
 
-func (cfg *Config) validate() error {
+// retiredRelayFields lists relay secrets that earlier builds read from YAML
+// but that now live only in managed state or the Keychain. They stay fatal
+// rather than becoming unknown-key warnings: a license key or session pasted
+// into YAML is a secret on disk in the wrong place, and silently ignoring it
+// would hide that.
+func retiredRelayFields(err error) []string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return nil
+	}
+	var retired []string
+	for _, problem := range typeErr.Errors {
+		if !strings.HasSuffix(problem, " not found in type config.RelayBootstrap") {
+			continue
+		}
+		for _, field := range []string{"license_key", "entitlement_token", "session_id"} {
+			if strings.Contains(problem, " field "+field+" not found ") && !slices.Contains(retired, field) {
+				retired = append(retired, field)
+			}
+		}
+	}
+	return retired
+}
+
+// retiredRelayFieldsError says what to do, not just what failed to parse:
+// the raw yaml error ("field session_id not found in type
+// config.RelayBootstrap") reads like a typo, not a moved setting.
+func retiredRelayFieldsError(fields []string) error {
+	keys := make([]string, len(fields))
+	for i, field := range fields {
+		keys[i] = "relay." + field
+	}
+	verb, pronoun := "are", "them"
+	if len(keys) == 1 {
+		verb, pronoun = "is", "it"
+	}
+	return fmt.Errorf("%s %s no longer read from redline.yaml; remove %s. "+
+		"Redline now keeps the relay session in relay-state.json beside the database, "+
+		"and hosted relay access comes from a license key: run `redline relay activate <key>` "+
+		"or use Pair a Device, then re-pair phones",
+		strings.Join(keys, ", "), verb, pronoun)
+}
+
+// ValidateEffectiveRelay applies security decisions only to the authoritative
+// resolved mode. In particular, losing YAML cannot relax trusted hosts.
+func ValidateEffectiveRelay(cfg Config, resolved ResolvedRelay) error {
+	return validateEffectiveTrustedHosts(cfg.API.TrustedHosts, resolved.Mode != RelayModeOff)
+}
+
+func validateEffectiveTrustedHosts(hosts []string, remoteAccess bool) error {
+	for index, host := range hosts {
+		if validTrustedHost(host, remoteAccess) {
+			continue
+		}
+		if remoteAccess {
+			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified domain name", index, host)
+		}
+		return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
+	}
+	return nil
+}
+
+// validateAccountFields checks the fields an account carries that describe
+// where its usage is read and how it is shown: its provider, profile
+// directory, usage source, OpenUsage card and label. It applies to enabled
+// and disabled accounts alike.
+func validateAccountFields(name string, provider Provider) error {
+	if provider.Provider == "" {
+		return fmt.Errorf("provider %q requires provider", name)
+	}
+	// Checked first: a profile directory explains its own source rules
+	// better than the generic source errors below.
+	if err := validateClaudeConfigDir(provider); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	if err := provider.validateWeeklyPolicy(); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	source := provider.EffectiveUsageSource()
+	if source != "auto" && source != "openusage" && source != "native" {
+		return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
+	}
+	if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
+		return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
+	}
+	if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
+		if !validOpenUsageCard(provider.Provider, card) {
+			return fmt.Errorf("provider %q: openusage_card %q must be %q or %q followed by an OpenUsage account suffix",
+				name, card, strings.ToLower(provider.Provider), strings.ToLower(provider.Provider)+"@…")
+		}
+		if source == "native" {
+			return fmt.Errorf("provider %q: openusage_card needs usage_source openusage or auto, not native", name)
+		}
+	}
+	if err := validateLabel(provider.Label); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	return nil
+}
+
+func (cfg *Config) validate(validateBootstrapRelay bool) error {
 	if cfg.Database == "" {
 		return fmt.Errorf("database is required")
 	}
@@ -366,22 +721,35 @@ func (cfg *Config) validate() error {
 	if len(cfg.Providers) == 0 {
 		return fmt.Errorf("at least one provider is required")
 	}
-	for index, host := range cfg.API.TrustedHosts {
-		if !validTrustedHost(host) {
-			return fmt.Errorf("api trusted_hosts[%d] %q must be a fully qualified Tailscale MagicDNS name ending in .ts.net", index, host)
+	if validateBootstrapRelay {
+		bootstrap, err := ResolveRelayBootstrap(cfg.Relay)
+		if err != nil {
+			return err
 		}
+		if err := validateEffectiveTrustedHosts(cfg.API.TrustedHosts, bootstrap.Mode != RelayModeOff); err != nil {
+			return err
+		}
+	}
+	for index, host := range cfg.API.TrustedHosts {
 		cfg.API.TrustedHosts[index] = strings.ToLower(host)
 	}
+	// A disabled account is kept on file and still listed, labelled, to
+	// paired phones, so it must meet the same field rules as an enabled one
+	// (no email as a label, a valid source and card). Otherwise disabling
+	// an account would be a way to store what the rules refuse.
+	disabled := make([]string, 0, len(cfg.DisabledAccounts))
+	for name := range cfg.DisabledAccounts {
+		disabled = append(disabled, name)
+	}
+	sort.Strings(disabled)
+	for _, name := range disabled {
+		if err := validateAccountFields(name, cfg.DisabledAccounts[name].ProviderConfig()); err != nil {
+			return err
+		}
+	}
 	for name, provider := range cfg.Providers {
-		if provider.Provider == "" {
-			return fmt.Errorf("provider %q requires provider", name)
-		}
-		source := provider.EffectiveUsageSource()
-		if source != "auto" && source != "openusage" && source != "native" {
-			return fmt.Errorf("provider %q usage_source %q must be auto, openusage, or native", name, provider.UsageSource)
-		}
-		if source == "openusage" && strings.TrimSpace(provider.OpenUsageURL) == "" {
-			return fmt.Errorf("provider %q usage_source is openusage but openusage_url is empty", name)
+		if err := validateAccountFields(name, provider); err != nil {
+			return err
 		}
 		if err := fraction("window_weekly_cost", provider.WindowWeeklyCost); err != nil {
 			return fmt.Errorf("provider %q: %w", name, err)
@@ -438,6 +806,17 @@ func (cfg *Config) validate() error {
 			if groupName == "" {
 				return fmt.Errorf("provider %q: model_groups has an empty group name", name)
 			}
+			roles := make(map[string]bool, len(group.RequiredAllowanceRoles))
+			for _, role := range group.RequiredAllowanceRoles {
+				role = strings.ToLower(strings.TrimSpace(role))
+				if role != "short" && role != "weekly" && role != "monthly" {
+					return fmt.Errorf("provider %q model group %q: unknown required allowance role %q", name, groupName, role)
+				}
+				if roles[role] {
+					return fmt.Errorf("provider %q model group %q: duplicate required allowance role %q", name, groupName, role)
+				}
+				roles[role] = true
+			}
 			for _, alias := range group.Aliases {
 				normalized := strings.ToLower(strings.TrimSpace(alias))
 				if normalized == "" {
@@ -450,6 +829,16 @@ func (cfg *Config) validate() error {
 			}
 		}
 	}
+	managed := cfg.ManagedAccounts
+	if managed == nil {
+		managed = map[string]bool{}
+	}
+	identityWarnings, err := accountIdentityConflicts(cfg.Providers, managed)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, identityWarnings...)
+	cfg.Warnings = append(cfg.Warnings, loginUnknownWarnings(cfg.Providers)...)
 	for name, policy := range cfg.Policies {
 		if err := fraction("trigger_margin", policy.TriggerMargin); err != nil {
 			return fmt.Errorf("policy %q: %w", name, err)
@@ -493,6 +882,14 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("reset_signals firesale must be off, notify, or auto")
 	}
 	if _, err := cfg.UsageMonitorInterval(); err != nil {
+		return err
+	}
+	switch source, _ := cfg.CursorUsage.EffectiveSource(); source {
+	case "off", "openusage", "native", "auto":
+	default:
+		return fmt.Errorf("cursor_usage source %q must be off, openusage, native, or auto", cfg.CursorUsage.Source)
+	}
+	if _, err := cfg.CursorUsage.Interval(); err != nil {
 		return err
 	}
 	if cfg.Notifications.Timeout != "" {

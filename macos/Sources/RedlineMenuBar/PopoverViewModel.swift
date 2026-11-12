@@ -11,10 +11,19 @@ final class PopoverViewModel: ObservableObject {
     @Published private(set) var tasksBeingControlled = Set<String>()
     @Published private(set) var showsBuilderUpdatesPrompt = false
     @Published private(set) var installationIssue: InstallationIssue?
+    /// The most recently fetched relay status, or nil before the first
+    /// successful `relayStatus()` call. Kept separate from `snapshot` and its
+    /// own error channel: a broken relay-status call must never blank out an
+    /// otherwise-healthy dashboard, and vice versa.
+    @Published private(set) var relayStatus: RelayStatus?
     /// Populated when the app launched the embedded service and it failed to
     /// come up. Distinct from `errorMessage` (a transient fetch failure): this
     /// carries the service's own diagnostic so a bad config is visible here.
     @Published private(set) var startupFailure: ServiceStartupFailure?
+    /// The account row expanded in the multi-account tray. View state only:
+    /// choosing a row never refreshes usage or touches any login. Kept here
+    /// so a refresh, or closing and reopening the popover, keeps it.
+    @Published var expandedAccountID: String?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 
@@ -49,6 +58,15 @@ final class PopoverViewModel: ObservableObject {
 
     func apply(installationIssue: InstallationIssue?) {
         self.installationIssue = installationIssue
+    }
+
+    /// Records the latest relay status for the menu bar's status line and the
+    /// "Manage subscription…" menu item. Called independently of
+    /// `apply(_ snapshot:)` / `apply(error:)`; a relay-status failure has no
+    /// effect here, and an older status is simply left in place rather than
+    /// cleared, so the menu item does not flicker on a transient failure.
+    func apply(relayStatus: RelayStatus) {
+        self.relayStatus = relayStatus
     }
 
     func apply(error: String) {

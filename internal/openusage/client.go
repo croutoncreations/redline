@@ -32,7 +32,14 @@ func (s Source) Fetch(ctx context.Context, provider config.Provider) (decision.U
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:6736"
 	}
-	return (Client{BaseURL: baseURL, HTTPClient: s.HTTPClient}).Fetch(ctx, provider.Provider)
+	client := Client{BaseURL: baseURL, HTTPClient: s.HTTPClient}
+	// An account bound to an OpenUsage card reads exactly that card from the
+	// limits API. Without one, the historical single-account route is kept
+	// unchanged so existing installs behave exactly as before.
+	if card := strings.TrimSpace(provider.OpenUsageCard); card != "" {
+		return client.FetchCard(ctx, provider.Provider, card)
+	}
+	return client.Fetch(ctx, provider.Provider)
 }
 
 func (c Client) Fetch(ctx context.Context, provider string) (decision.UsageSnapshot, []byte, error) {
@@ -79,13 +86,15 @@ type providerPayload struct {
 }
 
 type usageLine struct {
-	Type             string  `json:"type"`
-	Label            string  `json:"label"`
-	Value            string  `json:"value"`
-	Used             float64 `json:"used"`
-	Limit            float64 `json:"limit"`
-	ResetsAt         string  `json:"resetsAt"`
-	PeriodDurationMS int64   `json:"periodDurationMs"`
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	Value string `json:"value"`
+	// A pointer so "used 0" can be told apart from no used field at all:
+	// only the former says a window is untouched (see ShortWindowNotStarted).
+	Used             *float64 `json:"used"`
+	Limit            float64  `json:"limit"`
+	ResetsAt         string   `json:"resetsAt"`
+	PeriodDurationMS int64    `json:"periodDurationMs"`
 }
 
 func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
@@ -159,18 +168,48 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 		if key == "" {
 			continue
 		}
-		if scope == "account" && role == "short" && (strings.TrimSpace(line.ResetsAt) == "" || line.Limit == 0) {
-			// The short window is optional: OpenUsage can briefly report it
-			// without a reset while provider state is refreshing, and accounts
-			// with no session limit (verified Claude Ultra) have no denominator.
-			// Preserve the valid weekly snapshot rather than inventing a reset,
-			// treating the session as exhausted, or failing over.
-			snapshot.Confidence = "medium"
+		if scope == "account" && role == "short" && line.Limit == 0 {
+			// No session limit (verified Claude Ultra): there is no
+			// denominator and no session window. Scheduling uses the weekly
+			// window alone; the session is neither exhausted nor held.
 			continue
 		}
 		remaining, err := remainingFraction(line)
 		if err != nil {
 			return decision.UsageSnapshot{}, fmt.Errorf("line %q: %w", line.Label, err)
+		}
+		// Tested on the reported number, not the remaining fraction: a tiny
+		// nonzero use can round 1-used/limit to exactly 1, and a missing used
+		// field defaults to zero there. Neither says the window is untouched.
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" && scope == "account" && line.Used != nil && *line.Used == 0 {
+			// Entirely unused: the provider starts a five hour window's clock
+			// on first use, so an untouched window has no reset time yet.
+			// That is a known state -- all of it is available -- not a gap,
+			// and it must not lower confidence or read as "not available".
+			// No reset is invented for it; see ShortWindowNotStarted.
+			snapshot.ShortWindowNotStarted = true
+			continue
+		}
+		if strings.TrimSpace(line.ResetsAt) == "" && role == "short" {
+			// A short window is optional and OpenUsage can briefly report one
+			// without a reset while provider state is refreshing. Preserve the
+			// rest of the snapshot rather than inventing a reset or failing
+			// over: the weekly is usually fine and is what most of the screen
+			// is made of.
+			//
+			// This covers model-scoped short windows (Codex's Spark) as well as
+			// the account one. Guarding only on scope == "account" meant a
+			// resetless Spark line rejected the entire Codex snapshot, so the
+			// screen showed nothing at all -- the same asymmetry this branch
+			// exists to prevent, one scope over.
+			snapshot.Confidence = "medium"
+			if scope == "account" {
+				// Only the account window drives the "not available" row; a
+				// missing model pool is simply absent, as it is for a provider
+				// that has no such pool.
+				snapshot.ShortWindowUnavailable = true
+			}
+			continue
 		}
 		resetInferred := false
 		var reset time.Time
@@ -202,6 +241,12 @@ func Parse(data []byte, provider string) (decision.UsageSnapshot, error) {
 			weeklyFound = true
 		}
 	}
+	if snapshot.ShortWindowNotStarted && (snapshot.Short != nil || snapshot.ShortWindowUnavailable) {
+		// More than one account short-window line, and they disagree. A timed
+		// window is real data and an unknown one is unknown; either beats
+		// "untouched", which would draw a full bar over usage that exists.
+		snapshot.ShortWindowNotStarted = false
+	}
 	if !weeklyFound {
 		return decision.UsageSnapshot{}, fmt.Errorf(
 			"provider %q is missing required weekly usage window",
@@ -222,6 +267,18 @@ func normalizeLabel(label string) (key, scope, role string) {
 		return "weekly", "account", "weekly"
 	case "fable":
 		return "model:fable:weekly", "model", "weekly"
+	// Spark is a separate product with its own pair of windows, not Codex's
+	// version of Session. OpenAI: GPT-5.3-Codex-Spark "runs on specialized
+	// low-latency hardware [so] usage is governed by a separate usage limit",
+	// and it stays usable after the main weekly is gone. Putting it in the
+	// account short window claimed Codex has a general five hour limit it does
+	// not have, and showed a separate budget where people read their main one.
+	//
+	// Model-scoped like Fable, so the screen names it rather than guessing.
+	case "spark":
+		return "model:spark:short", "model", "short"
+	case "spark weekly":
+		return "model:spark:weekly", "model", "weekly"
 	default:
 		return "", "", ""
 	}
@@ -231,10 +288,14 @@ func remainingFraction(line usageLine) (float64, error) {
 	if line.Limit <= 0 {
 		return 0, fmt.Errorf("limit must be greater than zero")
 	}
-	if line.Used < 0 || line.Used > line.Limit {
+	used := 0.0
+	if line.Used != nil {
+		used = *line.Used
+	}
+	if used < 0 || used > line.Limit {
 		return 0, fmt.Errorf("used must be between zero and limit")
 	}
-	return 1 - line.Used/line.Limit, nil
+	return 1 - used/line.Limit, nil
 }
 
 func parseTime(name, value string) (time.Time, error) {

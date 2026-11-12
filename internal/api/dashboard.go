@@ -9,9 +9,13 @@ import (
 	"net/http"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/croutoncreations/redline/internal/config"
+	"github.com/croutoncreations/redline/internal/cursorusage"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/resetsignal"
@@ -39,7 +43,10 @@ type dashboardResponse struct {
 	Runs          []domain.Run             `json:"runs"`
 	Attempts      []domain.DispatchAttempt `json:"attempts"`
 	UnreadRuns    int                      `json:"unread_runs"`
-	Demo          *dashboardDemo           `json:"demo,omitempty"`
+	// CursorUsage is display-only. It is not a provider account and never
+	// takes part in scheduling.
+	CursorUsage *cursorusage.Report `json:"cursor_usage,omitempty"`
+	Demo        *dashboardDemo      `json:"demo,omitempty"`
 }
 
 type dashboardDemo struct {
@@ -48,8 +55,22 @@ type dashboardDemo struct {
 }
 
 type dashboardProvider struct {
-	ID                       string                  `json:"id"`
-	Provider                 string                  `json:"provider"`
+	WeeklyPolicy   string  `json:"weekly_policy,omitempty"`
+	SessionReserve float64 `json:"session_reserve,omitempty"`
+	ID             string  `json:"id"`
+	Provider       string  `json:"provider"`
+	// Label is the owner's name for this account ("Personal", "Client"). It
+	// is never an email; clients fall back to the ID when it is empty.
+	Label string `json:"label,omitempty"`
+	// OpenUsageCard is the OpenUsage card this account reads, when bound
+	// to one. It is an opaque ID ("claude@ab12cd34"), not an identity.
+	OpenUsageCard string `json:"openusage_card,omitempty"`
+	// RunLoginUnknown explains why work never dispatches to this account:
+	// its runs would start as another login. Usage is still shown.
+	RunLoginUnknown string `json:"run_login_unknown,omitempty"`
+	// AccountStatus is one of ok, stale, no_data, signed_out, error. It
+	// is derived from the fields below so every client words it the same.
+	AccountStatus            string                  `json:"account_status"`
 	Paused                   bool                    `json:"paused"`
 	Snapshot                 *decision.UsageSnapshot `json:"snapshot,omitempty"`
 	SnapshotStale            bool                    `json:"snapshot_stale"`
@@ -66,6 +87,43 @@ type dashboardProvider struct {
 	ActivePoolClaims         map[string]int          `json:"active_pool_claims,omitempty"`
 	LatestDecision           *dashboardDecision      `json:"latest_decision,omitempty"`
 	LatestDecisionAt         *time.Time              `json:"latest_decision_at,omitempty"`
+	// Scheduling is the effective policy's thresholds, in the shape a meter
+	// draws them: a floor on the 5-hour bar the scheduler never spends past,
+	// and the weekly floors it waits for as the reset nears. The decision
+	// alone said "waiting" and not where the line was.
+	Scheduling *dashboardScheduling `json:"scheduling,omitempty"`
+}
+
+// accountStatus condenses one account's collection state into a word every
+// client can render the same way. It never guesses: no snapshot is no_data,
+// not ok.
+func accountStatus(item dashboardProvider) string {
+	switch {
+	case item.UsageSource.Reason == usage.ReasonSignedOut:
+		return "signed_out"
+	case item.Snapshot == nil && item.UsageSource.LastError != "":
+		return "error"
+	case item.Snapshot == nil:
+		return "no_data"
+	case item.SnapshotStale:
+		return "stale"
+	default:
+		return "ok"
+	}
+}
+
+type dashboardScheduling struct {
+	RollingReserve float64                  `json:"rolling_reserve"`
+	TriggerMargin  float64                  `json:"trigger_margin"`
+	PaceGapTrigger *float64                 `json:"pace_gap_trigger,omitempty"`
+	PaceThresholds []dashboardPaceThreshold `json:"pace_thresholds"`
+}
+
+// dashboardPaceThreshold carries the duration as seconds: a Go duration string
+// would need parsing on two platforms, and a number reads the same everywhere.
+type dashboardPaceThreshold struct {
+	TimeRemainingSeconds int64   `json:"time_remaining_seconds"`
+	MinWeeklyRemaining   float64 `json:"min_weekly_remaining"`
 }
 
 type dashboardDecision struct {
@@ -164,18 +222,127 @@ func (s *Server) serveDashboardFile(w http.ResponseWriter, name, contentType str
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
+	fields, err := parseDashboardFields(r.URL.Query().Get("fields"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
+		return
+	}
 	result, err := s.dashboardData(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	if fields != nil {
+		writeJSON(w, http.StatusOK, selectDashboardFields(result, fields))
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// dashboardFields are the selectable top-level members of the read model.
+//
+// Enumerated rather than derived by reflection so an unknown name is an error
+// the caller sees immediately, instead of a silent empty response.
+var dashboardFields = map[string]bool{
+	"active_policy": true,
+	"policies":      true,
+	"health":        true,
+	"scheduler":     true,
+	"usage_monitor": true,
+	"providers":     true,
+	"tasks":         true,
+	"runs":          true,
+	"attempts":      true,
+	"unread_runs":   true,
+	"demo":          true,
+	"cursor_usage":  true,
+}
+
+// parseDashboardFields reads the fields selector, returning nil when the caller
+// did not ask for one.
+func parseDashboardFields(raw string) (map[string]bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	selected := make(map[string]bool)
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !dashboardFields[name] {
+			return nil, fmt.Errorf("unknown dashboard field %q", name)
+		}
+		selected[name] = true
+	}
+	if len(selected) == 0 {
+		return nil, errors.New("fields must name at least one member")
+	}
+	return selected, nil
+}
+
+// selectDashboardFields returns only the requested members.
+//
+// The read model carries every run and task, which is the bulk of its weight.
+// A phone renders a few kilobytes of it, so letting the caller ask for what it
+// needs avoids sending tens of times more data than it will use -- which
+// matters on mobile data and matters more through a relay.
+//
+// generated_at is always included: without it a client cannot tell one snapshot
+// from another, so every response would look equally current.
+func selectDashboardFields(result dashboardResponse, fields map[string]bool) map[string]any {
+	selected := map[string]any{"generated_at": result.GeneratedAt}
+	for name := range fields {
+		switch name {
+		case "active_policy":
+			selected[name] = result.ActivePolicy
+		case "policies":
+			selected[name] = result.Policies
+		case "health":
+			selected[name] = result.Health
+		case "scheduler":
+			selected[name] = result.Scheduler
+		case "usage_monitor":
+			selected[name] = result.UsageMonitor
+		case "providers":
+			selected[name] = result.Providers
+		case "tasks":
+			selected[name] = result.Tasks
+		case "runs":
+			selected[name] = result.Runs
+		case "attempts":
+			selected[name] = result.Attempts
+		case "unread_runs":
+			selected[name] = result.UnreadRuns
+		case "cursor_usage":
+			// Omitted when Cursor usage is off, like the unfiltered response.
+			if result.CursorUsage != nil {
+				selected[name] = result.CursorUsage
+			}
+		case "demo":
+			// Only present in a demo build, and omitted rather than sent as
+			// null so the shape matches the unfiltered response.
+			if result.Demo != nil {
+				selected[name] = result.Demo
+			}
+		}
+	}
+	return selected
 }
 
 func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, problem{Error: "streaming is unavailable"})
+		return
+	}
+	// The stream is where trimming compounds: it re-sends the whole read model
+	// every few seconds, so a client that renders only providers should not
+	// receive every run each time.
+	fields, fieldsErr := parseDashboardFields(r.URL.Query().Get("fields"))
+	if fieldsErr != nil {
+		writeJSON(w, http.StatusBadRequest, problem{Error: fieldsErr.Error()})
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -193,7 +360,11 @@ func (s *Server) dashboardEvents(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		payload, err := json.Marshal(result)
+		var body any = result
+		if fields != nil {
+			body = selectDashboardFields(result, fields)
+		}
+		payload, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
@@ -261,12 +432,29 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	sort.Strings(providerIDs)
 	for _, id := range providerIDs {
 		configured := s.config.Providers[id]
-		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id)}
+		item := dashboardProvider{ID: id, Provider: configured.Provider, UsageSource: s.usageSources.Status(id),
+			Label: configured.Label, OpenUsageCard: configured.OpenUsageCard, RunLoginUnknown: config.RunLoginUnknown(configured),
+			WeeklyPolicy: configured.WeeklyPolicy, SessionReserve: configured.EffectiveSessionReserve()}
 		selection, selectionErr := s.effectiveProviderPolicy(ctx, id)
 		if selectionErr != nil {
 			return dashboardResponse{}, selectionErr
 		}
 		item.Policy, item.PolicySource = selection.Policy, selection.Source
+		if thresholds, thresholdsErr := selection.Definition.DecisionThresholds(); thresholdsErr == nil {
+			scheduling := &dashboardScheduling{
+				RollingReserve: selection.Definition.RollingReserve,
+				TriggerMargin:  selection.Definition.TriggerMargin,
+				PaceGapTrigger: selection.Definition.PaceGapTrigger,
+				PaceThresholds: make([]dashboardPaceThreshold, 0, len(thresholds)),
+			}
+			for _, threshold := range thresholds {
+				scheduling.PaceThresholds = append(scheduling.PaceThresholds, dashboardPaceThreshold{
+					TimeRemainingSeconds: int64(threshold.TimeRemaining / time.Second),
+					MinWeeklyRemaining:   threshold.MinWeeklyRemaining,
+				})
+			}
+			item.Scheduling = scheduling
+		}
 		item.DefaultPolicy = configured.Policy
 		if item.DefaultPolicy == "" {
 			item.DefaultPolicy = s.config.ActivePolicy
@@ -296,7 +484,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 		if err != nil {
 			return dashboardResponse{}, err
 		}
-		snapshot, _, snapshotErr := s.store.LatestSnapshotFromSource(ctx, configured.Provider, item.UsageSource.Active)
+		snapshot, _, snapshotErr := s.store.LatestSnapshotFromSource(ctx, id, configured.Provider, item.UsageSource.Active)
 		if snapshotErr != nil {
 			if errors.Is(snapshotErr, store.ErrNotFound) {
 				item.Error = "No usage snapshot has been collected yet."
@@ -305,10 +493,23 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			}
 		} else {
 			item.Snapshot = &snapshot
+			if configured.SessionOnlyApplies(snapshot.WeeklyUnavailable) && item.Scheduling != nil {
+				item.Scheduling.RollingReserve = configured.EffectiveSessionReserve()
+				item.Scheduling.PaceGapTrigger = nil
+				item.Scheduling.PaceThresholds = []dashboardPaceThreshold{}
+			}
 			age := s.now().Sub(snapshot.ObservedAt)
-			if age > maxSnapshotAge || age < 0 {
+			// A Cursor account whose CLI and app disagree is not scheduled
+			// from the moment that is found, so its last numbers are not
+			// current for this account even while they are young.
+			if age > maxSnapshotAge || age < 0 || item.UsageSource.Reason == cursorusage.ReasonAccountMismatch {
 				item.SnapshotStale = true
-				item.Error = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+				item.Error = staleUsageError(item.UsageSource.LastError)
+			} else if snapshot.SourceStale {
+				// OpenUsage itself says this card's numbers are old (e.g.
+				// updates blocked upstream), however recently we asked.
+				item.SnapshotStale = true
+				item.Error = "OpenUsage reports this account's usage as out of date."
 			}
 		}
 		attempts, attemptsErr := s.store.ListDispatchAttempts(ctx, id, 8)
@@ -339,6 +540,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 				item.LatestDecisionAt = &createdAt
 			}
 		}
+		item.AccountStatus = accountStatus(item)
 		result.Providers = append(result.Providers, item)
 	}
 	sort.Slice(result.Attempts, func(i, j int) bool { return result.Attempts[i].CompletedAt.After(result.Attempts[j].CompletedAt) })
@@ -369,6 +571,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 	if err != nil {
 		return dashboardResponse{}, err
 	}
+	result.CursorUsage = s.cursorUsageSnapshot()
 	return result, nil
 }
 
@@ -387,4 +590,27 @@ func (s *Server) projectedTrigger(
 		return nil, err
 	}
 	return decision.ProjectTriggerAt(input, pollInterval), nil
+}
+
+const staleUsageMessage = "Usage data is stale; scheduling is paused until a fresh snapshot is available."
+
+// staleUsageError is the error every surface shows for a stale provider. When
+// collection is failing for a reason it can name -- Claude Code signed out,
+// a rate limit -- that reason follows, since "stale" alone sends people
+// looking in the wrong place. The collector's own "snapshot is stale" adds
+// nothing to the message it would follow, so it is left off.
+func staleUsageError(sourceError string) string {
+	reason := strings.TrimSpace(sourceError)
+	if reason == "" || strings.HasSuffix(reason, "usage snapshot is stale") {
+		return staleUsageMessage
+	}
+	return staleUsageMessage + " " + upperFirst(reason)
+}
+
+func upperFirst(text string) string {
+	first, size := utf8.DecodeRuneInString(text)
+	if size == 0 {
+		return text
+	}
+	return string(unicode.ToUpper(first)) + text[size:]
 }

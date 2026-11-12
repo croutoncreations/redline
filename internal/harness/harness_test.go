@@ -567,3 +567,112 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestCursorAdapterBuildsHeadlessCommandWithPromptOnStdin(t *testing.T) {
+	runner := &captureRunner{}
+	_, err := (harness.Adapter{Runner: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-cursor", OutputDirectory: t.TempDir(),
+		Task: domain.Task{ID: "task", Prompt: "fix the flaky test"},
+		Profile: domain.ExecutionProfile{
+			HarnessType: "cursor-agent", Model: "composer-2.5", HarnessArgs: []string{"--mode", "plan"},
+		},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sandboxed and without --force: --force overrides the sandbox.
+	want := "--print --output-format stream-json --trust --sandbox enabled --workspace /tmp/work --model composer-2.5 --mode plan"
+	if runner.command.Name != "cursor-agent" || strings.Join(runner.command.Args, " ") != want ||
+		runner.command.Dir != "/tmp/work" || runner.stdin != "fix the flaky test" {
+		t.Fatalf("command=%#v stdin=%q", runner.command, runner.stdin)
+	}
+	for _, arg := range runner.command.Args {
+		if strings.Contains(arg, "fix the flaky test") {
+			t.Fatal("the prompt must not appear in the process arguments")
+		}
+	}
+}
+
+// "default" would follow the CLI's own setting, which can be a model in the
+// other pool, so the run is pinned to the model it was scheduled against.
+func TestCursorAdapterPinsDefaultModelToAuto(t *testing.T) {
+	runner := &captureRunner{}
+	_, err := (harness.Adapter{Runner: runner}).Run(t.Context(), harness.Request{
+		RunID: "run-cursor-default", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "x"},
+		Profile:   domain.ExecutionProfile{HarnessType: "cursor-agent", Model: "default"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(runner.command.Args, " "), "--model auto") {
+		t.Fatalf("args = %v", runner.command.Args)
+	}
+}
+
+type cursorSignedOutRunner struct{}
+
+// Recorded stderr of the Cursor CLI when its login is missing.
+func (cursorSignedOutRunner) Run(_ context.Context, command redprocess.Command) (int, error) {
+	_, _ = io.WriteString(command.Stderr, "Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.\n")
+	return 1, nil
+}
+
+type cursorTaskAuthErrorRunner struct{}
+
+// A task whose own tool call hit an auth error: the transcript on stdout
+// carries it, and the CLI itself is signed in.
+func (cursorTaskAuthErrorRunner) Run(_ context.Context, command redprocess.Command) (int, error) {
+	_, _ = io.WriteString(command.Stdout, `{"type":"tool_call","output":"remote: Authentication required. fatal: not authenticated; run 'agent login'"}`+"\n")
+	_, _ = io.WriteString(command.Stderr, "task failed\n")
+	return 1, nil
+}
+
+func TestCursorAdapterIgnoresAuthErrorsInTaskOutput(t *testing.T) {
+	result, err := (harness.Adapter{Runner: cursorTaskAuthErrorRunner{}}).Run(t.Context(), harness.Request{
+		RunID: "run-cursor-task-401", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "x"},
+		Profile:   domain.ExecutionProfile{HarnessType: "cursor-agent", Model: "auto"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failure != "" || harness.IsAuthenticationFailure(result.Failure) {
+		t.Fatalf("task output misread as sign-out: %#v", result)
+	}
+}
+
+func TestCursorAdapterDiagnosesSignedOutSessionAndPausesAsAuthFailure(t *testing.T) {
+	result, err := (harness.Adapter{Runner: cursorSignedOutRunner{}}).Run(t.Context(), harness.Request{
+		RunID: "run-cursor-signed-out", OutputDirectory: t.TempDir(),
+		Task:      domain.Task{ID: "task", Prompt: "x"},
+		Profile:   domain.ExecutionProfile{HarnessType: "cursor-agent", Model: "auto"},
+		Workspace: domain.Workspace{Directory: "/tmp/work"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failure != "Cursor CLI is signed out. Run `agent login`, then retry this job." ||
+		!harness.IsAuthenticationFailure(result.Failure) {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestCursorHarnessArgsCannotMoveTheRunOrItsLogin(t *testing.T) {
+	for _, args := range [][]string{
+		{"--api-key", "k"}, {"--api-key=k"}, {"--workspace", "/"}, {"--add-dir", "/Users"}, {"-e", "https://x"}, {"--endpoint=https://x"},
+	} {
+		if err := harness.ValidateHarnessArgs("cursor-agent", args); err == nil {
+			t.Errorf("%v was accepted", args)
+		}
+	}
+	if err := harness.ValidateHarnessArgs("cursor-agent", []string{"--mode", "ask", "--force"}); err != nil {
+		t.Fatalf("ordinary flags rejected: %v", err)
+	}
+	if err := harness.ValidateHarnessArgs("codex-cli", []string{"--workspace", "/"}); err != nil {
+		t.Fatalf("other harnesses are not restricted: %v", err)
+	}
+}

@@ -19,6 +19,28 @@ import (
 
 var errCredentialsChanged = errors.New("credentials changed concurrently")
 
+// ErrSignedOut means Claude Code has no usable login on this machine: its
+// credential is missing, emptied (what a sign-out leaves behind), or expired
+// with nothing to refresh it. Nothing Redline can do brings it back, so the
+// message says what happened and the command that fixes it, and every
+// surface shows it as-is.
+var ErrSignedOut error = signedOutError{}
+
+type signedOutError struct{}
+
+func (signedOutError) Error() string {
+	return "Claude Code is signed out on this Mac; run `claude auth login` to sign in again"
+}
+
+// Reason is the machine-readable cause the usage manager reports beside the
+// message, so clients can offer the fix without parsing prose.
+func (signedOutError) Reason() string { return "signed_out" }
+
+// errNoCredential is what a credential store returns when no credential
+// exists at all, as opposed to one it could not read (a locked keychain, a
+// permission error), which is not a sign-out and keeps its own message.
+var errNoCredential = errors.New("no credential is stored")
+
 const (
 	claudeRefreshURL = "https://platform.claude.com/v1/oauth/token"
 	claudeClientID   = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -42,6 +64,90 @@ type DefaultCredentials struct {
 	CodexStore       secretStore
 	ClaudeRefreshURL string
 	CodexRefreshURL  string
+	// ClaudeProfileStore opens the credential store of one Claude Code
+	// profile directory (CLAUDE_CONFIG_DIR). Nil uses the platform's own.
+	ClaudeProfileStore func(dir string) secretStore
+}
+
+// ProfileCredentials reads the login of one Claude Code profile directory,
+// strictly read-only: Redline never refreshes or rewrites a profile's
+// credential (its refresh token belongs to that profile's Claude Code), so a
+// token near expiry is reported as needing a Claude Code session there.
+type ProfileCredentials interface {
+	AccessClaudeProfile(ctx context.Context, dir string) (Credential, error)
+}
+
+// ErrProfileSignedOut is ErrSignedOut for a Claude Code profile directory:
+// the fix is signing in with that profile, not the default one.
+type profileSignedOutError struct{ dir string }
+
+func (e profileSignedOutError) Error() string {
+	return "Claude Code profile " + e.dir + " is signed out on this Mac; run `CLAUDE_CONFIG_DIR=" + e.dir + " claude auth login` to sign in again"
+}
+func (profileSignedOutError) Reason() string { return "signed_out" }
+func (profileSignedOutError) Is(target error) bool {
+	return target == ErrSignedOut
+}
+
+// profileNeedsSessionError: the profile's token has expired and only Claude
+// Code may refresh it. Its own reason, so every surface can say what to do
+// rather than show a generic error.
+type profileNeedsSessionError struct{ dir string }
+
+func (e profileNeedsSessionError) Error() string {
+	return "Claude Code profile " + e.dir + " needs its login refreshed; Redline will not modify that profile's credential. " +
+		"Start Claude Code once with this profile (CLAUDE_CONFIG_DIR=" + e.dir + " claude) and it refreshes itself"
+}
+func (profileNeedsSessionError) Reason() string { return "needs_session" }
+
+// AccessClaudeProfile returns the access token of the Claude Code profile at
+// dir (an absolute, cleaned path) without refreshing or writing anything.
+func (d *DefaultCredentials) AccessClaudeProfile(ctx context.Context, dir string) (Credential, error) {
+	if !filepath.IsAbs(dir) {
+		return Credential{}, fmt.Errorf("claude profile directory must be absolute")
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		// No directory, no profile: nothing was ever signed in there.
+		return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+	}
+	open := d.ClaudeProfileStore
+	if open == nil {
+		open = newClaudeProfileStore
+	}
+	store := open(dir)
+	if store == nil {
+		return Credential{}, fmt.Errorf("claude profile credentials are unavailable on this platform")
+	}
+	file, err := readClaudeCredentials(ctx, store)
+	if errors.Is(err, ErrSignedOut) {
+		return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+	}
+	if err != nil {
+		// The store's own error may carry the full credential path (a
+		// file store's PathError), which would reach phones as last_error.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return Credential{}, fmt.Errorf("read Claude Code profile %s login: %v", displayDir(dir), pathErr.Err)
+		}
+		return Credential{}, err
+	}
+	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, profileSignedOutError{dir: displayDir(dir)}
+		}
+		return Credential{}, profileNeedsSessionError{dir: displayDir(dir)}
+	}
+	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
+}
+
+// displayDir shows a path under the home folder as "~/…" in messages.
+func displayDir(dir string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if rest, ok := strings.CutPrefix(dir, filepath.Clean(home)+string(filepath.Separator)); ok {
+			return "~/" + rest
+		}
+	}
+	return dir
 }
 
 func NewDefaultCredentials() *DefaultCredentials {
@@ -72,11 +178,34 @@ func (d *DefaultCredentials) Access(ctx context.Context, provider string) (Crede
 	}
 }
 
+// readClaudeCredentials reads and decodes Claude Code's credential. A missing
+// credential, or one whose access token is empty, is ErrSignedOut; a store
+// that cannot be read for any other reason keeps that reason.
+func readClaudeCredentials(ctx context.Context, store secretStore) (claudeCredentialsFile, error) {
+	raw, err := store.Read(ctx)
+	if errors.Is(err, errNoCredential) || errors.Is(err, os.ErrNotExist) {
+		return claudeCredentialsFile{}, ErrSignedOut
+	}
+	if err != nil {
+		return claudeCredentialsFile{}, fmt.Errorf("read Claude credentials: %w", err)
+	}
+	var file claudeCredentialsFile
+	if json.Unmarshal(raw, &file) != nil {
+		return claudeCredentialsFile{}, fmt.Errorf("claude credentials are invalid")
+	}
+	if strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
+		return claudeCredentialsFile{}, ErrSignedOut
+	}
+	file.raw = raw
+	return file, nil
+}
+
 // claudeCredentialsFile decodes only what Redline needs. Plan fields such as
 // subscriptionType and rateLimitTier are deliberately not decoded: limits come
 // from the usage windows the API reports, not from plan names (which change,
 // e.g. Max 20x became Ultra), and refreshes preserve every other field as-is.
 type claudeCredentialsFile struct {
+	raw           []byte
 	ClaudeAIOAuth struct {
 		AccessToken  string  `json:"accessToken"`
 		RefreshToken string  `json:"refreshToken"`
@@ -99,15 +228,14 @@ func (d *DefaultCredentials) AccessWithoutRefresh(ctx context.Context, provider 
 	if store == nil {
 		return Credential{}, fmt.Errorf("claude credential store is unavailable")
 	}
-	raw, err := store.Read(ctx)
+	file, err := readClaudeCredentials(ctx, store)
 	if err != nil {
-		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
-	}
-	var file claudeCredentialsFile
-	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
-		return Credential{}, fmt.Errorf("claude credentials are invalid")
+		return Credential{}, err
 	}
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(d.now()) <= 5*time.Minute {
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, ErrSignedOut
+		}
 		return Credential{}, fmt.Errorf("claude token is near expiry; skipping lookup rather than refreshing Claude Code's credential")
 	}
 	return Credential{AccessToken: file.ClaudeAIOAuth.AccessToken}, nil
@@ -118,22 +246,21 @@ func (d *DefaultCredentials) claude(ctx context.Context) (Credential, error) {
 	if store == nil {
 		return Credential{}, fmt.Errorf("claude credential store is unavailable")
 	}
-	raw, err := store.Read(ctx)
+	file, err := readClaudeCredentials(ctx, store)
 	if err != nil {
-		return Credential{}, fmt.Errorf("read Claude credentials: %w", err)
+		return Credential{}, err
 	}
-	var file claudeCredentialsFile
-	if json.Unmarshal(raw, &file) != nil || strings.TrimSpace(file.ClaudeAIOAuth.AccessToken) == "" {
-		return Credential{}, fmt.Errorf("claude credentials are invalid")
-	}
+	raw := file.raw
 	now := d.now()
 	if file.ClaudeAIOAuth.ExpiresAt > 0 && time.UnixMilli(int64(file.ClaudeAIOAuth.ExpiresAt)).Sub(now) <= 5*time.Minute {
+		// Nothing can refresh it: signed out, whether or not the store is
+		// writable. Checked first so the read-only macOS store reports it.
+		if file.ClaudeAIOAuth.RefreshToken == "" {
+			return Credential{}, ErrSignedOut
+		}
 		writable, ok := store.(writableSecretStore)
 		if !ok {
 			return Credential{}, fmt.Errorf("claude credentials require refresh; Redline will not modify Claude Code's shared credential - run `claude auth login`")
-		}
-		if file.ClaudeAIOAuth.RefreshToken == "" {
-			return Credential{}, fmt.Errorf("claude token expired without a refresh token")
 		}
 		payload := map[string]any{"grant_type": "refresh_token", "refresh_token": file.ClaudeAIOAuth.RefreshToken, "client_id": claudeClientID,
 			"scope": "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}
@@ -320,10 +447,24 @@ type firstFileStore struct {
 	Paths []string
 }
 
+// readOnlyStore exposes only Read, so a credential behind it can never be
+// rewritten: the writableSecretStore assertion fails.
+type readOnlyStore struct{ store secretStore }
+
+func (s readOnlyStore) Read(ctx context.Context) ([]byte, error) { return s.store.Read(ctx) }
+
+// locate returns the first credential file that exists. A path that cannot
+// be checked for a reason other than not existing -- a directory without
+// permission -- is reported as that error, not as "no file": the difference
+// is whether signing in again would help.
 func (s firstFileStore) locate() (string, error) {
 	for _, path := range s.Paths {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
 			return path, nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
 		}
 	}
 	return "", os.ErrNotExist

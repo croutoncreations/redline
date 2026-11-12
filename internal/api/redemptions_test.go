@@ -16,6 +16,7 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/nativeusage"
+	"github.com/croutoncreations/redline/internal/resetreminder"
 	"github.com/croutoncreations/redline/internal/store"
 	"github.com/croutoncreations/redline/internal/usage"
 )
@@ -49,7 +50,7 @@ func redemptionServer(t *testing.T, provider string) (*Server, *store.DB, decisi
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	expires := now.Add(time.Hour)
 	usable := true
-	pre := decision.UsageSnapshot{Provider: provider, Source: "native", ObservedAt: now, Weekly: decision.UsageWindow{Remaining: .1, ResetsAt: now.Add(24 * time.Hour)}, BankedResetDetails: []decision.BankedReset{{ID: "reset", Claimable: true, UsableNow: &usable, ResetsLeft: 1, ExpiresAt: &expires, Clears: []string{"weekly"}}}}
+	pre := decision.UsageSnapshot{Account: "main", Provider: provider, Source: "native", ObservedAt: now, Weekly: decision.UsageWindow{Remaining: .1, ResetsAt: now.Add(24 * time.Hour)}, BankedResetDetails: []decision.BankedReset{{ID: "reset", Claimable: true, UsableNow: &usable, ResetsLeft: 1, ExpiresAt: &expires, Clears: []string{"weekly"}}}}
 	if err := db.SaveSnapshot(context.Background(), pre, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +61,61 @@ func redemptionServer(t *testing.T, provider string) (*Server, *store.DB, decisi
 	return s, db, pre
 }
 
+func TestRedeemBankedResetRefusesNonDefaultAccounts(t *testing.T) {
+	// A non-default OpenUsage card names no local login, and a second
+	// account on the default login makes that login ambiguous. (Claude Code
+	// profile accounts spend from their own login: see
+	// TestProfileAccountRedeemsFromItsOwnLogin.)
+	for _, kind := range []string{"card", "second default-login account"} {
+		t.Run(kind, func(t *testing.T) {
+			s, db, snapshot := redemptionServer(t, "claude")
+			p := s.config.Providers["main"]
+			p.BankedResets = config.BankedResets{OnExpiry: "redeem", RemindBefore: []string{}}
+			s.config.UsageMonitor.Enabled = true
+			switch kind {
+			case "card":
+				p.OpenUsageCard = "claude@other"
+			case "second default-login account":
+				s.config.Providers["other"] = config.Provider{Provider: "claude", UsageSource: "native"}
+			}
+			s.config.Providers["main"] = p
+			s.redeemer = testRedeemer{prepare: func() nativeusage.RedeemRequest {
+				t.Fatal("unsafe native credential access")
+				return nativeusage.RedeemRequest{}
+			}}
+			for _, dry := range []bool{false, true} {
+				r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:7436/v1/providers/main/banked-resets/redeem", strings.NewReader(fmt.Sprintf(`{"dry_run":%t}`, dry)))
+				r.Header.Set("Authorization", "Bearer secret")
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				if w.Code != http.StatusConflict {
+					t.Fatalf("dry=%v: status=%d body=%s", dry, w.Code, w.Body.String())
+				}
+			}
+			handled, err := s.automaticallyRedeemable(t.Context(), "main", p, snapshot)
+			if err != nil || len(handled) != 0 {
+				t.Fatalf("unsafe automatic selection: %v %v", handled, err)
+			}
+			if err := s.redeemExpiringBankedReset(t.Context(), "main", p, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			events, err := s.providerResetEvents(t.Context(), "main", snapshot)
+			if err != nil || len(events) != 1 || events[0].Source != decision.ResetWeekly {
+				t.Fatalf("unsafe reset horizon: %v %v", events, err)
+			}
+			notifier := &redemptionNotifier{}
+			checker := resetreminder.Checker{Enabled: true, Store: db, Notifier: notifier,
+				AutoRedeems: func(reset decision.BankedReset) bool { return handled[reset.ID] }}
+			if err := checker.Check(t.Context(), "main", p, snapshot, s.now()); err != nil {
+				t.Fatal(err)
+			}
+			if len(notifier.events) != 1 || notifier.events[0].Data["action"] != "redeem_now" {
+				t.Fatalf("missing reminder fallback: %+v", notifier.events)
+			}
+		})
+	}
+}
+
 func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	s, db, pre := redemptionServer(t, "claude")
 	ctx := context.Background()
@@ -68,6 +124,9 @@ func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	post := pre
 	post.Weekly.Remaining = .9
 	post.ObservedAt = pre.ObservedAt.Add(time.Second)
+	// A real source does not know the account; the snapshot after a
+	// redemption must still be recorded against it.
+	post.Account = ""
 	now := pre.ObservedAt
 	s.now = func() time.Time { return now }
 	fresh := freshRedemptionSource{fetch: func() decision.UsageSnapshot {
@@ -103,7 +162,7 @@ func TestRedeemBankedResetPendingRetryRefreshAndNotification(t *testing.T) {
 	if err != nil || !got.Verified || got.ResetID != "reset" || got.RequestID != "key0" {
 		t.Fatalf("%+v %v", got, err)
 	}
-	latest, _, _ := db.LatestSnapshot(ctx, "claude")
+	latest, _, _ := db.LatestSnapshot(ctx, "main", "claude")
 	if latest.Weekly.Remaining != .9 {
 		t.Fatal(latest)
 	}
@@ -213,6 +272,12 @@ func TestRedeemBankedResetSelectionAndSafety(t *testing.T) {
 		{"unknown usability", "claude", "Claude did not report this reset as usable now", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true}}},
 		{"not usable", "claude", "Claude did not report this reset as usable now", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true, UsableNow: &no}}},
 		{"cooldown", "claude", "cooldown", []decision.BankedReset{{ID: "next", ResetsLeft: 1, Claimable: true, CooldownUntil: &later}}},
+		{"explained", "claude", "the Fable reset can't be used while you're at your weekly limit",
+			[]decision.BankedReset{{ID: "next", Kind: "fable", ResetsLeft: 1, Claimable: true, UsableNow: &no, UnavailableReason: "blocked_seven_day"}}},
+		{"paused is skipped", "codex", "live", []decision.BankedReset{{ID: "paused", ResetsLeft: 1, ExpiresAt: &sooner, Paused: true}, {ID: "live", ResetsLeft: 1, ExpiresAt: &later}}},
+		{"not started is skipped", "codex", "live", []decision.BankedReset{{ID: "future", ResetsLeft: 1, ExpiresAt: &sooner, StartsAt: &sooner}, {ID: "live", ResetsLeft: 1, ExpiresAt: &later}}},
+		{"only paused", "claude", "no claimable banked reset is available: the full reset it is paused",
+			[]decision.BankedReset{{ID: "next", Kind: "full", ResetsLeft: 1, Claimable: true, Paused: true, UnavailableReason: "paused"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := SelectBankedReset(tc.provider, tc.details, now)

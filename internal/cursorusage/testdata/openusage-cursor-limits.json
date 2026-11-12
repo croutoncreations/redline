@@ -1,0 +1,61 @@
+{
+  "errors": [],
+  "generatedAt": "2026-10-09T05:50:21.831Z",
+  "providers": {
+    "cursor": {
+      "displayName": "Cursor",
+      "expiresAt": "2026-10-09T05:50:34.883Z",
+      "fetchedAt": "2026-10-09T05:45:34.883Z",
+      "plan": "Pro",
+      "resources": {
+        "apiUsage": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 0,
+          "resetsAt": "2026-10-13T04:16:45.000Z",
+          "unit": "percent",
+          "used": 100,
+          "utilization": 1,
+          "windowSeconds": 2592000
+        },
+        "autoUsage": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-10-13T04:16:45.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 2592000
+        },
+        "credits": {
+          "available": 22.23,
+          "kind": "balance",
+          "unit": "usd"
+        },
+        "grokBot": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 41.991783,
+          "resetsAt": "2026-10-11T04:22:34.248Z",
+          "unit": "percent",
+          "used": 58.008217,
+          "utilization": 0.5800821700000001,
+          "windowSeconds": 604800
+        },
+        "totalUsage": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 95.16613756613756,
+          "resetsAt": "2026-10-13T04:16:45.000Z",
+          "unit": "percent",
+          "used": 4.833862433862434,
+          "utilization": 0.04833862433862434,
+          "windowSeconds": 2592000
+        }
+      },
+      "stale": false
+    }
+  },
+  "schema": "openusage.limits.v1"
+}
