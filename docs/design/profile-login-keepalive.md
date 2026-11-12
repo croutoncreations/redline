@@ -11,7 +11,8 @@ for the behaviour as shipped. Differences from this plan:
   `redline account status` line.
 - Every profile account is kept alive, including ones in `redline.yaml`, not only managed ones.
 - The process: 30s (status) / 90s (prompt) timeouts in its own process group, an allowlisted
-  environment (not the harness's drop list), a private work directory, output discarded.
+  environment (not the harness's drop list), a fresh private temporary directory per run,
+  output discarded.
   Failures retry after 5 minutes twice, then every 30 minutes. Off on Windows for now.
 - The command is not chosen by the overnight test. Both run: `auth status` throughout the lead
   window, then the prompt only inside the last 5 minutes, capped at 6 prompts per seat per day.

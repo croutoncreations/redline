@@ -123,7 +123,7 @@ idle seat it starts a 5-hour window. At most 6 such requests are sent per seat p
 
 Redline still never writes a credential: it only reads the expiry and checks that it moved. The
 renewal runs with a minimal environment (no API keys, base URLs, model overrides or other tools'
-secrets) in a private empty directory, and its output is discarded. Renewals run one at a time,
+secrets) in a fresh private temporary directory, and its output is discarded. Renewals run one at a time,
 skip an account while a Redline run is active on it (that run renews the login itself), and retry
 after 5 minutes, then 30. The default login and Codex are never touched. `claude` must be on the
 service's PATH; the Mac app adds `~/.local/bin`, Homebrew and `/usr/local/bin`. Not yet

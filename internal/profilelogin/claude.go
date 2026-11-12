@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +24,8 @@ const (
 type ClaudeRenewer struct {
 	// Binary is the claude executable; empty looks up "claude" on PATH.
 	Binary string
-	// WorkDir is an empty directory only this user can write; empty uses
-	// a "redline-profile-login" directory under the user's temp folder.
+	// WorkDir is an empty directory only this user can write; empty uses a
+	// fresh temporary directory per run.
 	WorkDir string
 	// timeout replaces the per-mode timeout; for tests.
 	timeout time.Duration
@@ -82,19 +81,26 @@ func ProfileEnvironment(env []string, dir string) []string {
 	return append(kept, "GATEPOST_HOST_DISABLE=1", "CLAUDE_CONFIG_DIR="+dir)
 }
 
-func (r ClaudeRenewer) workDir() (string, error) {
-	dir := r.WorkDir
-	if dir == "" {
-		dir = filepath.Join(os.TempDir(), "redline-profile-login")
+// workDir returns an empty directory only this user can use, and a cleanup.
+// By default a fresh one per run: os.MkdirTemp creates it 0700 under a
+// random name, so another user on a shared /tmp can neither pre-create nor
+// block it.
+func (r ClaudeRenewer) workDir() (string, func(), error) {
+	if r.WorkDir == "" {
+		dir, err := os.MkdirTemp("", "redline-profile-login-")
+		if err != nil {
+			return "", nil, err
+		}
+		return dir, func() { _ = os.RemoveAll(dir) }, nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+	if err := os.MkdirAll(r.WorkDir, 0o700); err != nil {
+		return "", nil, err
 	}
-	info, err := os.Lstat(dir)
+	info, err := os.Lstat(r.WorkDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ownedByMe(info) {
-		return "", fmt.Errorf("profile login work directory %s must be a private directory", dir)
+		return "", nil, fmt.Errorf("profile login work directory %s must be a private directory", r.WorkDir)
 	}
-	return dir, nil
+	return r.WorkDir, func() {}, nil
 }
 
 func (r ClaudeRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
@@ -110,10 +116,11 @@ func (r ClaudeRenewer) Renew(ctx context.Context, dir string, mode Mode) error {
 		}
 		binary = found
 	}
-	work, err := r.workDir()
+	work, cleanup, err := r.workDir()
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	timeout := PromptTimeout
 	if mode == ModeStatus {
 		timeout = StatusTimeout

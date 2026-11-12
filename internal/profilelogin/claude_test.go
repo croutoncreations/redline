@@ -132,3 +132,26 @@ func TestCertificateAuthorityOnlyWithAProxy(t *testing.T) {
 		t.Fatalf("without = %v, with = %v", without, with)
 	}
 }
+
+// Each run gets its own private directory, removed afterwards, so another
+// user on a shared /tmp cannot block renewals.
+func TestEachRenewalRunsInAFreshPrivateDirectory(t *testing.T) {
+	binary, record := fakeClaude(t, 0)
+	t.Setenv("TMPDIR", t.TempDir())
+	// Another user's leftover at the old fixed name changes nothing.
+	if err := os.Mkdir(filepath.Join(os.TempDir(), "redline-profile-login"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ClaudeRenewer{Binary: binary}).Renew(context.Background(), "/p", ModeStatus); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(record)
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	work := lines[len(lines)-1]
+	if !strings.Contains(filepath.Base(work), "redline-profile-login-") {
+		t.Fatalf("ran in %s", work)
+	}
+	if _, err := os.Stat(work); !os.IsNotExist(err) {
+		t.Fatalf("work directory %s was left behind", work)
+	}
+}
