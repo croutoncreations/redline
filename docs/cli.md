@@ -289,12 +289,20 @@ The desktop has no built-in push provider. See [push notifications](push-notific
 ```bash
 redline --config redline.yaml pair --qr
 redline --config redline.yaml pair --qr --host macbook-pro.example.ts.net --port 8443
+redline --config redline.yaml pair --qr --relay-only
 ```
 
-`--qr` is required. Without `--host`, the Tailscale MagicDNS name is discovered automatically; either
-way the host must be listed in `api.trusted_hosts`. `--port` defaults to 443.
+`--qr` is required. Without `--host`, Redline uses the detected Tailscale MagicDNS name if it is
+listed in `api.trusted_hosts`, otherwise the first trusted host; an explicit `--host` must be listed
+in `api.trusted_hosts` or the command fails. `--port` defaults to 443 and is overridden by a port
+written on the matching `trusted_hosts` entry. `--relay-only` omits the direct tailnet route and
+fails if the relay route is not currently usable. The code includes a relay route whenever the relay
+is connected, and the command prints the relay status before the QR code.
 
-See [Mobile dashboard setup](mobile.md).
+The relay is managed with `redline relay status|activate <key> [--label LABEL]|devices|device
+deactivate <id>|setup --url URL|off|deactivate`.
+
+See [Mobile dashboard setup](mobile.md) for the full pairing and relay flow.
 
 ## Related
 
