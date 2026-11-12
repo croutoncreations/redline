@@ -537,6 +537,11 @@ func resetKindGroups(details []decision.BankedReset, available int, now time.Tim
 	if len(groups) == 0 || spendable != available {
 		return nil
 	}
+	// Nothing said what any reset refills (Codex credits, for example): a
+	// single "Other" group says less than the plain count with deadlines.
+	if _, onlyUnknown := groups[""]; onlyUnknown && len(groups) == 1 {
+		return nil
+	}
 	var out []ResetKindGroup
 	for _, kind := range resetKindOrder {
 		group := groups[kind]

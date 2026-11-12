@@ -71,13 +71,25 @@ func TestMismatchedDetailsAreNotBrokenDown(t *testing.T) {
 	}
 }
 
-// Expired details are dropped, and an unknown kind is grouped as Other
-// rather than hidden.
+// Expired details are dropped, and an unknown kind beside known ones is
+// grouped as Other rather than hidden.
 func TestExpiredAndUnknownKinds(t *testing.T) {
-	credits := usageWithDetails(t, 1, `[
+	credits := usageWithDetails(t, 2, `[
 		{"id":"old","kind":"full","expires_at":"2026-07-01T00:00:00Z","resets_left":1},
+		{"id":"f","kind":"fable","resets_left":1},
 		{"id":"x","kind":"mystery","resets_left":1}]`)
-	if len(credits.Kinds) != 1 || credits.Kinds[0].Label != "Other" || credits.Kinds[0].Available != 1 || len(credits.Kinds[0].Expiries) != 0 {
+	if len(credits.Kinds) != 2 || credits.Kinds[0].Label != "Fable" || credits.Kinds[1].Label != "Other" || credits.Kinds[1].Available != 1 {
 		t.Fatalf("kinds = %+v", credits.Kinds)
+	}
+}
+
+// Credits that never say what they refill (Codex) are not broken down at
+// all: "Other 2" would replace the count and deadlines with less.
+func TestResetsWithNoKindAreNotBrokenDown(t *testing.T) {
+	credits := usageWithDetails(t, 2, `[
+		{"id":"c1","expires_at":"2026-07-30T00:00:00Z","resets_left":1},
+		{"id":"c2","expires_at":"2026-08-02T00:00:00Z","resets_left":1}]`)
+	if credits == nil || credits.Available != 2 || credits.Kinds != nil {
+		t.Fatalf("credits = %+v", credits)
 	}
 }
