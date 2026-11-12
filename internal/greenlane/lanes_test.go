@@ -128,7 +128,7 @@ func TestRenamesCountBothPaths(t *testing.T) {
 		{Filename: "web/package.json", PreviousFilename: "package.json", Status: "renamed", Patch: packageJSONBump},
 		{Filename: "go.sum", PreviousFilename: "docs/go.sum.md", Status: "renamed"},
 	} {
-		res := eval.Evaluate(passingPR(f), nil, nil)
+		res := eval.Evaluate(passingPR(f))
 		if res.Lane != LaneDocsDeps {
 			t.Fatalf("%s: lane = %s", f.Filename, res.Lane)
 		}
@@ -147,7 +147,7 @@ func TestRenamesCountBothPaths(t *testing.T) {
 func TestDocsDepsLaneSkipsRepro(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	pr := passingPR(PRFile{Filename: "docs/cli.md", Additions: 11, Deletions: 3})
-	res := eval.Evaluate(pr, &ReproResult{Inconclusive: true, Message: "No test files changed in PR"}, nil)
+	res := eval.Evaluate(pr)
 	if res.Lane != LaneDocsDeps {
 		t.Fatalf("lane = %s", res.Lane)
 	}
@@ -166,7 +166,7 @@ func TestDocsDepsLaneSkipsRepro(t *testing.T) {
 
 func TestCodeLaneUsesCIWithoutMandatoryRepro(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
-	res := eval.Evaluate(passingPR(PRFile{Filename: "internal/cli/cli.go", Additions: 5}), nil, nil)
+	res := eval.Evaluate(passingPR(PRFile{Filename: "internal/cli/cli.go", Additions: 5}))
 	if res.Lane != LaneCode || hasRule(res, "Test Repro") || hasRule(res, "File Types") || res.Verdict != VerdictWouldMerge {
 		t.Fatalf("lane=%s rules=%+v", res.Lane, res.Rules)
 	}
@@ -175,7 +175,7 @@ func TestCodeLaneUsesCIWithoutMandatoryRepro(t *testing.T) {
 func TestDocsDepsLaneHasTighterCaps(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
 	// 120 lines of docs pass the code lane's 150 cap but not the docs lane's.
-	res := eval.Evaluate(passingPR(PRFile{Filename: "docs/big.md", Additions: 120}), nil, nil)
+	res := eval.Evaluate(passingPR(PRFile{Filename: "docs/big.md", Additions: 120}))
 	if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "max 100") {
 		t.Errorf("Size = %+v, want fail at the docs/deps cap", r)
 	}
@@ -183,7 +183,7 @@ func TestDocsDepsLaneHasTighterCaps(t *testing.T) {
 	for _, f := range []string{"a.md", "b.md", "c.md", "d.md", "e.md", "f.md"} {
 		files = append(files, PRFile{Filename: f, Additions: 1})
 	}
-	res = eval.Evaluate(passingPR(files...), nil, nil)
+	res = eval.Evaluate(passingPR(files...))
 	if r := ruleByName(t, res, "Size"); r.Pass || !strings.Contains(r.Message, "max 5") {
 		t.Errorf("Size = %+v, want fail at 5 files", r)
 	}
@@ -199,7 +199,7 @@ func TestLockfileOnlyBumpStillFailsSize(t *testing.T) {
 		PRFile{Filename: "go.mod", Additions: 1, Deletions: 3, Patch: "@@ -1,8 +1,6 @@\n module x\n \n-go 1.26.0\n-\n-toolchain go1.26.6\n+go 1.26.9\n"},
 		PRFile{Filename: "marketing/video/package-lock.json", Additions: 3, Deletions: 3},
 	)
-	res := eval.Evaluate(pr, nil, nil)
+	res := eval.Evaluate(pr)
 	if res.Lane != LaneDocsDeps {
 		t.Fatalf("lane = %s", res.Lane)
 	}
@@ -219,7 +219,7 @@ func TestDocsDepsLockfileOnlyPRsFailSize(t *testing.T) {
 	for lockfile := range depLockfiles {
 		for _, dir := range []string{"", "web/"} {
 			name := dir + lockfile
-			res := eval.Evaluate(passingPR(PRFile{Filename: name, Additions: 4, Deletions: 4}), nil, nil)
+			res := eval.Evaluate(passingPR(PRFile{Filename: name, Additions: 4, Deletions: 4}))
 			if res.Lane != LaneDocsDeps {
 				t.Fatalf("%s: lane = %s", name, res.Lane)
 			}
@@ -242,7 +242,7 @@ func TestDocsDepsWhitespaceManifestDoesNotCoverLockfile(t *testing.T) {
 		PRFile{Filename: "go.mod", Additions: 1, Patch: "@@ -1,2 +1,3 @@\n module x\n+\n go 1.26"},
 		PRFile{Filename: "go.sum", Additions: 4, Deletions: 4},
 	)
-	res := eval.Evaluate(pr, nil, nil)
+	res := eval.Evaluate(pr)
 	if res.Lane != LaneDocsDeps {
 		t.Fatalf("lane = %s", res.Lane)
 	}
@@ -371,7 +371,7 @@ func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
 	for _, file := range []string{
 		"scripts/brew-lint.sh", "scripts/check-homebrew-versions.sh", "scripts/update-homebrew-cask.sh",
 		"cmd/green-lane-check/main.go",
-		"cmd/green-lane-repro-analyze/analyze.go",
+		"cmd/green-lane-provenance/main.go",
 		"internal/greenlane/rules.go",
 		"internal/greenlane/testdata/x.json",
 		".github/workflows/green-lane-shadow.yml",
@@ -397,7 +397,7 @@ func TestDeniedPathsCoverGreenLaneCode(t *testing.T) {
 // but stay off limits.
 func TestDocsDepsLaneKeepsDeniedPaths(t *testing.T) {
 	eval := NewEvaluator(DefaultConfig())
-	res := eval.Evaluate(passingPR(PRFile{Filename: ".github/release-notes-draft.md", Additions: 2}), nil, nil)
+	res := eval.Evaluate(passingPR(PRFile{Filename: ".github/release-notes-draft.md", Additions: 2}))
 	if res.Lane != LaneDocsDeps || ruleByName(t, res, "Denied Paths").Pass {
 		t.Errorf("lane=%s denied=%+v", res.Lane, ruleByName(t, res, "Denied Paths"))
 	}
@@ -441,7 +441,7 @@ func TestPlausibleLockfileEditsRemainIneligible(t *testing.T) {
 		"@@ -10,2 +10,2 @@\n     \"node_modules/safe\": {\n-      \"version\": \"2.0.0\",\n+      \"version\": \"1.0.0\",",
 	} {
 		files := []PRFile{{Filename: "package.json", Patch: packageJSONBump}, {Filename: "package-lock.json", Patch: patch}}
-		res := NewEvaluator(DefaultConfig()).Evaluate(passingPR(files...), nil, nil)
+		res := NewEvaluator(DefaultConfig()).Evaluate(passingPR(files...))
 		r := ruleByName(t, res, "File Types")
 		if r.Pass || !r.Inconclusive || !strings.Contains(r.Message, "trusted resolver validation") {
 			t.Fatalf("lockfile admitted: %+v", r)

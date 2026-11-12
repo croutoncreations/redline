@@ -250,7 +250,7 @@ repositories, paths, credentials, or live allowance data.
 
 ## Green Lane Shadow Check
 
-The `green-lane-shadow` check runs on every PR to simulate auto-merge decisions **without actually merging anything**. It evaluates six rules (size, test repro, CI status, cross-vendor review, duplicate detection, denied paths) and posts a clear "would merge" or "would not merge" verdict as a GitHub check run.
+The `green-lane-shadow` check runs on every PR to simulate auto-merge decisions **without actually merging anything**. It evaluates a simple policy (trusted author, completed review, size, CI status, denied paths) and posts a clear "would merge" or "would not merge" verdict as a GitHub check run.
 
 **This is shadow mode only.** The check is report-only and will never merge, approve, or modify settings. It helps validate the auto-merge design before the full infrastructure (trusted dispatcher, reviewer Apps, gate App, provenance verification) is built.
 

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,15 +74,9 @@ func apiClient(t *testing.T, mode string) (*GitHubClient, *apiFixture) {
 				total = 2
 			}
 			send(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{"headRefOid": head, "baseRefOid": "base", "reviewThreads": map[string]any{"totalCount": total, "nodes": nodes, "pageInfo": map[string]any{"hasNextPage": next, "endCursor": cursor}}}}}})
-		case r.URL.Path == "/repos/owner/repo/pulls":
-			send([]any{map[string]any{"number": 1, "body": "stale root cause"}})
 		case strings.HasSuffix(r.URL.Path, "/files"):
 			name := "README.md"
 			previous := ""
-			if mode == "renamed duplicate" {
-				name = "src/new.go"
-				previous = "src/old.go"
-			}
 			if mode == "missing file page" {
 				send([]any{})
 				return
@@ -153,7 +146,7 @@ func TestGitHubSnapshotPaginationAndCIIdentity(t *testing.T) {
 	if pr.CheckRuns[0].WorkflowID != 321038296 || pr.Reviews[0].SubmittedAt.IsZero() {
 		t.Fatal("lost check or review identity")
 	}
-	result := greenlane.NewEvaluator(c.config).Evaluate(pr, nil, nil)
+	result := greenlane.NewEvaluator(c.config).Evaluate(pr)
 	if !result.AdvisoryCandidate || result.Verdict != greenlane.VerdictWouldMerge {
 		t.Fatalf("reviewed candidate should qualify without provenance: %+v", result)
 	}
@@ -176,21 +169,11 @@ func TestGitHubChangedSnapshotAndWrongSourcesCannotBeCandidates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := greenlane.NewEvaluator(c.config).Evaluate(pr, nil, nil)
+			r := greenlane.NewEvaluator(c.config).Evaluate(pr)
 			if r.AdvisoryCandidate {
 				t.Fatalf("%s admitted: %+v", mode, r)
 			}
 		})
-	}
-}
-func TestDuplicateDiscoveryIncludesBothRenamePaths(t *testing.T) {
-	c, _ := apiClient(t, "renamed duplicate")
-	prs, err := c.GetOpenPRs(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(prs) != 1 || fmt.Sprint(prs[0].Files) != "[src/new.go src/old.go]" || prs[0].RootCause != "docs/readme#example" {
-		t.Fatalf("incomplete duplicates: %+v", prs)
 	}
 }
 func TestEvidenceComparisonDetectsReviewAndCheckChanges(t *testing.T) {

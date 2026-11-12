@@ -87,8 +87,7 @@ module.exports = async function live({github, accessAudit, context, core, run=ex
     const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
       encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
       env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
-        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
-        DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
+        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',REQUIRE_AUTOMATED_REVIEW:'true'}
     }));
     report.evaluations.push(result);
     await write(report);

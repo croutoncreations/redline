@@ -125,12 +125,12 @@ func TestSimplePolicyNeedsNoProvenanceReproOrTrailer(t *testing.T) {
 	p.Body = "Small bug fix"
 	p.Reviews[0].State = "COMMENTED"
 	p.Reviews[0].Body = "Reviewed the implementation and focused tests"
-	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
+	r := NewEvaluator(DefaultConfig()).Evaluate(p)
 	if r.Verdict != VerdictWouldMerge || !r.AdvisoryCandidate {
 		t.Fatalf("simple reviewed fix must qualify: %+v", r)
 	}
 	p.Files = []PRFile{{Filename: "go.mod", Patch: goModBump}, {Filename: "go.sum", Patch: "@@ -1 +1 @@\n+example.org/x v1.0.0 h1:abc="}}
-	if r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil); r.AdvisoryCandidate {
+	if r := NewEvaluator(DefaultConfig()).Evaluate(p); r.AdvisoryCandidate {
 		t.Fatal("unverified lockfile admitted candidate")
 	}
 }
