@@ -963,3 +963,30 @@ func projectByName(p hermes.ProfileOptions, name string) hermes.Project {
 	}
 	return hermes.Project{}
 }
+
+// A Gateway URL can be edited through the API and the Gateway is a remote
+// party, so a response must not be able to make the service buffer an
+// unbounded JSON document.
+func TestListJobsRejectsOversizedGatewayResponse(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jobs":[`))
+		chunk := []byte(strings.Repeat(`{"id":"x","name":"padding"},`, 4096))
+		// Far past any bound; the client must stop reading well before the
+		// server finishes (a write error ends the loop once it disconnects).
+		for written := 0; written < 256<<20; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer gateway.Close()
+	client := hermes.Client{HTTPClient: func(_ context.Context, _ domain.RuntimeConnection) (*http.Client, string, error) {
+		return gateway.Client(), gateway.URL, nil
+	}}
+
+	_, err := client.ListJobs(t.Context(), domain.RuntimeConnection{ID: "remote", Runtime: "hermes", Transport: "gateway"})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want an oversized-response error", err)
+	}
+}
