@@ -85,7 +85,7 @@ func TestUsageMonitorBankedResetReminderFailures(t *testing.T) {
 			if len(status.Providers) != 1 || (status.Providers[0].Error != "") != wantUsageError {
 				t.Fatalf("status=%+v", status)
 			}
-			_, _, snapshotErr := db.LatestSnapshot(t.Context(), "codex")
+			_, _, snapshotErr := db.LatestSnapshot(t.Context(), "codex-main", "codex")
 			if (snapshotErr != nil) != wantUsageError {
 				t.Fatalf("snapshot error=%v", snapshotErr)
 			}

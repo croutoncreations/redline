@@ -14,6 +14,17 @@ api:
   # trusted_hosts:
   #   - macbook-pro.example.ts.net
 
+# Optional bootstrap for relay-state.json. Once managed state exists, it wins
+# and this block is no longer consulted. An enabled relay with no URL selects
+# Redline's hosted relay; setting URL selects a token-free self-hosted relay.
+# The service never rewrites this YAML. session_id, license_key, and
+# entitlement_token are not configuration: session_id is generated into the
+# managed state file and the hosted license is stored only in macOS Keychain.
+relay:
+  enabled: false
+  # url: https://relay.example.com       # self-hosted only
+  # issuer_url: https://issuer.example.com/api  # hosted override only
+
 # Automatic dispatch is opt-in so installing or upgrading Redline cannot start
 # spending subscription capacity unexpectedly.
 scheduler:
@@ -27,6 +38,9 @@ scheduler:
 usage_monitor:
   enabled: true
   poll_interval: 5m
+  # Run Claude Code under each Claude Code profile account shortly before its
+  # login expires, so Claude Code renews it. Redline never writes the login.
+  keep_profile_logins_fresh: true
 
 # Optional public Codex reset monitoring; independent of scheduler/usage_monitor.
 # Alerts and firesales are announcement-only, never odds-based.
@@ -47,7 +61,14 @@ notifications:
   enabled: false
   command: ./scripts/redline-notify
   timeout: 30s
-  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended]
+  events: [run.started, run.completed, run.failed, scheduler.error, reset.expiring, reset.redeemed, reset.redeem_failed, firesale.started, firesale.ended, account.needs_login]
+
+# Display-only Cursor and Grok Bot usage for the dashboards. Never affects
+# scheduling. off (default), openusage (OpenUsage's cached Cursor card),
+# native (read the signed-in Cursor app's token without refreshing it), or auto.
+cursor_usage:
+  source: off
+  poll_interval: 5m
 
 # Optional provider-neutral push wake-ups; no push provider is built in.
 # Requires notifications.enabled. See docs/push-notifications.md.
@@ -56,6 +77,15 @@ notifications:
 #   auth_token_file: "" # Existing 0600 file containing the relay shared secret.
 
 providers:
+  # To queue jobs on Cursor, add a provider: cursor account (see
+  # docs/profiles-and-tasks.md#cursor). It runs the Cursor CLI (`cursor-agent`, sandboxed) with its
+  # own login and is scheduled only from the monthly subscription pools, never
+  # on-demand spend:
+  #   cursor-main:
+  #     provider: cursor
+  #     usage_source: openusage
+  #     openusage_url: http://127.0.0.1:6736
+  #     window_weekly_cost: 0.10
   codex-main:
     provider: codex
     # The banked_resets options shown under claude-main apply to Codex too.
@@ -76,12 +106,36 @@ providers:
     # Bootstrap fallback. Redline learns an observed ratio when a 5-hour
     # window is present and enough paired snapshot history is available.
     window_weekly_cost: 0.10
+    # Spark is a built-in model group (aliases: spark and
+    # gpt-5.3-codex-spark). Spark tasks require its model-specific short and
+    # weekly pools; rolling_reserve protects the short pool. Override
+    # model_groups.spark only to add or replace provider model identifiers:
+    # model_groups:
+    #   spark:
+    #     aliases: [spark, gpt-5.3-codex-spark]
+    #     required_allowance_roles: [short, weekly]
   claude-main:
     provider: claude
     usage_source: auto
     openusage_url: http://127.0.0.1:6736
     # One full 5-hour allowance expressed as a fraction of the weekly limit.
     window_weekly_cost: 0.08
+    # Team seats with no reported weekly cap hold by default (weekly_policy: "").
+    # Explicitly opt in to scheduling only the 5-hour window and model limits.
+    # The real weekly cap is hidden and may still stop runs.
+    # weekly_policy: session_only  # Claude only
+    # session_reserve: 0.50       # protected fraction, 0 <= value < 1; default 0.50
+    # session_reserve is only valid with weekly_policy: session_only.
+    # Optional name shown in the apps instead of the ID (never an email).
+    # label: Personal
+    # More Claude accounts: sign in to each in OpenUsage on this Mac, list the
+    # cards with `redline account discover claude`, and add one account per
+    # card (`redline account add claude-client --provider claude --card
+    # claude@ab12cd34 --label Client`). Each account reads only its own card
+    # and is scheduled only by tasks whose profile names it; Redline never
+    # moves work between accounts. Without a card an account reads the
+    # default login, and only one Claude account may do that.
+    # openusage_card: claude
     # Banked-reset reminders require notifications.enabled (defaults shown).
     # banked_resets:
     #   remind_before: [24h] # [] disables reminders, not the expiry action
@@ -107,6 +161,15 @@ policies:
     rolling_reserve: 0.40
     pace_thresholds:
       - { time_remaining: 24h, min_weekly_remaining: 0.50 }
+    # Used only by accounts that report no five-hour window (verified Claude
+    # Ultra, Codex without its short limit). Those never get 5-hour slot
+    # overflow, so the weekly reset is the only clock: run when what is left
+    # is at least ~1.4x the share of the week still to go.
+    weekly_only_pace_thresholds:
+      - { time_remaining: 72h, min_weekly_remaining: 0.60 }
+      - { time_remaining: 48h, min_weekly_remaining: 0.40 }
+      - { time_remaining: 24h, min_weekly_remaining: 0.20 }
+      - { time_remaining: 6h, min_weekly_remaining: 0.05 }
   standard:
     trigger_margin: 0.02
     rolling_reserve: 0.25

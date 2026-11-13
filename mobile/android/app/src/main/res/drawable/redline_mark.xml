@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Redline gauge mark, ported from macos/Sources/RedlineMenuBar/Resources/AppIcon.svg
+  so the phone and the menu bar show the same logo rather than two drawings that
+  drift apart.
+
+  The rounded-rect background of the app icon is dropped: this sits on the dark
+  header, and painting its own panel behind it would box it in. Geometry is
+  otherwise unchanged from the SVG, with the viewport cropped to the dial so the
+  mark optically fills its box instead of floating in the icon's padding.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="17dp"
+    android:viewportWidth="640"
+    android:viewportHeight="420">
+
+    <group android:translateX="-192" android:translateY="-300">
+
+        <!--
+          Dial: centre (512, 650), radius 310, stroke 64. The track runs 155deg to
+          25deg and the redline runs 48deg to 25deg on the same circle, so the two
+          are flush segments of one 130deg arc.
+        -->
+        <path
+            android:pathData="M231,519 A310,310 0 0 1 793,519"
+            android:strokeColor="#F7F7F8"
+            android:strokeWidth="64"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.95" />
+        <path
+            android:pathData="M719.4,419.6 A310,310 0 0 1 793,519"
+            android:strokeColor="#EF3F45"
+            android:strokeWidth="64"
+            android:strokeLineCap="round" />
+
+        <!--
+          Graduation notches, radial to the same centre. Endpoints sit at r 287 and
+          333 so the 9-unit round caps land exactly on the 278..342 stroke band
+          instead of bleeding past its edges.
+        -->
+        <path
+            android:pathData="M276.9,485.4 L239.2,459"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M390.7,389.9 L371.3,348.2"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M633.3,389.9 L652.7,348.2"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+        <path
+            android:pathData="M747.1,485.4 L784.8,459"
+            android:strokeColor="#111114"
+            android:strokeWidth="18"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.75" />
+
+        <!--
+          Needle pivots on the dial centre at 55deg, just short of the 48deg-25deg
+          redline segment: approaching the limit rather than past it.
+        -->
+        <path
+            android:pathData="M487.4,632.8 L656.5,443.6 L536.6,667.2 Z"
+            android:fillColor="#F7F7F8" />
+        <path
+            android:pathData="M512,650 m-62,0 a62,62 0 1,0 124,0 a62,62 0 1,0 -124,0"
+            android:fillColor="#F7F7F8" />
+        <path
+            android:pathData="M512,650 m-26,0 a26,26 0 1,0 52,0 a26,26 0 1,0 -52,0"
+            android:fillColor="#EF3F45" />
+
+    </group>
+</vector>

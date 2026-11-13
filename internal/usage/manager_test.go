@@ -80,6 +80,31 @@ func TestAutoSourceImmediatelyFallsBackWhenOpenUsageSnapshotIsStale(t *testing.T
 	}
 }
 
+// A report OpenUsage marks out of date holds dispatch, so auto failover
+// treats it like a stale timestamp and reads the native collector. When
+// that fails too, the out-of-date report is kept: it still holds dispatch
+// and is better to show than nothing.
+func TestAutoSourceFallsBackWhenOpenUsageReportsItselfStale(t *testing.T) {
+	now := time.Date(2026, 7, 24, 18, 30, 0, 0, time.UTC)
+	outOfDate := snapshot("openusage", now)
+	outOfDate.SourceStale = true
+	open := &fakeSource{name: "openusage", results: []sourceResult{{snapshot: outOfDate}, {snapshot: outOfDate}}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}, {err: errors.New("native offline")}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "claude", UsageSource: "auto"}
+
+	got, _, err := manager.Fetch(context.Background(), "claude-main", provider)
+	if err != nil || got.Source != "native" || got.SourceStale || native.calls != 1 {
+		t.Fatalf("snapshot=%#v err=%v native_calls=%d", got, err, native.calls)
+	}
+
+	other := usage.NewManager(open, native, func() time.Time { return now })
+	got, _, err = other.Fetch(context.Background(), "claude-main", provider)
+	if err != nil || got.Source != "openusage" || !got.SourceStale {
+		t.Fatalf("both unusable: snapshot=%#v err=%v", got, err)
+	}
+}
+
 func TestExplicitNativeNeverCallsOpenUsage(t *testing.T) {
 	now := time.Now()
 	open := &fakeSource{name: "openusage"}
@@ -178,4 +203,37 @@ func (f *fakeSource) Fetch(context.Context, config.Provider) (decision.UsageSnap
 func snapshot(source string, now time.Time) decision.UsageSnapshot {
 	return decision.UsageSnapshot{Provider: "codex", ObservedAt: now, Source: source, Confidence: "high",
 		Weekly: decision.UsageWindow{Remaining: .9, ResetsAt: now.Add(6 * 24 * time.Hour)}}
+}
+
+// An account bound to a non-default OpenUsage card must never fall back to
+// the native collector, which reads the default login (another account).
+func TestNonDefaultCardNeverFallsBackToNative(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	open := &fakeSource{name: "openusage", results: []sourceResult{
+		{err: errors.New("offline one")}, {err: errors.New("offline two")}, {err: errors.New("offline three")},
+	}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "claude", UsageSource: "auto", OpenUsageCard: "claude@ab12cd34"}
+	for range 3 {
+		if _, _, err := manager.Fetch(context.Background(), "claude-client", provider); err == nil {
+			t.Fatal("expected the OpenUsage failure to surface")
+		}
+	}
+	if native.calls != 0 {
+		t.Fatalf("native collector called %d times for a non-default card", native.calls)
+	}
+}
+
+// The bare family card is the default login, so auto may still fall back.
+func TestBareCardKeepsAutoFallback(t *testing.T) {
+	now := time.Date(2026, 7, 22, 18, 0, 0, 0, time.UTC)
+	open := &fakeSource{name: "openusage", results: []sourceResult{{err: errors.New("one")}, {err: errors.New("two")}}}
+	native := &fakeSource{name: "native", results: []sourceResult{{snapshot: snapshot("native", now)}, {snapshot: snapshot("native", now)}}}
+	manager := usage.NewManager(open, native, func() time.Time { return now })
+	provider := config.Provider{Provider: "codex", UsageSource: "auto", OpenUsageCard: "codex"}
+	_, _, _ = manager.Fetch(context.Background(), "codex-main", provider)
+	if got, _, err := manager.Fetch(context.Background(), "codex-main", provider); err != nil || got.Source != "native" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
 }

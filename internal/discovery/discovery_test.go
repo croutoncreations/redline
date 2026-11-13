@@ -3,6 +3,8 @@ package discovery_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,12 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 				return []byte("Hermes Agent v0.18.2 (2026.7.7.2)\nInstall directory: /opt/hermes\nUpdate available\n"), nil
 			case "/bin/codex login status", "/bin/claude auth status":
 				return []byte("authenticated\n"), nil
+			case "/bin/cursor-agent --version":
+				return []byte("2026.10.01-e373342\n"), nil
+			case "/bin/cursor-agent status --format json":
+				return []byte(`{"status":"authenticated","isAuthenticated":true,"hasAccessToken":true}` + "\n"), nil
+			case "/bin/cursor-agent models":
+				return cursorModels(t), nil
 			case "/bin/pi --offline --list-models openai-codex":
 				return []byte(piCodexModels), nil
 			case "/bin/pi --offline --list-models anthropic-cli":
@@ -44,11 +52,15 @@ func TestCatalogDiscoversInstalledHarnessVersionsAndModels(t *testing.T) {
 	}
 
 	catalog := service.Discover(t.Context())
-	if len(catalog.Harnesses) != 5 {
+	if len(catalog.Harnesses) != 6 {
 		t.Fatalf("harnesses = %#v", catalog.Harnesses)
 	}
 	assertHarness(t, catalog, "codex-cli", true, "0.144.6", "codex", "gpt-5.5")
 	assertHarness(t, catalog, "claude-code", true, "2.1.211", "claude", "claude-opus-4-8")
+	assertHarness(t, catalog, "cursor-agent", true, "2026.10.01-e373342", "cursor", "claude-opus-5-5-high")
+	if findHarness(t, catalog, "cursor-agent").Authentication != "authenticated" {
+		t.Fatalf("cursor authentication was not detected: %#v", findHarness(t, catalog, "cursor-agent"))
+	}
 	assertHarness(t, catalog, "pi", true, "0.80.10", "codex", "openai-codex/gpt-5.6-sol")
 	assertHarness(t, catalog, "pi", true, "0.80.10", "claude", "anthropic-cli/claude-fable-5")
 	hermesHarness := findHarness(t, catalog, "hermes")
@@ -215,3 +227,124 @@ anthropic-cli  claude-opus-4-8               200K    64K     yes      yes
 `
 
 const piConfiguredModels = `{"providers":{"openai-codex":{"models":[{"id":"gpt-5.6-sol","name":"GPT-5.6 Sol","contextWindow":1000000,"maxTokens":128000,"reasoning":true,"input":["text","image"]}]},"anthropic-cli":{"models":[{"id":"claude-opus-4-8","name":"Claude Opus 4.8","contextWindow":200000,"maxTokens":32000,"reasoning":false,"input":["text","image"]}]}}}`
+
+func cursorModels(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "agent-models.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// Recorded `agent models` output (model names only).
+func TestParseCursorModelsReadsTheCLIList(t *testing.T) {
+	models := discovery.ParseCursorModels(string(cursorModels(t)))
+	if len(models) < 100 {
+		t.Fatalf("parsed %d models", len(models))
+	}
+	byID := map[string]discovery.Model{}
+	for _, model := range models {
+		if model.Source != "cursor_cli" || strings.ContainsAny(model.ID, " \t") {
+			t.Fatalf("model = %#v", model)
+		}
+		byID[model.ID] = model
+	}
+	if byID["auto"].Label != "Auto" {
+		t.Fatalf("auto = %#v; the (current, default) marker must be dropped", byID["auto"])
+	}
+	if byID["grok-4.7-low-fast"].Label != "Grok 4.7 Low Fast" {
+		t.Fatalf("zero-width characters and doubled spaces must be cleaned: %q", byID["grok-4.7-low-fast"].Label)
+	}
+	if _, ok := byID["Available"]; ok {
+		t.Fatal("header line parsed as a model")
+	}
+}
+
+// A signed-out Cursor CLI must not be asked for models: it would prompt.
+func TestCursorSignedOutSkipsModelListing(t *testing.T) {
+	asked := false
+	service := discovery.Service{
+		LookPath: func(name string) (string, error) {
+			if name == "cursor-agent" {
+				return "/bin/cursor-agent", nil
+			}
+			return "", errors.New("missing")
+		},
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch strings.Join(args, " ") {
+			case "--version":
+				return []byte("2026.10.01"), nil
+			case "status --format json":
+				return []byte(`{"status":"unauthenticated","isAuthenticated":false}`), nil
+			case "models":
+				asked = true
+			}
+			return nil, errors.New("unexpected")
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
+	cursor := findHarness(t, service.Discover(t.Context()), "cursor-agent")
+	if cursor.Authentication != "signed_out" || asked || len(cursor.Models) != 0 {
+		t.Fatalf("cursor = %#v, models asked = %v", cursor, asked)
+	}
+}
+
+// An unreadable login status is said, not left blank: the model list is
+// skipped then, and an empty list would read as the account offering none.
+func TestCursorUnreadableStatusIsReported(t *testing.T) {
+	service := discovery.Service{
+		LookPath: func(name string) (string, error) {
+			if name == "cursor-agent" {
+				return "/bin/cursor-agent", nil
+			}
+			return "", errors.New("missing")
+		},
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if strings.Join(args, " ") == "--version" {
+				return []byte("2026.10.01"), nil
+			}
+			return []byte("Press any key to sign in"), errors.New("exit status 1")
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
+	cursor := findHarness(t, service.Discover(t.Context()), "cursor-agent")
+	if cursor.Authentication != "" || !strings.Contains(cursor.Error, "login status") {
+		t.Fatalf("cursor = %#v", cursor)
+	}
+}
+
+// Cursor CLI 2026.10 pretty-prints its status JSON across lines, after any
+// progress text. Recorded shape, account details replaced.
+func TestCursorMultiLineStatusIsRead(t *testing.T) {
+	status := "Checking login...\n{\n  \"status\": \"authenticated\",\n  \"isAuthenticated\": true,\n" +
+		"  \"hasAccessToken\": true,\n  \"userInfo\": {\n    \"email\": \"person@example.com\"\n  }\n}\n"
+	service := discovery.Service{
+		LookPath: func(name string) (string, error) {
+			if name == "cursor-agent" {
+				return "/bin/cursor-agent", nil
+			}
+			return "", errors.New("missing")
+		},
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch strings.Join(args, " ") {
+			case "--version":
+				return []byte("2026.10.01-e373342"), nil
+			case "status --format json":
+				return []byte(status), nil
+			case "models":
+				return cursorModels(t), nil
+			}
+			return nil, errors.New("unexpected")
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
+	cursor := findHarness(t, service.Discover(t.Context()), "cursor-agent")
+	if cursor.Authentication != "authenticated" || cursor.Error != "" || len(cursor.Models["cursor"]) == 0 {
+		t.Fatalf("cursor = %#v", cursor)
+	}
+	// Only the boolean is kept: the account email never reaches the catalog.
+	if strings.Contains(fmt.Sprintf("%#v", cursor), "person@example.com") {
+		t.Fatal("account details leaked into discovery")
+	}
+}

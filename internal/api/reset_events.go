@@ -74,7 +74,7 @@ func (s *Server) automaticResetState(ctx context.Context, providerID, name strin
 			}
 		}
 		if reset.ExpiresAt == nil {
-			reset.ExpiresAt, err = s.store.LastBankedResetExpiry(ctx, name, reset.ID)
+			reset.ExpiresAt, err = s.store.LastBankedResetExpiry(ctx, providerID, name, reset.ID)
 			if err != nil {
 				return state, err
 			}
@@ -113,7 +113,7 @@ func (s *Server) automaticAttemptAt(provider config.Provider, state automaticRes
 			at = deadline
 		}
 	}
-	later(s.usageSources.NativeBlockedUntil(name))
+	later(s.usageSources.LoginBlockedUntil(provider))
 	if state.pending.ID != 0 {
 		later(state.pending.CreatedAt.Add(5 * time.Minute))
 	}
@@ -162,7 +162,7 @@ func (s *Server) automaticallyRedeemable(ctx context.Context, providerID string,
 }
 
 func automaticResetUsable(provider string, reset decision.BankedReset, at time.Time) bool {
-	if reset.ID == "" || reset.ResetsLeft <= 0 || reset.ExpiresAt == nil || !reset.ExpiresAt.After(at) {
+	if reset.ID == "" || !reset.Spendable(at) || reset.ExpiresAt == nil || !reset.ExpiresAt.After(at) {
 		return false
 	}
 	if provider == "claude" {
@@ -174,9 +174,8 @@ func automaticResetUsable(provider string, reset decision.BankedReset, at time.T
 }
 
 func (s *Server) automaticRedemptionEnabled(provider config.Provider) bool {
-	name := strings.ToLower(strings.TrimSpace(provider.Provider))
 	return provider.BankedResetOnExpiry() == "redeem" && !s.redemptionDisabled &&
-		s.config.UsageMonitor.Enabled && !s.usageSources.SkipBankedResetProviders[name]
+		s.config.UsageMonitor.Enabled && s.redemptionAccountError(provider) == nil
 }
 
 func (s *Server) providerResetEvents(ctx context.Context, providerID string, snapshot decision.UsageSnapshot) ([]decision.ResetEvent, error) {

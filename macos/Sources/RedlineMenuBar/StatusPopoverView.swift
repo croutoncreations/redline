@@ -10,6 +10,8 @@ struct StatusPopoverActions {
     let enableNotifications: @MainActor () -> Void
     let showAgentPermissionHelp: @MainActor () -> Void
     let showAppSetup: @MainActor () -> Void
+    let pairDevice: @MainActor () -> Void
+    let manageSubscription: @MainActor () -> Void
     let quit: @MainActor () -> Void
 }
 
@@ -19,6 +21,7 @@ struct StatusPopoverView: View {
 
     private var snapshot: DashboardSnapshot? { model.snapshot }
     private var trayState: TrayState? { snapshot.map(TrayState.init) }
+    private var relayStatus: RelayStatus? { model.relayStatus }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +33,12 @@ struct StatusPopoverView: View {
                     installationSafetySection
                     failureSection
                     providerGrid
+                    if let cursor = snapshot?.cursorUsage {
+                        CursorUsageSection(
+                            report: cursor,
+                            scheduled: snapshot?.providers.contains { $0.provider == "cursor" } ?? false
+                        )
+                    }
                     activitySection
                     queueSection
                     recentRunsSection
@@ -165,6 +174,12 @@ struct StatusPopoverView: View {
 					}
 				}
                 Text(activityDetail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                if let relayStatus {
+                    Text(RelayStatusLine.line(for: relayStatus))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             if model.isRefreshing {
@@ -177,17 +192,47 @@ struct StatusPopoverView: View {
         .padding(.vertical, 15)
     }
 
+    /// Claude accounts, when there are two or more, as compact rows; every
+    /// other provider (and a lone Claude account) keeps today's card.
+    /// Provider cards share a row only up to this many; each needs about
+    /// 180pt to keep "Pause scheduling" and its labels on one line.
+    static let sideBySideLimit = 2
+
+    private var claudeTray: AccountTray? { snapshot.flatMap { AccountTray(snapshot: $0, provider: "claude") } }
+
     @ViewBuilder private var providerGrid: some View {
-        let providers = (snapshot?.providers ?? []).sorted {
-            providerRank($0.provider) < providerRank($1.provider)
+        let tray = claudeTray
+        let providers = (snapshot?.providers ?? [])
+            .filter { tray == nil || $0.provider.lowercased() != tray!.provider }
+            .sorted { providerRank($0.provider) < providerRank($1.provider) }
+        if let tray, let snapshot {
+            AccountTraySection(
+                snapshot: snapshot,
+                provider: tray.provider,
+                expandedID: $model.expandedAccountID,
+                pausing: model.providersBeingControlled,
+                setPaused: { id, paused in Task { await model.setPaused(paused, providerID: id) } }
+            )
         }
         if !providers.isEmpty {
-            HStack(spacing: 10) {
-                ForEach(providers) { provider in
-                    providerCard(provider)
+            // Side by side only while each card keeps a readable width: two
+            // providers fit the popover; three or more (or several accounts
+            // of one provider) stack full-width instead of squeezing until
+            // labels wrap a letter per line.
+            if providers.count <= Self.sideBySideLimit {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(providers) { provider in
+                        providerCard(provider)
+                    }
+                }
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(providers) { provider in
+                        providerCard(provider)
+                    }
                 }
             }
-        } else {
+        } else if tray == nil {
             emptyRow("Usage data is not available yet.", symbol: "chart.bar.xaxis")
         }
     }
@@ -207,8 +252,11 @@ struct StatusPopoverView: View {
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(provider.snapshotStale ? .orange : .primary)
             }
-            if provider.snapshotStale {
-                Label("Last usage sample is stale", systemImage: "exclamationmark.triangle.fill")
+            if !provider.snapshotStale, provider.snapshot?.weeklyUnavailable == true {
+                // A lone account without a weekly limit: say so, never a 0% bar.
+                Text("Weekly limit not reported").font(.system(size: 10)).foregroundStyle(.secondary)
+            } else if provider.snapshotStale {
+                Label(provider.staleSummary, systemImage: provider.signedOut ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .help(provider.error ?? "Scheduling waits for fresh usage data.")
@@ -217,7 +265,7 @@ struct StatusPopoverView: View {
                     .tint(progressColor(provider.weeklyPercent))
             }
             HStack {
-                Text(provider.snapshotStale ? "Scheduling paused" : "Weekly").foregroundStyle(.secondary)
+                Text(provider.snapshotStale ? "Scheduling paused" : provider.accountWindowLabel).foregroundStyle(.secondary)
                 Spacer()
                 if !provider.snapshotStale, let reset = resetSummary(provider) { Text(reset).foregroundStyle(.secondary) }
             }
@@ -448,6 +496,11 @@ struct StatusPopoverView: View {
                 .buttonStyle(.bordered)
                 .help("Enable or manage job notifications")
             Menu {
+                Button("Pair a Device…", action: actions.pairDevice)
+                if relayStatus?.mode == .hosted {
+                    Button("Manage subscription…", action: actions.manageSubscription)
+                }
+                Divider()
                 Button("Open in Browser", action: actions.openBrowser)
                 Button("Check for Updates…", action: actions.checkForUpdates)
                 Button("Agent Permissions…", action: actions.showAgentPermissionHelp)
@@ -560,6 +613,7 @@ struct StatusPopoverView: View {
     }
 
     private func resetSummary(_ provider: ProviderSummary) -> String? {
+        if let unstarted = provider.shortWindowSummary { return unstarted }
         if let short = provider.shortPercent {
             let reset = relativeReset(provider.snapshot?.short?.resetsAt).map { " · \($0)" } ?? ""
             return "5h \(short)%\(reset)"
@@ -570,8 +624,13 @@ struct StatusPopoverView: View {
     /// Only shown when at least one reset is banked; zero is not worth the
     /// space in a popover, and "not reported" must never look like zero.
     private func bankedResetSummary(_ provider: ProviderSummary) -> (text: String, expiringSoon: Bool)? {
-        guard let count = provider.snapshot?.bankedResets, count > 0 else { return nil }
-        let noun = count == 1 ? "banked reset" : "banked resets"
+        guard let snapshot = provider.snapshot, let count = snapshot.bankedResets, count > 0 else { return nil }
+        var noun = count == 1 ? "banked reset" : "banked resets"
+        let kinds = snapshot.bankedResetKinds()
+        if kinds.count > 1 || kinds.first.map({ !$0.kind.isEmpty }) == true {
+            let labels = ["full": "full", "session": "5-hour", "weekly": "weekly", "fable": "Fable", "opus": "Opus", "sonnet": "Sonnet"]
+            noun += " (" + kinds.map { "\($0.count) \(labels[$0.kind] ?? "other")" }.joined(separator: ", ") + ")"
+        }
         // A stored expiry can lapse while the snapshot sits unrefreshed.
         guard let expires = parseTimestamp(provider.snapshot?.bankedResetsExpireAt),
               expires.timeIntervalSinceNow > 0 else {

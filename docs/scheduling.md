@@ -16,6 +16,30 @@ redline decision --provider codex-main
 redline decision --provider claude-main --json
 ```
 
+## Claude Team seats without a reported weekly cap
+
+Such seats display weekly usage as **Not reported** and hold dispatch by default.
+Opt in per account in the main config's provider entry or managed `accounts.yaml`:
+
+```yaml
+weekly_policy: session_only
+session_reserve: 0.50
+```
+
+`weekly_policy` accepts only `""` (default hold) or `session_only` (Claude only).
+`session_reserve` is the fraction of each 5-hour window Redline never spends: it
+must be in `[0, 1)`, is valid only with `session_only`, and defaults to **0.50**.
+An explicit zero is allowed but removes that protection. This policy applies only
+when the weekly limit is not reported; normal weekly scheduling is unchanged.
+
+Fresh session room above the reserve admits only `behind`-tier work. An unstarted
+session is full (100% remaining); missing/stale telemetry still holds. Model budgets
+such as Fable still gate their tasks. There is no weekly pace, overflow or automatic
+pressure firesale: the real weekly cap is invisible and Anthropic may still stop runs.
+Manual or announcement firesales can unlock the firesale tier but cannot spend the
+session reserve. Use duration-based manual firesales; `--until-reset` requires a
+reported weekly reset. Calibration never invents a weekly number for these seats.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:
@@ -38,9 +62,11 @@ end a manual sale; without usage at start, only stop or the deadline ends it.
 Manual forcing overrides **pacing only** and unlocks the `firesale` tier. It does not change the
 effective reset horizon or overflow math, create allowance, spend a banked reset, bypass the
 five-hour reserve, stale/missing telemetry, provider pause, exhausted model budgets, concurrency,
-or job eligibility gates. Missing weekly telemetry stays `UNKNOWN`; zero weekly allowance stays
-held. A paused account may start a sale but cannot dispatch until resumed. The status API warns
-when starting is pointless without refusing it; demo mode refuses starts.
+or job eligibility gates. Missing weekly telemetry stays `UNKNOWN` unless the account explicitly
+uses the session-only policy above; zero reported weekly allowance stays held.
+
+A paused account may start a sale but cannot dispatch until resumed. The status API warns when
+starting is pointless without refusing it; demo mode refuses starts.
 
 The scheduler, usage monitor, startup reconciliation, and firesale API reconcile lifecycle changes.
 Start/end notices use `firesale.started`/`firesale.ended` with `trigger: manual`, the account,
@@ -61,7 +87,55 @@ Dry runs use nonexistent IDs, not a real reset: Claude expects `ineligible` / `u
 Codex expects `no_credit`, reported as `dry_run_ok`. Real redemption spends Claude's claimable
 next grant or Codex's soonest-expiring itemized credit. A missing Codex detail list means to wait
 for collection and try again shortly. Claude eligibility and cooldowns are respected. Multiple
-configured accounts of the same provider type are refused because the local CLI login is ambiguous.
+configured accounts are handled by the login each one spends from:
+
+- A Claude Code profile account (`claude_config_dir`) redeems from its own profile login, read
+  without refreshing it. Each profile has its own rate-limit lockout.
+- An account on the default login redeems only when it is the provider's only default-login
+  account; with two, the login is ambiguous and redemption is refused.
+- An account bound to a non-default `openusage_card` is refused: OpenUsage's card names no local
+  login Redline can spend from. Bind it to its Claude Code profile instead, or use `/limit-reset`.
+
+Refused accounts still get reminder notifications, and their automatic reset horizon is not
+shortened.
+
+### OpenUsage cards and run logins
+
+Claude Code and Codex start as the default login on this Mac unless the account names a Claude
+Code profile. An account bound to a non-default OpenUsage card therefore shows that card's usage
+but never dispatches work: a run would spend the default login's allowance while Redline
+scheduled against the card's numbers. Its decision reads `login_unknown`, the dashboard and
+phone say "Dispatch held · login unknown", and the service logs a warning at start. For Claude
+team seats, bind each person to their Claude Code profile with
+`redline account add-profile <id> --dir ~/.claude-cc-<name>`; usage, runs, and reset
+redemption then all use that profile's login.
+
+### Keeping profile logins fresh
+
+A Claude Code profile's access token lasts about 8 hours, and only Claude Code renews it, while
+it runs with that profile. Without help, a seat nobody used for 8 hours would go out of date and
+hold its work. So the usage monitor (`usage_monitor.enabled`) keeps each profile account's login
+fresh. From 15 minutes before expiry it runs `CLAUDE_CONFIG_DIR=<dir> claude auth status`, which
+spends no quota. If the expiry has not moved by the token's last 5 minutes, or the token has
+already expired, it sends the smallest real request instead: one word from haiku, with no tools,
+MCP servers, settings or saved session. That costs a few hundred tokens on that seat, and on an
+idle seat it starts a 5-hour window. At most 6 such requests are sent per seat per day.
+
+Redline still never writes a credential: it only reads the expiry and checks that it moved. The
+renewal runs with a minimal environment (no API keys, base URLs, model overrides or other tools'
+secrets) in a fresh private temporary directory, and its output is discarded. Renewals run one at a time,
+skip an account while a Redline run is active on it (that run renews the login itself), and retry
+after 5 minutes, then 30. The default login and Codex are never touched. `claude` must be on the
+service's PATH; the Mac app adds `~/.local/bin`, Homebrew and `/usr/local/bin`. Not yet
+available on Windows.
+
+When a profile cannot be renewed (signed out, or three renewals in a row did not take, which
+usually means its refresh token was revoked), an `account.needs_login` notification is sent once
+per sign-out with the command to run (add the event to `notifications.events`; a service restart
+repeats it once). A signed-out seat shows "Signed out"; a revoked one shows "Out of date" until
+you sign in again.
+
+Turn it off with `usage_monitor.keep_profile_logins_fresh: false`.
 
 Redline reads credentials without refreshing or rewriting them. If Claude's login needs refreshing,
 run `claude`, then retry or redeem in Claude Code with `/limit-reset`. Codex requires a ChatGPT
@@ -146,6 +220,33 @@ remaining exceeds the fraction of time remaining by that amount. For example, `0
 can run when an account is at least 30 percentage points behind an even weekly burn pace. The
 standard bundled policy uses `0.30`, early uses `0.15`, and late omits the setting so that it
 continues to require a configured time threshold or unavoidable overflow.
+
+### Accounts without a five-hour window
+
+An account that reports no five-hour window (a verified Claude Ultra account, or Codex while its
+short limit is absent) never produces slot overflow, so the weekly reset is its only clock. Policies
+may add `weekly_only_pace_thresholds`, using the same `{time_remaining, min_weekly_remaining}` rows
+as `pace_thresholds`. They are checked after the regular rules, and only when the latest usage
+snapshot has no five-hour window. They never change a decision for an account that reports one.
+
+The bundled `late` policy uses them so leftover weekly quota is filled before it expires. Each row
+asks for about 1.4 times the share of the week still to go:
+
+| Time to weekly reset | Weekly remaining needed |
+| --- | --- |
+| 72h | 60% |
+| 48h | 40% |
+| 24h | 20% |
+| 6h | 5% |
+
+`standard` and `early` already admit weekly-only accounts through `pace_gap_trigger` and their own
+thresholds, so they do not set them. Configs written before this release do not pick the rows up
+automatically. Copy the block from `config.example.yaml` into your `late` policy to use it.
+
+A policy with none of `pace_gap_trigger`, `pace_thresholds` or `weekly_only_pace_thresholds` can
+only admit work through five-hour slot overflow. Redline still loads it but logs a warning at
+startup, because a weekly-only account's decision is `UNKNOWN` under it except during a
+reset-announcement firesale.
 
 Each provider's usage detail in the dashboard includes a dispatch-policy selector. Selecting a named
 policy stores an override in SQLite; selecting **Default** returns to the provider-level YAML policy
@@ -290,7 +391,12 @@ redline decision --provider claude-main --json
 
 Decisions expose `window_weekly_cost`, `window_weekly_cost_source`, and
 `calibration_confidence`. Providers without a five-hour window, such as Codex while that limit is
-temporarily absent, cannot produce paired calibration evidence and continue using pace rules.
+temporarily absent or a verified Claude Ultra account (no five-hour limit since 2026-10-30), cannot
+produce paired calibration evidence and continue using pace rules on the weekly window alone.
+Redline decides this from the windows the provider reports, not the plan name: an unverified Ultra
+account that still reports a five-hour window is scheduled with slots like Max and Pro. See
+[Accounts without a five-hour window](#accounts-without-a-five-hour-window) for the pace rules
+that apply.
 
 ## Empirical token capacity
 

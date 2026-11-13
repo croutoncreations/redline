@@ -18,7 +18,7 @@ func TestResetSignalFiresaleBaselineUsesConfiguredUsageProvider(t *testing.T) {
 	s.config.Providers["codex-main"] = provider
 	at := s.now().Add(time.Second)
 	s.now = func() time.Time { return at }
-	snapshot := decision.UsageSnapshot{Provider: "codex", Source: "native", ObservedAt: at, Weekly: decision.UsageWindow{Remaining: .37, ResetsAt: at.Add(24 * time.Hour)}}
+	snapshot := decision.UsageSnapshot{Provider: "codex", Account: "codex-main", Source: "native", ObservedAt: at, Weekly: decision.UsageWindow{Remaining: .37, ResetsAt: at.Add(24 * time.Hour)}}
 	if err := s.store.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestResetSignalFiresaleUsageRefill(t *testing.T) {
 				// usage snapshot for its account.
 				usageProvider = "unrelated"
 			}
-			baseline := decision.UsageSnapshot{Provider: usageProvider, Source: "native", ObservedAt: start, Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: start.Add(24 * time.Hour)}}
+			baseline := decision.UsageSnapshot{Provider: usageProvider, Account: "main", Source: "native", ObservedAt: start, Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: start.Add(24 * time.Hour)}}
 			if err := s.store.SaveSnapshot(t.Context(), baseline, nil); err != nil {
 				t.Fatal(err)
 			}

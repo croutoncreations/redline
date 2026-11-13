@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -29,6 +32,120 @@ func TestExistingDirectoryWorkspace(t *testing.T) {
 	}
 }
 
+func TestGitWorktreeIgnoresRedlineDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git-worktree integration uses POSIX paths")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, linked := range []bool{false, true} {
+		for _, subdirectory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("linked=%t/subdirectory=%t", linked, subdirectory), func(t *testing.T) {
+				repo := t.TempDir()
+				gitWorkspaceTest(t, repo, "init")
+				const gitignore = "# user-maintained ignore rules\n/build/\n"
+				if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(gitignore), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitWorkspaceTest(t, repo, "add", ".gitignore")
+				gitWorkspaceTest(t, repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+				if linked {
+					checkout := filepath.Join(t.TempDir(), "linked")
+					gitWorkspaceTest(t, repo, "worktree", "add", "-b", "linked", checkout)
+					repo = checkout
+				}
+				if subdirectory {
+					repo = filepath.Join(repo, "component")
+					if err := os.Mkdir(repo, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				manager := workspace.Manager{}
+				for _, run := range []string{"run-1", "run-2"} {
+					_, err := manager.Prepare(context.Background(), run, "Task", domain.ExecutionProfile{
+						WorkspaceProvider: "git-worktree", Repository: repo,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if status := gitWorkspaceTest(t, repo, "status", "--porcelain", "--untracked-files=all"); status != "" {
+						t.Fatalf("git status = %q, want clean checkout", status)
+					}
+				}
+				ignorePath := filepath.Join(repo, ".redline", ".gitignore")
+				got, err := os.ReadFile(ignorePath)
+				if err != nil || string(got) != "*\n" {
+					t.Fatalf("managed .gitignore = %q, err=%v", got, err)
+				}
+				info, err := os.Stat(ignorePath)
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("managed .gitignore must have mode 0600: %v, err=%v", info, err)
+				}
+				root := strings.TrimSpace(gitWorkspaceTest(t, repo, "rev-parse", "--show-toplevel"))
+				if got, err := os.ReadFile(filepath.Join(root, ".gitignore")); err != nil || string(got) != gitignore {
+					t.Fatalf("tracked .gitignore changed: %q, err=%v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func gitWorkspaceTest(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return string(output)
+}
+
+func TestGitWorktreePreservesExistingIgnoreFile(t *testing.T) {
+	repo := t.TempDir()
+	redline := filepath.Join(repo, ".redline")
+	if err := os.Mkdir(redline, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const contents = "# user rules\nworktrees/\n"
+	ignorePath := filepath.Join(redline, ".gitignore")
+	if err := os.WriteFile(ignorePath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Runner: &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(redline, "worktrees", "run-1"), 0o700)
+	}}}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(ignorePath); err != nil || string(got) != contents {
+		t.Fatalf("existing .gitignore changed: %q, err=%v", got, err)
+	}
+}
+
+func TestGitWorktreeSkipsIgnoreFileInSymlinkDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires special privileges")
+	}
+	repo, target := t.TempDir(), t.TempDir()
+	if err := os.Symlink(target, filepath.Join(repo, ".redline")); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Runner: &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o700)
+	}}}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("must not create .gitignore through a symlink: %v", err)
+	}
+}
+
 func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	repo := t.TempDir()
 	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
@@ -46,6 +163,66 @@ func TestGitWorktreeWorkspaceUsesIsolatedBranch(t *testing.T) {
 	}
 	if got.Branch != "redline/run-1" || got.Directory != filepath.Join(repo, ".redline", "worktrees", "run-1") {
 		t.Fatalf("workspace = %#v", got)
+	}
+}
+
+func TestGitWorktreeParentDirectoryIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX permission bits")
+	}
+	repo := t.TempDir()
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(repo, ".redline", "worktrees", "run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".redline", filepath.Join(".redline", "worktrees")} {
+		path := filepath.Join(repo, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Fatalf("%s mode = %o, want 0700 (worktrees hold a checkout plus anything the agent or hooks write, and must not be world-traversable)", path, mode)
+		}
+	}
+}
+
+func TestGitWorktreeTightensExistingPermissiveParents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX permission bits")
+	}
+	repo := t.TempDir()
+	parent := filepath.Join(repo, ".redline", "worktrees")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(repo, ".redline"), parent} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &fakeRunner{run: func(command redprocess.Command) (int, error) {
+		return 0, os.MkdirAll(filepath.Join(parent, "run-1"), 0o755)
+	}}
+	manager := workspace.Manager{Runner: runner}
+	if _, err := manager.Prepare(context.Background(), "run-1", "Task", domain.ExecutionProfile{
+		WorkspaceProvider: "git-worktree", Repository: repo, BaseBranch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(repo, ".redline"), parent} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Fatalf("%s mode = %o, want an existing 0755 parent tightened to 0700", path, mode)
+		}
 	}
 }
 
