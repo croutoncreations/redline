@@ -878,6 +878,21 @@ func normalizeBaseURL(raw string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
+// maxGatewayResponseBytes bounds one Gateway HTTP response. The Gateway URL is
+// editable through the API and the Gateway is a remote party, so an unbounded
+// decode would let a hostile or compromised endpoint exhaust the service's
+// memory. The WebSocket side applies the same idea with SetReadLimit.
+const maxGatewayResponseBytes = 16 << 20
+
+func decodeBoundedJSON(body io.Reader, result any) error {
+	limited := &io.LimitedReader{R: body, N: maxGatewayResponseBytes + 1}
+	err := json.NewDecoder(limited).Decode(result)
+	if limited.N <= 0 {
+		return fmt.Errorf("response exceeds %d bytes", maxGatewayResponseBytes)
+	}
+	return err
+}
+
 func getJSON(ctx context.Context, client *http.Client, target string, result any) error {
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	response, err := client.Do(request)
@@ -888,7 +903,7 @@ func getJSON(ctx context.Context, client *http.Client, target string, result any
 	if response.StatusCode/100 != 2 {
 		return newHTTPStatusError(http.MethodGet, target, response)
 	}
-	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+	if err := decodeBoundedJSON(response.Body, result); err != nil {
 		return fmt.Errorf("decode response from GET %s: %w", target, err)
 	}
 	return nil
@@ -904,7 +919,7 @@ func postJSON(ctx context.Context, client *http.Client, target string, result an
 	if response.StatusCode/100 != 2 {
 		return newHTTPStatusError(http.MethodPost, target, response)
 	}
-	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+	if err := decodeBoundedJSON(response.Body, result); err != nil {
 		return fmt.Errorf("decode response from POST %s: %w", target, err)
 	}
 	return nil
@@ -992,7 +1007,7 @@ func dialGateway(
 		var ticket struct {
 			Ticket string `json:"ticket"`
 		}
-		if decodeErr := json.NewDecoder(response.Body).Decode(&ticket); decodeErr != nil {
+		if decodeErr := decodeBoundedJSON(response.Body, &ticket); decodeErr != nil {
 			return nil, fmt.Errorf("decode Hermes WebSocket ticket: %w", decodeErr)
 		}
 		if ticket.Ticket == "" {
