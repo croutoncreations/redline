@@ -72,6 +72,12 @@ require_clean = ?, cleanup_policy = ?, prepare_command = ?, finalize_command = ?
 	if err != nil {
 		return fmt.Errorf("update execution profile: %w", err)
 	}
+	// A kept workspace was prepared under the old settings (branch, hooks,
+	// repository); continuing it or cleaning it up under new ones is unsafe.
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET resume_fresh = 'profile'
+WHERE execution_profile_id = ? AND resume_run_id <> ''`, p.ID); err != nil {
+		return fmt.Errorf("mark waiting tasks fresh: %w", err)
+	}
 	if rows, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("read execution profile update result: %w", err)
 	} else if rows == 0 {
@@ -243,10 +249,18 @@ WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.Exec
 		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
 	}
 	// A kept session belongs to the old prompt and profile; after either
-	// changes, the next run cleans the kept workspace up and starts afresh.
-	if previous.Prompt != task.Prompt || previous.PromptFile != task.PromptFile ||
-		previous.ExecutionProfileID != task.ExecutionProfileID {
-		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET resume_fresh = 1 WHERE id = ? AND resume_run_id <> ''`, task.ID); err != nil {
+	// changes, the next run starts afresh. A profile change wins: the kept
+	// workspace's lifecycle settings are then no longer known.
+	fresh := ""
+	switch {
+	case previous.ExecutionProfileID != task.ExecutionProfileID:
+		fresh = domain.ResumeFreshProfile
+	case previous.Prompt != task.Prompt || previous.PromptFile != task.PromptFile:
+		fresh = domain.ResumeFreshPrompt
+	}
+	if fresh != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET resume_fresh = ?
+WHERE id = ? AND resume_run_id <> '' AND resume_fresh <> 'profile'`, fresh, task.ID); err != nil {
 			return fmt.Errorf("mark task resume fresh: %w", err)
 		}
 	}
@@ -579,7 +593,7 @@ t.created_at, t.updated_at FROM tasks t`
 
 // clearResume ends a task's usage-limit resume. Use it wherever a task
 // leaves the waiting state other than by being dispatched.
-const clearResume = `resume_after = NULL, resume_run_id = '', resume_fresh = 0, resume_attempts = 0`
+const clearResume = `resume_after = NULL, resume_run_id = '', resume_fresh = '', resume_attempts = 0`
 
 // preserveKeptWorkspace marks a usage-limited run's kept workspace as left
 // for manual recovery when its task stops waiting without a run taking it

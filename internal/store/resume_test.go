@@ -89,7 +89,7 @@ func TestEditingPromptOrProfileMarksResumeFresh(t *testing.T) {
 			}
 			stored, _ := db.GetTask(t.Context(), task.ID)
 			// The kept run stays linked so the next run can clean it up.
-			if !stored.ResumeFresh || stored.ResumeRunID != run.ID || stored.ResumeAfter == nil || stored.State != domain.Queued {
+			if stored.ResumeFresh != domain.ResumeFreshPrompt || stored.ResumeRunID != run.ID || stored.ResumeAfter == nil || stored.State != domain.Queued {
 				t.Fatalf("task = %#v", stored)
 			}
 		})
@@ -101,7 +101,27 @@ func TestEditingPromptOrProfileMarksResumeFresh(t *testing.T) {
 			t.Fatal(err)
 		}
 		stored, _ := db.GetTask(t.Context(), task.ID)
-		if stored.ResumeFresh || stored.ResumeRunID != run.ID {
+		if stored.ResumeFresh != "" || stored.ResumeRunID != run.ID {
+			t.Fatalf("task = %#v", stored)
+		}
+	})
+	t.Run("profile edited in place", func(t *testing.T) {
+		db, task, _, _ := usageLimitedTask(t)
+		profile, err := db.GetProfile(t.Context(), task.ExecutionProfileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile.PrepareCommand = "make setup"
+		if err := db.UpdateProfile(t.Context(), profile); err != nil {
+			t.Fatal(err)
+		}
+		// A later prompt edit must not downgrade the profile reason.
+		task.Prompt = "other"
+		if err := db.UpdateTask(t.Context(), task, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := db.GetTask(t.Context(), task.ID)
+		if stored.ResumeFresh != domain.ResumeFreshProfile {
 			t.Fatalf("task = %#v", stored)
 		}
 	})
@@ -149,8 +169,8 @@ func TestServiceRestartRecoveryClearsResumePlan(t *testing.T) {
 	if stored.State != domain.Failed || stored.ResumeAfter != nil || stored.ResumeRunID != "" || stored.ResumeAttempts != 0 {
 		t.Fatalf("task = %#v", stored)
 	}
-	// The interrupted run had taken the kept workspace over.
-	if storedKept, _ := db.GetRun(t.Context(), kept.ID); storedKept.FinalizeState != domain.FinalizeContinued {
+	// The interrupted run may have been mid-way through the kept workspace.
+	if storedKept, _ := db.GetRun(t.Context(), kept.ID); storedKept.FinalizeState != domain.FinalizePreserved {
 		t.Fatalf("kept run = %#v", storedKept)
 	}
 	if err := db.SetTaskControl(t.Context(), task.ID, "retry", after.Add(2*time.Minute)); err != nil {

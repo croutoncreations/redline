@@ -270,7 +270,7 @@ func TestFreshStartAfterEditFinalizesAndCleansKeptWorkspace(t *testing.T) {
 	}
 }
 
-func TestChangedProfileRepositoryStartsFreshAndCleansKeptWorkspace(t *testing.T) {
+func TestEditedProfileStartsFreshAndPreservesKeptWorkspace(t *testing.T) {
 	db, run, task, profile := claudeRun(t)
 	keptDir := workDir(t, profile)
 	workspaces := &keyedWorkspaces{countingWorkspaces: countingWorkspaces{fakeWorkspaces: fakeWorkspaces{workspace: domain.Workspace{Directory: keptDir}}}}
@@ -282,14 +282,54 @@ func TestChangedProfileRepositoryStartsFreshAndCleansKeptWorkspace(t *testing.T)
 	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
 		t.Fatal(err)
 	}
-	profile.Repository = t.TempDir()
-	workspaces.workspace = domain.Workspace{Directory: workDir(t, profile)}
+	// Same profile id, new base branch: the kept worktree is on the old one.
+	profile.BaseBranch = "release"
+	if err := db.UpdateProfile(t.Context(), profile); err != nil {
+		t.Fatal(err)
+	}
+	freshDir := workDir(t, profile)
+	workspaces.workspace = domain.Workspace{Directory: freshDir}
 	second, task := admitAgain(t, db, "run-2", task, resetsAt.Add(2*time.Minute))
 	if err := executor.Execute(t.Context(), second, task, profile); err != nil {
 		t.Fatal(err)
 	}
-	if agent.requests[1].ResumeSessionID != "" || len(workspaces.cleaned) != 2 || workspaces.cleaned[0] != keptDir {
-		t.Fatalf("request=%#v cleaned=%v", agent.requests[1], workspaces.cleaned)
+	if agent.requests[1].ResumeSessionID != "" || agent.requests[1].Workspace.Directory != freshDir {
+		t.Fatalf("second request = %#v", agent.requests[1])
+	}
+	// The kept workspace is not finalized or cleaned under the new settings.
+	if strings.Join(workspaces.cleaned, ",") != freshDir {
+		t.Fatalf("cleaned = %v", workspaces.cleaned)
+	}
+	first, _ := db.GetRun(t.Context(), run.ID)
+	if first.FinalizeState != domain.FinalizePreserved || !strings.Contains(first.FinalizeError, "profile changed") {
+		t.Fatalf("kept run = %#v", first)
+	}
+}
+
+func TestContinuedRunRecordsKeptRunsSourceRevision(t *testing.T) {
+	db, run, task, profile := claudeRun(t)
+	dir := workDir(t, profile)
+	executor := execution.Executor{
+		Store: db, Workspaces: &countingWorkspaces{fakeWorkspaces: fakeWorkspaces{workspace: domain.Workspace{Directory: dir}}},
+		Harness:         &recordingHarness{results: []harness.Result{usageLimited("sess-1"), {ExitCode: 0}}},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	// The base branch moved on while the task waited.
+	second, err := db.AdmitTask(t.Context(), "run-2", task.ID, "claude-main", "def", resetsAt.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := db.GetTask(t.Context(), task.ID)
+	if err := executor.Execute(t.Context(), second, stored, profile); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = db.GetTask(t.Context(), task.ID)
+	storedRun, _ := db.GetRun(t.Context(), second.ID)
+	if stored.LastSuccessfulSourceRevision != "abc" || storedRun.SourceRevision != "abc" {
+		t.Fatalf("task revision=%q run revision=%q", stored.LastSuccessfulSourceRevision, storedRun.SourceRevision)
 	}
 }
 

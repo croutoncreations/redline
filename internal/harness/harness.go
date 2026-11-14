@@ -137,7 +137,9 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 				claudeResumeRejected(result.OutputFile, result.ErrorFile)
 		}
 		result.Failure = diagnoseFailure(request.Profile.HarnessType, result.OutputFile, result.ErrorFile)
-		if result.UsageLimit != nil && result.Failure == "" {
+		if result.UsageLimit != nil {
+			// Claude Code's own structured report wins over a sign-out match,
+			// which can come from task output and would pause the account.
 			result.Failure = usageLimitFailure(*result.UsageLimit)
 		}
 		// A profile run's sign-in is that profile's, not the default one.

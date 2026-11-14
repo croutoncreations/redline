@@ -809,7 +809,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	for _, column := range []struct{ name, definition string }{
 		{"resume_after", "TEXT"},
 		{"resume_run_id", "TEXT NOT NULL DEFAULT ''"},
-		{"resume_fresh", "INTEGER NOT NULL DEFAULT 0"},
+		{"resume_fresh", "TEXT NOT NULL DEFAULT ''"},
 		{"resume_attempts", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := addColumnIfMissing(ctx, tx, "tasks", column.name, column.definition); err != nil {

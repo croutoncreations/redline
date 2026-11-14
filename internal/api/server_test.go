@@ -1714,6 +1714,17 @@ func TestSchedulerWaitsForUsageLimitResetBeforeResumingTask(t *testing.T) {
 	if err != nil || stored.State != domain.Queued || stored.ResumeAfter == nil || !stored.ResumeAfter.Equal(resumeAfter) {
 		t.Fatalf("task = %#v err=%v", stored, err)
 	}
+	// The dashboard shows the wait; it reads these fields from /v1/dashboard.
+	var dashboard struct {
+		Tasks []struct {
+			ID          string     `json:"id"`
+			ResumeAfter *time.Time `json:"resume_after"`
+		} `json:"tasks"`
+	}
+	getJSON(t, server.URL+"/v1/dashboard", &dashboard)
+	if len(dashboard.Tasks) != 1 || dashboard.Tasks[0].ResumeAfter == nil || !dashboard.Tasks[0].ResumeAfter.Equal(resumeAfter) {
+		t.Fatalf("dashboard tasks = %#v", dashboard.Tasks)
+	}
 }
 
 func TestDispatchingUsageLimitedTaskByIDOverridesResetWait(t *testing.T) {

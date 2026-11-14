@@ -244,6 +244,9 @@ WHERE id = ? AND state IN ('preparing', 'running')`, runID).Scan(&taskID, &sourc
 	if err := tx.QueryRowContext(ctx, `SELECT task_type FROM tasks WHERE id = ?`, taskID).Scan(&taskType); err != nil {
 		return fmt.Errorf("read run task: %w", err)
 	}
+	if completion.SourceRevision != "" {
+		sourceRevision = completion.SourceRevision
+	}
 	artifactsJSON, err := json.Marshal(completion.Artifacts)
 	if err != nil {
 		return fmt.Errorf("encode run artifacts: %w", err)
@@ -268,14 +271,14 @@ WHERE id = ? AND state IN ('preparing', 'running')`, runID).Scan(&taskID, &sourc
 output_file = ?, error_file = ?, error = ?, finalize_state = ?, finalize_error = ?,
 activity_summary = ?, activity_outcome = ?, activity_artifacts_json = ?,
 activity_warnings_json = ?, actual_provider = ?, actual_model = ?, activity_read_at = NULL,
-external_session_id = CASE WHEN ? <> '' THEN ? ELSE external_session_id END,
+external_session_id = CASE WHEN ? <> '' THEN ? ELSE external_session_id END, source_revision = ?,
 completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM runs)
 WHERE id = ?`,
 		completion.State, formatTime(now), completion.ExitCode, completion.OutputFile,
 		completion.ErrorFile, completion.Error, completion.FinalizeState, completion.FinalizeError,
 		completion.Summary, completion.Outcome, string(artifactsJSON), string(warningsJSON),
 		completion.ActualProvider, completion.ActualModel,
-		completion.ExternalSessionID, completion.ExternalSessionID, runID)
+		completion.ExternalSessionID, completion.ExternalSessionID, sourceRevision, runID)
 	if err != nil {
 		return fmt.Errorf("complete run: %w", err)
 	}
@@ -297,7 +300,7 @@ WHERE id = (SELECT resume_run_id FROM tasks WHERE id = ?) AND id <> ? AND finali
 			keptBy = runID
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'queued', resume_after = ?,
-resume_run_id = ?, resume_fresh = 0, resume_attempts = resume_attempts + 1, updated_at = ? WHERE id = ?`,
+resume_run_id = ?, resume_fresh = '', resume_attempts = resume_attempts + 1, updated_at = ? WHERE id = ?`,
 			formatTime(completion.Resume.After.UTC()), keptBy, formatTime(now), taskID)
 	case completion.State == domain.RunCompleted:
 		state := domain.Completed
@@ -326,6 +329,17 @@ last_completed_at = ?, last_successful_source_revision = ?, `+clearResume+`, upd
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit run completion: %w", err)
+	}
+	return nil
+}
+
+// SettleKeptWorkspace records what became of a workspace a usage-limited run
+// kept, when a later run started afresh instead of continuing it. Only a
+// still-deferred workspace is updated.
+func (d *DB) SettleKeptWorkspace(ctx context.Context, runID, finalizeState, finalizeError string) error {
+	if _, err := d.db.ExecContext(ctx, `UPDATE runs SET finalize_state = ?, finalize_error = ?
+WHERE id = ? AND finalize_state = 'deferred'`, finalizeState, finalizeError, runID); err != nil {
+		return fmt.Errorf("settle kept workspace: %w", err)
 	}
 	return nil
 }
@@ -487,12 +501,9 @@ completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM run
 WHERE id = ?`, formatTime(now), item.runID); err != nil {
 			return fmt.Errorf("recover interrupted run: %w", err)
 		}
-		// The interrupted run may have taken over a workspace an earlier
-		// usage-limited run kept; that workspace is now this run's and is
-		// preserved with it.
-		if _, err := tx.ExecContext(ctx, `UPDATE runs SET finalize_state = 'continued'
-WHERE id = (SELECT resume_run_id FROM tasks WHERE id = ?) AND id <> ? AND finalize_state = 'deferred'`,
-			item.taskID, item.runID); err != nil {
+		// The interrupted run may have been continuing or cleaning up a
+		// workspace an earlier usage-limited run kept; leave it as found.
+		if _, err := tx.ExecContext(ctx, preserveKeptWorkspace, item.taskID); err != nil {
 			return fmt.Errorf("recover kept workspace: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', `+clearResume+`, updated_at = ? WHERE id = ?`,

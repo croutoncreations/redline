@@ -33,20 +33,28 @@ func ProfileCanResume(profile domain.ExecutionProfile) bool {
 
 // claudeResumeRejected reports Claude Code's own refusal to reopen a session
 // passed to --resume (checked against 2.1.318), e.g. because the session
-// file is gone or belongs to another config directory.
-func claudeResumeRejected(paths ...string) bool {
-	for _, path := range paths {
-		data, err := readTail(path, 64*1024)
-		if err != nil {
-			continue
-		}
-		text := string(data)
-		if strings.Contains(text, "No conversation found with session ID") ||
-			strings.Contains(text, "--resume session load failed") {
-			return true
+// file is gone or belongs to another config directory. Claude Code exits
+// before starting the session, so its stdout holds no stream events and the
+// message is on stderr; any stream event means the session did open and
+// later text is task output.
+func claudeResumeRejected(stdoutPath, stderrPath string) bool {
+	if data, err := readHead(stdoutPath, sessionHeadBytes); err == nil {
+		started := false
+		eachJSONLine(data, func(line map[string]json.RawMessage) bool {
+			started = jsonString(line["type"]) != ""
+			return !started
+		})
+		if started {
+			return false
 		}
 	}
-	return false
+	data, err := readTail(stderrPath, 64*1024)
+	if err != nil {
+		return false
+	}
+	text := string(data)
+	return strings.Contains(text, "No conversation found with session ID") ||
+		strings.Contains(text, "--resume session load failed")
 }
 
 // ResumePrompt is sent to the continued session in place of the task prompt,

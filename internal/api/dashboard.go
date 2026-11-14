@@ -158,6 +158,18 @@ type dashboardTask struct {
 	DispatchTier        domain.DispatchTier `json:"dispatch_tier"`
 	LastStartedAt       *time.Time          `json:"last_started_at,omitempty"`
 	LastCompletedAt     *time.Time          `json:"last_completed_at,omitempty"`
+	// ResumeAfter and ResumeRunID describe a task waiting out a usage limit.
+	ResumeAfter *time.Time `json:"resume_after,omitempty"`
+	ResumeRunID string     `json:"resume_run_id,omitempty"`
+}
+
+// resumeRunForDisplay is the kept run the next run will continue, or empty
+// when it will start afresh.
+func resumeRunForDisplay(task domain.Task) string {
+	if task.ResumeFresh != "" {
+		return ""
+	}
+	return task.ResumeRunID
 }
 
 func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
@@ -561,6 +573,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			MinInterval: task.MinInterval, FiresaleMinInterval: task.FiresaleMinInterval, RequireRepoChange: task.RequireRepoChange,
 			DispatchTier:  task.DispatchTier,
 			LastStartedAt: task.LastStartedAt, LastCompletedAt: task.LastCompletedAt,
+			ResumeAfter: task.ResumeAfter, ResumeRunID: resumeRunForDisplay(task),
 		})
 	}
 	result.Runs, err = s.store.ListRuns(ctx, 20)

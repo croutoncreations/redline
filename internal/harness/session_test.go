@@ -25,6 +25,7 @@ const claudeUsageLimitedStream = `{"type":"system","subtype":"init","session_id"
 
 type scriptedRunner struct {
 	stdout   string
+	stderr   string
 	exitCode int
 	command  redprocess.Command
 	stdin    string
@@ -37,6 +38,7 @@ func (r *scriptedRunner) Run(_ context.Context, command redprocess.Command) (int
 		r.stdin = string(data)
 	}
 	_, _ = io.WriteString(command.Stdout, r.stdout)
+	_, _ = io.WriteString(command.Stderr, r.stderr)
 	return r.exitCode, nil
 }
 
@@ -158,7 +160,7 @@ func TestResumeIsRefusedForHarnessesThatCannotResume(t *testing.T) {
 }
 
 func TestClaudeAdapterReportsRejectedResume(t *testing.T) {
-	runner := &scriptedRunner{exitCode: 1, stdout: "No conversation found with session ID: sess-gone\n"}
+	runner := &scriptedRunner{exitCode: 1, stderr: "No conversation found with session ID: sess-gone\n"}
 	request := claudeRequest(t, "run-gone")
 	request.ResumeSessionID = "sess-gone"
 	result, err := (harness.Adapter{Runner: runner}).Run(t.Context(), request)
@@ -168,11 +170,35 @@ func TestClaudeAdapterReportsRejectedResume(t *testing.T) {
 	if !result.ResumeRejected || result.UsageLimit != nil {
 		t.Fatalf("result = %#v", result)
 	}
-	// The same text in a fresh run is task output, not a rejected resume.
-	runner = &scriptedRunner{exitCode: 1, stdout: "No conversation found with session ID: x\n"}
-	result, err = (harness.Adapter{Runner: runner}).Run(t.Context(), claudeRequest(t, "run-fresh"))
+	for name, runner := range map[string]*scriptedRunner{
+		// Not a resume: the same text is just output.
+		"fresh run": {exitCode: 1, stderr: "No conversation found with session ID: x\n"},
+	} {
+		result, err := (harness.Adapter{Runner: runner}).Run(t.Context(), claudeRequest(t, "run-"+name))
+		if err != nil || result.ResumeRejected {
+			t.Fatalf("%s: result=%#v err=%v", name, result, err)
+		}
+	}
+	// The session opened (stream events on stdout); the text came from a
+	// tool, and the run failed for its own reasons.
+	runner = &scriptedRunner{exitCode: 1,
+		stdout: `{"type":"system","subtype":"init","session_id":"sess-gone"}` + "\n",
+		stderr: "No conversation found with session ID: from a test fixture\n"}
+	result, err = (harness.Adapter{Runner: runner}).Run(t.Context(), request)
 	if err != nil || result.ResumeRejected {
-		t.Fatalf("fresh result=%#v err=%v", result, err)
+		t.Fatalf("opened session: result=%#v err=%v", result, err)
+	}
+}
+
+func TestUsageLimitWinsOverSignOutTextInTaskOutput(t *testing.T) {
+	stdout := `{"type":"user","session_id":"s","message":{"content":[{"type":"tool_result","content":"gh: not logged in"}]}}` + "\n" + claudeUsageLimitedStream
+	runner := &scriptedRunner{stdout: stdout, exitCode: 1}
+	result, err := (harness.Adapter{Runner: runner}).Run(t.Context(), claudeRequest(t, "run-both"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageLimit == nil || harness.IsAuthenticationFailure(result.Failure) {
+		t.Fatalf("result = %#v", result)
 	}
 }
 

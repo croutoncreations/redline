@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -240,6 +239,9 @@ func (e Executor) Execute(
 		Artifacts: activityResult.Artifacts, Warnings: activityResult.Warnings,
 		ActualProvider: activityResult.ActualProvider, ActualModel: activityResult.ActualModel,
 		ExternalSessionID: harnessResult.SessionID,
+		// The continued workspace holds the kept run's checkout, so a
+		// require_repo_change task has not yet processed any newer revision.
+		SourceRevision: kept.SourceRevision,
 	}
 	if resume != nil {
 		how := "start it again"
@@ -315,11 +317,16 @@ type runReader interface {
 	GetRun(context.Context, string) (domain.Run, error)
 }
 
+type keptWorkspaceSettler interface {
+	SettleKeptWorkspace(ctx context.Context, runID, finalizeState, finalizeError string) error
+}
+
 // takeKeptWorkspace returns the earlier usage-limited run whose session and
 // workspace this run continues, or the zero Run to start afresh. When the
-// kept workspace cannot be continued (the task changed, the profile cannot
-// resume, the session is missing), it is finalized and cleaned up here so it
-// is not left behind.
+// kept workspace cannot be continued, it is finalized and cleaned up here
+// under the same profile it was prepared with, so it is not left behind. If
+// the profile has changed since, the workspace's own settings are no longer
+// known and it is preserved for manual recovery instead.
 func (e Executor) takeKeptWorkspace(
 	ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile,
 ) domain.Run {
@@ -343,25 +350,42 @@ func (e Executor) takeKeptWorkspace(
 	}
 	reason := ""
 	switch {
-	case task.ResumeFresh:
-		reason = "task prompt or profile changed while waiting"
+	case task.ResumeFresh == domain.ResumeFreshProfile:
+		reason = "execution profile changed while waiting"
+	case task.ResumeFresh != "":
+		reason = "task prompt changed while waiting"
 	case !harness.ProfileCanResume(profile) || !keepsWorkspace(profile):
 		reason = "profile cannot resume sessions"
 	case kept.External.SessionID == "":
 		reason = "earlier run recorded no agent session"
 	case !exists:
 		reason = "earlier workspace no longer exists"
-	case !withinRepository(kept.Workspace.Directory, profile.Repository):
-		reason = "earlier workspace is outside the profile's repository"
 	default:
 		return kept
 	}
 	e.recordEvent(ctx, run.ID, domain.RunEventResumeFallback, map[string]any{
 		"resumes_run": kept.ID, "reason": reason, "workspace": kept.Workspace,
 	})
-	if exists {
-		e.finalizeAndClean(ctx, kept.ID, task.ID, "failed", harness.Result{ExitCode: valueOr(kept.ExitCode, 1), OutputFile: kept.OutputFile},
+	settledState, settledError := domain.FinalizeContinued, ""
+	switch {
+	case !exists:
+	case task.ResumeFresh == domain.ResumeFreshProfile:
+		settledState = domain.FinalizePreserved
+		settledError = "execution profile changed while waiting; workspace preserved for manual recovery"
+	default:
+		// The profile is unchanged since the kept run prepared this
+		// workspace, so its finalize hook and cleanup policy still apply.
+		state, errs := e.finalizeAndClean(ctx, kept.ID, task.ID, "failed",
+			harness.Result{ExitCode: valueOr(kept.ExitCode, 1), OutputFile: kept.OutputFile},
 			profile, kept.Workspace, false)
+		if state == "failed" {
+			settledState, settledError = "failed", strings.Join(errs, "; ")
+		}
+	}
+	if settler, ok := e.Store.(keptWorkspaceSettler); ok {
+		if err := settler.SettleKeptWorkspace(ctx, kept.ID, settledState, settledError); err != nil {
+			log.Printf("redline run %s settle kept workspace of %s: %v", run.ID, kept.ID, err)
+		}
 	}
 	return domain.Run{}
 }
@@ -371,11 +395,6 @@ func (e Executor) takeKeptWorkspace(
 // in it meanwhile.
 func keepsWorkspace(profile domain.ExecutionProfile) bool {
 	return profile.WorkspaceProvider == "git-worktree" || profile.WorkspaceProvider == "devx"
-}
-
-func withinRepository(directory, repository string) bool {
-	relative, err := filepath.Rel(repository, directory)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func valueOr(value *int, fallback int) int {

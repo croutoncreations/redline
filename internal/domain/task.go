@@ -112,9 +112,9 @@ type Task struct {
 	// next run. That run continues it, or finalizes and cleans it up before
 	// starting afresh. Empty when nothing was kept.
 	ResumeRunID string `json:"resume_run_id,omitempty"`
-	// ResumeFresh is set when the task's prompt or profile changed while it
-	// waited, so the kept session no longer matches the task.
-	ResumeFresh bool `json:"resume_fresh,omitempty"`
+	// ResumeFresh says why the next run starts afresh although a workspace
+	// was kept: ResumeFreshPrompt or ResumeFreshProfile. Empty to continue.
+	ResumeFresh string `json:"resume_fresh,omitempty"`
 	// ResumeAttempts counts consecutive runs that stopped at a usage limit.
 	ResumeAttempts int       `json:"resume_attempts,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -271,10 +271,24 @@ type RunCompletion struct {
 	// ExternalSessionID is the agent's own session id when the harness
 	// reported one. Empty leaves any recorded id unchanged.
 	ExternalSessionID string
+	// SourceRevision, when set, replaces the run's source revision: a run
+	// that continued a kept workspace worked on that workspace's checkout,
+	// not the revision resolved when it was admitted.
+	SourceRevision string
 	// Resume, on a failed run, queues the task again for after a usage limit
 	// resets instead of failing it.
 	Resume *ResumePlan
 }
+
+const (
+	// ResumeFreshPrompt: the task's prompt changed while it waited. The kept
+	// workspace is finalized and cleaned up as its profile still describes it.
+	ResumeFreshPrompt = "prompt"
+	// ResumeFreshProfile: the task's execution profile changed, so the kept
+	// workspace's own lifecycle settings are no longer known; it is left in
+	// place for manual recovery.
+	ResumeFreshProfile = "profile"
+)
 
 // ResumePlan is how a task continues after its run stopped at a usage limit.
 type ResumePlan struct {
