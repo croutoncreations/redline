@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/hermes"
@@ -38,6 +39,9 @@ type Request struct {
 	Profile           domain.ExecutionProfile
 	Workspace         domain.Workspace
 	OnExternalStarted func(domain.ExternalRun) error
+	// ResumeSessionID continues that earlier Claude Code session, which
+	// stopped at a usage limit, instead of starting the task prompt afresh.
+	ResumeSessionID string
 }
 
 func ResultFilePath(outputDirectory, runID string) string {
@@ -50,6 +54,14 @@ type Result struct {
 	ErrorFile  string         `json:"error_file"`
 	Failure    string         `json:"failure,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	// SessionID is the agent's own session id, read from its output.
+	SessionID string `json:"session_id,omitempty"`
+	// UsageLimit is set when the run stopped because the provider account
+	// reached its usage limit.
+	UsageLimit *UsageLimit `json:"usage_limit,omitempty"`
+	// ResumeRejected is set when Claude Code refused to reopen the session
+	// passed as ResumeSessionID.
+	ResumeRejected bool `json:"resume_rejected,omitempty"`
 }
 
 func IsAuthenticationFailure(failure string) bool {
@@ -94,9 +106,15 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		}
 		return a.runHermes(ctx, request, prompt, stdout, result)
 	}
-	prompt, err := loadPrompt(request.Task, request.Workspace.Directory)
-	if err != nil {
-		return Result{}, err
+	if request.ResumeSessionID != "" && request.Profile.HarnessType != "claude-code" {
+		return Result{}, fmt.Errorf("%s runs cannot resume a session", request.Profile.HarnessType)
+	}
+	prompt := ResumePrompt
+	if request.ResumeSessionID == "" {
+		prompt, err = loadPrompt(request.Task, request.Workspace.Directory)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	command, err := buildCommand(request, prompt, stdout, stderr)
 	if err != nil {
@@ -104,13 +122,24 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	}
 	exitCode, err := a.runner().Run(ctx, command)
 	result.ExitCode = exitCode
+	_ = stdout.Sync()
+	if request.Profile.HarnessType == "claude-code" {
+		result.SessionID = claudeSessionID(result.OutputFile)
+	}
 	if err != nil {
 		return result, fmt.Errorf("launch %s harness: %w", request.Profile.HarnessType, err)
 	}
 	if exitCode != 0 {
-		_ = stdout.Sync()
 		_ = stderr.Sync()
+		if request.Profile.HarnessType == "claude-code" {
+			result.UsageLimit = claudeUsageLimit(result.OutputFile)
+			result.ResumeRejected = request.ResumeSessionID != "" && result.UsageLimit == nil &&
+				claudeResumeRejected(result.OutputFile, result.ErrorFile)
+		}
 		result.Failure = diagnoseFailure(request.Profile.HarnessType, result.OutputFile, result.ErrorFile)
+		if result.UsageLimit != nil && result.Failure == "" {
+			result.Failure = usageLimitFailure(*result.UsageLimit)
+		}
 		// A profile run's sign-in is that profile's, not the default one.
 		// The "Claude Code is signed out." prefix stays, so the run still
 		// pauses its account.
@@ -119,6 +148,19 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		}
 	}
 	return result, nil
+}
+
+// usageLimitFailure is the run error for a usage-limited run. It is prefixed
+// so clients can recognise it without the structured outcome.
+func usageLimitFailure(limit UsageLimit) string {
+	message := "Claude Code reached the account's usage limit"
+	if limit.LimitType != "" {
+		message += " (" + strings.ReplaceAll(limit.LimitType, "_", " ") + ")"
+	}
+	if !limit.ResetsAt.IsZero() {
+		message += "; it resets at " + limit.ResetsAt.UTC().Format(time.RFC3339)
+	}
+	return message + "."
 }
 
 func diagnoseFailure(harnessType string, paths ...string) string {
@@ -363,6 +405,9 @@ func buildCommand(
 			base.Env = append(base.Env, "CLAUDE_CONFIG_DIR="+dir)
 		}
 		base.Args = []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto"}
+		if request.ResumeSessionID != "" {
+			base.Args = append(base.Args, "--resume", request.ResumeSessionID)
+		}
 		if request.Profile.Model != "" && request.Profile.Model != "default" {
 			base.Args = append(base.Args, "--model", request.Profile.Model)
 		}

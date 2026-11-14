@@ -220,7 +220,9 @@ func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) er
 	}
 	defer tx.Rollback()
 	var state domain.TaskState
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id = ?`, task.ID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+	var previous domain.Task
+	if err := tx.QueryRowContext(ctx, `SELECT state, prompt, prompt_file, execution_profile_id FROM tasks WHERE id = ?`, task.ID).
+		Scan(&state, &previous.Prompt, &previous.PromptFile, &previous.ExecutionProfileID); errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
 	} else if err != nil {
 		return fmt.Errorf("read task state: %w", err)
@@ -239,6 +241,14 @@ WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.Exec
 		return fmt.Errorf("read task update result: %w", err)
 	} else if rows == 0 {
 		return fmt.Errorf("%w: task %q", ErrNotFound, task.ID)
+	}
+	// A kept session belongs to the old prompt and profile; after either
+	// changes, the next run cleans the kept workspace up and starts afresh.
+	if previous.Prompt != task.Prompt || previous.PromptFile != task.PromptFile ||
+		previous.ExecutionProfileID != task.ExecutionProfileID {
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET resume_fresh = 1 WHERE id = ? AND resume_run_id <> ''`, task.ID); err != nil {
+			return fmt.Errorf("mark task resume fresh: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit task update: %w", err)
@@ -317,7 +327,12 @@ func (d *DB) SetTaskControl(ctx context.Context, id, action string, now time.Tim
 	var result sql.Result
 	switch action {
 	case "disable":
-		result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 0, state = 'disabled', updated_at = ?
+		// A disabled task is not dispatched, so nothing would take over a
+		// kept workspace: leave it for manual recovery.
+		if _, err = tx.ExecContext(ctx, preserveKeptWorkspace+` AND (SELECT state FROM tasks WHERE id = ?) != 'running'`, id, id); err != nil {
+			break
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 0, state = 'disabled', `+clearResume+`, updated_at = ?
 WHERE id = ? AND state != 'running'`, formatTime(now), id)
 	case "enable":
 		result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 1,
@@ -326,7 +341,7 @@ WHERE id = ?`, formatTime(now), id)
 	case "retry":
 		var sequence int64
 		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(queue_sequence), 0) + 1 FROM tasks`).Scan(&sequence); err == nil {
-			result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 1, state = 'queued',
+			result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 1, state = 'queued', `+clearResume+`,
 queue_sequence = ?, updated_at = ? WHERE id = ? AND state = 'failed'`, sequence, formatTime(now), id)
 		}
 	default:
@@ -559,7 +574,19 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
 t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.firesale_min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
-t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
+t.last_successful_source_revision, t.resume_after, t.resume_run_id, t.resume_fresh, t.resume_attempts,
+t.created_at, t.updated_at FROM tasks t`
+
+// clearResume ends a task's usage-limit resume. Use it wherever a task
+// leaves the waiting state other than by being dispatched.
+const clearResume = `resume_after = NULL, resume_run_id = '', resume_fresh = 0, resume_attempts = 0`
+
+// preserveKeptWorkspace marks a usage-limited run's kept workspace as left
+// for manual recovery when its task stops waiting without a run taking it
+// over. Pass the task id.
+const preserveKeptWorkspace = `UPDATE runs SET finalize_state = 'preserved',
+finalize_error = 'usage-limit resume abandoned; workspace preserved for manual recovery'
+WHERE id = (SELECT resume_run_id FROM tasks WHERE id = ?) AND finalize_state = 'deferred'`
 
 type scanner interface{ Scan(...any) error }
 
@@ -567,13 +594,14 @@ func scanTask(row scanner) (domain.Task, error) {
 	var task domain.Task
 	var minInterval, firesaleInterval int64
 	var requireChange, enabled bool
-	var lastStarted, lastCompleted sql.NullString
+	var lastStarted, lastCompleted, resumeAfter sql.NullString
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
 		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &firesaleInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
-		&task.LastSuccessfulSourceRevision, &created, &updated,
+		&task.LastSuccessfulSourceRevision, &resumeAfter, &task.ResumeRunID, &task.ResumeFresh, &task.ResumeAttempts,
+		&created, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Task{}, ErrNotFound
@@ -605,6 +633,13 @@ func scanTask(row scanner) (domain.Task, error) {
 			return domain.Task{}, err
 		}
 		task.LastCompletedAt = &value
+	}
+	if resumeAfter.Valid {
+		value, err := parseStoredTime(resumeAfter.String)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		task.ResumeAfter = &value
 	}
 	return task, nil
 }

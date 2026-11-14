@@ -1674,6 +1674,107 @@ func TestSchedulerExplainsRecurringTaskCooldown(t *testing.T) {
 	}
 }
 
+func TestSchedulerWaitsForUsageLimitResetBeforeResumingTask(t *testing.T) {
+	t.Parallel()
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "limited", Name: "Limited", Prompt: "work", Priority: 100, ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.AdmitTask(t.Context(), "limited-run", "limited", "codex-main", "", apiNow.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeAfter := apiNow.Add(2 * time.Hour)
+	if err := db.CompleteRun(t.Context(), run.ID, domain.RunCompletion{
+		State: domain.RunFailed, ExitCode: 1, Outcome: domain.RunOutcomeUsageLimited,
+		Resume: &domain.ResumePlan{After: resumeAfter},
+	}, apiNow.Add(-30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	response := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if response.SelectedTask != nil {
+		t.Fatalf("task dispatched before its usage limit reset: %#v", response)
+	}
+	if len(response.Result.CandidateRejections) != 1 ||
+		!strings.Contains(response.Result.CandidateRejections[0].Reason, "waiting for usage limit reset until "+resumeAfter.Format(time.RFC3339)) {
+		t.Fatalf("rejections = %#v", response.Result.CandidateRejections)
+	}
+	stored, err := db.GetTask(t.Context(), "limited")
+	if err != nil || stored.State != domain.Queued || stored.ResumeAfter == nil || !stored.ResumeAfter.Equal(resumeAfter) {
+		t.Fatalf("task = %#v err=%v", stored, err)
+	}
+}
+
+func TestDispatchingUsageLimitedTaskByIDOverridesResetWait(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	snapshot := decision.UsageSnapshot{
+		Provider: "codex", Account: "codex-main", ObservedAt: apiNow,
+		Weekly: decision.UsageWindow{Remaining: .6, ResetsAt: apiNow.Add(48 * time.Hour)},
+		Source: "test", Confidence: "high",
+	}
+	if err := db.SaveSnapshot(t.Context(), snapshot, []byte(`{"stored":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "limited", Name: "Limited", Prompt: "work", Priority: 100, ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.AdmitTask(t.Context(), "limited-run", "limited", "codex-main", "", apiNow.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteRun(t.Context(), run.ID, domain.RunCompletion{
+		State: domain.RunFailed, ExitCode: 1, Resume: &domain.ResumePlan{After: apiNow.Add(2 * time.Hour)},
+	}, apiNow.Add(-30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	executed := make(chan domain.Task, 1)
+	handler := api.NewDemoServer(testConfig("http://usage.invalid"), db, func() time.Time { return apiNow },
+		map[string]decision.UsageSnapshot{"codex-main": snapshot}, &fakeHarnessDiscoverer{}, fakeExecutor{
+			execute: func(_ context.Context, _ domain.Run, task domain.Task, _ domain.ExecutionProfile) error {
+				executed <- task
+				return nil
+			},
+		})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/tasks/limited/dispatch", nil)
+	request.Host = "localhost"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	select {
+	case task := <-executed:
+		if task.ID != "limited" {
+			t.Fatalf("executed %q", task.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("usage-limited task was not dispatched on request: %s", recorder.Body.String())
+	}
+}
+
 func TestSchedulerExplainsRepositoryRevisionFailure(t *testing.T) {
 	t.Parallel()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

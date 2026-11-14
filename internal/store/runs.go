@@ -224,6 +224,9 @@ func (d *DB) CompleteRun(
 	if completion.State != domain.RunCompleted && completion.State != domain.RunFailed {
 		return fmt.Errorf("completion state must be completed or failed")
 	}
+	if completion.Resume != nil && completion.State != domain.RunFailed {
+		return fmt.Errorf("only a failed run can schedule a resume")
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin run completion: %w", err)
@@ -265,16 +268,38 @@ WHERE id = ? AND state IN ('preparing', 'running')`, runID).Scan(&taskID, &sourc
 output_file = ?, error_file = ?, error = ?, finalize_state = ?, finalize_error = ?,
 activity_summary = ?, activity_outcome = ?, activity_artifacts_json = ?,
 activity_warnings_json = ?, actual_provider = ?, actual_model = ?, activity_read_at = NULL,
+external_session_id = CASE WHEN ? <> '' THEN ? ELSE external_session_id END,
 completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM runs)
 WHERE id = ?`,
 		completion.State, formatTime(now), completion.ExitCode, completion.OutputFile,
 		completion.ErrorFile, completion.Error, completion.FinalizeState, completion.FinalizeError,
 		completion.Summary, completion.Outcome, string(artifactsJSON), string(warningsJSON),
-		completion.ActualProvider, completion.ActualModel, runID)
+		completion.ActualProvider, completion.ActualModel,
+		completion.ExternalSessionID, completion.ExternalSessionID, runID)
 	if err != nil {
 		return fmt.Errorf("complete run: %w", err)
 	}
-	if completion.State == domain.RunCompleted {
+	// This run either continued or cleaned up any workspace an earlier
+	// usage-limited run kept for it (the executor did that before
+	// completing), so the earlier run no longer holds it.
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET finalize_state = 'continued'
+WHERE id = (SELECT resume_run_id FROM tasks WHERE id = ?) AND id <> ? AND finalize_state = 'deferred'`,
+		taskID, runID); err != nil {
+		return fmt.Errorf("release kept workspace: %w", err)
+	}
+	switch {
+	case completion.Resume != nil:
+		// The task keeps its queue position and waits for the reset; the
+		// scheduler will not pick it before resume_after. (A running task
+		// cannot be disabled, so it is still enabled here.)
+		keptBy := ""
+		if completion.Resume.KeepWorkspace {
+			keptBy = runID
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'queued', resume_after = ?,
+resume_run_id = ?, resume_fresh = 0, resume_attempts = resume_attempts + 1, updated_at = ? WHERE id = ?`,
+			formatTime(completion.Resume.After.UTC()), keptBy, formatTime(now), taskID)
+	case completion.State == domain.RunCompleted:
 		state := domain.Completed
 		var sequence any
 		if taskType == domain.Recurring {
@@ -290,10 +315,10 @@ WHERE id = ?`,
 			}
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = ?, queue_sequence = ?,
-last_completed_at = ?, last_successful_source_revision = ?, updated_at = ? WHERE id = ?`,
+last_completed_at = ?, last_successful_source_revision = ?, `+clearResume+`, updated_at = ? WHERE id = ?`,
 			state, sequence, formatTime(now), sourceRevision, formatTime(now), taskID)
-	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
+	default:
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', `+clearResume+`, updated_at = ? WHERE id = ?`,
 			formatTime(now), taskID)
 	}
 	if err != nil {
@@ -462,7 +487,15 @@ completion_sequence = (SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM run
 WHERE id = ?`, formatTime(now), item.runID); err != nil {
 			return fmt.Errorf("recover interrupted run: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
+		// The interrupted run may have taken over a workspace an earlier
+		// usage-limited run kept; that workspace is now this run's and is
+		// preserved with it.
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET finalize_state = 'continued'
+WHERE id = (SELECT resume_run_id FROM tasks WHERE id = ?) AND id <> ? AND finalize_state = 'deferred'`,
+			item.taskID, item.runID); err != nil {
+			return fmt.Errorf("recover kept workspace: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', `+clearResume+`, updated_at = ? WHERE id = ?`,
 			formatTime(now), item.taskID); err != nil {
 			return fmt.Errorf("recover interrupted task: %w", err)
 		}

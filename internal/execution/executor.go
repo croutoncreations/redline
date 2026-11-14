@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -62,13 +64,22 @@ func (e Executor) Execute(
 		},
 		"profile": auditProfile(profile),
 	})
+	kept := e.takeKeptWorkspace(ctx, run, task, profile)
 	e.recordEvent(ctx, run.ID, domain.RunEventWorkspacePrepare, map[string]any{
 		"provider":          profile.WorkspaceProvider,
 		"repository":        profile.Repository,
 		"base_branch":       profile.BaseBranch,
 		"prepare_artifacts": e.lifecycleArtifacts(run.ID, "prepare"),
+		"resumes_run":       kept.ID,
 	})
-	prepared, err := e.Workspaces.Prepare(ctx, run.ID, task.Name, profile)
+	var prepared domain.Workspace
+	var err error
+	if kept.ID != "" {
+		// The earlier run's workspace holds its partial work; continue there.
+		prepared = kept.Workspace
+	} else {
+		prepared, err = e.Workspaces.Prepare(ctx, run.ID, task.Name, profile)
+	}
 	if err != nil {
 		e.recordEvent(ctx, run.ID, domain.RunEventWorkspaceFailed, map[string]any{
 			"error": err.Error(), "workspace": prepared,
@@ -147,6 +158,7 @@ func (e Executor) Execute(
 	harnessResult, harnessErr := e.Harness.Run(ctx, harness.Request{
 		RunID: run.ID, OutputDirectory: e.OutputDirectory,
 		Task: task, Profile: profile, Workspace: prepared,
+		ResumeSessionID: kept.External.SessionID,
 		OnExternalStarted: func(external domain.ExternalRun) error {
 			if externalStore, ok := e.Store.(interface {
 				UpdateRunExternal(context.Context, string, domain.ExternalRun) error
@@ -171,6 +183,7 @@ func (e Executor) Execute(
 	agentSucceeded := harnessErr == nil && harnessResult.ExitCode == 0
 	state := domain.RunCompleted
 	agentError := ""
+	resume := e.resumePlan(task, profile, harnessResult, agentSucceeded)
 	if !agentSucceeded {
 		state = domain.RunFailed
 		if harnessErr != nil {
@@ -192,42 +205,24 @@ func (e Executor) Execute(
 		})
 	}
 
-	status := "completed"
-	if !agentSucceeded {
-		status = "failed"
+	if resume != nil {
+		e.recordEvent(ctx, run.ID, domain.RunEventResumeScheduled, map[string]any{
+			"resume_after": resume.After, "keep_workspace": resume.KeepWorkspace,
+			"session": harnessResult.SessionID, "usage_limit": harnessResult.UsageLimit,
+			"resume_rejected": harnessResult.ResumeRejected,
+		})
 	}
-	finalizeState := "completed"
+
+	finalizeState := domain.FinalizeDeferred
 	var lifecycleErrors []string
-	e.recordEvent(ctx, run.ID, domain.RunEventFinalizeStarted, map[string]any{
-		"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
-	})
-	if err := e.Workspaces.Finalize(ctx, workspace.FinalizeRequest{
-		RunID: run.ID, TaskID: task.ID, Status: status, ExitCode: harnessResult.ExitCode,
-		OutputFile: harnessResult.OutputFile,
-		ResultFile: harness.ResultFilePath(e.OutputDirectory, run.ID),
-		Profile:    profile, Workspace: prepared,
-	}); err != nil {
-		finalizeState = "failed"
-		lifecycleErrors = append(lifecycleErrors, err.Error())
-		e.recordEvent(ctx, run.ID, domain.RunEventFinalizeFailed, map[string]any{
-			"error": err.Error(), "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
-		})
-	} else {
-		e.recordEvent(ctx, run.ID, domain.RunEventFinalizeCompleted, map[string]any{
-			"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
-		})
-	}
-	e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
-		"policy": profile.CleanupPolicy, "workspace": prepared,
-	})
-	if err := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
-		Success: agentSucceeded, Profile: profile, Workspace: prepared,
-	}); err != nil {
-		finalizeState = "failed"
-		lifecycleErrors = append(lifecycleErrors, err.Error())
-		e.recordEvent(ctx, run.ID, domain.RunEventCleanupFailed, map[string]any{"error": err.Error()})
-	} else {
-		e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
+	if resume == nil || !resume.KeepWorkspace {
+		// A kept workspace is finalized and cleaned up by the run that
+		// finishes the task, so partial work is not shipped or removed.
+		status := "completed"
+		if !agentSucceeded {
+			status = "failed"
+		}
+		finalizeState, lifecycleErrors = e.finalizeAndClean(ctx, run.ID, task.ID, status, harnessResult, profile, prepared, agentSucceeded)
 	}
 
 	activityResult := activity.Build(activity.Input{
@@ -236,7 +231,7 @@ func (e Executor) Execute(
 		Workspace:  prepared, Metadata: harnessResult.Metadata,
 		Provider: profile.HarnessType, Model: profile.Model,
 	})
-	return e.complete(ctx, run, task, domain.RunCompletion{
+	completion := domain.RunCompletion{
 		State: state, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, ErrorFile: harnessResult.ErrorFile,
 		Error: agentError, FinalizeState: finalizeState,
@@ -244,7 +239,177 @@ func (e Executor) Execute(
 		Summary:       activityResult.Summary, Outcome: activityResult.Outcome,
 		Artifacts: activityResult.Artifacts, Warnings: activityResult.Warnings,
 		ActualProvider: activityResult.ActualProvider, ActualModel: activityResult.ActualModel,
+		ExternalSessionID: harnessResult.SessionID,
+	}
+	if resume != nil {
+		how := "start it again"
+		if resume.KeepWorkspace {
+			how = "continue this session in the same workspace"
+		}
+		completion.Outcome = domain.RunOutcomeUsageLimited
+		completion.Summary = fmt.Sprintf("Stopped at the account's usage limit. Redline will %s after %s.",
+			how, resume.After.UTC().Format(time.RFC3339))
+		if harnessResult.ResumeRejected {
+			completion.Summary = "Claude Code could not reopen the earlier session. Redline will start the task again."
+		}
+		completion.Resume = resume
+	}
+	return e.complete(ctx, run, task, completion)
+}
+
+// finalizeAndClean runs a workspace's finalize hook and cleanup policy and
+// returns the resulting finalize state and any errors.
+func (e Executor) finalizeAndClean(
+	ctx context.Context, runID, taskID, status string, result harness.Result,
+	profile domain.ExecutionProfile, prepared domain.Workspace, success bool,
+) (string, []string) {
+	finalizeState := "completed"
+	var lifecycleErrors []string
+	e.recordEvent(ctx, runID, domain.RunEventFinalizeStarted, map[string]any{
+		"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(runID, "finalize"),
+		"workspace": prepared.Directory,
 	})
+	if err := e.Workspaces.Finalize(ctx, workspace.FinalizeRequest{
+		RunID: runID, TaskID: taskID, Status: status, ExitCode: result.ExitCode,
+		OutputFile: result.OutputFile,
+		ResultFile: harness.ResultFilePath(e.OutputDirectory, runID),
+		Profile:    profile, Workspace: prepared,
+	}); err != nil {
+		finalizeState = "failed"
+		lifecycleErrors = append(lifecycleErrors, err.Error())
+		e.recordEvent(ctx, runID, domain.RunEventFinalizeFailed, map[string]any{
+			"error": err.Error(), "artifacts": e.lifecycleArtifacts(runID, "finalize"),
+		})
+	} else {
+		e.recordEvent(ctx, runID, domain.RunEventFinalizeCompleted, map[string]any{
+			"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(runID, "finalize"),
+		})
+	}
+	e.recordEvent(ctx, runID, domain.RunEventCleanupStarted, map[string]any{
+		"policy": profile.CleanupPolicy, "workspace": prepared,
+	})
+	if err := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
+		Success: success, Profile: profile, Workspace: prepared,
+	}); err != nil {
+		finalizeState = "failed"
+		lifecycleErrors = append(lifecycleErrors, err.Error())
+		e.recordEvent(ctx, runID, domain.RunEventCleanupFailed, map[string]any{"error": err.Error()})
+	} else {
+		e.recordEvent(ctx, runID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
+	}
+	return finalizeState, lifecycleErrors
+}
+
+// MaxUsageLimitResumes bounds how many consecutive runs of one task may stop
+// at a usage limit and be queued again before the task fails instead.
+const MaxUsageLimitResumes = 3
+
+// usageLimitResumeFallback is how long to wait when the harness did not say
+// when the limit resets. The scheduler's own usage checks still apply.
+const usageLimitResumeFallback = 30 * time.Minute
+
+// usageLimitResumeMargin keeps the next run clear of the reset boundary.
+const usageLimitResumeMargin = time.Minute
+
+type runReader interface {
+	GetRun(context.Context, string) (domain.Run, error)
+}
+
+// takeKeptWorkspace returns the earlier usage-limited run whose session and
+// workspace this run continues, or the zero Run to start afresh. When the
+// kept workspace cannot be continued (the task changed, the profile cannot
+// resume, the session is missing), it is finalized and cleaned up here so it
+// is not left behind.
+func (e Executor) takeKeptWorkspace(
+	ctx context.Context, run domain.Run, task domain.Task, profile domain.ExecutionProfile,
+) domain.Run {
+	if task.ResumeRunID == "" {
+		return domain.Run{}
+	}
+	runs, ok := e.Store.(runReader)
+	if !ok {
+		return domain.Run{}
+	}
+	kept, err := runs.GetRun(ctx, task.ResumeRunID)
+	if err != nil {
+		e.recordEvent(ctx, run.ID, domain.RunEventResumeFallback, map[string]any{
+			"resumes_run": task.ResumeRunID, "reason": "earlier run unavailable: " + err.Error(),
+		})
+		return domain.Run{}
+	}
+	exists := false
+	if info, statErr := os.Stat(kept.Workspace.Directory); kept.Workspace.Directory != "" && statErr == nil && info.IsDir() {
+		exists = true
+	}
+	reason := ""
+	switch {
+	case task.ResumeFresh:
+		reason = "task prompt or profile changed while waiting"
+	case !harness.ProfileCanResume(profile) || !keepsWorkspace(profile):
+		reason = "profile cannot resume sessions"
+	case kept.External.SessionID == "":
+		reason = "earlier run recorded no agent session"
+	case !exists:
+		reason = "earlier workspace no longer exists"
+	case !withinRepository(kept.Workspace.Directory, profile.Repository):
+		reason = "earlier workspace is outside the profile's repository"
+	default:
+		return kept
+	}
+	e.recordEvent(ctx, run.ID, domain.RunEventResumeFallback, map[string]any{
+		"resumes_run": kept.ID, "reason": reason, "workspace": kept.Workspace,
+	})
+	if exists {
+		e.finalizeAndClean(ctx, kept.ID, task.ID, "failed", harness.Result{ExitCode: valueOr(kept.ExitCode, 1), OutputFile: kept.OutputFile},
+			profile, kept.Workspace, false)
+	}
+	return domain.Run{}
+}
+
+// keepsWorkspace reports whether the profile gives each run its own
+// workspace, so one can be kept for a later run without other tasks running
+// in it meanwhile.
+func keepsWorkspace(profile domain.ExecutionProfile) bool {
+	return profile.WorkspaceProvider == "git-worktree" || profile.WorkspaceProvider == "devx"
+}
+
+func withinRepository(directory, repository string) bool {
+	relative, err := filepath.Rel(repository, directory)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func valueOr(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+// resumePlan decides whether a failed run stopped only because the account
+// reached its usage limit, and if so when and how the task continues.
+func (e Executor) resumePlan(task domain.Task, profile domain.ExecutionProfile, result harness.Result, agentSucceeded bool) *domain.ResumePlan {
+	if agentSucceeded || task.ResumeAttempts >= MaxUsageLimitResumes {
+		return nil
+	}
+	now := e.now().UTC()
+	if result.ResumeRejected {
+		// The earlier session could not be reopened; start afresh now.
+		return &domain.ResumePlan{After: now}
+	}
+	if result.UsageLimit == nil {
+		return nil
+	}
+	after := now.Add(usageLimitResumeFallback)
+	if !result.UsageLimit.ResetsAt.IsZero() {
+		after = result.UsageLimit.ResetsAt.UTC().Add(usageLimitResumeMargin)
+		if after.Before(now) {
+			after = now
+		}
+	}
+	return &domain.ResumePlan{
+		After:         after,
+		KeepWorkspace: harness.ProfileCanResume(profile) && keepsWorkspace(profile) && result.SessionID != "",
+	}
 }
 
 func (e Executor) complete(
@@ -275,11 +440,16 @@ func (e Executor) complete(
 	if completion.State == domain.RunFailed {
 		terminalEvent = domain.RunEventFailed
 	}
-	e.recordEvent(ctx, run.ID, terminalEvent, map[string]any{
+	terminalPayload := map[string]any{
 		"state": completion.State, "exit_code": completion.ExitCode,
 		"error": completion.Error, "finalize_state": completion.FinalizeState,
 		"finalize_error": completion.FinalizeError,
-	})
+	}
+	if completion.Resume != nil {
+		terminalPayload["outcome"] = domain.RunOutcomeUsageLimited
+		terminalPayload["resume_after"] = completion.Resume.After
+	}
+	e.recordEvent(ctx, run.ID, terminalEvent, terminalPayload)
 	if e.Notifier == nil {
 		return nil
 	}
@@ -289,14 +459,19 @@ func (e Executor) complete(
 		eventType = domain.EventRunFailed
 		message = "Redline run failed"
 	}
+	data := map[string]string{
+		"state": string(completion.State), "exit_code": strconv.Itoa(completion.ExitCode),
+		"finalize_state": completion.FinalizeState, "error": completion.Error,
+	}
+	if completion.Resume != nil {
+		message = "Redline run stopped at the usage limit and will resume"
+		data["outcome"] = domain.RunOutcomeUsageLimited
+		data["resume_after"] = completion.Resume.After.UTC().Format(time.RFC3339)
+	}
 	event := domain.NotificationEvent{
 		Version: 1, Type: eventType, OccurredAt: completedAt,
 		ProviderAccountID: run.ProviderAccountID, TaskID: task.ID, RunID: run.ID,
-		Message: message,
-		Data: map[string]string{
-			"state": string(completion.State), "exit_code": strconv.Itoa(completion.ExitCode),
-			"finalize_state": completion.FinalizeState, "error": completion.Error,
-		},
+		Message: message, Data: data,
 	}
 	if err := e.Notifier.Notify(ctx, event); err != nil {
 		log.Printf("redline run %s notification failed: %v", run.ID, err)
