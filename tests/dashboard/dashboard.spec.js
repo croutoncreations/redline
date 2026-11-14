@@ -653,6 +653,21 @@ test('describes enabled jobs as waiting when the global scheduler is off', async
   await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
 });
 
+test('shows a usage-limited job as waiting to resume instead of needing attention', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  // The harness clock is 2026-07-20T19:00:00Z.
+  dashboard.tasks = [{ ...dashboard.tasks[0], resume_after: '2026-07-20T22:00:00Z', resume_run_id: 'run-limited', resume_attempts: 1 }];
+  dashboard.runs = [{ id: 'run-limited', task_id: 'audit-auth', provider_account_id: 'codex-main', state: 'failed',
+    started_at: '2026-07-20T18:00:00Z', completed_at: '2026-07-20T18:55:00Z',
+    error: "Claude Code reached the account's usage limit (five hour).", outcome: 'usage_limited',
+    summary: 'Stopped at the account\'s usage limit. Redline will continue this session in the same workspace.' }];
+  await loadDashboard(page, { dashboard });
+
+  await expect(page.locator('#tasks-body')).toContainText('Resumes in 3 hrs');
+  await expect(page.locator('#tasks-body')).toContainText('Usage limit reached · continues after reset');
+  await expect(page.locator('#failure-alert')).toBeHidden();
+});
+
 test('gives actionable install and sign-in guidance when account readiness is missing', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];

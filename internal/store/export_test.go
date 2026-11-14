@@ -2,6 +2,10 @@ package store
 
 import "context"
 
+// LatestSchemaVersion is the newest migration Open applies. Bump it with
+// each new migration rather than editing every migration test.
+const LatestSchemaVersion = 44
+
 // ExplainRunUsageObservations returns the SQLite query plan of the run-usage
 // evidence query so tests can pin its index use.
 func (d *DB) ExplainRunUsageObservations(ctx context.Context) ([]string, error) {
