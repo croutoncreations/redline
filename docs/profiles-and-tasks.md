@@ -190,6 +190,73 @@ Optional prepare/finalize hooks run before and after the harness. Cleanup defaul
 commands, are retained with each run for reproducibility, so pass secrets via the environment
 rather than embedding them in profile command strings.
 
+## When a job hits the usage limit
+
+Claude Code, Codex CLI, and pi runs are checked for a usage-limit stop. The check reads the
+CLI's own error events (Claude's rejected `rate_limit_event` or an `is_error` result saying the
+limit was hit, Codex's `error`/`turn.failed` events, pi's `stopReason: "error"`). Tool output in
+the transcript is not checked, so a task that only mentions a limit is not flagged. Claude Code
+can exit 0 when it stops at the limit; that still counts as a stop.
+
+On a usage-limit stop, Redline:
+
+- records a `usage_limit.reached` run event with the harness session ID, the window that ran
+  out, and its reset time when the CLI reported them;
+- marks the run failed with outcome `usage_limited`. It does not pause the provider the way a
+  sign-out does, because the scheduler already reads the limit from usage polling;
+- keeps the workspace, whatever the cleanup policy, so the job can be resumed.
+
+Set `on_usage_limit_command` to hand the job to something else at that point. It runs in the
+kept workspace before finalize and cleanup. The task prompt arrives on stdin, along with this
+environment:
+
+| Variable | Meaning |
+| --- | --- |
+| `REDLINE_HARNESS`, `REDLINE_MODEL` | The harness and model that stopped |
+| `REDLINE_HARNESS_SESSION_ID` | Its session, for `claude --resume`, `codex exec resume`, or `pi --session` |
+| `REDLINE_CLAUDE_CONFIG_DIR` | The Claude Code profile directory a profile-bound account ran with; resume its sessions with `CLAUDE_CONFIG_DIR=$REDLINE_CLAUDE_CONFIG_DIR claude --resume ...`. Empty for the default login. `CLAUDE_CONFIG_DIR` itself is not set, so the hook does not spend the account that ran out. |
+| `REDLINE_USAGE_LIMIT_TYPE`, `REDLINE_USAGE_LIMIT_RESETS_AT`, `REDLINE_USAGE_LIMIT_MESSAGE` | What ran out and when it resets (RFC 3339), when known |
+| `REDLINE_WORKSPACE_DIR`, `REDLINE_WORKSPACE_BRANCH` | The kept workspace |
+| `REDLINE_OUTPUT_FILE`, `REDLINE_ERROR_FILE` | The stopped harness's transcript and stderr |
+| `REDLINE_RUN_ID`, `REDLINE_TASK_ID`, `REDLINE_TASK_NAME`, `REDLINE_PROVIDER_ACCOUNT_ID`, `REDLINE_REPO`, `REDLINE_BASE_BRANCH`, `REDLINE_RESULT_FILE` | Run context |
+
+Exit 0 means the command finished the job. The run then completes with outcome `handed_off`,
+and finalize and cleanup run as for a success. Any other exit leaves the run failed and the
+workspace kept. Output goes to the `usage_limit_stdout` and `usage_limit_stderr` log streams
+(`redline run logs <run-id> --stream usage_limit_stdout`). Finalize hooks also get
+`REDLINE_RUN_OUTCOME` (`completed`, `failed`, `usage_limited`, or `handed_off`).
+
+`examples/on-usage-limit-overflow.sh` continues the job in pi on another model, for example an
+OpenAI-compatible endpoint:
+
+```yaml
+# Copy the example somewhere stable first; the command runs in the job's workspace.
+on_usage_limit_command: OVERFLOW_MODEL=openrouter/qwen/qwen3-coder /path/to/on-usage-limit-overflow.sh
+```
+
+The run stays active until the command exits, and Redline sets no timeout on it. Until then it
+keeps its account's concurrency slot, so give a long-running hook its own timeout (for example
+`timeout 2h ...`). Whatever the other harness or endpoint costs is not counted against any
+Redline account.
+
+### Retrying after the reset
+
+Set `retry_after_usage_limit: true` on the profile (in the dashboard: **Retry after the usage
+limit resets**) to put a usage-limited job back in the queue. It is held until the reset time the
+CLI reported plus two minutes, or for one hour when no reset time was reported. After that it
+goes through the scheduler like any other queued job, so it also waits for usage polling to show
+the allowance is back. While held, the scheduler lists it with "waiting for the usage limit to
+reset at ...".
+
+The retry starts a fresh run in a new workspace. The stopped run's workspace and session are
+kept, and Redline does not resume that session itself. Have the prompt check the repository for
+earlier progress, or use `on_usage_limit_command` to resume the session.
+
+There is no retry when the usage limit command finished the job. After three retries in a row
+that stop at the limit again, the task is marked failed instead. A completed run, or a manual
+`redline task retry`, resets the count. A manual retry of a held job also starts it now instead
+of waiting for the reset.
+
 For report-only tasks such as release readiness, choose a profile whose prepare/finalize hooks
 and custom harness commands do not change repository files, commit, push, open pull requests,
 publish, deploy, or release. A task prompt does not disable these commands; prepare hooks run

@@ -217,6 +217,8 @@ async function saveOnboardingProfile() {
     harness_command:preserveHarnessConfiguration ? existing?.harness_command || '' : '',
     harness_args:preserveHarnessConfiguration ? existing?.harness_args || [] : [], workspace_args:leavingHermes ? [] : existing?.workspace_args || [],
     prepare_command:existing?.prepare_command || '', finalize_command:existing?.finalize_command || '',
+    on_usage_limit_command:existing?.on_usage_limit_command || '',
+    retry_after_usage_limit:existing?.retry_after_usage_limit || false,
   };
   const persistedID = existing?.id || id;
   const saved = await apiRequest(existing ? `/v1/profiles/${encodeURIComponent(persistedID)}` : '/v1/profiles',{
@@ -867,8 +869,10 @@ function renderTasks(tasks) {
     // One-off jobs never re-run after success, so an interval has no effect on them.
     const interval = task.type === 'recurring' ? duration(task.min_interval) : 'Runs once';
     const recurrence = (schedulerOff ? 'Waiting for global scheduling' : interval) + firesaleInterval;
-    const status = schedulerOff ? 'Ready · scheduler off' : task.state;
-    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(task.type === 'one_off' ? 'One-off' : title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff ? 'wait' : escapeHTML(task.state)}">${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
+    // A usage-limited job back in the queue, waiting for its limit to reset.
+    const held = task.state === 'queued' && task.retry_not_before && new Date(task.retry_not_before) > new Date();
+    const status = schedulerOff ? 'Ready · scheduler off' : held ? `Retry after ${shortTime(task.retry_not_before)}` : task.state;
+    return `<tr class="task-row" data-task-row="${escapeHTML(task.id)}" tabindex="0"><td><span class="priority">P${task.priority}</span></td><td><span class="job-name">${escapeHTML(task.name)}</span><span class="subtle">${escapeHTML(task.id)}</span></td><td><span class="tier tier-${escapeHTML(task.dispatch_tier || 'behind')}">${escapeHTML(dispatchTierLabel(task.dispatch_tier || 'behind'))}</span></td><td><span class="tag">${escapeHTML(task.provider_account_id)}</span><span class="tag">${escapeHTML(task.model || task.harness_type)}</span></td><td><span class="job-name">${escapeHTML(task.type === 'one_off' ? 'One-off' : title(task.type))}</span><span class="subtle">${escapeHTML(recurrence)}${task.require_repo_change ? ' · repo change required' : ''}</span></td><td><span class="status ${schedulerOff || held ? 'wait' : escapeHTML(task.state)}"${held ? ' data-testid="usage-limit-hold"' : ''}>${escapeHTML(status)}</span></td><td><button class="manage-button" type="button" data-task="${escapeHTML(task.id)}">Manage</button></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">No jobs are queued yet. Create one to start using spare capacity.</td></tr>';
   document.querySelectorAll('.manage-button').forEach(button => button.addEventListener('click',event => { event.stopPropagation(); openTask(button.dataset.task); }));
   document.querySelectorAll('[data-task-row]').forEach(row => {
@@ -1488,6 +1492,10 @@ function updateProfileExample() {
 function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
+  // Usage-limit handling reads CLI transcripts, which Hermes runs do not produce.
+  const hermes = harness === 'hermes';
+  $('#profile-on-usage-limit').disabled = hermes; $('#profile-retry-usage-limit').disabled = hermes;
+  $('#profile-usage-limit-note').textContent = hermes ? 'Hermes runs do not support usage-limit handling.' : 'Leave empty to stop the job at the limit and keep its workspace so it can be resumed.';
   $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
   setModelControl(harness, selectedModelValue || 'default');
 }
@@ -1520,7 +1528,7 @@ async function editProfile(id) {
     populateRepositoryChoices(profile.repository || '');
     $('#profile-cleanup').value = profile.cleanup_policy || ''; $('#profile-require-clean').checked = !!profile.require_clean;
     $('#profile-harness-command').value = profile.harness_command || ''; $('#profile-harness-args').value = (profile.harness_args || []).join('\n'); $('#profile-workspace-args').value = (profile.workspace_args || []).join('\n');
-    $('#profile-prepare').value = profile.prepare_command || ''; $('#profile-finalize').value = profile.finalize_command || ''; $('#delete-profile').hidden = false; renderProfiles();
+    $('#profile-prepare').value = profile.prepare_command || ''; $('#profile-finalize').value = profile.finalize_command || ''; $('#profile-on-usage-limit').value = profile.on_usage_limit_command || ''; $('#profile-retry-usage-limit').checked = !!profile.retry_after_usage_limit; $('#delete-profile').hidden = false; renderProfiles();
   } catch (error) { showProfileError(error.message); }
 }
 async function saveProfile(event) {
@@ -1541,7 +1549,7 @@ async function saveProfile(event) {
       if (contextIndex >= 0) agentContexts[contextIndex]=savedContext; else agentContexts.push(savedContext);
       workspaceProvider='runtime-owned';
     }
-    const payload = {id,provider_account_id:$('#profile-provider').value,agent_context_id:agentContextID,harness_type:harness,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:workspaceProvider,repository,base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:harness === 'hermes' ? '' : $('#profile-prepare').value,finalize_command:harness === 'hermes' ? '' : $('#profile-finalize').value};
+    const payload = {id,provider_account_id:$('#profile-provider').value,agent_context_id:agentContextID,harness_type:harness,model:selectedModel(),budget_model_group:$('#profile-budget-group').value,workspace_provider:workspaceProvider,repository,base_branch:$('#profile-base-branch').value.trim(),cleanup_policy:$('#profile-cleanup').value,require_clean:$('#profile-require-clean').checked,harness_command:$('#profile-harness-command').value.trim(),harness_args:lines($('#profile-harness-args').value),workspace_args:lines($('#profile-workspace-args').value),prepare_command:harness === 'hermes' ? '' : $('#profile-prepare').value,finalize_command:harness === 'hermes' ? '' : $('#profile-finalize').value,on_usage_limit_command:harness === 'hermes' ? '' : $('#profile-on-usage-limit').value,retry_after_usage_limit:harness !== 'hermes' && $('#profile-retry-usage-limit').checked};
     if (editingProfile) delete payload.id;
     const saved = await apiRequest(editingProfile ? `/v1/profiles/${encodeURIComponent(editingProfile)}` : '/v1/profiles',{method:editingProfile ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
     await loadProfiles(true); await editProfile(saved.id); await refresh();

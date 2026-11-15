@@ -38,14 +38,88 @@ type Manager struct {
 }
 
 type FinalizeRequest struct {
-	RunID      string
-	TaskID     string
-	Status     string
+	RunID  string
+	TaskID string
+	Status string
+	// Outcome refines Status: completed, failed, usage_limited (stopped at
+	// the usage limit), or handed_off (on_usage_limit_command took over).
+	Outcome    string
 	ExitCode   int
 	OutputFile string
 	ResultFile string
 	Profile    domain.ExecutionProfile
 	Workspace  domain.Workspace
+}
+
+// UsageLimitRequest describes a run its harness stopped at the account's
+// usage limit, for the profile's on_usage_limit_command.
+type UsageLimitRequest struct {
+	RunID             string
+	TaskID            string
+	TaskName          string
+	ProviderAccountID string
+	Prompt            string
+	OutputFile        string
+	ErrorFile         string
+	ResultFile        string
+	HarnessSessionID  string
+	LimitType         string
+	LimitMessage      string
+	ResetsAt          string
+	Profile           domain.ExecutionProfile
+	Workspace         domain.Workspace
+}
+
+// RunUsageLimitHook runs the profile's on_usage_limit_command in the run's
+// workspace, before finalize and cleanup, with the task prompt on stdin.
+// A nil error means the command exited 0 and took over the job.
+func (m Manager) RunUsageLimitHook(ctx context.Context, request UsageLimitRequest) error {
+	if request.Profile.OnUsageLimitCommand == "" {
+		return nil
+	}
+	stdout, stderr, closeArtifacts, err := m.artifactWriters(request.RunID, "usage_limit")
+	if err != nil {
+		return err
+	}
+	defer closeArtifacts()
+	shellName, shellArgs := redprocess.ShellCommand(request.Profile.OnUsageLimitCommand)
+	exitCode, err := m.runner().Run(ctx, redprocess.Command{
+		Name: shellName, Args: shellArgs, Dir: request.Workspace.Directory,
+		Env: append(os.Environ(),
+			"REDLINE_RUN_ID="+request.RunID,
+			"REDLINE_TASK_ID="+request.TaskID,
+			"REDLINE_TASK_NAME="+request.TaskName,
+			"REDLINE_PROVIDER_ACCOUNT_ID="+request.ProviderAccountID,
+			"REDLINE_HARNESS="+request.Profile.HarnessType,
+			"REDLINE_MODEL="+request.Profile.Model,
+			"REDLINE_REPO="+request.Profile.Repository,
+			"REDLINE_BASE_BRANCH="+request.Profile.BaseBranch,
+			"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
+			"REDLINE_WORKSPACE_BRANCH="+request.Workspace.Branch,
+			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
+			"REDLINE_HARNESS_SESSION_ID="+request.HarnessSessionID,
+			// Where a profile-bound Claude account keeps its sessions, for
+			// `CLAUDE_CONFIG_DIR=$REDLINE_CLAUDE_CONFIG_DIR claude --resume`.
+			// CLAUDE_CONFIG_DIR itself is not set: that would make every
+			// claude the hook starts spend the account that just ran out.
+			"REDLINE_CLAUDE_CONFIG_DIR="+request.Profile.ClaudeConfigDir,
+			"REDLINE_USAGE_LIMIT_TYPE="+request.LimitType,
+			"REDLINE_USAGE_LIMIT_MESSAGE="+request.LimitMessage,
+			"REDLINE_USAGE_LIMIT_RESETS_AT="+request.ResetsAt,
+			"REDLINE_OUTPUT_FILE="+request.OutputFile,
+			"REDLINE_ERROR_FILE="+request.ErrorFile,
+			"REDLINE_RESULT_FILE="+request.ResultFile,
+		),
+		Stdin:  strings.NewReader(request.Prompt),
+		Stdout: stdout, Stderr: stderr,
+	})
+	if err != nil {
+		return fmt.Errorf("run usage limit hook: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("usage limit hook exited with code %d", exitCode)
+	}
+	return nil
 }
 
 type CleanupRequest struct {
@@ -413,6 +487,7 @@ func hookEnvironment(request FinalizeRequest) []string {
 		"REDLINE_RUN_ID="+request.RunID,
 		"REDLINE_TASK_ID="+request.TaskID,
 		"REDLINE_RUN_STATUS="+request.Status,
+		"REDLINE_RUN_OUTCOME="+request.Outcome,
 		"REDLINE_EXIT_CODE="+strconv.Itoa(request.ExitCode),
 		"REDLINE_WORKSPACE_DIR="+request.Workspace.Directory,
 		"REDLINE_SESSION_ID="+request.Workspace.SessionID,

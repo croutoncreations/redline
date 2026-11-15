@@ -158,6 +158,8 @@ type dashboardTask struct {
 	DispatchTier        domain.DispatchTier `json:"dispatch_tier"`
 	LastStartedAt       *time.Time          `json:"last_started_at,omitempty"`
 	LastCompletedAt     *time.Time          `json:"last_completed_at,omitempty"`
+	// RetryNotBefore is set while a usage-limited job waits for its reset.
+	RetryNotBefore *time.Time `json:"retry_not_before,omitempty"`
 }
 
 func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
@@ -561,6 +563,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			MinInterval: task.MinInterval, FiresaleMinInterval: task.FiresaleMinInterval, RequireRepoChange: task.RequireRepoChange,
 			DispatchTier:  task.DispatchTier,
 			LastStartedAt: task.LastStartedAt, LastCompletedAt: task.LastCompletedAt,
+			RetryNotBefore: task.RetryNotBefore,
 		})
 	}
 	result.Runs, err = s.store.ListRuns(ctx, 20)

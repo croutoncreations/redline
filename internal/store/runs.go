@@ -142,6 +142,9 @@ WHERE t.id = ? AND p.provider_account_id = ?`, taskID, providerAccountID)
 	if task.LastCompletedAt != nil && interval > 0 && now.Before(task.LastCompletedAt.Add(interval)) {
 		return domain.Run{}, fmt.Errorf("task %q minimum interval has not elapsed", taskID)
 	}
+	if task.RetryNotBefore != nil && now.Before(*task.RetryNotBefore) {
+		return domain.Run{}, fmt.Errorf("task %q is held until its usage limit resets", taskID)
+	}
 	if task.RequireRepoChange &&
 		(sourceRevision == "" || sourceRevision == task.LastSuccessfulSourceRevision) {
 		return domain.Run{}, fmt.Errorf("task %q requires a changed repository revision", taskID)
@@ -290,10 +293,20 @@ WHERE id = ?`,
 			}
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = ?, queue_sequence = ?,
-last_completed_at = ?, last_successful_source_revision = ?, updated_at = ? WHERE id = ?`,
+last_completed_at = ?, last_successful_source_revision = ?, retry_not_before = NULL,
+usage_limit_retries = 0, updated_at = ? WHERE id = ?`,
 			state, sequence, formatTime(now), sourceRevision, formatTime(now), taskID)
+	} else if completion.RetryAt != nil {
+		// Back in the queue, at the front of its priority, held until the
+		// usage limit resets. A disabled task stays disabled.
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET
+state = CASE WHEN enabled = 1 THEN 'queued' ELSE 'disabled' END,
+retry_not_before = ?, usage_limit_retries = usage_limit_retries + 1, updated_at = ?
+WHERE id = ?`, formatTime(*completion.RetryAt), formatTime(now), taskID)
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', updated_at = ? WHERE id = ?`,
+		// The usage-limit retry count is kept, so a job that fails some
+		// other way between limit stops still reaches the cap.
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET state = 'failed', retry_not_before = NULL, updated_at = ? WHERE id = ?`,
 			formatTime(now), taskID)
 	}
 	if err != nil {
