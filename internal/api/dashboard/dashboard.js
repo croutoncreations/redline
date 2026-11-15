@@ -1492,6 +1492,10 @@ function updateProfileExample() {
 function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
+  // Usage-limit handling reads CLI transcripts, which Hermes runs do not produce.
+  const hermes = harness === 'hermes';
+  $('#profile-on-usage-limit').disabled = hermes; $('#profile-retry-usage-limit').disabled = hermes;
+  $('#profile-usage-limit-note').textContent = hermes ? 'Hermes runs do not support usage-limit handling.' : 'Leave empty to stop the job at the limit and keep its workspace so it can be resumed.';
   $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
   setModelControl(harness, selectedModelValue || 'default');
 }

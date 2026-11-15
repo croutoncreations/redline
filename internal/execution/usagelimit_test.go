@@ -257,3 +257,59 @@ func TestUsageLimitRetryCapIsCountedInTheStore(t *testing.T) {
 		run, task = next, stored
 	}
 }
+
+// The hook gets the prompt the harness ran with, even if the agent removed
+// prompt_file; with no prompt at all, the job is not handed off.
+func TestUsageLimitHookUsesTheHarnessPromptOrRefusesWithoutOne(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	profile.OnUsageLimitCommand = "./take-over.sh"
+	task.Prompt, task.PromptFile = "", "removed-by-agent.md"
+	workspaces := &hookWorkspaces{fakeWorkspaces: fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}}}
+	result := limitedResult()
+	result.UsageLimit.Prompt = "the original prompt"
+	executor := execution.Executor{
+		Store: db, Workspaces: workspaces, Harness: &fakeHarness{result: result},
+		OutputDirectory: t.TempDir(), Now: steppedClock(run.StartedAt),
+	}
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	if workspaces.hookRequest == nil || workspaces.hookRequest.Prompt != "the original prompt" {
+		t.Fatalf("hook request = %#v", workspaces.hookRequest)
+	}
+
+	db, run, _, profile = admittedRun(t, domain.OneOff)
+	profile.OnUsageLimitCommand = "./take-over.sh"
+	workspaces = &hookWorkspaces{fakeWorkspaces: fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}}}
+	executor.Store, executor.Workspaces, executor.Harness = db, workspaces, &fakeHarness{result: limitedResult()}
+	executor.Now = steppedClock(run.StartedAt)
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := db.GetRun(t.Context(), run.ID)
+	if workspaces.hookRequest != nil || stored.State != domain.RunFailed || stored.Outcome != "usage_limited" {
+		t.Fatalf("hook=%#v run=%#v", workspaces.hookRequest, stored)
+	}
+}
+
+// A reset that passes while the hook or finalize runs still holds the
+// retry until reset plus margin, not the one-hour fallback.
+func TestUsageLimitRetryKeepsResetPlusMarginWhenTheResetJustPassed(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	profile.RetryAfterUsageLimit = true
+	resets := run.StartedAt.Add(30 * time.Second)
+	result := limitedResult()
+	result.UsageLimit.ResetsAt = &resets
+	executor := execution.Executor{
+		Store: db, Workspaces: &hookWorkspaces{fakeWorkspaces: fakeWorkspaces{workspace: domain.Workspace{Directory: t.TempDir()}}},
+		Harness: &fakeHarness{result: result}, OutputDirectory: t.TempDir(),
+		Now: func() time.Time { return run.StartedAt.Add(time.Minute) },
+	}
+	if err := executor.Execute(t.Context(), run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	storedTask, _ := db.GetTask(t.Context(), task.ID)
+	if want := resets.Add(2 * time.Minute); storedTask.RetryNotBefore == nil || !storedTask.RetryNotBefore.Equal(want) {
+		t.Fatalf("retry_not_before = %v, want %v", storedTask.RetryNotBefore, want)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -25,6 +26,11 @@ type UsageLimit struct {
 	// SessionID is the harness's session for this run, so another process
 	// can resume it (claude --resume, codex exec resume, pi --session).
 	SessionID string `json:"session_id,omitempty"`
+	// Prompt is the prompt the harness was given, for the usage limit
+	// command. It is the copy read before the run, so the hook gets it
+	// even if the agent changed or removed prompt_file. Not serialized:
+	// it may be large and belongs to the task.
+	Prompt string `json:"-"`
 }
 
 // usageLimitPhrases are the messages the CLIs print when a subscription
@@ -71,18 +77,22 @@ func DetectUsageLimit(harnessType, outputFile string) *UsageLimit {
 	default:
 		return nil
 	}
-	data, err := readTail(outputFile, 256*1024)
-	if err != nil || len(data) == 0 {
+	// The whole transcript is streamed, not a tail: pi ends with turn_end
+	// and agent_end events that repeat every message, and on a long run
+	// they alone can be larger than any fixed tail.
+	file, err := os.Open(outputFile)
+	if err != nil {
 		return nil
 	}
+	defer file.Close()
 	var limit *UsageLimit
 	switch harnessType {
 	case "claude-code":
-		limit = detectClaudeLimit(data)
+		limit = detectClaudeLimit(file)
 	case "codex-cli":
-		limit = detectCodexLimit(data)
+		limit = detectCodexLimit(file)
 	case "pi":
-		limit = detectPiLimit(data)
+		limit = detectPiLimit(file)
 	}
 	if limit != nil {
 		limit.SessionID = firstSessionID(harnessType, outputFile)
@@ -90,57 +100,94 @@ func DetectUsageLimit(harnessType, outputFile string) *UsageLimit {
 	return limit
 }
 
-// eachEvent calls visit for every JSON object line in data.
-func eachEvent(data []byte, visit func(eventType string, event map[string]json.RawMessage)) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 || line[0] != '{' {
-			continue
+// maxEventLine bounds one transcript line. A longer line (pi's agent_end
+// can carry every message of a long run) is skipped whole.
+const maxEventLine = 64 * 1024 * 1024
+
+// eachEvent calls visit for every JSON object line read from transcript.
+// Only the "type" field is decoded up front; visit decodes what it needs.
+func eachEvent(transcript io.Reader, visit func(eventType string, line []byte)) {
+	reader := bufio.NewReaderSize(transcript, 64*1024)
+	for {
+		line, err := readEventLine(reader)
+		if len(line) > 0 && line[0] == '{' {
+			var header struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(line, &header) == nil {
+				visit(header.Type, line)
+			}
 		}
-		var event map[string]json.RawMessage
-		if json.Unmarshal(line, &event) != nil {
-			continue
+		if err != nil {
+			return
 		}
-		visit(stringField(event, "type"), event)
 	}
 }
 
-// detectClaudeLimit requires the run's final result to be an error. A
-// rejected rate_limit_event that the run was not using overage for
-// supplies the window and reset time; the final error text alone is also
-// enough when it names the limit.
-func detectClaudeLimit(data []byte) *UsageLimit {
+// readEventLine returns the next line, or nil for a line over maxEventLine
+// (which is consumed and skipped).
+func readEventLine(reader *bufio.Reader) ([]byte, error) {
+	var line []byte
+	tooLong := false
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if !tooLong {
+			if len(line)+len(chunk) > maxEventLine {
+				tooLong, line = true, nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if tooLong {
+			return nil, err
+		}
+		return bytes.TrimSpace(line), err
+	}
+}
+
+// detectClaudeLimit requires the run's final result to be an error. The
+// latest rate_limit_event decides whether the account was still refused:
+// a rejection the run was not on overage for supplies the window and
+// reset time, and any later event that lets work continue (the window
+// reopened, or overage took over) clears it. The final error text alone
+// is also enough when it names the limit.
+func detectClaudeLimit(transcript io.Reader) *UsageLimit {
 	var rejection *UsageLimit
-	var finalError string
-	var finalIsError, sawResult bool
-	eachEvent(data, func(eventType string, event map[string]json.RawMessage) {
+	var final struct {
+		IsError bool   `json:"is_error"`
+		Result  string `json:"result"`
+	}
+	sawResult := false
+	eachEvent(transcript, func(eventType string, line []byte) {
 		switch eventType {
 		case "rate_limit_event":
-			var info struct {
-				Status         string `json:"status"`
-				ResetsAt       int64  `json:"resetsAt"`
-				RateLimitType  string `json:"rateLimitType"`
-				OverageStatus  string `json:"overageStatus"`
-				IsUsingOverage bool   `json:"isUsingOverage"`
+			var event struct {
+				Info struct {
+					Status         string `json:"status"`
+					ResetsAt       int64  `json:"resetsAt"`
+					RateLimitType  string `json:"rateLimitType"`
+					OverageStatus  string `json:"overageStatus"`
+					IsUsingOverage bool   `json:"isUsingOverage"`
+				} `json:"rate_limit_info"`
 			}
-			if json.Unmarshal(event["rate_limit_info"], &info) != nil {
+			if json.Unmarshal(line, &event) != nil {
 				return
 			}
+			info := event.Info
 			if info.Status == "rejected" && !info.IsUsingOverage && info.OverageStatus != "allowed" {
 				rejection = &UsageLimit{LimitType: info.RateLimitType, ResetsAt: unixTime(info.ResetsAt)}
-			} else if info.Status == "allowed" || info.Status == "allowed_warning" {
-				// The window opened again (or overage took over).
+			} else {
 				rejection = nil
 			}
 		case "result":
-			sawResult = true
-			_ = json.Unmarshal(event["is_error"], &finalIsError)
-			finalError = strings.TrimSpace(stringField(event, "result"))
+			sawResult = json.Unmarshal(line, &final) == nil
 		}
 	})
-	if !sawResult || !finalIsError {
+	finalError := strings.TrimSpace(final.Result)
+	if !sawResult || !final.IsError {
 		return nil
 	}
 	if rejection == nil && !mentionsUsageLimit(finalError) {
@@ -160,29 +207,38 @@ func detectClaudeLimit(data []byte) *UsageLimit {
 	return limit
 }
 
-// detectCodexLimit requires the last turn to have failed on the limit,
-// with no completed turn after it.
-func detectCodexLimit(data []byte) *UsageLimit {
+// detectCodexLimit requires the run's final failure to be the limit. An
+// error event names the limit; the turn.failed that ends the turn is
+// authoritative, so a different final failure (a sign-out) replaces it,
+// and a later started or completed turn clears it.
+func detectCodexLimit(transcript io.Reader) *UsageLimit {
 	var limit *UsageLimit
-	eachEvent(data, func(eventType string, event map[string]json.RawMessage) {
-		var message string
+	eachEvent(transcript, func(eventType string, line []byte) {
 		switch eventType {
 		case "turn.completed", "turn.started":
 			limit = nil
-			return
 		case "error":
-			message = stringField(event, "message")
-		case "turn.failed":
-			var failure struct {
+			var event struct {
 				Message string `json:"message"`
 			}
-			_ = json.Unmarshal(event["error"], &failure)
-			message = failure.Message
-		default:
-			return
-		}
-		if message != "" && mentionsUsageLimit(message) {
-			limit = &UsageLimit{Message: strings.TrimSpace(message)}
+			if json.Unmarshal(line, &event) == nil && mentionsUsageLimit(event.Message) {
+				limit = &UsageLimit{Message: strings.TrimSpace(event.Message)}
+			}
+		case "turn.failed":
+			var event struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(line, &event) != nil {
+				return
+			}
+			switch message := event.Error.Message; {
+			case mentionsUsageLimit(message):
+				limit = &UsageLimit{Message: strings.TrimSpace(message)}
+			case strings.TrimSpace(message) != "":
+				limit = nil
+			}
 		}
 	})
 	return limit
@@ -190,30 +246,32 @@ func detectCodexLimit(data []byte) *UsageLimit {
 
 // detectPiLimit requires the last assistant message to have ended with an
 // error naming the limit.
-func detectPiLimit(data []byte) *UsageLimit {
+func detectPiLimit(transcript io.Reader) *UsageLimit {
 	var limit *UsageLimit
-	eachEvent(data, func(eventType string, event map[string]json.RawMessage) {
+	eachEvent(transcript, func(eventType string, line []byte) {
 		if eventType != "message_end" {
 			return
 		}
-		var message struct {
-			Role         string `json:"role"`
-			StopReason   string `json:"stopReason"`
-			ErrorMessage string `json:"errorMessage"`
+		var event struct {
+			Message struct {
+				Role         string `json:"role"`
+				StopReason   string `json:"stopReason"`
+				ErrorMessage string `json:"errorMessage"`
+			} `json:"message"`
 		}
-		if json.Unmarshal(event["message"], &message) != nil || message.Role != "assistant" {
+		if json.Unmarshal(line, &event) != nil || event.Message.Role != "assistant" {
 			return
 		}
 		limit = nil
-		if message.StopReason == "error" && mentionsUsageLimit(message.ErrorMessage) {
-			limit = &UsageLimit{Message: strings.TrimSpace(message.ErrorMessage)}
+		if event.Message.StopReason == "error" && mentionsUsageLimit(event.Message.ErrorMessage) {
+			limit = &UsageLimit{Message: strings.TrimSpace(event.Message.ErrorMessage)}
 		}
 	})
 	return limit
 }
 
 // firstSessionID reads the session identifier from the transcript's first
-// lines, which the tail read may have cut off.
+// lines.
 func firstSessionID(harnessType, path string) string {
 	file, err := os.Open(path)
 	if err != nil {

@@ -144,3 +144,32 @@ func TestDetectUsageLimitReadsLegacyClaudeResetTime(t *testing.T) {
 		t.Fatalf("limit = %#v", limit)
 	}
 }
+
+// pi ends with turn_end/agent_end events that repeat every message; on a
+// long run they can be far larger than any tail window.
+func TestDetectUsageLimitFindsPiErrorBeforeAHugeAgentEnd(t *testing.T) {
+	huge := `{"type":"agent_end","messages":[{"role":"toolResult","content":"` + strings.Repeat("x", 600*1024) + `"}]}`
+	transcript := `{"type":"session","id":"pi-session"}
+{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"You've hit your usage limit."}}
+` + huge + "\n" + `{"type":"agent_settled"}` + "\n"
+	limit := harness.DetectUsageLimit("pi", writeTranscript(t, transcript))
+	if limit == nil || limit.SessionID != "pi-session" {
+		t.Fatalf("limit = %#v", limit)
+	}
+}
+
+func TestDetectUsageLimitFollowsTheLatestRateLimitStateAndFinalCodexFailure(t *testing.T) {
+	claude := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"allowed","isUsingOverage":true}}
+{"type":"result","subtype":"success","is_error":true,"result":"API Error: 500 Internal server error"}`
+	if limit := harness.DetectUsageLimit("claude-code", writeTranscript(t, claude)); limit != nil {
+		t.Errorf("overage took over, but a usage limit was reported: %#v", limit)
+	}
+	codex := `{"type":"thread.started","thread_id":"t"}
+{"type":"turn.started"}
+{"type":"error","message":"You've hit your usage limit."}
+{"type":"turn.failed","error":{"message":"Not logged in: login required"}}`
+	if limit := harness.DetectUsageLimit("codex-cli", writeTranscript(t, codex)); limit != nil {
+		t.Errorf("a final sign-out was reported as a usage limit: %#v", limit)
+	}
+}

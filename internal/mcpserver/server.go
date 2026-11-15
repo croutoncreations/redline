@@ -239,6 +239,8 @@ type taskView struct {
 	LastStartedAt                *time.Time          `json:"last_started_at,omitempty"`
 	LastCompletedAt              *time.Time          `json:"last_completed_at,omitempty"`
 	LastSuccessfulSourceRevision string              `json:"last_successful_source_revision,omitempty"`
+	RetryNotBefore               *time.Time          `json:"retry_not_before,omitempty"`
+	UsageLimitRetries            int                 `json:"usage_limit_retries,omitempty"`
 }
 
 type runSummary struct {
@@ -817,7 +819,8 @@ func listOutput[T any](kind string, items []T, requested int) (*mcp.CallToolResu
 }
 
 func validLogStream(stream string) bool {
-	return oneOf(stream, "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr")
+	return oneOf(stream, "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr",
+		"usage_limit_stdout", "usage_limit_stderr")
 }
 
 func oneOf(value string, choices ...string) bool {
@@ -848,6 +851,7 @@ func viewTask(item domain.Task, includePrompt bool) taskView {
 		RequireRepoChange: item.RequireRepoChange, Enabled: item.Enabled, State: item.State,
 		LastStartedAt: item.LastStartedAt, LastCompletedAt: item.LastCompletedAt,
 		LastSuccessfulSourceRevision: item.LastSuccessfulSourceRevision,
+		RetryNotBefore:               item.RetryNotBefore, UsageLimitRetries: item.UsageLimitRetries,
 	}
 	if includePrompt {
 		result.Prompt, result.PromptTruncated = truncateString(item.Prompt, maxPromptBytes)

@@ -115,6 +115,7 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	// Claude Code can end a limited run as a "success" with is_error set,
 	// so the transcript is checked whatever the exit code.
 	if limit := DetectUsageLimit(request.Profile.HarnessType, result.OutputFile); limit != nil {
+		limit.Prompt = prompt
 		result.UsageLimit = limit
 		result.Failure = UsageLimitFailure(request.Profile.HarnessType, *limit)
 		return result, nil

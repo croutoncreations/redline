@@ -327,8 +327,15 @@ func (e Executor) usageLimitRetry(
 	}
 	now := e.now().UTC()
 	retryAt := now.Add(usageLimitRetryFallback)
-	if limit != nil && limit.ResetsAt != nil && limit.ResetsAt.After(now) {
-		retryAt = limit.ResetsAt.UTC().Add(usageLimitRetryMargin)
+	if limit != nil && limit.ResetsAt != nil {
+		// Compared after the margin: a reset that passed while the hook or
+		// finalize ran still holds the retry until reset plus margin.
+		if deadline := limit.ResetsAt.UTC().Add(usageLimitRetryMargin); deadline.After(now) {
+			retryAt = deadline
+		} else {
+			// The reported window is already over; retry on the next pass.
+			retryAt = now
+		}
 	}
 	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitRetry, map[string]any{
 		"scheduled": true, "retry_at": retryAt.Format(time.RFC3339),
@@ -369,11 +376,20 @@ func (e Executor) handleUsageLimit(
 		})
 		return false
 	}
-	prompt, err := harness.LoadPrompt(task, prepared.Directory)
-	if err != nil {
-		// A Hermes runtime job has no prompt; the command still gets the
-		// rest of the context.
-		prompt = ""
+	prompt := limit.Prompt
+	if prompt == "" {
+		// The prompt the harness ran with; read again only when the
+		// harness result did not carry it.
+		loaded, err := harness.LoadPrompt(task, prepared.Directory)
+		if err != nil || strings.TrimSpace(loaded) == "" {
+			reason := "the task prompt is unavailable, so the job was not handed off"
+			if err != nil {
+				reason += ": " + err.Error()
+			}
+			e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitFailed, map[string]any{"error": reason})
+			return false
+		}
+		prompt = loaded
 	}
 	artifacts := e.lifecycleArtifacts(run.ID, "usage_limit")
 	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitHook, map[string]any{"artifacts": artifacts})

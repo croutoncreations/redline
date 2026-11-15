@@ -1166,6 +1166,9 @@ test('imports Hermes Desktop and creates a remote profile from discovered contex
   await page.locator('#profile-provider').selectOption('codex-main');
   await page.locator('#profile-harness').selectOption('hermes');
   await expect(page.locator('#profile-hermes-fields')).toBeVisible();
+  await expect(page.locator('#profile-on-usage-limit')).toBeDisabled();
+  await expect(page.locator('#profile-retry-usage-limit')).toBeDisabled();
+  await expect(page.locator('#profile-usage-limit-note')).toContainText('Hermes runs do not support');
   await page.getByRole('button', { name: 'Import Desktop' }).click();
   await expect(page.locator('#profile-hermes-status')).toContainText('1 profile discovered');
   await expect(page.locator('#profile-runtime-profile')).toHaveValue('default');
