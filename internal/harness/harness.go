@@ -50,6 +50,9 @@ type Result struct {
 	ErrorFile  string         `json:"error_file"`
 	Failure    string         `json:"failure,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	// UsageLimit is set when the harness stopped because the account's
+	// usage limit was reached. Such a run failed even if the CLI exited 0.
+	UsageLimit *UsageLimit `json:"usage_limit,omitempty"`
 }
 
 func IsAuthenticationFailure(failure string) bool {
@@ -107,9 +110,16 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("launch %s harness: %w", request.Profile.HarnessType, err)
 	}
+	_ = stdout.Sync()
+	_ = stderr.Sync()
+	// Claude Code can end a limited run as a "success" with is_error set,
+	// so the transcript is checked whatever the exit code.
+	if limit := DetectUsageLimit(request.Profile.HarnessType, result.OutputFile); limit != nil {
+		result.UsageLimit = limit
+		result.Failure = UsageLimitFailure(request.Profile.HarnessType, *limit)
+		return result, nil
+	}
 	if exitCode != 0 {
-		_ = stdout.Sync()
-		_ = stderr.Sync()
 		result.Failure = diagnoseFailure(request.Profile.HarnessType, result.OutputFile, result.ErrorFile)
 		// A profile run's sign-in is that profile's, not the default one.
 		// The "Claude Code is signed out." prefix stays, so the run still
@@ -441,6 +451,12 @@ func claudeWorkspaceBoundary(directory string) string {
 			`Do not read or modify a parent checkout or another worktree.`,
 		directory,
 	)
+}
+
+// LoadPrompt returns the task's prompt, reading prompt_file from the
+// workspace with the same confinement the harness uses.
+func LoadPrompt(task domain.Task, workspaceDirectory string) (string, error) {
+	return loadPrompt(task, workspaceDirectory)
 }
 
 func loadPrompt(task domain.Task, workspaceDirectory string) (string, error) {

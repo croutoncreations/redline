@@ -26,11 +26,11 @@ func (d *DB) CreateProfile(ctx context.Context, p domain.ExecutionProfile, now t
 	_, err = d.db.ExecContext(ctx, `INSERT INTO execution_profiles (
 id, provider_account_id, agent_context_id, harness_type, model, harness_command, harness_args_json,
 budget_model_group, workspace_provider, workspace_args_json, repository, base_branch, require_clean, cleanup_policy,
-prepare_command, finalize_command, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+prepare_command, finalize_command, on_usage_limit_command, retry_after_usage_limit, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.ProviderAccountID, p.AgentContextID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON),
 		p.BudgetModelGroup, p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean, p.CleanupPolicy,
-		p.PrepareCommand, p.FinalizeCommand, formatTime(now),
+		p.PrepareCommand, p.FinalizeCommand, p.OnUsageLimitCommand, p.RetryAfterUsageLimit, formatTime(now),
 	)
 	if err != nil {
 		return fmt.Errorf("create execution profile: %w", err)
@@ -65,10 +65,11 @@ func (d *DB) UpdateProfile(ctx context.Context, p domain.ExecutionProfile) error
 	result, err := tx.ExecContext(ctx, `UPDATE execution_profiles SET
 provider_account_id = ?, agent_context_id = ?, harness_type = ?, model = ?, harness_command = ?, harness_args_json = ?,
 budget_model_group = ?, workspace_provider = ?, workspace_args_json = ?, repository = ?, base_branch = ?,
-require_clean = ?, cleanup_policy = ?, prepare_command = ?, finalize_command = ? WHERE id = ?`,
+require_clean = ?, cleanup_policy = ?, prepare_command = ?, finalize_command = ?, on_usage_limit_command = ?,
+retry_after_usage_limit = ? WHERE id = ?`,
 		p.ProviderAccountID, p.AgentContextID, p.HarnessType, p.Model, p.HarnessCommand, string(argsJSON), p.BudgetModelGroup,
 		p.WorkspaceProvider, string(workspaceArgsJSON), p.Repository, p.BaseBranch, p.RequireClean,
-		p.CleanupPolicy, p.PrepareCommand, p.FinalizeCommand, p.ID)
+		p.CleanupPolicy, p.PrepareCommand, p.FinalizeCommand, p.OnUsageLimitCommand, p.RetryAfterUsageLimit, p.ID)
 	if err != nil {
 		return fmt.Errorf("update execution profile: %w", err)
 	}
@@ -124,7 +125,7 @@ func validateProfile(p domain.ExecutionProfile) error {
 func (d *DB) ListProfiles(ctx context.Context) ([]domain.ExecutionProfile, error) {
 	rows, err := d.db.QueryContext(ctx, `SELECT id, provider_account_id, agent_context_id, harness_type, model,
 harness_command, harness_args_json, budget_model_group, workspace_provider, workspace_args_json, repository, base_branch,
-require_clean, cleanup_policy, prepare_command, finalize_command, created_at
+require_clean, cleanup_policy, prepare_command, finalize_command, on_usage_limit_command, retry_after_usage_limit, created_at
 FROM execution_profiles ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list execution profiles: %w", err)
@@ -136,7 +137,8 @@ FROM execution_profiles ORDER BY id`)
 		var created, argsJSON, workspaceArgsJSON string
 		if err := rows.Scan(&p.ID, &p.ProviderAccountID, &p.AgentContextID, &p.HarnessType, &p.Model,
 			&p.HarnessCommand, &argsJSON, &p.BudgetModelGroup, &p.WorkspaceProvider, &workspaceArgsJSON, &p.Repository, &p.BaseBranch,
-			&p.RequireClean, &p.CleanupPolicy, &p.PrepareCommand, &p.FinalizeCommand, &created); err != nil {
+			&p.RequireClean, &p.CleanupPolicy, &p.PrepareCommand, &p.FinalizeCommand, &p.OnUsageLimitCommand,
+			&p.RetryAfterUsageLimit, &created); err != nil {
 			return nil, fmt.Errorf("scan execution profile: %w", err)
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &p.HarnessArgs); err != nil {
@@ -326,8 +328,11 @@ WHERE id = ?`, formatTime(now), id)
 	case "retry":
 		var sequence int64
 		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(queue_sequence), 0) + 1 FROM tasks`).Scan(&sequence); err == nil {
+			// A manual retry runs now: it drops a usage-limit hold and
+			// restarts the automatic retry count.
 			result, err = tx.ExecContext(ctx, `UPDATE tasks SET enabled = 1, state = 'queued',
-queue_sequence = ?, updated_at = ? WHERE id = ? AND state = 'failed'`, sequence, formatTime(now), id)
+queue_sequence = ?, retry_not_before = NULL, usage_limit_retries = 0, updated_at = ?
+WHERE id = ? AND (state = 'failed' OR (state = 'queued' AND retry_not_before IS NOT NULL))`, sequence, formatTime(now), id)
 		}
 	default:
 		return fmt.Errorf("unknown task control %q", action)
@@ -559,7 +564,7 @@ WHERE provider_account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`, provid
 const taskSelect = `SELECT t.id, t.name, t.prompt, t.prompt_file, t.priority,
 t.queue_sequence, t.execution_profile_id, t.runtime_job_id, t.task_type, t.min_interval_ns, t.firesale_min_interval_ns, t.dispatch_tier,
 t.require_repo_change, t.enabled, t.state, t.last_started_at, t.last_completed_at,
-t.last_successful_source_revision, t.created_at, t.updated_at FROM tasks t`
+t.last_successful_source_revision, t.retry_not_before, t.usage_limit_retries, t.created_at, t.updated_at FROM tasks t`
 
 type scanner interface{ Scan(...any) error }
 
@@ -567,13 +572,13 @@ func scanTask(row scanner) (domain.Task, error) {
 	var task domain.Task
 	var minInterval, firesaleInterval int64
 	var requireChange, enabled bool
-	var lastStarted, lastCompleted sql.NullString
+	var lastStarted, lastCompleted, retryNotBefore sql.NullString
 	var created, updated string
 	err := row.Scan(
 		&task.ID, &task.Name, &task.Prompt, &task.PromptFile, &task.Priority,
 		&task.QueueSequence, &task.ExecutionProfileID, &task.RuntimeJobID, &task.Type, &minInterval, &firesaleInterval, &task.DispatchTier,
 		&requireChange, &enabled, &task.State, &lastStarted, &lastCompleted,
-		&task.LastSuccessfulSourceRevision, &created, &updated,
+		&task.LastSuccessfulSourceRevision, &retryNotBefore, &task.UsageLimitRetries, &created, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Task{}, ErrNotFound
@@ -605,6 +610,13 @@ func scanTask(row scanner) (domain.Task, error) {
 			return domain.Task{}, err
 		}
 		task.LastCompletedAt = &value
+	}
+	if retryNotBefore.Valid {
+		value, err := parseStoredTime(retryNotBefore.String)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		task.RetryNotBefore = &value
 	}
 	return task, nil
 }

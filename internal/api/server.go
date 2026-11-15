@@ -1678,6 +1678,9 @@ type profileUpdateRequest struct {
 	CleanupPolicy     *string   `json:"cleanup_policy"`
 	PrepareCommand    *string   `json:"prepare_command"`
 	FinalizeCommand   *string   `json:"finalize_command"`
+	// OnUsageLimitCommand: an empty string clears it.
+	OnUsageLimitCommand  *string `json:"on_usage_limit_command"`
+	RetryAfterUsageLimit *bool   `json:"retry_after_usage_limit"`
 }
 
 func (s *Server) getProfile(w http.ResponseWriter, r *http.Request) {
@@ -1744,6 +1747,12 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.FinalizeCommand != nil {
 		profile.FinalizeCommand = *request.FinalizeCommand
+	}
+	if request.OnUsageLimitCommand != nil {
+		profile.OnUsageLimitCommand = *request.OnUsageLimitCommand
+	}
+	if request.RetryAfterUsageLimit != nil {
+		profile.RetryAfterUsageLimit = *request.RetryAfterUsageLimit
 	}
 	if _, ok := s.config.Providers[profile.ProviderAccountID]; !ok {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider_account_id is not configured"})
@@ -2556,6 +2565,12 @@ func (s *Server) evaluateCandidate(
 			return verdict, nil
 		}
 	}
+	if task.RetryNotBefore != nil && s.now().Before(*task.RetryNotBefore) {
+		stamp := task.RetryNotBefore.UTC()
+		verdict.Reason = "waiting for the usage limit to reset at " + stamp.Format(time.RFC3339)
+		verdict.EligibleAt = &stamp
+		return verdict, nil
+	}
 	profile, err := s.store.GetProfile(ctx, task.ExecutionProfileID)
 	if err != nil {
 		return verdict, err
@@ -3063,6 +3078,10 @@ func (s *Server) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "finalize", "stdout")
 	case "finalize_stderr":
 		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "finalize", "stderr")
+	case "usage_limit_stdout":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "usage_limit", "stdout")
+	case "usage_limit_stderr":
+		path = workspace.ArtifactPath(s.config.ArtifactsDirectory(), run.ID, "usage_limit", "stderr")
 	default:
 		writeJSON(w, http.StatusBadRequest, problem{Error: "unsupported log stream"})
 		return

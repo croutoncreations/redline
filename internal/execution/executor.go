@@ -27,6 +27,23 @@ type WorkspaceManager interface {
 	Cleanup(context.Context, workspace.CleanupRequest) error
 }
 
+// UsageLimitHookRunner runs a profile's on_usage_limit_command. The
+// workspace manager implements it; it is optional so other managers keep
+// working without one.
+type UsageLimitHookRunner interface {
+	RunUsageLimitHook(context.Context, workspace.UsageLimitRequest) error
+}
+
+const (
+	// usageLimitRetryMargin is added to a reported reset time so the retry
+	// does not start on the edge of the window.
+	usageLimitRetryMargin = 2 * time.Minute
+	// usageLimitRetryFallback holds a retry when the harness did not say
+	// when its limit resets. The scheduler's usage check still gates the
+	// retry after that.
+	usageLimitRetryFallback = time.Hour
+)
+
 type Harness interface {
 	Run(context.Context, harness.Request) (harness.Result, error)
 }
@@ -168,10 +185,20 @@ func (e Executor) Execute(
 			e.recordEvent(ctx, run.ID, domain.RunEventUsageRecorded, map[string]any{"inserted": inserted})
 		}
 	}
-	agentSucceeded := harnessErr == nil && harnessResult.ExitCode == 0
+	usageLimit := harnessErr == nil && harnessResult.UsageLimit != nil
+	agentSucceeded := harnessErr == nil && harnessResult.ExitCode == 0 && !usageLimit
 	state := domain.RunCompleted
 	agentError := ""
-	if !agentSucceeded {
+	handedOff := false
+	if usageLimit {
+		agentError = harnessResult.Failure
+		handedOff = e.handleUsageLimit(ctx, run, task, profile, prepared, harnessResult)
+		if handedOff {
+			agentSucceeded = true
+		} else {
+			state = domain.RunFailed
+		}
+	} else if !agentSucceeded {
 		state = domain.RunFailed
 		if harnessErr != nil {
 			agentError = harnessErr.Error()
@@ -196,13 +223,20 @@ func (e Executor) Execute(
 	if !agentSucceeded {
 		status = "failed"
 	}
+	outcome := status
+	if usageLimit {
+		outcome = "usage_limited"
+		if handedOff {
+			outcome = "handed_off"
+		}
+	}
 	finalizeState := "completed"
 	var lifecycleErrors []string
 	e.recordEvent(ctx, run.ID, domain.RunEventFinalizeStarted, map[string]any{
 		"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
 	})
 	if err := e.Workspaces.Finalize(ctx, workspace.FinalizeRequest{
-		RunID: run.ID, TaskID: task.ID, Status: status, ExitCode: harnessResult.ExitCode,
+		RunID: run.ID, TaskID: task.ID, Status: status, Outcome: outcome, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile,
 		ResultFile: harness.ResultFilePath(e.OutputDirectory, run.ID),
 		Profile:    profile, Workspace: prepared,
@@ -217,17 +251,24 @@ func (e Executor) Execute(
 			"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
 		})
 	}
+	cleanupProfile := profile
+	if usageLimit && !handedOff {
+		// The job stopped part way through with nothing to pick it up, so
+		// its workspace and session are kept for a resume whatever the
+		// cleanup policy says.
+		cleanupProfile.CleanupPolicy = "never"
+	}
 	e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
-		"policy": profile.CleanupPolicy, "workspace": prepared,
+		"policy": cleanupProfile.CleanupPolicy, "workspace": prepared,
 	})
 	if err := e.Workspaces.Cleanup(ctx, workspace.CleanupRequest{
-		Success: agentSucceeded, Profile: profile, Workspace: prepared,
+		Success: agentSucceeded, Profile: cleanupProfile, Workspace: prepared,
 	}); err != nil {
 		finalizeState = "failed"
 		lifecycleErrors = append(lifecycleErrors, err.Error())
 		e.recordEvent(ctx, run.ID, domain.RunEventCleanupFailed, map[string]any{"error": err.Error()})
 	} else {
-		e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": profile.CleanupPolicy})
+		e.recordEvent(ctx, run.ID, domain.RunEventCleanupCompleted, map[string]any{"policy": cleanupProfile.CleanupPolicy})
 	}
 
 	activityResult := activity.Build(activity.Input{
@@ -236,6 +277,23 @@ func (e Executor) Execute(
 		Workspace:  prepared, Metadata: harnessResult.Metadata,
 		Provider: profile.HarnessType, Model: profile.Model,
 	})
+	var retryAt *time.Time
+	if usageLimit {
+		if handedOff {
+			activityResult.Outcome = "handed_off"
+			activityResult.Summary = "Usage limit reached; on_usage_limit_command took over the job."
+			activityResult.Warnings = append(activityResult.Warnings, agentError)
+			// The run itself did not fail, so its error is cleared.
+			agentError = ""
+		} else {
+			activityResult.Outcome = "usage_limited"
+			activityResult.Summary = agentError
+			retryAt = e.usageLimitRetry(ctx, run, task, profile, harnessResult.UsageLimit)
+			if retryAt != nil {
+				activityResult.Summary += " Redline will retry it after " + retryAt.Format(time.RFC3339) + "."
+			}
+		}
+	}
 	return e.complete(ctx, run, task, domain.RunCompletion{
 		State: state, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, ErrorFile: harnessResult.ErrorFile,
@@ -244,7 +302,97 @@ func (e Executor) Execute(
 		Summary:       activityResult.Summary, Outcome: activityResult.Outcome,
 		Artifacts: activityResult.Artifacts, Warnings: activityResult.Warnings,
 		ActualProvider: activityResult.ActualProvider, ActualModel: activityResult.ActualModel,
+		RetryAt: retryAt,
 	})
+}
+
+// usageLimitRetry decides whether a usage-limited run's task goes back in
+// the queue, and until when it is held.
+func (e Executor) usageLimitRetry(
+	ctx context.Context,
+	run domain.Run,
+	task domain.Task,
+	profile domain.ExecutionProfile,
+	limit *harness.UsageLimit,
+) *time.Time {
+	if !profile.RetryAfterUsageLimit {
+		return nil
+	}
+	if task.UsageLimitRetries >= domain.MaxUsageLimitRetries {
+		e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitRetry, map[string]any{
+			"scheduled": false, "retries": task.UsageLimitRetries,
+			"reason": fmt.Sprintf("stopped at the usage limit %d times in a row", task.UsageLimitRetries),
+		})
+		return nil
+	}
+	now := e.now().UTC()
+	retryAt := now.Add(usageLimitRetryFallback)
+	if limit != nil && limit.ResetsAt != nil && limit.ResetsAt.After(now) {
+		retryAt = limit.ResetsAt.UTC().Add(usageLimitRetryMargin)
+	}
+	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitRetry, map[string]any{
+		"scheduled": true, "retry_at": retryAt.Format(time.RFC3339),
+		"retry": task.UsageLimitRetries + 1, "max_retries": domain.MaxUsageLimitRetries,
+	})
+	return &retryAt
+}
+
+// handleUsageLimit records a usage-limit stop and runs the profile's
+// on_usage_limit_command. It reports whether the command took over.
+func (e Executor) handleUsageLimit(
+	ctx context.Context,
+	run domain.Run,
+	task domain.Task,
+	profile domain.ExecutionProfile,
+	prepared domain.Workspace,
+	result harness.Result,
+) bool {
+	limit := *result.UsageLimit
+	resetsAt := ""
+	if limit.ResetsAt != nil {
+		resetsAt = limit.ResetsAt.UTC().Format(time.RFC3339)
+	}
+	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitReached, map[string]any{
+		"exit_code": result.ExitCode, "error": result.Failure,
+		"limit_type": limit.LimitType, "message": limit.Message, "resets_at": resetsAt,
+		"harness_session_id": limit.SessionID, "workspace": prepared,
+		"configured": profile.OnUsageLimitCommand != "",
+		"stdout":     result.OutputFile, "stderr": result.ErrorFile,
+	})
+	if profile.OnUsageLimitCommand == "" {
+		return false
+	}
+	hooks, ok := e.Workspaces.(UsageLimitHookRunner)
+	if !ok {
+		e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitFailed, map[string]any{
+			"error": "this workspace manager cannot run on_usage_limit_command",
+		})
+		return false
+	}
+	prompt, err := harness.LoadPrompt(task, prepared.Directory)
+	if err != nil {
+		// A Hermes runtime job has no prompt; the command still gets the
+		// rest of the context.
+		prompt = ""
+	}
+	artifacts := e.lifecycleArtifacts(run.ID, "usage_limit")
+	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitHook, map[string]any{"artifacts": artifacts})
+	if err := hooks.RunUsageLimitHook(ctx, workspace.UsageLimitRequest{
+		RunID: run.ID, TaskID: task.ID, TaskName: task.Name,
+		ProviderAccountID: run.ProviderAccountID, Prompt: prompt,
+		OutputFile: result.OutputFile, ErrorFile: result.ErrorFile,
+		ResultFile:       harness.ResultFilePath(e.OutputDirectory, run.ID),
+		HarnessSessionID: limit.SessionID, LimitType: limit.LimitType,
+		LimitMessage: limit.Message, ResetsAt: resetsAt,
+		Profile: profile, Workspace: prepared,
+	}); err != nil {
+		e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitFailed, map[string]any{
+			"error": err.Error(), "artifacts": artifacts,
+		})
+		return false
+	}
+	e.recordEvent(ctx, run.ID, domain.RunEventUsageLimitHanded, map[string]any{"artifacts": artifacts})
+	return true
 }
 
 func (e Executor) complete(
@@ -296,7 +444,11 @@ func (e Executor) complete(
 		Data: map[string]string{
 			"state": string(completion.State), "exit_code": strconv.Itoa(completion.ExitCode),
 			"finalize_state": completion.FinalizeState, "error": completion.Error,
+			"outcome": completion.Outcome,
 		},
+	}
+	if completion.RetryAt != nil {
+		event.Data["retry_at"] = completion.RetryAt.UTC().Format(time.RFC3339)
 	}
 	if err := e.Notifier.Notify(ctx, event); err != nil {
 		log.Printf("redline run %s notification failed: %v", run.ID, err)
@@ -344,5 +496,6 @@ func auditProfile(profile domain.ExecutionProfile) map[string]any {
 		"repository": profile.Repository, "base_branch": profile.BaseBranch,
 		"require_clean": profile.RequireClean, "cleanup_policy": profile.CleanupPolicy,
 		"prepare_command": profile.PrepareCommand, "finalize_command": profile.FinalizeCommand,
+		"on_usage_limit_command": profile.OnUsageLimitCommand, "retry_after_usage_limit": profile.RetryAfterUsageLimit,
 	}
 }

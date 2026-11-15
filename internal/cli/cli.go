@@ -1357,7 +1357,7 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 		}
 		flags := flag.NewFlagSet("run logs", flag.ContinueOnError)
 		flags.SetOutput(stderr)
-		stream := flags.String("stream", "stdout", "stdout, stderr, prepare_stdout, prepare_stderr, finalize_stdout, or finalize_stderr")
+		stream := flags.String("stream", "stdout", "stdout, stderr, prepare_stdout, prepare_stderr, finalize_stdout, finalize_stderr, usage_limit_stdout, or usage_limit_stderr")
 		tailBytes := flags.Int64("tail-bytes", 32*1024, "maximum bytes from the end of the log")
 		jsonOutput := flags.Bool("json", false, "emit JSON metadata and content")
 		if err := flags.Parse(args[2:]); err != nil || !validRunLogStream(*stream) || *tailBytes <= 0 {
@@ -1390,7 +1390,8 @@ func runRuns(client apiclient.Client, args []string, stdout, stderr io.Writer) i
 
 func validRunLogStream(stream string) bool {
 	switch stream {
-	case "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr":
+	case "stdout", "stderr", "prepare_stdout", "prepare_stderr", "finalize_stdout", "finalize_stderr",
+		"usage_limit_stdout", "usage_limit_stderr":
 		return true
 	default:
 		return false

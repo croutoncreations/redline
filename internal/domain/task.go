@@ -26,23 +26,34 @@ const (
 )
 
 type ExecutionProfile struct {
-	ID                string    `json:"id"`
-	ProviderAccountID string    `json:"provider_account_id"`
-	AgentContextID    string    `json:"agent_context_id,omitempty"`
-	HarnessType       string    `json:"harness_type"`
-	Model             string    `json:"model,omitempty"`
-	BudgetModelGroup  string    `json:"budget_model_group,omitempty"`
-	HarnessCommand    string    `json:"harness_command,omitempty"`
-	HarnessArgs       []string  `json:"harness_args,omitempty"`
-	WorkspaceProvider string    `json:"workspace_provider"`
-	WorkspaceArgs     []string  `json:"workspace_args,omitempty"`
-	Repository        string    `json:"repository,omitempty"`
-	BaseBranch        string    `json:"base_branch,omitempty"`
-	RequireClean      bool      `json:"require_clean"`
-	CleanupPolicy     string    `json:"cleanup_policy,omitempty"`
-	PrepareCommand    string    `json:"prepare_command,omitempty"`
-	FinalizeCommand   string    `json:"finalize_command,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
+	ID                string   `json:"id"`
+	ProviderAccountID string   `json:"provider_account_id"`
+	AgentContextID    string   `json:"agent_context_id,omitempty"`
+	HarnessType       string   `json:"harness_type"`
+	Model             string   `json:"model,omitempty"`
+	BudgetModelGroup  string   `json:"budget_model_group,omitempty"`
+	HarnessCommand    string   `json:"harness_command,omitempty"`
+	HarnessArgs       []string `json:"harness_args,omitempty"`
+	WorkspaceProvider string   `json:"workspace_provider"`
+	WorkspaceArgs     []string `json:"workspace_args,omitempty"`
+	Repository        string   `json:"repository,omitempty"`
+	BaseBranch        string   `json:"base_branch,omitempty"`
+	RequireClean      bool     `json:"require_clean"`
+	CleanupPolicy     string   `json:"cleanup_policy,omitempty"`
+	PrepareCommand    string   `json:"prepare_command,omitempty"`
+	FinalizeCommand   string   `json:"finalize_command,omitempty"`
+	// OnUsageLimitCommand runs in the run's workspace when the harness
+	// stops because its subscription usage limit was reached, before
+	// finalize and cleanup. It can finish the job with another harness,
+	// model, or account. Exit 0 means it finished the job, and the run
+	// then completes as if the harness had succeeded.
+	OnUsageLimitCommand string `json:"on_usage_limit_command,omitempty"`
+	// RetryAfterUsageLimit puts a job that stopped at the usage limit back
+	// in the queue, held until the limit resets, unless the usage limit
+	// command already finished it. Retries in a row are capped at
+	// MaxUsageLimitRetries.
+	RetryAfterUsageLimit bool      `json:"retry_after_usage_limit,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 	// ClaudeConfigDir is not part of the stored profile. The service fills
 	// it in for one run from the run's account, so a claude-code run on an
 	// account bound to a Claude Code profile directory uses that login.
@@ -105,9 +116,19 @@ type Task struct {
 	LastStartedAt                *time.Time    `json:"last_started_at,omitempty"`
 	LastCompletedAt              *time.Time    `json:"last_completed_at,omitempty"`
 	LastSuccessfulSourceRevision string        `json:"last_successful_source_revision,omitempty"`
-	CreatedAt                    time.Time     `json:"created_at"`
-	UpdatedAt                    time.Time     `json:"updated_at"`
+	// RetryNotBefore holds a job re-queued after a usage-limit stop until
+	// the limit resets.
+	RetryNotBefore *time.Time `json:"retry_not_before,omitempty"`
+	// UsageLimitRetries counts usage-limit retries in a row. A completed
+	// run or a manual retry resets it.
+	UsageLimitRetries int       `json:"usage_limit_retries,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
+
+// MaxUsageLimitRetries caps automatic retries in a row after usage-limit
+// stops, so a job that hits the limit every time it runs stops retrying.
+const MaxUsageLimitRetries = 3
 
 type SchedulerDecision struct {
 	ID                int64           `json:"id"`
@@ -256,6 +277,9 @@ type RunCompletion struct {
 	Warnings       []string
 	ActualProvider string
 	ActualModel    string
+	// RetryAt re-queues a failed run's task, held until this time, and
+	// counts a usage-limit retry instead of marking the task failed.
+	RetryAt *time.Time
 }
 
 type RunEvent struct {
@@ -278,6 +302,11 @@ const (
 	RunEventProviderPaused    = "provider.paused"
 	RunEventUsageRecorded     = "usage.recorded"
 	RunEventUsageFailed       = "usage.failed"
+	RunEventUsageLimitReached = "usage_limit.reached"
+	RunEventUsageLimitHook    = "usage_limit.hook_started"
+	RunEventUsageLimitHanded  = "usage_limit.handed_off"
+	RunEventUsageLimitFailed  = "usage_limit.hook_failed"
+	RunEventUsageLimitRetry   = "usage_limit.retry"
 	RunEventFinalizeStarted   = "finalize.started"
 	RunEventFinalizeCompleted = "finalize.completed"
 	RunEventFinalizeFailed    = "finalize.failed"

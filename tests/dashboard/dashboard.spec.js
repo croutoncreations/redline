@@ -653,6 +653,14 @@ test('describes enabled jobs as waiting when the global scheduler is off', async
   await expect(page.locator('#tasks-body')).not.toContainText('Always eligible');
 });
 
+test('shows a usage-limited job waiting for its reset', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.tasks[0] = { ...dashboard.tasks[0], state: 'queued', retry_not_before: new Date(Date.now() + 3 * 3600 * 1000).toISOString() };
+  await loadDashboard(page, { dashboard });
+
+  await expect(page.getByTestId('usage-limit-hold')).toContainText('Retry after');
+});
+
 test('gives actionable install and sign-in guidance when account readiness is missing', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.tasks = [];
@@ -934,7 +942,7 @@ test('preserves advanced fields when revisiting a resumed profile', async ({ pag
     harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
     workspace_provider: 'command', repository: '/repo/advanced', base_branch: 'develop',
     harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
-    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', on_usage_limit_command: './overflow.sh', require_clean: true, cleanup_policy: 'always',
   };
   const state = await loadDashboard(page, { dashboard, profiles: [advancedProfile], waitForReady: false });
   await page.getByRole('region', { name: 'Getting started' }).getByRole('button', { name: 'Resume setup' }).click();
@@ -945,7 +953,7 @@ test('preserves advanced fields when revisiting a resumed profile', async ({ pag
   expect(state.requests.find(item => item.path === '/v1/profiles/advanced-command').body).toMatchObject({
     agent_context_id: 'context-1', harness_type: 'command', model: 'private-model', budget_model_group: 'premium',
     workspace_provider: 'command', harness_command: 'agent-run', harness_args: ['--json'], workspace_args: ['--isolated'],
-    prepare_command: './prepare.sh', finalize_command: './finalize.sh', require_clean: true, cleanup_policy: 'always',
+    prepare_command: './prepare.sh', finalize_command: './finalize.sh', on_usage_limit_command: './overflow.sh', require_clean: true, cleanup_policy: 'always',
   });
 });
 
@@ -1118,9 +1126,12 @@ test('creates a Pi profile and surfaces blocked deletion errors', async ({ page 
   await page.locator('#profile-harness').selectOption('pi');
   await page.locator('#profile-model-choice').selectOption('openai-codex/gpt-5.6-sol');
   await page.locator('#profile-repository').fill('/repo/redline');
+  await page.locator('#profile-advanced-config summary, details:has(#profile-on-usage-limit) > summary').first().click();
+  await page.locator('#profile-on-usage-limit').fill('./overflow.sh');
+  await page.locator('#profile-retry-usage-limit').check();
   await page.getByRole('button', { name: 'Save profile' }).click();
   await expect.poll(() => state.requests.filter(item => item.path === '/v1/profiles').length).toBe(1);
-  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({ id: 'pi-codex', provider_account_id: 'codex-main', harness_type: 'pi', model: 'openai-codex/gpt-5.6-sol' });
+  expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({ id: 'pi-codex', provider_account_id: 'codex-main', harness_type: 'pi', model: 'openai-codex/gpt-5.6-sol', on_usage_limit_command: './overflow.sh', retry_after_usage_limit: true });
 	await page.locator('#profile-base-branch').fill('main');
 	await page.getByRole('button', { name: 'Save profile' }).click();
 	await expect.poll(() => state.requests.some(item => item.method === 'PATCH' && item.path === '/v1/profiles/pi-codex')).toBe(true);

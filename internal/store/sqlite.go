@@ -804,6 +804,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	// Migration 44 repairs by column existence, like 41–43.
+	for _, column := range []struct{ table, name, definition string }{
+		{"execution_profiles", "on_usage_limit_command", "TEXT NOT NULL DEFAULT ''"},
+		{"execution_profiles", "retry_after_usage_limit", "INTEGER NOT NULL DEFAULT 0"},
+		{"tasks", "retry_not_before", "TEXT"},
+		{"tasks", "usage_limit_retries", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := addColumnIfMissing(ctx, tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 44 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=44)`); err != nil {
+		return fmt.Errorf("record usage limit command migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

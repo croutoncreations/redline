@@ -69,7 +69,7 @@ type runEventsInput struct {
 
 type runLogsInput struct {
 	RunID    string `json:"run_id" jsonschema:"Redline run ID"`
-	Stream   string `json:"stream,omitempty" jsonschema:"stdout, stderr, prepare_stdout, prepare_stderr, finalize_stdout, or finalize_stderr"`
+	Stream   string `json:"stream,omitempty" jsonschema:"stdout, stderr, prepare_stdout, prepare_stderr, finalize_stdout, finalize_stderr, usage_limit_stdout, or usage_limit_stderr"`
 	TailByte int64  `json:"tail_bytes,omitempty" jsonschema:"bytes to read from the end; defaults to 8192 and is capped at 32768"`
 }
 
@@ -125,41 +125,45 @@ type schedulerInput struct {
 }
 
 type profileCreateInput struct {
-	ID                string   `json:"id,omitempty" jsonschema:"optional stable profile ID"`
-	ProviderAccountID string   `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
-	AgentContextID    string   `json:"agent_context_id,omitempty" jsonschema:"Hermes agent context ID when harness_type is hermes"`
-	HarnessType       string   `json:"harness_type" jsonschema:"codex-cli, claude-code, pi, command, or another supported harness"`
-	Model             string   `json:"model,omitempty" jsonschema:"model identifier passed to the harness"`
-	BudgetModelGroup  string   `json:"budget_model_group,omitempty" jsonschema:"optional model-specific allowance routing override such as fable"`
-	HarnessCommand    string   `json:"harness_command,omitempty" jsonschema:"custom harness command when harness_type is command"`
-	HarnessArgs       []string `json:"harness_args,omitempty" jsonschema:"additional harness command arguments"`
-	WorkspaceProvider string   `json:"workspace_provider" jsonschema:"devx, git-worktree, existing-directory, or command"`
-	WorkspaceArgs     []string `json:"workspace_args,omitempty" jsonschema:"additional workspace-provider arguments"`
-	Repository        string   `json:"repository,omitempty" jsonschema:"absolute repository or working-directory path"`
-	BaseBranch        string   `json:"base_branch,omitempty" jsonschema:"base branch used for isolated workspaces"`
-	RequireClean      bool     `json:"require_clean,omitempty" jsonschema:"require a clean existing checkout"`
-	CleanupPolicy     string   `json:"cleanup_policy,omitempty" jsonschema:"never, on_success, always, or empty for the default"`
-	PrepareCommand    string   `json:"prepare_command,omitempty" jsonschema:"optional shell command run before the harness"`
-	FinalizeCommand   string   `json:"finalize_command,omitempty" jsonschema:"optional shell command run after the harness"`
+	ID                   string   `json:"id,omitempty" jsonschema:"optional stable profile ID"`
+	ProviderAccountID    string   `json:"provider_account_id" jsonschema:"configured Redline provider account ID"`
+	AgentContextID       string   `json:"agent_context_id,omitempty" jsonschema:"Hermes agent context ID when harness_type is hermes"`
+	HarnessType          string   `json:"harness_type" jsonschema:"codex-cli, claude-code, pi, command, or another supported harness"`
+	Model                string   `json:"model,omitempty" jsonschema:"model identifier passed to the harness"`
+	BudgetModelGroup     string   `json:"budget_model_group,omitempty" jsonschema:"optional model-specific allowance routing override such as fable"`
+	HarnessCommand       string   `json:"harness_command,omitempty" jsonschema:"custom harness command when harness_type is command"`
+	HarnessArgs          []string `json:"harness_args,omitempty" jsonschema:"additional harness command arguments"`
+	WorkspaceProvider    string   `json:"workspace_provider" jsonschema:"devx, git-worktree, existing-directory, or command"`
+	WorkspaceArgs        []string `json:"workspace_args,omitempty" jsonschema:"additional workspace-provider arguments"`
+	Repository           string   `json:"repository,omitempty" jsonschema:"absolute repository or working-directory path"`
+	BaseBranch           string   `json:"base_branch,omitempty" jsonschema:"base branch used for isolated workspaces"`
+	RequireClean         bool     `json:"require_clean,omitempty" jsonschema:"require a clean existing checkout"`
+	CleanupPolicy        string   `json:"cleanup_policy,omitempty" jsonschema:"never, on_success, always, or empty for the default"`
+	PrepareCommand       string   `json:"prepare_command,omitempty" jsonschema:"optional shell command run before the harness"`
+	FinalizeCommand      string   `json:"finalize_command,omitempty" jsonschema:"optional shell command run after the harness"`
+	OnUsageLimitCommand  string   `json:"on_usage_limit_command,omitempty" jsonschema:"optional shell command run in the kept workspace when the harness stops at its usage limit; the task prompt is on stdin, and exit 0 means it finished the job"`
+	RetryAfterUsageLimit bool     `json:"retry_after_usage_limit,omitempty" jsonschema:"re-queue a job that stopped at the usage limit, held until the limit resets (at most 3 retries in a row)"`
 }
 
 type profileUpdateInput struct {
-	ID                string    `json:"id" jsonschema:"execution profile ID"`
-	ProviderAccountID *string   `json:"provider_account_id,omitempty" jsonschema:"new configured provider account ID"`
-	AgentContextID    *string   `json:"agent_context_id,omitempty" jsonschema:"new Hermes agent context ID"`
-	HarnessType       *string   `json:"harness_type,omitempty" jsonschema:"new harness type"`
-	Model             *string   `json:"model,omitempty" jsonschema:"new model identifier; an empty string clears it"`
-	BudgetModelGroup  *string   `json:"budget_model_group,omitempty" jsonschema:"new allowance routing override; an empty string clears it"`
-	HarnessCommand    *string   `json:"harness_command,omitempty" jsonschema:"new custom harness command; an empty string clears it"`
-	HarnessArgs       *[]string `json:"harness_args,omitempty" jsonschema:"replacement harness argument list"`
-	WorkspaceProvider *string   `json:"workspace_provider,omitempty" jsonschema:"new workspace provider"`
-	WorkspaceArgs     *[]string `json:"workspace_args,omitempty" jsonschema:"replacement workspace-provider argument list"`
-	Repository        *string   `json:"repository,omitempty" jsonschema:"new repository path; an empty string clears it"`
-	BaseBranch        *string   `json:"base_branch,omitempty" jsonschema:"new base branch; an empty string clears it"`
-	RequireClean      *bool     `json:"require_clean,omitempty" jsonschema:"whether a clean existing checkout is required"`
-	CleanupPolicy     *string   `json:"cleanup_policy,omitempty" jsonschema:"new cleanup policy; an empty string clears it"`
-	PrepareCommand    *string   `json:"prepare_command,omitempty" jsonschema:"new prepare command; an empty string clears it"`
-	FinalizeCommand   *string   `json:"finalize_command,omitempty" jsonschema:"new finalize command; an empty string clears it"`
+	ID                   string    `json:"id" jsonschema:"execution profile ID"`
+	ProviderAccountID    *string   `json:"provider_account_id,omitempty" jsonschema:"new configured provider account ID"`
+	AgentContextID       *string   `json:"agent_context_id,omitempty" jsonschema:"new Hermes agent context ID"`
+	HarnessType          *string   `json:"harness_type,omitempty" jsonschema:"new harness type"`
+	Model                *string   `json:"model,omitempty" jsonschema:"new model identifier; an empty string clears it"`
+	BudgetModelGroup     *string   `json:"budget_model_group,omitempty" jsonschema:"new allowance routing override; an empty string clears it"`
+	HarnessCommand       *string   `json:"harness_command,omitempty" jsonschema:"new custom harness command; an empty string clears it"`
+	HarnessArgs          *[]string `json:"harness_args,omitempty" jsonschema:"replacement harness argument list"`
+	WorkspaceProvider    *string   `json:"workspace_provider,omitempty" jsonschema:"new workspace provider"`
+	WorkspaceArgs        *[]string `json:"workspace_args,omitempty" jsonschema:"replacement workspace-provider argument list"`
+	Repository           *string   `json:"repository,omitempty" jsonschema:"new repository path; an empty string clears it"`
+	BaseBranch           *string   `json:"base_branch,omitempty" jsonschema:"new base branch; an empty string clears it"`
+	RequireClean         *bool     `json:"require_clean,omitempty" jsonschema:"whether a clean existing checkout is required"`
+	CleanupPolicy        *string   `json:"cleanup_policy,omitempty" jsonschema:"new cleanup policy; an empty string clears it"`
+	PrepareCommand       *string   `json:"prepare_command,omitempty" jsonschema:"new prepare command; an empty string clears it"`
+	FinalizeCommand      *string   `json:"finalize_command,omitempty" jsonschema:"new finalize command; an empty string clears it"`
+	OnUsageLimitCommand  *string   `json:"on_usage_limit_command,omitempty" jsonschema:"new usage limit command; an empty string clears it"`
+	RetryAfterUsageLimit *bool     `json:"retry_after_usage_limit,omitempty" jsonschema:"whether to re-queue a job that stopped at the usage limit until the limit resets"`
 }
 
 type runtimeConnectionCreateInput struct {
@@ -585,6 +589,8 @@ func (s *server) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	putOptional(body, "cleanup_policy", input.CleanupPolicy)
 	putOptional(body, "prepare_command", input.PrepareCommand)
 	putOptional(body, "finalize_command", input.FinalizeCommand)
+	putOptional(body, "on_usage_limit_command", input.OnUsageLimitCommand)
+	putOptional(body, "retry_after_usage_limit", input.RetryAfterUsageLimit)
 	var item domain.ExecutionProfile
 	if err := s.client.Do(ctx, http.MethodPatch, "/v1/profiles/"+url.PathEscape(input.ID), body, &item); err != nil {
 		return nil, Output{}, err
