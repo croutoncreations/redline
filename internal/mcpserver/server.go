@@ -284,11 +284,11 @@ func New(client apiclient.Client) *mcp.Server {
 	mcp.AddTool(result, readTool("redline_profile_get", "Get execution profile",
 		"Get one execution profile, including harness, model, repository, workspace, and lifecycle hooks."), s.profileGet)
 	mcp.AddTool(result, readTool("redline_runtime_connections_list", "List runtime connections",
-		"List configured remote runtime connections without exposing credential contents."), s.runtimeConnectionsList)
+		"List configured remote runtime connections with a bounded response, without exposing credential contents."), s.runtimeConnectionsList)
 	mcp.AddTool(result, readTool("redline_runtime_connection_get", "Get runtime connection",
 		"Get one runtime connection and its credential reference, never the referenced secret."), s.runtimeConnectionGet)
 	mcp.AddTool(result, readTool("redline_agent_contexts_list", "List agent contexts",
-		"List configured runtime profiles, projects, and remote working directories."), s.agentContextsList)
+		"List configured runtime profiles, projects, and remote working directories with a bounded response."), s.agentContextsList)
 	mcp.AddTool(result, readTool("redline_agent_context_get", "Get agent context",
 		"Get one configured remote agent context."), s.agentContextGet)
 	mcp.AddTool(result, readTool("redline_runs_list", "List runs",
@@ -592,12 +592,12 @@ func (s *server) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	return nil, Output{Summary: fmt.Sprintf("Updated execution profile %s.", item.ID), Data: item}, nil
 }
 
-func (s *server) runtimeConnectionsList(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, Output, error) {
+func (s *server) runtimeConnectionsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
 	var items []domain.RuntimeConnection
 	if err := s.client.Do(ctx, http.MethodGet, "/v1/runtime-connections", nil, &items); err != nil {
 		return nil, Output{}, err
 	}
-	return nil, Output{Summary: fmt.Sprintf("Found %d runtime connections.", len(items)), Count: len(items), Data: items}, nil
+	return listOutput("runtime connection", items, input.Limit)
 }
 
 func (s *server) runtimeConnectionGet(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
@@ -654,12 +654,12 @@ func (s *server) runtimeConnectionDiscover(ctx context.Context, _ *mcp.CallToolR
 	}, nil
 }
 
-func (s *server) agentContextsList(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, Output, error) {
+func (s *server) agentContextsList(ctx context.Context, _ *mcp.CallToolRequest, input listInput) (*mcp.CallToolResult, Output, error) {
 	var items []domain.AgentContext
 	if err := s.client.Do(ctx, http.MethodGet, "/v1/agent-contexts", nil, &items); err != nil {
 		return nil, Output{}, err
 	}
-	return nil, Output{Summary: fmt.Sprintf("Found %d agent contexts.", len(items)), Count: len(items), Data: items}, nil
+	return listOutput("agent context", items, input.Limit)
 }
 
 func (s *server) agentContextGet(ctx context.Context, _ *mcp.CallToolRequest, input idInput) (*mcp.CallToolResult, Output, error) {
