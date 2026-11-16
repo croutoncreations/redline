@@ -234,7 +234,8 @@ CREATE TABLE token_observations (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_tokens >= 0),
     confidence TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(provider, source, source_id)
+    provider_account_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(provider, source, source_id, provider_account_id)
 );
 CREATE INDEX idx_token_observations_provider_observed
 ON token_observations(provider, observed_at, id);`); err != nil {
@@ -804,10 +805,87 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	// Migration 44. Version 30 made token-observation reads account-scoped,
+	// but retained the old provider-wide UNIQUE identity. INSERT OR IGNORE then
+	// silently dropped account B's record when account A had the same source ID.
+	// Repair stamped schemas too, since sibling branches may also claim 44.
+	if err := migrateTokenObservationIdentityV44(ctx, tx); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 44, "account token observation identity"); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
+}
+
+func migrateTokenObservationIdentityV44(ctx context.Context, tx *sql.Tx) error {
+	exists, err := tableExists(ctx, tx, "token_observations")
+	if err != nil || !exists {
+		return err
+	}
+	scoped, err := tokenObservationIdentityScoped(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if scoped {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE token_observations_v44 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0),
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_tokens >= 0),
+    confidence TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    provider_account_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(provider, source, source_id, provider_account_id)
+);
+INSERT INTO token_observations_v44 (
+    id, provider, source, source_id, observed_at, model, input_tokens, output_tokens,
+    cache_read_tokens, cache_creation_tokens, confidence, created_at, provider_account_id
+)
+SELECT id, provider, source, source_id, observed_at, model, input_tokens, output_tokens,
+    cache_read_tokens, cache_creation_tokens, confidence, created_at, provider_account_id
+FROM token_observations;
+DROP TABLE token_observations;
+ALTER TABLE token_observations_v44 RENAME TO token_observations;
+CREATE INDEX idx_token_observations_provider_observed
+ON token_observations(provider, observed_at, id);
+CREATE INDEX idx_token_observations_account_observed
+ON token_observations(provider_account_id, provider, observed_at, id);
+`); err != nil {
+		return fmt.Errorf("scope token observation identity to account: %w", err)
+	}
+	return nil
+}
+
+func tokenObservationIdentityScoped(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var tableSQL string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_observations'`).Scan(&tableSQL); err != nil {
+		return false, fmt.Errorf("inspect token observation identity: %w", err)
+	}
+	identifier := `"?[[:alnum:]_]+"?`
+	unique := regexp.MustCompile(`(?i)UNIQUE\s*\(\s*(` + identifier + `(?:\s*,\s*` + identifier + `)*)\s*\)`)
+	for _, match := range unique.FindAllStringSubmatch(tableSQL, -1) {
+		columns := strings.NewReplacer(`"`, "", " ", "", "\t", "", "\n", "", "\r", "").Replace(match[1])
+		if columns == "provider,source,source_id" {
+			return false, nil
+		}
+		if columns == "provider,source,source_id,provider_account_id" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func rebuildAllowanceWindowsV29(ctx context.Context, tx *sql.Tx) error {

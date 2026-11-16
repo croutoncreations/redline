@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Upgrading a 0.1.13 database now makes token-observation identities account-scoped. Two provider
+  accounts can retain observations with the same source ID instead of silently dropping the second
+  account's record during ingestion.
 - Claude Code profile accounts (team seats) no longer go out of date and hold their work
   8 hours after the seat was last used. The usage monitor now asks Claude Code to renew each
   profile's login shortly before it expires: `claude auth status` first, or a one-word haiku
