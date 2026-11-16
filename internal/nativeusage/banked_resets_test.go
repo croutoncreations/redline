@@ -138,6 +138,8 @@ func TestNativeUsageErrorsCarryRetryAfter(t *testing.T) {
 		"seconds beyond duration range": {"9223372036854775807", time.Duration(1<<63 - 1)},
 		"seconds beyond uint64 range":   {"18446744073709551616", time.Duration(1<<63 - 1)},
 		"malformed seconds":             {"12abc", 0},
+		"malformed overflowing prefix":  {"18446744073709551616abc", 0},
+		"malformed overflowing word":    {"99999999999999999999nine", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
