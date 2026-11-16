@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -283,9 +284,11 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+	// ParseUint reports ErrRange only for an all-digit value above uint64, which
+	// is still a valid delay-seconds and saturates like any other oversized one.
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 		const maxRetryAfter = time.Duration(1<<63 - 1)
-		if seconds > uint64(maxRetryAfter/time.Second) {
+		if err != nil || seconds > uint64(maxRetryAfter/time.Second) {
 			return maxRetryAfter
 		}
 		return time.Duration(seconds) * time.Second
