@@ -98,7 +98,7 @@
   <!-- ── Bottom tab bar ── -->
   <nav class="m-tabs" role="tablist" aria-label="Main navigation">
     <button class="m-tab active" id="m-tab-usage" role="tab"
-            aria-selected="true" aria-controls="m-usage-panel"
+            aria-selected="true" aria-controls="m-usage-panel" tabindex="0"
             data-tab="usage" type="button">
       <!-- Usage icon -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
@@ -109,7 +109,7 @@
       <span>Usage</span>
     </button>
     <button class="m-tab" id="m-tab-queue" role="tab"
-            aria-selected="false" aria-controls="m-queue-panel"
+            aria-selected="false" aria-controls="m-queue-panel" tabindex="-1"
             data-tab="queue" type="button">
       <!-- Queue icon -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
@@ -120,7 +120,7 @@
       <span>Queue</span>
     </button>
     <button class="m-tab" id="m-tab-runs" role="tab"
-            aria-selected="false" aria-controls="m-runs-panel"
+            aria-selected="false" aria-controls="m-runs-panel" tabindex="-1"
             data-tab="runs" type="button">
       <!-- Runs icon -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">

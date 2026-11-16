@@ -676,6 +676,38 @@ test('tab bar buttons have accessible roles and labels', async ({ page }) => {
   }
 });
 
+test('tab bar uses roving focus and arrow-key navigation', async ({ page }) => {
+  await loadMobileDashboard(page);
+  const usage = page.locator('#m-tab-usage');
+  const queue = page.locator('#m-tab-queue');
+  const runs = page.locator('#m-tab-runs');
+  // Only the selected tab may be a tab stop.
+  const expectTabStop = async selected => {
+    for (const tab of [usage, queue, runs]) {
+      await expect(tab).toHaveAttribute('tabindex', tab === selected ? '0' : '-1');
+    }
+  };
+
+  await expectTabStop(usage);
+
+  await usage.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(queue).toBeFocused();
+  await expect(queue).toHaveAttribute('aria-selected', 'true');
+  await expectTabStop(queue);
+  await expect(page.locator('#m-queue-panel')).toBeVisible();
+
+  await page.keyboard.press('End');
+  await expect(runs).toBeFocused();
+  await expect(runs).toHaveAttribute('aria-selected', 'true');
+  await expectTabStop(runs);
+
+  await page.keyboard.press('ArrowRight');
+  await expect(usage).toBeFocused();
+  await expect(usage).toHaveAttribute('aria-selected', 'true');
+  await expectTabStop(usage);
+});
+
 test('provider card headers are keyboard-focusable buttons', async ({ page }) => {
   await loadMobileDashboard(page);
   const btn = page.locator('[data-provider-toggle="claude-main"]');
