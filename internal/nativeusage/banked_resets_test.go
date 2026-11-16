@@ -131,10 +131,11 @@ func TestNativeUsageErrorsCarryRetryAfter(t *testing.T) {
 		header string
 		want   time.Duration
 	}{
-		"seconds":   {"988", 988 * time.Second},
-		"http date": {bankedNow.Add(time.Hour).Format(http.TimeFormat), time.Hour},
-		"zero":      {"0", 0},
-		"past date": {bankedNow.Add(-time.Hour).Format(http.TimeFormat), 0},
+		"seconds":                       {"988", 988 * time.Second},
+		"http date":                     {bankedNow.Add(time.Hour).Format(http.TimeFormat), time.Hour},
+		"zero":                          {"0", 0},
+		"past date":                     {bankedNow.Add(-time.Hour).Format(http.TimeFormat), 0},
+		"seconds beyond duration range": {"9223372036854775807", time.Duration(1<<63 - 1)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
