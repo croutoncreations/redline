@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- On Unix, relay startup now refuses an existing desktop identity file that is not an owner-only
+  regular file, instead of using a Noise private key readable by another local account.
 - Claude Code profile accounts (team seats) no longer go out of date and hold their work
   8 hours after the seat was last used. The usage monitor now asks Claude Code to renew each
   profile's login shortly before it expires: `claude auth status` first, or a one-word haiku
