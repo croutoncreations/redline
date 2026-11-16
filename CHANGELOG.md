@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- MCP runtime-connection and agent-context list tools now honor the documented 20-item default
+  and 100-item maximum, report truncation, and accept the same optional `limit` as other list
+  tools instead of returning an unbounded inventory.
 - Claude Code profile accounts (team seats) no longer go out of date and hold their work
   8 hours after the seat was last used. The usage monitor now asks Claude Code to renew each
   profile's login shortly before it expires: `claude auth status` first, or a one-word haiku
