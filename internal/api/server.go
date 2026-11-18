@@ -760,7 +760,7 @@ func (s *Server) createPairingToken(w http.ResponseWriter, r *http.Request) {
 		RelayOnly bool   `json:"relay_only"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
+		if err := decodePairingJSON(r, &request); err != nil {
 			writeJSON(w, http.StatusBadRequest, problem{Error: "invalid pairing request: " + err.Error()})
 			return
 		}
@@ -915,7 +915,7 @@ func (s *Server) redeemPairingToken(w http.ResponseWriter, r *http.Request) {
 		Name  string `json:"name"`
 		Kind  string `json:"kind"`
 	}
-	if err := decodeBoundedJSON(r, &request, 16<<10); err != nil {
+	if err := decodePairingJSON(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, problem{Error: err.Error()})
 		return
 	}
@@ -3415,33 +3415,40 @@ type problem struct {
 	Error string `json:"error"`
 }
 
-func decodeBoundedJSON(r *http.Request, target any, limit int64) error {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if err != nil {
-		return fmt.Errorf("invalid JSON: could not read request")
-	}
-	if int64(len(raw)) > limit {
-		return fmt.Errorf("invalid JSON: request is too large")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("invalid JSON: request must contain one object")
-	}
-	return nil
+type jsonDecodePolicy struct {
+	maxBodyBytes  int64
+	hideReadError bool
+	tooLargeError string
 }
 
 func decodeJSON(r *http.Request, target any) error {
 	const maxBodyBytes = 1 << 20
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	return decodeJSONBody(r, target, jsonDecodePolicy{
+		maxBodyBytes:  maxBodyBytes,
+		tooLargeError: fmt.Sprintf("request body exceeds %d bytes", maxBodyBytes),
+	})
+}
+
+// Pairing requests are deliberately smaller than general API requests. Keep
+// their established client-facing errors while sharing the strict decoder.
+func decodePairingJSON(r *http.Request, target any) error {
+	return decodeJSONBody(r, target, jsonDecodePolicy{
+		maxBodyBytes:  16 << 10,
+		hideReadError: true,
+		tooLargeError: "request is too large",
+	})
+}
+
+func decodeJSONBody(r *http.Request, target any, policy jsonDecodePolicy) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, policy.maxBodyBytes+1))
 	if err != nil {
+		if policy.hideReadError {
+			return fmt.Errorf("invalid JSON: could not read request")
+		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
-	if len(body) > maxBodyBytes {
-		return fmt.Errorf("invalid JSON: request body exceeds %d bytes", maxBodyBytes)
+	if int64(len(body)) > policy.maxBodyBytes {
+		return fmt.Errorf("invalid JSON: %s", policy.tooLargeError)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
