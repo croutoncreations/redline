@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -455,7 +456,7 @@ func (c *GitHubClient) doRequest(ctx context.Context, method, u string) ([]byte,
 func (c *GitHubClient) request(ctx context.Context, method, u string, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create GitHub API %s request for %q: %w", method, u, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -463,13 +464,79 @@ func (c *GitHubClient) request(ctx context.Context, method, u string, body []byt
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			err = urlError.Err
+		}
+		return nil, fmt.Errorf("GitHub API %s %s failed: %w; check network connectivity and GitHub availability", method, req.URL.Redacted(), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GitHub API error %d", resp.StatusCode)
+		return nil, githubAPIResponseError(req, resp)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read GitHub API %s %s response: %w", method, req.URL.Redacted(), err)
+	}
+	return data, nil
+}
+
+func githubAPIResponseError(req *http.Request, resp *http.Response) error {
+	const maxErrorBody = 64 << 10
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	var payload struct {
+		Message          string `json:"message"`
+		DocumentationURL string `json:"documentation_url"`
+	}
+	_ = json.Unmarshal(body, &payload)
+
+	parts := make([]string, 0, 4)
+	if message := githubAPIErrorValue(payload.Message, 500); message != "" {
+		parts = append(parts, message)
+	}
+	if requestID := githubAPIErrorValue(resp.Header.Get("X-GitHub-Request-Id"), 100); requestID != "" {
+		parts = append(parts, "request ID "+requestID)
+	}
+	if readErr != nil {
+		parts = append(parts, "could not read GitHub's error response: "+readErr.Error())
+	}
+	if action := githubAPIRecovery(resp.StatusCode); action != "" {
+		parts = append(parts, action)
+	}
+	if documentationURL := githubAPIErrorValue(payload.DocumentationURL, 500); documentationURL != "" {
+		parts = append(parts, "see "+documentationURL)
+	}
+
+	detail := ""
+	if len(parts) > 0 {
+		detail = ": " + strings.Join(parts, "; ")
+	}
+	return fmt.Errorf("GitHub API %s %s returned %s%s", req.Method, req.URL.Redacted(), resp.Status, detail)
+}
+
+func githubAPIErrorValue(value string, limit int) string {
+	runes := []rune(strings.Join(strings.Fields(value), " "))
+	if len(runes) > limit {
+		return string(runes[:limit]) + "..."
+	}
+	return string(runes)
+}
+
+func githubAPIRecovery(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "check that GITHUB_TOKEN is valid and can access the repository"
+	case http.StatusForbidden:
+		return "check GITHUB_TOKEN permissions and GitHub API rate limits"
+	case http.StatusNotFound:
+		return "check REPO_OWNER, REPO_NAME, and GITHUB_TOKEN repository access"
+	case http.StatusTooManyRequests:
+		return "retry after the GitHub API rate limit resets"
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return "retry the request or check https://www.githubstatus.com"
+	default:
+		return ""
+	}
 }
 
 func (c *GitHubClient) reviewComments(ctx context.Context, n int) ([]greenlane.ReviewComment, error) {
