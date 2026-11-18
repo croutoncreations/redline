@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,7 +92,12 @@ func apiClient(t *testing.T, mode string) (*GitHubClient, *apiFixture) {
 			send([]any{map[string]any{"filename": name, "previous_filename": previous, "status": "modified", "additions": 1}})
 		case strings.HasSuffix(r.URL.Path, "/reviews"):
 			if mode == "review page error" {
+				w.Header().Set("X-GitHub-Request-Id", "REQ-2AM-403")
 				w.WriteHeader(403)
+				send(map[string]any{
+					"message":           "API rate limit exceeded",
+					"documentation_url": "https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+				})
 				return
 			}
 			send([]any{map[string]any{"id": 1, "state": "APPROVED", "commit_id": "head", "submitted_at": "2026-10-21T00:00:00Z", "user": map[string]any{"login": "reviewer"}}})
@@ -162,12 +168,83 @@ func TestGitHubCollectionFailsClosed(t *testing.T) {
 	for _, mode := range []string{"graphql partial error", "graphql null", "graphql stale", "missing cursor", "repeated cursor", "thread count mismatch", "missing file page", "review page error", "check count mismatch"} {
 		t.Run(mode, func(t *testing.T) {
 			c, _ := apiClient(t, mode)
-			if _, err := c.GetPR(context.Background(), 1); err == nil {
+			_, err := c.GetPR(context.Background(), 1)
+			if err == nil {
 				t.Fatal("partial or stale API data admitted")
+			}
+			if mode == "review page error" {
+				for _, want := range []string{
+					"GitHub API GET " + c.apiBase + "/repos/owner/repo/pulls/1/reviews?per_page=100&page=1 returned 403 Forbidden",
+					"API rate limit exceeded",
+					"request ID REQ-2AM-403",
+					"check GITHUB_TOKEN permissions and GitHub API rate limits",
+					"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not contain %q", err, want)
+					}
+				}
+				if strings.Contains(err.Error(), c.token) {
+					t.Fatalf("error leaked bearer token: %q", err)
+				}
 			}
 		})
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestGitHubTransportErrorNamesOperationAndEndpoint(t *testing.T) {
+	const token = "secret-token-that-must-not-appear"
+	c := &GitHubClient{
+		token: token,
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp: connection refused")
+		})},
+	}
+	_, err := c.doRequest(context.Background(), "GET", "https://api.github.test/repos/owner/repo/pulls/42")
+	if err == nil {
+		t.Fatal("transport failure returned no error")
+	}
+	want := "GitHub API GET https://api.github.test/repos/owner/repo/pulls/42 failed: dial tcp: connection refused; check network connectivity and GitHub availability"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaked bearer token: %q", err)
+	}
+}
+
+func TestGitHubAPIErrorValuesAreSafeForLogs(t *testing.T) {
+	got := githubAPIErrorValue("first line\nsecond\tline "+strings.Repeat("x", 20), 24)
+	if got != "first line second line x..." {
+		t.Fatalf("sanitized error value = %q", got)
+	}
+}
+
+func TestGitHubAPIRecoveryHints(t *testing.T) {
+	tests := map[int]string{
+		http.StatusUnauthorized:        "check that GITHUB_TOKEN is valid and can access the repository",
+		http.StatusForbidden:           "check GITHUB_TOKEN permissions and GitHub API rate limits",
+		http.StatusNotFound:            "check REPO_OWNER, REPO_NAME, and GITHUB_TOKEN repository access",
+		http.StatusTooManyRequests:     "retry after the GitHub API rate limit resets",
+		http.StatusInternalServerError: "retry the request or check https://www.githubstatus.com",
+		http.StatusBadGateway:          "retry the request or check https://www.githubstatus.com",
+		http.StatusServiceUnavailable:  "retry the request or check https://www.githubstatus.com",
+		http.StatusGatewayTimeout:      "retry the request or check https://www.githubstatus.com",
+		http.StatusUnprocessableEntity: "",
+	}
+	for status, want := range tests {
+		if got := githubAPIRecovery(status); got != want {
+			t.Errorf("githubAPIRecovery(%d) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 func TestGitHubChangedSnapshotAndWrongSourcesCannotBeCandidates(t *testing.T) {
 	for _, mode := range []string{"head changes during fetch", "wrong check app", "wrong check head", "wrong workflow", "forged details URL"} {
 		t.Run(mode, func(t *testing.T) {
