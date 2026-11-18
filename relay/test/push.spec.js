@@ -225,7 +225,7 @@ describe("Google JWT, caching, and FCM request", () => {
 
 describe("Google errors and privacy", () => {
   it.each([
-    [404, {}, 410, "unregistered"],
+    [404, { status: "UNREGISTERED" }, 410, "unregistered"],
     [400, { status: "UNREGISTERED" }, 410, "unregistered"],
     [400, { details: [{ errorCode: "UNREGISTERED" }] }, 410, "unregistered"],
     [400, { status: "INVALID_ARGUMENT", message: "The registration token is not valid" }, 410, "unregistered"],
@@ -242,6 +242,14 @@ describe("Google errors and privacy", () => {
       return url === tokenURL ? oauthOK() : googleError(status, error);
     });
     await expectResult(await send(), expected, { code });
+  });
+
+  it("does not discard a device registration for a generic upstream 404", async () => {
+    upstream.mockImplementation(async (url, init) => {
+      new Request(url, init);
+      return url === tokenURL ? oauthOK() : googleError(404, { status: "NOT_FOUND" });
+    });
+    await expectResult(await send(), 502, { code: "push_upstream_error" });
   });
 
   it("never follows a redirect from Google", async () => {
@@ -266,9 +274,9 @@ describe("Google errors and privacy", () => {
     expect(upstream).toHaveBeenCalledTimes(5);
   });
 
-  it.each([[404, 410, "unregistered"], [503, 503, "push_upstream_unavailable"]])("maps the FCM %i after an auth retry", async (status, expected, code) => {
+  it.each([[404, { status: "UNREGISTERED" }, 410, "unregistered"], [503, {}, 503, "push_upstream_unavailable"]])("maps the FCM %i after an auth retry", async (status, error, expected, code) => {
     upstream.mockResolvedValueOnce(oauthOK()).mockResolvedValueOnce(googleError(401))
-      .mockResolvedValueOnce(oauthOK()).mockResolvedValueOnce(googleError(status));
+      .mockResolvedValueOnce(oauthOK()).mockResolvedValueOnce(googleError(status, error));
     await expectResult(await send(), expected, { code });
     expect(upstream).toHaveBeenCalledTimes(4);
   });
