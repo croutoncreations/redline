@@ -46,8 +46,16 @@ jobs:
         run: node --test .github/green-lane/*.test.cjs
       - name: Vet
         run: go vet ./...
-      - name: Test with race detector
-        run: go test -race ./...
+      # internal/api is the race suite's long pole (about five minutes on the
+      # 2-vCPU CI runner). Run every other package here while the dedicated
+      # go-api job exercises that package unchanged on another runner.
+      - name: Test non-API packages with race detector
+        run: |
+          set -euo pipefail
+          api_package="$(go list ./internal/api)"
+          mapfile -t packages < <(go list ./... | grep -Fvx "${api_package}")
+          ((${#packages[@]} > 0))
+          go test -race "${packages[@]}"
       - name: Cross-compile matrix
         run: |
           set -euo pipefail
@@ -57,6 +65,19 @@ jobs:
               GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -o /dev/null ./cmd/redline
             done
           done
+
+  go-api:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Keep the package intact so t.Parallel scheduling and race detection
+      # have exactly the same failure surface as `go test -race ./...`.
+      - name: Test API package with race detector
+        run: go test -race ./internal/api
 
   relay:
     runs-on: ubuntu-latest
