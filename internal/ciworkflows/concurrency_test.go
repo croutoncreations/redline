@@ -177,7 +177,7 @@ func TestTriggersAndJobsUnchanged(t *testing.T) {
 	want := map[string]struct{ on, jobs []string }{
 		"ci.yml": {
 			on:   []string{"pull_request", "push", "workflow_dispatch"},
-			jobs: []string{"actionlint", "android", "dashboard", "go", "homebrew", "linux-smoke", "macos", "macos-intel", "relay", "windows-smoke"},
+			jobs: []string{"actionlint", "android", "dashboard", "go", "go-api", "homebrew", "linux-smoke", "macos", "macos-intel", "relay", "windows-smoke"},
 		},
 		"claude-code-review.yml": {
 			on:   []string{"pull_request"},
