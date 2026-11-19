@@ -210,7 +210,10 @@ func claudeRunObservations(record runRecord, runID, configuredModel string, obse
 func nonzeroObservations(items []capacity.TokenObservation) []capacity.TokenObservation {
 	result := items[:0]
 	for _, item := range items {
-		if item.InputTokens+item.OutputTokens+item.CacheReadTokens+item.CacheCreationTokens > 0 {
+		if item.InputTokens < 0 || item.OutputTokens < 0 || item.CacheReadTokens < 0 || item.CacheCreationTokens < 0 {
+			continue
+		}
+		if item.InputTokens > 0 || item.OutputTokens > 0 || item.CacheReadTokens > 0 || item.CacheCreationTokens > 0 {
 			result = append(result, item)
 		}
 	}
