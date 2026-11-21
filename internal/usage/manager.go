@@ -11,6 +11,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
+	"github.com/croutoncreations/redline/internal/openusage"
 )
 
 type Source interface {
@@ -31,6 +32,12 @@ type bankedResetState struct {
 	nextFetch time.Time
 	inFlight  bool
 	lastError string
+	// generation advances when a redemption corrects the cache, so a lookup
+	// started before it (and answering with the old list) is discarded.
+	generation uint64
+	// failedUntil is a lookup failure's backoff; a redemption asks for a new
+	// list sooner, but never sooner than this.
+	failedUntil time.Time
 }
 
 // Anthropic's usage endpoint rate-limits per account, shared with Claude Code
@@ -47,10 +54,26 @@ type Status struct {
 	Active    string    `json:"active"`
 	ChangedAt time.Time `json:"changed_at,omitempty"`
 	LastError string    `json:"last_error,omitempty"`
-	Failures  int       `json:"consecutive_failures"`
+	// Reason names a failure a person can fix, when the source knows one
+	// (ReasonSignedOut), and is empty otherwise. LastError has the words.
+	Reason   string `json:"reason,omitempty"`
+	Failures int    `json:"consecutive_failures"`
 	// BankedResetsError explains why the supplementary reset lookup is
 	// failing. It never affects scheduling.
 	BankedResetsError string `json:"banked_resets_error,omitempty"`
+}
+
+// ReasonSignedOut: the provider's local login is gone and only signing in
+// again fixes it.
+const ReasonSignedOut = "signed_out"
+
+// failureReason returns the fixable cause an error declares, if any.
+func failureReason(err error) string {
+	var reasoned interface{ Reason() string }
+	if errors.As(err, &reasoned) {
+		return reasoned.Reason()
+	}
+	return ""
 }
 
 type sourceState struct {
@@ -121,14 +144,31 @@ func (m *Manager) FetchFresh(ctx context.Context, accountID string, provider con
 // scheduler its usage data.
 func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, provider config.Provider, snapshot *decision.UsageSnapshot) {
 	// An account pinned to OpenUsage opted out of native credential access.
-	// Native Claude snapshots already asked for grants; Codex usage carries
-	// only a count and needs the separate credit-details endpoint.
+	// Native Claude snapshots already asked for grants. OpenUsage carries only
+	// a count and the soonest expiry for both providers, so the per-reset
+	// details (kind, each expiry) come from the native lookup.
 	if m.BankedResets == nil || m.SkipBankedResetProviders[providerKey(snapshot.Provider)] || provider.EffectiveUsageSource() == "openusage" {
 		return
 	}
-	codexDetails := snapshot.Provider == "codex" && snapshot.BankedResets != nil && *snapshot.BankedResets > 0 && len(snapshot.BankedResetDetails) == 0
+	// The native lookup reads the default login on this Mac. An account bound
+	// to another OpenUsage card is a different login, and showing the default
+	// login's resets on it would be wrong; OpenUsage reports that card's own
+	// resets instead.
+	if card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard)); card != "" && card != providerKey(provider.Provider) {
+		return
+	}
+	// A Claude Code profile is its own login; the native fetch already read
+	// its resets, and the default login's would be another account's.
+	if strings.TrimSpace(provider.ClaudeConfigDir) != "" {
+		return
+	}
+	if snapshot.Provider != "codex" && snapshot.Provider != "claude" {
+		return
+	}
+	needsDetails := snapshot.BankedResets != nil && *snapshot.BankedResets > 0 && len(snapshot.BankedResetDetails) == 0 &&
+		(snapshot.Provider == "codex" || snapshot.Source != "native")
 	claudeReport := snapshot.Provider == "claude" && snapshot.BankedResets == nil && snapshot.Source != "native"
-	if !codexDetails && !claudeReport {
+	if !needsDetails && !claudeReport {
 		return
 	}
 	// The native lookup reads the single local provider login no matter which
@@ -152,7 +192,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 		state.inFlight = true
 		m.resetStates[key] = state
 		m.lookups.Add(1)
-		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider)
+		go m.lookupBankedResets(context.WithoutCancel(ctx), key, provider, state.generation)
 	}
 	m.mu.Unlock()
 
@@ -170,23 +210,26 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 				filtered.NextExpiresAt = nil
 				for _, detail := range report.Details {
 					if detail.ExpiresAt != nil && !detail.ExpiresAt.After(now) {
-						filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						// Paused or not-yet-started resets were never counted.
+						if detail.Spendable(state.fetchedAt) {
+							filtered.Available = max(0, filtered.Available-detail.ResetsLeft)
+						}
 						continue
 					}
 					filtered.Details = append(filtered.Details, detail)
-					if detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
+					if detail.Spendable(now) && detail.ExpiresAt != nil && (filtered.NextExpiresAt == nil || detail.ExpiresAt.Before(*filtered.NextExpiresAt)) {
 						filtered.NextExpiresAt = detail.ExpiresAt
 					}
 				}
 				report = &filtered
 			}
 		}
-		if codexDetails {
+		if needsDetails {
 			if report != nil {
 				// The primary source's count and expiry remain authoritative.
 				expiry := snapshot.BankedResetsExpireAt
 				snapshot.ApplyBankedResets(&decision.BankedResets{Available: *snapshot.BankedResets,
-					NextExpiresAt: report.NextExpiresAt, Details: report.Details})
+					NextExpiresAt: report.NextExpiresAt, Expiries: snapshot.BankedResetsExpiries, Details: report.Details})
 				if expiry != nil {
 					snapshot.BankedResetsExpireAt = expiry
 				}
@@ -197,7 +240,7 @@ func (m *Manager) supplementBankedResets(ctx context.Context, accountID string, 
 	}
 }
 
-func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider) {
+func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider config.Provider, generation uint64) {
 	defer m.lookups.Done()
 	lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	resets, err := m.BankedResets.BankedResets(lookupCtx, provider)
@@ -207,15 +250,25 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	defer m.mu.Unlock()
 	state := m.resetStates[key]
 	state.inFlight = false
+	if err == nil && state.generation != generation {
+		// A redemption corrected the cache while this lookup ran; its answer
+		// predates that and may still list the spent credit. Drop it and ask
+		// again on the next fetch.
+		state.nextFetch = state.failedUntil
+		m.resetStates[key] = state
+		return
+	}
 	if err != nil {
-		state.lastError = err.Error()
+		state.lastError = redact(err.Error())
 		backoff := max(m.bankedResetInterval(key), bankedResetFailureBackoff)
 		var limited interface{ RetryAfter() time.Duration }
 		if errors.As(err, &limited) && limited.RetryAfter() > backoff {
 			backoff = limited.RetryAfter()
 		}
 		state.nextFetch = fetchedAt.Add(backoff)
+		state.failedUntil = state.nextFetch
 	} else {
+		state.failedUntil = time.Time{}
 		state.resets, state.known, state.fetchedAt, state.lastError = resets, true, fetchedAt, ""
 		state.nextFetch = fetchedAt.Add(m.bankedResetInterval(key))
 	}
@@ -235,6 +288,51 @@ func (m *Manager) lookupBankedResets(ctx context.Context, key string, provider c
 	m.saveLockoutsLocked()
 }
 
+// ForgetBankedReset takes one use of a just-redeemed reset out of the cached
+// report and asks for a fresh report on the next fetch. Until then the cache
+// would still offer the spent credit, and the next redemption would select
+// it instead of one that is still available.
+func (m *Manager) ForgetBankedReset(provider config.Provider, resetID string) {
+	// The cache holds the default login's report. A profile account's
+	// resets come with its own fetch, which the caller refreshes, and its
+	// redemption must not touch another login's count.
+	if nativeLoginKey(provider) != providerKey(provider.Provider) {
+		return
+	}
+	key := providerKey(provider.Provider)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.resetStates[key]
+	if !ok {
+		return
+	}
+	if state.resets != nil {
+		report := *state.resets
+		report.Details, report.NextExpiresAt = nil, nil
+		for _, detail := range state.resets.Details {
+			if detail.ID == resetID {
+				detail.ResetsLeft--
+				report.Available = max(0, report.Available-1)
+				if detail.ResetsLeft <= 0 {
+					continue
+				}
+			}
+			report.Details = append(report.Details, detail)
+			if detail.ExpiresAt != nil && (report.NextExpiresAt == nil || detail.ExpiresAt.Before(*report.NextExpiresAt)) {
+				report.NextExpiresAt = detail.ExpiresAt
+			}
+		}
+		state.resets = &report
+	}
+	// Ask for a fresh list on the next fetch, but keep any failure backoff,
+	// and invalidate a lookup already running so it cannot undo this.
+	state.generation++
+	if !state.inFlight {
+		state.nextFetch = state.failedUntil
+	}
+	m.resetStates[key] = state
+}
+
 // WaitForBankedResetLookups blocks until background reset lookups finish.
 func (m *Manager) WaitForBankedResetLookups() { m.lookups.Wait() }
 
@@ -247,7 +345,11 @@ func (m *Manager) bankedResetInterval(provider string) time.Duration {
 
 func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
 	mode := provider.EffectiveUsageSource()
-	if mode == "openusage" {
+	if mode == "openusage" || readsNonDefaultCard(provider) {
+		// An account bound to a non-default OpenUsage card never falls back
+		// to the native collector: that reads the default login on this Mac,
+		// which is a different account, and its numbers would be shown and
+		// scheduled against under this account's name.
 		return m.fetch(ctx, accountID, provider, m.OpenUsage, false)
 	}
 	if mode == "native" {
@@ -264,12 +366,22 @@ func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider con
 	shouldProbe := active == "native" && !now.Before(state.nextProbe)
 	m.mu.Unlock()
 
+	// A report OpenUsage itself marks out of date (SourceStale) holds
+	// dispatch, so for failover it counts like a stale timestamp: try the
+	// native collector. If that fails too, the out-of-date report is still
+	// the best thing to show, and it keeps holding dispatch.
+	var sourceStale decision.UsageSnapshot
+	var sourceStaleRaw []byte
 	if active == "openusage" || shouldProbe {
 		snapshot, raw, err := m.OpenUsage.Fetch(ctx, provider)
 		fetchedAt := m.Now().UTC()
 		freshnessFailure := false
 		if err == nil {
 			err = m.snapshotError(snapshot, fetchedAt)
+			if err == nil && snapshot.SourceStale {
+				sourceStale, sourceStaleRaw = snapshot, raw
+				err = fmt.Errorf("usage source reports its data as out of date")
+			}
 			freshnessFailure = err != nil
 		}
 		if err == nil {
@@ -293,6 +405,9 @@ func (m *Manager) fetchUsage(ctx context.Context, accountID string, provider con
 	}
 	if err != nil {
 		m.nativeFailure(accountID, err)
+		if active == "openusage" && !sourceStale.ObservedAt.IsZero() {
+			return sourceStale, sourceStaleRaw, nil
+		}
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("native usage source: %w", err)
 	}
 	m.success(accountID, "native", fetchedAt)
@@ -319,7 +434,7 @@ func (m *Manager) Status(accountID string) Status {
 // fetchNative calls the native source unless the provider is still inside a
 // rate-limit penalty, in which case it fails without sending anything.
 func (m *Manager) fetchNative(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
-	key := providerKey(provider.Provider)
+	key := nativeLoginKey(provider)
 	now := m.Now().UTC()
 	m.mu.Lock()
 	until := m.nativeBlockedUntil[key]
@@ -339,6 +454,19 @@ func (m *Manager) NativeBlockedUntil(provider string) time.Time {
 	return m.nativeBlockedUntil[providerKey(provider)]
 }
 
+// LoginBlockedUntil is NativeBlockedUntil for the login an account uses: a
+// Claude Code profile has its own lockout, the default login the provider's.
+func (m *Manager) LoginBlockedUntil(provider config.Provider) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nativeBlockedUntil[nativeLoginKey(provider)]
+}
+
+// RecordLoginError is RecordNativeError for the login an account uses.
+func (m *Manager) RecordLoginError(provider config.Provider, err error) {
+	m.RecordNativeError(nativeLoginKey(provider), err)
+}
+
 // RecordNativeError applies the same persisted rate-limit backoff to a redeem
 // response as to a usage response.
 func (m *Manager) RecordNativeError(provider string, err error) {
@@ -348,7 +476,12 @@ func (m *Manager) RecordNativeError(provider string, err error) {
 		if m.nativeBlockedUntil == nil {
 			m.nativeBlockedUntil = make(map[string]time.Time)
 		}
-		key := providerKey(provider)
+		// A login key ("claude@profile:/dir") keeps its case: the directory
+		// is part of it. A bare provider name is normalized as before.
+		key := provider
+		if !strings.Contains(provider, "@profile:") {
+			key = providerKey(provider)
+		}
 		if until := m.Now().UTC().Add(wait); until.After(m.nativeBlockedUntil[key]) {
 			m.nativeBlockedUntil[key] = until
 		}
@@ -372,10 +505,30 @@ func rateLimitWait(err error) (time.Duration, bool) {
 
 const rateLimitFloor = 15 * time.Minute
 
+// readsNonDefaultCard reports an account bound to an OpenUsage card other
+// than the provider's default one.
+func readsNonDefaultCard(provider config.Provider) bool {
+	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
+	return card != "" && card != providerKey(provider.Provider)
+}
+
 // providerKey is the one spelling of a provider used for every lockout, so a
 // rate limit seen by the native fetch and by the reset lookup is shared even
 // when the config writes the provider as "Claude".
 func providerKey(provider string) string { return strings.ToLower(strings.TrimSpace(provider)) }
+
+// nativeLoginKey names the login a native fetch uses, for its lockout. The
+// default login keeps the provider key, so it still shares one lockout with
+// the reset lookup (which only reads the default login); each Claude Code
+// profile directory is a separate login with its own token, and one
+// profile being rate limited must not silence the others.
+func nativeLoginKey(provider config.Provider) string {
+	key := providerKey(provider.Provider)
+	if dir := config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir); dir != "" && key == "claude" {
+		return key + "@profile:" + dir
+	}
+	return key
+}
 
 // fetch reads one pinned source. native is passed explicitly rather than
 // derived from source == m.Native: comparing interfaces panics when the
@@ -425,7 +578,7 @@ func (m *Manager) success(accountID, active string, now time.Time) {
 	}
 	state.Active, state.Failures = active, 0
 	if !preserveFallbackError {
-		state.LastError = ""
+		state.LastError, state.Reason = "", ""
 	}
 	m.states[accountID] = state
 }
@@ -435,7 +588,7 @@ func (m *Manager) failure(accountID string, err error) int {
 	defer m.mu.Unlock()
 	state := m.states[accountID]
 	state.Failures++
-	state.LastError = err.Error()
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	if state.Active == "" {
 		state.Active = "openusage"
 	}
@@ -447,7 +600,7 @@ func (m *Manager) probeFailure(accountID string, err error, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError = err.Error()
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	state.nextProbe = now.Add(m.reprobeInterval())
 	m.states[accountID] = state
 }
@@ -456,7 +609,7 @@ func (m *Manager) nativeFailure(accountID string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError = err.Error()
+	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
 	m.states[accountID] = state
 }
 
@@ -480,3 +633,8 @@ func (m *Manager) maxSnapshotAge() time.Duration {
 	}
 	return m.MaxSnapshotAge
 }
+
+// redact keeps account identities out of collection errors, which reach the
+// dashboard, the phone and the relay. Collectors should never put an email
+// in an error, but upstream text (OpenUsage card errors) can.
+func redact(text string) string { return openusage.RedactEmails(text) }

@@ -1,9 +1,8 @@
 # Push notifications
 
-This build has no push provider built in; the relay decides. The desktop push layer is
-provider-neutral and disabled until a transport is configured. See the
-[relay's push documentation on the mobile branch](https://github.com/croutoncreations/redline/tree/jf-mobile-app/docs)
-for relay-side setup. This build contains no mobile app or relay implementation.
+The desktop push layer is provider-neutral and disabled until a transport is configured.
+The relay supports FCM HTTP v1 content-free wake hints. See
+[push self-hosting](push-self-hosting.md) for Firebase, relay-secret, and app-build setup.
 
 ## Privacy
 

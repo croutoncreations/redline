@@ -21,7 +21,7 @@ jobs:
       github.event.workflow_run.event == 'pull_request_review' &&
       github.event.workflow_run.workflow_id == 379979062 &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

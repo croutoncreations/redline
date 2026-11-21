@@ -1,0 +1,208 @@
+{
+  "errors": [],
+  "generatedAt": "2026-09-10T01:14:21.400Z",
+  "providers": {
+    "claude": {
+      "fetchedAt": "2026-09-10T01:14:21.306Z",
+      "plan": "Max 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 90,
+          "resetsAt": "2026-09-15T19:59:59.817Z",
+          "unit": "percent",
+          "used": 10,
+          "utilization": 0.1,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 1,
+          "expiresAt": [
+            "2026-09-21T19:00:00.000Z"
+          ],
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 0,
+          "resetsAt": "2026-09-10T01:19:59.817Z",
+          "unit": "percent",
+          "used": 100,
+          "utilization": 1,
+          "windowSeconds": 18000
+        },
+        "weekly": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 40,
+          "resetsAt": "2026-09-15T19:59:59.817Z",
+          "unit": "percent",
+          "used": 60,
+          "utilization": 0.6,
+          "windowSeconds": 604800
+        }
+      },
+      "stale": false
+    },
+    "claude@a0000002": {
+      "fetchedAt": "2026-09-10T01:14:21.157Z",
+      "plan": "Team 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-09-11T07:00:00.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 0,
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 18000
+        }
+      },
+      "stale": false
+    },
+    "claude@a0000003": {
+      "fetchedAt": "2026-09-10T01:14:21.157Z",
+      "plan": "Team 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-09-13T07:00:00.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 0,
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 18000
+        }
+      },
+      "stale": false
+    },
+    "claude@a0000004": {
+      "fetchedAt": "2026-09-10T01:14:21.107Z",
+      "plan": "Team 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-09-15T01:00:00.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 0,
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 70,
+          "resetsAt": "2026-09-10T03:49:59.799Z",
+          "unit": "percent",
+          "used": 30,
+          "utilization": 0.3,
+          "windowSeconds": 18000
+        }
+      },
+      "stale": false
+    },
+    "claude@a0000005": {
+      "fetchedAt": "2026-09-10T01:14:21.107Z",
+      "plan": "Team 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-09-16T16:00:00.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 0,
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 18000
+        }
+      },
+      "stale": false
+    },
+    "claude@a0000006": {
+      "fetchedAt": "2026-09-10T01:14:21.157Z",
+      "plan": "Team 5x",
+      "resources": {
+        "fable": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "resetsAt": "2026-09-13T03:00:00.000Z",
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 604800
+        },
+        "rateLimitResets": {
+          "available": 0,
+          "kind": "balance",
+          "unit": "resets"
+        },
+        "session": {
+          "kind": "consumption",
+          "limit": 100,
+          "remaining": 100,
+          "unit": "percent",
+          "used": 0,
+          "utilization": 0,
+          "windowSeconds": 18000
+        }
+      },
+      "stale": false
+    }
+  },
+  "schema": "openusage.limits.v1"
+}

@@ -105,7 +105,7 @@ func (s *Server) redeemExpiringBankedReset(ctx context.Context, providerID strin
 	if result.CooldownUntil != nil && result.CooldownUntil.After(a.RetryAt) {
 		a.RetryAt = *result.CooldownUntil
 	}
-	if until := s.usageSources.NativeBlockedUntil(name); until.After(a.RetryAt) {
+	if until := s.usageSources.LoginBlockedUntil(provider); until.After(a.RetryAt) {
 		a.RetryAt = until
 	}
 	// The engine records errors and emits outcome notifications. A failed

@@ -57,7 +57,7 @@ func TestRedeemClaudeRequestsAndCachedProfile(t *testing.T) {
 	r.claudeBaseURL = server.URL
 	for i := 0; i < 2; i++ {
 		got, err := r.Redeem(context.Background(), config.Provider{Provider: "claude"}, RedeemRequest{ResetID: "grant_1", RequestID: "request-1"})
-		if err != nil || got.Outcome != "redeemed" || strings.Join(got.Cleared, ",") != "five_hour,weekly" || got.ResetsLeft == nil || *got.ResetsLeft != 0 {
+		if err != nil || got.Outcome != "redeemed" || strings.Join(got.Cleared, ",") != "five_hour,weekly,fable" || got.ResetsLeft == nil || *got.ResetsLeft != 0 {
 			t.Fatalf("got=%+v err=%v", got, err)
 		}
 	}

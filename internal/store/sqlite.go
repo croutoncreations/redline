@@ -455,6 +455,7 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (23)`); err != nil {
 			return fmt.Errorf("record requested task dispatch target migration: %w", err)
 		}
+		version = 23
 	}
 	if version < 24 {
 		if err := migrateFixedWidthTimestampsV24(ctx, tx); err != nil {
@@ -465,16 +466,20 @@ ON runs(completed_at DESC) WHERE activity_read_at IS NULL AND state IN ('complet
 		}
 	}
 	if version < 26 {
-		// Version 26 rather than 25: builds of the unmerged mobile branch
-		// (PR #86) stamped 24 and 25 for different migrations (banked_resets
-		// and short_window_unavailable), so the banked columns are added
-		// only when missing and the version sits above both histories. That
-		// branch will need its own guarded v27+ for short_window_unavailable
-		// when it merges. Nullable on purpose: "not reported" is not zero.
+		// Version 26 rather than 25: pre-release builds of the mobile branch
+		// stamped 24 and 25 for different migrations (banked_resets and
+		// short_window_unavailable), so every column is added only when
+		// missing and the version sits above both histories. Nullable
+		// banked_resets on purpose: "not reported" is not zero.
 		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets", "INTEGER"); err != nil {
 			return err
 		}
 		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "banked_resets_expire_at", "TEXT"); err != nil {
+			return err
+		}
+		// Not nullable: a snapshot either reported the five hour window as
+		// unavailable or it did not, and older rows did not.
+		if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 		// Those mobile-branch databases skipped main's v24 timestamp rewrite
@@ -510,6 +515,80 @@ ON runs(completion_sequence) WHERE completion_sequence IS NOT NULL;`); err != ni
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (27)`); err != nil {
 			return fmt.Errorf("record run completion sequence migration: %w", err)
 		}
+	}
+	// short_window_unavailable came with the mobile branch's v25. Main's v26
+	// skipped it, so a database main created is past 26 without the column:
+	// add it whenever it is missing. Not nullable: a snapshot either reported
+	// the five hour window as unavailable or it did not.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Migrations 28–31 came from the mobile and multi-account branches, which
+	// stamped those versions before main's own 32–43. A database created by
+	// main is already at 43 and never ran them, so, like 32–43, each body is
+	// guarded by the schema itself rather than the recorded version, and the
+	// version row is only added when missing.
+	//
+	// 28: whether a snapshot saw an untouched five hour window. Not nullable,
+	// like short_window_unavailable: older rows did not.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "short_window_not_started", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 28, "short window not started"); err != nil {
+		return err
+	}
+	// 29: Cursor's subscription pools reset monthly. SQLite cannot alter a
+	// CHECK constraint, so the allowance table is rebuilt with the wider role
+	// list when it does not already allow monthly; every existing row is
+	// copied unchanged. Nothing has a foreign key into this table, so
+	// rebuilding it is safe in place. The rebuild copies only rows whose
+	// snapshot exists, so it needs usage_snapshots; a legacy database
+	// recorded at an early version can lack it
+	// (TestOpenMigratesExistingVersionTwoDatabase), and cannot store any
+	// snapshot, so skipping the rebuild there loses nothing.
+	hasAllowances, err := tableExists(ctx, tx, "usage_allowance_windows")
+	if err != nil {
+		return err
+	}
+	hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
+	if err != nil {
+		return err
+	}
+	if hasAllowances && hasSnapshots {
+		var allowancesSQL string
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'usage_allowance_windows'`).Scan(&allowancesSQL); err != nil {
+			return fmt.Errorf("inspect allowance windows: %w", err)
+		}
+		if !strings.Contains(allowancesSQL, "'monthly'") {
+			if err := rebuildAllowanceWindowsV29(ctx, tx); err != nil {
+				return err
+			}
+		}
+	}
+	if err := recordMigration(ctx, tx, 29, "monthly allowance"); err != nil {
+		return err
+	}
+	// 30: usage is recorded per provider account so two accounts of one
+	// provider can never read each other's numbers. Existing rows keep an
+	// empty account: AdoptLegacyUsage hands them to the provider's only
+	// account at startup, and leaves them unowned when there are several,
+	// because nothing recorded which account they came from. Every step is
+	// idempotent (columns added when missing, indexes recreated).
+	if err := migrateAccountUsageV30(ctx, tx); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 30, "account usage"); err != nil {
+		return err
+	}
+	// 31: accounts whose source reports no account-wide weekly limit (Team
+	// seats in OpenUsage). The weekly columns stay NOT NULL for every older
+	// reader; such rows store the zero window and this flag, and the flag is
+	// what says "not reported". Additive only.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "weekly_unavailable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := recordMigration(ctx, tx, 31, "weekly-unavailable"); err != nil {
+		return err
 	}
 	// Versions 32–34 rather than 28–30: unmerged mobile, Grok, and multi-account
 	// branches stamped 28–31 for unrelated migrations. Like v26, inspect the schema
@@ -727,6 +806,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func rebuildAllowanceWindowsV29(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE usage_allowance_windows_v29 (
+    snapshot_id INTEGER NOT NULL REFERENCES usage_snapshots(id) ON DELETE CASCADE,
+    pool_key TEXT NOT NULL,
+    source_label TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('account', 'model')),
+    role TEXT NOT NULL CHECK(role IN ('short', 'weekly', 'monthly')),
+    remaining REAL NOT NULL CHECK(remaining >= 0 AND remaining <= 1),
+    resets_at TEXT NOT NULL,
+    period_duration_s INTEGER NOT NULL CHECK(period_duration_s > 0),
+    reset_inferred INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(snapshot_id, pool_key)
+);
+INSERT INTO usage_allowance_windows_v29 (
+    snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
+)
+SELECT snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_duration_s, reset_inferred
+FROM usage_allowance_windows
+-- Rows orphaned by a hand-run prune with foreign keys off (the sqlite3
+-- shell's default) would fail the new table's foreign key and stop Redline
+-- from starting. They belong to no snapshot and nothing can read them.
+WHERE snapshot_id IN (SELECT id FROM usage_snapshots);
+DROP TABLE usage_allowance_windows;
+ALTER TABLE usage_allowance_windows_v29 RENAME TO usage_allowance_windows;
+CREATE INDEX idx_allowance_windows_pool_reset
+ON usage_allowance_windows(pool_key, resets_at);
+`); err != nil {
+		return fmt.Errorf("allow monthly allowance windows: %w", err)
 	}
 	return nil
 }
@@ -983,6 +1095,15 @@ ON usage_snapshots(provider, observed_at DESC, id DESC)`); err != nil {
 	return nil
 }
 
+// recordMigration stamps a schema-guarded migration's version unless it is
+// already recorded (by this build or a sibling branch).
+func recordMigration(ctx context.Context, tx *sql.Tx, version int, name string) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = ?)`, version, version); err != nil {
+		return fmt.Errorf("record %s migration: %w", name, err)
+	}
+	return nil
+}
+
 func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(
@@ -1025,15 +1146,123 @@ func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definiti
 	return nil
 }
 
+func migrateAccountUsageV30(ctx context.Context, tx *sql.Tx) error {
+	hasSnapshots, err := tableExists(ctx, tx, "usage_snapshots")
+	if err != nil {
+		return err
+	}
+	if hasSnapshots {
+		for _, column := range []struct{ name, definition string }{
+			{"provider_account_id", "TEXT NOT NULL DEFAULT ''"},
+			{"banked_resets_expiries", "TEXT"},
+			{"plan", "TEXT NOT NULL DEFAULT ''"},
+			{"source_stale", "INTEGER NOT NULL DEFAULT 0"},
+		} {
+			if err := addColumnIfMissing(ctx, tx, "usage_snapshots", column.name, column.definition); err != nil {
+				return err
+			}
+		}
+		// The identity index gains provider_account_id. Rebuild it only
+		// while it lacks the column, so reopening a migrated database
+		// leaves the schema untouched.
+		var identitySQL sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_snapshots_identity'`).Scan(&identitySQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("inspect usage snapshot identity index: %w", err)
+		}
+		if !strings.Contains(identitySQL.String, "provider_account_id") {
+			if _, err := tx.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_usage_snapshots_identity;
+CREATE UNIQUE INDEX idx_usage_snapshots_identity
+ON usage_snapshots(provider_account_id, provider, observed_at, source);`); err != nil {
+				return fmt.Errorf("index account usage snapshots: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_usage_snapshots_account_observed
+ON usage_snapshots(provider_account_id, provider, observed_at DESC, id DESC);`); err != nil {
+			return fmt.Errorf("index account usage snapshots: %w", err)
+		}
+	}
+	hasTokens, err := tableExists(ctx, tx, "token_observations")
+	if err != nil {
+		return err
+	}
+	if hasTokens {
+		if err := addColumnIfMissing(ctx, tx, "token_observations", "provider_account_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_token_observations_account_observed
+ON token_observations(provider_account_id, provider, observed_at, id)`); err != nil {
+			return fmt.Errorf("index account token observations: %w", err)
+		}
+	}
+	return nil
+}
+
+// AdoptLegacyUsage assigns usage recorded before accounts existed to the
+// provider's only account. It must be called with the full set of configured
+// accounts: a provider with several accounts adopts nothing, because those
+// rows cannot be attributed, and showing them on one account would be a
+// guess. It is idempotent and safe to run at every start.
+func (d *DB) AdoptLegacyUsage(ctx context.Context, accountsByProvider map[string][]string) (int64, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin legacy usage adoption: %w", err)
+	}
+	defer tx.Rollback()
+	var adopted int64
+	for provider, accounts := range accountsByProvider {
+		if len(accounts) != 1 || strings.TrimSpace(accounts[0]) == "" {
+			continue
+		}
+		for _, table := range []string{"usage_snapshots", "token_observations"} {
+			// A row the account already recorded with the same identity wins;
+			// the unowned duplicate is left behind rather than colliding.
+			result, err := tx.ExecContext(ctx, `UPDATE OR IGNORE `+table+` SET provider_account_id = ?
+WHERE provider_account_id = '' AND provider = ?`, accounts[0], strings.ToLower(provider))
+			if err != nil {
+				return 0, fmt.Errorf("adopt legacy %s: %w", table, err)
+			}
+			count, _ := result.RowsAffected()
+			adopted += count
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit legacy usage adoption: %w", err)
+	}
+	return adopted, nil
+}
+
 // bankedResetColumns converts a snapshot's optional reset report for storage.
-func bankedResetColumns(s decision.UsageSnapshot) (count, expires any) {
+func bankedResetColumns(s decision.UsageSnapshot) (count, expires, expiries any) {
 	if s.BankedResets != nil {
 		count = *s.BankedResets
 	}
 	if s.BankedResetsExpireAt != nil {
 		expires = formatTime(*s.BankedResetsExpireAt)
 	}
-	return count, expires
+	if len(s.BankedResetsExpiries) > 0 {
+		formatted := make([]string, len(s.BankedResetsExpiries))
+		for i, expiry := range s.BankedResetsExpiries {
+			formatted[i] = formatTime(expiry)
+		}
+		expiries = strings.Join(formatted, ",")
+	}
+	return count, expires, expiries
+}
+
+// scanBankedResetExpiries restores the per-reset deadline list.
+func scanBankedResetExpiries(s *decision.UsageSnapshot, expiries sql.NullString) error {
+	if !expiries.Valid || strings.TrimSpace(expiries.String) == "" {
+		return nil
+	}
+	for _, value := range strings.Split(expiries.String, ",") {
+		parsed, err := parseStoredTimeField("stored banked reset expiry list", value)
+		if err != nil {
+			return err
+		}
+		s.BankedResetsExpiries = append(s.BankedResetsExpiries, parsed)
+	}
+	return nil
 }
 
 // scanBankedResets restores the optional reset report, keeping zero distinct
@@ -1074,7 +1303,7 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 		return fmt.Errorf("begin snapshot save: %w", err)
 	}
 	defer tx.Rollback()
-	bankedResets, bankedResetsExpireAt := bankedResetColumns(s)
+	bankedResets, bankedResetsExpireAt, bankedResetsExpiries := bankedResetColumns(s)
 	var bankedResetDetails any
 	if len(s.BankedResetDetails) > 0 {
 		encoded, err := json.Marshal(s.BankedResetDetails)
@@ -1084,13 +1313,15 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 		bankedResetDetails = string(encoded)
 	}
 	const query = `INSERT OR IGNORE INTO usage_snapshots (
-provider, observed_at, short_remaining, short_resets_at,
+provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at, banked_reset_details
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
+		s.Account,
 		s.Provider,
 		formatTime(s.ObservedAt),
 		shortRemaining,
@@ -1102,6 +1333,12 @@ banked_resets, banked_resets_expire_at, banked_reset_details
 		raw,
 		bankedResets,
 		bankedResetsExpireAt,
+		s.ShortWindowUnavailable,
+		s.ShortWindowNotStarted,
+		bankedResetsExpiries,
+		s.Plan,
+		s.SourceStale,
+		s.WeeklyUnavailable,
 		bankedResetDetails,
 	)
 	if err != nil {
@@ -1112,6 +1349,16 @@ banked_resets, banked_resets_expire_at, banked_reset_details
 		return fmt.Errorf("count saved usage snapshot: %w", err)
 	}
 	if inserted == 0 {
+		// The same observation saved again can only learn that its report
+		// has since expired (a fixed fetchedAt outlives its expiresAt), so
+		// that one fact is carried onto the stored row; nothing else changes.
+		if s.SourceStale {
+			if _, err := tx.ExecContext(ctx, `UPDATE usage_snapshots SET source_stale = 1
+WHERE provider_account_id = ? AND provider = ? AND observed_at = ? AND source = ? AND source_stale = 0`,
+				s.Account, s.Provider, formatTime(s.ObservedAt), s.Source); err != nil {
+				return fmt.Errorf("mark duplicate usage snapshot stale: %w", err)
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit duplicate snapshot save: %w", err)
 		}
@@ -1137,26 +1384,29 @@ snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_d
 	return nil
 }
 
+// LatestSnapshot returns the newest snapshot recorded for one provider
+// account. account is the Redline provider ID; provider is its type.
 func (d *DB) LatestSnapshot(
 	ctx context.Context,
-	provider string,
+	account, provider string,
 ) (decision.UsageSnapshot, []byte, error) {
-	return d.latestSnapshot(ctx, provider, "")
+	return d.latestSnapshot(ctx, account, provider, "")
 }
 
-func (d *DB) LatestSnapshotFromSource(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
+func (d *DB) LatestSnapshotFromSource(ctx context.Context, account, provider, source string) (decision.UsageSnapshot, []byte, error) {
 	if strings.TrimSpace(source) == "" {
-		return d.LatestSnapshot(ctx, provider)
+		return d.LatestSnapshot(ctx, account, provider)
 	}
-	return d.latestSnapshot(ctx, provider, source)
+	return d.latestSnapshot(ctx, account, provider, source)
 }
 
-func (d *DB) latestSnapshot(ctx context.Context, provider, source string) (decision.UsageSnapshot, []byte, error) {
-	query := `SELECT id, provider, observed_at, short_remaining, short_resets_at,
+func (d *DB) latestSnapshot(ctx context.Context, account, provider, source string) (decision.UsageSnapshot, []byte, error) {
+	query := `SELECT id, provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
-banked_resets, banked_resets_expire_at, banked_reset_details
-FROM usage_snapshots WHERE provider = ?`
-	args := []any{provider}
+banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
+FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
+	args := []any{account, provider}
 	if source != "" {
 		query += ` AND source = ?`
 		args = append(args, source)
@@ -1169,9 +1419,10 @@ FROM usage_snapshots WHERE provider = ?`
 	var shortReset sql.NullString
 	var raw []byte
 	var bankedResets sql.NullInt64
-	var bankedResetsExpireAt, bankedResetDetails sql.NullString
+	var bankedResetsExpireAt, bankedResetsExpiries, bankedResetDetails sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
+		&s.Account,
 		&s.Provider,
 		&observedAt,
 		&shortRemaining,
@@ -1183,10 +1434,16 @@ FROM usage_snapshots WHERE provider = ?`
 		&raw,
 		&bankedResets,
 		&bankedResetsExpireAt,
+		&s.ShortWindowUnavailable,
+		&s.ShortWindowNotStarted,
+		&bankedResetsExpiries,
+		&s.Plan,
+		&s.SourceStale,
+		&s.WeeklyUnavailable,
 		&bankedResetDetails,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider %q", ErrNotFound, provider)
+		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider account %q", ErrNotFound, account)
 	}
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("query latest snapshot: %w", err)
@@ -1194,7 +1451,7 @@ FROM usage_snapshots WHERE provider = ?`
 	if s.ObservedAt, err = parseStoredTimeField("stored observation time", observedAt); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
-	if s.Weekly.ResetsAt, err = parseStoredTimeField("stored weekly reset", weeklyReset); err != nil {
+	if s.Weekly, err = storedWeekly(s.WeeklyUnavailable, s.Weekly.Remaining, weeklyReset); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
 	if shortRemaining.Valid != shortReset.Valid {
@@ -1207,14 +1464,62 @@ FROM usage_snapshots WHERE provider = ?`
 		}
 		s.Short = &decision.UsageWindow{Remaining: shortRemaining.Float64, ResetsAt: parsed}
 	}
+	dropContradictoryNotStarted(&s)
 	if err := scanBankedResets(&s, bankedResets, bankedResetsExpireAt, bankedResetDetails); err != nil {
+		return decision.UsageSnapshot{}, nil, err
+	}
+	if err := scanBankedResetExpiries(&s, bankedResetsExpiries); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
+	restoreAccountPeriod(&s)
 	return s, raw, nil
+}
+
+// storedWeekly reads the weekly columns. A row whose source reported no
+// weekly limit stores the zero window there (the columns are NOT NULL for
+// older readers) and loads back as the zero window: never a value.
+func storedWeekly(unavailable bool, remaining float64, reset string) (decision.UsageWindow, error) {
+	if unavailable {
+		return decision.UsageWindow{}, nil
+	}
+	parsed, err := parseStoredTimeField("stored weekly reset", reset)
+	if err != nil {
+		return decision.UsageWindow{}, err
+	}
+	return decision.UsageWindow{Remaining: remaining, ResetsAt: parsed}, nil
+}
+
+// restoreAccountPeriod recovers the account window's period from its stored
+// allowance row ("weekly" key, written by AllAllowances), so a monthly
+// account (Cursor) keeps its period across a reload without a new column.
+// Historical rows record the seven-day week, which is also the default.
+func restoreAccountPeriod(s *decision.UsageSnapshot) {
+	for _, allowance := range s.Allowances {
+		// Only a period clearly not a week (Cursor's month) is restored. A
+		// weekly row reported a second short would otherwise make the stored
+		// snapshot pace differently from the fresh one, which never sets it.
+		if allowance.Key == "weekly" && allowance.Scope == "account" &&
+			allowance.PeriodDurationSeconds > decision.WeekSeconds+24*60*60 {
+			s.Weekly.PeriodSeconds = allowance.PeriodDurationSeconds
+		}
+	}
+}
+
+// dropContradictoryNotStarted clears a "not started" flag stored beside a
+// timed or unavailable short window. SaveSnapshot has refused that since
+// UsageSnapshot.Validate forbade it, but rows written before then can still
+// carry it, and the decision engine would reject the snapshot and pause
+// dispatch until a new sample arrived. The other state is the stronger
+// evidence -- real data, or knowing the window is unreadable -- so "not
+// started" is the claim that goes.
+func dropContradictoryNotStarted(s *decision.UsageSnapshot) {
+	if s.ShortWindowNotStarted && (s.Short != nil || s.ShortWindowUnavailable) {
+		s.ShortWindowNotStarted = false
+	}
 }
 
 func (d *DB) loadAllowances(ctx context.Context, snapshotID int64) ([]decision.AllowanceWindow, error) {
@@ -1243,4 +1548,27 @@ FROM usage_allowance_windows WHERE snapshot_id = ? ORDER BY pool_key`, snapshotI
 		return nil, fmt.Errorf("list allowance windows: %w", err)
 	}
 	return allowances, nil
+}
+
+// columnExists reports whether a table already has a column.
+//
+// Needed because a fresh database gets its columns from the current schema
+// while an existing one gets them from migrations, so an ALTER that is correct
+// for the second is a duplicate-column error for the first.
+func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("scan %s column: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

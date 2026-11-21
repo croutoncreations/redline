@@ -7,7 +7,12 @@ const relative = (value) => {
   if (abs < 60) { amount = abs; unit = "sec"; }
   else if (abs < 3600) { amount = Math.round(abs/60); unit = "min"; if (amount >= 60) { amount = 1; unit = "hr"; } }
   else if (abs < 86400) { amount = Math.round(abs/3600); unit = "hr"; if (amount >= 24) { amount = 1; unit = "day"; } }
-  else { amount = Math.round(abs/86400); unit = "day"; }
+  // Days stay exact for the first two weeks (weekly resets live there); past
+  // that, a count of days is hard to read, so step up to weeks, months, years.
+  else if (abs < 14 * 86400) { amount = Math.round(abs/86400); unit = "day"; if (amount >= 14) { amount = 2; unit = "week"; } }
+  else if (abs < 56 * 86400) { amount = Math.round(abs/(7*86400)); unit = "week"; }
+  else if (abs < 365 * 86400) { amount = Math.round(abs/(30.44*86400)); unit = "month"; if (amount >= 12) { amount = 1; unit = "year"; } }
+  else { amount = Math.round(abs/(365.25*86400)); unit = "year"; }
   return seconds >= 0 ? `in ${amount} ${unit}${amount === 1 ? "" : "s"}` : `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
 };
 const shortTime = (value) => value ? new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)) : "—";
@@ -39,7 +44,7 @@ const onboardingStorage = {
 };
 
 function providerName(provider) {
-  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : title(provider);
+  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : title(provider);
 }
 
 function usageSourceName(source) {
@@ -47,18 +52,19 @@ function usageSourceName(source) {
 }
 
 function directHarnessFor(provider) {
-  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : '';
+  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : '';
   return harnessCatalog.find(item => item.id === id);
 }
 
 function providerSetupGuidance(provider) {
   if (provider === 'claude') return {label:'Claude Code',login:'claude auth login',url:'https://docs.anthropic.com/en/docs/claude-code/getting-started'};
   if (provider === 'codex') return {label:'Codex CLI',login:'codex login',url:'https://developers.openai.com/codex/cli/'};
+  if (provider === 'cursor') return {label:'Cursor CLI',login:'agent login',url:'https://cursor.com/docs/cli/installation'};
   return {label:providerName(provider),login:'',url:''};
 }
 
 function installedHarnessesFor(provider) {
-  const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : [];
+  const preferred = provider === 'claude' ? ['claude-code','pi'] : provider === 'codex' ? ['codex-cli','pi'] : provider === 'cursor' ? ['cursor-agent'] : [];
   const authenticationRank = harness => harness.authentication === 'authenticated' ? 0 : harness.authentication === 'signed_out' ? 2 : 1;
   return preferred.map(id => harnessCatalog.find(item => item.id === id))
     .filter(item => item?.installed && (item.id !== 'pi' || (item.models?.[provider] || []).length > 0))
@@ -301,20 +307,108 @@ function meter(label, remaining, reset) {
   const value = percent(remaining), tone = value < 15 ? "danger" : value < 35 ? "warn" : "";
   return `<div><div class="meter-head"><span>${escapeHTML(label)}</span><b>${value}% left</b></div><progress class="meter-progress ${tone}" max="100" value="${value}" aria-label="${value}% remaining"></progress><div class="reset">Resets ${escapeHTML(relative(reset))} · ${escapeHTML(shortTime(reset))}</div></div>`;
 }
+// A window whose clock has not started: full, with no reset time yet because
+// the provider starts the countdown on first use. Says how the clock runs
+// rather than showing a made-up reset.
+function notStartedMeter(label) {
+  return `<div data-testid="short-window-not-started"><div class="meter-head"><span>${escapeHTML(label)}</span><b>100% left</b></div><progress class="meter-progress" max="100" value="100" aria-label="100% remaining"></progress><div class="reset">Starts on first use · resets 5h after</div></div>`;
+}
 // Banked resets are on-demand refills of an exhausted window. Absent means the
 // provider did not report them, which is not the same as zero, so the row is
 // only drawn when a count is known.
+const RESET_SOON_MS = 3 * 86400000;
+const RESET_KINDS = {
+  full: { label: 'Full', help: 'Refills the 5-hour and weekly limits.' },
+  session: { label: '5-hour', help: 'Refills the 5-hour limit only.' },
+  weekly: { label: 'Weekly', help: 'Refills the weekly limit.' },
+  opus: { label: 'Opus', help: 'Refills the Opus weekly limit only.' },
+  sonnet: { label: 'Sonnet', help: 'Refills the Sonnet weekly limit only.' },
+  fable: { label: 'Fable', help: "Refills the 5-hour limit and the Fable allowance, and gives back what Fable used of the weekly limit. It doesn't reset the whole week." },
+};
+const resetExpiryText = (value) => {
+  const date = new Date(value);
+  const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+};
+// Why a held reset can't be spent now, in Claude Code's words.
+const RESET_UNAVAILABLE = {
+  paused: 'paused', not_started: "isn't active yet", cooldown: 'a reset was just used; try again in a minute',
+  blocked_five_hour: "can't be used while you're at your 5-hour limit", blocked_seven_day: "can't be used while you're at your weekly limit",
+  blocked_opus: "can't be used while you're at your Opus limit", blocked_sonnet: "can't be used while you're at your Sonnet limit",
+  blocked_other: "can't be used while you're at another limit it doesn't refill", cannot_clear: "doesn't refill the limit you've reached",
+  needs_limit: 'usable once you reach a limit it refills', unavailable: "can't be used right now",
+};
+const resetHeld = d => d.paused || (d.starts_at && new Date(d.starts_at) > Date.now());
+const resetReasonText = d => d.unavailable_reason ? (RESET_UNAVAILABLE[d.unavailable_reason] || RESET_UNAVAILABLE.unavailable) : '';
+// bankedResetGroups splits the reset details by kind, keeping each distinct
+// expiry. It returns null unless the live details account for every reset in
+// the aggregate count, so a partial or stale breakdown is never shown.
+function bankedResetGroups(snap, count) {
+  const details = (snap?.banked_reset_details || []).filter(d => d.resets_left > 0 && (!d.expires_at || new Date(d.expires_at) > Date.now()));
+  // Held (paused or not yet started) resets are not in the count; list them
+  // with their reason so they are not mistaken for usable ones.
+  if (!details.length || details.filter(d => !resetHeld(d)).reduce((sum, d) => sum + d.resets_left, 0) !== count) return null;
+  const groups = new Map();
+  for (const d of details) {
+    const kind = RESET_KINDS[d.kind] ? d.kind : '';
+    const group = groups.get(kind) || { kind, count: 0, held: 0, expiries: new Map(), undated: 0, reasons: new Map() };
+    if (resetHeld(d)) group.held += d.resets_left;
+    else group.count += d.resets_left;
+    const reason = resetReasonText(d);
+    if (reason) group.reasons.set(reason, (group.reasons.get(reason) || 0) + d.resets_left);
+    if (resetHeld(d)) { groups.set(kind, group); continue; }
+    if (d.expires_at) group.expiries.set(d.expires_at, (group.expiries.get(d.expires_at) || 0) + d.resets_left);
+    else group.undated += d.resets_left;
+    groups.set(kind, group);
+  }
+  const order = ['full', 'weekly', 'session', 'fable', 'opus', 'sonnet', ''];
+  return [...groups.values()].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)).map(group => {
+    const expiries = [...group.expiries.entries()].sort((a, b) => new Date(a[0]) - new Date(b[0]));
+    const soonest = expiries[0]?.[0];
+    return { ...group, lines: [...resetExpiryLines(group, expiries), ...[...group.reasons.entries()].map(([text, n]) => ({ soon: false, hint: true, text: group.count + group.held > 1 ? `${n} ${text}` : text.charAt(0).toUpperCase() + text.slice(1) }))], soonest, soon: soonest && new Date(soonest) - Date.now() < RESET_SOON_MS };
+  });
+}
+// One line per distinct expiry, so many dates never wrap into one long run.
+// Beyond MAX_EXPIRY_LINES the rest collapse into a single "+N more" line.
+const MAX_EXPIRY_LINES = 3;
+function resetExpiryLines(group, expiries) {
+  if (!expiries.length && !group.undated) return [];
+  const isSoon = at => new Date(at) - Date.now() < RESET_SOON_MS;
+  if (expiries.length === 1 && !group.undated) {
+    return [{ soon: isSoon(expiries[0][0]), text: `${group.count === 1 ? 'Expires' : 'All expire'} ${resetExpiryText(expiries[0][0])} · ${relative(expiries[0][0])}` }];
+  }
+  const lines = expiries.map(([at, n]) => ({ soon: isSoon(at), text: `Expires ${resetExpiryText(at)}${n > 1 ? ` ×${n}` : ''} · ${relative(at)}` }));
+  if (group.undated) lines.push({ soon: false, text: `No expiry reported${group.undated > 1 ? ` ×${group.undated}` : ''}` });
+  if (lines.length <= MAX_EXPIRY_LINES + 1) return lines;
+  const hidden = expiries.slice(MAX_EXPIRY_LINES);
+  const hiddenResets = hidden.reduce((sum, [, n]) => sum + n, 0) + group.undated;
+  const last = hidden.length ? `, last ${resetExpiryText(hidden[hidden.length - 1][0])}` : '';
+  return [...lines.slice(0, MAX_EXPIRY_LINES), { soon: false, text: `+${hiddenResets} more${last}` }];
+}
 function bankedResets(snap) {
   const count = snap?.banked_resets;
   if (count == null) return '';
+  const help = `<i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i>`;
+  const groups = count > 0 ? bankedResetGroups(snap, count) : null;
+  if (groups) {
+    const rows = groups.map(group => {
+      const kind = RESET_KINDS[group.kind];
+      const name = kind ? `${kind.label} reset${group.count + group.held === 1 ? '' : 's'}` : `Reset${group.count + group.held === 1 ? '' : 's'}`;
+      const groupHelp = kind ? ` <i class="help" tabindex="0" data-help="${escapeHTML(kind.help)}">?</i>` : '';
+      const lines = group.lines.map(line => `<div class="reset${line.soon ? ' soon' : ''}${line.hint ? ' hint' : ''}">${escapeHTML(line.text)}</div>`).join('');
+      return `<div class="banked-reset-kind" data-reset-kind="${escapeHTML(group.kind || 'other')}"><div class="meter-head"><span>${escapeHTML(name)}${groupHelp}</span><b>${escapeHTML(group.count)}${group.held ? ` <small>+${escapeHTML(group.held)} held</small>` : ''}</b></div>${lines}</div>`;
+    }).join('');
+    return `<div class="banked-resets grouped" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets ${help}</span><b>${escapeHTML(count)} available</b></div>${rows}</div>`;
+  }
   // A stored expiry can lapse while the snapshot sits unrefreshed; never
   // show "Expires … ago".
   const expires = count > 0 && snap.banked_resets_expire_at && new Date(snap.banked_resets_expire_at) > Date.now() ? snap.banked_resets_expire_at : null;
-  const soon = expires && new Date(expires) - Date.now() < 3 * 86400000;
+  const soon = expires && new Date(expires) - Date.now() < RESET_SOON_MS;
   const detail = expires
     ? `${count === 1 ? 'Expires' : 'Next expires'} ${relative(expires)} · ${shortTime(expires)}`
     : count > 0 ? 'Spend one to refill an exhausted limit' : 'None available right now';
-  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets <i class="help" tabindex="0" data-help="One-time resets the provider has granted this account. Spending one refills an exhausted usage limit. Redeem it from the provider's own app or CLI.">?</i></span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
+  return `<div class="banked-resets${soon ? ' soon' : ''}" data-banked-resets="${escapeHTML(count)}"><div class="meter-head"><span>Banked resets ${help}</span><b>${escapeHTML(count)} available</b></div><div class="reset">${escapeHTML(detail)}</div></div>`;
 }
 function policyControl(item, provider) {
   const defaultPolicy = item.default_policy || item.policy || 'default';
@@ -335,8 +429,45 @@ function concurrencyStatus(item) {
   ).join('');
   return `<span class="concurrency-status"><span><b>Parallel runs <i class="help" tabindex="0" data-help="The provider limit caps all simultaneous runs. Hermes connection and context limits, plus optional allowance-pool limits, apply independently.">?</i></b><span class="concurrency-control"><input data-provider-concurrency="${escapeHTML(item.id)}" type="number" min="1" max="32" value="${maximum}" aria-label="${escapeHTML(title(item.provider))} parallel run limit"><i>${active}/${maximum} active · ${escapeHTML(source)}</i>${reset}</span></span>${pools ? `<small>${pools}</small>` : ''}</span>`;
 }
+// The command that signs a provider's CLI back in, or '' if unknown. Matches
+// ProviderRecovery.loginCommand on macOS.
+function loginCommand(provider) {
+  return {claude:'claude auth login', codex:'codex login', cursor:'agent login'}[String(provider || '').toLowerCase()] || '';
+}
+// Stale because the provider's CLI signed out: the one stale cause a person
+// fixes, so it is named rather than left as "usage unavailable".
+function signedOut(item) {
+  return Boolean(item.snapshot_stale && item.usage_source?.reason === 'signed_out');
+}
+// The Cursor CLI that runs jobs and the Cursor app whose usage is read are
+// signed in to different accounts (or one cannot be confirmed). Nothing is
+// scheduled until they match.
+function accountMismatch(item) {
+  return Boolean(item.snapshot_stale && item.usage_source?.reason === 'account_mismatch');
+}
+// Cursor's account window is its monthly subscription. Decision reasons and
+// details are phrased for the weekly allowances Claude and Codex have; say
+// "monthly" instead of implying a week that does not exist.
 function providerPressure(item) {
+  const pressure = basePressure(item);
+  if ((item.snapshot?.weekly?.period_seconds || 0) <= 8 * 86400) return pressure;
+  const monthly = text => String(text || '').replace(/\bWeekly\b/g,'Monthly').replace(/\bweekly\b/g,'monthly').replace(/\bWeek resets\b/g,'Month resets');
+  return {...pressure, label:monthly(pressure.label), detail:monthly(pressure.detail)};
+}
+function basePressure(item) {
   if (item.paused) return {label:'Paused',detail:'Scheduling is paused for this provider.',tone:'paused'};
+  if (item.run_login_unknown) return {label:'Dispatch held · login unknown',detail:item.run_login_unknown,tone:'near'};
+  if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && item.weekly_policy === 'session_only') return {label:'Weekly not reported · session-only scheduling',detail:item.latest_decision?.reason || 'Scheduling uses the 5-hour window above its protected reserve; the hidden weekly cap is not reported.',tone:'neutral'};
+  if (item.snapshot?.weekly_unavailable && !item.snapshot_stale && !['RUN','ADMIT'].includes(item.latest_decision?.decision)) return {label:'Dispatch held · weekly not reported',detail:'This account does not report a weekly limit, so Redline holds dispatch until a policy exists for it.',tone:'neutral'};
+  if (accountMismatch(item)) return {
+    label:'Accounts differ',
+    detail:`${item.usage_source?.last_error || 'The Cursor CLI and the Cursor app are signed in to different accounts.'} Scheduling is paused until they match.`,
+    tone:'near',
+  };
+  if (signedOut(item)) {
+    const login = loginCommand(item.provider);
+    return {label:'Signed out',detail:`${login ? `Run ${login} on this Mac to sign in again.` : 'Sign in again on this Mac.'} Scheduling is paused until usage can be read.`,tone:'near'};
+  }
   if (item.snapshot_stale) return {
     label:'Usage unavailable',
     detail:'The last successful usage sample is stale. Scheduling is paused until a fresh sample is available.',
@@ -348,6 +479,7 @@ function providerPressure(item) {
     'weekly remaining is well behind pace':'Weekly capacity surplus is above the configured pace trigger',
     'weekly remaining is behind configured pace':'Weekly capacity surplus meets a configured pace threshold',
     'weekly remaining meets pace threshold':'Weekly capacity surplus meets a configured pace threshold',
+    'weekly remaining meets weekly-only pace threshold':'Weekly capacity left before reset meets a weekly-only pace threshold (no 5-hour limit)',
     'no pace threshold matched':'No actionable capacity surplus yet',
     'no actionable weekly overflow':'No actionable weekly surplus yet',
     'weekly remaining exceeds prorated short-window throughput':'Weekly capacity exceeds the remaining prorated 5-hour throughput',
@@ -406,19 +538,41 @@ function providerCompact(item) {
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
   const stale = Boolean(item.snapshot_stale);
   const source = item.usage_source?.active || snap?.source || 'unknown';
-  const icon = provider === 'claude' ? 'claude.svg' : 'codex.svg';
-  const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0, tone = value < 35 ? 'warn' : '';
+  const icon = provider === 'claude' ? 'claude.svg' : provider === 'cursor' ? '' : 'codex.svg';
+  // A Team seat reports no weekly window: no weekly number and no weekly
+  // bar. Its 5-hour window is the number it does have, so the headline and
+  // the bar show that instead, labelled 5h -- never as a weekly figure.
+  const notReported = Boolean(snap?.weekly_unavailable) && !stale;
+  const weekly = snap?.weekly, value = weekly ? percent(weekly.remaining) : 0;
+  const shortHeadline = notReported && !weekly
+    ? (snap?.short ? percent(snap.short.remaining) : snap?.short_window_not_started ? 100 : null)
+    : null;
+  const tone = weekly ? (value < 35 ? 'warn' : '') : shortHeadline !== null && shortHeadline < 35 ? 'warn' : '';
+  // Several accounts of one provider: the owner's label names the tile.
+  const label = String(item.label || '').trim();
+  const plan = String(snap?.plan || '').trim();
+  // Cursor's subscription resets monthly; its account window is not a week.
+  const monthly = (weekly?.period_seconds || 0) > 8 * 86400;
+  const periodWord = monthly ? 'monthly' : 'weekly';
   const pressure = providerPressure(item);
-  const weeklyReset = stale ? `Last sample ${relative(snap?.observed_at)}` : weekly ? `Week resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
-  const shortWindow = stale ? 'Fresh usage required' : snap?.short
+  const weeklyReset = stale ? `Last sample ${relative(snap?.observed_at)}` : notReported ? 'Weekly not reported' : weekly ? `${monthly ? 'Month' : 'Week'} resets ${relative(weekly.resets_at)}` : 'Weekly reset unavailable';
+  // An untouched window has no reset yet: the provider starts its clock on
+  // first use. It is full, not absent, and no reset time is invented for it.
+  const login = loginCommand(item.provider);
+  const shortWindow = accountMismatch(item) ? 'CLI and app accounts differ' : signedOut(item) ? (login ? `Signed out · run ${login}` : 'Signed out') : stale ? 'Fresh usage required' : snap?.short
     ? `5h ${percent(snap.short.remaining)}% · resets ${relative(snap.short.resets_at)}`
+    : snap?.short_window_not_started ? '5h 100% · starts on first use'
+    : snap?.short_window_unavailable ? '5h unavailable · dispatch held'
     : 'No 5h limit';
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
   if (snap) {
     const windows = [];
     const lastKnown = stale ? 'Last known ' : '';
     if (snap.short) windows.push(meter(`${lastKnown}5-hour window`,snap.short.remaining,snap.short.resets_at));
-    windows.push(meter(`${lastKnown}weekly allowance`,snap.weekly.remaining,snap.weekly.resets_at));
+    else if (snap.short_window_not_started) windows.push(notStartedMeter(`${lastKnown}5-hour window`));
+    else if (snap.short_window_unavailable) windows.push('<div data-testid="short-window-unavailable"><div class="meter-head"><span>5-hour window</span><b>unavailable</b></div><div class="reset">Reset time unavailable · dispatch holds until readable</div></div>');
+    if (snap.weekly) windows.push(meter(`${lastKnown}${monthly ? 'monthly subscription' : 'weekly allowance'}`,snap.weekly.remaining,snap.weekly.resets_at));
+    else if (snap.weekly_unavailable) windows.push(`<div data-testid="weekly-not-reported"><div class="meter-head"><span>weekly allowance</span><b>not reported</b></div><div class="reset">Weekly limit not reported for this account · ${item.weekly_policy === 'session_only' ? 'session-only scheduling' : 'dispatch holds'}</div></div>`);
     (snap.allowances || []).filter(window => window.scope === 'model').forEach(window => {
       const label = `${lastKnown}${window.source_label || title(window.key)}${window.reset_inferred ? ' · reset inferred' : ''}`;
       windows.push(meter(label,window.remaining,window.resets_at));
@@ -429,13 +583,166 @@ function providerCompact(item) {
     details = `${decisionDetail}${policyControl(item, provider)}${concurrencyStatus(item)}<div class="meters">${windows.join('')}</div>`;
   }
   const cached = capacityCache.get(item.id);
-  const evidence = cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
-  const sourceError = item.usage_source?.last_error ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML(title(provider))} usage details"><span class="provider-logo ${escapeHTML(provider)}"><img src="/assets/${icon}" alt=""></span><span class="provider-summary"><span class="provider-copy-line"><strong>${escapeHTML(title(provider))}</strong><b>${stale ? 'Usage unavailable' : weekly ? `${value}% weekly` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress ${tone}" max="100" value="${stale ? 0 : value}" aria-label="${stale ? 'Usage unavailable' : `${value}% weekly remaining`}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? 'Last known usage' : `${escapeHTML(title(provider))} capacity`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span></span></div>`;
+  // Empirical capacity is estimated per weekly window; it has no meaning for
+  // a monthly subscription, so a monthly provider does not show or load it.
+  const evidence = monthly ? '' : cached ? renderCapacityEvidence(cached) : '<span class="capacity-loading">Open to load empirical capacity evidence.</span>';
+  const sourceError = item.usage_source?.last_error && !signedOut(item) ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
+  return `<div class="provider-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([title(provider), label].filter(Boolean).join(' '))} usage details"><span class="provider-logo ${escapeHTML(provider)}">${icon ? `<img src="/assets/${icon}" alt="">` : `<span aria-hidden="true">${escapeHTML(providerName(provider).charAt(0))}</span>`}</span><span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([providerName(provider), label, plan].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(providerName(provider))}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span>${plan ? `<small class="cursor-plan provider-plan">${escapeHTML(plan)}</small>` : ''}</strong><b>${stale ? 'Usage unavailable' : weekly ? `${value}% ${periodWord}` : shortHeadline !== null ? `${shortHeadline}% 5h` : '—'}</b></span><span class="provider-window-line"><span>${escapeHTML(shortWindow)}</span><span>${escapeHTML(weeklyReset)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span>${shortHeadline !== null ? `<progress class="compact-progress ${tone}" max="100" value="${shortHeadline}" aria-label="${shortHeadline}% 5-hour remaining"></progress>` : notReported ? '' : `<progress class="compact-progress ${tone}" max="100" value="${stale ? 0 : value}" aria-label="${stale ? 'Usage unavailable' : `${value}% ${periodWord} remaining`}"></progress>`}</span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? `Last known usage${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(title(provider))}${label ? ` ${escapeHTML(label)}` : ''} capacity`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}${monthly ? '' : `<span class="capacity-evidence" data-capacity-evidence${cached ? ' data-loaded="true"' : ''}>${evidence}</span>`}</span></div>`;
+}
+// ── Cursor usage (display only) ─────────────────────────────────────────────
+// Cursor's monthly model pools, Grok Bot's weekly allowance, on-demand spend and
+// credits are shown for reference. Redline cannot dispatch to Cursor, so this
+// card has no policy, pause or queue controls and never feeds scheduling.
+const cursorDate = (value) => new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(new Date(value));
+const cursorMoney = (value) => new Intl.NumberFormat(undefined,{style:'currency',currency:'USD'}).format(value);
+function cursorAmount(value, unit) {
+  if (unit === 'usd') return cursorMoney(value);
+  if (unit === 'percent') return `${Math.round(value)}%`;
+  const n = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return unit ? `${n} ${unit}` : n;
+}
+// Freshness is judged against expires_at on this clock, not the server's flag,
+// with the same 2-minute grace the server uses: OpenUsage rotates its card a
+// few seconds after expiry, which is not the same as missing a refresh.
+const CURSOR_STALE_GRACE_MS = 2 * 60 * 1000;
+function cursorStale(report) {
+  if (!report?.fetched_at) return false;
+  return !report.expires_at || new Date(report.expires_at).getTime() + CURSOR_STALE_GRACE_MS <= Date.now();
+}
+function cursorState(report) {
+  const hasData = (report.meters || []).length || (report.balances || []).length;
+  if (!hasData) return {label:'No data', tone:'paused'};
+  if (cursorStale(report)) return {label:'Out of date', tone:'near'};
+  if ((report.errors || []).length) return {label:'Partial', tone:'near'};
+  return {label:'Up to date', tone:'healthy'};
+}
+function cursorLimit(meter) { return meter.limit > 0 ? meter.limit : null; }
+function cursorMeter(meter, lastKnown) {
+  const label = `${lastKnown ? 'Last known ' : ''}${meter.label}`;
+  const reset = meter.resets_at ? `Resets ${relative(meter.resets_at)} · ${cursorDate(meter.resets_at)}` : 'Reset date not reported';
+  const limit = cursorLimit(meter);
+  if (limit == null) {
+    // No denominator: report what was spent, never a bar or a percentage.
+    const spent = meter.unit === 'usd' ? `${cursorMoney(meter.used)} spent` : `${cursorAmount(meter.used, meter.unit)} used`;
+    return `<div class="cursor-meter" data-testid="cursor-meter-${escapeHTML(meter.key)}"><div class="meter-head"><span>${escapeHTML(label)}</span><b>${escapeHTML(spent)}</b></div><div class="reset">${escapeHTML(meter.resets_at ? reset : 'No limit reported')}</div></div>`;
+  }
+  // What is left, like every provider meter: a full bar is plenty, and the
+  // tone thresholds are the same 35% / 15% left.
+  const leftPct = Math.max(0, Math.min(100, (limit - meter.used) / limit * 100));
+  const exhausted = meter.used >= limit;
+  const left = Math.round(leftPct);
+  const tone = exhausted || left < 15 ? 'danger' : left < 35 ? 'warn' : '';
+  const value = exhausted ? 'Used up'
+    : meter.unit === 'percent' && limit === 100 ? `${left}% left`
+    : `${cursorAmount(limit - meter.used, meter.unit)} of ${cursorAmount(limit, meter.unit)} left`;
+  const detail = exhausted && meter.resets_at ? `Available again ${relative(meter.resets_at)} · ${cursorDate(meter.resets_at)}` : reset;
+  return `<div class="cursor-meter${exhausted ? ' exhausted' : ''}" data-testid="cursor-meter-${escapeHTML(meter.key)}"><div class="meter-head"><span>${escapeHTML(label)}</span><b>${escapeHTML(value)}</b></div><progress class="meter-progress ${tone}" max="100" value="${leftPct.toFixed(1)}" aria-label="${escapeHTML(meter.label)} ${left}% remaining"></progress><div class="reset">${escapeHTML(detail)}</div></div>`;
+}
+function cursorBalance(balance, lastKnown) {
+  const label = `${lastKnown ? 'Last known ' : ''}${balance.label}`;
+  const upcoming = (balance.expires_at || []).filter(value => new Date(value) > Date.now()).sort();
+  const detail = upcoming.length ? `<div class="reset">Next expires ${escapeHTML(relative(upcoming[0]))} · ${escapeHTML(cursorDate(upcoming[0]))}</div>` : '';
+  return `<div class="cursor-meter" data-testid="cursor-balance-${escapeHTML(balance.key)}"><div class="meter-head"><span>${escapeHTML(label)}</span><b>${escapeHTML(cursorAmount(balance.available, balance.unit))} available</b></div>${detail}</div>`;
+}
+// Rail summary: Grok Bot's weekly meter first, then the two monthly pools, each
+// described on its own. Never merged into one figure.
+function cursorDescribe(meter, short) {
+  const name = short && meter.key === 'autoUsage' ? 'Cursor' : short && meter.key === 'apiUsage' ? 'Other' : meter.label;
+  const limit = cursorLimit(meter);
+  if (limit == null) return `${name} ${meter.unit === 'usd' ? `${cursorMoney(meter.used)} spent` : cursorAmount(meter.used, meter.unit)}`;
+  if (meter.used >= limit) return `${name} used up`;
+  return `${name} ${Math.round(Math.max(0, limit - meter.used) / limit * 100)}% left`;
+}
+function cursorSummaryParts(report, stale) {
+  if (!report.fetched_at) return ['Waiting for usage data', ''];
+  if (stale) return [`Last read ${relative(report.fetched_at)}`, 'Fresh usage required'];
+  const meters = report.meters || [];
+  const grok = meters.find(meter => meter.key === 'grokBot');
+  const monthly = meters.filter(meter => meter.key === 'autoUsage' || meter.key === 'apiUsage');
+  return [
+    grok ? `${cursorDescribe(grok)}${grok.resets_at ? ` · resets ${relative(grok.resets_at)}` : ''}` : 'Grok Bot not reported',
+    monthly.map(meter => cursorDescribe(meter, true)).join(' · '),
+  ];
+}
+// With a Cursor provider account the monthly pools gate Cursor jobs, so the
+// card must not claim Redline ignores them. Grok Bot, on-demand and credits
+// never schedule anything either way.
+function cursorScheduled() {
+  return (latestDashboard?.providers || []).some(provider => provider.provider === 'cursor');
+}
+function cursorCompact(report) {
+  if (!report) return '';
+  const scheduled = cursorScheduled();
+  const badge = scheduled
+    ? '<b class="usage-only-badge" title="Monthly pools schedule Cursor jobs on the Cursor account card. Grok Bot, on-demand spend and credits never do.">Usage detail</b>'
+    : '<b class="usage-only-badge" title="Shown for reference. Redline does not schedule or submit work to Cursor or Grok Bot.">Usage only</b>';
+  const explainer = scheduled
+    ? '<b>Usage detail</b><span>The monthly pools here gate jobs on the Cursor account above. Grok Bot, on-demand spend and credits are shown for reference and never schedule work.</span>'
+    : '<b>Usage only · not a queue</b><span>Redline shows this for reference. It does not schedule, pause or submit jobs to Cursor or Grok Bot, and none of these meters affect Claude or Codex decisions.</span>';
+  const stale = cursorStale(report), state = cursorState(report), meters = report.meters || [], balancesList = report.balances || [];
+  const groups = [['monthly','Monthly · billing cycle'],['weekly','Weekly'],['on_demand','On-demand spend']].map(([group, heading]) => {
+    const rows = meters.filter(meter => meter.group === group);
+    return rows.length ? `<div class="cursor-group" data-testid="cursor-group-${group}"><span class="cursor-group-label">${escapeHTML(heading)}</span><div class="meters">${rows.map(meter => cursorMeter(meter, stale)).join('')}</div></div>` : '';
+  }).join('');
+  const balances = balancesList.length
+    ? `<div class="cursor-group" data-testid="cursor-group-balances"><span class="cursor-group-label">Credits</span><div class="meters">${balancesList.map(balance => cursorBalance(balance, stale)).join('')}</div></div>` : '';
+  const source = report.source === 'openusage' ? 'OpenUsage' : report.source === 'cursor' ? 'Cursor (built-in)' : '';
+  const updated = report.fetched_at ? `${source ? `${source} · ` : ''}read ${relative(report.fetched_at)}` : 'not read yet';
+  const errors = (report.errors || []).slice(0, 2).map(error => `<span class="source-error">${escapeHTML(error)}</span>`).join('');
+  const refreshError = report.refresh_error ? `<span class="source-error">${escapeHTML(report.refresh_error)}</span>` : '';
+  const partial = meters.length && (report.errors || []).length ? '<p class="cursor-note">Some Cursor usage could not be read; the rest is shown.</p>' : '';
+  const notReported = (report.not_reported || []).length && (meters.length || balancesList.length)
+    ? `<p class="cursor-note" data-testid="cursor-not-reported">Not reported: ${escapeHTML(report.not_reported.join(', '))}</p>` : '';
+  const empty = !meters.length && !balancesList.length
+    ? `<p class="no-data">${escapeHTML(report.fetched_at ? 'Cursor reported no usage meters.' : 'Waiting for the first Cursor usage read.')}</p>` : '';
+  const [primary, secondary] = cursorSummaryParts(report, stale);
+  const plan = report.plan ? ` <small class="cursor-plan">${escapeHTML(report.plan)}</small>` : '';
+  return `<div class="provider-compact cursor-compact${stale ? ' stale' : ''}" data-provider-id="cursor-usage" data-testid="cursor-card" data-stale="${stale}"><button class="provider-trigger" type="button" aria-label="Show Cursor usage details (${scheduled ? 'usage detail' : 'usage only, not scheduled'})"><span class="provider-logo cursor" aria-hidden="true">C</span><span class="provider-summary"><span class="provider-copy-line"><strong title="${escapeHTML(['Cursor', report.plan].filter(Boolean).join(' · '))}">Cursor${plan}</strong>${badge}</span><span class="provider-window-line"><span>${escapeHTML(primary)}</span>${secondary ? `<span>${escapeHTML(secondary)}</span>` : ''}</span><span class="provider-pressure ${escapeHTML(state.tone)}" data-testid="cursor-state">${escapeHTML(state.label)}</span></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? 'Last known Cursor usage' : 'Cursor usage'}</strong><span>${escapeHTML(updated)}</span></span><span class="decision-detail paused" data-testid="cursor-usage-only">${explainer}</span>${errors}${refreshError}${partial}${empty}${groups}${balances}${notReported}</span></div>`;
+}
+let cursorRenderedStale = null;
+function renderCursorCard(report, keepOpen = false) {
+  const strip = $('#usage-strip');
+  const existing = strip.querySelector('.cursor-compact');
+  const wasOpen = keepOpen || existing?.classList.contains('open');
+  existing?.remove();
+  cursorRenderedStale = report ? cursorStale(report) : null;
+  if (!report) return;
+  const template = document.createElement('template');
+  template.innerHTML = cursorCompact(report);
+  const card = template.content.firstElementChild;
+  strip.appendChild(card);
+  if (wasOpen) { alignProviderDetail(card); card.classList.add('open'); }
+  card.addEventListener('mouseenter', () => alignProviderDetail(card));
+  card.querySelector('.provider-trigger').addEventListener('focus', () => alignProviderDetail(card));
+  card.querySelector('.provider-trigger').addEventListener('click', event => {
+    event.stopPropagation();
+    alignProviderDetail(card);
+    document.querySelectorAll('.provider-compact.open').forEach(open => { if (open !== card) open.classList.remove('open'); });
+    card.classList.toggle('open');
+  });
+  card.querySelector('.provider-detail').addEventListener('click', event => event.stopPropagation());
+}
+// Re-render once the report crosses its expiry, even if no new data arrives.
+setInterval(() => {
+  const report = latestDashboard?.cursor_usage;
+  if (report && cursorStale(report) !== cursorRenderedStale) renderCursorCard(report);
+}, 1000);
+// The details panel opens below its tile, left-aligned; a tile in the
+// right-hand columns would push it past the window, so it opens leftwards.
+function alignProviderDetail(card) {
+  const detail = card.querySelector('.provider-detail');
+  if (!detail) return;
+  // Narrow windows show details as a fixed full-width panel; leave it be.
+  if (getComputedStyle(detail).position === 'fixed') { card.classList.remove('detail-left'); return; }
+  const width = detail.offsetWidth || 390;
+  card.classList.toggle('detail-left', card.getBoundingClientRect().left + 8 + width > document.documentElement.clientWidth - 8);
 }
 function wireProviderDetails() {
-  document.querySelectorAll('.provider-compact').forEach(card => {
+  document.querySelectorAll('.provider-compact:not(.cursor-compact)').forEach(card => {
     const trigger = card.querySelector('.provider-trigger');
+    card.addEventListener('mouseenter', () => alignProviderDetail(card));
+    trigger.addEventListener('focus', () => alignProviderDetail(card));
+    trigger.addEventListener('click', () => alignProviderDetail(card));
     card.addEventListener('mouseenter', () => loadCapacityEvidence(card));
     trigger.addEventListener('focus', () => loadCapacityEvidence(card));
     trigger.addEventListener('click', event => {
@@ -692,10 +999,12 @@ function render(data) {
   providerCatalog = data.providers.map(provider => ({id:provider.id,provider:provider.provider}));
   providerAccounts = providerCatalog.map(provider => provider.id);
   const openProviderID = document.querySelector('.provider-compact.open')?.dataset.providerId;
+  const cursorWasOpen = document.querySelector('.cursor-compact.open') != null;
   $('#usage-strip').innerHTML = data.providers.map(providerCompact).join(''); wireProviderDetails();
+  renderCursorCard(data.cursor_usage || null, cursorWasOpen);
   if (openProviderID) {
     document.querySelectorAll('.provider-compact').forEach(card => {
-      if (card.dataset.providerId === openProviderID) { card.classList.add('open'); loadCapacityEvidence(card); }
+      if (card.dataset.providerId === openProviderID) { alignProviderDetail(card); card.classList.add('open'); loadCapacityEvidence(card); }
     });
   }
   const policies = new Set(data.providers.map(provider => provider.policy).filter(Boolean));
@@ -1168,7 +1477,7 @@ function populateRepositoryChoices(selected='') {
 }
 function preferredHarness() {
   const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
-  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'command';
+  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : 'command';
 }
 function preferredModel(harness) {
   return harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()]?.[0]?.id || 'default';
@@ -1303,7 +1612,9 @@ for (const selector of ['#onboarding-job-name','#onboarding-job-prompt','#onboar
 }
 $('#onboarding-job-type').addEventListener('change',syncOnboardingJobType);
 $('#onboarding-refresh-detection').addEventListener('click',async event => {
-  event.currentTarget.disabled = true;
+  // currentTarget is cleared once the handler yields, so keep the button for finally.
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     showOnboardingError('');
     const accountIDs = (latestDashboard?.providers || []).map(provider => provider.id);
@@ -1326,7 +1637,7 @@ $('#onboarding-refresh-detection').addEventListener('click',async event => {
     const failures = usageResults.filter(result => result.status === 'rejected');
     if (failures.length) showOnboardingError(`Could not refresh usage for ${failures.length} account${failures.length === 1 ? '' : 's'}. Check the sign-in guidance above and try again.`);
   } catch (error) { showOnboardingError(`Detection refresh failed: ${error.message}`); }
-  finally { event.currentTarget.disabled = false; }
+  finally { button.disabled = false; }
 });
 $('#mark-runs-read').addEventListener('click',async event => {
   const button = event.currentTarget; button.disabled = true;

@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/work","session_id":"00000000-0000-4000-8000-000000000000","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly the word: ok"}]},"session_id":"00000000-0000-4000-8000-000000000000"}
+{"type":"thinking","subtype":"delta","text":"The user requested a","session_id":"00000000-0000-4000-8000-000000000000","timestamp_ms":1791573508446}
+{"type":"thinking","subtype":"delta","text":" reply containing exactly","session_id":"00000000-0000-4000-8000-000000000000","timestamp_ms":1791573508448}
+{"type":"thinking","subtype":"delta","text":" the word \"ok\".","session_id":"00000000-0000-4000-8000-000000000000","timestamp_ms":1791573508448}
+{"type":"thinking","subtype":"completed","session_id":"00000000-0000-4000-8000-000000000000","timestamp_ms":1791573508448}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"session_id":"00000000-0000-4000-8000-000000000000"}
+{"type":"result","subtype":"success","duration_ms":6170,"duration_api_ms":6170,"is_error":false,"result":"ok","session_id":"00000000-0000-4000-8000-000000000000","request_id":"00000000-0000-4000-8000-000000000000","usage":{"inputTokens":15281,"outputTokens":31,"cacheReadTokens":3840,"cacheWriteTokens":0}}

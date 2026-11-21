@@ -99,6 +99,17 @@ scheduler decisions, and bounded run-log tails. Jobs and execution profiles can 
 managed there. A server-sent event stream (`/v1/dashboard/events`) keeps the page current while it
 is open; the aggregate API does not expose task prompts or lifecycle commands.
 
+When `cursor_usage` is enabled, `/v1/dashboard` also carries a `cursor_usage` report (and
+`GET /v1/cursor-usage` returns it alone). That report is display-only and includes Grok Bot,
+on-demand spend and credits. A separate `provider: cursor` account is scheduled only from the
+monthly subscription pools; see [Cursor](profiles-and-tasks.md#cursor). A monthly account window
+carries `snapshot.weekly.period_seconds` (about 2592000); clients should label it monthly.
+
+A provider with `run_login_unknown` set never dispatches work, whatever its latest decision
+says: it reads a non-default OpenUsage card, and a run would start as the default login. The
+field is the sentence to show. Its scheduler decisions have mode `login_unknown`. See
+[scheduling](scheduling.md#openusage-cards-and-run-logins).
+
 ## Endpoints
 
 ```text
@@ -106,6 +117,7 @@ GET  /v1/health
 GET  /v1/health/details?window={duration}
 GET  /v1/dashboard
 GET  /v1/dashboard/events
+GET  /v1/cursor-usage
 POST /v1/pairing
 POST /v1/pairing/redeem
 GET  /v1/devices
@@ -191,6 +203,15 @@ history route accepts both owner and device authentication.
   spends nothing. It is ignored for dry runs. Unresolved redemptions are retried before selecting
   another reset. Completed successes return `replayed: true` and `completed_at` without a new
   provider call or verification claim.
+- Claude only: `"kind"` in the redeem body chooses which kind of reset to spend (`auto`, `full`,
+  `fable`, `weekly`, `session`, `opus`, `sonnet`). It reads the account's resets fresh at its limit
+  (`at_wall`) and picks as Claude Code's `/limit-reset` does; `auto` fits the limit reached.
+  `GET /v1/providers/{id}/banked-resets/choice?kind=…` returns the reset that would be spent,
+  without spending it, for a confirmation to bind with `expected_reset_id`. It answers **422** with
+  the reason and the kinds that can be used when none fits. Same authorization as redeem.
+- Both routes answer **409** for an account Redline cannot spend from: a non-default OpenUsage
+  card, or a second account on the provider's default login. A Claude Code profile account spends
+  from its own login ([details](scheduling.md#redeeming-banked-resets)).
 - `GET /v1/providers/{id}/banked-resets/redemptions` returns at most 20 recent attempts, newest
   first, including pending operations whose idempotency keys survive restarts. An ambiguous
   request finalized at expiry has outcome `unknown`; check the provider before trying another reset.
@@ -206,7 +227,8 @@ Outcomes are `redeemed`, `nothing_to_reset`, `unavailable`, `cooldown`, `gone`, 
 Refill verification compares weekly remaining allowance and the reset boundary after a usage
 refresh. Unverified redemption still returns `redeemed` with a note. HTTP errors cover invalid
 requests, unknown providers, transport/storage failures, and **409** for an in-progress redemption
-or ambiguous local login (multiple configured accounts of the same provider type). Demo servers
+or an account Redline cannot spend from (see above). Refused accounts retain reminder
+notifications but cannot shorten the automatic reset horizon. Demo servers
 refuse both real and dry-run redemption with **409**, without reading credentials or sending requests.
 
 Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger`
@@ -215,12 +237,30 @@ Attempts include `id`, `provider_account_id`, `reset_id`, `request_id`, `trigger
 so retries reuse the original key. Provider endpoints are fixed, not user-configurable, to prevent
 sending bearer tokens to another host. See [redemption safety and caveats](scheduling.md#redeeming-banked-resets).
 
+## Managed account weekly policy
+
+`POST /v1/accounts` and `PATCH /v1/accounts/{account}` accept `weekly_policy`
+(`""` for default hold, or `"session_only"` for Claude only) and `session_reserve`
+(a fraction in `[0,1)`, default 0.50 with `session_only`). A reserve without
+`session_only`, an unknown policy, or session-only on another provider is rejected.
+Both fields persist in `accounts.yaml` and appear in account responses; restart the
+service to apply changes. Setting `weekly_policy` to `""` clears a saved reserve.
+Main-config accounts remain read-only through this API.
+
+Dashboard providers include `weekly_policy` and the effective `session_reserve`.
+For opted-in accounts whose snapshot has `weekly_unavailable`, scheduling uses the
+session pool (plus required model pools), mode `session_only`, with no weekly number.
+See [scheduling](scheduling.md#claude-team-seats-without-a-reported-weekly-cap).
+
 ## Manual firesales (any provider)
 
 Owner and paired-device principals may use all three routes; unauthenticated calls receive **401**.
 
 - `GET /v1/firesales` returns `{"manual":[{"account":"claude-main","started_at":"2026-10-27T12:00:00Z","deadline":"2026-10-27T12:15:00Z","started_by":"owner"}],"eligible":[{"account":"claude-main","label":"claude-main","provider":"claude","weekly_resets_at":null,"reason_unavailable":"weekly usage not reported"}]}`.
-  All configured accounts are eligible, including paused accounts. `weekly_resets_at` and
+  All configured accounts are listed, including paused accounts. Seats without a reported
+  weekly cap are unavailable unless they opt into `weekly_policy: session_only`; these
+  seats can start duration-based firesales, never spend the session reserve, and still
+  have a null `weekly_resets_at`. `weekly_resets_at` and
   `reason_unavailable` are nullable. Reasons include `weekly usage not reported`,
   `weekly allowance used up`, and `provider paused`; these warnings do not prevent a start.
 - `POST /v1/firesales` accepts `{"account":"claude-main","until":"15m"}` or

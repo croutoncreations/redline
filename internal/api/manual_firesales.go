@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
@@ -14,10 +15,19 @@ import (
 	"github.com/croutoncreations/redline/internal/store"
 )
 
-func (s *Server) firesaleAccountLabel(id string) string { return id }
+// Accounts here have person-chosen labels (e.g. Joe); fall back to the ID.
+func (s *Server) firesaleAccountLabel(id string) string {
+	if label := strings.TrimSpace(s.config.Providers[id].Label); label != "" {
+		return label
+	}
+	return id
+}
 
 func (s *Server) firesaleAccountUsable(id string) error {
 	if _, ok := s.config.Providers[id]; !ok {
+		if _, disabled := s.config.DisabledAccounts[id]; disabled {
+			return fmt.Errorf("%w: account %s is disabled", store.ErrConflict, id)
+		}
 		return store.ErrNotFound
 	}
 	return nil
@@ -81,7 +91,7 @@ func (s *Server) reconcileManualFiresalesLocked(ctx context.Context) ([]manualFi
 		} else if sale.BaselineWeeklyResetsAt != nil {
 			provider, ok := s.config.Providers[sale.ProviderAccountID]
 			if ok {
-				snapshot, _, err := s.store.LatestSnapshot(ctx, provider.Provider)
+				snapshot, _, err := s.store.LatestSnapshot(ctx, sale.ProviderAccountID, provider.Provider)
 				if err != nil && !errors.Is(err, store.ErrNotFound) {
 					errs = append(errs, err)
 					continue
@@ -133,13 +143,15 @@ func (s *Server) manualFiresales(w http.ResponseWriter, r *http.Request) {
 		}
 		provider := s.config.Providers[id]
 		item := eligibleAccount{Account: id, Label: s.firesaleAccountLabel(id), Provider: provider.Provider}
-		snapshot, _, err := s.store.LatestSnapshot(r.Context(), provider.Provider)
+		snapshot, _, err := s.store.LatestSnapshot(r.Context(), id, provider.Provider)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			writeError(w, err)
 			return
 		}
 		reason := ""
 		switch {
+		case err == nil && provider.SessionOnlyApplies(snapshot.WeeklyUnavailable):
+			// A duration-based firesale can spend session room, never the reserve.
 		case errors.Is(err, store.ErrNotFound) || snapshot.Weekly.ResetsAt.IsZero():
 			reason = "weekly usage not reported"
 		case snapshot.Weekly.Remaining <= 0:
@@ -218,10 +230,15 @@ func (s *Server) startManualFiresale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manualFiresaleMu.Lock()
-	snapshot, _, err := s.store.LatestSnapshot(r.Context(), s.config.Providers[body.Account].Provider)
+	snapshot, _, err := s.store.LatestSnapshot(r.Context(), body.Account, s.config.Providers[body.Account].Provider)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.manualFiresaleMu.Unlock()
 		writeError(w, err)
+		return
+	}
+	if err == nil && snapshot.WeeklyUnavailable && !s.config.Providers[body.Account].SessionOnlyApplies(true) {
+		s.manualFiresaleMu.Unlock()
+		writeError(w, fmt.Errorf("%w: weekly usage not reported", store.ErrConflict))
 		return
 	}
 	var baseline *time.Time

@@ -56,7 +56,7 @@ func TestNotificationTestAll(t *testing.T) {
 	defer s.Close()
 	var out, errOut bytes.Buffer
 	code := cli.RunWithInput([]string{"--api", s.URL, "notification", "test", "--event", "all", "--json"}, strings.NewReader(""), &out, &errOut, time.Now)
-	if code != 0 || len(events) != len(notification.EventTypes()) || len(events) != 10 {
+	if code != 0 || len(events) != len(notification.EventTypes()) || len(events) != 11 {
 		t.Fatalf("code=%d events=%v err=%s", code, events, &errOut)
 	}
 	for i := 1; i < len(times); i++ {
