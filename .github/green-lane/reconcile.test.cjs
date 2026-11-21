@@ -38,3 +38,10 @@ test('failure warning names the cause',async()=>{
  f.args.publishReport=async()=>{throw new Error('Server Error\nstack')};await reconcile(f.args);
  assert.deepEqual(warnings,['PR #1: reconciliation failed: Server Error']);
 });
+
+test('failure warning prefers the evaluator stderr over the exec message',async()=>{
+ const f=fixture(1);const warnings=[];f.args.core.warning=w=>warnings.push(w);
+ f.args.run=()=>{throw Object.assign(new Error('Command failed: /tmp/green-lane-check\nError: failed to fetch PR: GitHub API error 502\n'),{stderr:'Error: failed to fetch PR: GitHub API error 502\n'})};
+ await reconcile(f.args);
+ assert.deepEqual(warnings,['PR #1: reconciliation failed: Error: failed to fetch PR: GitHub API error 502']);
+});

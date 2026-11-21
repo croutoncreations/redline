@@ -68,10 +68,9 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         with:
-          # Retry GitHub's intermittent 5xx and dropped connections. A retried
-          # check-run create can at worst add a duplicate green-lane-shadow run;
-          # GitHub shows the newest, and it carries the same result.
-          retries: 3
+          # No client retries here: a retried checks.create could publish a
+          # candidate past publish.cjs's five-minute freshness check. The
+          # evaluator retries its own reads.
           script: |
             await require('./.github/green-lane/reconcile.cjs')({github, context, core});
       - name: Upload evaluations
