@@ -32,3 +32,9 @@ test('failed collection clears a stale report',async()=>{
  const f=fixture(1);f.args.run=()=>{throw new Error('API unavailable')};await reconcile(f.args);
  assert.equal(f.checks[0].conclusion,'neutral');assert.equal(f.errors.length,1);
 });
+
+test('failure warning names the cause',async()=>{
+ const f=fixture(1);const warnings=[];f.args.core.warning=w=>warnings.push(w);
+ f.args.publishReport=async()=>{throw new Error('Server Error\nstack')};await reconcile(f.args);
+ assert.deepEqual(warnings,['PR #1: reconciliation failed: Server Error']);
+});

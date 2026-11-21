@@ -26,7 +26,8 @@ module.exports = async ({github, context, core, run=execFileSync, publishReport=
       failures++;
       // Clear a stale positive report even when collection fails. Do not
       // leave the last candidate on the current head as the newest signal.
-      core.warning(`PR #${pr.number}: reconciliation failed`);
+      // Name the cause; evaluator stderr already reached the job log.
+      core.warning(`PR #${pr.number}: reconciliation failed: ${String(err?.message ?? err).split('\n')[0].slice(0,500)}`);
       await github.rest.checks.create({...context.repo,name:'green-lane-shadow',head_sha:pr.head.sha,status:'completed',conclusion:'neutral',output:{title:'Green Lane Shadow: unavailable',summary:'Evidence collection failed; no candidate or merge authorization. A fresh evaluation is required.'}});
     }
   }
