@@ -59,7 +59,10 @@ for file in "$@"; do
   esac
   cp "${file}" "${dest}"
   printf '==> brew style --%s %s\n' "${kind}" "${file}"
-  brew style "--${kind}" "${dest}" || status=1
+  # Newer Homebrew no longer loads formulae or casks from file paths: a path
+  # falls through to homebrew/core or homebrew/cask, which are not tapped on
+  # CI runners. Name the file through the throwaway tap, as audit does below.
+  brew style "--${kind}" "${tap}/${name}" || status=1
   # GoReleaser's formula template always writes `version "X.Y.Z"`, which
   # strict audit reports as redundant with the version in the download URL.
   # We cannot change the template, so skip only that one check for formulae.
