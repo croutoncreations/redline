@@ -145,6 +145,9 @@ type Server struct {
 	redemptionDisabled  bool
 	redemptionMu        sync.Mutex
 	redemptionsInFlight map[string]bool
+
+	dashboardHealthCache      statusCache[struct{}, domain.OperationalHealth]
+	dashboardCalibrationCache statusCache[string, calibration.Estimate]
 }
 
 // redeemedMemory is how long a spent token stays reportable as redeemed.
@@ -3333,6 +3336,13 @@ func (s *Server) evaluateStoredProvider(
 func (s *Server) providerDecisionInput(
 	ctx context.Context, providerID string, snapshot decision.UsageSnapshot, selection providerPolicySelection,
 ) (decision.Input, error) {
+	return s.providerDecisionInputWithCalibration(ctx, providerID, snapshot, selection, s.calibration)
+}
+
+func (s *Server) providerDecisionInputWithCalibration(
+	ctx context.Context, providerID string, snapshot decision.UsageSnapshot, selection providerPolicySelection,
+	calibrate func(context.Context, string) (calibration.Estimate, error),
+) (decision.Input, error) {
 	thresholds, err := selection.Definition.DecisionThresholds()
 	if err != nil {
 		return decision.Input{}, err
@@ -3345,7 +3355,7 @@ func (s *Server) providerDecisionInput(
 	if err != nil {
 		return decision.Input{}, err
 	}
-	estimate, err := s.calibration(ctx, providerID)
+	estimate, err := calibrate(ctx, providerID)
 	if err != nil {
 		return decision.Input{}, err
 	}

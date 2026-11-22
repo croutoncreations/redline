@@ -420,7 +420,7 @@ func (s *Server) dashboardData(ctx context.Context) (dashboardResponse, error) {
 			result.Scheduler.NextCycleAt = &next
 		}
 	}
-	result.Health, err = s.store.OperationalHealth(ctx, s.now(), 24*time.Hour)
+	result.Health, err = s.cachedDashboardHealth(ctx)
 	if err != nil {
 		return dashboardResponse{}, err
 	}
@@ -581,7 +581,7 @@ func (s *Server) projectedTrigger(
 	snapshot decision.UsageSnapshot,
 	selection providerPolicySelection,
 ) (*time.Time, error) {
-	input, err := s.providerDecisionInput(ctx, providerID, snapshot, selection)
+	input, err := s.providerDecisionInputWithCalibration(ctx, providerID, snapshot, selection, s.cachedDashboardCalibration)
 	if err != nil {
 		return nil, err
 	}
