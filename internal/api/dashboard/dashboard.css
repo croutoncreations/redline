@@ -211,3 +211,13 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 #scheduler-setup-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#111519;border:1px solid var(--line);border-radius:6px;font-size:12px}
 #scheduler-setup-dialog a{color:var(--accent)}
 .scheduler-banner{flex-wrap:wrap}.scheduler-banner span{flex:1;min-width:180px}
+
+/* OpenAI API credits: a neutral "$" tile, then rule, paid and grant rows. */
+.provider-logo.credits{color:var(--text);font:700 13px ui-monospace,monospace}
+.credits-rules{color:var(--muted);font:8px/1.5 ui-monospace,monospace}
+.credits-paid,.credits-grant{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;column-gap:10px;row-gap:2px}
+.credits-paid span,.credits-grant span{font-size:11px}
+.credits-paid b,.credits-grant b{font:600 11px ui-monospace,monospace;white-space:nowrap}
+.credits-grant i{flex-basis:100%;color:var(--muted);font:normal 8px ui-monospace,monospace}
+.credits-grants{display:grid;gap:9px;border-top:1px solid var(--line);padding-top:12px}
+.credits-grants .cursor-group-label{margin-bottom:0}

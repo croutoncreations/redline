@@ -44,19 +44,28 @@ const onboardingStorage = {
 };
 
 function providerName(provider) {
-  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : title(provider);
+  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider === API_CREDITS ? 'OpenAI API credits' : title(provider);
 }
+// An OpenAI API credits account: a dollar balance of promotional credit, not
+// a subscription window. Only pi and command runs are given its API key, so
+// they are the only harnesses a profile on it may use (the server enforces it).
+const API_CREDITS = 'openai-api-credits';
+const API_CREDITS_HARNESSES = ['pi','command'];
+const isAPICredits = (provider) => String(provider || '').toLowerCase() === API_CREDITS;
 
 function usageSourceName(source) {
   return String(source).toLowerCase() === 'openusage' ? 'OpenUsage' : title(source);
 }
 
 function directHarnessFor(provider) {
-  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : '';
+  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isAPICredits(provider) ? 'pi' : '';
   return harnessCatalog.find(item => item.id === id);
 }
 
-function providerSetupGuidance(provider) {
+// accountID names the account in commands that take one (an API credits
+// account's session key is saved per account, from the local CLI only).
+function providerSetupGuidance(provider, accountID = '<id>') {
+  if (isAPICredits(provider)) return {label:'Pi',login:`redline account set-session-key ${accountID}`,url:'https://pi.dev'};
   if (provider === 'claude') return {label:'Claude Code',login:'claude auth login',url:'https://docs.anthropic.com/en/docs/claude-code/getting-started'};
   if (provider === 'codex') return {label:'Codex CLI',login:'codex login',url:'https://developers.openai.com/codex/cli/'};
   if (provider === 'cursor') return {label:'Cursor CLI',login:'agent login',url:'https://cursor.com/docs/cli/installation'};
@@ -75,7 +84,7 @@ function renderOnboardingAccounts() {
   const providers = latestDashboard?.providers || [];
   $('#onboarding-accounts').innerHTML = providers.map(item => {
     const harness = directHarnessFor(item.provider);
-    const guidance = providerSetupGuidance(item.provider);
+    const guidance = providerSetupGuidance(item.provider, item.id);
     const source = item.usage_source?.active || item.snapshot?.source || 'not available';
     const usageReady = Boolean(item.snapshot) && !item.snapshot_stale;
     const authenticated = harness?.authentication === 'authenticated';
@@ -534,7 +543,84 @@ function basePressure(item) {
   }
   return {label:'No actionable surplus',detail:normalizedReason || 'No dispatch threshold is currently active.',tone:'healthy'};
 }
+// ── OpenAI API credits ──────────────────────────────────────────────────────
+// Dollars, the promotional grant's expiry, the floor and pacing rules, and the
+// paid credit that is shown but never scheduled. Never a weekly, monthly or
+// 5-hour figure and no capacity evidence: the balance is not a window.
+const creditsDate = (value, year = false) => new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',...(year ? {year:'numeric'} : {})}).format(new Date(value));
+const creditsGrantDate = (value) => creditsDate(value, new Date(value).getFullYear() !== new Date().getFullYear());
+const CREDIT_GRANT_KINDS = {promo:'ChatGPT subscription grant', auto_recharge:'Auto recharge', purchase:'Purchased credit', other:'Credit grant'};
+function creditsPromoFraction(credits) {
+  return credits?.promo_granted > 0 ? Math.max(0, Math.min(1, credits.promo_remaining / credits.promo_granted)) : 0;
+}
+function creditsTone(fraction) {
+  const value = fraction * 100;
+  return value < 15 ? 'danger' : value < 35 ? 'warn' : '';
+}
+function creditsExpiryLine(credits) {
+  return credits?.promo_remaining > 0 && credits.expires_at ? `Expires ${relative(credits.expires_at)} · ${creditsDate(credits.expires_at)}` : 'No promotional credit';
+}
+function creditsRuleLine(credits) {
+  const days = Math.round((credits.firesale_window_seconds || 259200) / 86400);
+  const pacing = credits.pacing === 'even' ? 'Even pacing across the grant' : `Firesale: runs within ${days} day${days === 1 ? '' : 's'} of expiry`;
+  return `Jobs start above ${cursorMoney(credits.min_promo_balance || 0)} · ${pacing}`;
+}
+// Signed out means the platform session key is missing or expired.
+function creditsSignedOut(item) {
+  return item.account_status === 'signed_out' || signedOut(item);
+}
+// The window-based pressure words (surplus, pace, weekly not reported) do not
+// describe a dollar balance; a held balance says why in the decision's words.
+function creditsPressure(item) {
+  if (item.paused || item.run_login_unknown) return basePressure(item);
+  if (creditsSignedOut(item)) return {label:'Session key needed',detail:`Run redline account set-session-key ${item.id} on the computer running Redline. Scheduling is paused until the balance can be read.`,tone:'near'};
+  if (item.snapshot_stale) return basePressure(item);
+  const current = item.latest_decision;
+  if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
+  const reason = current.reason || '';
+  if (current.decision === 'RUN' || current.decision === 'ADMIT') {
+    return {label:current.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now',detail:reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.` : 'Background work is eligible.',tone:'triggered'};
+  }
+  const label = current.decision === 'UNKNOWN' ? 'Dispatch held'
+    : /no promotional/.test(reason) ? 'Held · no promotional credit'
+    : /floor/.test(reason) ? 'Held · at the floor'
+    : 'Holding credit';
+  return {label,detail:reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.` : 'Waiting for the promotional balance to qualify.',tone:current.decision === 'UNKNOWN' ? 'near' : 'neutral'};
+}
+function creditsCompact(item) {
+  const snap = item.snapshot, credits = snap?.credits, stale = Boolean(item.snapshot_stale), out = creditsSignedOut(item);
+  const label = String(item.label || '').trim(), name = providerName(API_CREDITS);
+  const source = item.usage_source?.active || snap?.source || 'unknown';
+  const fraction = creditsPromoFraction(credits), value = Number((fraction * 100).toFixed(1));
+  const noPromo = Boolean(credits) && !(credits.promo_remaining > 0);
+  const pressure = creditsPressure(item);
+  const headline = out ? 'Session key needed'
+    : !credits ? (stale ? 'Usage unavailable' : '—')
+    : stale ? `Last known ${cursorMoney(credits.promo_remaining)}`
+    : noPromo ? `${cursorMoney(0)} promo`
+    : `${cursorMoney(credits.promo_remaining)} left`;
+  const secondary = out ? `Run redline account set-session-key ${item.id}`
+    : stale ? `Last sample ${relative(snap?.observed_at)}`
+    : credits ? creditsExpiryLine(credits) : 'Waiting for the balance';
+  const barValue = out || stale ? 0 : value;
+  let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
+  if (credits) {
+    const lastKnown = stale ? 'Last known ' : '';
+    const promo = noPromo
+      ? `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}Promotional credit</span><b>${escapeHTML(cursorMoney(0))}</b></div><progress class="meter-progress" max="100" value="0" aria-label="No promotional credit"></progress><div class="reset">No promotional credit</div></div>`
+      : `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}Promotional credit</span><b>${escapeHTML(`${cursorMoney(credits.promo_remaining)} of ${cursorMoney(credits.promo_granted)} left`)}</b></div><progress class="meter-progress ${creditsTone(fraction)}" max="100" value="${value}" aria-label="${value}% of promotional credit left"></progress><div class="reset">${escapeHTML(creditsExpiryLine(credits))}</div></div>`;
+    const rules = `<div class="credits-rules" data-testid="credits-rules">${escapeHTML(creditsRuleLine(credits))}</div>`;
+    const paid = credits.paid_available > 0 ? `<div class="credits-paid" data-testid="credits-paid"><span>Paid credit</span><b>${escapeHTML(`${cursorMoney(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
+    const grants = (credits.grants || []).filter(grant => grant.remaining > 0).map(grant =>
+      `<div class="credits-grant" data-testid="credits-grant"><span>${escapeHTML(CREDIT_GRANT_KINDS[grant.kind] || CREDIT_GRANT_KINDS.other)}</span><b>${escapeHTML(`${cursorMoney(grant.remaining)} of ${cursorMoney(grant.amount)}`)}</b>${grant.expires_at ? `<i>expires ${escapeHTML(creditsGrantDate(grant.expires_at))}</i>` : ''}</div>`).join('');
+    const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
+    details = `${decisionDetail}${concurrencyStatus(item)}<div class="meters">${promo}${rules}${paid}${grants ? `<div class="credits-grants"><span class="cursor-group-label">Grants</span>${grants}</div>` : ''}</div>`;
+  }
+  const sourceError = item.usage_source?.last_error && !out ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
+  return `<div class="provider-compact credits-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([name, label].filter(Boolean).join(' '))} usage details"><span class="provider-logo credits" aria-hidden="true">$</span><span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([name, label].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(name)}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span></strong><b>${escapeHTML(headline)}</b></span><span class="provider-window-line"><span>${escapeHTML(secondary)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress ${creditsTone(fraction) ? 'warn' : ''}" max="100" value="${barValue}" aria-label="${escapeHTML(headline)}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? `Last known balance${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(name)}${label ? ` ${escapeHTML(label)}` : ''}`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error && !out ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}</span></div>`;
+}
 function providerCompact(item) {
+  if (isAPICredits(item.provider)) return creditsCompact(item);
   const snap = item.snapshot, provider = String(item.provider || item.id).toLowerCase();
   const stale = Boolean(item.snapshot_stale);
   const source = item.usage_source?.active || snap?.source || 'unknown';
@@ -1452,7 +1538,8 @@ function suggestedModels(harness) {
   return known;
 }
 function setHarnessControl(selected='') {
-  const options = harnessCatalog.length ? harnessCatalog : [{id:'command',label:'Custom command',installed:true}];
+  let options = harnessCatalog.length ? harnessCatalog : [{id:'command',label:'Custom command',installed:true}];
+  if (isAPICredits(providerKind())) options = options.filter(option => API_CREDITS_HARNESSES.includes(option.id));
   const hasSelected = options.some(option => option.id === selected);
   $('#profile-harness').innerHTML = options.map(option => {
     const version = option.version ? ` · v${option.version}` : '', unavailable = !option.installed ? ' · not found' : '';
@@ -1477,7 +1564,7 @@ function populateRepositoryChoices(selected='') {
 }
 function preferredHarness() {
   const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
-  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : 'command';
+  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isAPICredits(provider) ? 'pi' : 'command';
 }
 function preferredModel(harness) {
   return harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()]?.[0]?.id || 'default';
@@ -1659,7 +1746,7 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
-$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); updateHarnessFields(editingProfile ? model : preferredModel($('#profile-harness').value)); updateProfileExample(); });
+$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); else setHarnessControl(harness); updateHarnessFields(editingProfile ? model : preferredModel($('#profile-harness').value)); updateProfileExample(); });
 $('#profile-harness').addEventListener('change',() => updateHarnessFields(preferredModel($('#profile-harness').value)));
 $('#profile-runtime-connection').addEventListener('change',() => { $('#edit-runtime-connection').disabled=!$('#profile-runtime-connection').value; discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)); });
 $('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });

@@ -170,15 +170,101 @@ function cursorPoolRing(snap, stale) {
   return `<span class="m-ring-cell">${ring(tightest?.remaining ?? null, 58, stale)}<small>${esc(label)}</small><em>${tightest ? 'lowest pool' : 'not available'}</em></span>`;
 }
 function providerLabel(provider) {
-  return {claude: 'Claude', codex: 'Codex', cursor: 'Cursor'}[provider] || title(provider);
+  return {claude: 'Claude', codex: 'Codex', cursor: 'Cursor', [API_CREDITS]: 'OpenAI API credits'}[provider] || title(provider);
+}
+
+// ── OpenAI API credits ─────────────────────────────────────────────────────────────
+// A dollar balance of promotional credit, not a subscription window: dollars
+// and the grant's expiry, never session or weekly rings. Keys are never
+// entered on a phone; a signed-out account says to re-paste on the computer.
+const API_CREDITS = 'openai-api-credits';
+const isAPICredits = (provider) => String(provider || '').toLowerCase() === API_CREDITS;
+const CREDITS_SIGNED_OUT = 'Session key expired · re-paste it on the computer running Redline';
+const CREDIT_GRANT_KINDS = {promo: 'ChatGPT subscription grant', auto_recharge: 'Auto recharge', purchase: 'Purchased credit', other: 'Credit grant'};
+function creditsSignedOut(item) {
+  return item.account_status === 'signed_out' || signedOut(item);
+}
+function creditsDate(value, year = false) {
+  return new Intl.DateTimeFormat(undefined, {weekday: 'short', month: 'short', day: 'numeric', ...(year ? {year: 'numeric'} : {})}).format(new Date(value));
+}
+function creditsPromoFraction(credits) {
+  return credits?.promo_granted > 0 ? Math.max(0, Math.min(1, credits.promo_remaining / credits.promo_granted)) : 0;
+}
+function creditsTone(fraction) {
+  const v = fraction * 100;
+  return v < 15 ? 'danger' : v < 35 ? 'warn' : '';
+}
+function creditsExpiryLine(credits) {
+  return credits?.promo_remaining > 0 && credits.expires_at ? `Expires ${relative(credits.expires_at)} · ${creditsDate(credits.expires_at)}` : 'No promotional credit';
+}
+function creditsRuleLine(credits) {
+  const days = Math.round((credits.firesale_window_seconds || 259200) / 86400);
+  const pacing = credits.pacing === 'even' ? 'Even pacing across the grant' : `Firesale: runs within ${days} day${days === 1 ? '' : 's'} of expiry`;
+  return `Jobs start above ${money(credits.min_promo_balance || 0)} · ${pacing}`;
+}
+/** The card's headline and secondary line, shared by the card and the carousel. */
+function creditsSummary(item) {
+  const credits = item.snapshot?.credits, stale = Boolean(item.snapshot_stale);
+  if (creditsSignedOut(item)) return {headline: 'Session key needed', secondary: CREDITS_SIGNED_OUT, fraction: null};
+  if (!credits) return {headline: stale ? 'Usage unavailable' : '—', secondary: item.error || 'Waiting for the balance', fraction: null};
+  if (stale) return {headline: `Last known ${money(credits.promo_remaining)}`, secondary: `Last sample ${relative(item.snapshot.observed_at)}`, fraction: null};
+  if (!(credits.promo_remaining > 0)) return {headline: `${money(0)} promo`, secondary: 'No promotional credit', fraction: 0};
+  return {headline: `${money(credits.promo_remaining)} left`, secondary: creditsExpiryLine(credits), fraction: creditsPromoFraction(credits)};
+}
+/** The detail meters: promotional credit, rule line, paid row and grants. */
+function creditsMeters(item) {
+  const credits = item.snapshot?.credits;
+  if (!credits || creditsSignedOut(item)) return '';
+  const lastKnown = item.snapshot_stale ? 'Last known ' : '';
+  const fraction = creditsPromoFraction(credits), v = Number((fraction * 100).toFixed(1));
+  const promo = credits.promo_remaining > 0
+    ? `<div data-testid="credits-promo">
+        <div class="m-meter-head"><span>${esc(lastKnown)}Promotional credit</span><b>${esc(`${money(credits.promo_remaining)} of ${money(credits.promo_granted)} left`)}</b></div>
+        <progress class="m-meter-bar ${esc(creditsTone(fraction))}" max="100" value="${v}" aria-label="${v}% of promotional credit left"></progress>
+        <div class="m-reset">${esc(creditsExpiryLine(credits))}</div>
+      </div>`
+    : `<div data-testid="credits-promo">
+        <div class="m-meter-head"><span>${esc(lastKnown)}Promotional credit</span><b>${esc(money(0))}</b></div>
+        <progress class="m-meter-bar" max="100" value="0" aria-label="No promotional credit"></progress>
+        <div class="m-reset">No promotional credit</div>
+      </div>`;
+  const rules = `<div class="m-credits-rules" data-testid="credits-rules">${esc(creditsRuleLine(credits))}</div>`;
+  const paid = credits.paid_available > 0
+    ? `<div class="m-credits-row" data-testid="credits-paid"><span>Paid credit</span><b>${esc(`${money(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
+  const thisYear = new Date().getFullYear();
+  const grants = (credits.grants || []).filter(g => g.remaining > 0).map(g => `<div class="m-credits-row" data-testid="credits-grant">
+      <span>${esc(CREDIT_GRANT_KINDS[g.kind] || CREDIT_GRANT_KINDS.other)}</span><b>${esc(`${money(g.remaining)} of ${money(g.amount)}`)}</b>
+      ${g.expires_at ? `<em>expires ${esc(creditsDate(g.expires_at, new Date(g.expires_at).getFullYear() !== thisYear))}</em>` : ''}
+    </div>`).join('');
+  return `<div class="m-meters">${promo}${rules}${paid}${grants ? `<div class="m-credits-grants"><div class="m-pools-label">GRANTS</div>${grants}</div>` : ''}</div>`;
+}
+/** The provider header for a credits account: a dollar headline, no rings. */
+function creditsHeadline(item) {
+  const summary = creditsSummary(item);
+  // No promotional credit is a state, not an alarm: muted, like a stale figure.
+  const tone = summary.fraction == null || !(item.snapshot?.credits?.promo_remaining > 0) ? 'muted' : creditsTone(summary.fraction);
+  return `<span class="m-credits-headline">
+      <b class="${esc(tone)}" data-testid="credits-headline">${esc(summary.headline)}</b>
+      <em data-testid="credits-secondary">${esc(summary.secondary)}</em>
+    </span>`;
+}
+// A credits balance is held by its floor or pacing, not a weekly surplus.
+function creditsPressure(d) {
+  if (!d) return {label: 'Evaluating', tone: 'neutral'};
+  if (d.decision === 'RUN' || d.decision === 'ADMIT') return {label: d.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now', tone: 'triggered'};
+  if (d.decision === 'UNKNOWN') return {label: 'Dispatch held', tone: 'near'};
+  const reason = d.reason || '';
+  return {label: /no promotional/.test(reason) ? 'Held · no promo credit' : /floor/.test(reason) ? 'Held · at the floor' : 'Holding credit', tone: 'neutral'};
 }
 function providerPressure(item) {
   if (item.paused) return {label: 'Paused', tone: 'paused'};
   if (item.run_login_unknown) return {label: 'Held · login unknown', tone: 'near'};
   if (accountMismatch(item)) return {label: 'Accounts differ', tone: 'near'};
+  if (isAPICredits(item.provider) && creditsSignedOut(item)) return {label: 'Session key needed', tone: 'near'};
   if (signedOut(item)) return {label: 'Signed out', tone: 'near'};
   if (item.snapshot_stale) return {label: 'Stale', tone: 'near'};
   if (item.error && !item.snapshot) return {label: 'No data', tone: 'paused'};
+  if (isAPICredits(item.provider)) return creditsPressure(item.latest_decision);
   if (item.snapshot?.weekly_unavailable && !['RUN', 'ADMIT'].includes(item.latest_decision?.decision)) return {label: 'Held · weekly n/r', tone: 'neutral'};
   const d = item.latest_decision;
   if (!d) return {label: 'Evaluating', tone: 'neutral'};
@@ -199,6 +285,8 @@ function renderUsageProvider(item) {
   const snap = item.snapshot;
   const provider = String(item.provider || item.id).toLowerCase();
   const icon = provider === 'claude' ? '/assets/claude.svg' : provider === 'codex' ? '/assets/codex.svg' : '';
+  const credits = isAPICredits(provider);
+  const accountLabel = credits ? String(item.label || '').trim() : '';
   const accountAllowances = (snap?.allowances || []).filter(a => a.scope === 'account');
   const session = accountAllowances.find(a => a.role === 'session' || a.role === 'short') || snap?.short || null;
   // A source that reports no weekly limit (Team seats) has none to draw:
@@ -221,19 +309,19 @@ function renderUsageProvider(item) {
             aria-expanded="${isOpen}"
             aria-controls="m-provider-detail-${esc(item.id)}"
             data-provider-toggle="${esc(item.id)}"
-            aria-label="Show ${esc(title(provider))} usage details">
+            aria-label="Show ${esc(credits ? [providerLabel(provider), accountLabel].filter(Boolean).join(' ') : title(provider))} usage details">
       <span class="m-provider-logo ${esc(provider)}">${icon
         ? `<img src="${esc(icon)}" alt="${esc(title(provider))} logo" width="18" height="18">`
-        : `<span class="m-provider-fallback" aria-hidden="true">${esc(providerLabel(provider).charAt(0))}</span>`
+        : `<span class="m-provider-fallback" aria-hidden="true">${esc(credits ? '$' : providerLabel(provider).charAt(0))}</span>`
       }</span>
       <span class="m-provider-summary">
-        <span class="m-provider-name">${esc(providerLabel(provider))}</span>
+        <span class="m-provider-name">${esc([providerLabel(provider), accountLabel].filter(Boolean).join(' · '))}</span>
         <span class="m-provider-status ${esc(pressure.tone)}">${esc(pressure.label)}</span>
       </span>
-      <span class="m-rings" aria-label="Account allowances">
+      ${credits ? creditsHeadline(item) : `<span class="m-rings" aria-label="Account allowances">
         ${monthly ? cursorPoolRing(snap, stale) : `<span class="m-ring-cell">${ring(session?.remaining ?? (snap?.short_window_not_started ? 1 : null), 58, stale)}<small>Session</small><em>${session ? relative(session.resets_at) : snap?.short_window_not_started ? 'on first use' : 'not available'}</em></span>`}
         <span class="m-ring-cell">${ring(weekly?.remaining ?? null, 58, stale)}<small>${monthly ? 'Monthly' : 'Weekly'}</small><em>${weekly ? `${weekly.reset_inferred ? '~ ' : ''}${relative(weekly.resets_at)}` : snap?.weekly_unavailable ? 'not reported' : 'not available'}</em></span>
-      </span>
+      </span>`}
     </button>
     <div id="m-provider-detail-${esc(item.id)}" class="m-provider-detail" ${isOpen ? '' : 'hidden'} data-testid="provider-detail-${esc(item.id)}">
       ${detailHTML}
@@ -277,8 +365,12 @@ function renderUsageDetail(item, opts = {}) {
   const provider = String(item.provider || item.id).toLowerCase();
   const pressure = providerPressure(item);
 
+  const credits = isAPICredits(provider);
   let metersHTML = '';
-  if (snap) {
+  if (credits) {
+    // Signed out is already said in the source line; don't repeat it.
+    metersHTML = creditsMeters({...item, snapshot: snap}) || (creditsSignedOut(item) ? '' : `<p class="m-inline-muted">${esc(item.error || 'No usage data available.')}</p>`);
+  } else if (snap) {
     // On an account page "was" already says it; elsewhere the label does.
     const lastKnown = stale && !outOfDate ? 'Last known ' : '';
     const windows = [];
@@ -388,6 +480,12 @@ function renderUsageDetail(item, opts = {}) {
     </details>`;
   } else if (d && outOfDate) {
     decisionHTML = '';
+  } else if (d && credits) {
+    // The credits decision's reason already says why, in dollars.
+    decisionHTML = `<details class="m-provider-decision ${esc(pressure.tone)}" data-testid="decision-detail">
+      <summary><b>${esc(pressure.label)}</b></summary>
+      <span>${esc(d.reason || '')}</span>
+    </details>`;
   } else if (d) {
     const detail = d.projected_trigger_at && new Date(d.projected_trigger_at) > Date.now()
       ? `Likely eligible ${relative(d.projected_trigger_at)}.`
@@ -409,13 +507,15 @@ function renderUsageDetail(item, opts = {}) {
 
   const stateLabel = paused ? 'Paused' : `${item.active_runs || 0}/${item.max_concurrent_runs || 1} active`;
   // Inside a carousel the buttons name the account, not just the provider.
-  const who = opts.accountPage ? accountName(item) : title(provider);
+  const who = opts.accountPage ? accountName(item) : credits ? [providerLabel(provider), String(item.label || '').trim()].filter(Boolean).join(' ') : title(provider);
 
   return `
     ${decisionHTML}
     <div class="m-source-meta">
       ${esc(item.usage_source?.active || 'unknown')} source
-      ${accountMismatch(item)
+      ${credits && creditsSignedOut(item)
+        ? `<span class="m-source-error" data-testid="signed-out">${esc(CREDITS_SIGNED_OUT)}</span>`
+        : accountMismatch(item)
         ? '<span class="m-source-error" data-testid="account-mismatch">Cursor CLI and app are on different accounts · sign both in to the same one on your Mac</span>'
         : signedOut(item)
         ? `<span class="m-source-error" data-testid="signed-out">${esc(loginCommand(item.provider) ? `Signed out on your Mac · run ${loginCommand(item.provider)}` : 'Signed out on your Mac · sign in again')}</span>`
@@ -624,13 +724,14 @@ function accountDispatching(item) {
 function accountStateLine(item) {
   if (item.paused) return {text: 'Paused', tone: 'paused'};
   switch (accountState(item)) {
-    case 'signed_out': return {text: loginCommand(item.provider) ? `Signed out · run ${loginCommand(item.provider)}` : 'Signed out', tone: 'danger'};
+    case 'signed_out': return {text: isAPICredits(item.provider) ? CREDITS_SIGNED_OUT : loginCommand(item.provider) ? `Signed out · run ${loginCommand(item.provider)}` : 'Signed out', tone: 'danger'};
     case 'stale': return {text: 'Out of date · dispatch held', tone: 'near'};
     case 'error': return {text: 'Usage unavailable · dispatch held', tone: 'danger'};
     case 'no_data': return {text: 'No usage yet · dispatch held', tone: 'near'};
   }
   if (item.run_login_unknown) return {text: 'Dispatch held · login unknown', tone: 'near'};
   const d = item.latest_decision?.decision;
+  if (isAPICredits(item.provider) && d !== 'RUN' && d !== 'ADMIT') return {text: creditsPressure(item.latest_decision).label, tone: 'neutral'};
   if (item.snapshot?.weekly_unavailable && item.weekly_policy === 'session_only') return {text: 'Weekly not reported · session-only scheduling', tone: 'neutral'};
   if (item.snapshot?.weekly_unavailable && d !== 'RUN' && d !== 'ADMIT') return {text: 'Dispatch held · weekly not reported', tone: 'neutral'};
   if (d === 'RUN' || d === 'ADMIT') return {text: 'Dispatching', tone: 'healthy'};
@@ -718,7 +819,25 @@ function familyOverview(accounts) {
   return parts.join(' · ');
 }
 
+/** A credits account's overview row: its balance and expiry, not windows. */
+function renderCreditsOverviewRow(item) {
+  const state = accountStateLine(item), summary = creditsSummary(item), credits = item.snapshot?.credits;
+  const expires = !creditsSignedOut(item) && credits?.promo_remaining > 0 && credits.expires_at ? relative(credits.expires_at) : '—';
+  const compactState = accountState(item) === 'signed_out' ? 'Session key needed' : state.text;
+  return `<button type="button" class="m-acct-row" data-account-open="${esc(item.id)}" data-testid="overview-row"
+      aria-label="${esc([accountName(item), state.text, summary.headline, summary.secondary].join('. '))}. Open ${esc(accountName(item))}">
+    <span class="m-acct-name">
+      <span class="m-acct-title">${esc(accountName(item))}</span>
+      <span class="m-acct-sub"><span class="m-acct-state ${esc(state.tone)}">${esc(compactState)}</span></span>
+    </span>
+    <span class="m-acct-cell${summary.fraction == null ? ' muted' : ''}"><b>${esc(summary.fraction == null && !credits ? '—' : money(credits?.promo_remaining || 0))}</b><em>promo</em></span>
+    <span class="m-acct-cell${expires === '—' ? ' muted' : ''}"><b>${esc(expires)}</b><em>${expires === '—' ? ' ' : 'expires'}</em></span>
+    <span class="m-acct-go" aria-hidden="true">›</span>
+  </button>`;
+}
+
 function renderOverviewRow(item, index) {
+  if (isAPICredits(item.provider)) return renderCreditsOverviewRow(item);
   const outOfDate = accountState(item) !== 'ok';
   const snap = accountState(item) === 'signed_out' ? null : item.snapshot;
   const pools = (snap?.allowances || []).filter(a => a.scope === 'account');
@@ -771,7 +890,7 @@ function renderFamily(group) {
   const pages = [
     `<div class="m-acct-page" data-page="0" ${page === 0 ? '' : 'hidden'} data-testid="carousel-page-0"
         role="group" aria-roledescription="slide" aria-label="Overview">
-      <div class="m-acct-columns" aria-hidden="true"><span>Account</span><span>5-hour</span><span>Weekly</span><span></span></div>
+      <div class="m-acct-columns" aria-hidden="true"><span>Account</span>${isAPICredits(provider) ? '<span>Promo</span><span>Expires</span>' : '<span>5-hour</span><span>Weekly</span>'}<span></span></div>
       ${accounts.map(renderOverviewRow).join('')}
     </div>`,
     ...accounts.map((item, i) => `<div class="m-acct-page" data-page="${i + 1}" ${page === i + 1 ? '' : 'hidden'} data-testid="carousel-page-${i + 1}"
@@ -782,7 +901,7 @@ function renderFamily(group) {
   return `<section class="m-provider-card m-acct-carousel" data-family="${esc(provider)}" data-testid="account-carousel"
       aria-roledescription="carousel" aria-label="${esc(name)} accounts">
     <div class="m-acct-head">
-      <span class="m-provider-logo ${esc(provider)}">${icon ? `<img src="${esc(icon)}" alt="" width="18" height="18">` : ''}</span>
+      <span class="m-provider-logo ${esc(provider)}">${icon ? `<img src="${esc(icon)}" alt="" width="18" height="18">` : isAPICredits(provider) ? '<span class="m-provider-fallback" aria-hidden="true">$</span>' : ''}</span>
       <span class="m-provider-summary">
         <span class="m-provider-name">${esc(name)} · ${esc(familyOverview(accounts))}</span>
       </span>
@@ -1011,7 +1130,7 @@ function renderQueueSelector(providers) {
   const sel = $('#m-queue-provider');
   const prev = sel.value;
   sel.innerHTML = (providers || []).map(p =>
-    `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.provider)}</option>`
+    `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(isAPICredits(p.provider) ? providerLabel(API_CREDITS) : p.provider)}</option>`
   ).join('');
   // Restore or set initial selection
   if (prev && providers.some(p => p.id === prev)) {
