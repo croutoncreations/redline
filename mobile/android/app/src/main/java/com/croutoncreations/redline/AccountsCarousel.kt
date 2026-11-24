@@ -435,7 +435,10 @@ private fun OverviewRow(account: ProviderUsage, onOpen: () -> Unit) {
                 account.sessionUnknown -> MiniUnknown("5-hour", Modifier.weight(1f))
             }
             val weekly = account.weekly
-            if (weekly != null) {
+            val credits = account.credits
+            if (credits != null) {
+                MiniCredits(credits, Modifier.weight(1f))
+            } else if (weekly != null) {
                 MiniMeter(account.weeklyLabel.ifEmpty { "Weekly" }.removeSuffix(" allowance"), weekly, Modifier.weight(1f), old)
             } else if (account.weeklyNotReported) {
                 MiniUnknown("Weekly", Modifier.weight(1f), "Not reported")
@@ -499,6 +502,29 @@ private fun MiniMeter(label: String, window: Window, modifier: Modifier, outOfDa
         )
         Spacer(Modifier.height(2.dp))
         Text(reset, color = TextMuted, fontSize = 10.sp)
+    }
+}
+
+/** A credits account's dollar headline and promotional credit bar, never a window. */
+@Composable
+private fun MiniCredits(credits: CreditsView, modifier: Modifier) {
+    val line = creditsExpiryLine(credits)
+    Column(modifier.semantics(mergeDescendants = true) { contentDescription = "${credits.headline}. $line" }) {
+        Text(
+            credits.headline,
+            color = if (credits.signedOut) Danger else if (credits.stale) TextMuted else TextPrimary,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Spacer(Modifier.height(3.dp))
+        LinearProgressIndicator(
+            progress = { if (credits.signedOut) 0f else credits.remainingPercent / 100f },
+            modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+            color = if (credits.stale) TextMuted.copy(alpha = 0.5f) else toneFor(credits.remainingPercent),
+            trackColor = Line,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(line, color = TextMuted, fontSize = 10.sp)
     }
 }
 
