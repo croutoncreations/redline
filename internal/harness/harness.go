@@ -297,6 +297,24 @@ func displayHome(dir string) string {
 	return dir
 }
 
+// openAIRoutingVariables would sign a run in as another OpenAI organization
+// or project, or send its key to another host.
+var openAIRoutingVariables = []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+	"OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT"}
+
+// withOpenAICredentials gives an API credits run exactly its account's key
+// and organization, after dropping whatever the service inherited.
+func withOpenAICredentials(environment []string, key, organization string) []string {
+	for _, name := range openAIRoutingVariables {
+		environment = withoutVariable(environment, name)
+	}
+	environment = append(environment, "OPENAI_API_KEY="+key)
+	if organization != "" {
+		environment = append(environment, "OPENAI_ORG_ID="+organization, "OPENAI_ORGANIZATION="+organization)
+	}
+	return environment
+}
+
 func withoutVariable(environment []string, name string) []string {
 	kept := make([]string, 0, len(environment))
 	for _, entry := range environment {
@@ -333,6 +351,9 @@ func buildCommand(
 			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
 			"REDLINE_RESULT_FILE="+ResultFilePath(request.OutputDirectory, request.RunID),
 		),
+	}
+	if key := request.Profile.OpenAIAPIKey; key != "" {
+		base.Env = withOpenAICredentials(base.Env, key, request.Profile.OpenAIOrganization)
 	}
 	switch request.Profile.HarnessType {
 	case "codex-cli":

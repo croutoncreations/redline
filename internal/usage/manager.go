@@ -524,6 +524,11 @@ func providerKey(provider string) string { return strings.ToLower(strings.TrimSp
 // profile being rate limited must not silence the others.
 func nativeLoginKey(provider config.Provider) string {
 	key := providerKey(provider.Provider)
+	// Each API credits account reads its own organization with its own key;
+	// one organization's rate limit must not hold another's reads.
+	if provider.IsAPICredits() {
+		return config.MeteringIdentity(provider)
+	}
 	if dir := config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir); dir != "" && key == "claude" {
 		return key + "@profile:" + dir
 	}

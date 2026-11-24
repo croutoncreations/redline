@@ -25,6 +25,7 @@ import (
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/apiauth"
 	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/apicredits"
 	"github.com/croutoncreations/redline/internal/appdir"
 	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/calibration"
@@ -175,6 +176,20 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		}
 		if len(remaining) > 1 && remaining[1] == "add-profile" {
 			return runAccountAddProfile(remaining[2:], *configPath, stdout, stderr)
+		}
+		// OpenAI API credits accounts and their keys are set up locally:
+		// keys never pass through the HTTP API.
+		if len(remaining) > 1 {
+			switch remaining[1] {
+			case "add-openai-credits":
+				return runAccountAddOpenAICredits(remaining[2:], *configPath, stdin, stdout, stderr)
+			case "set-session-key":
+				return runAccountSetKey(apicredits.SecretSessionKey, remaining[2:], *configPath, stdin, stdout, stderr)
+			case "set-api-key":
+				return runAccountSetKey(apicredits.SecretAPIKey, remaining[2:], *configPath, stdin, stdout, stderr)
+			case "clear-keys":
+				return runAccountClearKeys(remaining[2:], *configPath, stdout, stderr)
+			}
 		}
 		return runAccount(client, remaining[1:], stdout, stderr)
 	default:

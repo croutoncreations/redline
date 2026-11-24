@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croutoncreations/redline/internal/apicredits"
 	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/calibration"
 	"github.com/croutoncreations/redline/internal/capacity"
@@ -120,16 +121,21 @@ type Server struct {
 	// cursorUsage is display-only Cursor and Grok Bot tracking. It is kept
 	// apart from usageSources so it can never reach scheduling decisions.
 	cursorUsage *cursorusage.Tracker
-	catalogMu   sync.Mutex
-	catalog     discovery.Catalog
-	catalogAt   time.Time
-	mux         *http.ServeMux
-	workers     sync.WaitGroup
-	loopWorkers sync.WaitGroup
-	startMu     sync.Mutex
-	started     bool
-	pairingMu   sync.Mutex
-	pairing     map[string]time.Time
+	// apiCredits reads OpenAI API credit grants for openai-api-credits
+	// accounts; apiCreditSecrets holds their session and API keys, which
+	// never leave this machine.
+	apiCredits       *apicredits.UsageSource
+	apiCreditSecrets apicredits.SecretStore
+	catalogMu        sync.Mutex
+	catalog          discovery.Catalog
+	catalogAt        time.Time
+	mux              *http.ServeMux
+	workers          sync.WaitGroup
+	loopWorkers      sync.WaitGroup
+	startMu          sync.Mutex
+	started          bool
+	pairingMu        sync.Mutex
+	pairing          map[string]time.Time
 	// redeemed remembers a spent token for a short while after the fact, so
 	// the surface that showed the code can learn the phone got in. Without
 	// this a redeem was a deletion and nothing more: the sheet kept showing
@@ -212,6 +218,13 @@ func (c cursorAccountCheck) Verify(ctx context.Context) error {
 // Cursor app are signed in to the same account. Tests use it to avoid
 // depending on this machine's Cursor sign-ins.
 func (s *Server) SetCursorAccountCheck(check cursorusage.AccountCheck) { s.cursorAccounts = check }
+
+// SetAPICredits replaces the credit grants client and secret store (tests).
+func (s *Server) SetAPICredits(client apicredits.Client, secrets apicredits.SecretStore) {
+	s.apiCredits.Client = client
+	s.apiCredits.Secrets = secrets
+	s.apiCreditSecrets = secrets
+}
 
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
 	server := NewServer(cfg, database, now)
@@ -352,7 +365,13 @@ func newServer(
 	server.cursorAccounts = cursorusage.NewLocalAccountCheck(now)
 	openUsageWithCursor, nativeWithCursor := cursorusage.NewUsageSources(openusage.Source{}, nativeSource, now,
 		cursorAccountCheck{server})
-	server.usageSources = usage.NewManager(openUsageWithCursor, nativeWithCursor, now)
+	// openai-api-credits accounts read the OpenAI platform. They are pinned
+	// to the native source, so only it needs the wrapper; the pointer lets
+	// tests swap the client after construction.
+	server.apiCreditSecrets = apicredits.DefaultSecretStore(cfg.ConfigPath)
+	server.apiCredits = &apicredits.UsageSource{Next: nativeWithCursor, Client: apicredits.Client{Now: now},
+		Secrets: server.apiCreditSecrets}
+	server.usageSources = usage.NewManager(openUsageWithCursor, apiCreditsSource{server}, now)
 	// Wrapping hides the native source's banked-reset lookup; keep it.
 	server.usageSources.BankedResets = nativeSource
 	server.profileLogins = newProfileLogins(cfg, credentials, profilelogin.ClaudeRenewer{}, func(ctx context.Context, account string) bool {
@@ -2383,6 +2402,18 @@ func (s *Server) dispatchCore(
 		response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
+	// An API credits run is given its account's own API key; without one
+	// it would inherit whatever key the service has and bill an unknown
+	// organization. Checked before usage is read, like the login above.
+	var runAPIKey string
+	if configuredProvider.IsAPICredits() {
+		key, reason := s.apiCreditsRunKey(ctx, request.ProviderAccountID, configuredProvider)
+		if reason != "" {
+			response.Result = decision.Result{Decision: decision.Wait, Mode: decision.ModeLoginUnknown, Reason: reason}
+			return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+		}
+		runAPIKey = key
+	}
 	active, err := s.store.ActiveRunCount(ctx, request.ProviderAccountID)
 	if err != nil {
 		return response, false, err
@@ -2468,6 +2499,10 @@ func (s *Server) dispatchCore(
 	// that login, or it would spend the default account's allowance while
 	// being scheduled against this one's.
 	profile = profileForAccount(profile, s.config.Providers[request.ProviderAccountID])
+	if runAPIKey != "" {
+		profile.OpenAIAPIKey = runAPIKey
+		profile.OpenAIOrganization = configuredProvider.EffectiveAPICredits().OrganizationID
+	}
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -2485,6 +2520,13 @@ func (s *Server) dispatchCore(
 // default login (or whichever one the service inherited) while being
 // scheduled against this account.
 func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.Provider) error {
+	// API credits pay only for direct OpenAI API calls made with the
+	// account's key, which Redline injects into pi and command runs.
+	// Anything else would be scheduled against money it never spends.
+	if account.IsAPICredits() && !account.HarnessSpendsAPICredits(profile.HarnessType) {
+		return fmt.Errorf("account %q is OpenAI API credits: its harness must be pi or command, because only those runs are given its API key; %q bills elsewhere "+
+			"(Codex usage through API keys is not covered by the benefit)", profile.ProviderAccountID, profile.HarnessType)
+	}
 	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
 		return nil
 	}
@@ -2497,10 +2539,36 @@ func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.P
 // directory; the field is ignored by every other harness.
 func profileForAccount(profile domain.ExecutionProfile, account config.Provider) domain.ExecutionProfile {
 	profile.ClaudeConfigDir = ""
+	profile.OpenAIAPIKey, profile.OpenAIOrganization = "", ""
 	if strings.EqualFold(strings.TrimSpace(account.Provider), "claude") {
 		profile.ClaudeConfigDir = config.NormalizeClaudeConfigDir(account.ClaudeConfigDir)
 	}
 	return profile
+}
+
+// apiCreditsRunKey is the API key an API credits account's runs use, or a
+// reason work must hold. It never comes from the service's environment.
+func (s *Server) apiCreditsRunKey(ctx context.Context, accountID string, account config.Provider) (string, string) {
+	key, err := apicredits.ResolveSecret(ctx, s.apiCreditSecrets, accountID, apicredits.SecretAPIKey,
+		account.EffectiveAPICredits().APIKeyFile)
+	switch {
+	case errors.Is(err, apicredits.ErrSecretNotFound):
+		return "", fmt.Sprintf("no OpenAI API key is saved for runs on this account; run `redline account set-api-key %s`", accountID)
+	case err != nil:
+		return "", "the OpenAI API key for runs could not be read: " + err.Error()
+	case !strings.HasPrefix(key, "sk-"):
+		return "", "the saved OpenAI API key does not look like an API key (sk-…)"
+	}
+	return key, ""
+}
+
+// apiCreditsSource routes native usage reads through the server's API
+// credits source, read at call time so tests can replace its client.
+type apiCreditsSource struct{ server *Server }
+
+func (a apiCreditsSource) Name() string { return a.server.apiCredits.Name() }
+func (a apiCreditsSource) Fetch(ctx context.Context, provider config.Provider) (decision.UsageSnapshot, []byte, error) {
+	return a.server.apiCredits.Fetch(ctx, provider)
 }
 
 func (s *Server) triggerAfterRun(run domain.Run) {
@@ -3397,7 +3465,7 @@ func (s *Server) fetchAndStore(
 	if !ok {
 		return decision.UsageSnapshot{}, config.Provider{}, fmt.Errorf("provider %q is not configured", providerID)
 	}
-	snapshot, raw, err := s.usageSources.Fetch(ctx, providerID, configured)
+	snapshot, raw, err := s.usageSources.Fetch(apicredits.WithAccount(ctx, providerID), providerID, configured)
 	if err != nil {
 		return decision.UsageSnapshot{}, config.Provider{}, err
 	}

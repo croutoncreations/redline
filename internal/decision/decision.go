@@ -125,6 +125,44 @@ type UsageSnapshot struct {
 	// their freshness interval (OpenUsage's "stale"). Redline still applies
 	// its own max snapshot age on top.
 	SourceStale bool `json:"source_stale,omitempty"`
+	// Credits is set only for OpenAI API credits accounts: a dollar balance
+	// rather than a subscription window. When promotional credit remains,
+	// Weekly mirrors it as a fraction of the grant resetting at expiry;
+	// otherwise Weekly is unavailable and Credits says why.
+	Credits *CreditsBalance `json:"credits,omitempty"`
+}
+
+// CreditsBalance is an OpenAI API organization's credit, in US dollars.
+type CreditsBalance struct {
+	// PromoRemaining and PromoGranted sum the available promotional
+	// (ChatGPT subscription) grants. Only promotional credit is capacity.
+	PromoRemaining float64 `json:"promo_remaining"`
+	PromoGranted   float64 `json:"promo_granted"`
+	// NextExpiring is what lapses at ExpiresAt, the soonest promo expiry.
+	NextExpiring float64    `json:"next_expiring"`
+	EffectiveAt  *time.Time `json:"effective_at,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	// PaidAvailable is purchased and auto-recharge credit: shown, never
+	// scheduled against.
+	PaidAvailable float64 `json:"paid_available"`
+	// MinPromoBalance and Pacing are the account's settings when observed,
+	// so every client explains a hold the same way.
+	MinPromoBalance float64 `json:"min_promo_balance"`
+	Pacing          string  `json:"pacing,omitempty"`
+	// FiresaleWindowSeconds is how long before expiry firesale pacing runs.
+	FiresaleWindowSeconds int64 `json:"firesale_window_seconds,omitempty"`
+	// Grants lists the grants that still hold money, soonest expiry first.
+	Grants []CreditGrant `json:"grants,omitempty"`
+}
+
+// CreditGrant is one grant with money left. Kind is promo, auto_recharge,
+// purchase or other.
+type CreditGrant struct {
+	Kind        string     `json:"kind"`
+	Amount      float64    `json:"amount"`
+	Remaining   float64    `json:"remaining"`
+	EffectiveAt *time.Time `json:"effective_at,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
 // BankedReset describes one grant or credit, not additional scheduling capacity.
@@ -415,7 +453,7 @@ func (s UsageSnapshot) Validate() error {
 				return fmt.Errorf("an unreported weekly window cannot have a weekly allowance")
 			}
 		}
-		if s.Short == nil && !s.ShortWindowNotStarted && !s.ShortWindowUnavailable && len(s.Allowances) == 0 && s.BankedResets == nil {
+		if s.Short == nil && !s.ShortWindowNotStarted && !s.ShortWindowUnavailable && len(s.Allowances) == 0 && s.BankedResets == nil && s.Credits == nil {
 			return fmt.Errorf("a snapshot without a weekly window must report something else")
 		}
 	} else {
@@ -431,6 +469,16 @@ func (s UsageSnapshot) Validate() error {
 	}
 	if s.BankedResets != nil && *s.BankedResets < 0 {
 		return fmt.Errorf("banked resets cannot be negative")
+	}
+	if c := s.Credits; c != nil {
+		for _, amount := range []float64{c.PromoRemaining, c.PromoGranted, c.NextExpiring, c.PaidAvailable, c.MinPromoBalance} {
+			if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+				return fmt.Errorf("credit amounts must be finite and non-negative")
+			}
+		}
+		if c.PromoRemaining > 0 && c.ExpiresAt == nil {
+			return fmt.Errorf("promotional credit requires an expiry")
+		}
 	}
 	if s.BankedResetsExpireAt != nil && (s.BankedResets == nil || *s.BankedResets == 0) {
 		return fmt.Errorf("banked reset expiry requires at least one banked reset")
@@ -595,6 +643,11 @@ type Result struct {
 }
 
 func Evaluate(in Input) Result {
+	// A dollar balance has its own rules: a floor and expiry pacing rather
+	// than subscription windows.
+	if in.Snapshot.Credits != nil {
+		return EvaluateCredits(in)
+	}
 	if err := in.Snapshot.Validate(); err != nil {
 		return unknown(err.Error())
 	}

@@ -47,6 +47,12 @@ type ExecutionProfile struct {
 	// it in for one run from the run's account, so a claude-code run on an
 	// account bound to a Claude Code profile directory uses that login.
 	ClaudeConfigDir string `json:"-"`
+	// OpenAIAPIKey and OpenAIOrganization are not part of the stored
+	// profile either. The service fills them in for one run on an OpenAI API
+	// credits account, so the run bills exactly the organization whose
+	// credit it was scheduled against.
+	OpenAIAPIKey       string `json:"-"`
+	OpenAIOrganization string `json:"-"`
 }
 
 type RuntimeConnection struct {
