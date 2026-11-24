@@ -42,6 +42,13 @@ Changes require a service restart. Main-config accounts must be edited in YAML.
 See [session-only scheduling](scheduling.md#claude-team-seats-without-a-reported-weekly-cap)
 for the hidden-weekly-cap risk and model-budget gates.
 
+OpenAI API credits accounts are added and keyed only on the machine running Redline:
+`redline account add-openai-credits <id> [--org org-…] [--label L] [--min-balance USD]
+[--pacing firesale|even] [--firesale-window 72h] [--session-key-file PATH] [--api-key-file PATH]
+[--session-key-stdin]`, then `set-session-key <id>` and `set-api-key <id>` read a key from
+standard input; `clear-keys <id>` removes both. Keys are never printed and never pass through
+the HTTP API. See [OpenAI API credits](scheduling.md#openai-api-credits).
+
 ## Device sessions (owner only)
 
 ```bash

@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- OpenAI API credits accounts. Redline reads the monthly API credits an eligible ChatGPT Pro or
+  Business subscription grants to a linked API organization, shows the promotional balance and
+  its expiry in dollars on the desktop dashboard, the menu bar, the Android app and the mobile
+  web page, and spends it on queued `pi` and `command` jobs before it lapses (firesale near
+  expiry by default, or even pacing), never below a dollar floor you set and never against
+  purchased credit. Runs get the account's own API key. Keys are entered with
+  `redline account add-openai-credits`, `set-session-key` and `set-api-key` on the machine
+  running Redline and stored in the Keychain (or owner-only files elsewhere).
+
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count

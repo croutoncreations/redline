@@ -40,6 +40,73 @@ Manual or announcement firesales can unlock the firesale tier but cannot spend t
 session reserve. Use duration-based manual firesales; `--until-reset` requires a
 reported weekly reset. Calibration never invents a weekly number for these seats.
 
+## OpenAI API credits
+
+Eligible ChatGPT Pro and Business subscriptions grant monthly
+[API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) to one linked
+OpenAI API organization. They expire at the end of each billing cycle and do not roll over.
+An `openai-api-credits` account lets Redline show that balance and spend it on queued work
+before it lapses.
+
+- **What counts.** Only *promotional* grants (the subscription benefit) that are in effect and
+  have money left. Purchased and auto-recharge credit is shown on every dashboard but is never
+  scheduling capacity.
+- **Floor.** No job starts while the promotional balance is at or below `min_promo_balance`
+  (default $5). The floor is checked when a job starts; a running job is not stopped, so keep
+  `max_concurrent_runs` low or the floor generous if you never want to touch paid credit. For a
+  hard cap, give Redline a key from a dedicated OpenAI project with an enforced
+  [spend limit](https://developers.openai.com/api/docs/guides/spend-limits).
+- **Pacing.** `firesale` (default) holds the balance until a grant with money on it is within
+  `firesale_window` (default 72h) of expiring, then runs queued work at the firesale tier.
+  `even` runs work whenever a grant has more left than the share of its cycle still to go.
+  A manual firesale overrides pacing, never the floor. Stale or unreadable balances are UNKNOWN
+  and hold.
+- **Which jobs.** Only `pi` and `command` profiles can use the account: each run is given the
+  account's own API key as `OPENAI_API_KEY` (and its organization), after any inherited OpenAI
+  key, organization, project or base URL is removed. OpenAI's terms exclude Codex usage
+  through API keys, and Claude Code and Cursor bill elsewhere, so those profiles are refused.
+  With no saved API key, work holds rather than inherit whatever key the service has.
+
+```yaml
+providers:
+  api-credits:
+    provider: openai-api-credits
+    label: Linked org
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: org-…        # optional; empty reads the session's default organization
+      min_promo_balance: 5          # USD
+      pacing: firesale              # or even
+      firesale_window: 72h
+      # session_key_file: /abs/path # optional: read the session key from a private file
+      # api_key_file: /abs/path     # optional: read the run API key from a private file
+```
+
+### Keys
+
+OpenAI exposes the grant list only to the platform dashboard, so Redline needs the browser
+**session key** (`sess-…`): on platform.openai.com › Settings › Billing › Credit grants, open
+the browser's developer tools, select the `credit_grants` request and copy its `Authorization`
+value. API keys and Codex sign-ins are rejected by that endpoint. The session key carries your
+full dashboard access; Redline sends it only to the credit grants endpoint (no redirects), never
+logs or displays it, and never sends it to phones or the relay. When it expires the account
+shows "Session key needed"; paste a fresh one.
+
+Keys are entered only on the machine running Redline, from standard input:
+
+```bash
+redline account add-openai-credits api-credits --org org-… --label "Linked org"
+pbpaste | redline account set-session-key api-credits
+pbpaste | redline account set-api-key api-credits      # an sk-… key from that organization
+redline account clear-keys api-credits
+```
+
+They are stored in the login Keychain on macOS and in owner-only files beside the config
+elsewhere (`REDLINE_SECRETS_DIR` overrides the directory). A headless service can instead read
+`session_key_file`/`api_key_file` (owner-only, not a symlink, re-read every poll, so a secret
+manager can rotate them) or take `REDLINE_OPENAI_SESSION_KEY`, which the service removes from
+its environment at start so no job inherits it.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:
