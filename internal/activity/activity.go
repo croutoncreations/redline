@@ -209,7 +209,7 @@ func summaryFromJSON(value any) string {
 func links(summary string) []domain.RunArtifact {
 	var result []domain.RunArtifact
 	for _, raw := range urlPattern.FindAllString(summary, -1) {
-		url := strings.TrimRight(raw, ".,;:!?)]}*_`")
+		url := trimLinkPunctuation(raw)
 		artifactType, label := "link", "Link"
 		switch {
 		case strings.Contains(url, "github.com/") && strings.Contains(url, "/pull/"):
@@ -222,6 +222,29 @@ func links(summary string) []domain.RunArtifact {
 		result = appendUniqueArtifact(result, domain.RunArtifact{Type: artifactType, Label: label, URL: url})
 	}
 	return result
+}
+
+func trimLinkPunctuation(raw string) string {
+	url := strings.TrimRight(raw, ".,;:!?*_`")
+	for len(url) > 0 {
+		close := url[len(url)-1]
+		var open byte
+		switch close {
+		case ')':
+			open = '('
+		case ']':
+			open = '['
+		case '}':
+			open = '{'
+		default:
+			return url
+		}
+		if strings.Count(url, string(open)) >= strings.Count(url, string(close)) {
+			return url
+		}
+		url = url[:len(url)-1]
+	}
+	return url
 }
 
 func readTail(path string, limit int64) ([]byte, error) {

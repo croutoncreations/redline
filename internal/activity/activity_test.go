@@ -96,6 +96,21 @@ func TestBuildPreservesPublishedLinkFromEarlierAssistantSummary(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesBalancedParenthesisAtEndOfLink(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "run.stdout.jsonl")
+	const want = "https://en.wikipedia.org/wiki/Function_(mathematics)"
+	body := `{"type":"item.completed","item":{"type":"agent_message","text":"See ` + want + ` and (https://example.com/docs)."}}` + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if len(got.Artifacts) != 2 || got.Artifacts[0].URL != want || got.Artifacts[1].URL != "https://example.com/docs" {
+		t.Fatalf("artifacts = %#v, want URL %q", got.Artifacts, want)
+	}
+}
+
 func TestBuildMakesFailureHumanReadable(t *testing.T) {
 	got := activity.Build(activity.Input{
 		State: domain.RunFailed, Error: "Claude Code is signed out. Run `claude auth login`, then retry this job.",
