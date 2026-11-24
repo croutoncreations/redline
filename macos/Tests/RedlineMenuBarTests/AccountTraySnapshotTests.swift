@@ -207,7 +207,7 @@ struct AccountTraySnapshotTests {
     static var freshCredits: String {
         #"""
         {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"ok",
-         "latest_decision":{"decision":"RUN","mode":"api_credits","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+         "latest_decision":{"decision":"RUN","mode":"api_credits","unlocked_tier":"firesale","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
          "snapshot":{"observed_at":"\#(expiry(-0.001))","weekly":{"remaining":0.624,"resets_at":"\#(expiry(2.2))","period_seconds":2592000},
            "credits":{"promo_remaining":62.4,"promo_granted":100,"next_expiring":62.4,"expires_at":"\#(expiry(2.2))",
              "paid_available":7.25,"min_promo_balance":5,"pacing":"firesale","firesale_window_seconds":259200,

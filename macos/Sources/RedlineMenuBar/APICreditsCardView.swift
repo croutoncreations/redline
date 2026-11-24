@@ -45,9 +45,7 @@ struct APICreditsCardView: View {
             if expanded && hasDetails(card) {
                 details(card)
             } else {
-                if let progress = card.progress {
-                    ProgressView(value: progress, total: 1).tint(toneColor(card.tone))
-                }
+                promoBar(card)
                 secondaryLine(card)
             }
             HStack(spacing: 6) {
@@ -105,22 +103,26 @@ struct APICreditsCardView: View {
     @ViewBuilder private func details(_ card: APICreditsCard) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             if let decision = card.decision {
-                Text(decision)
-                    .font(.system(size: 10, weight: .medium))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(decision)
+                        .font(.system(size: 10, weight: .semibold))
+                    if let reason = card.decisionReason {
+                        Text(reason)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine)
             }
             if let promo = card.promoLine {
                 VStack(alignment: .leading, spacing: 4) {
                     detailRow("Promotional credit", promo)
-                    if let progress = card.progress {
-                        ProgressView(value: progress, total: 1).tint(toneColor(card.tone))
-                    }
+                    promoBar(card)
                     secondaryLine(card)
                 }
             } else {
-                if let progress = card.progress {
-                    ProgressView(value: progress, total: 1).tint(toneColor(card.tone))
-                }
+                promoBar(card)
                 secondaryLine(card)
             }
             if let rule = card.rule {
@@ -154,6 +156,16 @@ struct APICreditsCardView: View {
         }
     }
 
+    /// The promotional credit bar. None at zero, where an empty bar still
+    /// draws a dot; "$0.00 promo" already says it.
+    @ViewBuilder private func promoBar(_ card: APICreditsCard) -> some View {
+        if let progress = card.progress, progress > 0 {
+            ProgressView(value: progress, total: 1)
+                .tint(toneColor(card.tone))
+                .accessibilityLabel("Promotional credit, \(Int((progress * 100).rounded())) percent left")
+        }
+    }
+
     private func detailRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -177,6 +189,7 @@ struct APICreditsCardView: View {
         case .normal: .green
         case .warning: .orange
         case .danger: .red
+        case .muted: .secondary
         }
     }
 

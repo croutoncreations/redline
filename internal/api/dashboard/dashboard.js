@@ -94,6 +94,7 @@ function renderOnboardingAccounts() {
     const authStatus = authenticated
       ? 'Agent sign-in verified'
       : `Sign in from Terminal · <code>${escapeHTML(guidance.login)}</code>`;
+    if (isAPICredits(item.provider)) return creditsOnboardingAccount(item, usageReady, source);
     return `<article class="onboarding-account">
       <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
       <ul>
@@ -549,6 +550,32 @@ function basePressure(item) {
 // 5-hour figure and no capacity evidence: the balance is not a window.
 const creditsDate = (value, year = false) => new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',...(year ? {year:'numeric'} : {})}).format(new Date(value));
 const creditsGrantDate = (value) => creditsDate(value, new Date(value).getFullYear() !== new Date().getFullYear());
+// The credits decision label and its reason, worded the same on every surface
+// (mobile.js, macOS and the phone core keep the same map).
+function creditsDecisionLabel(decision) {
+  if (!decision) return 'Evaluating';
+  if (decision.decision === 'RUN' || decision.decision === 'ADMIT') return decision.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now';
+  if (decision.decision === 'UNKNOWN') return 'Dispatch held';
+  const reason = decision.reason || '';
+  return /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit';
+}
+const creditsReasonText = (reason) => reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : '';
+// Onboarding for a credits account: no harness to install and no
+// subscription; the balance is read with the account's saved keys.
+function creditsOnboardingAccount(item, usageReady, source) {
+  const out = creditsSignedOut(item);
+  const balance = usageReady && !out
+    ? '<li class="ready">Balance read from OpenAI</li>'
+    : `<li class="needs-action">${out ? 'Session key needed' : 'Balance not read yet'} · <code>${escapeHTML(`redline account set-session-key ${item.id}`)}</code></li>`;
+  return `<article class="onboarding-account">
+      <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
+      <ul>
+        ${balance}
+        <li>Jobs run with the account's API key · <code>${escapeHTML(`redline account set-api-key ${item.id}`)}</code></li>
+        <li>Usage source · ${escapeHTML(usageSourceName(source))}</li>
+      </ul>
+    </article>`;
+}
 const CREDIT_GRANT_KINDS = {promo:'ChatGPT subscription grant', auto_recharge:'Auto recharge', purchase:'Purchased credit', other:'Credit grant'};
 function creditsPromoFraction(credits) {
   return credits?.promo_granted > 0 ? Math.max(0, Math.min(1, credits.promo_remaining / credits.promo_granted)) : 0;
@@ -573,19 +600,13 @@ function creditsSignedOut(item) {
 // describe a dollar balance; a held balance says why in the decision's words.
 function creditsPressure(item) {
   if (item.paused || item.run_login_unknown) return basePressure(item);
-  if (creditsSignedOut(item)) return {label:'Session key needed',detail:`Run redline account set-session-key ${item.id} on the computer running Redline. Scheduling is paused until the balance can be read.`,tone:'near'};
-  if (item.snapshot_stale) return basePressure(item);
+  if (creditsSignedOut(item)) return {label:'Session key needed',detail:`Run redline account set-session-key ${item.id}`,tone:'near'};
+  if (item.snapshot_stale) return {label:'Usage unavailable',detail:'The last balance read is out of date. Jobs are held until the balance can be read.',tone:'near'};
   const current = item.latest_decision;
   if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
-  const reason = current.reason || '';
-  if (current.decision === 'RUN' || current.decision === 'ADMIT') {
-    return {label:current.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now',detail:reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.` : 'Background work is eligible.',tone:'triggered'};
-  }
-  const label = current.decision === 'UNKNOWN' ? 'Dispatch held'
-    : /no promotional/.test(reason) ? 'Held · no promotional credit'
-    : /floor/.test(reason) ? 'Held · at the floor'
-    : 'Holding credit';
-  return {label,detail:reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.` : 'Waiting for the promotional balance to qualify.',tone:current.decision === 'UNKNOWN' ? 'near' : 'neutral'};
+  const label = creditsDecisionLabel(current), reason = creditsReasonText(current.reason);
+  if (current.decision === 'RUN' || current.decision === 'ADMIT') return {label,detail:reason || 'Background work is eligible',tone:'triggered'};
+  return {label,detail:reason || 'Waiting for the promotional balance to qualify',tone:current.decision === 'UNKNOWN' ? 'near' : 'neutral'};
 }
 function creditsCompact(item) {
   const snap = item.snapshot, credits = snap?.credits, stale = Boolean(item.snapshot_stale), out = creditsSignedOut(item);
@@ -602,13 +623,18 @@ function creditsCompact(item) {
   const secondary = out ? `Run redline account set-session-key ${item.id}`
     : stale ? `Last sample ${relative(snap?.observed_at)}`
     : credits ? creditsExpiryLine(credits) : 'Waiting for the balance';
-  const barValue = out || stale ? 0 : value;
+  // Stale keeps the last-known bar, muted; signed out shows none.
+  const barValue = out ? 0 : value, barTone = stale ? 'muted' : creditsTone(fraction);
   let details = `<p class="no-data">${escapeHTML(item.error || 'Waiting for usage data.')}</p>`;
-  if (credits) {
-    const lastKnown = stale ? 'Last known ' : '';
+  // Signed out, the old balance and decision are not shown: only the fix.
+  if (out) details = `<span class="decision-detail ${escapeHTML(pressure.tone)}" data-testid="credits-signed-out"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}</span></span>`;
+  else if (credits) {
+    const lastKnown = stale ? 'Last known p' : 'P';
+    // A stale balance is a last-known figure, muted rather than coloured.
+    const tone = stale ? 'muted' : creditsTone(fraction);
     const promo = noPromo
-      ? `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}Promotional credit</span><b>${escapeHTML(cursorMoney(0))}</b></div><progress class="meter-progress" max="100" value="0" aria-label="No promotional credit"></progress><div class="reset">No promotional credit</div></div>`
-      : `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}Promotional credit</span><b>${escapeHTML(`${cursorMoney(credits.promo_remaining)} of ${cursorMoney(credits.promo_granted)} left`)}</b></div><progress class="meter-progress ${creditsTone(fraction)}" max="100" value="${value}" aria-label="${value}% of promotional credit left"></progress><div class="reset">${escapeHTML(creditsExpiryLine(credits))}</div></div>`;
+      ? `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}romotional credit</span><b>${escapeHTML(cursorMoney(0))}</b></div><progress class="meter-progress credits-progress" max="100" value="0" aria-label="No promotional credit"></progress><div class="reset">No promotional credit</div></div>`
+      : `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}romotional credit</span><b>${escapeHTML(`${cursorMoney(credits.promo_remaining)} of ${cursorMoney(credits.promo_granted)} left`)}</b></div><progress class="meter-progress credits-progress ${tone}" max="100" value="${value}" aria-label="${value}% of promotional credit left"></progress><div class="reset">${escapeHTML(creditsExpiryLine(credits))}</div></div>`;
     const rules = `<div class="credits-rules" data-testid="credits-rules">${escapeHTML(creditsRuleLine(credits))}</div>`;
     const paid = credits.paid_available > 0 ? `<div class="credits-paid" data-testid="credits-paid"><span>Paid credit</span><b>${escapeHTML(`${cursorMoney(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
     const grants = (credits.grants || []).filter(grant => grant.remaining > 0).map(grant =>
@@ -617,7 +643,7 @@ function creditsCompact(item) {
     details = `${decisionDetail}${concurrencyStatus(item)}<div class="meters">${promo}${rules}${paid}${grants ? `<div class="credits-grants"><span class="cursor-group-label">Grants</span>${grants}</div>` : ''}</div>`;
   }
   const sourceError = item.usage_source?.last_error && !out ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact credits-compact${stale ? ' stale' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([name, label].filter(Boolean).join(' '))} usage details"><span class="provider-logo credits" aria-hidden="true">$</span><span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([name, label].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(name)}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span></strong><b>${escapeHTML(headline)}</b></span><span class="provider-window-line"><span>${escapeHTML(secondary)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress ${creditsTone(fraction) ? 'warn' : ''}" max="100" value="${barValue}" aria-label="${escapeHTML(headline)}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale ? `Last known balance${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(name)}${label ? ` ${escapeHTML(label)}` : ''}`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error && !out ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}</span></div>`;
+  return `<div class="provider-compact credits-compact${stale ? ' stale' : ''}${out ? ' signed-out' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([name, label].filter(Boolean).join(' '))} usage details"><span class="provider-logo credits" aria-hidden="true">$</span><span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([name, label].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(name)}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span></strong><b>${escapeHTML(headline)}</b></span><span class="provider-window-line"><span>${escapeHTML(secondary)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress credits-progress ${barTone}" max="100" value="${barValue}" aria-label="${escapeHTML(headline)}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale && !out ? `Last known balance${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(name)}${label ? ` ${escapeHTML(label)}` : ''}`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error && !out ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}</span></div>`;
 }
 function providerCompact(item) {
   if (isAPICredits(item.provider)) return creditsCompact(item);

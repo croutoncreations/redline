@@ -316,6 +316,7 @@ type dashboardPayload struct {
 		LatestDecision *struct {
 			Decision           string    `json:"decision"`
 			Reason             string    `json:"reason"`
+			UnlockedTier       string    `json:"unlocked_tier"`
 			ProjectedTriggerAt time.Time `json:"projected_trigger_at"`
 		} `json:"latest_decision,omitempty"`
 	} `json:"providers"`
@@ -371,6 +372,10 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 		if isCreditsProvider(item.Provider) {
 			signedOut := item.AccountStatus == "signed_out" || item.UsageSource.Reason == "signed_out"
 			provider.Credits = creditsView(item.Snapshot, item.SnapshotStale && !signedOut, signedOut, now)
+			if c := provider.Credits; c != nil && !c.SignedOut && !c.Stale && item.LatestDecision != nil {
+				c.DecisionLabel = creditsDecisionLabel(item.LatestDecision.Decision, item.LatestDecision.UnlockedTier, item.LatestDecision.Reason)
+				c.DecisionReason = capitalised(item.LatestDecision.Reason)
+			}
 			if signedOut {
 				provider.StaleReason = creditsSignedOutLine
 			}

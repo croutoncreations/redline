@@ -24,6 +24,8 @@ class CreditsModelsTest {
            "promo_label":"${'$'}62.40 of ${'$'}100.00 left",
            "rule_line":"Jobs start above ${'$'}5.00 · Firesale: runs within 3 days of expiry",
            "paid_label":"${'$'}7.25 · shown only, never scheduled",
+           "decision_label":"Run now · firesale",
+           "decision_reason":"${'$'}62.40 of promotional credit expires in 2 days; running queued work before it lapses",
            "grants":[{"label":"ChatGPT subscription grant","amount_label":"${'$'}62.40 of ${'$'}100.00","expires_at":"2026-11-27T00:00:00Z"},
                      {"label":"Auto recharge","amount_label":"${'$'}7.25 of ${'$'}10.00","expires_at":"2027-10-15T19:00:00Z"},
                      {"label":"Purchased credit","amount_label":"${'$'}2.00 of ${'$'}2.00"}]},
@@ -43,6 +45,19 @@ class CreditsModelsTest {
         assertEquals("\$7.25 · shown only, never scheduled", credits.paidLabel)
         assertEquals(listOf("ChatGPT subscription grant", "Auto recharge", "Purchased credit"), credits.grants.map { it.label })
         assertFalse(credits.noPromo || credits.stale || credits.signedOut)
+        assertEquals("Run now · firesale", credits.decisionLabel)
+        assertEquals("\$62.40 of promotional credit expires in 2 days; running queued work before it lapses", credits.decisionReason)
+    }
+
+    @Test
+    fun `a stale balance's line says when it was last sampled, not the expiry`() {
+        val credits = decode(
+            """{"providers":[{"id":"api-credits","provider":"openai-api-credits","account_status":"stale","stale":true,
+              "credits":{"headline":"Last known ${'$'}62.40","detail":"Last sample 2 hrs ago","expires_at":"2026-11-27T00:00:00Z",
+               "remaining_percent":62,"stale":true}}]}""",
+        ).providers[0].credits!!
+        assertEquals("Last sample 2 hrs ago", creditsExpiryLine(credits, zone, now, Locale.US))
+        assertEquals("", credits.decisionLabel)
     }
 
     @Test
@@ -64,7 +79,7 @@ class CreditsModelsTest {
     fun `grants say when they expire, with the year when it is not this one`() {
         val grants = decode().providers[0].credits!!.grants
         assertEquals("expires Thu, Nov 26", creditGrantExpiry(grants[0], zone, now, Locale.US))
-        assertEquals("expires Oct 15, 2027", creditGrantExpiry(grants[1], zone, now, Locale.US))
+        assertEquals("expires Fri, Oct 15, 2027", creditGrantExpiry(grants[1], zone, now, Locale.US))
         assertEquals("no expiry", creditGrantExpiry(grants[2], zone, now, Locale.US))
     }
 

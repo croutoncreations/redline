@@ -94,6 +94,9 @@ function apiCreditsProviderFixture() {
   const start = new Date(observedMs + (2 * 24 + 5 - 30 * 24) * 3600 * 1000).toISOString();
   const rechargeStart = new Date(observedMs - 40 * 86400 * 1000).toISOString();
   const rechargeExpiry = new Date(observedMs + 325 * 86400 * 1000).toISOString();
+  // Sampled a minute before the frozen clock, so it reads "1 min ago", never
+  // a sample from the future.
+  const creditsObservedAt = new Date(observedMs - 60 * 1000).toISOString();
   return {
     id: 'credits-main', provider: 'openai-api-credits', label: 'Linked org', account_status: 'ok',
     policy: 'standard', policy_source: 'global', default_policy: 'standard',
@@ -101,7 +104,7 @@ function apiCreditsProviderFixture() {
     latest_decision: { decision: 'RUN', policy: 'standard', mode: 'api_credits', unlocked_tier: 'firesale', pace_gap: .55,
       reason: '$62.40 of promotional credit expires in 2 days; running queued work before it lapses' },
     snapshot: {
-      provider: 'openai-api-credits', observed_at: FIXTURE_NOW, source: 'native',
+      provider: 'openai-api-credits', observed_at: creditsObservedAt, source: 'native',
       weekly: { remaining: 0.624, resets_at: expiry, period_seconds: 2592000 },
       allowances: [{ key: 'weekly', source_label: 'Weekly', scope: 'account', role: 'weekly', remaining: 0.624, resets_at: expiry, period_duration_seconds: 2592000 }],
       credits: {
@@ -123,7 +126,7 @@ function apiCreditsNoPromoFixture() {
   const paid = item.snapshot.credits.grants[1];
   item.latest_decision = { decision: 'WAIT', policy: 'standard', mode: 'api_credits', reason: 'no promotional API credit is available' };
   item.snapshot = {
-    provider: 'openai-api-credits', observed_at: FIXTURE_NOW, source: 'native', weekly_unavailable: true,
+    provider: 'openai-api-credits', observed_at: item.snapshot.observed_at, source: 'native', weekly_unavailable: true,
     credits: { promo_remaining: 0, promo_granted: 0, next_expiring: 0, paid_available: 7.25, min_promo_balance: 5,
       pacing: 'firesale', firesale_window_seconds: 259200, grants: [paid] },
   };

@@ -45,9 +45,15 @@ type CreditsView struct {
 	// no paid credit and the row is omitted.
 	PaidLabel string            `json:"paid_label,omitempty"`
 	Grants    []CreditGrantView `json:"grants,omitempty"`
-	NoPromo   bool              `json:"no_promo,omitempty"`
-	Stale     bool              `json:"stale,omitempty"`
-	SignedOut bool              `json:"signed_out,omitempty"`
+	// DecisionLabel is the scheduler's decision in the dashboards' words:
+	// "Run now · firesale", "Held · at the floor", …; DecisionReason is its
+	// reason, first letter capitalised. Both empty when signed out or stale,
+	// where the last decision was about a balance that is no longer current.
+	DecisionLabel  string `json:"decision_label,omitempty"`
+	DecisionReason string `json:"decision_reason,omitempty"`
+	NoPromo        bool   `json:"no_promo,omitempty"`
+	Stale          bool   `json:"stale,omitempty"`
+	SignedOut      bool   `json:"signed_out,omitempty"`
 }
 
 // CreditGrantView is one grant with money left.
@@ -81,12 +87,62 @@ func creditsView(snapshot *decision.UsageSnapshot, stale, signedOut bool, now ti
 	}
 	switch {
 	case signedOut:
-		view.Headline = "Session key needed"
-		view.Detail = creditsSignedOutLine
+		// Only the fix: the old balance, rule, paid credit and grants are not
+		// shown beside "Session key needed".
+		*view = CreditsView{SignedOut: true, Headline: "Session key needed", Detail: creditsSignedOutLine}
 	case stale:
 		view.Headline = "Last known " + usd(balance.PromoRemaining)
+		view.Detail = "Last sample " + creditsAgo(now.Sub(snapshot.ObservedAt))
 	}
 	return view
+}
+
+// creditsDecisionLabel words a credits decision as every dashboard does.
+func creditsDecisionLabel(decision, tier, reason string) string {
+	switch decision {
+	case "RUN", "ADMIT":
+		if tier == "firesale" {
+			return "Run now · firesale"
+		}
+		return "Run now"
+	case "UNKNOWN":
+		return "Dispatch held"
+	}
+	switch {
+	case strings.Contains(reason, "floor"):
+		return "Held · at the floor"
+	case strings.Contains(reason, "no promotional"):
+		return "Held · no promotional credit"
+	default:
+		return "Holding credit"
+	}
+}
+
+// capitalised upper-cases a sentence's first letter, adding no full stop.
+func capitalised(text string) string {
+	if text == "" {
+		return ""
+	}
+	return strings.ToUpper(text[:1]) + text[1:]
+}
+
+// creditsAgo is "2 hrs ago", "5 mins ago" or "1 day ago", as the web
+// dashboards word a sample's age.
+func creditsAgo(d time.Duration) string {
+	seconds := max(int(d.Seconds()), 0)
+	amount, unit := seconds, "sec"
+	switch {
+	case seconds >= 86400:
+		amount, unit = int(math.Round(float64(seconds)/86400)), "day"
+	case seconds >= 3600:
+		amount, unit = int(math.Round(float64(seconds)/3600)), "hr"
+	case seconds >= 60:
+		amount, unit = int(math.Round(float64(seconds)/60)), "min"
+	}
+	if amount != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s ago", amount, unit)
 }
 
 func fillCredits(view *CreditsView, balance *decision.CreditsBalance, weeklyUnavailable bool, now time.Time) {

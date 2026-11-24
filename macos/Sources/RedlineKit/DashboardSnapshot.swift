@@ -254,6 +254,9 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let latestDecision: String?
     /// The scheduler's sentence for that decision; nil when not sent.
     public let latestDecisionReason: String?
+    /// The tier the decision unlocked ("firesale" for an expiring credits
+    /// balance); nil when not sent.
+    public let latestDecisionTier: String?
     public let weeklyPolicy: String?
 
     public init(
@@ -268,6 +271,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         accountStatus: String? = nil,
         latestDecision: String? = nil,
         latestDecisionReason: String? = nil,
+        latestDecisionTier: String? = nil,
         weeklyPolicy: String? = nil
     ) {
         self.id = id
@@ -281,6 +285,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.accountStatus = accountStatus
         self.latestDecision = latestDecision
         self.latestDecisionReason = latestDecisionReason
+        self.latestDecisionTier = latestDecisionTier
         self.weeklyPolicy = weeklyPolicy
     }
 
@@ -296,6 +301,12 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     private struct LatestDecision: Codable {
         let decision: String?
         var reason: String? = nil
+        var unlockedTier: String? = nil
+
+        enum CodingKeys: String, CodingKey {
+            case decision, reason
+            case unlockedTier = "unlocked_tier"
+        }
     }
 
     private struct UsageSourceStatus: Codable {
@@ -317,6 +328,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         let latest = (try? container.decodeIfPresent(LatestDecision.self, forKey: .latestDecision)) ?? nil
         latestDecision = latest?.decision
         latestDecisionReason = latest?.reason
+        latestDecisionTier = latest?.unlockedTier
         weeklyPolicy = try container.decodeIfPresent(String.self, forKey: .weeklyPolicy)
     }
 
@@ -335,7 +347,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         try container.encodeIfPresent(accountStatus, forKey: .accountStatus)
         try container.encodeIfPresent(weeklyPolicy, forKey: .weeklyPolicy)
         if latestDecision != nil || latestDecisionReason != nil {
-            try container.encode(LatestDecision(decision: latestDecision, reason: latestDecisionReason), forKey: .latestDecision)
+            try container.encode(LatestDecision(decision: latestDecision, reason: latestDecisionReason, unlockedTier: latestDecisionTier), forKey: .latestDecision)
         }
     }
 

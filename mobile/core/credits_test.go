@@ -20,7 +20,7 @@ func creditsAccountPayload(status string, stale bool, reason string) string {
 	}
 	return `{"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"` + status + `",
 	  "snapshot_stale":` + staleJSON + `,"usage_source":{"active":"apicredits","reason":"` + reason + `"},
-	  "latest_decision":{"decision":"RUN","projected_trigger_at":"2026-10-09T12:00:04Z","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+	  "latest_decision":{"decision":"RUN","unlocked_tier":"firesale","projected_trigger_at":"2026-10-09T12:00:04Z","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
 	  "scheduling":{"rolling_reserve":0.25,"pace_thresholds":[]},
 	  "snapshot":{"provider":"openai-api-credits","observed_at":"` + cursorNow.Add(-time.Minute).Format(time.RFC3339) + `",
 	   "weekly":{"remaining":0.624,"resets_at":"` + expires + `","period_seconds":2592000},
@@ -103,8 +103,13 @@ func TestCreditsAccountWithNoPromotionalCredit(t *testing.T) {
 
 func TestCreditsAccountStaleAndSignedOut(t *testing.T) {
 	stale := renderPayload(t, `{"providers":[`+creditsAccountPayload("stale", true, "")+`]}`).Providers[0]
-	if stale.Credits == nil || !stale.Credits.Stale || stale.Credits.Headline != "Last known $62.40" {
+	if stale.Credits == nil || !stale.Credits.Stale || stale.Credits.Headline != "Last known $62.40" ||
+		stale.Credits.Detail != "Last sample 1 min ago" {
 		t.Fatalf("stale = %+v", stale.Credits)
+	}
+	// The last RUN was about a balance that is no longer current.
+	if stale.Credits.DecisionLabel != "" || stale.Credits.DecisionReason != "" {
+		t.Fatalf("stale decision = %q / %q", stale.Credits.DecisionLabel, stale.Credits.DecisionReason)
 	}
 	signedOut := renderPayload(t, `{"providers":[`+creditsAccountPayload("signed_out", true, "signed_out")+`]}`).Providers[0]
 	credits := signedOut.Credits
@@ -114,6 +119,11 @@ func TestCreditsAccountStaleAndSignedOut(t *testing.T) {
 	}
 	if signedOut.StaleReason != credits.Detail {
 		t.Fatalf("stale reason = %q", signedOut.StaleReason)
+	}
+	// Signed out with a stale RUN decision and an old balance: only the fix.
+	if credits.DecisionLabel != "" || credits.DecisionReason != "" || credits.PromoLabel != "" || credits.RuleLine != "" ||
+		credits.PaidLabel != "" || len(credits.Grants) != 0 || credits.RemainingPercent != 0 {
+		t.Fatalf("signed out shows more than the fix: %+v", credits)
 	}
 	// Signed out with no snapshot at all still names the fix.
 	bare := renderPayload(t, `{"providers":[{"id":"api-credits","provider":"openai-api-credits","account_status":"signed_out",
@@ -150,5 +160,32 @@ func TestOtherProvidersCarryNoCreditsView(t *testing.T) {
 func TestDisplayProviderNamesCreditsAccounts(t *testing.T) {
 	if got := displayProvider("openai-api-credits"); got != "OpenAI API credits" {
 		t.Fatalf("displayProvider = %q", got)
+	}
+}
+
+func TestCreditsDecisionWordingMatchesTheDashboards(t *testing.T) {
+	fresh := renderPayload(t, `{"providers":[`+creditsAccountPayload("ok", false, "")+`]}`).Providers[0].Credits
+	if fresh.DecisionLabel != "Run now · firesale" ||
+		fresh.DecisionReason != "$62.40 of promotional credit expires in 2 days; running queued work before it lapses" {
+		t.Fatalf("decision = %q / %q", fresh.DecisionLabel, fresh.DecisionReason)
+	}
+	for _, c := range []struct{ decision, tier, reason, want string }{
+		{"RUN", "", "x", "Run now"},
+		{"WAIT", "", "promotional credit is at or below the $5.00 floor", "Held · at the floor"},
+		{"WAIT", "", "no promotional API credit is available", "Held · no promotional credit"},
+		{"WAIT", "", "holding promotional credit until it is within 3 days of expiring", "Holding credit"},
+		{"UNKNOWN", "", "usage unavailable", "Dispatch held"},
+	} {
+		if got := creditsDecisionLabel(c.decision, c.tier, c.reason); got != c.want {
+			t.Errorf("creditsDecisionLabel(%q, %q) = %q, want %q", c.decision, c.reason, got, c.want)
+		}
+	}
+	if got := capitalised("no promotional API credit is available"); got != "No promotional API credit is available" {
+		t.Errorf("capitalised = %q", got)
+	}
+	for d, want := range map[time.Duration]string{30 * time.Second: "30 secs ago", time.Minute: "1 min ago", 2 * time.Hour: "2 hrs ago", 26 * time.Hour: "1 day ago"} {
+		if got := creditsAgo(d); got != want {
+			t.Errorf("creditsAgo(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

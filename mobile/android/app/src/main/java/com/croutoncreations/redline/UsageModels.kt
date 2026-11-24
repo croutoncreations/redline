@@ -205,6 +205,13 @@ data class CreditsView(
     /** "\$7.25 · shown only, never scheduled"; empty when there is no paid credit. */
     @SerialName("paid_label") val paidLabel: String = "",
     val grants: List<CreditGrantView> = emptyList(),
+    /**
+     * "Run now · firesale", "Held · at the floor", …: the same words as every
+     * dashboard. Empty when signed out or stale.
+     */
+    @SerialName("decision_label") val decisionLabel: String = "",
+    /** The scheduler's reason, first letter capitalised. */
+    @SerialName("decision_reason") val decisionReason: String = "",
     @SerialName("no_promo") val noPromo: Boolean = false,
     val stale: Boolean = false,
     /** The platform session key is missing or expired. It is re-pasted on the computer, never here. */
@@ -223,7 +230,7 @@ data class CreditGrantView(
 
 /**
  * A credit expiry as a calendar date in the reader's timezone: "Thu, Nov 26",
- * or "Oct 15, 2027" when it is not this year. "" when unparseable.
+ * or "Fri, Oct 15, 2027" when it is not this year. "" when unparseable.
  */
 fun creditDateLabel(
     at: String,
@@ -233,7 +240,7 @@ fun creditDateLabel(
 ): String {
     val instant = runCatching { java.time.Instant.parse(at) }.getOrNull() ?: return ""
     val date = instant.atZone(zone)
-    val pattern = if (date.year == now.atZone(zone).year) "EEE, MMM d" else "MMM d, yyyy"
+    val pattern = if (date.year == now.atZone(zone).year) "EEE, MMM d" else "EEE, MMM d, yyyy"
     return date.format(java.time.format.DateTimeFormatter.ofPattern(pattern, locale))
 }
 
@@ -244,7 +251,8 @@ fun creditsExpiryLine(
     now: java.time.Instant = java.time.Instant.now(),
     locale: java.util.Locale = java.util.Locale.getDefault(),
 ): String {
-    if (credits.signedOut || credits.noPromo) return credits.detail
+    // Signed out the detail is the fix; stale it is "Last sample 2 hrs ago".
+    if (credits.signedOut || credits.noPromo || credits.stale) return credits.detail
     val date = creditDateLabel(credits.expiresAt, zone, now, locale)
     return listOf(credits.detail, date).filter { it.isNotEmpty() }.joinToString(" · ")
 }

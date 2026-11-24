@@ -88,13 +88,14 @@ public struct APICreditGrant: Codable, Sendable, Equatable {
 /// Everything the native tray and popover say about one OpenAI API credits
 /// account. Dollars, never a weekly, monthly or 5-hour window.
 public struct APICreditsCard: Sendable, Equatable {
-    public enum Tone: Sendable, Equatable { case normal, warning, danger }
+    /// Normal is healthy (green); muted is a last-known, stale balance.
+    public enum Tone: Sendable, Equatable { case normal, warning, danger, muted }
 
     public struct Grant: Sendable, Equatable, Hashable {
         public let label: String
         /// "$62.40 of $100.00".
         public let value: String
-        /// "expires Nov 27"; nil when the grant does not expire.
+        /// "expires Fri, Nov 27"; nil when the grant does not expire.
         public let expires: String?
 
         public init(label: String, value: String, expires: String?) {
@@ -113,13 +114,19 @@ public struct APICreditsCard: Sendable, Equatable {
     public let paused: Bool
     /// "$62.40 left", "$0.00 promo", "Last known $62.40", "Session key needed", or "—".
     public let headline: String
-    /// "Expires in 2 days · Fri, Nov 27", "No promotional credit", or the fix.
+    /// "Expires in 2 days · Fri, Nov 27", "No promotional credit",
+    /// "Last sample 2 hrs ago", or the fix.
     public let secondary: String
-    /// 0–1 of the promotional grant left; nil when there is no current number.
+    /// 0–1 of the promotional grant left (last known when stale); nil when
+    /// there is no number, as when signed out.
     public let progress: Double?
     public let tone: Tone
-    /// "RUN · $62.40 of promotional credit expires in 2 days; …".
+    /// "Run now · firesale", "Held · at the floor", …: the same words as the
+    /// web dashboards. Nil when signed out or stale, where the last decision
+    /// was about a balance that is no longer current.
     public let decision: String?
+    /// The scheduler's reason, first letter capitalised; nil with no decision.
+    public let decisionReason: String?
     /// "$62.40 of $100.00 left"; nil without promotional credit.
     public let promoLine: String?
     /// "Jobs start above $5.00 · Firesale: runs within 3 days of expiry".
@@ -145,12 +152,16 @@ public struct APICreditsCard: Sendable, Equatable {
         let money = { (value: Double) in CursorUsageFormat.money(value, locale: locale) }
         let dates = CreditDates(now: now, calendar: calendar, locale: locale)
 
-        let decisionWord = account.latestDecision?.uppercased()
-        let reason = account.latestDecisionReason.flatMap { $0.isEmpty ? nil : $0 }
-        decision = [decisionWord, reason].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
-
         let credits = status == .signedOut ? nil : account.snapshot?.credits
         let outOfDate = status != .ok
+        let reason = account.latestDecisionReason.flatMap { $0.isEmpty ? nil : $0 }
+        if outOfDate || account.latestDecision == nil {
+            decision = nil
+            decisionReason = nil
+        } else {
+            decision = Self.decisionLabel(account.latestDecision, tier: account.latestDecisionTier, reason: reason)
+            decisionReason = reason.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        }
         let noPromo = !outOfDate && credits != nil && account.snapshot?.weeklyUnavailable == true
         let expiry = TrayTime.parse(credits?.expiresAt)
 
@@ -160,7 +171,7 @@ public struct APICreditsCard: Sendable, Equatable {
             secondary = "Run redline account set-session-key \(account.id)"
         case .stale:
             headline = credits.map { "Last known \(money($0.promoRemaining))" } ?? "—"
-            secondary = expiry.map { "Out of date · expires \(dates.day($0))" } ?? "Out of date"
+            secondary = TrayTime.parse(account.snapshot?.observedAt).map { "Last sample \(dates.ago($0))" } ?? "Out of date"
         case .error, .noData:
             headline = "—"
             secondary = status.word
@@ -181,12 +192,13 @@ public struct APICreditsCard: Sendable, Equatable {
 
         if noPromo {
             progress = 0
-        } else if !outOfDate, let credits, credits.promoGranted > 0 {
+        } else if status == .ok || status == .stale, let credits, credits.promoGranted > 0 {
             progress = min(max(credits.promoRemaining / credits.promoGranted, 0), 1)
         } else {
             progress = nil
         }
         tone = switch progress {
+        case _ where status == .stale: .muted
         case let value? where value < 0.15: .danger
         case let value? where value < 0.35: .warning
         default: .normal
@@ -216,6 +228,19 @@ public struct APICreditsCard: Sendable, Equatable {
                 value: "\(money(grant.remaining)) of \(money(grant.amount))",
                 expires: TrayTime.parse(grant.expiresAt).map { "expires \(dates.date($0))" }
             )
+        }
+    }
+
+    /// The credits decision in the web dashboards' words.
+    static func decisionLabel(_ decision: String?, tier: String?, reason: String?) -> String {
+        switch decision?.uppercased() {
+        case "RUN", "ADMIT": return tier == "firesale" ? "Run now · firesale" : "Run now"
+        case "UNKNOWN": return "Dispatch held"
+        default:
+            let reason = reason ?? ""
+            if reason.contains("floor") { return "Held · at the floor" }
+            if reason.contains("no promotional") { return "Held · no promotional credit" }
+            return "Holding credit"
         }
     }
 
@@ -252,10 +277,21 @@ private struct CreditDates {
     /// "Fri, Nov 27".
     func day(_ date: Date) -> String { format(date, template: "EEEMMMd") }
 
-    /// "Nov 27", with the year when it is not this year.
+    /// "Fri, Nov 27", with the year when it is not this year.
     func date(_ date: Date) -> String {
         let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
-        return format(date, template: sameYear ? "MMMd" : "MMMdyyyy")
+        return format(date, template: sameYear ? "EEEMMMd" : "EEEMMMdyyyy")
+    }
+
+    /// "2 hrs ago", "5 mins ago", "1 day ago": the web dashboards' wording.
+    func ago(_ date: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        let (amount, unit): (Int, String) =
+            seconds < 60 ? (seconds, "sec")
+            : seconds < 3600 ? (Int((Double(seconds) / 60).rounded()), "min")
+            : seconds < 86400 ? (Int((Double(seconds) / 3600).rounded()), "hr")
+            : (Int((Double(seconds) / 86400).rounded()), "day")
+        return "\(amount) \(unit)\(amount == 1 ? "" : "s") ago"
     }
 
     private func format(_ date: Date, template: String) -> String {

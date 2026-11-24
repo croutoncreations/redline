@@ -215,16 +215,18 @@ function creditsSummary(item) {
 function creditsMeters(item) {
   const credits = item.snapshot?.credits;
   if (!credits || creditsSignedOut(item)) return '';
-  const lastKnown = item.snapshot_stale ? 'Last known ' : '';
+  const lastKnown = item.snapshot_stale ? 'Last known p' : 'P';
   const fraction = creditsPromoFraction(credits), v = Number((fraction * 100).toFixed(1));
+  // A stale balance is a last-known figure: muted, never coloured as current.
+  const tone = item.snapshot_stale ? 'muted' : creditsTone(fraction);
   const promo = credits.promo_remaining > 0
     ? `<div data-testid="credits-promo">
-        <div class="m-meter-head"><span>${esc(lastKnown)}Promotional credit</span><b>${esc(`${money(credits.promo_remaining)} of ${money(credits.promo_granted)} left`)}</b></div>
-        <progress class="m-meter-bar ${esc(creditsTone(fraction))}" max="100" value="${v}" aria-label="${v}% of promotional credit left"></progress>
+        <div class="m-meter-head"><span>${esc(lastKnown)}romotional credit</span><b>${esc(`${money(credits.promo_remaining)} of ${money(credits.promo_granted)} left`)}</b></div>
+        <progress class="m-meter-bar ${esc(tone)}" max="100" value="${v}" aria-label="${v}% of promotional credit left"></progress>
         <div class="m-reset">${esc(creditsExpiryLine(credits))}</div>
       </div>`
     : `<div data-testid="credits-promo">
-        <div class="m-meter-head"><span>${esc(lastKnown)}Promotional credit</span><b>${esc(money(0))}</b></div>
+        <div class="m-meter-head"><span>${esc(lastKnown)}romotional credit</span><b>${esc(money(0))}</b></div>
         <progress class="m-meter-bar" max="100" value="0" aria-label="No promotional credit"></progress>
         <div class="m-reset">No promotional credit</div>
       </div>`;
@@ -243,19 +245,24 @@ function creditsHeadline(item) {
   const summary = creditsSummary(item);
   // No promotional credit is a state, not an alarm: muted, like a stale figure.
   const tone = summary.fraction == null || !(item.snapshot?.credits?.promo_remaining > 0) ? 'muted' : creditsTone(summary.fraction);
+  // Signed out, the fix is a sentence: it gets its own row under the name so
+  // the name never squeezes into three lines.
+  const secondary = `<em data-testid="credits-secondary">${esc(summary.secondary)}</em>`;
   return `<span class="m-credits-headline">
       <b class="${esc(tone)}" data-testid="credits-headline">${esc(summary.headline)}</b>
-      <em data-testid="credits-secondary">${esc(summary.secondary)}</em>
-    </span>`;
+      ${creditsSignedOut(item) ? '' : secondary}
+    </span>${creditsSignedOut(item) ? `<span class="m-credits-fix">${secondary}</span>` : ''}`;
 }
 // A credits balance is held by its floor or pacing, not a weekly surplus.
+// The labels match dashboard.js creditsDecisionLabel, macOS and the phone core.
 function creditsPressure(d) {
   if (!d) return {label: 'Evaluating', tone: 'neutral'};
   if (d.decision === 'RUN' || d.decision === 'ADMIT') return {label: d.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now', tone: 'triggered'};
   if (d.decision === 'UNKNOWN') return {label: 'Dispatch held', tone: 'near'};
   const reason = d.reason || '';
-  return {label: /no promotional/.test(reason) ? 'Held · no promo credit' : /floor/.test(reason) ? 'Held · at the floor' : 'Holding credit', tone: 'neutral'};
+  return {label: /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit', tone: 'neutral'};
 }
+const creditsReasonText = (reason) => reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : '';
 function providerPressure(item) {
   if (item.paused) return {label: 'Paused', tone: 'paused'};
   if (item.run_login_unknown) return {label: 'Held · login unknown', tone: 'near'};
@@ -480,11 +487,14 @@ function renderUsageDetail(item, opts = {}) {
     </details>`;
   } else if (d && outOfDate) {
     decisionHTML = '';
+  } else if (credits && (creditsSignedOut(item) || item.snapshot_stale)) {
+    // Signed out or stale, the last decision is about an old balance.
+    decisionHTML = '';
   } else if (d && credits) {
     // The credits decision's reason already says why, in dollars.
     decisionHTML = `<details class="m-provider-decision ${esc(pressure.tone)}" data-testid="decision-detail">
       <summary><b>${esc(pressure.label)}</b></summary>
-      <span>${esc(d.reason || '')}</span>
+      <span>${esc(creditsReasonText(d.reason))}</span>
     </details>`;
   } else if (d) {
     const detail = d.projected_trigger_at && new Date(d.projected_trigger_at) > Date.now()
@@ -514,7 +524,7 @@ function renderUsageDetail(item, opts = {}) {
     <div class="m-source-meta">
       ${esc(item.usage_source?.active || 'unknown')} source
       ${credits && creditsSignedOut(item)
-        ? `<span class="m-source-error" data-testid="signed-out">${esc(CREDITS_SIGNED_OUT)}</span>`
+        ? '' // the header already says to re-paste the key
         : accountMismatch(item)
         ? '<span class="m-source-error" data-testid="account-mismatch">Cursor CLI and app are on different accounts · sign both in to the same one on your Mac</span>'
         : signedOut(item)

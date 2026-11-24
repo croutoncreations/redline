@@ -691,7 +691,26 @@ internal fun ProviderDetails(
             }
             // A seat with no weekly limit already says dispatch holds, just
             // above; a red "Waiting" line would only repeat it as alarm.
-            provider.scheduling?.takeIf { !staleNumbers && !(provider.weeklyNotReported && !it.admits) }?.let { scheduling ->
+            // A credits account says its decision in the dashboards' words,
+            // and nothing at all when signed out or stale.
+            provider.credits?.takeIf { it.decisionLabel.isNotEmpty() }?.let { credits ->
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(if (provider.scheduling?.admits == true) Good else Accent),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        listOf(credits.decisionLabel, credits.decisionReason).filter { it.isNotEmpty() }.joinToString(" · "),
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+            provider.scheduling?.takeIf { provider.credits == null && !staleNumbers && !(provider.weeklyNotReported && !it.admits) }?.let { scheduling ->
                 val line = schedulingLine(scheduling)
                 if (line.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))

@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const { loadDashboard, loadMobileDashboard, dashboardFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture } = require('./harness');
+const { loadDashboard, loadMobileDashboard, dashboardFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture } = require('./harness');
 
 // An openai-api-credits account is a dollar balance, not a subscription
 // window: it reads in dollars with the promotional grant's expiry, never as a
@@ -28,6 +28,35 @@ function staleCredits(credits) {
 
 const forbidden = /weekly|monthly|5h|5-hour|No 5h limit|Week resets|Month resets/i;
 
+function staleNotSignedOut(credits) {
+  staleCredits(credits);
+  credits.snapshot.observed_at = new Date(Date.parse(credits.snapshot.observed_at) - 2 * 3600 * 1000).toISOString();
+}
+
+// The promotional balance at a given fraction of its grant.
+function promoAt(fraction) {
+  return credits => {
+    credits.snapshot.credits.promo_remaining = 100 * fraction;
+    credits.snapshot.credits.grants[0].remaining = 100 * fraction;
+  };
+}
+
+// Rule 10: Claude, Codex and Cursor render byte-for-byte the same with or
+// without a credits account beside them.
+async function existingCardsHTML(page, load, withAccount) {
+  const dashboard = dashboardFixture();
+  dashboard.providers.push(cursorProviderFixture());
+  if (withAccount) dashboard.providers.push(apiCreditsProviderFixture());
+  await load(page, { dashboard });
+  const html = {};
+  for (const id of ['claude-main', 'codex-main', 'cursor-main']) {
+    const card = page.locator(`[data-provider-id="${id}"]`).first();
+    await expect(card).toBeAttached();
+    html[id] = await card.evaluate(node => node.innerHTML);
+  }
+  return html;
+}
+
 test.describe('OpenAI API credits account (desktop)', () => {
   test.skip(({ isMobile }) => isMobile, 'desktop dashboard');
   test.use({ timezoneId: 'America/Los_Angeles', locale: 'en-US' });
@@ -50,7 +79,8 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
     const detail = card.locator('.provider-detail');
     await expect(detail.locator('.decision-detail')).toContainText('Run now · firesale');
-    await expect(detail.locator('.decision-detail')).toContainText('$62.40 of promotional credit expires in 2 days');
+    await expect(detail.locator('.decision-detail')).toContainText('$62.40 of promotional credit expires in 2 days; running queued work before it lapses');
+    await expect(detail.locator('.decision-detail')).not.toContainText('lapses.');
     const promo = detail.getByTestId('credits-promo');
     await expect(promo).toContainText('Promotional credit');
     await expect(promo).toContainText('$62.40 of $100.00 left');
@@ -82,12 +112,21 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(page.getByTestId('credits-rules')).toHaveText('Jobs start above $5.00 · Even pacing across the grant');
   });
 
-  test('a stale balance reads as last known', async ({ page }) => {
-    await loadDashboard(page, { dashboard: withCredits(staleCredits) });
+  test('a stale balance reads as last known, with muted bars', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits(staleNotSignedOut) });
     const card = page.locator('[data-provider-id="credits-main"]');
     await expect(card).toHaveClass(/stale/);
     await expect(card.locator('.provider-copy-line b')).toHaveText('Last known $62.40');
+    await expect(card.locator('.provider-window-line')).toHaveText('Last sample 2 hrs ago');
+    await expect(card.locator('.compact-progress')).toHaveClass(/muted/);
+    await expect(card.locator('.compact-progress')).not.toHaveClass(/danger|warn/);
     await expect(card.locator('.provider-trigger')).not.toContainText(forbidden);
+    await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
+    const promo = card.getByTestId('credits-promo');
+    await expect(promo).toContainText('Last known promotional credit');
+    await expect(promo.locator('progress')).toHaveClass(/muted/);
+    await expect(card.locator('.decision-detail')).toContainText('Jobs are held until the balance can be read');
+    await expect(card.locator('.decision-detail')).not.toContainText(/Run now|running queued work/);
   });
 
   test('signed out asks for the session key with the CLI command', async ({ page }) => {
@@ -96,8 +135,79 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(card.locator('.provider-copy-line b')).toHaveText('Session key needed');
     await expect(card.locator('.provider-window-line')).toHaveText('Run redline account set-session-key credits-main');
     await expect(card.locator('.provider-pressure')).toHaveText('Session key needed');
+    // The name stays readable beside the headline (L1).
+    const name = card.locator('.provider-name-text');
+    expect(await name.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     // No key entry: the only input is the existing parallel-runs limit.
     await expect(card.locator('input:not([data-provider-concurrency]), textarea')).toHaveCount(0);
+  });
+
+  test('signed out with a stale RUN decision shows only the fix in details', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits(signedOutCredits) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
+    const detail = card.locator('.provider-detail');
+    await expect(detail.getByTestId('credits-signed-out')).toHaveText(/Session key needed\s*Run redline account set-session-key credits-main/);
+    await expect(detail).not.toContainText(/Run now|running queued work|Last known|Promotional credit|Paid credit|Grants/);
+    await expect(detail.locator('progress')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-promo')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-paid')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-grant')).toHaveCount(0);
+  });
+
+  test('bars are green when healthy, amber below 35% and red below 15%', async ({ page }) => {
+    const classes = async (fraction) => {
+      await loadDashboard(page, { dashboard: withCredits(promoAt(fraction)) });
+      const card = page.locator('[data-provider-id="credits-main"]');
+      return [await card.locator('.compact-progress').getAttribute('class'), await card.getByTestId('credits-promo').locator('progress').getAttribute('class')];
+    };
+    await classes(0.624);
+    // The credits bar's colour comes from its own rule, not the shared red accent.
+    const fill = await page.evaluate(() => [...document.styleSheets].flatMap(sheet => [...sheet.cssRules])
+      .filter(rule => rule.selectorText && /^\.credits-progress(\.\w+)?::-webkit-progress-value$/.test(rule.selectorText))
+      .map(rule => [rule.selectorText, rule.style.background || rule.style.backgroundColor]));
+    expect(Object.fromEntries(fill)).toEqual({
+      '.credits-progress::-webkit-progress-value': 'var(--green)',
+      '.credits-progress.warn::-webkit-progress-value': 'var(--amber)',
+      '.credits-progress.danger::-webkit-progress-value': 'rgb(255, 123, 114)',
+      '.credits-progress.muted::-webkit-progress-value': 'var(--muted)',
+    });
+    for (const [fraction, tone] of [[0.624, null], [0.36, null], [0.30, 'warn'], [0.16, 'warn'], [0.10, 'danger']]) {
+      for (const cls of await classes(fraction)) {
+        expect(cls).toMatch(/\bcredits-progress\b/);
+        if (tone) expect(cls).toMatch(new RegExp(`\\b${tone}\\b`));
+        else expect(cls).not.toMatch(/\b(warn|danger|muted)\b/);
+      }
+    }
+  });
+
+  test('held decisions use the shared wording', async ({ page }) => {
+    const cases = [
+      ['promotional credit is at or below the $5.00 floor', 'Held · at the floor', 'Promotional credit is at or below the $5.00 floor'],
+      ['holding promotional credit until it is within 3 days of expiring', 'Holding credit', 'Holding promotional credit until it is within 3 days of expiring'],
+    ];
+    for (const [reason, label, detail] of cases) {
+      await loadDashboard(page, { dashboard: withCredits(credits => { credits.latest_decision = { decision: 'WAIT', mode: 'api_credits', reason }; }) });
+      const card = page.locator('[data-provider-id="credits-main"]');
+      await expect(card.locator('.provider-pressure')).toHaveText(label);
+      await expect(card.locator('.decision-detail > span')).toHaveText(detail);
+    }
+    await loadDashboard(page, { dashboard: withCredits(null, apiCreditsNoPromoFixture) });
+    await expect(page.locator('[data-provider-id="credits-main"] .provider-pressure')).toHaveText('Held · no promotional credit');
+  });
+
+  test('onboarding speaks of the balance, not installs or subscriptions', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits() });
+    await page.evaluate(() => renderOnboardingAccounts());
+    const article = page.locator('#onboarding-accounts .onboarding-account', { hasText: 'OpenAI API credits' });
+    await expect(article).toContainText('Balance read from OpenAI');
+    await expect(article).not.toContainText(/Install|Subscription usage/);
+    await loadDashboard(page, { dashboard: withCredits(signedOutCredits) });
+    await page.evaluate(() => renderOnboardingAccounts());
+    const out = page.locator('#onboarding-accounts .onboarding-account', { hasText: 'OpenAI API credits' });
+    await expect(out).toContainText('redline account set-session-key credits-main');
+    await expect(out).toContainText('redline account set-api-key credits-main');
+    await expect(out).not.toContainText(/Install|Subscription usage|Balance read/);
   });
 
   test('no promotional credit is not mistaken for an unreported weekly limit', async ({ page }) => {
@@ -118,6 +228,12 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(page.locator('[data-provider-id="claude-main"] .provider-copy-line b')).toHaveText('53% weekly');
     await expect(page.locator('[data-provider-id="codex-main"] .provider-copy-line b')).toHaveText('47% weekly');
     await expect(page.locator('[data-provider-id="codex-main"] .provider-window-line')).toContainText('No 5h limit');
+  });
+
+  test('Claude, Codex and Cursor cards are byte-for-byte unchanged by a credits account', async ({ page }) => {
+    const without = await existingCardsHTML(page, loadDashboard, false);
+    const withAccount = await existingCardsHTML(page, loadDashboard, true);
+    expect(withAccount).toEqual(without);
   });
 
   test('a profile on the credits account offers only pi and a custom command', async ({ page }) => {
@@ -164,10 +280,15 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await expect(detail).not.toContainText(forbidden);
   });
 
-  test('a stale balance reads as last known', async ({ page }) => {
-    await loadMobileDashboard(page, { dashboard: withCredits(staleCredits) });
+  test('a stale balance reads as last known, muted, without the old decision', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(staleNotSignedOut) });
     const card = page.locator('[data-provider-id="credits-main"]');
     await expect(card.getByTestId('credits-headline')).toHaveText('Last known $62.40');
+    await expect(card.getByTestId('credits-secondary')).toHaveText('Last sample 2 hrs ago');
+    const detail = page.getByTestId('provider-detail-credits-main');
+    await expect(detail.getByTestId('credits-promo')).toContainText('Last known promotional credit');
+    await expect(detail.getByTestId('credits-promo').locator('progress')).toHaveClass(/muted/);
+    await expect(detail.getByTestId('decision-detail')).toHaveCount(0);
   });
 
   test('signed out says to re-paste the key on the computer, with no key entry', async ({ page }) => {
@@ -175,9 +296,51 @@ test.describe('OpenAI API credits account (mobile)', () => {
     const card = page.locator('[data-provider-id="credits-main"]');
     await expect(card.getByTestId('credits-headline')).toHaveText('Session key needed');
     await expect(card.getByTestId('credits-secondary')).toHaveText('Session key expired · re-paste it on the computer running Redline');
-    await expect(card.getByTestId('signed-out')).toHaveText('Session key expired · re-paste it on the computer running Redline');
+    // Said once, not again in red in the source line.
+    await expect(card.getByText('Session key expired · re-paste it on the computer running Redline')).toHaveCount(1);
     await expect(card).not.toContainText('set-session-key');
     await expect(card.locator('input, textarea')).toHaveCount(0);
+  });
+
+  test('signed out with a stale RUN decision shows no reason or meters', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(signedOutCredits) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    const detail = page.getByTestId('provider-detail-credits-main');
+    await expect(detail.getByTestId('decision-detail')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-promo')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-paid')).toHaveCount(0);
+    await expect(detail.getByTestId('credits-grant')).toHaveCount(0);
+    await expect(card).not.toContainText(/Run now|running queued work|Last known/);
+  });
+
+  test('signed out keeps the name on at most two lines and the source line on one', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(signedOutCredits) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    const name = card.locator('.m-provider-name');
+    const lines = await name.evaluate(node => Math.round(node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight === 'normal' ? 16 : getComputedStyle(node).lineHeight)));
+    expect(lines).toBeLessThanOrEqual(2);
+    const source = card.locator('.m-source-meta');
+    expect((await source.textContent()).replace(/\s+/g, ' ').trim()).toBe('native source · 0/1 active · sampled 1 min ago');
+    const height = await source.evaluate(node => node.getBoundingClientRect().height);
+    expect(height).toBeLessThan(20);
+  });
+
+  test('held decisions use the shared wording, reason capitalised', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(null, apiCreditsNoPromoFixture) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await expect(card.locator('.m-provider-status')).toHaveText('Held · no promotional credit');
+    await expect(card.getByTestId('decision-detail').locator('span')).toHaveText('No promotional API credit is available');
+  });
+
+  test('even pacing states its rule', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(credits => { credits.snapshot.credits.pacing = 'even'; }) });
+    await expect(page.getByTestId('provider-detail-credits-main').getByTestId('credits-rules')).toHaveText('Jobs start above $5.00 · Even pacing across the grant');
+  });
+
+  test('Claude, Codex and Cursor cards are byte-for-byte unchanged by a credits account', async ({ page }) => {
+    const without = await existingCardsHTML(page, loadMobileDashboard, false);
+    const withAccount = await existingCardsHTML(page, loadMobileDashboard, true);
+    expect(withAccount).toEqual(without);
   });
 
   test('no promotional credit is not mistaken for an unreported weekly limit', async ({ page }) => {

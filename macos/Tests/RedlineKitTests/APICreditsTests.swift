@@ -23,7 +23,7 @@ private enum CreditsFixture {
 
     static let fresh = #"""
     {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"ok",
-     "latest_decision":{"decision":"RUN","mode":"api_credits","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+     "latest_decision":{"decision":"RUN","mode":"api_credits","unlocked_tier":"firesale","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
      "snapshot":{"provider":"openai-api-credits","observed_at":"2026-11-24T18:59:00Z",
        "weekly":{"remaining":0.624,"resets_at":"2026-11-27T00:00:00Z","period_seconds":2592000},
        \#(credits)}}
@@ -31,14 +31,19 @@ private enum CreditsFixture {
 
     static let stale = #"""
     {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"stale","snapshot_stale":true,
-     "snapshot":{"observed_at":"2026-11-24T10:00:00Z",
+     "latest_decision":{"decision":"RUN","mode":"api_credits","unlocked_tier":"firesale","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+     "snapshot":{"observed_at":"2026-11-24T17:00:00Z",
        "weekly":{"remaining":0.624,"resets_at":"2026-11-27T00:00:00Z","period_seconds":2592000},
        \#(credits)}}
     """#
 
     static let signedOut = #"""
     {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"signed_out","snapshot_stale":true,
-     "usage_source":{"reason":"signed_out","last_error":"no OpenAI platform session key is saved; run `redline account set-session-key api-credits`"}}
+     "latest_decision":{"decision":"RUN","mode":"api_credits","unlocked_tier":"firesale","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+     "usage_source":{"reason":"signed_out","last_error":"no OpenAI platform session key is saved; run `redline account set-session-key api-credits`"},
+     "snapshot":{"observed_at":"2026-11-24T17:00:00Z",
+       "weekly":{"remaining":0.624,"resets_at":"2026-11-27T00:00:00Z","period_seconds":2592000},
+       \#(credits)}}
     """#
 
     static let noPromo = #"""
@@ -112,10 +117,11 @@ private enum CreditsFixture {
     #expect(card.secondary == "Expires in 2 days · Fri, Nov 27")
     #expect(card.promoLine == "$62.40 of $100.00 left")
     #expect(card.rule == "Jobs start above $5.00 · Firesale: runs within 3 days of expiry")
-    #expect(card.decision == "RUN · $62.40 of promotional credit expires in 2 days; running queued work before it lapses")
+    #expect(card.decision == "Run now · firesale")
+    #expect(card.decisionReason == "$62.40 of promotional credit expires in 2 days; running queued work before it lapses")
     #expect(card.grants == [
-        APICreditsCard.Grant(label: "ChatGPT subscription grant", value: "$62.40 of $100.00", expires: "expires Nov 27"),
-        APICreditsCard.Grant(label: "Auto recharge", value: "$7.25 of $10.00", expires: "expires Oct 15, 2027"),
+        APICreditsCard.Grant(label: "ChatGPT subscription grant", value: "$62.40 of $100.00", expires: "expires Fri, Nov 27"),
+        APICreditsCard.Grant(label: "Auto recharge", value: "$7.25 of $10.00", expires: "expires Fri, Oct 15, 2027"),
     ])
 }
 
@@ -129,11 +135,17 @@ private enum CreditsFixture {
     #expect(try CreditsFixture.card(zeroPaid).paid == nil)
 }
 
-@Test func apiCreditsStaleSaysLastKnown() throws {
+@Test func apiCreditsStaleSaysLastKnownWithAMutedBarAndNoDecision() throws {
     let card = try CreditsFixture.card(CreditsFixture.stale)
     #expect(card.status == .stale)
     #expect(card.headline == "Last known $62.40")
-    #expect(card.progress == nil)
+    #expect(card.secondary == "Last sample 2 hrs ago")
+    #expect(card.progress == 0.624)
+    #expect(card.tone == .muted)
+    #expect(card.promoLine == "Last known $62.40 of $100.00 left")
+    // The RUN decision was about a balance that is no longer current.
+    #expect(card.decision == nil)
+    #expect(card.decisionReason == nil)
     #expect(card.attention)
 }
 
@@ -144,6 +156,13 @@ private enum CreditsFixture {
     #expect(card.secondary == "Run redline account set-session-key api-credits")
     #expect(card.progress == nil)
     #expect(card.attention)
+    // Signed out with a stale RUN decision and an old balance: only the fix.
+    #expect(card.decision == nil)
+    #expect(card.decisionReason == nil)
+    #expect(card.promoLine == nil)
+    #expect(card.rule == nil)
+    #expect(card.paid == nil)
+    #expect(card.grants.isEmpty)
     let account = try #require(try CreditsFixture.snapshot(CreditsFixture.signedOut).providers.first)
     #expect(account.staleSummary == "Session key needed · run redline account set-session-key api-credits")
 }
@@ -155,7 +174,9 @@ private enum CreditsFixture {
     #expect(card.progress == 0)
     #expect(card.paid == "$7.25 · shown only, never scheduled")
     #expect(card.rule == "Jobs start above $5.00 · Even pacing across the grant")
-    #expect(card.grants == [APICreditsCard.Grant(label: "Purchased credit", value: "$7.25 of $10.00", expires: "expires Oct 15, 2027")])
+    #expect(card.grants == [APICreditsCard.Grant(label: "Purchased credit", value: "$7.25 of $10.00", expires: "expires Fri, Oct 15, 2027")])
+    #expect(card.decision == "Held · no promotional credit")
+    #expect(card.decisionReason == "No promotional API credit is available")
 
     let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.noPromo))
     let badge = try #require(tray.providerBadges.first)
@@ -207,4 +228,14 @@ private enum CreditsFixture {
         #expect(APICreditsCard(account: provider) == nil)
         #expect(provider.accountWindowLabel == "Weekly")
     }
+}
+
+@Test func apiCreditsDecisionLabelsMatchTheWebDashboards() {
+    let label = APICreditsCard.decisionLabel
+    #expect(label("RUN", "firesale", "x") == "Run now · firesale")
+    #expect(label("RUN", nil, "x") == "Run now")
+    #expect(label("WAIT", nil, "promotional credit is at or below the $5.00 floor") == "Held · at the floor")
+    #expect(label("WAIT", nil, "no promotional API credit is available") == "Held · no promotional credit")
+    #expect(label("WAIT", nil, "holding promotional credit until it is within 3 days of expiring") == "Holding credit")
+    #expect(label("UNKNOWN", nil, "usage unavailable") == "Dispatch held")
 }

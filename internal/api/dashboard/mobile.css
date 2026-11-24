@@ -458,7 +458,7 @@ button { color: inherit; font: inherit; }
 /* OpenAI API credits: a dollar headline in place of rings, then rule, paid
    and grant rows in the detail. */
 .m-provider-logo.openai-api-credits .m-provider-fallback { color: var(--text); }
-.m-credits-headline { display: flex; flex-direction: column; align-items: flex-end; flex: none; max-width: 52%; text-align: right; gap: 3px; }
+.m-credits-headline { display: flex; flex-direction: column; align-items: flex-end; flex: 0 1 auto; min-width: 0; max-width: 52%; text-align: right; gap: 3px; }
 .m-credits-headline b { font: 600 15px ui-monospace, monospace; color: var(--green); white-space: nowrap; }
 .m-credits-headline b.warn { color: var(--amber); }
 .m-credits-headline b.danger { color: #ff7b72; }
@@ -474,3 +474,9 @@ button { color: inherit; font: inherit; }
 /* The account name is long; keep it and the status on their own lines. */
 .m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-name,
 .m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-status { display: block; }
+/* Signed out: the re-paste fix wraps on its own row below the name. */
+.m-provider-header:has(.m-credits-fix) { flex-wrap: wrap; row-gap: 4px; }
+.m-credits-fix { flex-basis: 100%; padding-left: 42px; color: #ff918b; font: normal 10px/1.4 ui-monospace, monospace; }
+.m-credits-fix em { font-style: normal; }
+.m-meter-bar.muted::-webkit-progress-value { background: var(--muted); }
+.m-meter-bar.muted::-moz-progress-bar { background: var(--muted); }
