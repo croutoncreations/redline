@@ -55,7 +55,7 @@
     <section class="panel queue-panel">
       <div class="section-head">
         <div><p class="eyebrow">DISPATCH QUEUE</p><h1>Scheduled jobs</h1></div>
-        <div class="section-actions"><span id="task-count" class="count">0 jobs</span><button id="manage-profiles" class="quiet-button" type="button">Profiles</button><button id="new-task" class="primary-button" type="button">+ New job</button></div>
+        <div class="section-actions"><span id="task-count" class="count">0 jobs</span><button id="manage-issues" class="quiet-button" type="button">Issue sources</button><button id="manage-profiles" class="quiet-button" type="button">Profiles</button><button id="new-task" class="primary-button" type="button">+ New job</button></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Priority</th><th>Job</th><th>Run when</th><th>Route</th><th>Recurrence</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -241,6 +241,39 @@
       </div>
       <div class="form-footer"><button id="delete-runtime" class="danger-button" type="button" hidden>Delete connection</button><div><button id="cancel-runtime" class="quiet-button" type="button">Cancel</button><button id="save-runtime" class="primary-button" type="submit">Save connection</button></div></div>
     </form>
+  </dialog>
+
+  <dialog id="issues-dialog" class="task-dialog" aria-labelledby="issues-title">
+    <div class="dialog-head"><div><p class="eyebrow">GITHUB BACKLOG</p><h2 id="issues-title">Issue sources</h2></div><button id="close-issues" type="button" aria-label="Close issue sources">×</button></div>
+    <div class="form-body issue-source-body">
+      <p>Choose eligible issues and an isolated execution profile. Redline uses your existing allowance rules. Each issue gets one coding attempt; retries are explicit.</p>
+      <div id="issues-error" class="form-error" role="alert" hidden></div>
+      <div id="issue-sources-list" aria-live="polite"></div>
+      <details id="issue-source-create"><summary>Add or edit a source</summary>
+        <form id="issue-source-form">
+          <label class="field"><span>Source ID</span><input id="issue-source-id" required placeholder="project-backlog"></label>
+          <label class="field"><span>Repository</span><input id="issue-source-repository" required placeholder="owner/repository"></label>
+          <label class="field"><span>GitHub host</span><input id="issue-source-host" value="github.com" required></label>
+          <label class="field"><span>Authentication</span><select id="issue-source-auth"><option value="gh">Existing gh login</option><option value="public">Public read access</option><option value="environment">Token environment variable</option></select></label>
+          <label class="field"><span>GitHub account (optional, gh)</span><input id="issue-source-account" autocomplete="off"></label>
+          <label class="field"><span>Token variable name (environment mode)</span><input id="issue-source-credential" autocomplete="off" placeholder="GITHUB_TOKEN"></label>
+          <label class="field"><span>Required labels (comma separated)</span><input id="issue-source-labels" value="redline" required></label>
+          <label class="field"><span>Excluded labels (comma separated)</span><input id="issue-source-exclude" value="redline:hold"></label>
+          <label class="field"><span>Execution profile</span><select id="issue-source-profile" required></select><small>Requires a local Git worktree profile with a named base branch and matching origin.</small></label>
+          <label class="field"><span>Goal</span><select id="issue-source-goal"><option value="draft_pr">Draft PR</option><option value="local_changes">Local changes</option><option value="investigation">Investigation</option></select></label>
+          <label class="field"><span>Instructions (optional)</span><textarea id="issue-source-instructions" rows="3"></textarea></label>
+          <label class="field"><span>Verification command (optional)</span><input id="issue-source-verify" placeholder="go test ./..."><small>Runs locally in the worktree before publication.</small></label>
+          <label class="field"><span>Priority</span><input id="issue-source-priority" type="number" value="50"></label>
+          <label class="field"><span>Run when</span><select id="issue-source-tier"><option value="behind">Standard surplus</option><option value="well_behind">High surplus</option><option value="expiring">Near expiry</option><option value="firesale">Firesale</option></select></label>
+          <label class="field"><span>Maximum queued issues</span><input id="issue-source-max" type="number" min="1" max="100" value="10"></label>
+          <label><input id="issue-source-assigned" type="checkbox"> Include assigned issues</label>
+          <label><input id="issue-source-enabled" type="checkbox" checked> Enable source polling</label>
+          <div class="form-footer"><button id="issue-source-new" class="quiet-button" type="button">New source</button><button class="primary-button" type="submit">Save source</button></div>
+        </form>
+      </details>
+      <section id="issue-source-preview" aria-live="polite"></section>
+      <h3>Issue history</h3><div id="issue-history" aria-live="polite"></div>
+    </div>
   </dialog>
 
   <dialog id="logs-dialog" aria-labelledby="log-title">

@@ -211,3 +211,10 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 #scheduler-setup-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#111519;border:1px solid var(--line);border-radius:6px;font-size:12px}
 #scheduler-setup-dialog a{color:var(--accent)}
 .scheduler-banner{flex-wrap:wrap}.scheduler-banner span{flex:1;min-width:180px}
+
+.issue-source-body { display: block; overflow-wrap: anywhere; }
+.issue-source-body .field { margin: 12px 0; }
+.issue-source-card { border-bottom: 1px solid var(--border, #333); padding: 14px 0; }
+.issue-source-card p { margin: 6px 0; }
+.issue-source-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#issue-source-create summary, #issue-history summary { cursor: pointer; padding: 10px 0; }

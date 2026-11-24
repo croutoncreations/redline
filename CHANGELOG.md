@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- GitHub issue sources in the dashboard and CLI: label filters, public/gh/environment authentication,
+  bounded one-off queues, durable attempt history, and explicit retries. Issue delivery supports
+  draft PRs, local changes, and investigations, with retained workspaces and publication recovery.
+
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count

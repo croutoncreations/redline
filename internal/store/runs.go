@@ -169,6 +169,30 @@ state, source_revision, started_at
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("create run: %w", err)
 	}
+	// An external issue is claimed in the same transaction as its run.
+	var issueState string
+	issueErr := tx.QueryRowContext(ctx, `SELECT state FROM issue_attempts WHERE task_id=?`, taskID).Scan(&issueState)
+	if issueErr != nil && !errors.Is(issueErr, sql.ErrNoRows) {
+		return domain.Run{}, issueErr
+	}
+	if issueErr == nil {
+		var enabled int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(json_extract(s.definition,'$.enabled'),0) FROM issue_sources s JOIN issue_items i ON i.source_id=s.id JOIN issue_attempts a ON a.item_id=i.id WHERE a.task_id=?`, taskID).Scan(&enabled); err != nil {
+			return domain.Run{}, err
+		}
+		if enabled != 1 {
+			return domain.Run{}, fmt.Errorf("%w: issue source is paused", ErrConflict)
+		}
+		if issueState != "queued" {
+			return domain.Run{}, fmt.Errorf("%w: issue attempt is %s", ErrConflict, issueState)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_attempts SET state='running',run_id=? WHERE task_id=? AND state='queued'`, runID, taskID); err != nil {
+			return domain.Run{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_items SET state='running' WHERE id=(SELECT item_id FROM issue_attempts WHERE task_id=?)`, taskID); err != nil {
+			return domain.Run{}, err
+		}
+	}
 	for _, pool := range pools {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO run_allowance_pool_claims (
 run_id, provider_account_id, pool_key
@@ -273,6 +297,22 @@ WHERE id = ?`,
 		completion.ActualProvider, completion.ActualModel, runID)
 	if err != nil {
 		return fmt.Errorf("complete run: %w", err)
+	}
+	if completion.State == domain.RunFailed {
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_attempts SET state='failed' WHERE task_id=? AND state='running'`, taskID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_items SET state='failed',reason=? WHERE id=(SELECT item_id FROM issue_attempts WHERE task_id=? AND state='failed')`, completion.Error, taskID); err != nil {
+			return err
+		}
+	}
+	if completion.State == domain.RunCompleted {
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_attempts SET state='needs_attention' WHERE task_id=? AND state='running'`, taskID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_items SET state='needs_attention',reason='Execution finished without verified issue delivery; inspect the run' WHERE id=(SELECT item_id FROM issue_attempts WHERE task_id=? AND state='needs_attention')`, taskID); err != nil {
+			return err
+		}
 	}
 	if completion.State == domain.RunCompleted {
 		state := domain.Completed
@@ -448,6 +488,12 @@ FROM runs WHERE state IN ('preparing', 'running')`)
 	}
 	rows.Close()
 	for _, item := range items {
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_attempts SET state='interrupted' WHERE run_id=? AND state='running'`, item.runID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_items SET state='interrupted',reason='Service restarted; inspect preserved workspace before retrying' WHERE id=(SELECT item_id FROM issue_attempts WHERE run_id=? AND state='interrupted')`, item.runID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE runs SET state = 'failed', completed_at = ?,
 exit_code = -1, error = 'service restarted while run was active',
 finalize_state = CASE WHEN workspace_directory <> '' THEN 'preserved' ELSE 'skipped' END,

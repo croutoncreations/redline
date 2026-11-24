@@ -41,7 +41,11 @@ type Request struct {
 }
 
 func ResultFilePath(outputDirectory, runID string) string {
-	return filepath.Join(outputDirectory, runID+".result.json")
+	path := filepath.Join(outputDirectory, runID+".result.json")
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return path
 }
 
 type Result struct {

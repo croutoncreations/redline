@@ -38,6 +38,11 @@ exits. Finalize or cleanup failure is recorded separately and does not turn a su
 run into a failed run. On service startup, runs interrupted by a prior process exit are marked
 failed for explicit inspection and retry.
 
+Issue sources add a local intake loop that materializes deduplicated one-off tasks. Issue attempt
+claims share the run admission transaction. Built-in issue delivery records publication intent before
+remote writes, verifies the delivered draft PR, and retains workspaces for recovery. See
+[Issue sources](issue-sources.md) for configuration and retry behavior.
+
 Cleanup defaults to `never`. Supported values are `never`, `on_success`, and `always`.
 Agent instructions and lifecycle hooks remain responsible for commit, push, and PR behavior.
 

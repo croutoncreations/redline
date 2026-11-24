@@ -192,6 +192,12 @@ See [Agent-assisted install](docs/agent-install.md) for what the agent must not 
 → [Scheduling and the allowance model](docs/scheduling.md) explains policies, tiers, calibration,
 and the token-capacity estimates in depth.
 
+## GitHub issue backlogs
+
+Open **Issue sources** in the dashboard to queue open issues with a chosen label, using an existing
+`gh` login or public read access. Redline tracks each attempt locally and can deliver a draft PR,
+retain local changes, or produce an investigation. [Issue source setup and recovery](docs/issue-sources.md).
+
 ## Give your agent access
 
 Redline ships an MCP server so Codex, Claude Code, or Pi can check allowance, inspect the queue,

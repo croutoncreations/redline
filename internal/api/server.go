@@ -35,6 +35,7 @@ import (
 	"github.com/croutoncreations/redline/internal/execution"
 	"github.com/croutoncreations/redline/internal/harness"
 	"github.com/croutoncreations/redline/internal/hermes"
+	"github.com/croutoncreations/redline/internal/issues"
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/notification"
@@ -82,6 +83,7 @@ type HermesDiscoverer interface {
 }
 
 type Server struct {
+	issues             *issues.Service
 	config             config.Config
 	store              *store.DB
 	now                func() time.Time
@@ -170,7 +172,7 @@ const redeemedMemory = time.Minute
 
 func NewServer(cfg config.Config, database *store.DB, now func() time.Time) *Server {
 	notifier := configuredNotifier(cfg, database, now)
-	defaultExecutor := execution.Executor{
+	defaultExecutor := &execution.Executor{
 		Store: database, Workspaces: workspace.Manager{OutputDirectory: cfg.ArtifactsDirectory()},
 		Harness:  &harness.Adapter{Contexts: database},
 		Notifier: notifier, UsageRecorder: tokenlog.RunUsageRecorder{Store: database},
@@ -454,6 +456,19 @@ func newServer(
 	mux.HandleFunc("PATCH /v1/providers/{provider}/policy", server.updateProviderPolicy)
 	mux.HandleFunc("PATCH /v1/providers/{provider}/concurrency", server.updateProviderConcurrency)
 	mux.HandleFunc("POST /v1/providers/{provider}/{control}", server.providerControl)
+	server.issues = &issues.Service{Store: database, Now: now}
+	if executor, ok := server.executor.(*execution.Executor); ok {
+		executor.IssueDelivery = server.issues
+	}
+	mux.HandleFunc("GET /v1/issue-sources", server.listIssueSources)
+	mux.HandleFunc("POST /v1/issue-sources", server.createIssueSource)
+	mux.HandleFunc("PATCH /v1/issue-sources/{source}", server.updateIssueSource)
+	mux.HandleFunc("GET /v1/issue-sources/{source}/preview", server.issuePreview)
+	mux.HandleFunc("POST /v1/issue-sources/{source}/sync", server.syncIssueSource)
+	mux.HandleFunc("POST /v1/issue-sources/{source}/{control}", server.controlIssueSource)
+	mux.HandleFunc("GET /v1/issues", server.listIssueItems)
+	mux.HandleFunc("POST /v1/issues/{item}/retry", server.retryIssue)
+	mux.HandleFunc("POST /v1/issue-delivery/{task}/retry", server.retryIssueDelivery)
 	mux.HandleFunc("GET /v1/profiles", server.listProfiles)
 	mux.HandleFunc("GET /v1/profile-options", server.profileOptions)
 	mux.HandleFunc("POST /v1/profiles", server.createProfile)
@@ -1120,6 +1135,8 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		return
 	}
 	s.started = true
+	s.loopWorkers.Add(1)
+	go func() { defer s.loopWorkers.Done(); s.issues.Run(ctx) }()
 	if err := s.reconcileResetSignalFiresales(ctx); err != nil {
 		log.Printf("redline reset firesale startup reconciliation: %v", err)
 	}
@@ -2413,6 +2430,7 @@ func (s *Server) dispatchCore(
 		response.Result.Firesale = false
 		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
 	}
+	ctx = context.WithValue(ctx, issueDispatchKey{}, true)
 	task, profile, revision, selectedResult, err := s.selectTask(
 		ctx, request.ProviderAccountID, request.CurrentRevision, response.Snapshot, response.Result,
 		request.RequestedTaskID,
@@ -2603,6 +2621,23 @@ func (s *Server) evaluateCandidate(
 	if !dispatchTierEligible(task.DispatchTier, result.UnlockedTier) {
 		verdict.Reason = fmt.Sprintf("requires %s pressure; %s is currently unlocked", task.DispatchTier, result.UnlockedTier)
 		return verdict, nil
+	}
+	if dispatch, _ := ctx.Value(issueDispatchKey{}).(bool); dispatch && s.issues != nil {
+		bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ready, issueErr := s.issues.Revalidate(bounded, &task, &profile)
+		cancel()
+		if issueErr != nil {
+			verdict.Reason = "Issue held: " + issueErr.Error()
+			return verdict, nil
+		}
+		if !ready {
+			verdict.Reason = "Issue is no longer eligible"
+			return verdict, nil
+		}
+		verdict.Profile = profile
+		if s.issues.IsIssue(ctx, task.ID) {
+			verdict.Revision = profile.BaseBranch
+		}
 	}
 	verdict.Eligible = true
 	return verdict, nil

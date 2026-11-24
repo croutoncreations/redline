@@ -1698,3 +1698,60 @@ $('#scheduler-setup').addEventListener('click', () => {
 $('#close-scheduler-setup').addEventListener('click', () => $('#scheduler-setup-dialog').close());
 
 refresh(); connectLive();
+
+let issueSources = [], editingIssueSource = '';
+function issueError(error) {
+  $('#issues-error').hidden = !error;
+  $('#issues-error').textContent = error?.message || '';
+}
+async function loadIssueSources() {
+  const [sources,items] = await Promise.all([apiRequest('/v1/issue-sources'),apiRequest('/v1/issues')]);
+  issueSources = sources;
+  $('#issue-sources-list').innerHTML = sources.length ? sources.map(source => `<article class="issue-source-card"><strong>${escapeHTML(source.id)}</strong> · ${escapeHTML(source.repository)}<p>${source.enabled ? 'Polling enabled' : 'Paused'} · ${escapeHTML(source.goal === 'draft_pr' ? 'Draft PR' : title(source.goal))} · ${escapeHTML(source.auth)} · ${escapeHTML(source.labels.join(', '))}</p><p>${escapeHTML(source.last_error || (source.last_synced_at ? 'Last synced ' + shortTime(source.last_synced_at) : 'Not yet synced'))}</p><div class="issue-source-actions"><button class="quiet-button" data-source-action="preview" data-source="${escapeHTML(source.id)}">Preview</button><button class="quiet-button" data-source-action="sync" data-source="${escapeHTML(source.id)}" ${source.enabled ? '' : 'disabled'}>Sync now</button><button class="quiet-button" data-source-action="${source.enabled ? 'disable' : 'enable'}" data-source="${escapeHTML(source.id)}">${source.enabled ? 'Pause' : 'Enable'}</button><button class="quiet-button" data-source-action="edit" data-source="${escapeHTML(source.id)}">Edit</button></div></article>`).join('') : '<p>No issue sources yet. Add a source to preview a labeled backlog.</p>';
+  $('#issue-history').innerHTML = items.length ? items.map(item => `<details class="issue-source-card"><summary>#${escapeHTML(item.snapshot.number)} ${escapeHTML(item.snapshot.title)} · ${escapeHTML(title(item.state))}</summary><p>${escapeHTML(item.reason || '')}</p>${(item.attempts || []).map(a => `<p>Attempt ${escapeHTML(a.id)} · ${escapeHTML(title(a.state))}${a.run_id ? ' · Run ' + escapeHTML(a.run_id) : ''}</p><p>${escapeHTML(a.summary || '')}</p>${a.error ? `<p>${escapeHTML(a.error)}</p>` : ''}${a.pr_url && safeIssueURL(a.pr_url) ? `<a href="${escapeHTML(a.pr_url)}" target="_blank" rel="noopener noreferrer">Draft PR</a>` : ''}${a.state === 'delivery_failed' || a.state === 'publishing' ? `<button class="quiet-button" data-issue-delivery="${escapeHTML(a.task_id)}">Retry delivery</button>` : ''}`).join('')}${!['queued','running','publishing','delivery_failed','delivered'].includes(item.state) ? `<button class="quiet-button" data-issue-retry="${escapeHTML(item.id)}">Retry issue</button>` : ''}</details>`).join('') : '<p>No issues attempted yet.</p>';
+}
+function fillIssueSource(source) {
+  editingIssueSource = source?.id || '';
+  const values = {id:source?.id || '',repository:source?.repository || '',host:source?.host || 'github.com',auth:source?.auth || 'gh',account:source?.account || '',credential:source?.credential_ref || '',labels:(source?.labels || ['redline']).join(', '),exclude:(source?.exclude_labels || ['redline:hold']).join(', '),profile:source?.execution_profile_id || $('#issue-source-profile').options[0]?.value || '',goal:source?.goal || 'draft_pr',instructions:source?.instructions || '',verify:source?.verify_command || '',priority:source?.priority ?? 50,tier:source?.dispatch_tier || 'behind',max:source?.max_queued || 10};
+  for (const [key,value] of Object.entries(values)) $(`#issue-source-${key}`).value = value;
+  $('#issue-source-assigned').checked = Boolean(source?.include_assigned);
+  $('#issue-source-enabled').checked = source?.enabled ?? true;
+  for (const key of ['id','repository','host','profile']) $(`#issue-source-${key}`).disabled = Boolean(source);
+}
+$('#manage-issues').addEventListener('click',async () => {
+  $('#issues-dialog').showModal(); issueError(null);
+  try {
+    await loadProfiles(true);
+    $('#issue-source-profile').innerHTML = profiles.filter(p => p.workspace_provider === 'git-worktree' && !p.agent_context_id).map(p => `<option value="${escapeHTML(p.id)}">${escapeHTML(p.id)}</option>`).join('');
+    fillIssueSource(null); await loadIssueSources();
+  } catch (error) { issueError(error); }
+});
+$('#close-issues').addEventListener('click',() => $('#issues-dialog').close());
+$('#issue-source-new').addEventListener('click',() => fillIssueSource(null));
+$('#issue-sources-list').addEventListener('click',async event => {
+  const button = event.target.closest('[data-source-action]'); if (!button) return;
+  const id = button.dataset.source, action = button.dataset.sourceAction; issueError(null);
+  if (action === 'edit') { fillIssueSource(issueSources.find(s => s.id === id)); $('#issue-source-create').open = true; return; }
+  button.disabled = true;
+  try {
+    const result = await apiRequest(`/v1/issue-sources/${encodeURIComponent(id)}/${action}`,{method:action === 'preview' ? 'GET' : 'POST'});
+    if (action === 'preview') $('#issue-source-preview').innerHTML = `<h3>Matching issues</h3>${result.length ? result.map(c => `<p>#${escapeHTML(c.issue.number)} ${escapeHTML(c.issue.title)} · ${escapeHTML(c.eligible ? 'Eligible' : c.reason)}</p>`).join('') : '<p>No matching issues.</p>'}`;
+    await loadIssueSources();
+  } catch (error) { issueError(error); } finally { button.disabled = false; }
+});
+$('#issue-source-form').addEventListener('submit',async event => {
+  event.preventDefault(); issueError(null);
+  const value = key => $(`#issue-source-${key}`).value.trim(), labels = key => value(key).split(',').map(s => s.trim()).filter(Boolean);
+  const source = {id:value('id'),host:value('host'),repository:value('repository'),auth:value('auth'),account:value('account'),credential_ref:value('credential'),labels:labels('labels'),exclude_labels:labels('exclude'),execution_profile_id:value('profile'),goal:value('goal'),instructions:value('instructions'),verify_command:value('verify'),priority:Number(value('priority')),dispatch_tier:value('tier'),max_queued:Number(value('max')),include_assigned:$('#issue-source-assigned').checked,enabled:$('#issue-source-enabled').checked};
+  const button = event.submitter; if (button) button.disabled = true;
+  try { await apiRequest('/v1/issue-sources' + (editingIssueSource ? '/' + encodeURIComponent(editingIssueSource) : ''),{method:editingIssueSource ? 'PATCH' : 'POST',body:JSON.stringify(source)}); await loadIssueSources(); $('#issue-source-create').open = false; }
+  catch (error) { issueError(error); } finally { if (button) button.disabled = false; }
+});
+$('#issue-history').addEventListener('click',async event => {
+  const delivery = event.target.closest('[data-issue-delivery]'), retry = event.target.closest('[data-issue-retry]');
+  const button = delivery || retry; if (!button) return; button.disabled = true; issueError(null);
+  try { await apiRequest(delivery ? `/v1/issue-delivery/${encodeURIComponent(delivery.dataset.issueDelivery)}/retry` : `/v1/issues/${encodeURIComponent(retry.dataset.issueRetry)}/retry`,{method:'POST'}); await loadIssueSources(); }
+  catch (error) { issueError(error); } finally { button.disabled = false; }
+});
+
+function safeIssueURL(value) { try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; } }

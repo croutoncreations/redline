@@ -81,7 +81,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
-		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|firesale|candidates|pause|resume|pair|devices|relay|account|version>")
+		fmt.Fprintln(stderr, "usage: redline [--api URL] <serve|dashboard|demo|mcp|health|decision|status|calibration|capacity|metrics|token|usage|task|later|profile|scheduler|run|notification|reset|firesale|candidates|pause|resume|pair|devices|relay|account|issue-source|issue|version>")
 		return 1
 	}
 	// The public reset preview is standalone and unauthenticated. Handle it
@@ -91,6 +91,10 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	client := apiclient.Client{BaseURL: *apiURL, Token: clientToken(*configPath)}
 	switch remaining[0] {
+	case "issue-source":
+		return runIssueSources(client, remaining[1:], stdout, stderr)
+	case "issue":
+		return runIssues(client, remaining[1:], stdout, stderr)
 	case "firesale":
 		return runManualFiresale(client, remaining[1:], stdout, stderr)
 	case "reset":
@@ -190,7 +194,8 @@ func writeHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands: serve, dashboard, demo, mcp, health, decision, status, calibration, capacity, metrics, token,")
 	fmt.Fprintln(output, "          usage, task, later, profile, scheduler, run, notification, reset, candidates, pause, resume,")
-	fmt.Fprintln(output, "          firesale, pair, devices, relay, account, version")
+	fmt.Fprintln(output, "          firesale, pair, devices, relay, account, issue-source, issue, version")
+	fmt.Fprintln(output, "Issue sources: issue-source add --file source.yaml | list | preview ID | sync ID | enable ID | disable ID\nIssue history: issue list | retry ITEM_ID | retry-delivery TASK_ID")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, `later "<text>"       queue a one-off task for this repository; it runs only when usage`)
 	fmt.Fprintln(output, "                     is behind pace and above your reserve")

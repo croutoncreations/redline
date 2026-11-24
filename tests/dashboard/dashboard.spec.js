@@ -1436,3 +1436,63 @@ test('scheduler instructions safely render unknown paths and support Windows hos
   await expect(page.locator('#scheduler-restart-command')).toContainText("tester's".replace("'", "''"));
   await expect(page.locator('#scheduler-config-fallback')).toBeHidden();
 });
+
+test('configures an issue source, previews eligibility, and pauses polling', async ({ page }) => {
+  await loadDashboard(page,{profiles:[{id:'local',provider_account_id:'codex-main',harness_type:'codex-cli',workspace_provider:'git-worktree',repository:'/repo',base_branch:'main'}]});
+  const sources = [], requests = [];
+  await page.route(/\/v1\/issue/,async route => {
+    const request = route.request(), url = new URL(request.url()), method = request.method();
+    const json = body => route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
+    requests.push({path:url.pathname,method});
+    if (url.pathname === '/v1/issues') return json([]);
+    if (url.pathname === '/v1/issue-sources' && method === 'GET') return json(sources);
+    if (url.pathname === '/v1/issue-sources' && method === 'POST') { sources.push(request.postDataJSON()); return json(sources[0]); }
+    if (url.pathname.endsWith('/preview')) return json([{issue:{number:1,title:'Fix a bug'},eligible:true},{issue:{number:2,title:'Existing work'},eligible:false,reason:'Already tracked: delivered'}]);
+    if (url.pathname.endsWith('/disable')) { sources[0].enabled = false; return json(sources[0]); }
+    return json([]);
+  });
+  await page.getByRole('button',{name:'Issue sources',exact:true}).click();
+  await expect(page.locator('#issues-dialog')).toBeVisible();
+  await expect(page.locator('#issue-history')).toContainText('No issues attempted');
+  await page.locator('#issue-source-create summary').click();
+  await page.locator('#issue-source-id').fill('backlog');
+  await page.locator('#issue-source-repository').fill('owner/repo');
+  await page.locator('#issue-source-auth').selectOption('public');
+  await page.getByRole('button',{name:'Save source',exact:true}).click();
+  await expect(page.locator('#issue-sources-list')).toContainText('backlog');
+  expect(sources[0]).toMatchObject({repository:'owner/repo',auth:'public',execution_profile_id:'local',labels:['redline'],goal:'draft_pr',enabled:true});
+  await page.getByRole('button',{name:'Preview',exact:true}).click();
+  await expect(page.locator('#issue-source-preview')).toContainText('Eligible');
+  await expect(page.locator('#issue-source-preview')).toContainText('Already tracked: delivered');
+  await page.getByRole('button',{name:'Pause',exact:true}).click();
+  await expect(page.locator('#issue-sources-list')).toContainText('Paused');
+  expect(requests.some(r => r.path.endsWith('/disable') && r.method === 'POST')).toBeTruthy();
+});
+
+test('issue delivery failures can be retried without another coding job', async ({ page }) => {
+  await loadDashboard(page);
+  let retries = 0;
+  const item = {id:'item',state:'delivery_failed',snapshot:{number:3,title:'Preserved implementation'},attempts:[{id:'attempt',task_id:'task-3',run_id:'run-3',state:'delivery_failed',error:'GitHub request timed out'}]};
+  await page.route(/\/v1\/issue/,async route => {
+    const url = new URL(route.request().url());
+    let body = [];
+    if (url.pathname === '/v1/issues') body = [item];
+    if (url.pathname === '/v1/issue-delivery/task-3/retry') { retries++; item.state = item.attempts[0].state = 'delivered'; item.attempts[0].pr_url = 'https://github.com/owner/repo/pull/3'; body = {status:'delivered'}; }
+    return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
+  });
+  await page.getByRole('button',{name:'Issue sources',exact:true}).click();
+  await page.locator('#issue-history summary').click();
+  await expect(page.locator('#issue-history')).toContainText('GitHub request timed out');
+  await page.getByRole('button',{name:'Retry delivery',exact:true}).click();
+  await expect(page.locator('#issue-history')).toContainText('Delivered');
+  expect(retries).toBe(1);
+});
+
+test('issue source loading errors remain visible and recover on reopening', async ({ page }) => {
+  await loadDashboard(page);
+  await page.route(/\/v1\/issue/,route => route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'Issue storage unavailable'})}));
+  await page.getByRole('button',{name:'Issue sources',exact:true}).click();
+  await expect(page.locator('#issues-error')).toHaveText('Issue storage unavailable');
+  await page.getByRole('button',{name:'Close issue sources',exact:true}).click();
+  await expect(page.locator('#issues-dialog')).not.toBeVisible();
+});

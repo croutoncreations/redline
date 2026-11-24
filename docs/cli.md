@@ -301,3 +301,8 @@ See [Mobile dashboard setup](mobile.md).
 - [HTTP API](api.md)
 - [Scheduling](scheduling.md)
 - [Execution profiles and tasks](profiles-and-tasks.md)
+
+## Issue sources
+
+See [GitHub issue sources](issue-sources.md) for `issue-source add/list/preview/sync/enable/disable`
+and `issue list/retry/retry-delivery`. These commands use the local HTTP service and never open SQLite.

@@ -313,3 +313,8 @@ persistence, lifecycle, and notification data.
 - [MCP and agent interface](mcp.md)
 - [CLI reference](cli.md)
 - [Architecture](architecture.md)
+
+## Issue intake and delivery
+
+The [issue sources API](issue-sources.md#http-api) manages source configuration, preview, sync,
+attempt history, coding retries, and publication retries through the same authentication boundary.

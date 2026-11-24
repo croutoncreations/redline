@@ -208,6 +208,12 @@ last_started_at, last_completed_at, last_successful_source_revision, created_at,
 }
 
 func (d *DB) UpdateTask(ctx context.Context, task domain.Task, now time.Time) error {
+	if _, issueErr := d.IssueAttemptForTask(ctx, task.ID); issueErr == nil {
+		return fmt.Errorf("%w: use issue source and issue retry controls for imported jobs", ErrConflict)
+	} else if !errors.Is(issueErr, ErrNotFound) {
+		return issueErr
+	}
+
 	if task.DispatchTier == "" {
 		task.DispatchTier = domain.DispatchBehind
 	}
@@ -247,6 +253,12 @@ WHERE id = ?`, task.Name, task.Prompt, task.PromptFile, task.Priority, task.Exec
 }
 
 func (d *DB) DeleteTask(ctx context.Context, id string) error {
+	if _, issueErr := d.IssueAttemptForTask(ctx, id); issueErr == nil {
+		return fmt.Errorf("%w: use issue source and issue retry controls for imported jobs", ErrConflict)
+	} else if !errors.Is(issueErr, ErrNotFound) {
+		return issueErr
+	}
+
 	if id == "" {
 		return fmt.Errorf("task id is required")
 	}
@@ -309,6 +321,12 @@ func (d *DB) GetTask(ctx context.Context, id string) (domain.Task, error) {
 }
 
 func (d *DB) SetTaskControl(ctx context.Context, id, action string, now time.Time) error {
+	if _, issueErr := d.IssueAttemptForTask(ctx, id); issueErr == nil {
+		return fmt.Errorf("%w: use issue source and issue retry controls for imported jobs", ErrConflict)
+	} else if !errors.Is(issueErr, ErrNotFound) {
+		return issueErr
+	}
+
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin task control: %w", err)

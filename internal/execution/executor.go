@@ -39,7 +39,13 @@ type UsageRecorder interface {
 	RecordRunUsage(context.Context, domain.Run, domain.ExecutionProfile, string, time.Time) (int, error)
 }
 
+type IssueDelivery interface {
+	IsIssue(context.Context, string) bool
+	Finish(context.Context, domain.Run, domain.Task, domain.ExecutionProfile, domain.Workspace, string, bool) (string, string, []domain.RunArtifact, error)
+}
+
 type Executor struct {
+	IssueDelivery   IssueDelivery
 	Store           Store
 	Workspaces      WorkspaceManager
 	Harness         Harness
@@ -55,6 +61,11 @@ func (e Executor) Execute(
 	task domain.Task,
 	profile domain.ExecutionProfile,
 ) error {
+	issueJob := e.IssueDelivery != nil && e.IssueDelivery.IsIssue(ctx, task.ID)
+	if issueJob {
+		profile.CleanupPolicy = "never"
+		profile.FinalizeCommand = ""
+	}
 	e.recordEvent(ctx, run.ID, domain.RunEventStarted, map[string]any{
 		"task": map[string]any{
 			"id": task.ID, "name": task.Name, "type": task.Type,
@@ -144,6 +155,9 @@ func (e Executor) Execute(
 		"harness_args": profile.HarnessArgs, "model": profile.Model,
 		"working_directory": prepared.Directory,
 	})
+	if e.IssueDelivery != nil && e.IssueDelivery.IsIssue(ctx, task.ID) {
+		task.Prompt += "\nAbsolute result file path: " + harness.ResultFilePath(e.OutputDirectory, run.ID) + "\n"
+	}
 	harnessResult, harnessErr := e.Harness.Run(ctx, harness.Request{
 		RunID: run.ID, OutputDirectory: e.OutputDirectory,
 		Task: task, Profile: profile, Workspace: prepared,
@@ -217,6 +231,20 @@ func (e Executor) Execute(
 			"configured": profile.FinalizeCommand != "", "artifacts": e.lifecycleArtifacts(run.ID, "finalize"),
 		})
 	}
+	var issueOutcome, issueSummary string
+	var issueArtifacts []domain.RunArtifact
+	if issueJob {
+		var deliveryErr error
+		issueOutcome, issueSummary, issueArtifacts, deliveryErr = e.IssueDelivery.Finish(ctx, run, task, profile, prepared, harness.ResultFilePath(e.OutputDirectory, run.ID), agentSucceeded)
+		if deliveryErr != nil {
+			if issueOutcome == "" {
+				issueOutcome = "needs_attention"
+				issueSummary = "Issue delivery bookkeeping failed; inspect the retained workspace"
+			}
+			finalizeState = "failed"
+			lifecycleErrors = append(lifecycleErrors, deliveryErr.Error())
+		}
+	}
 	e.recordEvent(ctx, run.ID, domain.RunEventCleanupStarted, map[string]any{
 		"policy": profile.CleanupPolicy, "workspace": prepared,
 	})
@@ -236,6 +264,11 @@ func (e Executor) Execute(
 		Workspace:  prepared, Metadata: harnessResult.Metadata,
 		Provider: profile.HarnessType, Model: profile.Model,
 	})
+	if issueOutcome != "" {
+		activityResult.Outcome = issueOutcome
+		activityResult.Summary = issueSummary
+		activityResult.Artifacts = append(activityResult.Artifacts, issueArtifacts...)
+	}
 	return e.complete(ctx, run, task, domain.RunCompletion{
 		State: state, ExitCode: harnessResult.ExitCode,
 		OutputFile: harnessResult.OutputFile, ErrorFile: harnessResult.ErrorFile,

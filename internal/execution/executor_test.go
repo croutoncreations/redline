@@ -405,3 +405,61 @@ func steppedClock(start time.Time) func() time.Time {
 		return current
 	}
 }
+
+type issueDeliveryProbe struct {
+	called     bool
+	resultPath string
+	workspaces *issueWorkspaceProbe
+}
+
+func (p *issueDeliveryProbe) IsIssue(context.Context, string) bool { return true }
+func (p *issueDeliveryProbe) Finish(_ context.Context, _ domain.Run, _ domain.Task, _ domain.ExecutionProfile, _ domain.Workspace, path string, success bool) (string, string, []domain.RunArtifact, error) {
+	if p.workspaces.cleaned {
+		return "", "", nil, errors.New("cleanup preceded delivery")
+	}
+	p.called = true
+	p.resultPath = path
+	return "delivery_failed", "Code committed; publication needs retry", nil, errors.New("GitHub unavailable")
+}
+
+type issueWorkspaceProbe struct {
+	workspace                      domain.Workspace
+	cleaned                        bool
+	prepareProfile, cleanupProfile domain.ExecutionProfile
+	finalizeCommand                string
+}
+
+func (p *issueWorkspaceProbe) Prepare(_ context.Context, _, _ string, profile domain.ExecutionProfile) (domain.Workspace, error) {
+	p.prepareProfile = profile
+	return p.workspace, nil
+}
+func (p *issueWorkspaceProbe) Finalize(_ context.Context, r workspace.FinalizeRequest) error {
+	p.finalizeCommand = r.Profile.FinalizeCommand
+	return nil
+}
+func (p *issueWorkspaceProbe) Cleanup(_ context.Context, r workspace.CleanupRequest) error {
+	p.cleaned = true
+	p.cleanupProfile = r.Profile
+	return nil
+}
+func TestIssueDeliveryRunsBeforeCleanupAndPreservesExecutionResult(t *testing.T) {
+	db, run, task, profile := admittedRun(t, domain.OneOff)
+	profile.CleanupPolicy = "always"
+	profile.FinalizeCommand = "publish-externally"
+	workspaces := &issueWorkspaceProbe{workspace: domain.Workspace{Directory: t.TempDir(), Branch: "redline/test"}}
+	delivery := &issueDeliveryProbe{workspaces: workspaces}
+	executor := execution.Executor{Store: db, Workspaces: workspaces, Harness: &fakeHarness{result: harness.Result{ExitCode: 0}}, IssueDelivery: delivery, OutputDirectory: t.TempDir()}
+	if e := executor.Execute(t.Context(), run, task, profile); e != nil {
+		t.Fatal(e)
+	}
+	result, e := db.GetRun(t.Context(), run.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !delivery.called || !filepath.IsAbs(delivery.resultPath) || workspaces.prepareProfile.CleanupPolicy != "never" || workspaces.cleanupProfile.CleanupPolicy != "never" || workspaces.finalizeCommand != "" {
+		t.Fatalf("delivery=%+v workspace=%+v", delivery, workspaces)
+	}
+	if result.State != domain.RunCompleted || result.Outcome != "delivery_failed" || result.FinalizeState != "failed" {
+		t.Fatalf("run=%+v", result)
+	}
+}

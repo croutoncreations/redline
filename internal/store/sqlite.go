@@ -804,6 +804,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	if err := migrateIssues(ctx, tx); err != nil {
+		return fmt.Errorf("migrate issue sources: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
