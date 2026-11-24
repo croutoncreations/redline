@@ -224,27 +224,40 @@ func links(summary string) []domain.RunArtifact {
 	return result
 }
 
+// trimLinkPunctuation removes trailing prose punctuation and unmatched
+// closing delimiters while keeping closers that balance an opener in the URL.
 func trimLinkPunctuation(raw string) string {
-	url := strings.TrimRight(raw, ".,;:!?*_`")
-	for len(url) > 0 {
-		close := url[len(url)-1]
-		var open byte
-		switch close {
+	const closers = ")]}"
+	var opens, closes [len(closers)]int
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '(':
+			opens[0]++
+		case '[':
+			opens[1]++
+		case '{':
+			opens[2]++
 		case ')':
-			open = '('
+			closes[0]++
 		case ']':
-			open = '['
+			closes[1]++
 		case '}':
-			open = '{'
-		default:
+			closes[2]++
+		}
+	}
+	url := raw
+	for {
+		url = strings.TrimRight(url, ".,;:!?*_`")
+		if url == "" {
 			return url
 		}
-		if strings.Count(url, string(open)) >= strings.Count(url, string(close)) {
+		k := strings.IndexByte(closers, url[len(url)-1])
+		if k < 0 || opens[k] >= closes[k] {
 			return url
 		}
+		closes[k]--
 		url = url[:len(url)-1]
 	}
-	return url
 }
 
 func readTail(path string, limit int64) ([]byte, error) {
