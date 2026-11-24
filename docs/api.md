@@ -99,8 +99,14 @@ scheduler decisions, and bounded run-log tails. Jobs and execution profiles can 
 managed there. A server-sent event stream (`/v1/dashboard/events`) keeps the page current while it
 is open; the aggregate API does not expose task prompts or lifecycle commands.
 
-When `cursor_usage` is enabled, `/v1/dashboard` also carries a `cursor_usage` report (and
-`GET /v1/cursor-usage` returns it alone). That report is display-only and includes Grok Bot,
+When `cursor_usage` is enabled, `/v1/dashboard` also carries a `cursor_usage` report.
+`GET /v1/cursor-usage` returns the same report under the `cursor` key in a stable envelope:
+
+```json
+{"generated_at":"2026-11-24T18:30:00Z","cursor":{"source":"openusage","meters":[],"balances":[]}}
+```
+
+`cursor` is `null` when no report is available. The report is display-only and includes Grok Bot,
 on-demand spend and credits. A separate `provider: cursor` account is scheduled only from the
 monthly subscription pools; see [Cursor](profiles-and-tasks.md#cursor). A monthly account window
 carries `snapshot.weekly.period_seconds` (about 2592000); clients should label it monthly.
