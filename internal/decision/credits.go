@@ -69,17 +69,39 @@ func EvaluateCredits(in Input) Result {
 	if window <= 0 {
 		window = defaultCreditsFiresaleWindow
 	}
-	left := expiry.Sub(in.Now)
+	grants := promoGrants(credits, expiry)
+	// Firesale follows the money that is actually lapsing: a grant inside
+	// the window with at least the floor (and at least a cent) still on it.
+	// A scrap left on an expiring grant is no reason to spend a fresh grant
+	// at firesale speed.
+	lapsing := 0.0
+	var lapseAt time.Time
+	for _, grant := range grants {
+		if grant.ExpiresAt.Sub(in.Now) <= window && grant.Remaining >= max(floor, 0.01) {
+			lapsing += grant.Remaining
+			if lapseAt.IsZero() || grant.ExpiresAt.Before(lapseAt) {
+				lapseAt = *grant.ExpiresAt
+			}
+		}
+	}
+	behind := 0.0
+	if credits.Pacing == creditsPacingEven {
+		for _, grant := range grants {
+			behind = max(behind, grantPaceGap(grant, in.Now))
+		}
+		result.PaceGap = behind
+	}
 	switch {
-	case left <= window:
+	case lapsing > 0:
 		result.Decision = Admit
 		result.Firesale = true
 		result.UnlockedTier = domain.DispatchFiresale
+		result.EffectiveResetAt = lapseAt
 		result.Reason = fmt.Sprintf("%s of promotional credit expires in %s; running queued work before it lapses",
-			dollars(credits.NextExpiring), roundDuration(left))
-	case credits.Pacing == creditsPacingEven && result.PaceGap > 0:
+			dollars(lapsing), roundDuration(lapseAt.Sub(in.Now)))
+	case credits.Pacing == creditsPacingEven && behind > 0:
 		result.Decision = Admit
-		result.UnlockedTier = tierForPaceGap(result.PaceGap)
+		result.UnlockedTier = tierForPaceGap(behind)
 		result.Reason = "promotional credit is behind an even pace for this cycle"
 	case credits.Pacing == creditsPacingEven:
 		result.Decision = Wait
@@ -102,4 +124,31 @@ func roundDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%d minutes", max(int(d.Minutes()), 1))
 	}
+}
+
+// promoGrants is the account's available promotional grants. Snapshots
+// without a grant list (older rows) are treated as one grant covering the
+// whole balance over the account window.
+func promoGrants(credits *CreditsBalance, expiry time.Time) []CreditGrant {
+	var grants []CreditGrant
+	for _, grant := range credits.Grants {
+		if grant.Kind == "promo" && grant.Remaining > 0 && grant.ExpiresAt != nil {
+			grants = append(grants, grant)
+		}
+	}
+	if len(grants) == 0 {
+		grants = []CreditGrant{{Kind: "promo", Amount: credits.PromoGranted, Remaining: credits.PromoRemaining,
+			EffectiveAt: credits.EffectiveAt, ExpiresAt: &expiry}}
+	}
+	return grants
+}
+
+// grantPaceGap is how far a grant's remaining share is ahead of the share
+// of its own cycle still to go; positive means behind on spending.
+func grantPaceGap(grant CreditGrant, now time.Time) float64 {
+	if grant.Amount <= 0 || grant.ExpiresAt == nil || grant.EffectiveAt == nil || !grant.ExpiresAt.After(*grant.EffectiveAt) {
+		return 0
+	}
+	period := grant.ExpiresAt.Sub(*grant.EffectiveAt)
+	return grant.Remaining/grant.Amount - clampFraction(grant.ExpiresAt.Sub(now).Seconds()/period.Seconds())
 }

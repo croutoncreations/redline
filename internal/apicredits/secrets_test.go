@@ -92,6 +92,42 @@ func TestFileSecretStoreRefusesWorldReadableFiles(t *testing.T) {
 	}
 }
 
+// A key file that is a symlink is refused: it could point anywhere,
+// including at a file another user can swap.
+func TestResolveSecretRefusesSymlinkedKeyFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinks")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real")
+	if err := os.WriteFile(target, []byte("sess-TARGET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveSecret(context.Background(), nil, "acct", SecretSessionKey, link); err == nil {
+		t.Fatal("followed a symlinked key file")
+	}
+}
+
+// Errors name the problem, never the file's path, because hold reasons
+// reach the dashboard and paired phones.
+func TestSecretFileErrorsDoNotNameThePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	file := filepath.Join(t.TempDir(), "private-name-xyz")
+	if err := os.WriteFile(file, []byte("sk-x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolveSecret(context.Background(), nil, "acct", SecretAPIKey, file)
+	if err == nil || strings.Contains(err.Error(), "private-name-xyz") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // A configured key file wins over the store, is re-read on every call, and
 // must be private.
 func TestResolveSessionKeyPrefersConfiguredFile(t *testing.T) {
@@ -125,8 +161,20 @@ func TestResolveSessionKeyPrefersConfiguredFile(t *testing.T) {
 }
 
 // The environment variable serves a headless service with no store at all.
+// It is taken out of the process environment as it is captured, so no job,
+// hook or notifier Redline starts can ever inherit the session key.
 func TestResolveSessionKeyFallsBackToEnvironment(t *testing.T) {
 	t.Setenv(SessionKeyEnv, "sess-FROMENV")
+	CaptureSessionKeyEnv()
+	t.Cleanup(func() { capturedSessionKey.Store("") })
+	if _, present := os.LookupEnv(SessionKeyEnv); present {
+		t.Fatal("session key still in the process environment after capture")
+	}
+	for _, entry := range os.Environ() {
+		if strings.Contains(entry, "sess-FROMENV") {
+			t.Fatalf("session key visible to child processes: %s", entry[:10])
+		}
+	}
 	got, err := ResolveSecret(context.Background(), FileSecretStore{Dir: t.TempDir()}, "acct", SecretSessionKey, "")
 	if err != nil || got != "sess-FROMENV" {
 		t.Fatalf("env = %q, %v", got, err)

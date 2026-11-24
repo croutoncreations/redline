@@ -100,3 +100,16 @@ func mustJSON(t *testing.T, value any) string {
 	}
 	return string(encoded)
 }
+
+// A session key supplied through the environment never reaches a run: the
+// service captures and removes it before starting anything, and runs strip
+// it as a second line of defence.
+func TestRunsNeverSeeTheSessionKeyEnvironment(t *testing.T) {
+	t.Setenv("REDLINE_OPENAI_SESSION_KEY", "sess-SHOULD-NOT-LEAK")
+	for _, profile := range []domain.ExecutionProfile{{HarnessType: "pi"}, {HarnessType: "command", HarnessCommand: "true"},
+		{HarnessType: "pi", OpenAIAPIKey: "sk-proj-ACCOUNT"}} {
+		if got := envValues(runEnv(t, profile), "REDLINE_OPENAI_SESSION_KEY"); len(got) != 0 {
+			t.Fatalf("%s run inherited the session key", profile.HarnessType)
+		}
+	}
+}

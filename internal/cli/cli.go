@@ -560,6 +560,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
+	// Before anything can start a child process that would inherit it.
+	apicredits.CaptureSessionKeyEnv()
 	cfg, err := config.LoadForService(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)

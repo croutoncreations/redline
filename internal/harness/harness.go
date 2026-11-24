@@ -352,6 +352,9 @@ func buildCommand(
 			"REDLINE_RESULT_FILE="+ResultFilePath(request.OutputDirectory, request.RunID),
 		),
 	}
+	// The platform session key carries full dashboard access; no run may
+	// see it, even if the service was started with it in its environment.
+	base.Env = withoutVariable(base.Env, "REDLINE_OPENAI_SESSION_KEY")
 	if key := request.Profile.OpenAIAPIKey; key != "" {
 		base.Env = withOpenAICredentials(base.Env, key, request.Profile.OpenAIOrganization)
 	}

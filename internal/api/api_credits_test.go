@@ -312,8 +312,64 @@ func TestCreditsAccountCannotBeCreatedOverHTTP(t *testing.T) {
 	}
 	for _, field := range []string{"session_key", "api_key", "api_credits"} {
 		response = request(t, fixture.server, http.MethodPost, "/v1/accounts", map[string]any{"id": "x", "provider": "codex", field: "sess-x"})
-		if response.StatusCode != http.StatusBadRequest {
-			t.Fatalf("%s accepted: %d", field, response.StatusCode)
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "unknown field") {
+			t.Fatalf("%s: status = %d body = %s", field, response.StatusCode, body)
 		}
+	}
+}
+
+// A codex profile left on a credits account (saved before the rule, or from
+// the config file) is passed over with its reason; other jobs still run.
+func TestCreditsAccountSkipsMismatchedProfileAndRunsTheRest(t *testing.T) {
+	fixture := newCreditsServer(t, 80, 24*time.Hour, nil)
+	fixture.saveKeys(t)
+	if err := fixture.db.CreateProfile(t.Context(), domain.ExecutionProfile{ID: "legacy-codex", ProviderAccountID: "api-credits",
+		HarnessType: "codex-cli", WorkspaceProvider: "devx"}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.CreateTask(t.Context(), domain.Task{ID: "legacy", Name: "legacy", Prompt: "p", ExecutionProfileID: "legacy-codex",
+		Priority: 99, Type: domain.OneOff, DispatchTier: domain.DispatchFiresale}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	createCreditsCandidate(t, fixture.db, "pi")
+	var result struct {
+		schedulerResponseForTest
+	}
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run == nil || result.SelectedTask == nil || result.SelectedTask.ID != "credits-task-pi" {
+		t.Fatalf("result = %+v", result.Result)
+	}
+	rejected := false
+	for _, rejection := range result.Result.CandidateRejections {
+		rejected = rejected || (rejection.TaskID == "legacy" && strings.Contains(rejection.Reason, "pi or command"))
+	}
+	if !rejected {
+		t.Fatalf("rejections = %+v", result.Result.CandidateRejections)
+	}
+}
+
+// Paid credit alone never dispatches, even near expiry.
+func TestCreditsPaidOnlyBalanceNeverDispatches(t *testing.T) {
+	fixture := newCreditsServer(t, 0, 24*time.Hour, nil)
+	fixture.saveKeys(t)
+	createCreditsCandidate(t, fixture.db, "pi")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || result.Result.Decision == decision.Admit {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
+// The user's floor holds at the server too.
+func TestCreditsFloorHoldsDispatch(t *testing.T) {
+	floor := 50.0
+	fixture := newCreditsServer(t, 40, 24*time.Hour, &config.APICredits{MinPromoBalance: &floor})
+	fixture.saveKeys(t)
+	createCreditsCandidate(t, fixture.db, "pi")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "$50.00 floor") {
+		t.Fatalf("result = %+v", result.Result)
 	}
 }

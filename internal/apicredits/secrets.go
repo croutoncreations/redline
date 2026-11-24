@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/croutoncreations/redline/internal/apiauth"
 )
@@ -33,6 +35,24 @@ const SessionKeyEnv = "REDLINE_OPENAI_SESSION_KEY"
 const maxSecretBytes = 16 << 10
 
 var ErrSecretNotFound = errors.New("secret not found")
+
+// capturedSessionKey holds REDLINE_OPENAI_SESSION_KEY once taken out of the
+// process environment.
+var capturedSessionKey atomic.Value
+
+// CaptureSessionKeyEnv moves REDLINE_OPENAI_SESSION_KEY from the process
+// environment into memory. Every job, hook, notifier and discovery command
+// Redline starts inherits os.Environ(), and the session key carries full
+// platform dashboard access, so it must not stay there. The service calls
+// this before starting anything; it is safe to call more than once.
+func CaptureSessionKeyEnv() {
+	if value, present := os.LookupEnv(SessionKeyEnv); present {
+		if value = strings.TrimSpace(value); value != "" {
+			capturedSessionKey.Store(value)
+		}
+		_ = os.Unsetenv(SessionKeyEnv)
+	}
+}
 
 var secretAccountPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
@@ -92,6 +112,11 @@ func (s FileSecretStore) Replace(ctx context.Context, account, kind, value strin
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return fmt.Errorf("create secret directory: %w", err)
 	}
+	// The directory must be a real directory this user owns: a symlink or
+	// someone else's directory could redirect or expose the key.
+	if info, err := os.Lstat(s.Dir); err != nil || !info.IsDir() || (runtime.GOOS != "windows" && !ownedByCurrentUser(info)) {
+		return fmt.Errorf("the secret directory must be a directory owned by the user running Redline")
+	}
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(s.Dir, 0o700); err != nil {
 			return fmt.Errorf("protect secret directory: %w", err)
@@ -133,24 +158,40 @@ func (s FileSecretStore) Clear(ctx context.Context, account, kind string) error 
 }
 
 // readPrivateFile reads a small secret file that only its owner can read.
+// It is opened without following a final symlink and checked through the
+// open handle, so the file cannot be swapped between check and read. Errors
+// never name the path: hold reasons reach the dashboard and phones.
 func readPrivateFile(path string) (string, error) {
-	info, err := os.Stat(path)
+	file, err := openNoFollow(path)
 	if err != nil {
-		return "", err
+		if errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		return "", fmt.Errorf("the key file could not be opened (it must be a regular file, not a symlink)")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("the key file could not be read")
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("secret file %s is not a regular file", path)
+		return "", fmt.Errorf("the key file is not a regular file")
 	}
 	// Windows reports fixed permission bits regardless of its ACLs.
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("secret file %s must not be readable by group or other users", path)
+	if runtime.GOOS != "windows" {
+		if info.Mode().Perm()&0o077 != 0 {
+			return "", fmt.Errorf("the key file must not be readable by group or other users (chmod 600)")
+		}
+		if !ownedByCurrentUser(info) {
+			return "", fmt.Errorf("the key file must be owned by the user running Redline")
+		}
 	}
 	if info.Size() > maxSecretBytes {
-		return "", fmt.Errorf("secret file %s is too large", path)
+		return "", fmt.Errorf("the key file is too large")
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, maxSecretBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("read secret file %s", path)
+		return "", fmt.Errorf("the key file could not be read")
 	}
 	value := strings.TrimSpace(string(data))
 	if value == "" {
@@ -176,7 +217,7 @@ func ResolveSecret(ctx context.Context, store SecretStore, account, kind, file s
 		}
 	}
 	if kind == SecretSessionKey {
-		if value := strings.TrimSpace(os.Getenv(SessionKeyEnv)); value != "" {
+		if value, _ := capturedSessionKey.Load().(string); value != "" {
 			return value, nil
 		}
 	}

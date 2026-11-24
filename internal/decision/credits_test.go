@@ -113,6 +113,61 @@ func TestCreditsFailClosed(t *testing.T) {
 	}
 }
 
+// When the soonest grant has almost nothing left, its expiry is no reason to
+// spend a fresh grant at firesale speed: pacing follows the grant whose
+// money is actually lapsing.
+func TestCreditsFiresaleIgnoresAnAlmostEmptyExpiringGrant(t *testing.T) {
+	s := creditsSnapshot(100.4, 2*24*time.Hour, "firesale")
+	later := now.Add(29 * 24 * time.Hour)
+	s.Credits.PromoGranted, s.Credits.NextExpiring = 200, 0.4
+	s.Weekly.Remaining = 100.4 / 200
+	s.Credits.Grants = []decision.CreditGrant{
+		{Kind: "promo", Amount: 100, Remaining: 0.4, ExpiresAt: s.Credits.ExpiresAt},
+		{Kind: "promo", Amount: 100, Remaining: 100, ExpiresAt: &later},
+	}
+	got := decision.EvaluateCredits(creditsInput(s))
+	if got.Decision != decision.Wait || got.Firesale {
+		t.Fatalf("a $0.40 expiring scrap triggered firesale on a fresh grant: %+v", got)
+	}
+}
+
+// Even pacing compares each grant with its own cycle.
+func TestCreditsEvenPacingUsesEachGrantsOwnCycle(t *testing.T) {
+	s := creditsSnapshot(130, 20*24*time.Hour, "even")
+	soon := *s.Credits.ExpiresAt
+	start := soon.Add(-30 * 24 * time.Hour)
+	later := now.Add(29 * 24 * time.Hour)
+	laterStart := later.Add(-30 * 24 * time.Hour)
+	// The soon grant (20 of 30 days left, 67%) has 30% left: ahead of pace.
+	// The new grant (29 of 30 left, 97%) has 100% left: barely behind.
+	// The aggregate (130/200 = 65%) against the soon grant's clock would look
+	// on pace; per grant, the new one is slightly behind.
+	s.Credits.PromoGranted, s.Credits.NextExpiring = 200, 30
+	s.Weekly.Remaining = 130.0 / 200
+	s.Credits.Grants = []decision.CreditGrant{
+		{Kind: "promo", Amount: 100, Remaining: 30, EffectiveAt: &start, ExpiresAt: &soon},
+		{Kind: "promo", Amount: 100, Remaining: 100, EffectiveAt: &laterStart, ExpiresAt: &later},
+	}
+	got := decision.EvaluateCredits(creditsInput(s))
+	if got.Decision != decision.Admit || got.Firesale {
+		t.Fatalf("got %+v", got)
+	}
+	// With the new grant spent down on pace, nothing is behind.
+	s.Credits.Grants[1].Remaining = 90
+	s.Credits.PromoRemaining, s.Weekly.Remaining = 120, 120.0/200
+	if got := decision.EvaluateCredits(creditsInput(s)); got.Decision != decision.Wait {
+		t.Fatalf("on pace: %+v", got)
+	}
+}
+
+// The dashboard's next-trigger projection stays cheap below the floor.
+func TestCreditsProjectionBelowFloorIsImmediate(t *testing.T) {
+	in := creditsInput(creditsSnapshot(4, 29*24*time.Hour, "firesale"))
+	if got := decision.ProjectTriggerAt(in, time.Minute); got != nil {
+		t.Fatalf("projected %v below the floor", got)
+	}
+}
+
 // A manual firesale overrides pacing but never the floor.
 func TestCreditsManualFiresaleRespectsFloor(t *testing.T) {
 	in := creditsInput(creditsSnapshot(80, 20*24*time.Hour, "firesale"))

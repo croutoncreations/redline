@@ -368,6 +368,7 @@ func newServer(
 	// openai-api-credits accounts read the OpenAI platform. They are pinned
 	// to the native source, so only it needs the wrapper; the pointer lets
 	// tests swap the client after construction.
+	apicredits.CaptureSessionKeyEnv()
 	server.apiCreditSecrets = apicredits.DefaultSecretStore(cfg.ConfigPath)
 	server.apiCredits = &apicredits.UsageSource{Next: nativeWithCursor, Client: apicredits.Client{Now: now},
 		Secrets: server.apiCreditSecrets}
@@ -2629,6 +2630,14 @@ func (s *Server) evaluateCandidate(
 		return verdict, err
 	}
 	verdict.Profile = profile
+	// A profile whose harness cannot run on this account (saved before the
+	// account was bound to a profile directory, or a codex profile on an
+	// API credits account) is passed over with its reason, so the rest of
+	// the queue still runs.
+	if err := profileHarnessFitsAccount(profile, s.config.Providers[provider]); err != nil {
+		verdict.Reason = err.Error()
+		return verdict, nil
+	}
 	verdict.Revision = suppliedRevision
 	if verdict.Revision == "" && profile.Repository != "" {
 		cached, ok := revisions[profile.ID]

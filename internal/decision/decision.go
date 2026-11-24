@@ -715,6 +715,11 @@ func ProjectTriggerAt(in Input, pollInterval time.Duration) *time.Time {
 	if pollInterval <= 0 || in.Now.IsZero() || !in.Snapshot.Weekly.ResetsAt.After(in.Now) {
 		return nil
 	}
+	// A credits balance at or below its floor never qualifies without new
+	// money; skip the poll-by-poll walk to its expiry.
+	if c := in.Snapshot.Credits; c != nil && c.PromoRemaining <= c.MinPromoBalance {
+		return nil
+	}
 	if result := Evaluate(in); result.Decision == Admit {
 		projected := in.Now
 		return &projected
