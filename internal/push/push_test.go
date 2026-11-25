@@ -178,21 +178,47 @@ func (b blockingTransport) Wake(ctx context.Context, _ Wake) error {
 }
 func TestDispatcherCoalescesQueuedDevices(t *testing.T) {
 	b := blockingTransport{make(chan struct{}, 8), make(chan struct{})}
-	data := &memoryStore{registrations: []store.PushRegistration{{DeviceSessionID: "phone"}}}
+	data := &memoryStore{registrations: []store.PushRegistration{
+		{DeviceSessionID: "busy-1"}, {DeviceSessionID: "busy-2"},
+		{DeviceSessionID: "busy-3"}, {DeviceSessionID: "busy-4"},
+		{DeviceSessionID: "phone"},
+	}}
 	d := NewDispatcher(data, "", b, log.New(&bytes.Buffer{}, "", 0))
 	defer d.Close()
-	for i := range 4 {
-		d.Dispatch(t.Context(), int64(i+1), "run.started", false)
+	d.Dispatch(t.Context(), 1, "run.started", false)
+	for range 4 {
 		select {
 		case <-b.entered:
 		case <-time.After(time.Second):
 			t.Fatal("worker not started")
 		}
 	}
-	d.Dispatch(t.Context(), 5, "run.started", false)
-	d.Dispatch(t.Context(), 6, "run.started", false)
+	data.mu.Lock()
+	data.registrations = data.registrations[4:]
+	data.mu.Unlock()
+	d.Dispatch(t.Context(), 2, "run.completed", false)
 	if d.Stats().Coalesced != 1 {
 		t.Fatalf("stats=%+v", d.Stats())
+	}
+	close(b.release)
+}
+
+func TestDispatcherCoalescesDeviceWhileWakeIsInFlight(t *testing.T) {
+	b := blockingTransport{make(chan struct{}, 2), make(chan struct{})}
+	data := &memoryStore{registrations: []store.PushRegistration{{DeviceSessionID: "phone"}}}
+	d := NewDispatcher(data, "", b, log.New(&bytes.Buffer{}, "", 0))
+	defer d.Close()
+
+	d.Dispatch(t.Context(), 1, "run.started", false)
+	select {
+	case <-b.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first wake did not start")
+	}
+
+	d.Dispatch(t.Context(), 2, "run.completed", false)
+	if got := d.Stats().Coalesced; got != 1 {
+		t.Fatalf("coalesced = %d, want 1 while the device wake is in flight", got)
 	}
 	close(b.release)
 }

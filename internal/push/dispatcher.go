@@ -165,9 +165,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, id int64, event string, wait 
 func (d *Dispatcher) worker() {
 	defer d.workers.Done()
 	for item := range d.queue {
-		d.mu.Lock()
-		delete(d.pending, item.registration.DeviceSessionID)
-		d.mu.Unlock()
 		ok := false
 		configured := true
 		if d.ctx.Err() == nil {
@@ -198,6 +195,9 @@ func (d *Dispatcher) worker() {
 			}
 			cancel()
 		}
+		d.mu.Lock()
+		delete(d.pending, item.registration.DeviceSessionID)
+		d.mu.Unlock()
 		if item.done != nil {
 			item.done <- outcome{woken: ok, configured: configured}
 		}
