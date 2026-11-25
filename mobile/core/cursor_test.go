@@ -86,6 +86,40 @@ func TestCursorCardStalenessUsesTheDesktopGrace(t *testing.T) {
 	}
 }
 
+// Grok Bot gets the same pace mark as the provider meters: how far through
+// its week now is. Without a reported window it is paced as a week.
+func TestCursorMetersCarryElapsedForThePaceMark(t *testing.T) {
+	card := renderPayload(t, `{"cursor_usage":`+cursorCard(4*time.Minute)+`}`).Cursor
+	// Resets in 2 days of a 7 day week: 5/7 gone.
+	if grok := card.Groups[1].Meters[0]; grok.ElapsedPercent != 71 {
+		t.Fatalf("grok elapsed = %d", grok.ElapsedPercent)
+	}
+	// Resets in 4 days of a 30 day month.
+	if auto := card.Groups[0].Meters[0]; auto.ElapsedPercent != 87 {
+		t.Fatalf("auto elapsed = %d", auto.ElapsedPercent)
+	}
+	// No limit: no bar, so no mark.
+	if spend := card.Groups[2].Meters[0]; spend.ElapsedPercent != 0 {
+		t.Fatalf("on-demand elapsed = %d", spend.ElapsedPercent)
+	}
+
+	// A reported window wins over the group's default.
+	reset := cursorNow.Add(5 * 24 * time.Hour)
+	row := cursorMeterRow(cursorMeter{Key: "grokBot", Group: cursorGroupWeekly, Unit: "percent", Used: 10,
+		Limit: floatPtr(100), ResetsAt: &reset, WindowSeconds: int64Ptr(10 * 24 * 3600)}, cursorNow)
+	if row.ElapsedPercent != 50 {
+		t.Fatalf("reported window elapsed = %d", row.ElapsedPercent)
+	}
+	// No reset reported: never a made-up mark.
+	row = cursorMeterRow(cursorMeter{Key: "grokBot", Group: cursorGroupWeekly, Unit: "percent", Used: 10, Limit: floatPtr(100)}, cursorNow)
+	if row.ElapsedPercent != 0 {
+		t.Fatalf("no reset elapsed = %d", row.ElapsedPercent)
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
+func int64Ptr(v int64) *int64     { return &v }
+
 func TestNoCursorUsageMeansNoCard(t *testing.T) {
 	if card := renderPayload(t, `{"providers":[]}`).Cursor; card != nil {
 		t.Fatalf("card = %#v", card)

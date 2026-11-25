@@ -42,6 +42,9 @@ jobs:
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
+          # Let the PR maintenance bot's branch updates trigger a review.
+          # Named explicitly (not '*') so other bots can't spend the token.
+          allowed_bots: 'crouton-neo'
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
