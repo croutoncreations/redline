@@ -223,6 +223,60 @@ func TestDispatcherCoalescesDeviceWhileWakeIsInFlight(t *testing.T) {
 	close(b.release)
 }
 
+type hintTransport struct {
+	entered chan WakeHint
+	release chan struct{}
+}
+
+func (h hintTransport) Wake(ctx context.Context, w Wake) error {
+	h.entered <- w.Hint
+	select {
+	case <-h.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The device may finish fetching before an in-flight wake returns, so
+// deliveries that arrive during the send need one follow-up wake.
+func TestDispatcherSendsFollowUpWakeForDeliveryDuringInFlightWake(t *testing.T) {
+	h := hintTransport{make(chan WakeHint, 4), make(chan struct{})}
+	data := &memoryStore{registrations: []store.PushRegistration{{DeviceSessionID: "phone"}}}
+	d := NewDispatcher(data, "", h, log.New(&bytes.Buffer{}, "", 0))
+	defer d.Close()
+	next := func() WakeHint {
+		t.Helper()
+		select {
+		case hint := <-h.entered:
+			return hint
+		case <-time.After(time.Second):
+			t.Fatal("wake not sent")
+			return WakeHint{}
+		}
+	}
+
+	d.Dispatch(t.Context(), 1, "run.started", false)
+	if hint := next(); hint.DeliveryID != 1 {
+		t.Fatalf("first wake hint = %+v", hint)
+	}
+	d.Dispatch(t.Context(), 2, "run.completed", false)
+	d.Dispatch(t.Context(), 3, "run.completed", false)
+	h.release <- struct{}{}
+	if hint := next(); hint.DeliveryID != 3 {
+		t.Fatalf("follow-up wake hint = %+v, want the latest delivery", hint)
+	}
+	h.release <- struct{}{}
+	select {
+	case hint := <-h.entered:
+		t.Fatalf("unexpected extra wake %+v", hint)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := d.Stats().Coalesced; got != 2 {
+		t.Fatalf("coalesced = %d, want 2", got)
+	}
+}
+
 type recordingTransport struct {
 	mu     sync.Mutex
 	tokens []string
