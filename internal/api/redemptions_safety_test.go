@@ -90,7 +90,7 @@ func TestRedeemBankedResetOutcomesAndVerification(t *testing.T) {
 						t.Fatal(notifier.events)
 					}
 				}
-				latest, _, err := db.LatestSnapshot(context.Background(), "codex")
+				latest, _, err := db.LatestSnapshot(context.Background(), "main", "codex")
 				if err != nil || latest.Weekly != pre.Weekly {
 					t.Fatalf("%+v %v", latest, err)
 				}

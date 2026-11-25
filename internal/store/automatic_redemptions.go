@@ -20,13 +20,13 @@ type AutomaticBankedResetRedemption struct {
 
 // LastBankedResetExpiry recovers metadata for a pending request that vanished
 // from telemetry, returning only the last matching detail rather than snapshots.
-func (d *DB) LastBankedResetExpiry(ctx context.Context, provider, resetID string) (*time.Time, error) {
+func (d *DB) LastBankedResetExpiry(ctx context.Context, account, provider, resetID string) (*time.Time, error) {
 	var raw string
 	err := d.db.QueryRowContext(ctx, `SELECT json_extract(detail.value, '$.expires_at')
 FROM usage_snapshots AS snapshot, json_each(snapshot.banked_reset_details) AS detail
-WHERE snapshot.provider=? AND json_extract(detail.value, '$.id')=?
+WHERE snapshot.provider_account_id=? AND snapshot.provider=? AND json_extract(detail.value, '$.id')=?
 AND json_extract(detail.value, '$.expires_at') IS NOT NULL
-ORDER BY snapshot.observed_at DESC, snapshot.id DESC LIMIT 1`, provider, resetID).Scan(&raw)
+ORDER BY snapshot.observed_at DESC, snapshot.id DESC LIMIT 1`, account, provider, resetID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

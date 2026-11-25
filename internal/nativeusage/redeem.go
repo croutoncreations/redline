@@ -92,7 +92,7 @@ func (r *Redeemer) Prepare(ctx context.Context, provider config.Provider, resetI
 		return dryRequest(name, req), nil
 	}
 	if name == "codex" {
-		credential, err := r.credential(ctx, name)
+		credential, err := r.credential(ctx, name, provider)
 		if err != nil {
 			return req, err
 		}
@@ -119,9 +119,26 @@ func dryRequest(name string, req RedeemRequest) RedeemRequest {
 	return req
 }
 
-func (r *Redeemer) credential(ctx context.Context, name string) (Credential, error) {
+// credential reads the login an account spends from, never refreshing it:
+// the account's Claude Code profile when it has one, else the default login.
+func (r *Redeemer) credential(ctx context.Context, name string, provider config.Provider) (Credential, error) {
 	if r.credentials == nil {
 		return Credential{}, fmt.Errorf("native credentials are unavailable")
+	}
+	if profile := profileDir(name, provider); profile != "" {
+		reader, ok := r.credentials.(ProfileCredentials)
+		if !ok {
+			return Credential{}, fmt.Errorf("claude profile credentials are unavailable")
+		}
+		c, err := reader.AccessClaudeProfile(ctx, profile)
+		if err != nil {
+			// Already says which profile and how to fix it; never a token.
+			return Credential{}, err
+		}
+		if c.AccessToken == "" {
+			return Credential{}, fmt.Errorf("claude access token is unavailable")
+		}
+		return c, nil
 	}
 	c, err := r.credentials.AccessWithoutRefresh(ctx, name)
 	if name == "claude" && err != nil {
@@ -151,7 +168,7 @@ func (r *Redeemer) Redeem(ctx context.Context, provider config.Provider, req Red
 	if !requestIDPattern.MatchString(req.RequestID) || (name == "claude" && !grantIDPattern.MatchString(req.ResetID)) || req.ResetID == "" {
 		return result, fmt.Errorf("invalid reset id or request id")
 	}
-	credential, err := r.credential(ctx, name)
+	credential, err := r.credential(ctx, name, provider)
 	if err != nil {
 		result.Reason = err.Error()
 		return result, nil

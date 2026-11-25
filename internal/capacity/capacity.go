@@ -22,7 +22,10 @@ const (
 )
 
 type TokenObservation struct {
-	Provider            string    `json:"provider"`
+	Provider string `json:"provider"`
+	// Account is the Redline provider account the tokens were spent on.
+	// Empty for observations recorded before accounts were tracked.
+	Account             string    `json:"account,omitempty"`
 	Source              string    `json:"source"`
 	SourceID            string    `json:"source_id"`
 	ObservedAt          time.Time `json:"observed_at"`
@@ -167,6 +170,9 @@ func estimateWindow(kind, provider string, snapshots []decision.UsageSnapshot, o
 			}
 			remaining, reset = snapshot.Short.Remaining, snapshot.Short.ResetsAt
 		} else {
+			if snapshot.WeeklyUnavailable {
+				continue
+			}
 			remaining, reset = snapshot.Weekly.Remaining, snapshot.Weekly.ResetsAt
 		}
 		key := reset.UTC().Round(time.Minute).Unix()

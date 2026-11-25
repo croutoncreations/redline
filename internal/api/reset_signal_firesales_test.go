@@ -47,7 +47,7 @@ func firesaleAction(t *testing.T, s *Server, key, action string) *httptest.Respo
 
 func mustSnapshot(t *testing.T, s *Server) decision.UsageSnapshot {
 	t.Helper()
-	snapshot, _, err := s.store.LatestSnapshot(t.Context(), "codex")
+	snapshot, _, err := s.store.LatestSnapshot(t.Context(), "main", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
