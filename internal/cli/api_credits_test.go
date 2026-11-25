@@ -34,6 +34,17 @@ func runCLI(t *testing.T, stdin string, args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+func TestAccountHelpListsTheOpenAICreditsCommands(t *testing.T) {
+	configPath, _ := creditsHome(t)
+	_, stdout, stderr := runCLI(t, "", "--config", configPath, "account")
+	help := stdout + stderr
+	for _, command := range []string{"add-openai-credits <id>", "set-session-key <id>", "set-api-key <id>", "clear-keys <id>"} {
+		if !strings.Contains(help, command) {
+			t.Errorf("account help does not mention %q:\n%s", command, help)
+		}
+	}
+}
+
 func TestAddOpenAICreditsAccountWritesNoSecretToTheAccountsFile(t *testing.T) {
 	configPath, secretsDir := creditsHome(t)
 	code, stdout, stderr := runCLI(t, "sess-SYNTHETICSESSIONKEY000000\n", "--config", configPath,
