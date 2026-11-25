@@ -41,10 +41,15 @@ type Dispatcher struct {
 	mu        sync.Mutex
 	queue     chan job
 	pending   map[string]bool
-	closed    bool
-	started   bool
-	stats     Stats
-	workers   sync.WaitGroup
+	// inFlight marks devices whose wake is being sent. A delivery that
+	// arrives then may postdate the device's fetch, so it records one
+	// follow-up wake instead of being dropped. Guarded by mu.
+	inFlight map[string]bool
+	followUp map[string]job
+	closed   bool
+	started  bool
+	stats    Stats
+	workers  sync.WaitGroup
 	// unavailable is set while push is known to be unconfigured, so each
 	// outage logs once; a successful wake clears it. Guarded by mu.
 	unavailable bool
@@ -75,7 +80,7 @@ func NewDispatcher(s Store, issuer string, t Transport, logger *log.Logger) *Dis
 		logger = log.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &Dispatcher{store: s, issuer: issuer, transport: t, logger: logger, ctx: ctx, cancel: cancel, queue: make(chan job, 256), pending: map[string]bool{}}
+	d := &Dispatcher{store: s, issuer: issuer, transport: t, logger: logger, ctx: ctx, cancel: cancel, queue: make(chan job, 256), pending: map[string]bool{}, inFlight: map[string]bool{}, followUp: map[string]job{}}
 	return d
 }
 func (d *Dispatcher) Stats() Stats { d.mu.Lock(); defer d.mu.Unlock(); return d.stats }
@@ -127,11 +132,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, id int64, event string, wait 
 		}
 	}
 	for _, registration := range registrations {
+		item := job{registration: registration, hint: WakeHint{DeliveryID: id, Kind: kind(event)}}
 		if d.pending[registration.DeviceSessionID] {
 			d.stats.Coalesced++
+			if d.inFlight[registration.DeviceSessionID] {
+				d.followUp[registration.DeviceSessionID] = item
+			}
 			continue
 		}
-		item := job{registration: registration, hint: WakeHint{DeliveryID: id, Kind: kind(event)}}
 		if wait {
 			item.done = make(chan outcome, 1)
 		}
@@ -166,7 +174,7 @@ func (d *Dispatcher) worker() {
 	defer d.workers.Done()
 	for item := range d.queue {
 		d.mu.Lock()
-		delete(d.pending, item.registration.DeviceSessionID)
+		d.inFlight[item.registration.DeviceSessionID] = true
 		d.mu.Unlock()
 		ok := false
 		configured := true
@@ -198,8 +206,29 @@ func (d *Dispatcher) worker() {
 			}
 			cancel()
 		}
+		d.finish(item.registration.DeviceSessionID)
 		if item.done != nil {
 			item.done <- outcome{woken: ok, configured: configured}
 		}
 	}
+}
+
+// finish releases a device after its wake and queues the follow-up wake
+// recorded while that wake was in flight, if any.
+func (d *Dispatcher) finish(device string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.inFlight, device)
+	next, ok := d.followUp[device]
+	delete(d.followUp, device)
+	if ok && !d.closed {
+		select {
+		case d.queue <- next:
+			return
+		default:
+			d.stats.Dropped++
+			d.logger.Print("push queue full; wake dropped")
+		}
+	}
+	delete(d.pending, device)
 }
