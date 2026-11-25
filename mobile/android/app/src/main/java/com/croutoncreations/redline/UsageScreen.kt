@@ -508,8 +508,12 @@ internal fun CursorUsageCard(cursor: CursorUsage) {
 @Composable
 private fun CursorMeterRow(meter: CursorMeter, lastKnown: Boolean) {
     val label = (if (lastKnown) "Last known " else "") + meter.label
+    // Same rule as the provider meters: old numbers against the present clock
+    // say nothing true, so no mark for them.
+    val showPace = meter.hasLimit && meter.elapsedPercent > 0 && !lastKnown
     Column(modifier = Modifier.semantics {
-        contentDescription = "$label: ${meter.valueLabel}. ${cursorMeterDetail(meter)}"
+        contentDescription = "$label: ${meter.valueLabel}. ${cursorMeterDetail(meter)}" +
+            if (showPace) paceSentence(paceOf(meter.remainingPercent, meter.elapsedPercent)) else ""
     }) {
         Row {
             Text(label, color = TextPrimary, fontSize = 13.sp)
@@ -524,14 +528,21 @@ private fun CursorMeterRow(meter: CursorMeter, lastKnown: Boolean) {
         }
         if (meter.hasLimit) {
             Spacer(Modifier.height(6.dp))
-            // What is left, the same direction and colours as the provider
-            // meters above it.
-            LinearProgressIndicator(
-                progress = { meter.remainingPercent / 100f },
-                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                color = toneFor(meter.remainingPercent),
-                trackColor = Line,
-            )
+            // What is left, the same direction, colours and pace mark as the
+            // provider meters above it.
+            BoxWithConstraints(Modifier.fillMaxWidth().height(14.dp)) {
+                LinearProgressIndicator(
+                    progress = { meter.remainingPercent / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = toneFor(meter.remainingPercent),
+                    trackColor = Line,
+                )
+                if (showPace) PaceMark(meter.elapsedPercent, maxWidth)
+            }
         }
         Spacer(Modifier.height(4.dp))
         Text(cursorMeterDetail(meter), color = TextMuted, fontSize = 11.sp)
@@ -873,6 +884,30 @@ private fun BoxWithConstraintsScope.SchedulerLine(x: Dp, maxWidth: Dp, color: Co
     )
 }
 
+/** What TalkBack says for a pace mark, appended to the meter's sentence. */
+private fun paceSentence(pace: Pace): String = when (pace) {
+    Pace.AHEAD -> ". Ahead of pace"
+    Pace.BEHIND -> ". Behind pace"
+    Pace.ON_PACE -> ". On pace"
+}
+
+/**
+ * Where the bar's edge would be if the window were spent evenly: a white
+ * line taller than the bar, shared by every meter so it reads the same.
+ */
+@Composable
+private fun PaceMark(elapsedPercent: Int, maxWidth: androidx.compose.ui.unit.Dp) {
+    val mark = paceMarkPercent(elapsedPercent)
+    Box(
+        Modifier
+            .offset(x = (maxWidth * mark / 100f - 1.dp).coerceIn(0.dp, maxWidth - 2.dp))
+            .width(2.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(1.dp))
+            .background(TextPrimary),
+    )
+}
+
 /** The scheduler's lines on one meter. Empty draws nothing. */
 data class MeterZones(
     val reservePercent: Int = 0,
@@ -915,15 +950,7 @@ private fun Meter(
             }
             if (absolute.isNotEmpty()) append(", at $absolute")
             // The pace mark is visual; this is its sentence.
-            if (showPace) {
-                append(
-                    when (pace) {
-                        Pace.AHEAD -> ". Ahead of pace"
-                        Pace.BEHIND -> ". Behind pace"
-                        Pace.ON_PACE -> ". On pace"
-                    },
-                )
-            }
+            if (showPace) append(paceSentence(pace))
         }
     }) {
         Row {
@@ -998,17 +1025,7 @@ private fun Meter(
             // that is about the clock rather than the policy. Pace remains in
             // the accessibility sentence; the visual mark is always white so
             // every meter has the same easily scanned landmark.
-            if (showPace) {
-                val mark = paceMarkPercent(elapsedPercent)
-                Box(
-                    Modifier
-                        .offset(x = (maxWidth * mark / 100f - 1.dp).coerceIn(0.dp, maxWidth - 2.dp))
-                        .width(2.dp)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(TextPrimary),
-                )
-            }
+            if (showPace) PaceMark(elapsedPercent, maxWidth)
         }
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

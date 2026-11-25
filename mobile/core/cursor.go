@@ -30,6 +30,8 @@ type cursorMeter struct {
 	Used     float64    `json:"used"`
 	Limit    *float64   `json:"limit,omitempty"`
 	ResetsAt *time.Time `json:"resets_at,omitempty"`
+	// WindowSeconds is the meter's period, when the source reported it.
+	WindowSeconds *int64 `json:"window_seconds,omitempty"`
 }
 
 type cursorBalance struct {
@@ -117,6 +119,10 @@ type CursorMeterRow struct {
 	// ResetsAt is empty when the reset was not reported; never invented.
 	ResetsAt        string `json:"resets_at,omitempty"`
 	ResetsInSeconds int64  `json:"resets_in_seconds"`
+	// ElapsedPercent is how far through the meter's period now is, 0-100,
+	// for the same pace mark the provider meters carry. Zero when the meter
+	// has no limit or no reported reset: no mark is better than a made-up one.
+	ElapsedPercent int `json:"elapsed_percent"`
 }
 
 // CursorBalanceRow is an amount available to spend, such as credits.
@@ -234,6 +240,9 @@ func cursorMeterRow(meter cursorMeter, now time.Time) CursorMeterRow {
 	left := math.Max(0, math.Min(100, (limit-meter.Used)/limit*100))
 	row.HasLimit = true
 	row.RemainingPercent = int(math.Round(left))
+	if meter.ResetsAt != nil {
+		row.ElapsedPercent = elapsedPercent(*meter.ResetsAt, cursorMeterPeriod(meter), now)
+	}
 	row.Exhausted = meter.Used >= limit
 	switch {
 	case row.Exhausted:
@@ -244,6 +253,21 @@ func cursorMeterRow(meter cursorMeter, now time.Time) CursorMeterRow {
 		row.ValueLabel = cursorAmount(math.Max(0, limit-meter.Used), meter.Unit) + " of " + cursorAmount(limit, meter.Unit) + " left"
 	}
 	return row
+}
+
+// cursorMeterPeriod is the meter's reported window, or its group's usual one
+// (Grok Bot weekly, the model pools monthly) when the source left it out.
+func cursorMeterPeriod(meter cursorMeter) time.Duration {
+	if meter.WindowSeconds != nil && *meter.WindowSeconds > 0 {
+		return time.Duration(*meter.WindowSeconds) * time.Second
+	}
+	switch meter.Group {
+	case cursorGroupWeekly:
+		return weeklyPeriod
+	case cursorGroupMonthly:
+		return 30 * 24 * time.Hour
+	}
+	return 0
 }
 
 func cursorAmount(value float64, unit string) string {
