@@ -354,9 +354,18 @@ func buildCommand(
 	}
 	// The platform session key carries full dashboard access; no run may
 	// see it, even if the service was started with it in its environment.
-	base.Env = withoutVariable(base.Env, "REDLINE_OPENAI_SESSION_KEY")
+	// The run markers below are Redline's to set, never inherited.
+	for _, name := range []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENAI_API_CREDITS", "REDLINE_PROVIDER_ACCOUNT_ID"} {
+		base.Env = withoutVariable(base.Env, name)
+	}
+	if account := request.Profile.ProviderAccountID; account != "" {
+		base.Env = append(base.Env, "REDLINE_PROVIDER_ACCOUNT_ID="+account)
+	}
 	if key := request.Profile.OpenAIAPIKey; key != "" {
 		base.Env = withOpenAICredentials(base.Env, key, request.Profile.OpenAIOrganization)
+		// Tools inside the run (such as a pi extension that moves OpenAI
+		// models to a ChatGPT subscription) use this to keep billing the key.
+		base.Env = append(base.Env, "REDLINE_OPENAI_API_CREDITS=1")
 	}
 	switch request.Profile.HarnessType {
 	case "codex-cli":

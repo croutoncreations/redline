@@ -64,6 +64,34 @@ func TestCreditsRunUsesOnlyTheAccountsKeyAndOrganization(t *testing.T) {
 	}
 }
 
+// A credits run is marked so tools inside it (such as pi extensions that
+// move OpenAI models to a ChatGPT subscription) keep billing the API key.
+// Other runs, including subscription Codex runs, are never marked, even if
+// the service inherited the marker.
+func TestOnlyCreditsRunsAreMarkedAsSpendingAPICredits(t *testing.T) {
+	t.Setenv("REDLINE_OPENAI_API_CREDITS", "1")
+	t.Setenv("REDLINE_PROVIDER_ACCOUNT_ID", "inherited")
+	credits := runEnv(t, domain.ExecutionProfile{HarnessType: "pi", ProviderAccountID: "openai-credits", OpenAIAPIKey: "sk-proj-ACCOUNT"})
+	if got := envValues(credits, "REDLINE_OPENAI_API_CREDITS"); len(got) != 1 || got[0] != "1" {
+		t.Fatalf("credits run REDLINE_OPENAI_API_CREDITS = %v", got)
+	}
+	if got := envValues(credits, "REDLINE_PROVIDER_ACCOUNT_ID"); len(got) != 1 || got[0] != "openai-credits" {
+		t.Fatalf("credits run REDLINE_PROVIDER_ACCOUNT_ID = %v", got)
+	}
+	for _, profile := range []domain.ExecutionProfile{
+		{HarnessType: "pi", ProviderAccountID: "claude-main"},
+		{HarnessType: "codex-cli", ProviderAccountID: "codex-main"},
+	} {
+		env := runEnv(t, profile)
+		if got := envValues(env, "REDLINE_OPENAI_API_CREDITS"); len(got) != 0 {
+			t.Fatalf("%s run REDLINE_OPENAI_API_CREDITS = %v", profile.ProviderAccountID, got)
+		}
+		if got := envValues(env, "REDLINE_PROVIDER_ACCOUNT_ID"); len(got) != 1 || got[0] != profile.ProviderAccountID {
+			t.Fatalf("%s run REDLINE_PROVIDER_ACCOUNT_ID = %v", profile.ProviderAccountID, got)
+		}
+	}
+}
+
 // Without an organization the run still drops any inherited one, so the
 // key's own default organization is billed, as Redline measured.
 func TestCreditsRunWithoutOrganizationDropsInheritedOne(t *testing.T) {

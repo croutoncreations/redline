@@ -66,6 +66,10 @@ before it lapses.
   key, organization, project or base URL is removed. OpenAI's terms exclude Codex usage
   through API keys, and Claude Code and Cursor bill elsewhere, so those profiles are refused.
   With no saved API key, work holds rather than inherit whatever key the service has.
+  Such runs also get `REDLINE_OPENAI_API_CREDITS=1`, so tools inside them can tell they must
+  bill the API key: for example, a pi extension that moves `openai/*` models to a ChatGPT
+  subscription should leave them alone when it is set. Every run gets
+  `REDLINE_PROVIDER_ACCOUNT_ID`; neither variable is ever inherited from the service.
 
 ```yaml
 providers:
