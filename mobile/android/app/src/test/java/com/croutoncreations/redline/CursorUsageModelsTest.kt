@@ -60,6 +60,17 @@ class CursorUsageModelsTest {
     }
 
     @Test
+    fun `decodes a Cursor meter's elapsed percent for the pace mark`() {
+        val meter = redlineJson.decodeFromString(
+            CursorMeter.serializer(),
+            """{"key":"grokBot","label":"Grok Bot","has_limit":true,"remaining_percent":42,"elapsed_percent":71}""",
+        )
+        assertEquals(71, meter.elapsedPercent)
+        // An older desktop sends none: no mark.
+        assertEquals(0, redlineJson.decodeFromString(CursorMeter.serializer(), """{"key":"grokBot"}""").elapsedPercent)
+    }
+
+    @Test
     fun `a missing reset is said rather than made up`() {
         assertEquals("Reset date not reported", cursorMeterDetail(CursorMeter(hasLimit = true)))
         assertEquals("No limit reported", cursorMeterDetail(CursorMeter(hasLimit = false)))
