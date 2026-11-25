@@ -82,6 +82,11 @@ data class CursorMeter(
     /** Empty when the reset was not reported; never made up. */
     @SerialName("resets_at") val resetsAt: String = "",
     @SerialName("resets_in_seconds") val resetsInSeconds: Long = 0,
+    /**
+     * How far through the meter's period now is, 0-100, for the pace mark.
+     * Zero from an older desktop, or with no limit or reset: no mark drawn.
+     */
+    @SerialName("elapsed_percent") val elapsedPercent: Int = 0,
 )
 
 @Serializable

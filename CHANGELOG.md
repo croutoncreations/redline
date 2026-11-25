@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count
   as before.
+- The Android app draws the pace mark on Cursor's usage card too: Grok Bot's weekly allowance
+  and the monthly model pools get the same white tick, and the same "ahead / on / behind pace"
+  TalkBack sentence, as the Claude and Codex meters. No mark is drawn when Cursor reported no
+  reset, or while the card is out of date.
 
 ### Fixed
 
