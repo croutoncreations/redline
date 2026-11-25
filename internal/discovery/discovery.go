@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	redprocess "github.com/croutoncreations/redline/internal/process"
 )
 
 type Model struct {
@@ -53,6 +55,10 @@ func (s Service) Discover(ctx context.Context) Catalog {
 	specs := []struct{ id, label, binary string }{
 		{"codex-cli", "Codex CLI", "codex"},
 		{"claude-code", "Claude Code", "claude"},
+		// cursor-agent, not agent: the installer provides both names, and
+		// "agent" is common enough that the first one on PATH may be another
+		// tool entirely.
+		{"cursor-agent", "Cursor CLI", "cursor-agent"},
 		{"pi", "Pi", "pi"},
 		{"hermes", "Hermes", "hermes"},
 	}
@@ -88,6 +94,16 @@ func (s Service) Discover(ctx context.Context) Catalog {
 		switch harness.ID {
 		case "codex-cli":
 			harness.Models = map[string][]Model{"codex": s.codexModels()}
+		case "cursor-agent":
+			// The account's own list, so it tracks what Cursor offers today.
+			// Only asked when signed in: a signed-out CLI prompts to log in.
+			if harness.Installed && harness.Authentication == "authenticated" {
+				if output, err := s.run()(ctx, harness.Path, "models"); err == nil {
+					harness.Models = map[string][]Model{"cursor": ParseCursorModels(string(output))}
+				} else {
+					harness.Error = "list models: " + firstLine(string(output))
+				}
+			}
 		case "pi":
 			if harness.Installed {
 				harness.Models = map[string][]Model{
@@ -130,6 +146,26 @@ func (s Service) inspect(ctx context.Context, id, label, binary string, args []s
 	case "claude-code":
 		authArgs = []string{"auth", "status"}
 	}
+	if id == "cursor-agent" {
+		// `agent status` exits 0 either way; its JSON says which. The output
+		// can name the account, so only the boolean is kept.
+		output, err := s.run()(ctx, path, "status", "--format", "json")
+		var status struct {
+			IsAuthenticated *bool `json:"isAuthenticated"`
+		}
+		if err == nil && json.Unmarshal(lastJSONLine(output), &status) == nil && status.IsAuthenticated != nil {
+			harness.Authentication = "signed_out"
+			if *status.IsAuthenticated {
+				harness.Authentication = "authenticated"
+			}
+		} else {
+			// Said rather than left blank: an unread status also means the
+			// model list is not fetched, which would otherwise look like the
+			// account offering no models.
+			harness.Error = "read login status: `cursor-agent status` gave no answer"
+		}
+		return harness
+	}
 	if len(authArgs) > 0 {
 		authOutput, authErr := s.run()(ctx, path, authArgs...)
 		var exitErr *exec.ExitError
@@ -141,6 +177,70 @@ func (s Service) inspect(ctx context.Context, id, label, binary string, args []s
 		_ = authOutput // Authentication output can contain account details; do not expose it through discovery.
 	}
 	return harness
+}
+
+// ParseCursorModels reads `agent models`: "id - Label" lines under a header.
+// The CLI marks the current default with "(current, default)"; that is a
+// session detail, not part of the model's name.
+func ParseCursorModels(output string) []Model {
+	models := []Model{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(stripANSI(output), "\n") {
+		id, label, found := strings.Cut(strings.TrimSpace(line), " - ")
+		id = strings.TrimSpace(id)
+		if !found || id == "" || strings.ContainsAny(id, " \t") || seen[id] {
+			continue
+		}
+		label = strings.Map(func(r rune) rune {
+			if r == '\u200b' || r == '\u200c' || r == '\u200d' || r == '\ufeff' {
+				return -1
+			}
+			return r
+		}, label)
+		label = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(label), "(current, default)"))
+		label = strings.Join(strings.Fields(label), " ")
+		seen[id] = true
+		models = append(models, Model{ID: id, Label: label, Source: "cursor_cli"})
+	}
+	return models
+}
+
+// lastJSONLine returns the JSON object in a CLI's output. Cursor CLI
+// 2026.10 pretty-prints `status --format json` across many lines, while
+// older builds printed one line after progress text, so a whole-output
+// object is tried first, then the object starting at the last "{" line
+// that parses, then the last single line beginning with "{".
+func lastJSONLine(output []byte) []byte {
+	text := strings.TrimSpace(stripANSI(string(output)))
+	if json.Valid([]byte(text)) {
+		return []byte(text)
+	}
+	lines := strings.Split(text, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if strings.HasPrefix(lines[index], "{") {
+			if candidate := strings.Join(lines[index:], "\n"); json.Valid([]byte(candidate)) {
+				return []byte(candidate)
+			}
+		}
+	}
+	for index := len(lines) - 1; index >= 0; index-- {
+		if line := strings.TrimSpace(lines[index]); strings.HasPrefix(line, "{") {
+			return []byte(line)
+		}
+	}
+	return nil
+}
+
+func firstLine(output string) string {
+	for _, line := range strings.Split(stripANSI(output), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			if len(line) > 160 {
+				line = line[:160]
+			}
+			return line
+		}
+	}
+	return "failed"
 }
 
 func ParsePiModels(output, provider string, qualify bool) []Model {
@@ -315,7 +415,9 @@ func (s Service) run() func(context.Context, string, ...string) ([]byte, error) 
 		commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		command := exec.CommandContext(commandCtx, name, args...)
-		command.Env = append(os.Environ(), "GATEPOST_HOST_DISABLE=1")
+		// Without Cursor credential variables, so the Cursor CLI reports its
+		// own login rather than a key Redline's runs would not use either.
+		command.Env = append(redprocess.WithoutCursorCredentials(os.Environ()), "GATEPOST_HOST_DISABLE=1")
 		return command.CombinedOutput()
 	}
 }

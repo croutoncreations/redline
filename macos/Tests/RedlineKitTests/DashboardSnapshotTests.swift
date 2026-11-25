@@ -18,6 +18,46 @@ import Testing
     #expect(absent.bankedResetsExpireAt == nil)
 }
 
+/// An untouched five hour window has no reset yet: the provider starts its
+/// clock on first use. It is full, and the menu bar says so instead of
+/// falling back to the weekly reset as if the window did not exist.
+@Test func unstartedShortWindowIsFullAndStartsOnFirstUse() throws {
+    let data = Data(#"""
+    {"health":{"status":"ok","window":"24h0m0s","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[{"id":"claude-main","provider":"claude","snapshot":{"short_window_not_started":true,"weekly":{"remaining":0.87,"resets_at":"2026-10-02T17:00:00Z"},"source":"openusage"}}]}
+    """#.utf8)
+    let provider = try DashboardSnapshot.decode(data).providers[0]
+    #expect(provider.snapshot?.shortWindowNotStarted == true)
+    #expect(provider.shortPercent == 100)
+    #expect(provider.shortWindowSummary == "5h 100% · starts on first use")
+
+    let older = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"ok","window":"24h0m0s","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[{"id":"codex-main","provider":"codex","snapshot":{"weekly":{"remaining":0.3,"resets_at":"2026-10-02T17:00:00Z"}}}]}
+    """#.utf8)).providers[0]
+    #expect(older.snapshot?.shortWindowNotStarted == false)
+    #expect(older.shortPercent == nil)
+    #expect(older.shortWindowSummary == nil)
+}
+
+@Test func usageSnapshotGroupsBankedResetsByKindOnlyWhenDetailsAreComplete() throws {
+    let decoder = JSONDecoder()
+    let now = ISO8601DateFormatter().date(from: "2026-11-11T14:00:00Z")!
+    let snapshot = try decoder.decode(UsageSnapshot.self, from: Data(#"""
+    {"banked_resets":5,"banked_resets_expire_at":"2026-12-10T22:00:00Z","banked_reset_details":[
+      {"id":"fable-a","kind":"fable","expires_at":"2027-03-09T07:59:00Z","resets_left":1},
+      {"id":"full-a","kind":"full","expires_at":"2026-12-10T22:00:00Z","resets_left":1},
+      {"id":"full-b","kind":"full","expires_at":"2026-12-16T04:59:00Z","resets_left":1},
+      {"id":"fable-b","kind":"fable","expires_at":"2027-03-09T07:59:00Z","resets_left":2}]}
+    """#.utf8))
+    let kinds = snapshot.bankedResetKinds(now: now)
+    #expect(kinds.map(\.kind) == ["full", "fable"])
+    #expect(kinds.map(\.count) == [2, 3])
+
+    let partial = try decoder.decode(UsageSnapshot.self, from: Data(#"""
+    {"banked_resets":5,"banked_reset_details":[{"id":"full-a","kind":"full","resets_left":1}]}
+    """#.utf8))
+    #expect(partial.bankedResetKinds(now: now).isEmpty)
+}
+
 @Test func dashboardSnapshotDecodesProviderWindowsAndOperationalState() throws {
     let data = Data(#"""
     {
@@ -213,6 +253,29 @@ import Testing
     #expect(snapshot.providers[0].error == "Usage data is stale")
     #expect(TrayState(snapshot: snapshot).lowestWeeklyPercent == 32)
     #expect(TrayState(snapshot: snapshot).menuBarTitle == "WAIT  Codex 32% · Claude —")
+}
+
+/// A signed-out provider says so on the card itself, not in a hover tooltip:
+/// "stale" alone sent people looking at the wrong thing. Other stale causes
+/// keep the generic line.
+@Test func signedOutProviderNamesTheFixInsteadOfJustStale() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"degraded","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[
+      {"id":"claude-main","provider":"claude","snapshot_stale":true,
+       "error":"Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again",
+       "usage_source":{"active":"openusage","reason":"signed_out","consecutive_failures":3},
+       "snapshot":{"weekly":{"remaining":0.22,"resets_at":"2026-10-02T17:00:00Z"},"source":"openusage"}},
+      {"id":"codex-main","provider":"codex","snapshot_stale":true,"error":"Usage data is stale",
+       "snapshot":{"weekly":{"remaining":0.32,"resets_at":"2026-10-05T03:24:11Z"},"source":"openusage"}}
+    ],"tasks":[],"runs":[],"attempts":[]}
+    """#.utf8))
+
+    let claude = snapshot.providers[0]
+    #expect(claude.signedOut)
+    #expect(claude.staleSummary == "Claude Code is signed out · run claude auth login")
+    let codex = snapshot.providers[1]
+    #expect(!codex.signedOut)
+    #expect(codex.staleSummary == "Last usage sample is stale")
 }
 
 private extension DashboardSnapshot {

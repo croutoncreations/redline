@@ -43,7 +43,7 @@ func (s *memoryStore) DeletePushRegistrationToken(_ context.Context, id, token s
 	return nil
 }
 func TestRelayDispatchPrivacyAuthAndErrors(t *testing.T) {
-	for _, status := range []int{200, 410, 404, 501} {
+	for _, status := range []int{200, 202, 410, 404, 501} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var mu sync.Mutex
 			calls := 0
@@ -77,7 +77,7 @@ func TestRelayDispatchPrivacyAuthAndErrors(t *testing.T) {
 			d := NewDispatcher(data, "issuer", transport, log.New(&logs, "", 0))
 			defer d.Close()
 			result := d.Dispatch(t.Context(), 42, "reset.expiring", true)
-			if result.Woken != map[int]int{200: 1, 410: 0, 404: 0, 501: 0}[status] {
+			if result.Woken != map[int]int{200: 1, 202: 1, 410: 0, 404: 0, 501: 0}[status] {
 				t.Fatalf("result=%+v", result)
 			}
 			if status == 501 || status == 404 {

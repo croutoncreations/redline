@@ -10,7 +10,7 @@ import (
 func TestBankedResetDetailsAppearInStatusAndDashboard(t *testing.T) {
 	t.Parallel()
 	server, db := newAPIServer(t, codexPayload)
-	snapshot := decision.UsageSnapshot{Provider: "codex", ObservedAt: apiNow,
+	snapshot := decision.UsageSnapshot{Account: "codex-main", Provider: "codex", ObservedAt: apiNow,
 		Weekly: decision.UsageWindow{Remaining: .5, ResetsAt: apiNow.AddDate(0, 0, 4)}, Source: "test"}
 	snapshot.ApplyBankedResets(&decision.BankedResets{Available: 1,
 		Details: []decision.BankedReset{{ID: "credit", ResetsLeft: 1, Clears: []string{"five_hour", "weekly"}}}})

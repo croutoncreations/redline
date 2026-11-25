@@ -11,8 +11,18 @@ final class MenuBarController: NSObject {
     private let popoverModel: PopoverViewModel
     private let updates: NativeUpdateController
     private let dashboardURL: URL
-    private lazy var dashboardWindow = DashboardWindowController(dashboardURL: dashboardURL)
+    private lazy var dashboardWindow = DashboardWindowController(
+        dashboardURL: dashboardURL,
+        // The same handlers the menu bar uses, so the two menus cannot do
+        // subtly different things under the same labels.
+        actions: DashboardMenuActions(
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
+            checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
+            showAppSetup: { [weak self] in self?.showAppSetup() }
+        )
+    )
     private lazy var runLogWindow = RunLogWindowController(client: client)
+    private lazy var pairDeviceWindow = PairDeviceWindowController(client: client)
     private lazy var notifications = NativeNotificationController(
         client: client,
         onOpenRun: { [weak self] runID in self?.openRun(runID) },
@@ -29,6 +39,8 @@ final class MenuBarController: NSObject {
             enableNotifications: { [weak self] in self?.notifications.enable() },
             showAgentPermissionHelp: { [weak self] in self?.showAgentPermissionHelp() },
             showAppSetup: showAppSetup,
+            pairDevice: { [weak self] in self?.pairDeviceWindow.show() },
+            manageSubscription: { [weak self] in self?.manageSubscription() },
             quit: { NSApplication.shared.terminate(nil) }
         )
     )
@@ -117,6 +129,25 @@ final class MenuBarController: NSObject {
             let message = error.localizedDescription
             popoverModel.apply(error: message)
         }
+        // A second, independent call piggybacked on the same 20-second timer
+        // rather than a Timer of its own. Its failure is swallowed here: relay
+        // status is an addition to the dashboard render, and a broken or
+        // absent relay endpoint must never take down the existing dashboard
+        // refresh above.
+        if let relayStatus = try? await client.relayStatus() {
+            popoverModel.apply(relayStatus: relayStatus)
+        }
+    }
+
+    /// "Manage subscription…": opens a freshly minted Customer Portal URL.
+    /// Silent no-op on failure, matching `reconnectProvider`'s AppleScript
+    /// failure path -- no crash, no attempt to open a broken or partial URL,
+    /// no alert.
+    private func manageSubscription() {
+        Task {
+            guard let url = try? await client.relayPortalURL() else { return }
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func render(_ snapshot: DashboardSnapshot) {
@@ -164,7 +195,7 @@ final class MenuBarController: NSObject {
                 range: NSRange(location: 0, length: artwork.length)
             )
             result.append(artwork)
-            let value = badge.percent.map { " \($0)%" } ?? " —"
+            let value = " " + badge.compact
             result.append(NSAttributedString(
                 string: value,
                 attributes: [.font: font]

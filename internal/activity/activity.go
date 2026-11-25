@@ -208,7 +208,7 @@ func summaryFromJSON(value any) string {
 func links(summary string) []domain.RunArtifact {
 	var result []domain.RunArtifact
 	for _, raw := range urlPattern.FindAllString(summary, -1) {
-		url := strings.TrimRight(raw, ".,;:!?)]}*_`")
+		url := trimLinkPunctuation(raw)
 		artifactType, label := "link", "Link"
 		switch {
 		case strings.Contains(url, "github.com/") && strings.Contains(url, "/pull/"):
@@ -221,6 +221,42 @@ func links(summary string) []domain.RunArtifact {
 		result = appendUniqueArtifact(result, domain.RunArtifact{Type: artifactType, Label: label, URL: url})
 	}
 	return result
+}
+
+// trimLinkPunctuation removes trailing prose punctuation and unmatched
+// closing delimiters while keeping closers that balance an opener in the URL.
+func trimLinkPunctuation(raw string) string {
+	const closers = ")]}"
+	var opens, closes [len(closers)]int
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '(':
+			opens[0]++
+		case '[':
+			opens[1]++
+		case '{':
+			opens[2]++
+		case ')':
+			closes[0]++
+		case ']':
+			closes[1]++
+		case '}':
+			closes[2]++
+		}
+	}
+	url := raw
+	for {
+		url = strings.TrimRight(url, ".,;:!?*_`")
+		if url == "" {
+			return url
+		}
+		k := strings.IndexByte(closers, url[len(url)-1])
+		if k < 0 || opens[k] >= closes[k] {
+			return url
+		}
+		closes[k]--
+		url = url[:len(url)-1]
+	}
 }
 
 func appendUnique(values []string, value string) []string {

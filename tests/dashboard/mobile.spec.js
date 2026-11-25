@@ -1,6 +1,6 @@
 // Mobile dashboard Playwright tests — Phase 4
 const { test, expect } = require('@playwright/test');
-const { assets, loadMobileDashboard, candidatesFixture, dashboardFixture } = require('./harness');
+const { assets, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture } = require('./harness');
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
@@ -65,6 +65,19 @@ test('ring falls back to short window when weekly is absent', async ({ page }) =
   expect(parseFloat(remaining)).toBeCloseTo(0.62, 2);
 });
 
+test('a signed-out provider says so and names the fix', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  dashboard.providers[0].snapshot_stale = true;
+  dashboard.providers[0].error = 'Usage data is stale; scheduling is paused until a fresh snapshot is available. Claude Code is signed out on this Mac; run `claude auth login` to sign in again';
+  dashboard.providers[0].usage_source = { active: 'openusage', reason: 'signed_out', last_error: 'native usage source: Claude Code is signed out on this Mac; run `claude auth login` to sign in again', consecutive_failures: 3 };
+  await loadMobileDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card).toContainText('Signed out');
+  await expect(card.getByTestId('signed-out')).toContainText('claude auth login');
+  // The fix is shown once, plainly -- not again as raw collector plumbing.
+  await expect(card).not.toContainText('native usage source');
+});
+
 test('ring shows stale state when snapshot is stale', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot_stale = true;
@@ -88,6 +101,22 @@ test('relative() rounds up to the next unit instead of overflowing the current o
   expect(oneDayAgo).toBe('1 day ago');
 });
 
+test('relative() steps up from days to weeks, months, and years for far-off dates', async ({ page }) => {
+  await loadMobileDashboard(page);
+  const at = days => page.evaluate(d => relative(new Date(Date.now() + d * 86400000).toISOString()), days);
+  expect(await at(6)).toBe('in 6 days');
+  expect(await at(13)).toBe('in 13 days');
+  expect(await at(13.6)).toBe('in 2 weeks');
+  expect(await at(26)).toBe('in 4 weeks');
+  expect(await at(55)).toBe('in 8 weeks');
+  expect(await at(60)).toBe('in 2 months');
+  expect(await at(143)).toBe('in 5 months');
+  expect(await at(232)).toBe('in 8 months');
+  expect(await at(360)).toBe('in 1 year');
+  expect(await at(800)).toBe('in 2 years');
+  expect(await at(-21)).toBe('3 weeks ago');
+});
+
 test('shows error-state card when provider has no snapshot', async ({ page }) => {
   const dashboard = dashboardFixture();
   dashboard.providers[0].snapshot = undefined;
@@ -105,6 +134,22 @@ test('shows paused card styling when provider is paused', async ({ page }) => {
   await expect(card).toHaveClass(/paused/);
   // Pressure status label shows Paused
   await expect(card.locator('.m-provider-status')).toHaveText('Paused');
+});
+
+test('an OpenUsage card with no local login shows usage but says dispatch is held', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.openusage_card = 'claude@f48a43e1';
+  claude.run_login_unknown = 'OpenUsage card claude@f48a43e1 is not tied to a Claude login on this Mac, so runs would spend the default login; usage is shown but work holds. Bind the account to its Claude Code profile with `redline account add-profile`';
+  claude.latest_decision = { decision: 'RUN', mode: 'pace_threshold', reason: 'stale decision from before the guard' };
+  await loadMobileDashboard(page, { dashboard });
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.m-provider-status')).toHaveText('Held · login unknown');
+  const detail = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="decision-detail"]');
+  await expect(detail).toContainText('redline account add-profile');
+  await expect(detail).not.toContainText('stale decision');
+  // Usage is still shown.
+  await expect(page.locator('[data-testid="provider-detail-claude-main"] .m-meters')).toBeVisible();
 });
 
 test('opens every provider usage detail by default', async ({ page }) => {
@@ -144,6 +189,83 @@ test('banked resets row shows count and expiry, and is absent when unreported', 
   await expect(claudeResets).toHaveClass(/soon/);
   expect(codex.snapshot.banked_resets).toBeUndefined();
   await expect(page.locator('[data-testid="provider-detail-codex-main"] [data-testid="banked-resets"]')).toHaveCount(0);
+});
+
+test('an untouched five hour window reads as full and starting on first use', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  delete claude.snapshot.short;
+  claude.snapshot.allowances = (claude.snapshot.allowances || []).filter(a => a.key !== 'session');
+  claude.snapshot.short_window_not_started = true;
+  await loadMobileDashboard(page, { dashboard });
+
+  const card = page.locator('[data-provider-id="claude-main"]');
+  await expect(card.locator('.m-rings')).toContainText('on first use');
+  await expect(card.locator('.m-rings')).not.toContainText('not available');
+  const window = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="short-window-not-started"]');
+  await expect(window).toContainText('5-hour window');
+  await expect(window).toContainText('100% left');
+  await expect(window).toContainText('Starts on first use · resets 5h after');
+});
+
+test('banked resets are split by kind with each expiry', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  claude.snapshot.banked_resets = 5;
+  claude.snapshot.banked_resets_expire_at = '2026-07-22T19:00:00Z';
+  claude.snapshot.banked_reset_details = [
+    { id: 'full-a', kind: 'full', expires_at: '2026-07-22T19:00:00Z', resets_left: 1 },
+    { id: 'full-b', kind: 'full', expires_at: '2026-08-16T04:59:00Z', resets_left: 1 },
+    { id: 'fable-a', kind: 'fable', expires_at: '2027-03-09T07:59:00Z', resets_left: 3 },
+  ];
+  await loadMobileDashboard(page, { dashboard });
+  const resets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  // Collapsed by default, with counts by kind and the soonest expiry visible.
+  await expect(resets).not.toHaveAttribute('open', '');
+  await expect(resets.locator('summary')).toContainText('5 available');
+  await expect(resets.locator('.m-banked-summary')).toHaveText('2 Full · 3 Fable · next in 2 days');
+  await expect(resets).toHaveClass(/soon-summary/);
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeHidden();
+
+  await resets.locator('summary').click();
+  const full = resets.locator('[data-reset-kind="full"]');
+  await expect(full).toBeVisible();
+  await expect(full.locator('.m-reset')).toHaveCount(2);
+  await expect(full.locator('.m-reset').nth(0)).toContainText(/Expires Jul 22/);
+  await expect(full.locator('.m-reset').nth(0)).toHaveClass(/soon/);
+  await expect(full.locator('.m-reset').nth(1)).toContainText(/Expires Aug 1[56]/);
+  await expect(full.locator('.m-reset').nth(1)).not.toHaveClass(/soon/);
+  await expect(resets.locator('[data-reset-kind="fable"]')).toContainText(/Fable resets.*All expire Mar [89], 2027/s);
+
+  // A live dashboard update re-renders the card; the list stays open.
+  await page.evaluate(next => window.__redlineEventSources[0].emit('dashboard', next), dashboard);
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeVisible();
+  await resets.locator('summary').click();
+  await expect(resets.locator('[data-reset-kind="full"]')).toBeHidden();
+});
+
+test('many banked reset expiries show one per line and fold the rest into a count', async ({ page }) => {
+  const dashboard = dashboardFixture();
+  const [claude] = dashboard.providers;
+  const days = [3, 9, 15, 21, 27, 33];
+  claude.snapshot.banked_resets = days.length + 1;
+  claude.snapshot.banked_reset_details = days.map((day, i) => ({
+    id: `full-${i}`, kind: 'full', resets_left: i === 0 ? 2 : 1,
+    expires_at: new Date(Date.UTC(2026, 7, day, 19)).toISOString(),
+  }));
+  await loadMobileDashboard(page, { dashboard });
+  const resets = page.locator('[data-testid="provider-detail-claude-main"] [data-testid="banked-resets"]');
+  await resets.locator('summary').click();
+  const lines = resets.locator('[data-reset-kind="full"] .m-reset');
+  await expect(lines).toHaveCount(4);
+  await expect(lines.nth(0)).toContainText(/Expires Aug 3, .* ×2/);
+  await expect(lines.nth(2)).toContainText(/Expires Aug 15/);
+  await expect(lines.nth(3)).toHaveText(/^\+3 more, last Sep 2, /);
+  // One date per line: no line wraps on a phone-width card.
+  for (let i = 0; i < 4; i++) {
+    const box = await lines.nth(i).boundingBox();
+    expect(box.height).toBeLessThan(20);
+  }
 });
 
 test('account pools displayed before model pools in detail', async ({ page }) => {
@@ -686,4 +808,193 @@ test('repeated SSE reconnect failures probe the session only once', async ({ pag
   });
   await expect.poll(() => state.requests.filter(r => r.path === '/v1/dashboard').length)
     .toBe(before + 1);
+});
+
+// ── Cursor usage (display only) ──────────────────────────────────────────────
+// Synthetic fixtures only; see cursorUsageFixture in harness.js.
+
+function withCursor(mutate) {
+  const dashboard = dashboardFixture();
+  dashboard.cursor_usage = cursorUsageFixture();
+  if (mutate) mutate(dashboard.cursor_usage);
+  return dashboard;
+}
+
+test.describe('Cursor usage card', () => {
+  test.use({ timezoneId: 'America/Los_Angeles', locale: 'en-US' });
+
+  test('shows monthly pools, Grok Bot weekly and credits with reset dates in the viewer timezone', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor() });
+    const card = page.getByTestId('cursor-card');
+    await expect(card).toBeVisible();
+    await expect(card.locator('.m-provider-name')).toContainText('Cursor');
+    await expect(card.locator('.m-cursor-plan')).toHaveText('Pro');
+    await expect(page.getByTestId('cursor-state')).toHaveText('Up to date');
+    await expect(page.getByTestId('cursor-meta')).toContainText('Updated 2 mins ago · from OpenUsage · not used for scheduling');
+
+    const monthly = page.getByTestId('cursor-group-monthly');
+    await expect(monthly.locator('.m-cursor-meter')).toHaveCount(2);
+    await expect(monthly.getByTestId('cursor-meter-autoUsage')).toContainText('Cursor Models');
+    await expect(monthly.getByTestId('cursor-meter-autoUsage')).toContainText('100% left');
+    // 2026-08-02T04:16:45Z is Saturday Aug 1, 9:16 PM in Los Angeles (PDT).
+    await expect(monthly.getByTestId('cursor-meter-autoUsage').locator('.m-reset')).toHaveText('Resets in 12 days · Sat, Aug 1, 9:16 PM PDT');
+
+    const weekly = page.getByTestId('cursor-group-weekly');
+    await expect(weekly.getByTestId('cursor-meter-grokBot')).toContainText('Grok Bot');
+    await expect(weekly.getByTestId('cursor-meter-grokBot')).toContainText('42% left');
+    await expect(weekly.getByTestId('cursor-meter-grokBot').locator('.m-reset')).toHaveText('Resets in 2 days · Wed, Jul 22, 9:22 PM PDT');
+    // The bar is what is left, like every provider meter.
+    await expect(weekly.locator('progress')).toHaveAttribute('value', '42.0');
+
+    await expect(page.getByTestId('cursor-balance-credits')).toContainText('Credits');
+    await expect(page.getByTestId('cursor-balance-credits')).toContainText('$22.23 available');
+    await expect(page.getByTestId('cursor-balance-credits').locator('.m-reset')).toHaveCount(0);
+    await expect(page.getByTestId('cursor-group-on_demand')).toHaveCount(0);
+    await expect(page.getByTestId('cursor-not-reported')).toHaveCount(0);
+    // Display only: no Pause, Queue or Refresh controls.
+    await expect(card.locator('button')).toHaveCount(0);
+  });
+
+  test('marks an exhausted pool as used up until its reset', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor() });
+    const other = page.getByTestId('cursor-meter-apiUsage');
+    await expect(other).toHaveClass(/exhausted/);
+    await expect(other.locator('.m-meter-head b')).toHaveText('Used up');
+    await expect(other.locator('progress')).toHaveClass(/danger/);
+    await expect(other.locator('.m-reset')).toHaveText('Available again in 12 days · Sat, Aug 1, 9:16 PM PDT');
+  });
+
+  test('renders on-demand spend without a limit as spend, with no bar or percentage', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters.push({ key: 'onDemand', label: 'On-demand', group: 'on_demand', unit: 'usd', used: 12.4 });
+    }) });
+    const onDemand = page.getByTestId('cursor-meter-onDemand');
+    await expect(onDemand.locator('.m-meter-head b')).toHaveText('$12.40 spent');
+    await expect(onDemand.locator('progress')).toHaveCount(0);
+    await expect(onDemand).not.toContainText('%');
+    await expect(onDemand.locator('.m-reset')).toHaveText('No limit reported');
+  });
+
+  test('renders bounded on-demand against its own dollar limit', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters.push({ key: 'onDemand', label: 'On-demand', group: 'on_demand', unit: 'usd', used: 40, limit: 50 });
+    }) });
+    const onDemand = page.getByTestId('cursor-meter-onDemand');
+    await expect(onDemand.locator('.m-meter-head b')).toHaveText('$10.00 of $50.00 left');
+    await expect(onDemand.locator('progress')).toHaveAttribute('value', '20.0');
+    await expect(onDemand.locator('.m-reset')).toHaveText('Reset date not reported');
+  });
+
+  test('omits a missing Grok Bot meter instead of showing zero, and says it was not reported', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters = report.meters.filter(meter => meter.key !== 'grokBot');
+      report.not_reported = ['Grok Bot'];
+    }) });
+    await expect(page.getByTestId('cursor-meter-grokBot')).toHaveCount(0);
+    await expect(page.getByTestId('cursor-group-weekly')).toHaveCount(0);
+    await expect(page.getByTestId('cursor-not-reported')).toHaveText('Not reported: Grok Bot');
+  });
+
+  test('shows an unknown reset as not reported rather than inventing one', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      delete report.meters[2].resets_at;
+    }) });
+    await expect(page.getByTestId('cursor-meter-grokBot').locator('.m-reset')).toHaveText('Reset date not reported');
+  });
+
+  test('marks data as out of date once it passes its expiry on the viewer clock', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor() });
+    await expect(page.getByTestId('cursor-state')).toHaveText('Up to date');
+    
+    // Expired at 19:03Z, but within the grace OpenUsage is only rotating.
+    await page.clock.fastForward('04:00');
+    await expect(page.getByTestId('cursor-state')).toHaveText('Up to date');
+    // Past the grace: the source missed its refresh.
+    await page.clock.fastForward('02:00');
+    await expect(page.getByTestId('cursor-state')).toHaveText('Out of date');
+    await expect(page.getByTestId('cursor-card')).toHaveAttribute('data-stale', 'true');
+    await expect(page.getByTestId('cursor-meter-grokBot')).toContainText('Last known Grok Bot');
+    await expect(page.getByTestId('cursor-balance-credits')).toContainText('Last known Credits');
+  });
+
+  test('ignores the server stale flag when the expiry has not passed', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => { report.stale = true; }) });
+    await expect(page.getByTestId('cursor-state')).toHaveText('Up to date');
+  });
+
+  test('keeps working meters on partial failure and escapes the error text', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters = report.meters.filter(meter => meter.key === 'grokBot');
+      report.balances = [];
+      report.not_reported = ['Cursor Models', 'Other Models'];
+      report.errors = ['Cursor plan usage unavailable: <img src=x onerror=alert(1)> HTTP 503'];
+    }) });
+    await expect(page.getByTestId('cursor-state')).toHaveText('Partial');
+    await expect(page.getByTestId('cursor-meter-grokBot')).toBeVisible();
+    const meta = page.getByTestId('cursor-meta');
+    await expect(meta).toContainText('Some Cursor usage could not be read; the rest is shown.');
+    await expect(meta).toContainText('<img src=x onerror=alert(1)> HTTP 503');
+    await expect(meta.locator('img')).toHaveCount(0);
+    await expect(page.getByTestId('cursor-not-reported')).toHaveText('Not reported: Cursor Models, Other Models');
+  });
+
+  test('explains why there is no data yet', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters = []; report.balances = []; delete report.fetched_at; delete report.expires_at; delete report.source; delete report.plan;
+      report.not_reported = ['Cursor Models', 'Other Models', 'Grok Bot'];
+      report.refresh_error = 'cursor is not signed in on this Mac; open Cursor and sign in';
+    }) });
+    await expect(page.getByTestId('cursor-state')).toHaveText('No data');
+    await expect(page.getByTestId('cursor-meta')).toContainText('Not read yet');
+    await expect(page.getByTestId('cursor-meta')).toContainText('open Cursor and sign in');
+    await expect(page.getByTestId('cursor-not-reported')).toHaveCount(0);
+  });
+
+  test('shows promo credit expiry only when supplied, skipping lapsed dates', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.balances[0].expires_at = ['2026-07-01T00:00:00Z', '2026-08-15T07:00:00Z'];
+    }) });
+    await expect(page.getByTestId('cursor-balance-credits').locator('.m-reset')).toHaveText('Next expires in 4 weeks · Sat, Aug 15, 12:00 AM PDT');
+  });
+
+  test('distinguishes resets on either side of the autumn DST change', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      // 2026-11-01 01:30 local happens twice in Los Angeles: first PDT, then PST.
+      report.meters[0].resets_at = '2026-11-01T08:30:00Z';
+      report.meters[2].resets_at = '2026-11-01T09:30:00Z';
+    }) });
+    await expect(page.getByTestId('cursor-meter-autoUsage').locator('.m-reset')).toContainText('Sun, Nov 1, 1:30 AM PDT');
+    await expect(page.getByTestId('cursor-meter-grokBot').locator('.m-reset')).toContainText('Sun, Nov 1, 1:30 AM PST');
+  });
+
+  test('omits the card when Cursor tracking is off', async ({ page }) => {
+    await loadMobileDashboard(page);
+    await expect(page.getByTestId('cursor-card')).toHaveCount(0);
+  });
+
+  test('fits the Pixel 9 viewport without horizontal overflow', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'mobile', 'mobile project only');
+    await loadMobileDashboard(page, { dashboard: withCursor(report => {
+      report.meters.push({ key: 'onDemand', label: 'On-demand', group: 'on_demand', unit: 'usd', used: 1234.56 });
+      report.errors = ['Grok Bot usage unavailable: ' + 'averyveryverylongunbrokenprovidermessage'.repeat(4)];
+    }) });
+    await page.getByTestId('cursor-card').scrollIntoViewIfNeeded();
+    const overflow = await page.evaluate(() => ({
+      doc: document.documentElement.scrollWidth, viewport: window.innerWidth,
+      card: document.querySelector('[data-testid="cursor-card"]').getBoundingClientRect().right,
+    }));
+    expect(overflow.viewport).toBe(412);
+    expect(overflow.doc).toBeLessThanOrEqual(overflow.viewport);
+    expect(overflow.card).toBeLessThanOrEqual(overflow.viewport);
+  });
+});
+
+test.describe('Cursor usage card in another timezone', () => {
+  test.use({ timezoneId: 'Europe/London', locale: 'en-GB' });
+
+  test('formats reset dates for the viewer locale and zone', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCursor() });
+    // Same instant as the Los Angeles test: 04:22 Thursday in London (BST).
+    await expect(page.getByTestId('cursor-meter-grokBot').locator('.m-reset')).toContainText('Thu 23 Jul, 05:22 BST');
+  });
 });

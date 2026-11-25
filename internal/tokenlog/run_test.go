@@ -44,15 +44,15 @@ func TestRunUsageRecorderPersistsOwnedRunExactlyOnce(t *testing.T) {
 	}
 	defer db.Close()
 	recorder := tokenlog.RunUsageRecorder{Store: db}
-	run := domain.Run{ID: "owned-run"}
+	run := domain.Run{ID: "owned-run", ProviderAccountID: "claude-main"}
 	profile := domain.ExecutionProfile{HarnessType: "claude-code", Model: "haiku"}
 	for range 2 {
 		if _, err := recorder.RecordRunUsage(context.Background(), run, profile, path, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got, err := db.ListTokenObservations(t.Context(), "claude", time.Time{}, time.Time{})
-	if err != nil || len(got) != 1 || got[0].Source != "redline-run" || got[0].SourceID != "owned-run" {
+	got, err := db.ListTokenObservations(t.Context(), "claude-main", "claude", time.Time{}, time.Time{})
+	if err != nil || len(got) != 1 || got[0].Source != "redline-run" || got[0].SourceID != "owned-run" || got[0].Account != "claude-main" {
 		t.Fatalf("observations=%#v err=%v", got, err)
 	}
 }
@@ -225,5 +225,23 @@ func TestLoadRunArtifactReadsExistingHermesJobUsage(t *testing.T) {
 		item.InputTokens != 120 || item.OutputTokens != 8 ||
 		item.CacheReadTokens != 400 || item.CacheCreationTokens != 5 {
 		t.Fatalf("observation=%#v", item)
+	}
+}
+
+// Recorded cursor-agent stream-json run (ids and paths replaced). Only the
+// terminal result carries usage; thinking and assistant events do not count.
+func TestLoadRunArtifactReadsCursorAgentResultUsage(t *testing.T) {
+	observations, err := tokenlog.LoadRunArtifact(filepath.Join("testdata", "cursor-agent-stream.jsonl"),
+		"cursor-agent", "run-cursor", "auto", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 1 {
+		t.Fatalf("observations = %#v", observations)
+	}
+	got := observations[0]
+	if got.Provider != "cursor" || got.Model != "auto" || got.InputTokens != 15281 || got.OutputTokens != 31 ||
+		got.CacheReadTokens != 3840 || got.CacheCreationTokens != 0 {
+		t.Fatalf("observation = %#v", got)
 	}
 }

@@ -129,7 +129,7 @@ func TestRedeemVerificationRequiresFreshNativeObservation(t *testing.T) {
 			if err != nil || got.Verified != (change != "unchanged") || nativeCalls != 1 || openCalls != 0 {
 				t.Fatalf("%+v err=%v native=%d open=%d", got, err, nativeCalls, openCalls)
 			}
-			latest, _, err := db.LatestSnapshot(t.Context(), "codex")
+			latest, _, err := db.LatestSnapshot(t.Context(), "main", "codex")
 			if err != nil || !latest.ObservedAt.Equal(now) {
 				t.Fatalf("snapshot=%+v err=%v", latest, err)
 			}

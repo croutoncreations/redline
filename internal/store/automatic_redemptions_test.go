@@ -7,8 +7,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/store"
 )
+
+func TestLastBankedResetExpiryIsAccountScoped(t *testing.T) {
+	db := openTaskDB(t)
+	now := time.Now().UTC()
+	for i, account := range []string{"first", "second"} {
+		expires := now.Add(time.Duration(i+1) * time.Hour)
+		snapshot := usageSnapshot(now.Add(time.Duration(i)*time.Minute), .5)
+		snapshot.Account = account
+		snapshot.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "same-credit", ExpiresAt: &expires, ResetsLeft: 1}}})
+		if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, account := range []string{"first", "second"} {
+		expires, err := db.LastBankedResetExpiry(t.Context(), account, "codex", "same-credit")
+		if err != nil || expires == nil || !expires.Equal(now.Add(time.Duration(i+1)*time.Hour)) {
+			t.Fatalf("account=%s expiry=%v err=%v", account, expires, err)
+		}
+	}
+	expires, err := db.LastBankedResetExpiry(t.Context(), "absent", "codex", "same-credit")
+	if err != nil || expires != nil {
+		t.Fatalf("unconfigured account read another account's deadline: %v %v", expires, err)
+	}
+}
 
 func TestAutomaticBankedResetRedemptionsMigration36AndPersistence(t *testing.T) {
 	for _, stamp := range []int{35, 36, 99} {

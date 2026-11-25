@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,30 +27,49 @@ func runResetRedeem(client apiclient.Client, args []string, stdin io.Reader, std
 	dryRun := flags.Bool("dry-run", false, "validate the provider request using a nonexistent reset id")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	yes := flags.Bool("yes", false, "confirm spending a one-time reset")
+	kind := flags.String("kind", "", "Claude only: auto (fits the limit you've reached), full, fable, weekly, session, opus, or sonnet")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if *provider == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: redline reset redeem --provider <id> [--dry-run] [--json] [--yes]")
+		fmt.Fprintln(stderr, "usage: redline reset redeem --provider <id> [--kind auto|full|fable|weekly|session|opus|sonnet] [--dry-run] [--json] [--yes]")
+		return 1
+	}
+	if *kind != "" && !slices.Contains(api.ResetKinds, *kind) {
+		fmt.Fprintf(stderr, "--kind must be one of %s\n", strings.Join(api.ResetKinds, ", "))
 		return 1
 	}
 	path := "/v1/providers/" + url.PathEscape(*provider)
 	body := map[string]any{"dry_run": *dryRun}
+	if *kind != "" {
+		body["kind"] = *kind
+	}
 	if !*dryRun && !*yes {
 		file, ok := stdin.(*os.File)
 		if !ok || !isatty.IsTerminal(file.Fd()) {
 			fmt.Fprintln(stderr, "spending a reset requires a TTY for confirmation; use --yes or --dry-run")
 			return 1
 		}
-		var snapshot decision.UsageSnapshot
-		if err := client.Do(context.Background(), http.MethodGet, path+"/status", nil, &snapshot); err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		selected, err := api.SelectBankedReset(snapshot.Provider, snapshot.BankedResetDetails, now())
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 4
+		var selected decision.BankedReset
+		if *kind != "" {
+			// The server reads the account's resets fresh and picks the
+			// same way redemption will; the answer binds the redemption.
+			if err := client.Do(context.Background(), http.MethodGet, path+"/banked-resets/choice?kind="+url.QueryEscape(*kind), nil, &selected); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 4
+			}
+		} else {
+			var snapshot decision.UsageSnapshot
+			if err := client.Do(context.Background(), http.MethodGet, path+"/status", nil, &snapshot); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			var err error
+			selected, err = api.SelectBankedReset(snapshot.Provider, snapshot.BankedResetDetails, now())
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 4
+			}
 		}
 		expiry := "unknown"
 		if selected.ExpiresAt != nil {
@@ -59,7 +79,11 @@ func runResetRedeem(client apiclient.Client, args []string, stdin io.Reader, std
 		if clears == "" {
 			clears = "unknown windows"
 		}
-		fmt.Fprintf(stderr, "Provider: %s\nReset: %s\nExpires: %s\nClears: %s\nThis spends a one-time reset. Continue? [y/N] ", *provider, selected.ID, expiry, clears)
+		resetKind := selected.Kind
+		if resetKind == "" {
+			resetKind = "unknown"
+		}
+		fmt.Fprintf(stderr, "Provider: %s\nReset: %s (%s)\nExpires: %s\nClears: %s\nThis spends a one-time reset. Continue? [y/N] ", *provider, selected.ID, resetKind, expiry, clears)
 		answer, _ := bufio.NewReader(stdin).ReadString('\n')
 		if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
 			fmt.Fprintln(stderr, "Cancelled; no reset spent.")

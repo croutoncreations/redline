@@ -13,7 +13,7 @@ func TestApplyBankedResetDetails(t *testing.T) {
 	s := decision.UsageSnapshot{Provider: "claude", ObservedAt: now, Weekly: decision.UsageWindow{ResetsAt: now.Add(time.Hour)}}
 	details := []decision.BankedReset{{ID: "grant", ResetsLeft: 2, Claimable: true, Clears: []string{"five_hour", "seven_day", "seven_day_overage_included", "unknown"}}}
 	s.ApplyBankedResets(&decision.BankedResets{Available: 2, Details: details})
-	if len(s.BankedResetDetails) != 1 || !s.BankedResetDetails[0].Claimable || !reflect.DeepEqual(s.BankedResetDetails[0].Clears, []string{"five_hour", "weekly"}) {
+	if len(s.BankedResetDetails) != 1 || !s.BankedResetDetails[0].Claimable || !reflect.DeepEqual(s.BankedResetDetails[0].Clears, []string{"five_hour", "weekly", "fable"}) {
 		t.Fatalf("details = %#v", s.BankedResetDetails)
 	}
 	details[0].ID = "changed"
@@ -26,6 +26,68 @@ func TestApplyBankedResetDetails(t *testing.T) {
 	s.ApplyBankedResets(nil)
 	if s.BankedResetDetails != nil {
 		t.Fatal("nil report left details behind")
+	}
+}
+
+func TestApplyBankedResetsPreservesBothDeadlineReports(t *testing.T) {
+	soon, later := time.Now().UTC(), time.Now().UTC().Add(time.Hour)
+	details := []decision.BankedReset{{ID: "later", ResetsLeft: 1, ExpiresAt: &later}, {ID: "soon", ResetsLeft: 1, ExpiresAt: &soon}}
+	for _, expiries := range [][]time.Time{nil, {later, soon}} {
+		var snapshot decision.UsageSnapshot
+		snapshot.ApplyBankedResets(&decision.BankedResets{Available: 2, Expiries: expiries, Details: details})
+		if !reflect.DeepEqual(snapshot.BankedResetsExpiries, []time.Time{soon, later}) || snapshot.BankedResetsExpireAt == nil || !snapshot.BankedResetsExpireAt.Equal(soon) || len(snapshot.BankedResetDetails) != 2 {
+			t.Fatalf("lost reset telemetry: %+v", snapshot)
+		}
+		snapshot.ApplyBankedResets(nil)
+		if snapshot.BankedResets != nil || snapshot.BankedResetsExpireAt != nil || len(snapshot.BankedResetsExpiries) != 0 || len(snapshot.BankedResetDetails) != 0 {
+			t.Fatalf("nil report left reset telemetry: %+v", snapshot)
+		}
+	}
+}
+
+// A Fable reset clears the 5-hour window and the Fable allowance
+// (seven_day_overage_included) but not the week. Mapping that allowance to
+// "weekly" would treat it as a weekly reset when scheduling and verifying.
+func TestFableResetDoesNotClearTheWeek(t *testing.T) {
+	var s decision.UsageSnapshot
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{
+		{ID: "fable", Kind: "fable", ResetsLeft: 1, Clears: []string{"five_hour", "seven_day_overage_included"}}}})
+	if got := s.BankedResetDetails[0].Clears; !reflect.DeepEqual(got, []string{"five_hour", "fable"}) {
+		t.Fatalf("clears = %v", got)
+	}
+}
+
+func TestModelScopedResetWindowsKeepTheirNames(t *testing.T) {
+	var s decision.UsageSnapshot
+	s.ApplyBankedResets(&decision.BankedResets{Available: 1, Details: []decision.BankedReset{{ID: "g", ResetsLeft: 1,
+		Clears:   []string{"seven_day_opus", "seven_day_sonnet", "seven_day_cowork"},
+		Blocking: []string{"seven_day", "five_hour", "seven_day_oauth_apps"}}}})
+	d := s.BankedResetDetails[0]
+	if !reflect.DeepEqual(d.Clears, []string{"opus", "sonnet"}) || !reflect.DeepEqual(d.Blocking, []string{"weekly", "five_hour"}) {
+		t.Fatalf("clears=%v blocking=%v", d.Clears, d.Blocking)
+	}
+}
+
+func TestBankedResetSpendable(t *testing.T) {
+	now := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	future, past := now.Add(time.Hour), now.Add(-time.Hour)
+	for name, tc := range map[string]struct {
+		reset decision.BankedReset
+		want  bool
+	}{
+		"held":        {decision.BankedReset{ResetsLeft: 1}, true},
+		"started":     {decision.BankedReset{ResetsLeft: 1, StartsAt: &past}, true},
+		"spent":       {decision.BankedReset{ResetsLeft: 0}, false},
+		"paused":      {decision.BankedReset{ResetsLeft: 1, Paused: true}, false},
+		"not started": {decision.BankedReset{ResetsLeft: 1, StartsAt: &future}, false},
+	} {
+		if got := tc.reset.Spendable(now); got != tc.want {
+			t.Errorf("%s: spendable = %v, want %v", name, got, tc.want)
+		}
+	}
+	if decision.ResetUnavailableText("blocked_opus") != "can't be used while you're at your Opus limit" ||
+		decision.ResetUnavailableText("something_new") != "can't be used right now" || decision.ResetUnavailableText("") != "" {
+		t.Fatal("unexpected unavailable text")
 	}
 }
 

@@ -1,0 +1,365 @@
+<!doctype html>
+<!--
+  DESIGN MOCKUP ONLY: Redline Android (Jetpack Compose) multi-account usage.
+  Synthetic accounts and numbers. Not wired to any API, login, or credential.
+  Tokens and metrics copied from mobile/android/.../Theme.kt, UsageScreen.kt,
+  QueueScreen.kt and MainActivity.kt on branch cursor-grok-surfaces
+  (the app is dark-only). Frame = Pixel 9 at 412 x 923 dp.
+  Render: node docs/design/multi-account-usage/render.cjs
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Redline Android: multi-account usage mockups</title>
+<style>
+:root{
+  --bg:#0D0F12;--panel:#15191D;--raised:#1A1F24;--line:#2A3036;
+  --text:#F2F0ED;--muted:#91989E;--accent:#F0524D;--accent-soft:#3B2021;
+  --good:#72D9A4;--warn:#EFBD62;--danger:#F0524D;
+  --mono:"Roboto Mono","SF Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#050607;font-family:Roboto,"Google Sans",-apple-system,"Helvetica Neue",sans-serif;color:var(--text);
+  display:flex;flex-wrap:wrap;gap:40px;padding:32px;-webkit-font-smoothing:antialiased}
+.slot{display:flex;flex-direction:column;gap:10px;width:412px}
+.caption{font:600 13px -apple-system,sans-serif;color:#cfd3d6;min-height:58px}
+.caption small{display:block;font-weight:400;color:#8a9298;margin-top:3px;line-height:1.4}
+.phone{width:412px;height:923px;background:var(--bg);position:relative;overflow:hidden;display:flex;flex-direction:column}
+.sysbar{height:32px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 22px 0 26px;font:500 13px sans-serif;color:#e6e6e6}
+.sysbar .icons{display:flex;gap:6px;align-items:center}
+.sysbar .icons i{display:block;width:14px;height:10px;border-radius:2px;background:#e6e6e6;opacity:.85}
+.sysbar .icons i.b{width:20px}
+.navbar{height:24px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--bg)}
+.navbar i{width:108px;height:4px;border-radius:2px;background:#e6e6e6;opacity:.8}
+.mockflag{position:absolute;top:8px;left:50%;transform:translateX(-50%);font:600 9px var(--mono);letter-spacing:.06em;color:#0D0F12;background:#EFBD62;border-radius:3px;padding:2px 6px;z-index:9;white-space:nowrap}
+.hdr{background:var(--panel);padding:14px 16px;flex:none}
+.hdr .r1{display:flex;align-items:center}
+.hdr .mark{width:26px;height:17px;margin-right:8px}
+.hdr .word{font-weight:700;font-size:16px;letter-spacing:1px}
+.sp{flex:1}
+.pill{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--good)}
+.pill i{width:6px;height:6px;border-radius:50%;background:var(--good)}
+.kebab{color:var(--muted);font-size:18px;margin-left:10px;line-height:1}
+.hdr .r2{font-size:12px;color:var(--muted);margin-top:2px}
+.content{flex:1;overflow:hidden;padding:8px 0;display:flex;flex-direction:column;gap:8px;position:relative}
+.card{background:var(--panel);border-radius:12px;margin:0 12px;padding:14px}
+.row{display:flex;align-items:center}
+.title{font-weight:600;font-size:16px}
+.status{font-size:12px;color:var(--muted)}
+.src{font-size:11px;color:var(--muted);margin-top:4px}
+.mono{font-family:var(--mono)}
+.chip{font:500 10.5px var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 5px;white-space:nowrap}
+.chip.plan{color:#e2cdbd;border-color:#4a3a30;background:#221a15}
+.problem{font-size:12px;color:var(--danger);margin-top:8px;line-height:1.35}
+.meter{margin-top:12px}
+.meter .lr{display:flex;align-items:baseline}
+.meter .lbl{font-size:13px}
+.meter .val{font:600 13px var(--mono);margin-left:auto}
+.meter .used{font:400 11px var(--mono);color:var(--muted);margin-left:8px}
+.barbox{position:relative;height:14px;margin-top:6px}
+.track{position:absolute;left:0;right:0;top:4px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.fill{height:100%;border-radius:3px}
+.line{position:absolute;top:4px;width:1px;height:6px;background:var(--accent)}
+.line.faint{opacity:.4}
+.pace{position:absolute;top:0;width:2px;height:14px;border-radius:1px;background:var(--text)}
+.reset{display:flex;font-size:11px;color:var(--muted);margin-top:4px}
+.reset span:last-child{margin-left:auto}
+.sched{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--muted);margin-top:8px;line-height:1.35}
+.sched i{width:6px;height:6px;border-radius:50%;flex:none;margin-top:4px}
+.banked{display:flex;font-size:11px;color:var(--muted);margin-top:10px}
+.banked b{margin-left:auto;font:400 11px var(--mono);color:var(--text)}
+.actions{display:flex;align-items:center;gap:8px;margin-top:14px}
+.act{font-size:12px;font-weight:500;border-radius:8px;background:var(--line);padding:8px 14px}
+.act.em{background:var(--accent-soft);color:var(--accent)}
+.act.txt{background:none;color:var(--muted);margin-left:auto;padding:8px}
+.tabs{background:var(--panel);display:flex;padding:10px 0;flex:none}
+.tabs div{flex:1;text-align:center;font-size:13px;color:var(--muted);height:20px}
+.tabs div.on{color:var(--text);font-weight:700}
+/* summary tile */
+.sum-h{display:flex;align-items:center;gap:8px}
+.sum-sub{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4}
+.acct{border-top:1px solid var(--line);padding:10px 0 10px 10px;margin-left:-4px;position:relative}
+.acct.first{margin-top:10px}
+.acct.sel::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--accent)}
+.acct .top{display:flex;align-items:flex-start;gap:8px}
+.acct .name{font-size:14px;font-weight:500;line-height:1.3;flex:1;min-width:0;overflow-wrap:anywhere}
+.acct .chev{color:var(--muted);font-size:18px;line-height:18px}
+.mini{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:7px}
+.mm .ml{display:flex;align-items:baseline;font-size:11px;color:var(--muted)}
+.mm .ml b{margin-left:auto;font:600 12px var(--mono);color:var(--text)}
+.mm .mt{height:4px;border-radius:2px;background:var(--line);margin-top:4px;overflow:hidden}
+.mm .mt div{height:100%;border-radius:2px}
+.mm .mr{font-size:10.5px;color:var(--muted);margin-top:3px}
+.mm.na .ml b{color:var(--muted);font-weight:500}
+.route{display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;color:var(--muted)}
+.route i{width:6px;height:6px;border-radius:50%;flex:none}
+.badge{font:500 10.5px sans-serif;border-radius:4px;padding:1px 6px;white-space:nowrap}
+.badge.on{color:var(--good);background:#13261c}
+.badge.held{color:#ff8f89;background:#2b191b}
+.badge.mon{color:#aab4bd;background:#20262c}
+.badge.paused{color:var(--warn);background:#2b2414}
+.state{font-size:11.5px;line-height:1.35;margin-top:6px}
+.state.warn{color:var(--warn)} .state.bad{color:#ff8f89} .state.mut{color:var(--muted)}
+.pager-h{display:flex;align-items:center;margin:0 12px}
+.pager-h .lbl{font-size:10px;letter-spacing:1px;color:var(--muted)}
+.pnav{display:flex;align-items:center;gap:2px;margin-left:auto}
+.pbtn{width:44px;height:40px;border-radius:20px;display:grid;place-items:center;color:var(--text);font-size:20px;background:var(--panel)}
+.pbtn.dis{color:#4a5157}
+.pcount{font:500 12px var(--mono);color:var(--text);min-width:56px;text-align:center}
+.dots{display:flex;justify-content:center;gap:6px}
+.dots i{width:6px;height:6px;border-radius:50%;background:#3a4147}
+.dots i.on{width:18px;border-radius:3px;background:var(--accent)}
+.dots i.ex{background:#8a3330}
+.strip{display:flex;gap:8px;align-items:flex-start}
+.strip .card{flex:none;width:368px;margin:0}
+.peek{width:10px;flex:none;align-self:stretch;background:var(--panel);border-radius:12px;opacity:.55}
+.peekL{border-radius:0 12px 12px 0} .peekR{border-radius:12px 0 0 12px}
+.chips{display:flex;gap:8px;margin-top:12px;align-items:stretch}
+.achip{flex:1;border:1px solid var(--line);border-radius:10px;padding:7px 9px;min-width:0;background:var(--bg)}
+.achip.on{border-color:var(--accent);background:var(--accent-soft)}
+/* r2: alias bounded to 2 lines with ellipsis (Compose: maxLines = 2, TextOverflow.Ellipsis);
+   the full name is the chip's contentDescription and the body heading. */
+.achip .n{font-size:12.5px;font-weight:500;line-height:1.25;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:31px}
+.achip .bars{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px}
+.achip .bars div{height:3px;border-radius:2px;background:var(--line);overflow:hidden}
+.achip .bars div span{display:block;height:100%}
+.achip .p{font:400 10px var(--mono);color:var(--muted);margin-top:4px;line-height:1.5;white-space:nowrap}
+.topbar{background:var(--panel);padding:8px 12px 8px 4px;display:flex;align-items:center;gap:4px;flex:none}
+.topbar .back{width:44px;height:44px;display:grid;place-items:center;font-size:20px}
+.topbar .t{font-size:16px;font-weight:600}
+.topbar .s{font-size:11px;color:var(--muted);margin-top:1px}
+.note{margin:0 12px;font-size:11px;color:var(--muted);line-height:1.4;padding:8px 10px;border:1px dashed var(--line);border-radius:10px}
+.more{display:flex;align-items:center;justify-content:center;gap:6px;border-top:1px solid var(--line);padding-top:12px;font-size:13px;color:var(--accent);font-weight:500}
+.legend{font-size:10.5px;color:var(--muted);margin-top:8px}
+.qchips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.qchip{font-size:12px;border-radius:16px;padding:6px 12px;background:var(--line);line-height:1.3}
+.qchip.on{background:var(--accent);color:var(--bg);font-weight:700}
+.qchip.mon{background:none;border:1px dashed #4a5157;color:var(--muted)}
+.cand{background:var(--panel);border-radius:12px;margin:0 12px;padding:14px}
+.cand .reason{font-size:12px;color:var(--muted);background:var(--bg);border-radius:6px;padding:6px 8px;margin-top:8px;line-height:1.4}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.6);z-index:6}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--raised);border-radius:16px 16px 0 0;padding:10px 16px 34px;z-index:7}
+.grab{width:32px;height:4px;border-radius:2px;background:#4a5157;margin:0 auto 12px}
+.sheet h4{margin:0 0 2px;font-size:16px}
+.sheet .opt{display:flex;align-items:center;gap:12px;padding:11px 2px;border-top:1px solid var(--line);font-size:14px;min-height:48px}
+.sheet .opt small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.radio{width:18px;height:18px;border-radius:50%;border:2px solid var(--muted);flex:none}
+#comparison{flex:0 0 768px;width:768px;align-self:flex-start;background:#0a0b0d;border:1px solid #23292e;border-radius:14px;padding:18px 18px 14px;color:#e8e6e3}
+.cmp-head b{font-size:17px;display:block}.cmp-head span{display:block;font-size:12px;color:#8a9298;margin-top:4px}
+.cmp-grid{display:grid;grid-template-columns:repeat(3,230px);gap:22px;margin-top:14px}
+.cmp-t{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;min-height:44px}.cmp-t em{font-style:normal;font-size:10px;color:#0D0F12;background:var(--good);border-radius:3px;padding:1px 5px}
+.cmp-l{display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:var(--accent);color:#fff;font-weight:700;font-size:13px;flex:none}
+.cmp-nav{font-size:11.5px;color:#b8bec3;margin-top:6px;line-height:1.35;min-height:46px}
+.cmp-pc{font-size:11px;line-height:1.4;margin:4px 0 8px;min-height:64px}.cmp-pc span{display:block}.cmp-pc span:first-child{color:var(--good)}.cmp-pc span:last-child{color:var(--warn)}
+.cmp-ph{width:230px;height:515px;overflow:hidden;border-radius:12px;border:1px solid #2a3036;margin-bottom:10px}
+.cmp-sc{transform:scale(.5583);transform-origin:0 0;width:412px}
+.cmp-foot{font-size:11px;color:#8a9298;margin-top:4px;line-height:1.4;max-width:730px}
+.radio.on{border-color:var(--accent);box-shadow:inset 0 0 0 3px var(--raised);background:var(--accent)}
+.b-a11y{width:412px;background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--text)}
+.b-a11y-h{font-size:15px;font-weight:600;margin-bottom:12px}
+.b-a11y-row{display:flex;gap:24px;margin-bottom:12px;align-items:flex-start}
+.b-a11y-l{font-size:11px;color:var(--muted);margin-bottom:6px}
+.b-a11y-t{font-size:12px;line-height:1.45;color:#c9ced2;margin-top:8px}
+.b-a11y-t code{font:11px var(--mono);color:#e2cdbd}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const tone = p => p < 15 ? 'var(--danger)' : p < 35 ? 'var(--warn)' : 'var(--good)';
+const MARK = `<svg class="mark" viewBox="192 300 640 420"><path d="M231,519 A310,310 0 0 1 793,519" stroke="#F7F7F8" stroke-width="64" stroke-linecap="round" fill="none" opacity=".95"/><path d="M719.4,419.6 A310,310 0 0 1 793,519" stroke="#EF3F45" stroke-width="64" stroke-linecap="round" fill="none"/><path d="M487.4,632.8 L656.5,443.6 L536.6,667.2 Z" fill="#F7F7F8"/><circle cx="512" cy="650" r="62" fill="#F7F7F8"/><circle cx="512" cy="650" r="26" fill="#EF3F45"/></svg>`;
+
+// Synthetic accounts only. Aliases are user-chosen; "ID …xxxx" is a hash of Redline's account id, never an email.
+const A = {
+  personal: {alias:'Personal', plan:'Max 20x', hint:'…7c1e', route:'on', src:'OpenUsage · sampled 1m ago',
+    s:{p:64, el:40, reset:'Resets in 2h 10m', at:'4:55 PM'}, w:{p:41, el:62, reset:'Resets in 3d 4h', at:'Mon 9:00 AM'},
+    fable:{p:72, reset:'Resets ~3d 4h', at:'Mon 9:00 AM'}, banked:1,
+    // r2: weekly resets in 76h; standard policy arms 50% at 72h and 20% at 24h, so no floor is armed yet.
+    floors:[{p:50},{p:20}], sched:['ADMIT','Dispatching · no weekly floor armed yet · 50% floor arms in 4h']},
+  client: {alias:'Client — Northwind long-running engagement', plan:'Team', hint:'…a91f', route:'held', src:'OpenUsage · sampled 2m ago',
+    s:{p:0, el:76, reset:'Available again in 1h 12m', at:'3:57 PM', ex:true}, w:{p:58, el:30, reset:'Resets in 4d 22h', at:'Wed 3:00 AM'},
+    floors:[{p:50},{p:20}], sched:['HOLD','Held · 5-hour window used up. Its tasks wait for this account; none move to another.']},
+  side: {alias:'Side project', plan:'Pro', hint:'…03b2', route:'mon', src:'Native · sampled 4m ago',
+    s:{p:100, el:0, ns:true, reset:'Starts on first use · resets 5h after', at:''}, w:{p:88, el:20, reset:'Resets in 5d 14h', at:'Thu 11:00 PM'}, sched:null},
+};
+
+const REV = 'r2';
+function phone(inner, overlay='', opt='') {
+  return `<div class="phone"><div class="mockflag">${opt?`OPTION ${opt} ${REV} · `:`${REV} · `}MOCKUP · SYNTHETIC DATA</div>
+  <div class="sysbar"><span>2:45</span><span class="icons"><i></i><i></i><i class="b"></i></span></div>
+  ${inner}<div class="navbar"><i></i></div>${overlay}</div>`;
+}
+const header = (sub='Capacity') => `<div class="hdr"><div class="r1">${MARK}<span class="word">REDLINE</span><span class="sp"></span><span class="pill"><i></i>live</span><span class="kebab">⋮</span></div><div class="r2">${sub}</div></div>`;
+const tabs = (on='Usage') => `<div class="tabs">${['Usage','Queue','Runs'].map(t=>`<div class="${t===on?'on':''}">${t}</div>`).join('')}</div>`;
+const shell = (content, tab) => header() + `<div class="content">${content}</div>` + tabs(tab);
+
+function meter(label, m, {reserve=0, floors=[], used=true}={}) {
+  const pace = m.el>0 ? `<div class="pace" style="left:calc(${100-m.el}% - 1px)"></div>` : '';
+  const res = reserve ? `<div class="line" style="left:${reserve}%"></div>` : '';
+  const fl = floors.map(f=>`<div class="line ${f.armed?'':'faint'}" style="left:${f.p}%"></div>`).join('');
+  return `<div class="meter"><div class="lr"><span class="lbl">${label}</span><span class="val" style="${m.ex?'color:var(--danger)':''}">${m.p}% left</span>${used?`<span class="used">${100-m.p}% used</span>`:''}</div>
+  <div class="barbox"><div class="track"><div class="fill" style="width:${m.p}%;background:${tone(m.p)}"></div></div>${res}${fl}${pace}</div>
+  <div class="reset"><span>${m.reset}</span><span>${m.at||''}</span></div></div>`;
+}
+const BADGE = {on:'<span class="badge on">Dispatch on</span>', held:'<span class="badge held">Dispatch held</span>',
+  mon:'<span class="badge mon">Monitor only</span>', paused:'<span class="badge paused">Paused</span>'};
+
+function detailCard(a, style='') {
+  const routed = a.route !== 'mon';
+  return `<div class="card" style="${style}">
+   <div class="title" style="overflow-wrap:anywhere;line-height:1.3">${a.alias}</div>
+   <div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap"><span class="chip plan">${a.plan}</span><span class="chip">Claude · ID ${a.hint}</span>${BADGE[a.route]}</div>
+   <div class="src">${a.src}</div>
+   ${meter('5-hour window', a.s, {reserve: routed?25:0})}
+   ${meter('Weekly allowance', a.w, {floors: routed?(a.floors||[]):[]})}
+   ${a.fable?meter('Fable · model weekly', a.fable):''}
+   ${a.sched?`<div class="sched"><i style="background:${a.sched[0]==='ADMIT'?'var(--good)':'var(--accent)'}"></i><span>${a.sched[1]}</span></div>`
+     :`<div class="sched"><i style="background:#59636b"></i><span>Monitor only · no execution profile routes tasks to this account</span></div>`}
+   ${a.banked!=null?`<div class="banked">Banked quota resets<b>${a.banked} available</b></div>`:''}
+   <div class="actions">${routed?'<span class="act">View queue</span><span class="act em">Pause</span>':''}<span class="act txt">Refresh</span></div>
+  </div>`;
+}
+function miniMeter(label, m) {
+  if (!m || m.unknown) return `<div class="mm na"><div class="ml">${label}<b>—</b></div><div class="mt"></div><div class="mr">${(m&&m.unknownText)||'not reported'}</div></div>`;
+  const val = m.ex ? `<b style="color:var(--danger)">0% left</b>` : `<b style="${m.stale?'color:var(--muted)':''}">${m.p}% left</b>`;
+  const r = m.ex ? `back at ${m.at}` : m.ns ? 'not started' : m.stale ? 'last known' : (m.short || m.reset.replace('Resets in ','resets in '));
+  return `<div class="mm"><div class="ml">${label}${val}</div><div class="mt"><div style="width:${m.p}%;background:${m.stale?'#59636b':tone(m.p)}"></div></div><div class="mr">${r}</div></div>`;
+}
+const ROUTE = {on:['Dispatch on','var(--good)'], held:['Dispatch held · waiting for this account\u2019s reset','var(--accent)'],
+  mon:['Monitor only · not routed','#59636b'], paused:['Dispatch paused by you','var(--warn)'],
+  signin:['Dispatch held · until the account is signed in again','var(--accent)']};
+function acctRow(a, i, sel) {
+  const [txt, dot] = ROUTE[a.route];
+  return `<div class="acct${i===0?' first':''}${sel?' sel':''}"><div class="top"><div class="name">${a.alias}</div><span class="chip plan">${a.plan}</span><span class="chev">›</span></div>
+    ${a.state?`<div class="state ${a.stateTone}">${a.state}</div>`:''}
+    ${a.hideMeters?'':`<div class="mini">${miniMeter('5-hour', a.s)}${miniMeter('Weekly', a.w)}</div>`}
+    <div class="route"><i style="background:${dot}"></i>${txt}</div></div>`;
+}
+function summaryTile(accts, {sel=0, count, extra='', sub, ready}={}) {
+  const n = count ?? accts.length;
+  const r = ready ?? accts.filter(a=>a.route==='on').length;
+  return `<div class="card"><div class="sum-h"><span class="title">Claude</span><span class="chip">${n} accounts</span><span class="sp"></span><span class="status">${r} of ${n} dispatching</span></div>
+   <div class="sum-sub">${sub||'Each account has its own limits. Numbers are per account and never added together.'}</div>
+   ${accts.map((a,i)=>acctRow(a,i,i===sel)).join('')}${extra}</div>`;
+}
+function pagerHead(i, n, {dots=true, ex=[], chooser=false}={}) {
+  return `<div class="pager-h"><span class="lbl">ACCOUNT ${i+1} OF ${n}</span><span class="pnav">
+   <span class="pbtn ${i===0?'dis':''}">‹</span><span class="pcount">${chooser?`${i+1} of ${n} ▾`:`${i+1} / ${n}`}</span><span class="pbtn ${i===n-1?'dis':''}">›</span></span></div>
+   ${dots?`<div class="dots">${Array.from({length:n},(_,k)=>`<i class="${k===i?'on':''}${ex.includes(k)&&k!==i?' ex':''}"></i>`).join('')}</div>`:''}`;
+}
+const codexCard = () => `<div class="card"><div class="row"><span class="title">Codex</span><span class="sp"></span><span class="status">Live</span></div>
+  <div class="src">OpenUsage · sampled 1m ago</div>${meter('Weekly allowance',{p:47,el:29,reset:'Resets in 5d',at:'Wed 8:00 AM'},{used:false})}</div>`;
+
+const frames = [];
+const add = (id, cap, sub, html) => frames.push({id, cap, sub, html});
+const three = [A.personal, A.client, A.side];
+
+add('00-baseline-current', '00 · Today, for reference', 'The current single Claude card, rebuilt from UsageScreen.kt: one account per provider.',
+  phone(shell(`<div class="card"><div class="row"><span class="title">Claude</span><span class="sp"></span><span class="status">Live</span></div>
+  <div class="src">OpenUsage · sampled 1m ago</div>
+  ${meter('5-hour window',A.personal.s,{reserve:25,used:false})}${meter('Weekly allowance',A.personal.w,{floors:A.personal.floors,used:false})}${meter('Fable',A.personal.fable,{used:false})}
+  <div class="sched"><i style="background:var(--good)"></i><span>${A.personal.sched[1]}</span></div>
+  <div class="banked">Banked quota resets<b>1 available</b></div>
+  <div class="actions"><span class="act">View queue</span><span class="act em">Pause</span><span class="act txt">Refresh</span></div></div>${codexCard()}`)));
+
+// ── Three options, two screens each (overview → switching account) ──
+const chipLabel = (a,i) => `Claude account ${i+1} of 3, ${a.alias}, ${a.plan} plan. 5-hour ${a.s.p} percent left, weekly ${a.w.p} percent left.`;
+const chipRow = (sel) => `<div class="chips" role="tablist">${three.map((a,i)=>`<div class="achip ${i===sel?'on':''}" role="tab" aria-selected="${i===sel}" aria-label="${chipLabel(a,i)}" title="${a.alias}"><div class="n">${a.alias}</div><div class="bars"><div><span style="width:${a.s.p}%;background:${tone(a.s.p)}"></span></div><div><span style="width:${a.w.p}%;background:${tone(a.w.p)}"></span></div></div><div class="p">${a.s.ex?'<span style="color:var(--danger)">5h 0% left</span>':'5h '+a.s.p+'% left'}<br>wk ${a.w.p}% left</div></div>`).join('')}</div>`;
+const bCard = (sel, a) => `<div class="card"><div class="sum-h"><span class="title">Claude</span><span class="chip">3 accounts</span><span class="sp"></span><span class="status">1 of 3 dispatching</span></div>
+   ${chipRow(sel)}<div class="legend">Tap a chip to switch account · or swipe the card body · chip bars = 5-hour | weekly left · long names shorten to 2 lines; the full name is the heading below</div>
+   <div style="border-top:1px solid var(--line);margin:12px -14px 0"></div>
+   ${detailCard(a,'margin:0 -14px;background:none;padding-bottom:0')}</div>`;
+const OPT = {
+  A: {name:'Summary tile + carousel', nav:'Overview and detail on the same screen. Tap a row or swipe, ‹ › buttons.', pro:'Best at-a-glance comparison; closest to the owner’s concept', con:'Tallest; detail starts below the fold'},
+  B: {name:'Chip switcher in one card', nav:'One card. Chips on top switch the body; swipe the body.', pro:'Most compact; closest to today’s single card', con:'Weak overview; crowded past ~4 accounts'},
+  C: {name:'Summary tab + full-screen detail', nav:'Usage tab shows only the summary. Tap a row → full-screen pager, back arrow.', pro:'Scales to many accounts; Usage tab stays short', con:'One extra navigation level; no gauges on the tab'},
+};
+
+add('A1-overview-r2', 'Option A · Summary tile + carousel — overview', OPT.A.nav,
+  phone(shell(summaryTile(three,{sel:0}) + pagerHead(0,3,{ex:[1]}) + `<div class="strip" style="margin-left:12px">${detailCard(A.personal)}<div class="peek peekR"></div></div>`), '', 'A'));
+add('A2-switch-account-r2', 'Option A — after swiping to account 2 of 3', 'The summary shrinks to a sticky strip; the pager stays. The used-up account is held; others keep dispatching.',
+  phone(shell(`<div class="card" style="padding:10px 14px"><div class="sum-h"><span class="title" style="font-size:14px">Claude</span><span class="chip">3 accounts</span><span class="sp"></span><span class="status">1 of 3 dispatching</span></div></div>`
+   + pagerHead(1,3,{ex:[1]}) + `<div class="strip"><div class="peek peekL"></div>${detailCard(A.client)}<div class="peek peekR"></div></div>`), '', 'A'));
+add('B1-overview-r2', 'Option B (corrected r2) · Chip switcher in one card — overview', OPT.B.nav + ' r2: status copy matches 41% weekly (no floor armed yet); chip names capped at 2 lines.',
+  phone(shell(bCard(0, A.personal) + codexCard()), '', 'B'));
+add('B2-switch-account-r2', 'Option B (corrected r2) — after tapping the second chip', 'The same card swaps its body to the selected account; the full long name is the body heading. The chip shows 2 lines with an ellipsis.',
+  phone(shell(bCard(1, A.client)), '', 'B'));
+add('C1-overview-r2', 'Option C · Summary tab + full-screen detail — overview', OPT.C.nav,
+  phone(shell(summaryTile(three,{sel:-1, sub:'Each account has its own limits. Numbers are per account and never added together. Tap an account for detail.'}) + codexCard()), '', 'C'));
+add('C2-switch-account-r2', 'Option C — full-screen detail, account 2 of 3', 'Back arrow returns to the Usage tab. Swipe or ‹ › to move between accounts.',
+  phone(`<div class="topbar"><span class="back">←</span><div><div class="t">Claude accounts</div><div class="s">Account 2 of 3 · swipe, or tap ‹ ›</div></div></div>
+   <div class="content">${pagerHead(1,3,{ex:[1]})}<div class="strip"><div class="peek peekL"></div>${detailCard(A.client)}<div class="peek peekR"></div></div></div>` + tabs(), '', 'C'));
+
+const lab = {alias:'Lab bench', plan:'Max 5x', route:'paused', state:'Stale · last known values from 47m ago. OpenUsage is not responding.', stateTone:'warn',
+  s:{p:52, stale:true}, w:{p:33, stale:true}};
+const old = {alias:'Old laptop login', plan:'Pro', route:'signin', state:'Needs sign-in on the Mac · Claude Code is signed out for this account. You can\u2019t fix this from the phone.', stateTone:'bad', hideMeters:true};
+const spare = {alias:'Spare (via proxy)', plan:'Plan unknown', route:'on', state:'Usage unavailable · Redline has no metering source for this account. Tasks can still run on it.', stateTone:'mut',
+  s:{unknown:true, unknownText:'not metered'}, w:{unknown:true, unknownText:'not metered'}};
+add('05-states', '05 · States inside the summary tile', 'Shows stale (grey bars plus age), needs sign-in (no numbers, fix on the Mac), routed but unmetered, paused, and monitor only. A word always names each state, so colour is never the only signal.',
+  phone(shell(summaryTile([A.personal, lab, old, spare, A.side],{sel:-1, ready:2, sub:'Limits are per account and never combined. Dispatch state is shown separately from usage reporting.'}))));
+
+add('06-one-account', '06 · One account, backward compatible', 'Looks exactly like today’s card. The only additions are an optional alias and the plan chip. No summary, pager or dots.',
+  phone(shell(`<div class="card"><div class="row"><span class="title">Claude</span><span class="chip plan" style="margin-left:8px">Max 20x</span><span class="sp"></span><span class="status">Live</span></div>
+  <div class="src">Personal · OpenUsage · sampled 1m ago</div>
+  ${meter('5-hour window',A.personal.s,{reserve:25})}${meter('Weekly allowance',A.personal.w,{floors:A.personal.floors})}${meter('Fable · model weekly',A.personal.fable)}
+  <div class="sched"><i style="background:var(--good)"></i><span>${A.personal.sched[1]}</span></div>
+  <div class="banked">Banked quota resets<b>1 available</b></div>
+  <div class="actions"><span class="act">View queue</span><span class="act em">Pause</span><span class="act txt">Refresh</span></div></div>${codexCard()}`)));
+
+const research = {alias:'Research', plan:'Max 5x', hint:'…5d40', route:'held', src:'OpenUsage · sampled 1m ago',
+  s:{p:22, el:83, reset:'Resets in 50m', at:'3:35 PM'}, w:{p:12, el:85, reset:'Resets in 1d 2h', at:'Tomorrow 5:00 PM'},
+  // r2: resets in 26h, so the 50% floor (72h) is armed and the 20% floor (24h) arms in 2h.
+  floors:[{p:50,armed:true},{p:20}], sched:['HOLD','Waiting · weekly 12% left is below the armed 50% floor']};
+const many = [A.client, {...old, state:'Needs sign-in on the Mac'}, research];
+add('07-many-accounts', '07 · Many accounts (7)', 'Rows needing attention sort first, and the tile caps at 3 with “Show all 7”. Past 5 accounts the dots become “3 of 7 ▾”, which opens a chooser.',
+  phone(shell(summaryTile(many,{sel:2,count:7,ready:3, extra:`<div class="more">Show all 7 accounts ⌄</div>`, sub:'Accounts that need attention are listed first. Limits are per account.'})
+   + pagerHead(2,7,{dots:false, chooser:true}) + `<div class="strip" style="margin-left:12px">${detailCard(research)}<div class="peek peekR"></div></div>`)));
+
+const all7 = [['Client — Northwind long-running engagement','Team','5-hour used up · weekly 58% left','var(--danger)'],['Old laptop login','Pro','Needs sign-in on the Mac','var(--danger)'],['Research','Max 5x','5-hour 22% left · weekly 12% left','var(--warn)'],['Personal','Max 20x','5-hour 64% left · weekly 41% left','var(--good)'],['Lab bench','Max 5x','Stale 47m · weekly 33% last known','var(--warn)'],['Side project','Pro','Monitor only · weekly 88% left','#59636b'],['Spare (via proxy)','Plan unknown','Usage not metered','#59636b']];
+add('08-account-chooser', '08 · Account chooser (tap alternative)', 'Tapping “3 of 7 ▾” or “Show all” opens this list, so any account can be reached without swiping. Long names wrap instead of being cut off.',
+  phone(shell(summaryTile(many,{sel:2,count:7,ready:3})),
+   `<div class="scrim"></div><div class="sheet"><div class="grab"></div><h4>Claude accounts</h4><div class="sum-sub" style="margin-bottom:8px">Changes which account you are viewing. It does not change where tasks run.</div>
+   ${all7.map((r,i)=>`<div class="opt"><span class="radio ${i===2?'on':''}"></span><div style="flex:1;min-width:0"><div style="overflow-wrap:anywhere;line-height:1.3">${r[0]}</div><small><span style="color:${r[3]}">●</span> ${r[1]} · ${r[2]}</small></div></div>`).join('')}</div>`));
+
+add('09-queue-per-account', '09 · Queue tab: routing is per account', 'The queue picker uses account aliases. Monitor-only accounts appear but are marked “not routed”. A held account explains why, and Redline never moves work to another account on its own.',
+  phone(`<div class="hdr"><div class="r1"><span class="word">DISPATCH QUEUE</span><span class="sp"></span><span style="color:var(--accent);font-size:13px">Refresh</span></div>
+   <div class="qchips"><span class="qchip">Claude · Personal</span><span class="qchip on">Claude · Client — Northwind long-running engagement</span><span class="qchip">Codex</span><span class="qchip mon">Claude · Side project · not routed</span></div>
+   <div style="font-size:12px;color:var(--warn);margin-top:8px">Usage sampled 2m ago · 5-hour window used up, back at 3:57 PM</div></div>
+   <div class="content"><div class="cand"><div style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--muted)">NEXT UP · HELD</div>
+   <div class="row" style="margin-top:6px"><span class="mono" style="color:var(--accent);font-weight:700;font-size:12px">P8</span><div style="margin-left:10px;flex:1"><div style="font-size:14px;font-weight:500">Nightly dependency audit</div><div class="mono" style="font-size:11px;color:var(--muted)">task-dep-audit</div></div><span class="act" style="color:var(--muted)">Run</span></div>
+   <div class="reason">Held on this account until its 5-hour window resets at 3:57 PM. Tasks are never moved to another account automatically. To route this task elsewhere, change its execution profile on the Mac.</div></div>
+   <div class="cand"><div class="row"><span class="mono" style="color:var(--accent);font-weight:700;font-size:12px">P5</span><div style="margin-left:10px;flex:1"><div style="font-size:14px;font-weight:500">Docs link checker</div><div class="mono" style="font-size:11px;color:var(--muted)">task-link-check</div></div><span class="act" style="color:var(--muted)">Run</span></div>
+   <div class="reason">Waiting · this account’s 5-hour window is used up</div></div></div>` + tabs('Queue')));
+
+// B r2 accessibility callout: bounded chip and its spoken label, beside the 4-line r1 chip for comparison.
+{
+  const longA = A.client;
+  const chipBody = `<div class="bars"><div><span style="width:0%"></span></div><div><span style="width:58%;background:${tone(58)}"></span></div></div><div class="p"><span style="color:var(--danger)">5h 0% left</span><br>wk 58% left</div>`;
+  const r1chip = `<div class="achip on" style="flex:none;width:118px"><div class="n" style="-webkit-line-clamp:unset;display:block;min-height:0">${longA.alias}</div>${chipBody}</div>`;
+  const r2chip = `<div class="achip on" style="flex:none;width:118px"><div class="n">${longA.alias}</div>${chipBody}</div>`;
+  const html = `<div class="b-a11y"><div class="b-a11y-h">Option B · chip name length (r2)</div>
+   <div class="b-a11y-row"><div><div class="b-a11y-l">r1 · unbounded (4 lines)</div>${r1chip}</div><div><div class="b-a11y-l">r2 · max 2 lines + ellipsis</div>${r2chip}</div></div>
+   <div class="b-a11y-t"><b>TalkBack reads the full label:</b> “${chipLabel(longA,1)} Selected. Double-tap to show this account.”</div>
+   <div class="b-a11y-t"><b>Compose:</b> <code>Text(alias, maxLines = 2, overflow = TextOverflow.Ellipsis)</code>; chip <code>Modifier.semantics { contentDescription = fullLabel; role = Role.Tab; selected = … }</code>; long-press shows the full alias as a tooltip. The full alias is always the body heading, so nothing is hidden.</div>
+   <div class="b-a11y-t"><b>Alias rules:</b> any length is allowed; there is no hard limit on what users can type; display is bounded. In settings, suggest ≤ 24 characters for a clean chip.</div></div>`;
+  frames.push({id:'B-chip-a11y-r2', cap:'Option B (corrected r2) · long name handling', sub:'Bounded alias on the chip; the full name is the accessible label and the body heading.', html});
+}
+document.getElementById('root').innerHTML = frames.map(f =>
+  `<div class="slot"><div class="caption">${f.cap}<small>${f.sub}</small></div><div id="${f.id}">${f.html}</div></div>`).join('');
+window.FRAMES = frames.map(f=>f.id);
+
+// ── Compact A/B/C comparison sheet ──
+const byId = Object.fromEntries(frames.map(f=>[f.id,f.html]));
+const mini = id => `<div class="cmp-ph"><div class="cmp-sc">${byId[id]}</div></div>`;
+const cmp = document.createElement('div');
+cmp.id = 'comparison';
+cmp.innerHTML = `<div class="cmp-head"><b>Redline Android · multi-account Claude usage — pick one <span style="display:inline;font-size:11px;color:#0D0F12;background:#EFBD62;border-radius:3px;padding:1px 6px;vertical-align:middle">r2 · B copy corrected · B chip names bounded</span></b><span>Design mockup · synthetic data · Pixel 9 · dark theme (the app is dark-only). Top: overview. Bottom: switching to account 2 of 3.</span></div>
+<div class="cmp-grid">${['A','B','C'].map(k=>`<div class="cmp-col"><div class="cmp-t"><span class="cmp-l">${k}</span>${OPT[k].name}${k==='A'?' <em>recommended</em>':''}</div>
+<div class="cmp-nav">${OPT[k].nav}</div><div class="cmp-pc"><span>+ ${OPT[k].pro}</span><span>− ${OPT[k].con}</span></div>
+${mini(k+'1-overview-r2')}${mini(k+'2-switch-account-r2')}</div>`).join('')}</div>
+<div class="cmp-foot">All options: per-account numbers are never summed · 5-hour and weekly shown separately with resets · “% left” plus “% used” in detail · dispatch state is a separate line from usage · ‹ › buttons and tappable rows as a no-swipe alternative.</div>`;
+document.body.prepend(cmp);
+</script>
+</body>
+</html>

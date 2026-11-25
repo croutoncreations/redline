@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -23,7 +24,7 @@ func TestResetSignalFiresaleBaseline(t *testing.T) {
 			}
 			now := time.Now().UTC()
 			deadline := now.Add(time.Hour)
-			snapshot := decision.UsageSnapshot{Provider: "main", ObservedAt: now.Add(-time.Minute), Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: now.Add(24 * time.Hour)}}
+			snapshot := decision.UsageSnapshot{Provider: "main", Account: "main", ObservedAt: now.Add(-time.Minute), Weekly: decision.UsageWindow{Remaining: .4, ResetsAt: now.Add(24 * time.Hour)}}
 			if withSnapshot {
 				if err := db.SaveSnapshot(t.Context(), snapshot, nil); err != nil {
 					t.Fatal(err)
@@ -54,6 +55,106 @@ func TestResetSignalFiresaleBaseline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResetSignalFiresaleMutationsApplyOnlyWhileActive(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "mutations.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := t.Context()
+	now := time.Date(2026, time.November, 24, 12, 0, 0, 0, time.UTC)
+	resetsAt := now.Add(24 * time.Hour)
+	observedAt := now.Add(-time.Minute)
+	if err := db.SaveSnapshot(ctx, decision.UsageSnapshot{
+		Provider:   "main",
+		Account:    "main",
+		ObservedAt: observedAt,
+		Weekly: decision.UsageWindow{
+			Remaining: 0.4,
+			ResetsAt:  resetsAt,
+		},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := now.Add(time.Hour)
+	announcement := resetsignal.Announcement{
+		Key:       "announcement:123",
+		Kind:      resetsignal.KindPromised,
+		Quote:     "original",
+		WindowEnd: &deadline,
+	}
+	if ok, err := db.StartResetSignalFiresale(ctx, "main", "main", "auto", announcement, now, false); err != nil || !ok {
+		t.Fatalf("start=%v err=%v", ok, err)
+	}
+	sales, err := db.ActiveResetSignalFiresales(ctx)
+	if err != nil || len(sales) != 1 {
+		t.Fatalf("sales=%+v err=%v", sales, err)
+	}
+	saleID := sales[0].ID
+
+	if err := db.LowerResetSignalFiresaleBaseline(ctx, saleID, 0.2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.LowerResetSignalFiresaleBaseline(ctx, saleID, 0.3); err != nil {
+		t.Fatal(err)
+	}
+	updatedDeadline := deadline.Add(30 * time.Minute)
+	updated := announcement
+	updated.Quote = "updated"
+	updated.WindowEnd = &updatedDeadline
+	if changed, err := db.UpdateResetSignalFiresaleDeadline(ctx, saleID, updated); err != nil || !changed {
+		t.Fatalf("update=%v err=%v", changed, err)
+	}
+	if changed, err := db.UpdateResetSignalFiresaleDeadline(ctx, saleID, updated); err != nil || changed {
+		t.Fatalf("unchanged update=%v err=%v", changed, err)
+	}
+
+	sales, err = db.ActiveResetSignalFiresales(ctx)
+	if err != nil || len(sales) != 1 {
+		t.Fatalf("sales=%+v err=%v", sales, err)
+	}
+	sale := sales[0]
+	if sale.BaselineWeeklyRemaining == nil || *sale.BaselineWeeklyRemaining != 0.2 {
+		t.Fatalf("baseline=%v, want low-water mark 0.2", sale.BaselineWeeklyRemaining)
+	}
+	if sale.BaselineWeeklyResetsAt == nil || !sale.BaselineWeeklyResetsAt.Equal(resetsAt) || sale.BaselineObservedAt == nil || !sale.BaselineObservedAt.Equal(observedAt) {
+		t.Fatalf("baseline metadata changed: %+v", sale)
+	}
+	if !sale.Deadline.Equal(updatedDeadline) || sale.Announcement.Quote != "updated" {
+		t.Fatalf("updated sale=%+v", sale)
+	}
+
+	if ended, err := db.EndResetSignalFiresale(ctx, saleID, "stopped", now); err != nil || !ended {
+		t.Fatalf("end=%v err=%v", ended, err)
+	}
+	if err := db.LowerResetSignalFiresaleBaseline(ctx, saleID, 0.1); err != nil {
+		t.Fatal(err)
+	}
+	staleDeadline := updatedDeadline.Add(time.Hour)
+	stale := updated
+	stale.Quote = "stale"
+	stale.WindowEnd = &staleDeadline
+	if changed, err := db.UpdateResetSignalFiresaleDeadline(ctx, saleID, stale); err != nil || changed {
+		t.Fatalf("ended update=%v err=%v", changed, err)
+	}
+
+	var storedBaseline float64
+	var storedDeadline string
+	var storedAnnouncement []byte
+	if err := db.db.QueryRowContext(ctx, `SELECT baseline_weekly_remaining, deadline, announcement_json FROM reset_signal_firesales WHERE id=?`, saleID).Scan(&storedBaseline, &storedDeadline, &storedAnnouncement); err != nil {
+		t.Fatal(err)
+	}
+	var persisted resetsignal.Announcement
+	if err := json.Unmarshal(storedAnnouncement, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if storedBaseline != 0.2 || storedDeadline != formatTime(updatedDeadline) || persisted.Quote != "updated" {
+		t.Fatalf("ended sale mutated: baseline=%v deadline=%q announcement=%+v", storedBaseline, storedDeadline, persisted)
 	}
 }
 
