@@ -23,8 +23,10 @@ public struct NotificationDelivery: Decodable, Sendable {
         eventType.hasPrefix("reset.") || eventType.hasPrefix("firesale.") || eventType.hasPrefix("account.")
     }
     public var hasSound: Bool {
-        // A seat that needs signing in holds its work until someone acts.
+        // A seat that needs signing in, or a credits account that needs a
+        // fresh session key, holds its work until someone acts.
         eventType == "reset.redeem_failed" || eventType == "account.needs_login"
+            || eventType == "account.session_key_needed"
             || (eventType == "reset.expiring" && payload.data?["action"] == "redeem_now")
     }
 }

@@ -804,6 +804,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	// Migration 44: an OpenAI API credits account's dollar balance, as JSON.
+	// Additive and schema-guarded like 41-43.
+	if err := addColumnIfMissing(ctx, tx, "usage_snapshots", "credits", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 44 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=44)`); err != nil {
+		return fmt.Errorf("record API credits migration: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -1304,6 +1312,14 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 	}
 	defer tx.Rollback()
 	bankedResets, bankedResetsExpireAt, bankedResetsExpiries := bankedResetColumns(s)
+	var credits any
+	if s.Credits != nil {
+		encoded, err := json.Marshal(s.Credits)
+		if err != nil {
+			return fmt.Errorf("encode credits: %w", err)
+		}
+		credits = string(encoded)
+	}
 	var bankedResetDetails any
 	if len(s.BankedResetDetails) > 0 {
 		encoded, err := json.Marshal(s.BankedResetDetails)
@@ -1316,8 +1332,8 @@ func (d *DB) SaveSnapshot(ctx context.Context, s decision.UsageSnapshot, raw []b
 provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
 banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details, credits
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	result, err := tx.ExecContext(
 		ctx,
 		query,
@@ -1340,6 +1356,7 @@ banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_det
 		s.SourceStale,
 		s.WeeklyUnavailable,
 		bankedResetDetails,
+		credits,
 	)
 	if err != nil {
 		return fmt.Errorf("save usage snapshot: %w", err)
@@ -1404,7 +1421,7 @@ func (d *DB) latestSnapshot(ctx context.Context, account, provider, source strin
 	query := `SELECT id, provider_account_id, provider, observed_at, short_remaining, short_resets_at,
 weekly_remaining, weekly_resets_at, source, confidence, raw_payload,
 banked_resets, banked_resets_expire_at, short_window_unavailable, short_window_not_started,
-banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details
+banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_details, credits
 FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 	args := []any{account, provider}
 	if source != "" {
@@ -1419,7 +1436,7 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 	var shortReset sql.NullString
 	var raw []byte
 	var bankedResets sql.NullInt64
-	var bankedResetsExpireAt, bankedResetsExpiries, bankedResetDetails sql.NullString
+	var bankedResetsExpireAt, bankedResetsExpiries, bankedResetDetails, credits sql.NullString
 	err := d.db.QueryRowContext(ctx, query, args...).Scan(
 		&snapshotID,
 		&s.Account,
@@ -1441,6 +1458,7 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 		&s.SourceStale,
 		&s.WeeklyUnavailable,
 		&bankedResetDetails,
+		&credits,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision.UsageSnapshot{}, nil, fmt.Errorf("%w for provider account %q", ErrNotFound, account)
@@ -1469,6 +1487,9 @@ FROM usage_snapshots WHERE provider_account_id = ? AND provider = ?`
 		return decision.UsageSnapshot{}, nil, err
 	}
 	if err := scanBankedResetExpiries(&s, bankedResetsExpiries); err != nil {
+		return decision.UsageSnapshot{}, nil, err
+	}
+	if s.Credits, err = scanCredits(credits); err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
 	s.Allowances, err = d.loadAllowances(ctx, snapshotID)
@@ -1502,8 +1523,10 @@ func restoreAccountPeriod(s *decision.UsageSnapshot) {
 		// Only a period clearly not a week (Cursor's month) is restored. A
 		// weekly row reported a second short would otherwise make the stored
 		// snapshot pace differently from the fresh one, which never sets it.
+		// A credit grant's period is always its own (a prorated first grant
+		// can be days long), so it is restored whatever its length.
 		if allowance.Key == "weekly" && allowance.Scope == "account" &&
-			allowance.PeriodDurationSeconds > decision.WeekSeconds+24*60*60 {
+			(allowance.PeriodDurationSeconds > decision.WeekSeconds+24*60*60 || s.Credits != nil) {
 			s.Weekly.PeriodSeconds = allowance.PeriodDurationSeconds
 		}
 	}
@@ -1571,4 +1594,16 @@ func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, 
 		}
 	}
 	return false, rows.Err()
+}
+
+// scanCredits decodes a stored API credits balance; NULL is none.
+func scanCredits(stored sql.NullString) (*decision.CreditsBalance, error) {
+	if !stored.Valid || stored.String == "" {
+		return nil, nil
+	}
+	var credits decision.CreditsBalance
+	if err := json.Unmarshal([]byte(stored.String), &credits); err != nil {
+		return nil, fmt.Errorf("decode stored credits: %w", err)
+	}
+	return &credits, nil
 }

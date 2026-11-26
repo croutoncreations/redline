@@ -84,6 +84,55 @@ function cursorProviderFixture() {
   };
 }
 
+// A provider: openai-api-credits account as /v1/dashboard serves it: the
+// promotional balance mirrored as the account window, and the dollar detail
+// under snapshot.credits. $62.40 of a $100 grant left, expiring in 2d5h,
+// plus $7.25 of paid credit. Synthetic values; no real org, key or email.
+function apiCreditsProviderFixture() {
+  const observedMs = new Date(FIXTURE_NOW).getTime();
+  const expiry = new Date(observedMs + (2 * 24 + 5) * 3600 * 1000).toISOString();
+  const start = new Date(observedMs + (2 * 24 + 5 - 30 * 24) * 3600 * 1000).toISOString();
+  const rechargeStart = new Date(observedMs - 40 * 86400 * 1000).toISOString();
+  const rechargeExpiry = new Date(observedMs + 325 * 86400 * 1000).toISOString();
+  // Sampled a minute before the frozen clock, so it reads "1 min ago", never
+  // a sample from the future.
+  const creditsObservedAt = new Date(observedMs - 60 * 1000).toISOString();
+  return {
+    id: 'credits-main', provider: 'openai-api-credits', label: 'Linked org', account_status: 'ok',
+    policy: 'standard', policy_source: 'global', default_policy: 'standard',
+    max_concurrent_runs: 1, active_runs: 0, usage_source: { active: 'native' },
+    latest_decision: { decision: 'RUN', policy: 'standard', mode: 'api_credits', unlocked_tier: 'firesale', pace_gap: .55,
+      reason: '$62.40 of promotional credit expires in 2 days; running queued work before it lapses' },
+    snapshot: {
+      provider: 'openai-api-credits', observed_at: creditsObservedAt, source: 'native',
+      weekly: { remaining: 0.624, resets_at: expiry, period_seconds: 2592000 },
+      allowances: [{ key: 'weekly', source_label: 'Weekly', scope: 'account', role: 'weekly', remaining: 0.624, resets_at: expiry, period_duration_seconds: 2592000 }],
+      credits: {
+        promo_remaining: 62.4, promo_granted: 100, next_expiring: 62.4, effective_at: start, expires_at: expiry,
+        paid_available: 7.25, min_promo_balance: 5, pacing: 'firesale', firesale_window_seconds: 259200,
+        grants: [
+          { kind: 'promo', amount: 100, remaining: 62.4, effective_at: start, expires_at: expiry },
+          { kind: 'auto_recharge', amount: 10, remaining: 7.25, effective_at: rechargeStart, expires_at: rechargeExpiry },
+        ],
+      },
+    },
+  };
+}
+
+// The same account once every promotional grant is spent: no account window,
+// only the paid credit that is never scheduled.
+function apiCreditsNoPromoFixture() {
+  const item = apiCreditsProviderFixture();
+  const paid = item.snapshot.credits.grants[1];
+  item.latest_decision = { decision: 'WAIT', policy: 'standard', mode: 'api_credits', reason: 'no promotional API credit is available' };
+  item.snapshot = {
+    provider: 'openai-api-credits', observed_at: item.snapshot.observed_at, source: 'native', weekly_unavailable: true,
+    credits: { promo_remaining: 0, promo_granted: 0, next_expiring: 0, paid_available: 7.25, min_promo_balance: 5,
+      pacing: 'firesale', firesale_window_seconds: 259200, grants: [paid] },
+  };
+  return item;
+}
+
 function profileFixture() {
   return [
     { id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', repository: '/repo/redline' },
@@ -461,4 +510,4 @@ async function loadMobileDashboard(page, options = {}) {
   return state;
 }
 
-module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture, cursorProviderFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
+module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };

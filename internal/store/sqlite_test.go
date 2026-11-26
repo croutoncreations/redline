@@ -865,6 +865,9 @@ func TestEverySnapshotFieldSurvivesTheStore(t *testing.T) {
 		BankedResetDetails:     []decision.BankedReset{{ID: "credit", ResetsLeft: 1, ExpiresAt: &resetsExpire}},
 		Plan:                   "Pro",
 		SourceStale:            true,
+		Credits: &decision.CreditsBalance{PromoRemaining: 40, PromoGranted: 100, NextExpiring: 40,
+			ExpiresAt: &resetsExpire, PaidAvailable: 2.5, MinPromoBalance: 5, Pacing: "even",
+			Grants: []decision.CreditGrant{{Kind: "promo", Amount: 100, Remaining: 40, ExpiresAt: &resetsExpire}}},
 	}
 	// ShortWindowNotStarted cannot be valid beside a timed or unavailable
 	// window (UsageSnapshot.Validate), so it rides a second snapshot. Between

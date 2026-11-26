@@ -216,8 +216,9 @@ public enum CursorUsageFormat {
         return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
-    public static func money(_ value: Double) -> String {
+    public static func money(_ value: Double, locale: Locale = .current) -> String {
         let formatter = NumberFormatter()
+        formatter.locale = locale
         formatter.numberStyle = .currency
         formatter.currencyCode = "USD"
         return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)

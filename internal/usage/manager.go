@@ -67,8 +67,8 @@ type Status struct {
 // again fixes it.
 const ReasonSignedOut = "signed_out"
 
-// failureReason returns the fixable cause an error declares, if any.
-func failureReason(err error) string {
+// FailureReason returns the fixable cause an error declares, if any.
+func FailureReason(err error) string {
 	var reasoned interface{ Reason() string }
 	if errors.As(err, &reasoned) {
 		return reasoned.Reason()
@@ -524,6 +524,11 @@ func providerKey(provider string) string { return strings.ToLower(strings.TrimSp
 // profile being rate limited must not silence the others.
 func nativeLoginKey(provider config.Provider) string {
 	key := providerKey(provider.Provider)
+	// Each API credits account reads its own organization with its own key;
+	// one organization's rate limit must not hold another's reads.
+	if provider.IsAPICredits() {
+		return config.MeteringIdentity(provider)
+	}
 	if dir := config.NormalizeClaudeConfigDir(provider.ClaudeConfigDir); dir != "" && key == "claude" {
 		return key + "@profile:" + dir
 	}
@@ -588,7 +593,7 @@ func (m *Manager) failure(accountID string, err error) int {
 	defer m.mu.Unlock()
 	state := m.states[accountID]
 	state.Failures++
-	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), FailureReason(err)
 	if state.Active == "" {
 		state.Active = "openusage"
 	}
@@ -600,7 +605,7 @@ func (m *Manager) probeFailure(accountID string, err error, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), FailureReason(err)
 	state.nextProbe = now.Add(m.reprobeInterval())
 	m.states[accountID] = state
 }
@@ -609,7 +614,7 @@ func (m *Manager) nativeFailure(accountID string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.states[accountID]
-	state.LastError, state.Reason = redact(err.Error()), failureReason(err)
+	state.LastError, state.Reason = redact(err.Error()), FailureReason(err)
 	m.states[accountID] = state
 }
 

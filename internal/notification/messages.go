@@ -25,6 +25,14 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		name = provider
 	}
 	switch event.Type {
+	case domain.EventAccountSessionKeyNeeded:
+		label := d["label"]
+		if label == "" {
+			label = event.ProviderAccountID
+		}
+		event.Title = label + " needs a fresh OpenAI session key"
+		event.Message = "OpenAI API credits work is held on this account until you paste one on the computer running Redline: " +
+			"pbpaste | redline account set-session-key " + event.ProviderAccountID
 	case domain.EventAccountNeedsLogin:
 		label := d["label"]
 		if label == "" {

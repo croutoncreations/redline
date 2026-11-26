@@ -16,7 +16,7 @@ import (
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {
-	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown", "multi-account"}
+	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown", "multi-account", "api-credits"}
 	got := demo.Scenarios()
 	if len(got) != len(want) {
 		t.Fatalf("scenarios = %#v", got)
@@ -267,5 +267,34 @@ func TestMultiAccountScenarioKeepsEachAccountsOwnUsage(t *testing.T) {
 		if err != nil || got.Plan != want || got.Account != account {
 			t.Fatalf("%s = %+v, %v", account, got, err)
 		}
+	}
+}
+
+// The API credits scene adds a synthetic credits account in its firesale
+// window, with a pi job queued against it.
+func TestAPICreditsScenarioShowsAnExpiringBalance(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	env, err := demo.Create(context.Background(), "api-credits", t.TempDir(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	snapshot, _, err := env.Database.LatestSnapshot(context.Background(), "api-credits", config.ProviderAPICredits)
+	if err != nil || snapshot.Credits == nil || snapshot.Credits.PromoRemaining != 62.4 || snapshot.Credits.PaidAvailable != 7.25 {
+		t.Fatalf("snapshot = %+v, %v", snapshot, err)
+	}
+	if !env.Config.Providers["api-credits"].IsAPICredits() {
+		t.Fatal("api-credits is not a credits account")
+	}
+	profiles, err := env.Database.ListProfiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, profile := range profiles {
+		found = found || (profile.ProviderAccountID == "api-credits" && profile.HarnessType == "pi")
+	}
+	if !found {
+		t.Fatal("no pi profile on the credits account")
 	}
 }

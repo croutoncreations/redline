@@ -19,3 +19,6 @@ func (unavailableLicenseStore) Replace(context.Context, string) error {
 func (unavailableLicenseStore) Clear(context.Context) error {
 	return ErrLicenseStoreUnavailable
 }
+
+// KeychainItem reports that this build has no Keychain access.
+func KeychainItem(string, string) (LicenseStore, bool) { return nil, false }
