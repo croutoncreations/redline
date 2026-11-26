@@ -1325,6 +1325,7 @@ function switchTab(name) {
     const active = btn.dataset.tab === name;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-selected', String(active));
+    btn.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll('.m-panel').forEach(panel => {
     const active = panel.id === `m-${name}-panel`;
@@ -1523,8 +1524,20 @@ $('#m-queue-provider').addEventListener('change', () => {
 });
 
 // ── Tab wiring ────────────────────────────────────────────────────────────────
-document.querySelectorAll('.m-tab').forEach(btn => {
+const tabs = [...document.querySelectorAll('.m-tab')];
+tabs.forEach((btn, index) => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  btn.addEventListener('keydown', event => {
+    let target;
+    if (event.key === 'ArrowRight') target = tabs[(index + 1) % tabs.length];
+    else if (event.key === 'ArrowLeft') target = tabs[(index - 1 + tabs.length) % tabs.length];
+    else if (event.key === 'Home') target = tabs[0];
+    else if (event.key === 'End') target = tabs[tabs.length - 1];
+    if (!target) return;
+    event.preventDefault();
+    switchTab(target.dataset.tab);
+    target.focus();
+  });
 });
 
 // ── Run confirm sheet ─────────────────────────────────────────────────────────
