@@ -164,6 +164,27 @@ func TestClaudeCreditsClaudeCodeRunsInAnEmptyPrivateConfigDir(t *testing.T) {
 	}
 }
 
+// An empty CLAUDE_CONFIG_DIR does not stop a workspace's .claude/settings.json
+// from setting ANTHROPIC_BASE_URL and sending the key elsewhere, so a credits
+// run loads no settings sources at all, ahead of the profile's arguments.
+// Other Claude Code runs keep their settings.
+func TestClaudeCreditsClaudeCodeRunLoadsNoSettingsSources(t *testing.T) {
+	profile := claudeCreditsProfile("claude-code")
+	profile.Model = "claude-sonnet-4-6"
+	profile.HarnessArgs = []string{"--max-turns", "5"}
+	args := runClaudeCredits(t, profile).command.Args
+	index := slices.Index(args, "--setting-sources=")
+	if index < 0 || index+1 >= len(args) || args[index+1] != "--max-turns" {
+		t.Fatalf("args = %v, want --setting-sources= before the profile's arguments", args)
+	}
+	other := runClaudeCredits(t, domain.ExecutionProfile{HarnessType: "claude-code", Model: "sonnet"}).command.Args
+	for _, arg := range other {
+		if strings.HasPrefix(arg, "--setting-sources") {
+			t.Fatalf("subscription run args = %v", other)
+		}
+	}
+}
+
 // Two runs never share a config directory.
 func TestClaudeCreditsConfigDirIsPerRun(t *testing.T) {
 	first := runClaudeCredits(t, claudeCreditsProfile("claude-code")).configDir
@@ -298,9 +319,10 @@ func TestClaudeCreditsCommandRunGetsAnEmptyPrivateConfigDir(t *testing.T) {
 	}
 }
 
-// The pin fails closed: a model it cannot move, a setModel that does not
-// switch, or a request about to leave on a subscription provider ends the
-// run with a message instead of spending a subscription login. Copied
+// The pin fails closed: a model it cannot move, a non-Anthropic model, a
+// setModel that does not switch, or a request about to leave on any provider
+// but the pinned one ends the run with a message instead of spending a
+// subscription login or another vendor's credential. Copied
 // models lose any endpoint or credential of their own.
 func TestEmbeddedPiExtensionFailsClosed(t *testing.T) {
 	source := harness.PiAnthropicCreditsExtension()
@@ -311,7 +333,8 @@ func TestEmbeddedPiExtensionFailsClosed(t *testing.T) {
 		"(await pi.setModel(target)) === true",
 		"if (!moved) return refuse(model);",
 		`pi.on("before_provider_request"`,
-		"ctx.model && SUBSCRIPTION_PROVIDERS.includes(ctx.model.provider)",
+		"if (ctx.model && ctx.model.provider !== PROVIDER) refuse(ctx.model);",
+		"if (!SUBSCRIPTION_PROVIDERS.includes(model.provider)) return refuse(model);",
 		"({ provider, baseUrl, headers, apiKey, authHeader, oauth, ...m }: any) => m",
 	} {
 		if !strings.Contains(source, want) {
@@ -323,14 +346,16 @@ func TestEmbeddedPiExtensionFailsClosed(t *testing.T) {
 	}
 }
 
-// Flags that would put the key in argv, pick another provider, or load
-// other extensions or settings are refused on credits accounts.
+// Flags that would put the key in argv, pick another provider or model, or
+// load other extensions or settings are refused on credits accounts.
 func TestCreditsHarnessArgsCannotRerouteTheRun(t *testing.T) {
 	refused := map[string][][]string{
 		"anthropic/pi": {{"--api-key", "k"}, {"--api-key=k"}, {"--provider", "anthropic"}, {"--provider=anthropic"},
-			{"-e", "./other.ts"}, {"--extension", "./other.ts"}, {"--extension=./other.ts"}},
+			{"-e", "./other.ts"}, {"--extension", "./other.ts"}, {"--extension=./other.ts"},
+			{"--model", "openai/gpt-5.6-sol"}, {"--model=openai/gpt-5.6-sol"}, {"--models", "openai/*"}},
 		"anthropic/claude-code": {{"--settings", "{}"}, {"--settings=./s.json"}, {"--setting-sources", "user"}},
-		"openai/pi":             {{"--api-key", "k"}, {"--api-key=k"}},
+		"openai/pi": {{"--api-key", "k"}, {"--api-key=k"}, {"--model", "anthropic/claude-sonnet-4-6"},
+			{"--model=anthropic/claude-sonnet-4-6"}, {"--models", "anthropic/*"}},
 	}
 	for key, cases := range refused {
 		vendor, harnessType, _ := strings.Cut(key, "/")
@@ -346,7 +371,7 @@ func TestCreditsHarnessArgsCannotRerouteTheRun(t *testing.T) {
 		"anthropic/claude-code": {"--max-turns", "5"},
 		"anthropic/command":     {"--api-key", "k"},
 		"openai/pi":             {"--provider", "openai", "-e", "./mine.ts"},
-		"/pi":                   {"--api-key", "k", "-e", "./mine.ts"},
+		"/pi":                   {"--api-key", "k", "-e", "./mine.ts", "--model", "openai/gpt-5.6-sol"},
 		"/claude-code":          {"--settings", "{}"},
 	}
 	for key, args := range allowed {

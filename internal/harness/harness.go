@@ -595,6 +595,12 @@ func buildHarnessCommand(
 		if request.Profile.Model != "" && request.Profile.Model != "default" {
 			base.Args = append(base.Args, "--model", request.Profile.Model)
 		}
+		if anthropicCredits {
+			// The empty config directory does not cover project settings: a
+			// workspace .claude/settings.json could set ANTHROPIC_BASE_URL and
+			// send the key elsewhere. Load no settings sources at all.
+			base.Args = append(base.Args, "--setting-sources=")
+		}
 		base.Args = append(base.Args, request.Profile.HarnessArgs...)
 		base.Args = append(base.Args, "--append-system-prompt", claudeWorkspaceBoundary(request.Workspace.Directory))
 		base.Stdin = strings.NewReader(prompt)
@@ -684,15 +690,17 @@ func ValidateHarnessArgs(harnessType string, args []string) error {
 // pass, by vendor and harness: --api-key would put a key in argv, and the
 // rest would move a Claude credits run off the account's key (another
 // provider, another extension ahead of or instead of the pin, or Claude Code
-// settings carrying their own credentials or endpoint). pi's
-// --no-extensions is allowed: it leaves the explicit -e pin loaded.
+// settings carrying their own credentials or endpoint). pi's --model and
+// --models are refused because the profile's model is the one checked
+// against the account's vendor. pi's --no-extensions is allowed: it leaves
+// the explicit -e pin loaded.
 var creditsReservedArgs = map[string]map[string][]string{
 	"anthropic": {
-		"pi":          {"--api-key", "--provider", "-e", "--extension"},
+		"pi":          {"--api-key", "--provider", "-e", "--extension", "--model", "--models"},
 		"claude-code": {"--settings", "--setting-sources"},
 	},
 	"openai": {
-		"pi": {"--api-key"},
+		"pi": {"--api-key", "--model", "--models"},
 	},
 }
 
