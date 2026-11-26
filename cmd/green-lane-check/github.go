@@ -288,13 +288,15 @@ func (c *GitHubClient) reviews(ctx context.Context, n int) ([]greenlane.Review, 
 			Submitted time.Time `json:"submitted_at"`
 			User      struct {
 				Login string `json:"login"`
+				ID    int64  `json:"id"`
+				Type  string `json:"type"`
 			} `json:"user"`
 		}
 		if err := json.Unmarshal(data, &rows); err != nil {
 			return nil, err
 		}
 		for _, r := range rows {
-			all = append(all, greenlane.Review{ID: r.ID, User: r.User.Login, State: r.State, Body: r.Body, CommitID: r.Commit, SubmittedAt: r.Submitted})
+			all = append(all, greenlane.Review{ID: r.ID, User: r.User.Login, UserID: r.User.ID, UserType: r.User.Type, State: r.State, Body: r.Body, CommitID: r.Commit, SubmittedAt: r.Submitted})
 		}
 		if len(rows) < 100 {
 			return all, nil

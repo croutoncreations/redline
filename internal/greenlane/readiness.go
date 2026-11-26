@@ -78,7 +78,7 @@ func (e *Evaluator) checkReviewReadiness(pr PRInfo) RuleResult {
 		var bodies []string
 		for _, review := range pr.Reviews {
 			if !strings.EqualFold(review.User, pr.Author) &&
-				strings.TrimSpace(review.Body) != "" &&
+				strings.TrimSpace(review.Body) != "" && !isClaudeNoReviewNotice(review) &&
 				(review.CommitID == pr.HeadSHA || !reviewBodySuperseded(pr, review)) {
 				bodies = append(bodies, fmt.Sprintf("%s/%d", review.User, review.ID))
 			}
