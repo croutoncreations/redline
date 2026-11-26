@@ -10,7 +10,14 @@ import (
 // serviceOnlyVariables are never passed to anything Redline starts. The
 // platform session key carries full dashboard access; the run markers are
 // Redline's to set per run, so an inherited copy must never mislabel one.
-var serviceOnlyVariables = []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENAI_API_CREDITS", "REDLINE_PROVIDER_ACCOUNT_ID"}
+var serviceOnlyVariables = []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENAI_API_CREDITS",
+	"REDLINE_ANTHROPIC_API_CREDITS", "REDLINE_PROVIDER_ACCOUNT_ID"}
+
+// WithoutServiceOnlyVariables drops the variables only Redline may set from
+// environment, ignoring case on Windows.
+func WithoutServiceOnlyVariables(environment []string) []string {
+	return serviceEnvironment(runtime.GOOS, environment)
+}
 
 // ServiceEnvironment is the service's environment for an agent run or a
 // workspace hook, without the variables only Redline may set.

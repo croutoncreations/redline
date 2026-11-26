@@ -210,8 +210,8 @@ func TestCreditsFiresaleDispatchesWithTheAccountsKey(t *testing.T) {
 	}
 	select {
 	case profile := <-fixture.ran:
-		if profile.OpenAIAPIKey != "sk-proj-SYNTHETIC" || profile.OpenAIOrganization != "org-synthetic" {
-			t.Fatalf("run profile key=%q org=%q", profile.OpenAIAPIKey, profile.OpenAIOrganization)
+		if profile.APICreditsVendor != "openai" || profile.APICreditsKey != "sk-proj-SYNTHETIC" || profile.APICreditsOrganization != "org-synthetic" {
+			t.Fatalf("run profile vendor=%q key=%q org=%q", profile.APICreditsVendor, profile.APICreditsKey, profile.APICreditsOrganization)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not start")

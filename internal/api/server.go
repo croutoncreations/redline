@@ -2523,8 +2523,9 @@ func (s *Server) dispatchCore(
 	// being scheduled against this one's.
 	profile = profileForAccount(profile, s.config.Providers[request.ProviderAccountID])
 	if runAPIKey != "" {
-		profile.OpenAIAPIKey = runAPIKey
-		profile.OpenAIOrganization = configuredProvider.EffectiveAPICredits().OrganizationID
+		profile.APICreditsVendor = configuredProvider.APICreditsVendor()
+		profile.APICreditsKey = runAPIKey
+		profile.APICreditsOrganization = configuredProvider.EffectiveAPICredits().OrganizationID
 	}
 	s.workers.Add(1)
 	go func() {
@@ -2543,19 +2544,33 @@ func (s *Server) dispatchCore(
 // default login (or whichever one the service inherited) while being
 // scheduled against this account.
 func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.Provider) error {
-	// API credits pay only for direct OpenAI API calls made with the
-	// account's key, which Redline injects into pi and command runs.
-	// Anything else would be scheduled against money it never spends.
+	// API credits pay only for direct API calls made with the account's
+	// key, which Redline injects into pi and command runs (and, on a Claude
+	// account, claude-code runs). Anything else would be scheduled against
+	// money it never spends.
+	anthropic := account.APICreditsVendor() == config.APICreditsVendorAnthropic
 	if account.IsAPICredits() && !account.HarnessSpendsAPICredits(profile.HarnessType) {
+		if anthropic {
+			return fmt.Errorf("account %q is Claude API credits: its harness must be claude-code, pi or command, because only those runs are given its API key; %q bills elsewhere",
+				profile.ProviderAccountID, profile.HarnessType)
+		}
 		return fmt.Errorf("account %q is OpenAI API credits: its harness must be pi or command, because only those runs are given its API key; %q bills elsewhere "+
 			"(Codex usage through API keys is not covered by the benefit)", profile.ProviderAccountID, profile.HarnessType)
 	}
-	// pi bills whichever provider its model names, and only openai/* uses the
-	// injected key; its default model and subscription routes such as
-	// openai-codex/* or anthropic-cli/* would never touch the credits.
-	if account.IsAPICredits() && profile.HarnessType == "pi" && !strings.HasPrefix(strings.TrimSpace(profile.Model), "openai/") {
-		return fmt.Errorf("account %q is OpenAI API credits: a pi profile model on it must be an openai/… model (for example openai/gpt-5.6-sol), "+
-			"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
+	// pi bills whichever provider its model names, and only openai/* (or
+	// anthropic/* on a Claude account) uses the injected key; its default
+	// model and subscription routes such as openai-codex/* or anthropic-cli/*
+	// would never touch the credits.
+	if account.IsAPICredits() && profile.HarnessType == "pi" {
+		model := strings.TrimSpace(profile.Model)
+		if anthropic && !strings.HasPrefix(model, "anthropic/") {
+			return fmt.Errorf("account %q is Claude API credits: a pi profile model on it must be an anthropic/… model (for example anthropic/claude-sonnet-4-6), "+
+				"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
+		}
+		if !anthropic && !strings.HasPrefix(model, "openai/") {
+			return fmt.Errorf("account %q is OpenAI API credits: a pi profile model on it must be an openai/… model (for example openai/gpt-5.6-sol), "+
+				"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
+		}
 	}
 	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
 		return nil
@@ -2569,7 +2584,7 @@ func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.P
 // directory; the field is ignored by every other harness.
 func profileForAccount(profile domain.ExecutionProfile, account config.Provider) domain.ExecutionProfile {
 	profile.ClaudeConfigDir = ""
-	profile.OpenAIAPIKey, profile.OpenAIOrganization = "", ""
+	profile.APICreditsVendor, profile.APICreditsKey, profile.APICreditsOrganization = "", "", ""
 	if strings.EqualFold(strings.TrimSpace(account.Provider), "claude") {
 		profile.ClaudeConfigDir = config.NormalizeClaudeConfigDir(account.ClaudeConfigDir)
 	}
@@ -2581,13 +2596,19 @@ func profileForAccount(profile domain.ExecutionProfile, account config.Provider)
 func (s *Server) apiCreditsRunKey(ctx context.Context, accountID string, account config.Provider) (string, string) {
 	key, err := apicredits.ResolveSecret(ctx, s.apiCreditSecrets, account.APICreditsVendor(), accountID, apicredits.SecretAPIKey,
 		account.EffectiveAPICredits().APIKeyFile)
+	what, prefix := "OpenAI API key", "sk-"
+	if account.APICreditsVendor() == config.APICreditsVendorAnthropic {
+		what, prefix = "Claude API key", "sk-ant-api"
+	}
 	switch {
 	case errors.Is(err, apicredits.ErrSecretNotFound):
-		return "", fmt.Sprintf("no OpenAI API key is saved for runs on this account; run `redline account set-api-key %s`", accountID)
+		return "", fmt.Sprintf("no %s is saved for runs on this account; run `redline account set-api-key %s`", what, accountID)
 	case err != nil:
-		return "", "the OpenAI API key for runs could not be read: " + err.Error()
-	case !strings.HasPrefix(key, "sk-"):
-		return "", "the saved OpenAI API key does not look like an API key (sk-…)"
+		return "", "the " + what + " for runs could not be read: " + err.Error()
+	case !strings.HasPrefix(key, prefix):
+		return "", "the saved " + what + " does not look like an API key (" + prefix + "…)"
+	case prefix == "sk-" && strings.HasPrefix(key, "sk-ant-"):
+		return "", "the saved OpenAI API key is a Claude (Anthropic) key; save an OpenAI sk-… key with `redline account set-api-key " + accountID + "`"
 	}
 	return key, ""
 }

@@ -130,3 +130,146 @@ func TestClaudeCreditsAccountCannotBeCreatedOverHTTP(t *testing.T) {
 		t.Fatalf("status = %d body = %s", response.StatusCode, body)
 	}
 }
+
+func createClaudeCreditsCandidate(t *testing.T, db *store.DB, harness, model string) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "credits-" + harness, ProviderAccountID: "api-credits", HarnessType: harness, HarnessCommand: "true",
+		Model: model, WorkspaceProvider: "devx",
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "credits-task-" + harness, Name: "Credits " + harness, Prompt: "p", ExecutionProfileID: "credits-" + harness,
+		Priority: 1, Type: domain.OneOff, DispatchTier: domain.DispatchFiresale,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Near expiry, claude-code, pi and command jobs run with exactly the
+// account's Claude key, tagged with its vendor.
+func TestClaudeCreditsFiresaleDispatchesWithTheAccountsKey(t *testing.T) {
+	for harness, model := range map[string]string{"claude-code": "claude-sonnet-4-6", "pi": "anthropic/claude-sonnet-4-6", "command": ""} {
+		fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+		fixture.saveClaudeKeys(t)
+		createClaudeCreditsCandidate(t, fixture.db, harness, model)
+		var result schedulerResponseForTest
+		decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+		if result.Run == nil || !result.Result.Firesale {
+			t.Fatalf("%s: result = %+v", harness, result.Result)
+		}
+		select {
+		case profile := <-fixture.ran:
+			if profile.APICreditsVendor != "anthropic" || profile.APICreditsKey != testClaudeAPIKey ||
+				profile.APICreditsOrganization != testConsoleOrg || profile.ClaudeConfigDir != "" {
+				t.Fatalf("%s: run profile vendor=%q org=%q dir=%q", harness, profile.APICreditsVendor, profile.APICreditsOrganization, profile.ClaudeConfigDir)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: run did not start", harness)
+		}
+	}
+}
+
+// An OpenAI key saved on a Claude account (or anything else that is not an
+// sk-ant-api… key) holds work rather than being handed to a run.
+func TestClaudeCreditsWithWrongAPIKeyHoldsWork(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+	fixture.saveClaudeKeys(t)
+	fixture.secrets.items["api-credits/"+apicredits.SecretAPIKey] = "sk-proj-OPENAI"
+	createClaudeCreditsCandidate(t, fixture.db, "command", "")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "sk-ant-api") || strings.Contains(result.Result.Reason, "sk-proj-OPENAI") {
+		t.Fatalf("result = %+v", result.Result)
+	}
+	delete(fixture.secrets.items, "api-credits/"+apicredits.SecretAPIKey)
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "no Claude API key") || !strings.Contains(result.Result.Reason, "set-api-key api-credits") {
+		t.Fatalf("missing key: result = %+v", result.Result)
+	}
+}
+
+// Codex, Cursor and Hermes cannot spend Claude API credits; claude-code,
+// pi and command can.
+func TestClaudeCreditsAccountRefusesHarnessesThatCannotSpendCredits(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+	for _, harness := range []string{"codex-cli", "cursor-agent", "hermes"} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": "bad-" + harness, "provider_account_id": "api-credits", "harness_type": harness, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "Claude API credits") || !strings.Contains(body, "must be") {
+			t.Fatalf("%s: status = %d body = %s", harness, response.StatusCode, body)
+		}
+	}
+	for harness, model := range map[string]string{"claude-code": "", "pi": "anthropic/claude-sonnet-4-6", "command": ""} {
+		body := map[string]any{"id": "ok-" + harness, "provider_account_id": "api-credits", "harness_type": harness,
+			"model": model, "workspace_provider": "devx"}
+		if harness == "command" {
+			body["harness_command"] = "true"
+		}
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", body)
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("%s profile status = %d: %s", harness, response.StatusCode, readBody(t, response))
+		}
+	}
+}
+
+// A pi profile on a Claude credits account must name an anthropic/… model:
+// the default model and subscription routes would never bill the key.
+func TestClaudeCreditsAccountRefusesPiModelsThatDoNotBillTheAPIKey(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+	for _, model := range []string{"", "default", "anthropic-cli/claude-sonnet-4-6", "openai/gpt-5.6-sol", "claude-sonnet-4-6"} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": "pi-" + strings.NewReplacer("/", "-", ".", "-").Replace(model) + "x", "provider_account_id": "api-credits",
+			"harness_type": "pi", "model": model, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "anthropic/") {
+			t.Fatalf("model %q: status = %d body = %s", model, response.StatusCode, body)
+		}
+	}
+}
+
+// The floor and the in-flight reservation hold a Claude credits account
+// exactly as they hold an OpenAI one: $6 promo, $5 floor, $1 per run in
+// flight leaves no room for a second run.
+func TestClaudeCreditsFloorReservesRunsAlreadyInFlight(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 6, 24*time.Hour, nil)
+	fixture.saveClaudeKeys(t)
+	createClaudeCreditsCandidate(t, fixture.db, "command", "")
+	if err := fixture.db.CreateTask(t.Context(), domain.Task{
+		ID: "credits-task-2", Name: "Credits 2", Prompt: "p", ExecutionProfileID: "credits-command",
+		Priority: 1, Type: domain.OneOff, DispatchTier: domain.DispatchFiresale,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetProviderMaxConcurrentRuns(t.Context(), "api-credits", 4); err != nil {
+		t.Fatal(err)
+	}
+	run, err := fixture.db.AdmitTask(t.Context(), "in-flight", "credits-task-2", "api-credits", "", apiNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkRunRunning(t.Context(), run.ID, domain.Workspace{Directory: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "in flight") {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
+func TestClaudeCreditsFloorHoldsDispatch(t *testing.T) {
+	floor := 50.0
+	fixture := newClaudeCreditsServer(t, 40, 24*time.Hour, &config.APICredits{OrganizationID: testConsoleOrg, MinPromoBalance: &floor})
+	fixture.saveClaudeKeys(t)
+	createClaudeCreditsCandidate(t, fixture.db, "command", "")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "$50.00 floor") {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}

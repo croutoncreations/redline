@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -99,10 +100,11 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	command, err := buildCommand(request, prompt, stdout, stderr)
+	command, cleanup, err := buildCommand(request, prompt, stdout, stderr)
 	if err != nil {
 		return Result{}, err
 	}
+	defer cleanup()
 	exitCode, err := a.runner().Run(ctx, command)
 	result.ExitCode = exitCode
 	if err != nil {
@@ -115,7 +117,12 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		// A profile run's sign-in is that profile's, not the default one.
 		// The "Claude Code is signed out." prefix stays, so the run still
 		// pauses its account.
-		if dir := request.Profile.ClaudeConfigDir; dir != "" && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
+		// A Claude API credits run signs in with the account's API key, so
+		// the fix is a fresh key, not a login.
+		if request.Profile.APICreditsVendor == apiCreditsVendorAnthropic && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
+			result.Failure = "Claude Code is signed out. The Claude API key saved for this account was rejected; run " +
+				"`pbpaste | redline account set-api-key " + request.Profile.ProviderAccountID + "` with a key from the linked Console org, then retry this job."
+		} else if dir := request.Profile.ClaudeConfigDir; dir != "" && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
 			result.Failure = "Claude Code is signed out. Run `CLAUDE_CONFIG_DIR=" + displayHome(dir) + " claude auth login`, then retry this job."
 		}
 	}
@@ -316,6 +323,78 @@ func withOpenAICredentials(environment []string, key, organization string) []str
 	return environment
 }
 
+// API credits vendors, as config.APICreditsVendor names them. The harness
+// does not import config; the service fills these in on the run profile.
+const (
+	apiCreditsVendorOpenAI    = "openai"
+	apiCreditsVendorAnthropic = "anthropic"
+)
+
+// anthropicRoutingVariables would sign a run in as another Anthropic
+// account or organization, send its key to another host, or bill a cloud
+// provider instead of the Console organization.
+var anthropicRoutingVariables = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+	"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_FEDERATION_RULE_ID",
+	"ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_WORKSPACE_ID"}
+
+// withAnthropicCredentials gives a Claude API credits run exactly its
+// account's key, after dropping whatever the service inherited.
+func withAnthropicCredentials(environment []string, key string) []string {
+	for _, name := range anthropicRoutingVariables {
+		environment = withoutVariable(environment, name)
+	}
+	return append(environment, "ANTHROPIC_API_KEY="+key)
+}
+
+//go:embed pi_anthropic_credits.ts
+var piAnthropicCreditsExtension string
+
+// PiAnthropicCreditsExtension is the pi extension a Claude API credits pi
+// run loads: it moves anthropic models onto a provider that reads
+// $ANTHROPIC_API_KEY, ahead of any stored Anthropic OAuth login.
+func PiAnthropicCreditsExtension() string { return piAnthropicCreditsExtension }
+
+// runScratch holds a run's private, run-scoped files (an empty Claude Code
+// config directory, the pi extension) and removes them when the run ends.
+type runScratch struct{ dirs []string }
+
+func (r *runScratch) dir(pattern string) (string, error) {
+	dir, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	r.dirs = append(r.dirs, dir)
+	return dir, nil
+}
+
+func (r *runScratch) cleanup() {
+	for _, dir := range r.dirs {
+		_ = os.RemoveAll(dir)
+	}
+}
+
+// writePiExtension writes the pin extension into a private run directory.
+func (r *runScratch) writePiExtension() (string, error) {
+	dir, err := r.dir("redline-pi-credits-")
+	if err != nil {
+		return "", fmt.Errorf("create pi extension directory: %w", err)
+	}
+	path := filepath.Join(dir, "redline-anthropic-credits.ts")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create pi extension: %w", err)
+	}
+	_, writeErr := file.WriteString(piAnthropicCreditsExtension)
+	if closeErr := file.Close(); writeErr != nil || closeErr != nil {
+		return "", fmt.Errorf("write pi extension")
+	}
+	return path, nil
+}
+
 // withoutVariable drops name from environment, ignoring case on Windows.
 func withoutVariable(environment []string, name string) []string {
 	return redprocess.WithoutVariables(runtime.GOOS, environment, name)
@@ -332,10 +411,27 @@ func splitHermesModel(value string) (provider, model string) {
 	return "", value
 }
 
+// buildCommand returns the harness command and a cleanup that removes the
+// run's scratch files; cleanup is safe to call whatever the outcome.
 func buildCommand(
 	request Request,
 	prompt string,
 	stdout, stderr io.Writer,
+) (redprocess.Command, func(), error) {
+	scratch := &runScratch{}
+	command, err := buildHarnessCommand(request, prompt, stdout, stderr, scratch)
+	if err != nil {
+		scratch.cleanup()
+		return redprocess.Command{}, func() {}, err
+	}
+	return command, scratch.cleanup, nil
+}
+
+func buildHarnessCommand(
+	request Request,
+	prompt string,
+	stdout, stderr io.Writer,
+	scratch *runScratch,
 ) (redprocess.Command, error) {
 	base := redprocess.Command{
 		Dir: request.Workspace.Directory, Stdout: stdout, Stderr: stderr,
@@ -351,17 +447,27 @@ func buildCommand(
 	// The platform session key carries full dashboard access; no run may
 	// see it, even if the service was started with it in its environment.
 	// The run markers below are Redline's to set, never inherited.
-	for _, name := range []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENAI_API_CREDITS", "REDLINE_PROVIDER_ACCOUNT_ID"} {
-		base.Env = withoutVariable(base.Env, name)
-	}
+	base.Env = redprocess.WithoutServiceOnlyVariables(base.Env)
 	if account := request.Profile.ProviderAccountID; account != "" {
 		base.Env = append(base.Env, "REDLINE_PROVIDER_ACCOUNT_ID="+account)
 	}
-	if key := request.Profile.OpenAIAPIKey; key != "" {
-		base.Env = withOpenAICredentials(base.Env, key, request.Profile.OpenAIOrganization)
-		// Tools inside the run (such as a pi extension that moves OpenAI
-		// models to a ChatGPT subscription) use this to keep billing the key.
-		base.Env = append(base.Env, "REDLINE_OPENAI_API_CREDITS=1")
+	anthropicCredits := false
+	if key := request.Profile.APICreditsKey; key != "" {
+		switch request.Profile.APICreditsVendor {
+		case apiCreditsVendorOpenAI:
+			base.Env = withOpenAICredentials(base.Env, key, request.Profile.APICreditsOrganization)
+			// Tools inside the run (such as a pi extension that moves OpenAI
+			// models to a ChatGPT subscription) use this to keep billing the key.
+			base.Env = append(base.Env, "REDLINE_OPENAI_API_CREDITS=1")
+		case apiCreditsVendorAnthropic:
+			base.Env = withAnthropicCredentials(base.Env, key)
+			// The pi extension below, and pi-config's provider priority, use
+			// this to keep anthropic models on the key.
+			base.Env = append(base.Env, "REDLINE_ANTHROPIC_API_CREDITS=1")
+			anthropicCredits = true
+		default:
+			return redprocess.Command{}, fmt.Errorf("unknown API credits vendor %q", request.Profile.APICreditsVendor)
+		}
 	}
 	switch request.Profile.HarnessType {
 	case "codex-cli":
@@ -379,7 +485,16 @@ func buildCommand(
 		// CLAUDE_CONFIG_DIR inherited from the service is dropped first, so
 		// a default-login account never runs on a profile by accident.
 		base.Env = withoutVariable(base.Env, "CLAUDE_CONFIG_DIR")
-		if dir := request.Profile.ClaudeConfigDir; dir != "" {
+		if anthropicCredits {
+			// Claude Code prefers a stored login over ANTHROPIC_API_KEY, so
+			// a credits run starts from a fresh, empty, private config
+			// directory of its own and never sees any profile's login.
+			dir, err := scratch.dir("redline-claude-credits-")
+			if err != nil {
+				return redprocess.Command{}, fmt.Errorf("create Claude Code config directory: %w", err)
+			}
+			base.Env = append(base.Env, "CLAUDE_CONFIG_DIR="+dir)
+		} else if dir := request.Profile.ClaudeConfigDir; dir != "" {
 			// Variables that would sign Claude Code in as someone else
 			// take precedence over the profile's login; drop them so the
 			// run spends only this profile's allowance.
@@ -428,6 +543,13 @@ func buildCommand(
 		base.Args = []string{"--print", "--mode", "json", "--name", "redline-" + request.RunID}
 		if request.Profile.Model != "" && request.Profile.Model != "default" {
 			base.Args = append(base.Args, "--model", request.Profile.Model)
+		}
+		if anthropicCredits {
+			path, err := scratch.writePiExtension()
+			if err != nil {
+				return redprocess.Command{}, err
+			}
+			base.Args = append(base.Args, "-e", path)
 		}
 		base.Args = append(base.Args, request.Profile.HarnessArgs...)
 		base.Stdin = strings.NewReader(prompt)
