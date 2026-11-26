@@ -190,8 +190,10 @@ const creditGrantKinds = (provider) => isClaudeCredits(provider) ? CLAUDE_CREDIT
 function creditsSignedOut(item) {
   return item.account_status === 'signed_out' || signedOut(item);
 }
+// Grants lapse at 00:00 UTC, so the date is the UTC one: local time would
+// show the day before everywhere west of Greenwich.
 function creditsDate(value, year = false) {
-  return new Intl.DateTimeFormat(undefined, {weekday: 'short', month: 'short', day: 'numeric', ...(year ? {year: 'numeric'} : {})}).format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, {weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC', ...(year ? {year: 'numeric'} : {})}).format(new Date(value));
 }
 function creditsPromoFraction(credits) {
   return credits?.promo_granted > 0 ? Math.max(0, Math.min(1, credits.promo_remaining / credits.promo_granted)) : 0;
@@ -238,11 +240,11 @@ function creditsMeters(item) {
       </div>`;
   const rules = `<div class="m-credits-rules" data-testid="credits-rules">${esc(creditsRuleLine(credits))}</div>`;
   const paid = credits.paid_available > 0
-    ? `<div class="m-credits-row" data-testid="credits-paid"><span>Paid credit</span><b>${esc(`${money(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
-  const thisYear = new Date().getFullYear(), kinds = creditGrantKinds(item.provider);
+    ? `<div class="m-credits-row" data-testid="credits-paid"><span>Other credit</span><b>${esc(`${money(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
+  const thisYear = new Date().getUTCFullYear(), kinds = creditGrantKinds(item.provider);
   const grants = (credits.grants || []).filter(g => g.remaining > 0).map(g => `<div class="m-credits-row" data-testid="credits-grant">
       <span>${esc(kinds[g.kind] || kinds.other)}</span><b>${esc(`${money(g.remaining)} of ${money(g.amount)}`)}</b>
-      ${g.expires_at ? `<em>expires ${esc(creditsDate(g.expires_at, new Date(g.expires_at).getFullYear() !== thisYear))}</em>` : ''}
+      ${g.expires_at ? `<em>expires ${esc(creditsDate(g.expires_at, new Date(g.expires_at).getUTCFullYear() !== thisYear))}</em>` : ''}
     </div>`).join('');
   return `<div class="m-meters">${promo}${rules}${paid}${grants ? `<div class="m-credits-grants"><div class="m-pools-label">GRANTS</div>${grants}</div>` : ''}</div>`;
 }

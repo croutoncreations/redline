@@ -2,7 +2,7 @@ import Foundation
 
 /// The dollar detail of an API credits account (`snapshot.credits`).
 /// Promotional credit (from a ChatGPT or Claude subscription) is what Redline
-/// spends; paid credit is shown and never scheduled.
+/// spends; other credit (`paid_available`) is shown and never scheduled.
 public struct APICredits: Codable, Sendable, Equatable {
     public let promoRemaining: Double
     public let promoGranted: Double
@@ -135,6 +135,9 @@ public struct APICreditsCard: Sendable, Equatable {
     public let promoLine: String?
     /// "Jobs start above $5.00 · Firesale: runs within 3 days of expiry".
     public let rule: String?
+    /// The label of the `paid` row. For Claude that money is mostly another
+    /// promotional program, not purchased credit, so it is not called paid.
+    public static let otherCreditLabel = "Other credit"
     /// "$7.25 · shown only, never scheduled"; nil when there is none.
     public let paid: String?
     public let grants: [Grant]
@@ -284,12 +287,21 @@ private struct CreditDates {
         return minutes == 1 ? "in 1 minute" : "in \(minutes) minutes"
     }
 
+    /// Grants lapse at 00:00 UTC, so their dates are UTC ones: the Mac's own
+    /// zone would show the day before everywhere in the Americas.
+    private var utc: Calendar {
+        var utc = calendar
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        return utc
+    }
+
     /// "Fri, Nov 27".
     func day(_ date: Date) -> String { format(date, template: "EEEMMMd") }
 
     /// "Fri, Nov 27", with the year when it is not this year.
     func date(_ date: Date) -> String {
-        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        let utc = utc
+        let sameYear = utc.component(.year, from: date) == utc.component(.year, from: now)
         return format(date, template: sameYear ? "EEEMMMd" : "EEEMMMdyyyy")
     }
 
@@ -307,8 +319,8 @@ private struct CreditDates {
     private func format(_ date: Date, template: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = locale
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
+        formatter.calendar = utc
+        formatter.timeZone = TimeZone(identifier: "UTC")!
         formatter.setLocalizedDateFormatFromTemplate(template)
         return formatter.string(from: date)
     }

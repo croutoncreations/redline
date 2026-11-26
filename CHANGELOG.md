@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- API credits cards on every surface (desktop and mobile web dashboards, menu bar, Android): the
+  summary row for credit that is shown but never scheduled is now "Other credit" instead of
+  "Paid credit", since for Claude it is mostly another promotional program. Credit expiry dates
+  are shown in UTC, because grants end at 00:00 UTC and local time showed the previous day
+  in the Americas. On Android a normal hold ("Holding credit", "Held · at the floor", …) now has
+  a grey dot instead of a red one; amber is kept for an unknown decision or an out-of-date or
+  signed-out balance.
+
 ## [0.1.14] - 2026-11-26
 
 ### Upgrade notes
