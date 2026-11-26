@@ -34,8 +34,11 @@ func Snapshot(report FetchedReport, settings config.EffectiveAPICredits) (decisi
 		credits.Grants = append(credits.Grants, decision.CreditGrant{Kind: grant.Kind, Amount: grant.Amount,
 			Remaining: grant.Remaining, EffectiveAt: grant.EffectiveAt, ExpiresAt: grant.ExpiresAt})
 	}
+	// Soonest expiry first; credit that never expires (Console purchases)
+	// last.
 	sort.SliceStable(credits.Grants, func(i, j int) bool {
-		return credits.Grants[i].ExpiresAt.Before(*credits.Grants[j].ExpiresAt)
+		a, b := credits.Grants[i].ExpiresAt, credits.Grants[j].ExpiresAt
+		return a != nil && (b == nil || a.Before(*b))
 	})
 	snapshot := decision.UsageSnapshot{
 		Provider: config.ProviderAPICredits, ObservedAt: report.FetchedAt.UTC(), Source: "native",

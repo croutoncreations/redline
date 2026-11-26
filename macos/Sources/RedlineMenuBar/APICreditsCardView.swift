@@ -1,7 +1,7 @@
 import RedlineKit
 import SwiftUI
 
-/// The popover card for an OpenAI API credits account: dollars of
+/// The popover card for an API credits account (OpenAI or Claude): dollars of
 /// promotional credit, never a weekly, monthly or 5-hour window. Opening the
 /// details is view state only; it never refreshes usage.
 struct APICreditsCardView: View {

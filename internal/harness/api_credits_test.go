@@ -46,7 +46,7 @@ func TestCreditsRunUsesOnlyTheAccountsKeyAndOrganization(t *testing.T) {
 	t.Setenv("OPENAI_PROJECT_ID", "proj-inherited")
 	for _, harnessType := range []string{"pi", "command"} {
 		profile := domain.ExecutionProfile{HarnessType: harnessType, HarnessCommand: "true",
-			OpenAIAPIKey: "sk-proj-ACCOUNT", OpenAIOrganization: "org-account"}
+			APICreditsVendor: "openai", APICreditsKey: "sk-proj-ACCOUNT", APICreditsOrganization: "org-account"}
 		env := runEnv(t, profile)
 		if got := envValues(env, "OPENAI_API_KEY"); len(got) != 1 || got[0] != "sk-proj-ACCOUNT" {
 			t.Fatalf("%s: OPENAI_API_KEY = %v", harnessType, got)
@@ -71,7 +71,7 @@ func TestCreditsRunUsesOnlyTheAccountsKeyAndOrganization(t *testing.T) {
 func TestOnlyCreditsRunsAreMarkedAsSpendingAPICredits(t *testing.T) {
 	t.Setenv("REDLINE_OPENAI_API_CREDITS", "1")
 	t.Setenv("REDLINE_PROVIDER_ACCOUNT_ID", "inherited")
-	credits := runEnv(t, domain.ExecutionProfile{HarnessType: "pi", ProviderAccountID: "openai-credits", OpenAIAPIKey: "sk-proj-ACCOUNT"})
+	credits := runEnv(t, domain.ExecutionProfile{HarnessType: "pi", ProviderAccountID: "openai-credits", APICreditsVendor: "openai", APICreditsKey: "sk-proj-ACCOUNT"})
 	if got := envValues(credits, "REDLINE_OPENAI_API_CREDITS"); len(got) != 1 || got[0] != "1" {
 		t.Fatalf("credits run REDLINE_OPENAI_API_CREDITS = %v", got)
 	}
@@ -96,7 +96,7 @@ func TestOnlyCreditsRunsAreMarkedAsSpendingAPICredits(t *testing.T) {
 // key's own default organization is billed, as Redline measured.
 func TestCreditsRunWithoutOrganizationDropsInheritedOne(t *testing.T) {
 	t.Setenv("OPENAI_ORG_ID", "org-inherited")
-	env := runEnv(t, domain.ExecutionProfile{HarnessType: "pi", OpenAIAPIKey: "sk-proj-ACCOUNT"})
+	env := runEnv(t, domain.ExecutionProfile{HarnessType: "pi", APICreditsVendor: "openai", APICreditsKey: "sk-proj-ACCOUNT"})
 	if got := envValues(env, "OPENAI_ORG_ID"); len(got) != 0 {
 		t.Fatalf("OPENAI_ORG_ID = %v", got)
 	}
@@ -113,7 +113,7 @@ func TestNonCreditsRunKeepsItsEnvironment(t *testing.T) {
 
 // The injected key is never part of the stored or serialized profile.
 func TestCreditsKeyIsNeverSerialized(t *testing.T) {
-	profile := domain.ExecutionProfile{ID: "p", HarnessType: "pi", OpenAIAPIKey: "sk-proj-SECRET", OpenAIOrganization: "org-x"}
+	profile := domain.ExecutionProfile{ID: "p", HarnessType: "pi", APICreditsVendor: "openai", APICreditsKey: "sk-proj-SECRET", APICreditsOrganization: "org-x"}
 	encoded := mustJSON(t, profile)
 	if strings.Contains(encoded, "sk-proj-SECRET") || strings.Contains(encoded, "org-x") {
 		t.Fatalf("profile JSON leaks the key: %s", encoded)
@@ -135,7 +135,7 @@ func mustJSON(t *testing.T, value any) string {
 func TestRunsNeverSeeTheSessionKeyEnvironment(t *testing.T) {
 	t.Setenv("REDLINE_OPENAI_SESSION_KEY", "sess-SHOULD-NOT-LEAK")
 	for _, profile := range []domain.ExecutionProfile{{HarnessType: "pi"}, {HarnessType: "command", HarnessCommand: "true"},
-		{HarnessType: "pi", OpenAIAPIKey: "sk-proj-ACCOUNT"}} {
+		{HarnessType: "pi", APICreditsVendor: "openai", APICreditsKey: "sk-proj-ACCOUNT"}} {
 		if got := envValues(runEnv(t, profile), "REDLINE_OPENAI_SESSION_KEY"); len(got) != 0 {
 			t.Fatalf("%s run inherited the session key", profile.HarnessType)
 		}

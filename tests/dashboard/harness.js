@@ -133,6 +133,18 @@ function apiCreditsNoPromoFixture() {
   return item;
 }
 
+// A provider: anthropic-api-credits account (Claude subscription API credit
+// in a linked Claude Console organization), shaped exactly like the OpenAI
+// one: $62.40 of a $100 subscription credit left, plus $7.25 purchased.
+// Synthetic values; no real org, key or email.
+function claudeCreditsProviderFixture() {
+  const item = apiCreditsProviderFixture();
+  item.id = 'claude-credits'; item.provider = 'anthropic-api-credits'; item.label = 'Console org';
+  item.snapshot.provider = 'anthropic-api-credits';
+  item.snapshot.credits.grants[1] = { ...item.snapshot.credits.grants[1], kind: 'purchase', amount: 10, expires_at: undefined };
+  return item;
+}
+
 function profileFixture() {
   return [
     { id: 'codex-devx', provider_account_id: 'codex-main', harness_type: 'codex-cli', model: 'gpt-5.5', workspace_provider: 'devx', repository: '/repo/redline' },
@@ -510,4 +522,4 @@ async function loadMobileDashboard(page, options = {}) {
   return state;
 }
 
-module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };
+module.exports = { assets, loadDashboard, loadMobileDashboard, candidatesFixture, dashboardFixture, cursorUsageFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture, claudeCreditsProviderFixture, profileFixture, profileOptionsFixture, taskTemplatesFixture, capacityFixture };

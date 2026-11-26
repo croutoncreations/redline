@@ -1,0 +1,76 @@
+{
+  "amount": 999999,
+  "currency": "USD",
+  "balance": {"money": null, "credits": {"amount_minor": 999999, "exponent": 2}},
+  "balance_credits": 999999,
+  "amount_without_scoped_credits": 999999,
+  "auto_reload_settings": null,
+  "auto_reload_disabled_reason": null,
+  "auto_reload_stripe_error_code": null,
+  "pending_invoice_amount_cents": null,
+  "last_paid_purchase_cents": null,
+  "expiry_policy_months": null,
+  "credit_expiry_policy": null,
+  "auto_reload_terms_banner": null,
+  "tranches": [
+    {
+      "remaining_amount_minor_units": 725,
+      "currency": "USD",
+      "expires_at": null,
+      "shown_expires_at": null,
+      "granted_amount_minor_units": 1000,
+      "granted_at": "2025-11-02T09:30:00Z",
+      "remaining": {"money": null, "credits": {"amount_minor": 725, "exponent": 2}},
+      "granted": {"money": null, "credits": {"amount_minor": 1000, "exponent": 2}},
+      "program_id": "purchase",
+      "name": "Synthetic purchase",
+      "id": "tranche_SYNTHETIC_PURCHASE_0001",
+      "scope": {"kind": "global", "applies_to": []}
+    }
+  ],
+  "promo_tranches": [
+    {
+      "remaining_amount_minor_units": 6240,
+      "currency": "USD",
+      "expires_at": "2026-02-01T00:00:00Z",
+      "shown_expires_at": null,
+      "granted_amount_minor_units": 10000,
+      "granted_at": "2026-01-01T00:00:00Z",
+      "remaining": {"money": null, "credits": {"amount_minor": 6240, "exponent": 2}},
+      "granted": {"money": null, "credits": {"amount_minor": 10000, "exponent": 2}},
+      "program_id": "subscription_api_credit",
+      "name": "Synthetic subscription credit",
+      "id": "promo_SYNTHETIC_SUBSCRIPTION_0001",
+      "scope": {"kind": "scoped", "applies_to": [{"product": "api", "model_family": null, "model_version": null}]}
+    },
+    {
+      "remaining_amount_minor_units": 1800,
+      "currency": "USD",
+      "expires_at": "2026-03-01T00:00:00Z",
+      "shown_expires_at": "2026-02-28T00:00:00Z",
+      "granted_amount_minor_units": 2500,
+      "granted_at": "2025-12-15T00:00:00Z",
+      "remaining": {"money": null, "credits": {"amount_minor": 1800, "exponent": 2}},
+      "granted": {"money": null, "credits": {"amount_minor": 2500, "exponent": 2}},
+      "program_id": "credit_program_v2",
+      "name": "Synthetic other program",
+      "id": "promo_SYNTHETIC_OTHER_0001",
+      "scope": {"kind": "scoped", "applies_to": [{"product": "chat", "model_family": null, "model_version": null}]}
+    },
+    {
+      "remaining_amount_minor_units": 500,
+      "currency": "USD",
+      "expires_at": "2026-01-01T00:00:00Z",
+      "shown_expires_at": null,
+      "granted_amount_minor_units": 10000,
+      "granted_at": "2025-12-01T00:00:00Z",
+      "remaining": {"money": null, "credits": {"amount_minor": 500, "exponent": 2}},
+      "granted": {"money": null, "credits": {"amount_minor": 10000, "exponent": 2}},
+      "program_id": "subscription_api_credit",
+      "name": "Synthetic lapsed subscription credit",
+      "id": "promo_SYNTHETIC_SUBSCRIPTION_0000",
+      "scope": {"kind": "scoped", "applies_to": [{"product": "api", "model_family": null, "model_version": null}]}
+    }
+  ],
+  "next_expires_at": "2026-02-01T00:00:00Z"
+}

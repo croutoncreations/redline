@@ -15,15 +15,17 @@ import (
 	"sync/atomic"
 
 	"github.com/croutoncreations/redline/internal/apiauth"
+	"github.com/croutoncreations/redline/internal/config"
 )
 
 // Secret kinds an API credits account can hold.
 const (
-	// SecretSessionKey is the platform browser session key (sess-…) used
-	// only to read credit grants.
+	// SecretSessionKey is the browser session key used only to read the
+	// balance: OpenAI's platform key (sess-…) or the Claude Console
+	// sessionKey cookie (sk-ant-sid…).
 	SecretSessionKey = "session-key"
-	// SecretAPIKey is the organization API key (sk-…) runs are given as
-	// OPENAI_API_KEY.
+	// SecretAPIKey is the organization API key runs are given, as
+	// OPENAI_API_KEY (sk-…) or ANTHROPIC_API_KEY (sk-ant-api…).
 	SecretAPIKey = "api-key"
 )
 
@@ -201,8 +203,9 @@ func readPrivateFile(path string) (string, error) {
 
 // ResolveSecret finds an account's secret: a configured file first (re-read
 // every time, so a secret manager can rotate it), then the store, then (for
-// the session key only) the REDLINE_OPENAI_SESSION_KEY environment variable.
-func ResolveSecret(ctx context.Context, store SecretStore, account, kind, file string) (string, error) {
+// an OpenAI account's session key only) the REDLINE_OPENAI_SESSION_KEY
+// environment variable. vendor is config.APICreditsVendor of the account.
+func ResolveSecret(ctx context.Context, store SecretStore, vendor, account, kind, file string) (string, error) {
 	if file = strings.TrimSpace(file); file != "" {
 		return readPrivateFile(file)
 	}
@@ -215,7 +218,7 @@ func ResolveSecret(ctx context.Context, store SecretStore, account, kind, file s
 			return "", err
 		}
 	}
-	if kind == SecretSessionKey {
+	if kind == SecretSessionKey && vendor == config.APICreditsVendorOpenAI {
 		if value, _ := capturedSessionKey.Load().(string); value != "" {
 			return value, nil
 		}

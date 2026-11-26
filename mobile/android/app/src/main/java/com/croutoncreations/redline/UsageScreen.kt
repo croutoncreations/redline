@@ -1187,8 +1187,8 @@ private fun BankedResetKinds(provider: ProviderUsage, kinds: List<ResetKindGroup
 const val BANKED_RESET_KINDS_TAG = "banked-reset-kinds"
 
 /**
- * The neutral tile beside "OpenAI API credits": a dollar sign, not any
- * provider's artwork.
+ * The neutral tile beside "OpenAI API credits" and "Claude API credits": a
+ * dollar sign. The Android app draws no provider artwork for any account.
  */
 @Composable
 private fun CreditsGlyph() {

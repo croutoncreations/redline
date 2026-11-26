@@ -115,3 +115,26 @@ func TestTransientCreditsFailureSendsNoAlert(t *testing.T) {
 		t.Fatalf("events = %+v", notifier.events)
 	}
 }
+
+// A Claude credits account's alert names the Claude Console and the same
+// fix; an OpenAI one keeps its wording.
+func TestClaudeCreditsSessionAlertNamesTheConsole(t *testing.T) {
+	s, expired, notifier := creditsAlertServer(t)
+	s.config.Providers["claude-credits"] = config.Provider{Provider: config.ProviderAnthropicAPICredits, Label: "Console org",
+		UsageSource: "native", WindowWeeklyCost: 0.05, APICredits: &config.APICredits{}}
+	*expired = true
+	_ = s.monitorProvider(context.Background(), "claude-credits")
+	_ = s.monitorProvider(context.Background(), "openai-credits")
+	if len(notifier.events) != 2 {
+		t.Fatalf("events = %d", len(notifier.events))
+	}
+	claude, openai := notifier.events[0], notifier.events[1]
+	if claude.Title != "Console org needs a fresh Claude Console session key" ||
+		!strings.Contains(claude.Message, "Claude API credits") || !strings.Contains(claude.Message, "platform.claude.com") ||
+		!strings.Contains(claude.Message, "pbpaste | redline account set-session-key claude-credits") {
+		t.Fatalf("claude event = %+v", claude)
+	}
+	if !strings.Contains(openai.Title, "OpenAI session key") || strings.Contains(openai.Message, "Claude") {
+		t.Fatalf("openai event = %+v", openai)
+	}
+}

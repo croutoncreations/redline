@@ -42,7 +42,7 @@ type ManagedAccount struct {
 	ClaudeConfigDir  string  `yaml:"claude_config_dir,omitempty" json:"claude_config_dir,omitempty"`
 	WindowWeeklyCost float64 `yaml:"window_weekly_cost,omitempty" json:"window_weekly_cost,omitempty"`
 	Policy           string  `yaml:"policy,omitempty" json:"policy,omitempty"`
-	// APICredits holds an openai-api-credits account's settings. The
+	// APICredits holds an API credits account's settings. The
 	// platform session key is never one of them: it stays in the platform
 	// secret store (or the file the settings name).
 	APICredits *APICredits `yaml:"api_credits,omitempty" json:"api_credits,omitempty"`
@@ -221,6 +221,8 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 			var err error
 			if org, isCredits := strings.CutPrefix(identity, "openai-org:"); isCredits {
 				err = fmt.Errorf("%w: accounts %q and %q both read API credits for organization %s", ErrAccountConflict, other, id, org)
+			} else if org, isCredits := strings.CutPrefix(identity, "anthropic-org:"); isCredits {
+				err = fmt.Errorf("%w: accounts %q and %q both read Claude API credits for Console organization %s", ErrAccountConflict, other, id, org)
 			} else if strings.HasPrefix(identity, "default:") {
 				err = fmt.Errorf("%w: accounts %q and %q would both read the default %s login on this Mac; give each extra account its own openusage_card or claude_config_dir",
 					ErrAccountConflict, other, id, provider.Provider)
@@ -255,11 +257,22 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 // name, so it could be the organization another account reads and the same
 // promotional balance would be spent twice.
 func apiCreditsDefaultOrganizationAlias(providers map[string]Provider, ids []string) error {
+	for _, vendor := range []string{APICreditsVendorOpenAI, APICreditsVendorAnthropic} {
+		if err := apiCreditsDefaultOrganizationAliasFor(vendor, providers, ids); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// apiCreditsDefaultOrganizationAliasFor applies the rule within one vendor:
+// an OpenAI and a Console organization are never the same balance.
+func apiCreditsDefaultOrganizationAliasFor(vendor string, providers map[string]Provider, ids []string) error {
 	var credits []string
 	unnamed := ""
 	for _, id := range ids {
 		provider := providers[id]
-		if !provider.IsAPICredits() {
+		if provider.APICreditsVendor() != vendor {
 			continue
 		}
 		credits = append(credits, id)

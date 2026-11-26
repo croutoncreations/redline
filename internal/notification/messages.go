@@ -30,6 +30,12 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		if label == "" {
 			label = event.ProviderAccountID
 		}
+		if strings.EqualFold(provider, "anthropic-api-credits") {
+			event.Title = label + " needs a fresh Claude Console session key"
+			event.Message = "Claude API credits work is held on this account until you paste the sessionKey cookie from platform.claude.com " +
+				"on the computer running Redline: pbpaste | redline account set-session-key " + event.ProviderAccountID
+			break
+		}
 		event.Title = label + " needs a fresh OpenAI session key"
 		event.Message = "OpenAI API credits work is held on this account until you paste one on the computer running Redline: " +
 			"pbpaste | redline account set-session-key " + event.ProviderAccountID

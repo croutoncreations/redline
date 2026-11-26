@@ -70,6 +70,13 @@ class CreditsModelsTest {
     }
 
     @Test
+    fun `names a Claude credits account Claude API credits and waits for its balance`() {
+        assertEquals("Claude API credits", providerDisplayName("anthropic-api-credits"))
+        val unread = ProviderUsage(id = "claude-credits", provider = "anthropic-api-credits", accountStatus = "no_data")
+        assertEquals(OverviewEmptyState("Credits", "Balance not read yet"), overviewEmptyState(unread))
+    }
+
+    @Test
     fun `the secondary line is the relative expiry with its local date`() {
         val credits = decode().providers[0].credits!!
         assertEquals("Expires in 2 days · Thu, Nov 26", creditsExpiryLine(credits, zone, now, Locale.US))
