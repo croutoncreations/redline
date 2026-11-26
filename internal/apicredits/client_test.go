@@ -139,3 +139,26 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("session key was forwarded to the redirect target")
 	}
 }
+
+// A rejected or throttled response is classified by its status even when
+// its body cannot be read in full.
+func TestClientClassifiesStatusBeforeReadingBody(t *testing.T) {
+	cases := map[int]error{
+		http.StatusUnauthorized:    ErrSessionExpired,
+		http.StatusForbidden:       ErrSessionExpired,
+		http.StatusTooManyRequests: ErrRateLimited,
+	}
+	for status, want := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Promise more body than is sent, then drop the connection.
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error"`))
+		}))
+		_, err := testClient(server).Fetch(context.Background(), Credential{SessionKey: fakeSessionKey})
+		server.Close()
+		if !errors.Is(err, want) {
+			t.Fatalf("%d: err = %v, want %v", status, err, want)
+		}
+	}
+}

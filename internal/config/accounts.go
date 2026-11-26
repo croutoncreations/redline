@@ -240,10 +240,42 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 		}
 		owners[identity] = id
 	}
+	if err := apiCreditsDefaultOrganizationAlias(providers, ids); err != nil {
+		return warnings, err
+	}
 	if err := mixedClaudeSources(providers, ids); err != nil {
 		return warnings, err
 	}
 	return warnings, nil
+}
+
+// apiCreditsDefaultOrganizationAlias refuses a credits account without
+// organization_id beside any other credits account. Without one it reads
+// the session's default organization, which the grants response does not
+// name, so it could be the organization another account reads and the same
+// promotional balance would be spent twice.
+func apiCreditsDefaultOrganizationAlias(providers map[string]Provider, ids []string) error {
+	var credits []string
+	unnamed := ""
+	for _, id := range ids {
+		provider := providers[id]
+		if !provider.IsAPICredits() {
+			continue
+		}
+		credits = append(credits, id)
+		if unnamed == "" && provider.EffectiveAPICredits().OrganizationID == "" {
+			unnamed = id
+		}
+	}
+	if unnamed == "" || len(credits) < 2 {
+		return nil
+	}
+	other := credits[0]
+	if other == unnamed {
+		other = credits[1]
+	}
+	return fmt.Errorf("%w: account %q has no api_credits organization_id, so it reads the session's default organization, which may be the one account %q reads; set organization_id on every API credits account when there is more than one",
+		ErrAccountConflict, unnamed, other)
 }
 
 // mixedClaudeSources refuses Claude accounts read from both non-default

@@ -91,11 +91,7 @@ func (s FileSecretStore) Load(ctx context.Context, account, kind string) (string
 	if err := validSecretItem(account, kind); err != nil {
 		return "", err
 	}
-	value, err := readPrivateFile(s.path(account, kind))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", ErrSecretNotFound
-	}
-	return value, err
+	return readPrivateFile(s.path(account, kind))
 }
 
 func (s FileSecretStore) Replace(ctx context.Context, account, kind, value string) error {
@@ -165,7 +161,7 @@ func readPrivateFile(path string) (string, error) {
 	file, err := openNoFollow(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", err
+			return "", ErrSecretNotFound
 		}
 		return "", fmt.Errorf("the key file could not be opened (it must be a regular file, not a symlink)")
 	}
@@ -177,7 +173,10 @@ func readPrivateFile(path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("the key file is not a regular file")
 	}
-	// Windows reports fixed permission bits regardless of its ACLs.
+	// Windows reports fixed permission bits regardless of its ACLs, and
+	// Redline does not inspect a configured file's DACL there: the user must
+	// keep the file private (docs/scheduling.md says so). Files Redline
+	// writes itself get an owner-only DACL from apiauth.CreatePrivateFile.
 	if runtime.GOOS != "windows" {
 		if info.Mode().Perm()&0o077 != 0 {
 			return "", fmt.Errorf("the key file must not be readable by group or other users (chmod 600)")

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -315,14 +316,9 @@ func withOpenAICredentials(environment []string, key, organization string) []str
 	return environment
 }
 
+// withoutVariable drops name from environment, ignoring case on Windows.
 func withoutVariable(environment []string, name string) []string {
-	kept := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		if key, _, _ := strings.Cut(entry, "="); key != name {
-			kept = append(kept, entry)
-		}
-	}
-	return kept
+	return redprocess.WithoutVariables(runtime.GOOS, environment, name)
 }
 
 func splitHermesModel(value string) (provider, model string) {

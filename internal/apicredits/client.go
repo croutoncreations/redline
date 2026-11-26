@@ -99,10 +99,8 @@ func (c Client) Fetch(ctx context.Context, credential Credential) (FetchedReport
 		return FetchedReport{}, fmt.Errorf("credit grants request failed: connection failed")
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return FetchedReport{}, fmt.Errorf("credit grants request failed: read failed")
-	}
+	// Classify by status first: a truncated error body must not hide a
+	// rejected session or a rate limit.
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return FetchedReport{}, ErrSessionExpired
@@ -110,6 +108,10 @@ func (c Client) Fetch(ctx context.Context, credential Credential) (FetchedReport
 		return FetchedReport{}, ErrRateLimited
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return FetchedReport{}, fmt.Errorf("credit grants request failed: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return FetchedReport{}, fmt.Errorf("credit grants request failed: read failed")
 	}
 	now := c.now()
 	report, err := Parse(body, now)

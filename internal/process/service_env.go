@@ -2,6 +2,7 @@ package process
 
 import (
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 )
@@ -14,11 +15,28 @@ var serviceOnlyVariables = []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENA
 // ServiceEnvironment is the service's environment for an agent run or a
 // workspace hook, without the variables only Redline may set.
 func ServiceEnvironment() []string {
-	environment := os.Environ()
+	return serviceEnvironment(runtime.GOOS, os.Environ())
+}
+
+func serviceEnvironment(goos string, environment []string) []string {
+	return WithoutVariables(goos, environment, serviceOnlyVariables...)
+}
+
+// WithoutVariables drops every entry of environment named in names. Windows
+// environment names are case-insensitive, so on goos "windows" a mixed-case
+// entry such as OpenAI_Base_URL matches OPENAI_BASE_URL; elsewhere names
+// match exactly.
+func WithoutVariables(goos string, environment []string, names ...string) []string {
 	kept := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if !slices.Contains(serviceOnlyVariables, name) {
+		matches := slices.ContainsFunc(names, func(drop string) bool {
+			if goos == "windows" {
+				return strings.EqualFold(name, drop)
+			}
+			return name == drop
+		})
+		if !matches {
 			kept = append(kept, entry)
 		}
 	}

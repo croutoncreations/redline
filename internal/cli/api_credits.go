@@ -99,11 +99,15 @@ func runAccountAddOpenAICredits(args []string, configPath string, stdin io.Reade
 	}
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "\nNext:")
+	redline := "redline"
+	if configPath != defaultConfigPath {
+		redline = "redline --config " + shellQuote(configPath)
+	}
 	if sessionKey == "" && settings.SessionKeyFile == "" {
-		fmt.Fprintf(stdout, "  pbpaste | redline account set-session-key %s   # Authorization value from the platform's credit_grants request\n", id)
+		fmt.Fprintf(stdout, "  pbpaste | %s account set-session-key %s   # Authorization value from the platform's credit_grants request\n", redline, id)
 	}
 	if settings.APIKeyFile == "" {
-		fmt.Fprintf(stdout, "  pbpaste | redline account set-api-key %s       # an sk-… key from that organization, used by pi and command jobs\n", id)
+		fmt.Fprintf(stdout, "  pbpaste | %s account set-api-key %s       # an sk-… key from that organization, used by pi and command jobs\n", redline, id)
 	}
 	fmt.Fprintln(stdout, "  Restart the Redline service to apply account changes.")
 	fmt.Fprintln(stdout, "\nThe session key carries your full platform dashboard access. Redline stores it on this machine only")
@@ -122,7 +126,7 @@ func runAccountSetKey(kind string, args []string, configPath string, stdin io.Re
 		return 1
 	}
 	id := args[0]
-	cfg, err := creditsAccount(configPath, id)
+	cfg, provider, err := creditsAccount(configPath, id)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -136,6 +140,17 @@ func runAccountSetKey(kind string, args []string, configPath string, stdin io.Re
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	settings := provider.EffectiveAPICredits()
+	fileSetting, file := "session_key_file", settings.SessionKeyFile
+	if kind == apicredits.SecretAPIKey {
+		fileSetting, file = "api_key_file", settings.APIKeyFile
+	}
+	if file != "" {
+		// ResolveSecret reads a configured file before the store.
+		fmt.Fprintf(stdout, "saved %s for %s\n", strings.TrimPrefix(what, "an "), id)
+		fmt.Fprintf(stderr, "warning: %s is configured for %s and takes precedence; Redline keeps using the key in that file until you update it or remove the setting\n", fileSetting, id)
+		return 0
+	}
 	fmt.Fprintf(stdout, "saved %s for %s; Redline uses it from the next poll, no restart needed\n", strings.TrimPrefix(what, "an "), id)
 	return 0
 }
@@ -145,7 +160,7 @@ func runAccountClearKeys(args []string, configPath string, stdout, stderr io.Wri
 		fmt.Fprintln(stderr, "usage: redline account clear-keys <id>")
 		return 1
 	}
-	cfg, err := creditsAccount(configPath, args[0])
+	cfg, _, err := creditsAccount(configPath, args[0])
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -175,28 +190,28 @@ func loadForAccounts(configPath string) (config.Config, string, error) {
 }
 
 // creditsAccount loads the configuration and confirms id is an API credits
-// account, enabled or saved but not yet applied.
-func creditsAccount(configPath, id string) (config.Config, error) {
+// account, enabled or saved but not yet applied, returning its settings.
+func creditsAccount(configPath, id string) (config.Config, config.Provider, error) {
 	cfg, path, err := loadForAccounts(configPath)
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, config.Provider{}, err
 	}
 	if provider, ok := cfg.Providers[id]; ok {
 		if !provider.IsAPICredits() {
-			return config.Config{}, fmt.Errorf("account %q is not an OpenAI API credits account", id)
+			return config.Config{}, config.Provider{}, fmt.Errorf("account %q is not an OpenAI API credits account", id)
 		}
-		return cfg, nil
+		return cfg, provider, nil
 	}
 	saved, err := config.ReadManagedAccounts(path)
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, config.Provider{}, err
 	}
 	for _, account := range saved {
 		if account.ID == id && account.ProviderConfig().IsAPICredits() {
-			return cfg, nil
+			return cfg, account.ProviderConfig(), nil
 		}
 	}
-	return config.Config{}, fmt.Errorf("no OpenAI API credits account %q; add one with `redline account add-openai-credits %s`", id, id)
+	return config.Config{}, config.Provider{}, fmt.Errorf("no OpenAI API credits account %q; add one with `redline account add-openai-credits %s`", id, id)
 }
 
 // readKey reads one key from standard input. Its value never appears in an

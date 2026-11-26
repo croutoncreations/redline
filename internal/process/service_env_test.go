@@ -26,3 +26,18 @@ func TestServiceEnvironmentDropsSecretsAndRunMarkers(t *testing.T) {
 		t.Fatal("dropped an unrelated variable")
 	}
 }
+
+// Windows environment names are case-insensitive, so a mixed-case copy of
+// a routing variable or run marker is the same variable there and must be
+// dropped; elsewhere names are exact.
+func TestWithoutVariablesMatchesCaseOnlyOnWindows(t *testing.T) {
+	environment := []string{"OpenAI_Base_URL=https://elsewhere.example", "redline_openai_api_credits=1", "KEEP=yes"}
+	windows := redprocess.WithoutVariables("windows", environment, "OPENAI_BASE_URL", "REDLINE_OPENAI_API_CREDITS")
+	if !slices.Equal(windows, []string{"KEEP=yes"}) {
+		t.Fatalf("windows kept %v", windows)
+	}
+	linux := redprocess.WithoutVariables("linux", environment, "OPENAI_BASE_URL", "REDLINE_OPENAI_API_CREDITS")
+	if !slices.Equal(linux, environment) {
+		t.Fatalf("linux dropped %v", linux)
+	}
+}

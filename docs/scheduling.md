@@ -58,8 +58,10 @@ before it lapses.
   expensive jobs (a run can still spend more than it reserves), or set it to 0 to turn the
   reservation off. For a hard cap, give Redline a key from a dedicated OpenAI project with an
   enforced [spend limit](https://developers.openai.com/api/docs/guides/spend-limits).
-- **Pacing.** `firesale` (default) holds the balance until a grant with money on it is within
-  `firesale_window` (default 72h) of expiring, then runs queued work at the firesale tier.
+- **Pacing.** `firesale` (default) holds the balance until a single grant expiring within
+  `firesale_window` (default 72h) still holds at least `min_promo_balance` (and at least $0.01),
+  then runs queued work at the firesale tier. Smaller grants about to lapse do not trigger it on
+  their own: with a $5 floor, $1 expiring tomorrow and $100 expiring next month, work holds.
   `even` runs work whenever a grant has more left than the share of its cycle still to go.
   A manual firesale overrides pacing, never the floor. Stale or unreadable balances are UNKNOWN
   and hold.
@@ -81,7 +83,7 @@ providers:
     label: Linked org
     window_weekly_cost: 0.05
     api_credits:
-      organization_id: org-…        # optional; empty reads the session's default organization
+      organization_id: org-…        # empty reads the session's default organization; required on every credits account when there is more than one
       min_promo_balance: 5          # USD
       run_cost_estimate: 1          # USD each run in flight reserves against the floor
       pacing: firesale              # or even
@@ -106,6 +108,11 @@ Keys are entered only on the machine running Redline, from standard input:
 redline account add-openai-credits api-credits --org org-… --label "Linked org"
 pbpaste | redline account set-session-key api-credits
 pbpaste | redline account set-api-key api-credits      # an sk-… key from that organization
+```
+
+To remove both saved keys later (work on the account then holds until new ones are saved):
+
+```bash
 redline account clear-keys api-credits
 ```
 
@@ -114,7 +121,11 @@ in the service log at start and on the account, rather than treated as "no key")
 owner-only files beside the config elsewhere (`REDLINE_SECRETS_DIR` overrides the directory). A headless service can instead read
 `session_key_file`/`api_key_file` (owner-only, not a symlink, re-read every poll, so a secret
 manager can rotate them) or take `REDLINE_OPENAI_SESSION_KEY`, which the service removes from
-its environment at start so no job inherits it.
+its environment at start so no job inherits it. A configured key file takes precedence over a
+saved key: `set-session-key` and `set-api-key` still save, but warn that the file stays in use.
+On Windows, Redline does not verify a configured key file's ACL (it still refuses symlinks):
+protect the file yourself so only your user can read it. Keys Redline saves itself get an
+owner-only ACL.
 
 When the session key is missing or OpenAI rejects it, work on the account holds and an
 `account.session_key_needed` notification is sent once (again only after a successful read in

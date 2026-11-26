@@ -57,6 +57,9 @@ type schedulerResponse struct {
 	Run          *domain.Run            `json:"run,omitempty"`
 }
 
+// defaultConfigPath is the --config value when the flag is not given.
+const defaultConfigPath = "redline.yaml"
+
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	return RunWithInput(args, os.Stdin, stdout, stderr, now)
 }
@@ -70,7 +73,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	global := flag.NewFlagSet("redline", flag.ContinueOnError)
 	global.SetOutput(stderr)
-	configPath := global.String("config", "redline.yaml", "service configuration file")
+	configPath := global.String("config", defaultConfigPath, "service configuration file")
 	apiURL := global.String("api", "http://127.0.0.1:7436", "Redline service API URL")
 	showVersion := global.Bool("version", false, "print the Redline version and exit")
 	if err := global.Parse(args); err != nil {
@@ -759,7 +762,7 @@ func resolveTokenConfigPath(configPath string) string {
 	if _, err := apiauth.ReadToken(configPath); err == nil {
 		return configPath
 	}
-	if configPath != "redline.yaml" {
+	if configPath != defaultConfigPath {
 		return configPath
 	}
 	dataDir, err := appdir.Default()

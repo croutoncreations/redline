@@ -186,3 +186,16 @@ func TestResolveSessionKeyFallsBackToEnvironment(t *testing.T) {
 		t.Fatalf("api key from env = %v", err)
 	}
 }
+
+// A configured key file that does not exist reads as a missing secret, so
+// the account reports signed out, and the error never names the path.
+func TestResolveSecretMissingKeyFileIsNotFound(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "private-name-xyz")
+	_, err := ResolveSecret(context.Background(), nil, "acct", SecretSessionKey, file)
+	if !errors.Is(err, ErrSecretNotFound) {
+		t.Fatalf("err = %v, want ErrSecretNotFound", err)
+	}
+	if strings.Contains(err.Error(), "private-name-xyz") {
+		t.Fatalf("err names the path: %v", err)
+	}
+}

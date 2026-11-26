@@ -137,3 +137,28 @@ func TestAPICreditsHarnessesExcludeCodexAndClaude(t *testing.T) {
 		}
 	}
 }
+
+// An account without organization_id reads the session's default
+// organization, which could be the one another account names, so it is
+// only accepted as the sole credits account.
+func TestAPICreditsAccountWithoutOrganizationMustBeTheOnlyOne(t *testing.T) {
+	second := `  openai-credits-2:
+    provider: openai-api-credits
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: org-named
+policies:
+`
+	text := strings.Replace(apiCreditsConfig, "policies:\n", second, 1)
+	_, err := config.Load(writeConfig(t, text))
+	if err == nil || !strings.Contains(err.Error(), "openai-credits") || !strings.Contains(err.Error(), "organization_id") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := config.Load(writeConfig(t, apiCreditsConfig)); err != nil {
+		t.Fatalf("sole credits account without organization refused: %v", err)
+	}
+	named := strings.Replace(withAPICredits("    api_credits:\n      organization_id: org-first\n"), "policies:\n", second, 1)
+	if _, err := config.Load(writeConfig(t, named)); err != nil {
+		t.Fatalf("two named organizations refused: %v", err)
+	}
+}

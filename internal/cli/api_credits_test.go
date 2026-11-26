@@ -143,3 +143,48 @@ func TestAddOpenAICreditsRefusesBadSettings(t *testing.T) {
 		}
 	}
 }
+
+// The next-step commands name the configuration the account went into, so
+// they find the account when it is not the default one.
+func TestAddOpenAICreditsNextStepsNameTheSelectedConfig(t *testing.T) {
+	configPath, _ := creditsHome(t)
+	code, stdout, stderr := runCLI(t, "", "--config", configPath, "account", "add-openai-credits", "api-credits")
+	if code != 0 {
+		t.Fatalf("add: %s", stderr)
+	}
+	for _, command := range []string{"set-session-key api-credits", "set-api-key api-credits"} {
+		want := "redline --config '" + configPath + "' account " + command
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// A configured key file wins over the store, so saving a key for a kind
+// that has one warns that the file stays in use.
+func TestSetKeyWarnsWhenAConfiguredFileTakesPrecedence(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if code, _, stderr := runCLI(t, "", "--config", configPath, "account", "add-openai-credits", "api-credits",
+		"--api-key-file", keyFile); code != 0 {
+		t.Fatalf("add: %s", stderr)
+	}
+	code, stdout, stderr := runCLI(t, "sk-proj-SAVED\n", "--config", configPath, "account", "set-api-key", "api-credits")
+	if code != 0 {
+		t.Fatalf("set-api-key: %d %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "api_key_file") || !strings.Contains(stderr, "takes precedence") {
+		t.Fatalf("no precedence warning: stdout=%s stderr=%s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "uses it from the next poll") {
+		t.Fatalf("claims the saved key is active: %s", stdout)
+	}
+	if got, _ := (apicredits.FileSecretStore{Dir: secretsDir}).Load(t.Context(), "api-credits", apicredits.SecretAPIKey); got != "sk-proj-SAVED" {
+		t.Fatalf("stored = %q", got)
+	}
+	// The session key has no file configured: no warning.
+	_, _, stderr = runCLI(t, "sess-SAVED\n", "--config", configPath, "account", "set-session-key", "api-credits")
+	if strings.Contains(stderr, "takes precedence") {
+		t.Fatalf("warned without a session key file: %s", stderr)
+	}
+}
