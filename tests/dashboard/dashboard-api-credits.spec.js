@@ -225,6 +225,7 @@ test.describe('OpenAI API credits account (desktop)', () => {
   test('held decisions use the shared wording', async ({ page }) => {
     const cases = [
       ['promotional credit is at or below the $5.00 floor', 'Held · at the floor', 'Promotional credit is at or below the $5.00 floor'],
+      ['$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another', 'Held · run in flight', '$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another'],
       ['holding promotional credit until it is within 3 days of expiring', 'Holding credit', 'Holding promotional credit until it is within 3 days of expiring'],
     ];
     for (const [reason, label, detail] of cases) {

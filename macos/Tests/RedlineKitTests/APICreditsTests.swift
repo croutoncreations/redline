@@ -236,6 +236,7 @@ private enum CreditsFixture {
     #expect(label("RUN", nil, "x") == "Run now")
     #expect(label("WAIT", nil, "promotional credit is at or below the $5.00 floor") == "Held · at the floor")
     #expect(label("WAIT", nil, "no promotional API credit is available") == "Held · no promotional credit")
+    #expect(label("WAIT", nil, "$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another") == "Held · run in flight")
     #expect(label("WAIT", nil, "holding promotional credit until it is within 3 days of expiring") == "Holding credit")
     #expect(label("UNKNOWN", nil, "usage unavailable") == "Dispatch held")
 }

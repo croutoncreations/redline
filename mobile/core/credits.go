@@ -109,6 +109,8 @@ func creditsDecisionLabel(decision, tier, reason string) string {
 		return "Dispatch held"
 	}
 	switch {
+	case strings.Contains(reason, "in flight"):
+		return "Held · run in flight"
 	case strings.Contains(reason, "floor"):
 		return "Held · at the floor"
 	case strings.Contains(reason, "no promotional"):

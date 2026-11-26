@@ -2212,6 +2212,9 @@ func (s *Server) providerCandidates(w http.ResponseWriter, r *http.Request) {
 	} else if cap := providerDispatchCap(s.config.Providers[providerID], concurrency.MaxConcurrentRuns, base); active >= cap {
 		response.DispatchAvailable = false
 		response.ProviderReason = fmt.Sprintf("provider concurrency limit %d reached", cap)
+	} else if hold := creditsInFlightHold(s.config.Providers[providerID], snapshot, active); hold != "" && base.Decision == decision.Admit {
+		response.DispatchAvailable = false
+		response.ProviderReason = hold
 	}
 	revisions := make(map[string]profileRevision)
 	for _, task := range tasks {
@@ -2475,7 +2478,8 @@ func (s *Server) dispatchCore(
 		return response, false, err
 	}
 	response.SelectedTask = &task
-	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency, ProviderFiresale: firesale}
+	limits := store.AdmissionLimits{Provider: maxConcurrent, Pools: configuredProvider.PoolConcurrency, ProviderFiresale: firesale,
+		MaxActiveForReservation: creditsReservationLimit(configuredProvider, response.Snapshot)}
 	if profile.AgentContextID != "" {
 		agentContext, contextErr := s.store.GetAgentContext(ctx, profile.AgentContextID)
 		if contextErr != nil {
@@ -2996,8 +3000,26 @@ func creditsInFlightHold(provider config.Provider, snapshot decision.UsageSnapsh
 	if left > settings.MinPromoBalance {
 		return ""
 	}
-	return fmt.Sprintf("$%.2f of promotional credit is reserved for %d run(s) in flight; another could reach the $%.2f floor",
-		reserved, active, settings.MinPromoBalance)
+	return fmt.Sprintf("$%.2f of promotional credit is reserved for %d run(s) in flight; waiting for one to finish before starting another",
+		reserved, active)
+}
+
+// creditsReservationLimit is how many runs an API credits account may have in
+// flight when another is admitted (the admission re-checks it atomically), or
+// 0 for no limit: any account that isn't credits, or no reservation.
+func creditsReservationLimit(provider config.Provider, snapshot decision.UsageSnapshot) int {
+	if !provider.IsAPICredits() || snapshot.Credits == nil {
+		return 0
+	}
+	settings := provider.EffectiveAPICredits()
+	if settings.RunCostEstimate <= 0 {
+		return 0
+	}
+	// Runs in flight n may start another only while
+	// promo - n*estimate > floor, i.e. n < (promo-floor)/estimate.
+	headroom := (snapshot.Credits.PromoRemaining - settings.MinPromoBalance) / settings.RunCostEstimate
+	limit := int(math.Ceil(headroom))
+	return max(limit, 1)
 }
 
 func providerDispatchCap(provider config.Provider, effective int, base decision.Result) int {

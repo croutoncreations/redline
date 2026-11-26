@@ -238,6 +238,7 @@ public struct APICreditsCard: Sendable, Equatable {
         case "UNKNOWN": return "Dispatch held"
         default:
             let reason = reason ?? ""
+            if reason.contains("in flight") { return "Held · run in flight" }
             if reason.contains("floor") { return "Held · at the floor" }
             if reason.contains("no promotional") { return "Held · no promotional credit" }
             return "Holding credit"

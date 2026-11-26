@@ -247,6 +247,51 @@ func TestCreditsFloorReservesRunsAlreadyInFlight(t *testing.T) {
 	if result.Run != nil || result.Result.Decision != decision.Wait || !strings.Contains(result.Result.Reason, "in flight") {
 		t.Fatalf("result = %+v", result.Result)
 	}
+	// The balance is above the floor, so dashboards must not say "at the floor".
+	if strings.Contains(result.Result.Reason, "floor") {
+		t.Fatalf("reason %q reads as being at the floor", result.Result.Reason)
+	}
+	// The candidates view agrees with dispatch.
+	var candidates struct {
+		DispatchAvailable bool   `json:"dispatch_available"`
+		ProviderReason    string `json:"provider_reason"`
+	}
+	decodeResponse(t, request(t, fixture.server, http.MethodGet, "/v1/providers/api-credits/candidates", nil), &candidates)
+	if candidates.DispatchAvailable || !strings.Contains(candidates.ProviderReason, "in flight") {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+}
+
+// The reservation is re-checked when the run is admitted, so two dispatches
+// that both decided to run before either was admitted can't both start.
+func TestCreditsAdmissionRechecksTheReservation(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, id := range []string{"a", "b"} {
+		createTaskForAdmission(t, db, id)
+	}
+	limits := store.AdmissionLimits{Provider: 4, MaxActiveForReservation: 1}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-a", "task-a", "api-credits", "", nil, limits, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTaskWithLimits(t.Context(), "run-b", "task-b", "api-credits", "", nil, limits, apiNow); err == nil {
+		t.Fatal("second admission ignored the reservation")
+	}
+}
+
+func createTaskForAdmission(t *testing.T, db *store.DB, id string) {
+	t.Helper()
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{ID: "p-" + id, ProviderAccountID: "api-credits", HarnessType: "command",
+		HarnessCommand: "true", WorkspaceProvider: "devx"}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "task-" + id, Name: id, Prompt: "p", ExecutionProfileID: "p-" + id,
+		Priority: 1, Type: domain.OneOff, DispatchTier: domain.DispatchFiresale}, apiNow); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // With nothing in flight the same balance starts one run.

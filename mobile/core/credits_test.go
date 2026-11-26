@@ -172,6 +172,7 @@ func TestCreditsDecisionWordingMatchesTheDashboards(t *testing.T) {
 	for _, c := range []struct{ decision, tier, reason, want string }{
 		{"RUN", "", "x", "Run now"},
 		{"WAIT", "", "promotional credit is at or below the $5.00 floor", "Held · at the floor"},
+		{"WAIT", "", "$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another", "Held · run in flight"},
 		{"WAIT", "", "no promotional API credit is available", "Held · no promotional credit"},
 		{"WAIT", "", "holding promotional credit until it is within 3 days of expiring", "Holding credit"},
 		{"UNKNOWN", "", "usage unavailable", "Dispatch held"},

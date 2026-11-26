@@ -557,7 +557,7 @@ function creditsDecisionLabel(decision) {
   if (decision.decision === 'RUN' || decision.decision === 'ADMIT') return decision.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now';
   if (decision.decision === 'UNKNOWN') return 'Dispatch held';
   const reason = decision.reason || '';
-  return /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit';
+  return /in flight/.test(reason) ? 'Held · run in flight' : /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit';
 }
 const creditsReasonText = (reason) => reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : '';
 // Onboarding for a credits account: no harness to install and no

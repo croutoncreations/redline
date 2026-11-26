@@ -260,7 +260,7 @@ function creditsPressure(d) {
   if (d.decision === 'RUN' || d.decision === 'ADMIT') return {label: d.unlocked_tier === 'firesale' ? 'Run now · firesale' : 'Run now', tone: 'triggered'};
   if (d.decision === 'UNKNOWN') return {label: 'Dispatch held', tone: 'near'};
   const reason = d.reason || '';
-  return {label: /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit', tone: 'neutral'};
+  return {label: /in flight/.test(reason) ? 'Held · run in flight' : /floor/.test(reason) ? 'Held · at the floor' : /no promotional/.test(reason) ? 'Held · no promotional credit' : 'Holding credit', tone: 'neutral'};
 }
 const creditsReasonText = (reason) => reason ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : '';
 function providerPressure(item) {
