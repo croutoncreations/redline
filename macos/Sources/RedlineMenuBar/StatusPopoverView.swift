@@ -20,7 +20,7 @@ struct StatusPopoverView: View {
     let actions: StatusPopoverActions
 
     private var snapshot: DashboardSnapshot? { model.snapshot }
-    private var trayState: TrayState? { snapshot.map(TrayState.init) }
+    private var trayState: TrayState? { snapshot.map { TrayState(snapshot: $0) } }
     private var relayStatus: RelayStatus? { model.relayStatus }
 
     var body: some View {

@@ -692,7 +692,9 @@ public struct TrayState: Sendable {
     public let menuBarTitle: String
     public let providerBadges: [ProviderBadge]
 
-    public init(snapshot: DashboardSnapshot) {
+    /// `now` and `locale` reach the API credits badge, which reads a lapsed
+    /// grant as out of date and formats dollars in the user's locale.
+    public init(snapshot: DashboardSnapshot, now: Date = Date(), locale: Locale = .current) {
         // A promotional dollar balance is not weekly capacity.
         let percentages = snapshot.providers.compactMap { provider in
             provider.snapshotStale || provider.isAPICredits ? nil : provider.snapshot?.weekly?.remaining
@@ -755,7 +757,7 @@ public struct TrayState: Sendable {
             .map(\.element)
             .map { family in
                 let first = family.accounts[0]
-                if let card = APICreditsCard(account: first) {
+                if let card = APICreditsCard(account: first, now: now, locale: locale) {
                     return ProviderBadge(provider: first.provider, displayName: first.displayName, credits: card)
                 }
                 return ProviderBadge(

@@ -140,7 +140,8 @@ struct APICreditsCardView: View {
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .tracking(1.2)
                         .foregroundStyle(.secondary)
-                    ForEach(card.grants, id: \.self) { grant in
+                    // Two grants can read the same; offsets keep both rows.
+                    ForEach(Array(card.grants.enumerated()), id: \.offset) { _, grant in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(grant.label).font(.system(size: 10))
                             Spacer(minLength: 4)

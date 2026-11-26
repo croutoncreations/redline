@@ -178,7 +178,7 @@ private enum CreditsFixture {
     #expect(card.decision == "Held · no promotional credit")
     #expect(card.decisionReason == "No promotional API credit is available")
 
-    let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.noPromo))
+    let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.noPromo), now: CreditsFixture.now, locale: CreditsFixture.locale)
     let badge = try #require(tray.providerBadges.first)
     #expect(badge.compact == "$0.00")
     #expect(badge.spoken == "OpenAI API credits $0.00 promo")
@@ -187,15 +187,32 @@ private enum CreditsFixture {
 }
 
 @Test func apiCreditsMenuBarBadgeSaysDollars() throws {
-    let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.codex, CreditsFixture.claude, CreditsFixture.fresh))
+    let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.codex, CreditsFixture.claude, CreditsFixture.fresh),
+                         now: CreditsFixture.now, locale: CreditsFixture.locale)
     #expect(tray.menuBarTitle == "WAIT  Codex 32% · Claude 53% · OpenAI API credits $62.40 left")
     #expect(tray.providerBadges.last?.compact == "$62.40")
     // A promotional balance is not weekly capacity: the gauge follows Codex and Claude.
     #expect(tray.lowestWeeklyPercent == 32)
-    let signedOut = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.signedOut))
+    let signedOut = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.signedOut), now: CreditsFixture.now, locale: CreditsFixture.locale)
     #expect(signedOut.providerBadges.first?.compact == "—")
     #expect(signedOut.menuBarTitle == "WAIT  OpenAI API credits session key needed")
     #expect(signedOut.iconDescription == "Redline: usage unavailable")
+}
+
+/// A retained snapshot whose promotional grant has since expired is not a
+/// current balance, even when the service last called it up to date: it
+/// reads as last known, with no compact figure and no decision.
+@Test func apiCreditsExpiredBalanceIsNotShownAsCurrent() throws {
+    let account = try #require(try CreditsFixture.snapshot(CreditsFixture.fresh).providers.first)
+    let afterExpiry = ISO8601DateFormatter().date(from: "2026-11-27T00:00:01Z")!
+    let card = try #require(APICreditsCard(account: account, now: afterExpiry, calendar: CreditsFixture.utc, locale: CreditsFixture.locale))
+    #expect(card.status == .stale)
+    #expect(card.headline == "Last known $62.40")
+    #expect(card.compact == "—")
+    #expect(card.tone == .muted)
+    #expect(card.decision == nil)
+    let tray = TrayState(snapshot: try CreditsFixture.snapshot(CreditsFixture.fresh), now: afterExpiry, locale: CreditsFixture.locale)
+    #expect(tray.providerBadges.first?.compact == "—")
 }
 
 @Test func malformedCreditsNeverBreakTheDashboard() throws {

@@ -147,7 +147,12 @@ public struct APICreditsCard: Sendable, Equatable {
         title = account.displayName
         let trimmed = account.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         label = trimmed.isEmpty ? nil : trimmed
-        status = AccountTrayStatus(account)
+        // A snapshot the service last called current stops being current
+        // once its promotional grant has expired, for example while a
+        // refresh keeps failing: show it as last known, never as money left.
+        let reported = AccountTrayStatus(account)
+        let promoExpired = TrayTime.parse(account.snapshot?.credits?.expiresAt).map { $0 <= now } ?? false
+        status = reported == .ok && promoExpired && (account.snapshot?.credits?.promoRemaining ?? 0) > 0 ? .stale : reported
         paused = account.paused
         let money = { (value: Double) in CursorUsageFormat.money(value, locale: locale) }
         let dates = CreditDates(now: now, calendar: calendar, locale: locale)
