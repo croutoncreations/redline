@@ -16,6 +16,32 @@ import (
 // API with that organization's key.
 const ProviderAPICredits = "openai-api-credits"
 
+// ProviderAnthropicAPICredits is a Claude Console organization's prepaid
+// credit: the monthly API credit a Claude subscription grants to a linked
+// Console organization. It is the second vendor of the API credits family
+// and shares its settings, scheduling and display; runs are given the
+// organization's ANTHROPIC_API_KEY.
+const ProviderAnthropicAPICredits = "anthropic-api-credits"
+
+// API credits vendors, as APICreditsVendor names them.
+const (
+	APICreditsVendorOpenAI    = "openai"
+	APICreditsVendorAnthropic = "anthropic"
+)
+
+// APICreditsVendor names the vendor of an API credits provider, or "" for
+// any other provider.
+func APICreditsVendor(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case ProviderAPICredits:
+		return APICreditsVendorOpenAI
+	case ProviderAnthropicAPICredits:
+		return APICreditsVendorAnthropic
+	default:
+		return ""
+	}
+}
+
 // API credits pacing modes.
 const (
 	// APICreditsPacingFiresale holds work until the grant nears expiry with
@@ -38,14 +64,25 @@ const DefaultAPICreditsRunCostEstimate = 1.0
 // starts spending a grant.
 const DefaultAPICreditsFiresaleWindow = 72 * time.Hour
 
-var organizationIDPattern = regexp.MustCompile(`^org-[A-Za-z0-9_-]{1,64}$`)
+var (
+	organizationIDPattern        = regexp.MustCompile(`^org-[A-Za-z0-9_-]{1,64}$`)
+	consoleOrganizationIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
 
-// APICredits configures an openai-api-credits account. It never holds the
+// ValidConsoleOrganizationID reports whether id is a Claude Console
+// organization UUID.
+func ValidConsoleOrganizationID(id string) bool {
+	return consoleOrganizationIDPattern.MatchString(id)
+}
+
+// APICredits configures an API credits account (either vendor). It never holds the
 // platform session key: that lives in the platform secret store, or in the
 // file SessionKeyFile names (for example one written by a secret manager).
 type APICredits struct {
-	// OrganizationID selects the API organization (OpenAI-Organization
-	// header). Empty reads the session's default organization.
+	// OrganizationID selects the organization: an OpenAI org-… ID (the
+	// OpenAI-Organization header; empty reads the session's default
+	// organization), or a Claude Console organization UUID (empty reads the
+	// one organization with API access).
 	OrganizationID string `yaml:"organization_id,omitempty" json:"organization_id,omitempty"`
 	// MinPromoBalance is the promotional balance (USD) a job needs before it
 	// may start. Nil is DefaultAPICreditsMinPromoBalance.
@@ -87,9 +124,15 @@ type EffectiveAPICredits struct {
 	APIKeyFile      string
 }
 
-// IsAPICredits reports whether the account is an OpenAI API credits account.
+// IsAPICredits reports whether the account is an API credits account of
+// either vendor.
 func (p Provider) IsAPICredits() bool {
-	return strings.EqualFold(strings.TrimSpace(p.Provider), ProviderAPICredits)
+	return APICreditsVendor(p.Provider) != ""
+}
+
+// APICreditsVendor is the account's API credits vendor, or "".
+func (p Provider) APICreditsVendor() string {
+	return APICreditsVendor(p.Provider)
 }
 
 // EffectiveAPICredits returns the account's credits settings with defaults.
@@ -118,13 +161,17 @@ func (p Provider) EffectiveAPICredits() EffectiveAPICredits {
 }
 
 // HarnessSpendsAPICredits reports whether a harness can draw on API credits.
-// Only harnesses that call the OpenAI API with the injected organization key
-// qualify. Codex is excluded by the benefit's terms ("Codex usage through
-// API keys is not supported"); Claude Code, Cursor and Hermes bill elsewhere.
+// Only harnesses that call the vendor's API with the injected organization
+// key qualify. On OpenAI, Codex is excluded by the benefit's terms ("Codex
+// usage through API keys is not supported"); Claude Code, Cursor and Hermes
+// bill elsewhere. On Anthropic, Claude Code runs as `claude -p` with the
+// key; Codex, Cursor and Hermes bill elsewhere.
 func (p Provider) HarnessSpendsAPICredits(harness string) bool {
 	switch harness {
 	case "pi", "command":
-		return true
+		return p.IsAPICredits()
+	case "claude-code":
+		return p.APICreditsVendor() == APICreditsVendorAnthropic
 	default:
 		return false
 	}
@@ -133,15 +180,21 @@ func (p Provider) HarnessSpendsAPICredits(harness string) bool {
 func validateAPICredits(provider Provider) error {
 	if !provider.IsAPICredits() {
 		if provider.APICredits != nil {
-			return fmt.Errorf("api_credits settings apply only to provider %s", ProviderAPICredits)
+			return fmt.Errorf("api_credits settings apply only to providers %s and %s", ProviderAPICredits, ProviderAnthropicAPICredits)
 		}
 		return nil
 	}
+	id := strings.ToLower(strings.TrimSpace(provider.Provider))
+	anthropic := provider.APICreditsVendor() == APICreditsVendorAnthropic
+	platform := "the OpenAI platform"
+	if anthropic {
+		platform = "the Claude Console"
+	}
 	if source := strings.ToLower(strings.TrimSpace(provider.UsageSource)); source != "" && source != "native" {
-		return fmt.Errorf("an %s account reads the OpenAI platform directly; remove usage_source %q", ProviderAPICredits, provider.UsageSource)
+		return fmt.Errorf("an %s account reads %s directly; remove usage_source %q", id, platform, provider.UsageSource)
 	}
 	if strings.TrimSpace(provider.OpenUsageCard) != "" || strings.TrimSpace(provider.ClaudeConfigDir) != "" {
-		return fmt.Errorf("an %s account cannot have an OpenUsage card or Claude Code profile", ProviderAPICredits)
+		return fmt.Errorf("an %s account cannot have an OpenUsage card or Claude Code profile", id)
 	}
 	settings := provider.APICredits
 	if settings == nil {
@@ -158,8 +211,13 @@ func validateAPICredits(provider Provider) error {
 			return err
 		}
 	}
-	if org := strings.TrimSpace(settings.OrganizationID); org != "" && !organizationIDPattern.MatchString(org) {
-		return fmt.Errorf("api_credits organization_id must look like org-…")
+	if org := strings.TrimSpace(settings.OrganizationID); org != "" {
+		if anthropic && !ValidConsoleOrganizationID(org) {
+			return fmt.Errorf("api_credits organization_id must be a Claude Console organization UUID")
+		}
+		if !anthropic && !organizationIDPattern.MatchString(org) {
+			return fmt.Errorf("api_credits organization_id must look like org-…")
+		}
 	}
 	if floor := settings.MinPromoBalance; floor != nil && (math.IsNaN(*floor) || math.IsInf(*floor, 0) || *floor < 0) {
 		return fmt.Errorf("api_credits min_promo_balance must be zero or more US dollars")
@@ -181,11 +239,15 @@ func validateAPICredits(provider Provider) error {
 }
 
 // apiCreditsIdentity is the metering identity of a credits account: its
-// organization, or the session's default organization when none is set.
+// vendor and organization, or the session's default organization when none
+// is set. The vendor keeps an OpenAI and a Console organization apart.
 func apiCreditsIdentity(provider Provider) string {
 	org := strings.ToLower(strings.TrimSpace(provider.EffectiveAPICredits().OrganizationID))
 	if org == "" {
 		org = "default"
+	}
+	if provider.APICreditsVendor() == APICreditsVendorAnthropic {
+		return "anthropic-org:" + org
 	}
 	return "openai-org:" + org
 }

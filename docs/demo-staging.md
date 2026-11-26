@@ -35,6 +35,7 @@ Available scenes:
   six hours before the weekly reset.
 - `decision-unknown`: the same task held because its synthetic sample is stale.
 - `api-credits`: Claude and Codex plus a synthetic OpenAI API credits account ("Linked org") with $62.40 of a $100 promotional grant left two days before it expires (inside the firesale window), $7.25 of purchased credit that is never scheduled, and a pi job queued against it.
+- `claude-credits`: the same balance on a synthetic Claude API credits account ("Console org", a made-up Console organization UUID), with the $7.25 as a purchased tranche without expiry and a claude-code job queued against it.
 - `multi-account`: three synthetic Claude accounts (Personal on Max 20x with two reset credits, a Team client account, a stale Pro side project) plus Codex, for the accounts carousel.
 
 Decision scenes default to Claude. Use `--provider codex-main` to stage the

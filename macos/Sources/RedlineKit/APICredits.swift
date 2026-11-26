@@ -1,8 +1,8 @@
 import Foundation
 
-/// The dollar detail of an OpenAI API credits account (`snapshot.credits`).
-/// Promotional credit (from a ChatGPT subscription) is what Redline spends;
-/// paid credit is shown and never scheduled.
+/// The dollar detail of an API credits account (`snapshot.credits`).
+/// Promotional credit (from a ChatGPT or Claude subscription) is what Redline
+/// spends; paid credit is shown and never scheduled.
 public struct APICredits: Codable, Sendable, Equatable {
     public let promoRemaining: Double
     public let promoGranted: Double
@@ -75,18 +75,22 @@ public struct APICreditGrant: Codable, Sendable, Equatable {
         case expiresAt = "expires_at"
     }
 
-    public var kindLabel: String {
+    public var kindLabel: String { kindLabel(claude: false) }
+
+    /// The grant's kind in the vendor's words: a Claude account's promo is
+    /// its subscription credit, and "other" is another promotional program.
+    public func kindLabel(claude: Bool) -> String {
         switch kind {
-        case "promo": "ChatGPT subscription grant"
+        case "promo": claude ? "Claude subscription credit" : "ChatGPT subscription grant"
         case "auto_recharge": "Auto recharge"
         case "purchase": "Purchased credit"
-        default: "Credit grant"
+        default: claude ? "Other promotional credit" : "Credit grant"
         }
     }
 }
 
-/// Everything the native tray and popover say about one OpenAI API credits
-/// account. Dollars, never a weekly, monthly or 5-hour window.
+/// Everything the native tray and popover say about one API credits account
+/// (OpenAI or Claude). Dollars, never a weekly, monthly or 5-hour window.
 public struct APICreditsCard: Sendable, Equatable {
     /// Normal is healthy (green); muted is a last-known, stale balance.
     public enum Tone: Sendable, Equatable { case normal, warning, danger, muted }
@@ -106,7 +110,7 @@ public struct APICreditsCard: Sendable, Equatable {
     }
 
     public let id: String
-    /// "OpenAI API credits".
+    /// "OpenAI API credits" or "Claude API credits".
     public let title: String
     /// The owner's label; nil when unset.
     public let label: String?
@@ -173,7 +177,7 @@ public struct APICreditsCard: Sendable, Equatable {
         switch status {
         case .signedOut:
             headline = "Session key needed"
-            secondary = "Run redline account set-session-key \(account.id)"
+            secondary = account.apiCreditsSessionKeyFix
         case .stale:
             headline = credits.map { "Last known \(money($0.promoRemaining))" } ?? "—"
             secondary = TrayTime.parse(account.snapshot?.observedAt).map { "Last sample \(dates.ago($0))" } ?? "Out of date"
@@ -229,7 +233,7 @@ public struct APICreditsCard: Sendable, Equatable {
         paid = credits.flatMap { $0.paidAvailable > 0 ? "\(lastKnown)\(money($0.paidAvailable)) · shown only, never scheduled" : nil }
         grants = (credits?.grants ?? []).map { grant in
             Grant(
-                label: grant.kindLabel,
+                label: grant.kindLabel(claude: account.isClaudeAPICredits),
                 value: "\(money(grant.remaining)) of \(money(grant.amount))",
                 expires: TrayTime.parse(grant.expiresAt).map { "expires \(dates.date($0))" }
             )

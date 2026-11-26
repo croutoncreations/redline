@@ -170,17 +170,23 @@ function cursorPoolRing(snap, stale) {
   return `<span class="m-ring-cell">${ring(tightest?.remaining ?? null, 58, stale)}<small>${esc(label)}</small><em>${tightest ? 'lowest pool' : 'not available'}</em></span>`;
 }
 function providerLabel(provider) {
-  return {claude: 'Claude', codex: 'Codex', cursor: 'Cursor', [API_CREDITS]: 'OpenAI API credits'}[provider] || title(provider);
+  return {claude: 'Claude', codex: 'Codex', cursor: 'Cursor', [API_CREDITS]: 'OpenAI API credits', [CLAUDE_API_CREDITS]: 'Claude API credits'}[provider] || title(provider);
 }
 
-// ── OpenAI API credits ─────────────────────────────────────────────────────────────
+// ── API credits (OpenAI and Claude) ─────────────────────────────────────────────────────────────
 // A dollar balance of promotional credit, not a subscription window: dollars
 // and the grant's expiry, never session or weekly rings. Keys are never
 // entered on a phone; a signed-out account says to re-paste on the computer.
 const API_CREDITS = 'openai-api-credits';
-const isAPICredits = (provider) => String(provider || '').toLowerCase() === API_CREDITS;
+const CLAUDE_API_CREDITS = 'anthropic-api-credits';
+const isAPICredits = (provider) => [API_CREDITS, CLAUDE_API_CREDITS].includes(String(provider || '').toLowerCase());
+const isClaudeCredits = (provider) => String(provider || '').toLowerCase() === CLAUDE_API_CREDITS;
 const CREDITS_SIGNED_OUT = 'Session key expired · re-paste it on the computer running Redline';
+const CLAUDE_CREDITS_SIGNED_OUT = 'Session key expired · re-paste it from platform.claude.com on the computer running Redline';
+const creditsSignedOutText = (provider) => isClaudeCredits(provider) ? CLAUDE_CREDITS_SIGNED_OUT : CREDITS_SIGNED_OUT;
 const CREDIT_GRANT_KINDS = {promo: 'ChatGPT subscription grant', auto_recharge: 'Auto recharge', purchase: 'Purchased credit', other: 'Credit grant'};
+const CLAUDE_CREDIT_GRANT_KINDS = {...CREDIT_GRANT_KINDS, promo: 'Claude subscription credit', other: 'Other promotional credit'};
+const creditGrantKinds = (provider) => isClaudeCredits(provider) ? CLAUDE_CREDIT_GRANT_KINDS : CREDIT_GRANT_KINDS;
 function creditsSignedOut(item) {
   return item.account_status === 'signed_out' || signedOut(item);
 }
@@ -205,7 +211,7 @@ function creditsRuleLine(credits) {
 /** The card's headline and secondary line, shared by the card and the carousel. */
 function creditsSummary(item) {
   const credits = item.snapshot?.credits, stale = Boolean(item.snapshot_stale);
-  if (creditsSignedOut(item)) return {headline: 'Session key needed', secondary: CREDITS_SIGNED_OUT, fraction: null};
+  if (creditsSignedOut(item)) return {headline: 'Session key needed', secondary: creditsSignedOutText(item.provider), fraction: null};
   if (!credits) return {headline: stale ? 'Usage unavailable' : '—', secondary: item.error || 'Waiting for the balance', fraction: null};
   if (stale) return {headline: `Last known ${money(credits.promo_remaining)}`, secondary: `Last sample ${relative(item.snapshot.observed_at)}`, fraction: null};
   if (!(credits.promo_remaining > 0)) return {headline: `${money(0)} promo`, secondary: 'No promotional credit', fraction: 0};
@@ -233,9 +239,9 @@ function creditsMeters(item) {
   const rules = `<div class="m-credits-rules" data-testid="credits-rules">${esc(creditsRuleLine(credits))}</div>`;
   const paid = credits.paid_available > 0
     ? `<div class="m-credits-row" data-testid="credits-paid"><span>Paid credit</span><b>${esc(`${money(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
-  const thisYear = new Date().getFullYear();
+  const thisYear = new Date().getFullYear(), kinds = creditGrantKinds(item.provider);
   const grants = (credits.grants || []).filter(g => g.remaining > 0).map(g => `<div class="m-credits-row" data-testid="credits-grant">
-      <span>${esc(CREDIT_GRANT_KINDS[g.kind] || CREDIT_GRANT_KINDS.other)}</span><b>${esc(`${money(g.remaining)} of ${money(g.amount)}`)}</b>
+      <span>${esc(kinds[g.kind] || kinds.other)}</span><b>${esc(`${money(g.remaining)} of ${money(g.amount)}`)}</b>
       ${g.expires_at ? `<em>expires ${esc(creditsDate(g.expires_at, new Date(g.expires_at).getFullYear() !== thisYear))}</em>` : ''}
     </div>`).join('');
   return `<div class="m-meters">${promo}${rules}${paid}${grants ? `<div class="m-credits-grants"><div class="m-pools-label">GRANTS</div>${grants}</div>` : ''}</div>`;
@@ -291,7 +297,7 @@ function renderUsageProvider(item) {
   const paused = item.paused;
   const snap = item.snapshot;
   const provider = String(item.provider || item.id).toLowerCase();
-  const icon = provider === 'claude' ? '/assets/claude.svg' : provider === 'codex' ? '/assets/codex.svg' : '';
+  const icon = provider === 'claude' || isClaudeCredits(provider) ? '/assets/claude.svg' : provider === 'codex' ? '/assets/codex.svg' : '';
   const credits = isAPICredits(provider);
   const accountLabel = credits ? String(item.label || '').trim() : '';
   const accountAllowances = (snap?.allowances || []).filter(a => a.scope === 'account');
@@ -734,7 +740,7 @@ function accountDispatching(item) {
 function accountStateLine(item) {
   if (item.paused) return {text: 'Paused', tone: 'paused'};
   switch (accountState(item)) {
-    case 'signed_out': return {text: isAPICredits(item.provider) ? CREDITS_SIGNED_OUT : loginCommand(item.provider) ? `Signed out · run ${loginCommand(item.provider)}` : 'Signed out', tone: 'danger'};
+    case 'signed_out': return {text: isAPICredits(item.provider) ? creditsSignedOutText(item.provider) : loginCommand(item.provider) ? `Signed out · run ${loginCommand(item.provider)}` : 'Signed out', tone: 'danger'};
     case 'stale': return {text: 'Out of date · dispatch held', tone: 'near'};
     case 'error': return {text: 'Usage unavailable · dispatch held', tone: 'danger'};
     case 'no_data': return {text: 'No usage yet · dispatch held', tone: 'near'};
@@ -899,7 +905,7 @@ function renderFamily(group) {
   const page = index >= 0 ? index + 1 : 0;
   if (index < 0 && selected) accountCarouselPage.set(provider, '');
   const name = providerLabel(provider);
-  const icon = provider === 'claude' ? '/assets/claude.svg' : provider === 'codex' ? '/assets/codex.svg' : '';
+  const icon = provider === 'claude' || isClaudeCredits(provider) ? '/assets/claude.svg' : provider === 'codex' ? '/assets/codex.svg' : '';
   const position = page === 0 ? 'Overview · swipe or use › for each account' : `Account ${page} of ${accounts.length}`;
   const pages = [
     `<div class="m-acct-page" data-page="0" ${page === 0 ? '' : 'hidden'} data-testid="carousel-page-0"
@@ -1144,7 +1150,7 @@ function renderQueueSelector(providers) {
   const sel = $('#m-queue-provider');
   const prev = sel.value;
   sel.innerHTML = (providers || []).map(p =>
-    `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(isAPICredits(p.provider) ? providerLabel(API_CREDITS) : p.provider)}</option>`
+    `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(isAPICredits(p.provider) ? providerLabel(String(p.provider).toLowerCase()) : p.provider)}</option>`
   ).join('');
   // Restore or set initial selection
   if (prev && providers.some(p => p.id === prev)) {

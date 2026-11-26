@@ -121,7 +121,7 @@ type ProviderUsage struct {
 	// monthly. Named here so the screen never calls a month a week.
 	WeeklyLabel string `json:"weekly_label,omitempty"`
 	Pools       []Pool `json:"pools,omitempty"`
-	// Credits is set only for an OpenAI API credits account, which has a
+	// Credits is set only for an API credits account (OpenAI or Claude), which has a
 	// dollar balance instead of windows: Session, Weekly, WeeklyLabel and
 	// Pools stay empty for it, so nothing calls the balance a week or a month.
 	Credits *CreditsView `json:"credits,omitempty"`
@@ -371,13 +371,13 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 		}
 		if isCreditsProvider(item.Provider) {
 			signedOut := item.AccountStatus == "signed_out" || item.UsageSource.Reason == "signed_out"
-			provider.Credits = creditsView(item.Snapshot, item.SnapshotStale && !signedOut, signedOut, now)
+			provider.Credits = creditsView(item.Provider, item.Snapshot, item.SnapshotStale && !signedOut, signedOut, now)
 			if c := provider.Credits; c != nil && !c.SignedOut && !c.Stale && item.LatestDecision != nil {
 				c.DecisionLabel = creditsDecisionLabel(item.LatestDecision.Decision, item.LatestDecision.UnlockedTier, item.LatestDecision.Reason)
 				c.DecisionReason = capitalised(item.LatestDecision.Reason)
 			}
 			if signedOut {
-				provider.StaleReason = creditsSignedOutLine
+				provider.StaleReason = creditsSignedOutText(item.Provider)
 			}
 		}
 		if item.Snapshot != nil && provider.Credits != nil {

@@ -4,6 +4,7 @@ package apicredits
 
 import (
 	"context"
+	"github.com/croutoncreations/redline/internal/config"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -19,7 +20,7 @@ func TestResolveSecretRefusesFIFOKeyFileWithoutBlocking(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := ResolveSecret(context.Background(), nil, "acct", SecretSessionKey, fifo)
+		_, err := ResolveSecret(context.Background(), nil, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, fifo)
 		done <- err
 	}()
 	select {

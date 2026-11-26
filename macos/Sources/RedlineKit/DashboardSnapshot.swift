@@ -358,9 +358,19 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     /// accounts, so Cursor is not scheduled until they match.
     public var accountMismatch: Bool { usageSourceReason == "account_mismatch" }
 
-    /// An OpenAI API credits account: a dollar balance of promotional
-    /// credit, not a weekly window.
-    public var isAPICredits: Bool { provider.lowercased() == "openai-api-credits" }
+    /// An API credits account (OpenAI, or Claude through the Claude
+    /// Console): a dollar balance of promotional credit, not a weekly window.
+    public var isAPICredits: Bool { ["openai-api-credits", "anthropic-api-credits"].contains(provider.lowercased()) }
+
+    /// A Claude (Anthropic) API credits account.
+    public var isClaudeAPICredits: Bool { provider.lowercased() == "anthropic-api-credits" }
+
+    /// The fix for a signed-out credits account: the CLI command, and on
+    /// Claude where the session key comes from.
+    public var apiCreditsSessionKeyFix: String {
+        let command = "redline account set-session-key \(id)"
+        return isClaudeAPICredits ? "Paste the sessionKey cookie from platform.claude.com: \(command)" : "Run \(command)"
+    }
 
     /// The line shown on a stale provider's card. A signed-out provider says
     /// so and names the fix, rather than leaving it in a hover tooltip.
@@ -370,7 +380,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         }
         if signedOut && isAPICredits {
             // The platform session key is only ever entered through the CLI.
-            return "Session key needed · run redline account set-session-key \(id)"
+            let fix = apiCreditsSessionKeyFix
+            return "Session key needed · " + fix.prefix(1).lowercased() + fix.dropFirst()
         }
         if signedOut, let login = ProviderRecovery.loginCommand(for: provider) {
             // The CLI that holds the login, which is what signed out.
@@ -390,6 +401,7 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         case "codex": "Codex"
         case "cursor": "Cursor"
         case "openai-api-credits": "OpenAI API credits"
+        case "anthropic-api-credits": "Claude API credits"
         default: provider.capitalized
         }
     }
@@ -818,7 +830,7 @@ public struct ProviderBadge: Sendable, Equatable {
     public let accounts: [Account]
     /// A single account whose source reports no weekly limit.
     public let weeklyNotReported: Bool
-    /// An OpenAI API credits account's dollar balance: "$62.40" for the menu
+    /// An API credits account's dollar balance: "$62.40" for the menu
     /// bar, "$62.40 left" spoken. Nil for every other provider.
     public let credits: (compact: String, spoken: String)?
 

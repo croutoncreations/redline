@@ -9,7 +9,8 @@ enum ProviderArtwork {
         if provider.lowercased() == "openai-api-credits" {
             return monogram("$", provider: provider, size: size)
         }
-        if provider.lowercased() != "claude",
+        // Claude API credits wear the Claude artwork.
+        if provider.lowercased() != "claude" && provider.lowercased() != "anthropic-api-credits",
            let data = Data(base64Encoded: chatGPTTemplatePNG),
            let source = NSImage(data: data),
            let image = source.copy() as? NSImage {

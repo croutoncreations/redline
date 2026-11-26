@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/config"
@@ -25,15 +26,18 @@ func AccountFrom(ctx context.Context) string {
 	return account
 }
 
-// UsageSource is a usage.Source for openai-api-credits accounts. It wraps
-// the native source and handles only that provider, so adding a credits
-// account changes nothing for any other.
+// UsageSource is a usage.Source for API credits accounts of either vendor.
+// It wraps the native source and handles only those providers, so adding a
+// credits account changes nothing for any other.
 type UsageSource struct {
 	Next interface {
 		Name() string
 		Fetch(context.Context, config.Provider) (decision.UsageSnapshot, []byte, error)
 	}
+	// Client reads openai-api-credits accounts; Console reads
+	// anthropic-api-credits accounts.
 	Client  Client
+	Console ConsoleClient
 	Secrets SecretStore
 }
 
@@ -48,18 +52,30 @@ func (s UsageSource) Fetch(ctx context.Context, provider config.Provider) (decis
 		return decision.UsageSnapshot{}, nil, errors.New("API credits fetch is missing its account")
 	}
 	settings := provider.EffectiveAPICredits()
-	key, err := ResolveSecret(ctx, s.Secrets, account, SecretSessionKey, settings.SessionKeyFile)
+	vendor := provider.APICreditsVendor()
+	key, err := ResolveSecret(ctx, s.Secrets, vendor, account, SecretSessionKey, settings.SessionKeyFile)
 	if errors.Is(err, ErrSecretNotFound) {
-		return decision.UsageSnapshot{}, nil, signedOut{fmt.Errorf("no OpenAI platform session key is saved; run `redline account set-session-key %s`", account)}
+		what := "OpenAI platform"
+		if vendor == config.APICreditsVendorAnthropic {
+			what = "Claude Console"
+		}
+		return decision.UsageSnapshot{}, nil, signedOut{fmt.Errorf("no %s session key is saved; run `redline account set-session-key %s`", what, account)}
 	}
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
-	report, err := s.Client.Fetch(ctx, Credential{SessionKey: key, OrganizationID: settings.OrganizationID})
+	credential := Credential{SessionKey: key, OrganizationID: settings.OrganizationID}
+	var report FetchedReport
+	if vendor == config.APICreditsVendorAnthropic {
+		report, err = s.Console.Fetch(ctx, credential)
+	} else {
+		report, err = s.Client.Fetch(ctx, credential)
+	}
 	switch {
-	case errors.Is(err, ErrSessionExpired), errors.Is(err, ErrNotSessionKey):
+	case errors.Is(err, ErrSessionExpired), errors.Is(err, ErrNotSessionKey),
+		errors.Is(err, ErrConsoleSessionExpired), errors.Is(err, ErrNotConsoleSessionKey):
 		return decision.UsageSnapshot{}, nil, signedOut{err}
-	case errors.Is(err, ErrRateLimited):
+	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrConsoleRateLimited):
 		return decision.UsageSnapshot{}, nil, rateLimited{err}
 	case err != nil:
 		return decision.UsageSnapshot{}, nil, err
@@ -68,6 +84,7 @@ func (s UsageSource) Fetch(ctx context.Context, provider config.Provider) (decis
 	if err != nil {
 		return decision.UsageSnapshot{}, nil, err
 	}
+	snapshot.Provider = strings.ToLower(strings.TrimSpace(provider.Provider))
 	snapshot.Source = s.Name()
 	raw, err := RawPayload(report)
 	return snapshot, raw, err

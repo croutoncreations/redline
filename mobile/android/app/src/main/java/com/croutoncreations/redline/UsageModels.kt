@@ -177,15 +177,15 @@ data class ProviderUsage(
     /** Where Redline will act on the meters. Null from a desktop that sends no policy. */
     val scheduling: Scheduling? = null,
     /**
-     * An OpenAI API credits account's dollar balance, already worded by the
-     * core. Set only for that provider, which has no session, weekly or pool
+     * An API credits account's (OpenAI or Claude) dollar balance, already
+     * worded by the core. Set only for those providers, which has no session, weekly or pool
      * windows; null for every other provider.
      */
     val credits: CreditsView? = null,
 )
 
 /**
- * An OpenAI API credits account. Only promotional credit is capacity: the
+ * An API credits account (OpenAI or Claude). Only promotional credit is capacity: the
  * bar and the headline are about it; paid credit is shown, never scheduled.
  */
 @Serializable
@@ -593,7 +593,7 @@ data class OverviewEmptyState(val label: String, val detail: String)
  * never a weekly allowance; subscription providers keep the weekly wording.
  */
 fun overviewEmptyState(account: ProviderUsage): OverviewEmptyState = when {
-    account.provider.equals("openai-api-credits", ignoreCase = true) -> OverviewEmptyState("Credits", "Balance not read yet")
+    isAPICreditsProvider(account.provider) -> OverviewEmptyState("Credits", "Balance not read yet")
     account.weeklyNotReported -> OverviewEmptyState("Weekly", "Not reported")
     else -> OverviewEmptyState("Weekly", "No usage reported")
 }
@@ -604,8 +604,13 @@ fun providerDisplayName(provider: String): String = when (provider.lowercase()) 
     "codex" -> "Codex"
     "cursor" -> "Cursor"
     "openai-api-credits" -> "OpenAI API credits"
+    "anthropic-api-credits" -> "Claude API credits"
     else -> provider.replaceFirstChar { it.uppercase() }
 }
+
+/** OpenAI and Claude (Anthropic) API credits accounts: a dollar balance, not windows. */
+fun isAPICreditsProvider(provider: String): Boolean =
+    provider.equals("openai-api-credits", ignoreCase = true) || provider.equals("anthropic-api-credits", ignoreCase = true)
 
 /**
  * The one-line status shown under a provider's name.
