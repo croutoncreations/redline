@@ -41,6 +41,12 @@ type AdmissionLimits struct {
 	RuntimeConnection   int
 	AgentContextID      string
 	AgentContext        int
+	// MaxActiveForReservation, when positive, is how many runs an API
+	// credits account may have in flight before this one starts (its promo
+	// balance minus run_cost_estimate per run stays above the floor). It is
+	// re-checked here, inside the admission transaction, so two dispatches
+	// that decided to run at once can't both start.
+	MaxActiveForReservation int
 }
 
 func (d *DB) AdmitTask(
@@ -79,6 +85,10 @@ WHERE provider_account_id = ? AND state IN ('preparing', 'running')`, providerAc
 	if active >= limits.Provider {
 		return domain.Run{}, fmt.Errorf("%w: provider concurrency limit %d reached for %q",
 			ErrConflict, limits.Provider, providerAccountID)
+	}
+	if limits.MaxActiveForReservation > 0 && active >= limits.MaxActiveForReservation {
+		return domain.Run{}, fmt.Errorf("%w: promotional credit is reserved for %d run(s) in flight on %q",
+			ErrConflict, active, providerAccountID)
 	}
 	if limits.RuntimeConnectionID != "" {
 		if limits.RuntimeConnection <= 0 {

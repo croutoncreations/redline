@@ -121,6 +121,10 @@ type ProviderUsage struct {
 	// monthly. Named here so the screen never calls a month a week.
 	WeeklyLabel string `json:"weekly_label,omitempty"`
 	Pools       []Pool `json:"pools,omitempty"`
+	// Credits is set only for an OpenAI API credits account, which has a
+	// dollar balance instead of windows: Session, Weekly, WeeklyLabel and
+	// Pools stay empty for it, so nothing calls the balance a week or a month.
+	Credits *CreditsView `json:"credits,omitempty"`
 	// Scheduling is where Redline will act, drawn on the meters. Nil from a
 	// desktop that does not send its policy, in which case no zones are drawn
 	// rather than guessed.
@@ -312,6 +316,7 @@ type dashboardPayload struct {
 		LatestDecision *struct {
 			Decision           string    `json:"decision"`
 			Reason             string    `json:"reason"`
+			UnlockedTier       string    `json:"unlocked_tier"`
 			ProjectedTriggerAt time.Time `json:"projected_trigger_at"`
 		} `json:"latest_decision,omitempty"`
 	} `json:"providers"`
@@ -364,7 +369,29 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 				provider.StaleReason = "OpenUsage says these numbers are out of date"
 			}
 		}
-		if item.Snapshot != nil {
+		if isCreditsProvider(item.Provider) {
+			signedOut := item.AccountStatus == "signed_out" || item.UsageSource.Reason == "signed_out"
+			provider.Credits = creditsView(item.Snapshot, item.SnapshotStale && !signedOut, signedOut, now)
+			if c := provider.Credits; c != nil && !c.SignedOut && !c.Stale && item.LatestDecision != nil {
+				c.DecisionLabel = creditsDecisionLabel(item.LatestDecision.Decision, item.LatestDecision.UnlockedTier, item.LatestDecision.Reason)
+				c.DecisionReason = capitalised(item.LatestDecision.Reason)
+			}
+			if signedOut {
+				provider.StaleReason = creditsSignedOutLine
+			}
+		}
+		if item.Snapshot != nil && provider.Credits != nil {
+			if observed := item.Snapshot.ObservedAt; !observed.IsZero() {
+				if age := int(now.Sub(observed).Seconds()); age > view.SampledAgeSeconds {
+					view.SampledAgeSeconds = age
+				}
+			}
+			provider.SourceLabel = sourceLabel(
+				item.UsageSource.Active, item.Snapshot.Source,
+				item.ActiveRuns, item.MaxConcurrentRuns,
+				item.Snapshot.ObservedAt, now,
+			)
+		} else if item.Snapshot != nil {
 			// The oldest sample across providers, so the header can say how
 			// stale the numbers are rather than only that the stream is up.
 			if observed := item.Snapshot.ObservedAt; !observed.IsZero() {
@@ -428,7 +455,11 @@ func renderUsage(payload dashboardPayload, now time.Time) UsageView {
 			if item.LatestDecision != nil {
 				scheduling.Decision = item.LatestDecision.Decision
 				scheduling.Reason = item.LatestDecision.Reason
-				scheduling.ProjectedTriggerAt = item.LatestDecision.ProjectedTriggerAt
+				// A credits balance is not spent down by flat usage, so the
+				// projection says nothing; the reason says why it waits.
+				if provider.Credits == nil {
+					scheduling.ProjectedTriggerAt = item.LatestDecision.ProjectedTriggerAt
+				}
 			}
 			provider.Scheduling = scheduling
 		}
