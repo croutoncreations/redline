@@ -217,6 +217,15 @@ never authorizes merging. Historical review-body prose only clears after that sa
 publishes a later full completion for the new head. A push or another provider
 cannot silently clear it. Dismissing a review also does not resolve its body.
 This deliberately also defers benign review prose.
+
+One narrow exception: `claude[bot]` (user ID 209825114, type Bot) posts a
+`COMMENTED` review when it **did not review at all**, for example when the
+organization has no Claude usage left or the review was requested by a bot. Two
+such notices are listed in `internal/greenlane/review_notices.go` and are ignored
+only when the review body matches byte for byte. Any other wording, an extra
+character, another author or another review state still blocks. These notices
+never count as a completed review. If Anthropic changes the wording, the new text
+blocks again until it is added to that list in a reviewed PR.
 All review bodies remain bound into the twice-collected and premerge-revalidated
 review snapshot, so body edits invalidate old eligibility.
 
