@@ -9,19 +9,38 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 )
 
-// creditsProvider is the provider name of an OpenAI API credits account: a
-// dollar balance, not a subscription window.
-const creditsProvider = "openai-api-credits"
+// The provider names of API credits accounts: a dollar balance, not a
+// subscription window. OpenAI's API credits and Claude's (read from the
+// Claude Console) are worded alike, with vendor-specific labels.
+const (
+	creditsProvider       = "openai-api-credits"
+	claudeCreditsProvider = "anthropic-api-credits"
+)
 
 // creditsSignedOutLine is the phone's fix for an expired session key. Keys
 // are only ever entered on the computer running Redline, never on a phone.
 const creditsSignedOutLine = "Session key expired · re-paste it on the computer running Redline"
 
+// claudeCreditsSignedOutLine also says where a Claude Console key comes from.
+const claudeCreditsSignedOutLine = "Session key expired · re-paste it from platform.claude.com on the computer running Redline"
+
+func isClaudeCreditsProvider(provider string) bool {
+	return strings.EqualFold(provider, claudeCreditsProvider)
+}
+
+// creditsSignedOutText is the signed-out fix for provider's credits account.
+func creditsSignedOutText(provider string) string {
+	if isClaudeCreditsProvider(provider) {
+		return claudeCreditsSignedOutLine
+	}
+	return creditsSignedOutLine
+}
+
 // defaultCreditsFiresaleWindow matches the scheduler's default when a
 // snapshot does not carry the account's own window.
 const defaultCreditsFiresaleWindow = 72 * time.Hour
 
-// CreditsView is an OpenAI API credits account, worded for display. Only
+// CreditsView is an API credits account (OpenAI or Claude), worded for display. Only
 // promotional credit is capacity; paid credit is shown and never scheduled.
 type CreditsView struct {
 	// Headline is "$62.40 left", "$0.00 promo", "Last known $62.40" or
@@ -58,8 +77,9 @@ type CreditsView struct {
 
 // CreditGrantView is one grant with money left.
 type CreditGrantView struct {
-	// Label names the grant's kind: "ChatGPT subscription grant", "Auto
-	// recharge", "Purchased credit" or "Credit grant".
+	// Label names the grant's kind: "ChatGPT subscription grant" (or "Claude
+	// subscription credit"), "Auto recharge", "Purchased credit" or "Credit
+	// grant" (or "Other promotional credit").
 	Label string `json:"label"`
 	// AmountLabel is "$62.40 of $100.00".
 	AmountLabel string `json:"amount_label"`
@@ -68,12 +88,12 @@ type CreditGrantView struct {
 }
 
 func isCreditsProvider(provider string) bool {
-	return strings.EqualFold(provider, creditsProvider)
+	return strings.EqualFold(provider, creditsProvider) || isClaudeCreditsProvider(provider)
 }
 
 // creditsView words a credits account's balance. Nil when there is neither a
 // balance nor a signed-out session to explain.
-func creditsView(snapshot *decision.UsageSnapshot, stale, signedOut bool, now time.Time) *CreditsView {
+func creditsView(provider string, snapshot *decision.UsageSnapshot, stale, signedOut bool, now time.Time) *CreditsView {
 	var balance *decision.CreditsBalance
 	if snapshot != nil {
 		balance = snapshot.Credits
@@ -83,13 +103,13 @@ func creditsView(snapshot *decision.UsageSnapshot, stale, signedOut bool, now ti
 	}
 	view := &CreditsView{Stale: stale, SignedOut: signedOut}
 	if balance != nil {
-		fillCredits(view, balance, snapshot.WeeklyUnavailable, now)
+		fillCredits(view, balance, snapshot.WeeklyUnavailable, isClaudeCreditsProvider(provider), now)
 	}
 	switch {
 	case signedOut:
 		// Only the fix: the old balance, rule, paid credit and grants are not
 		// shown beside "Session key needed".
-		*view = CreditsView{SignedOut: true, Headline: "Session key needed", Detail: creditsSignedOutLine}
+		*view = CreditsView{SignedOut: true, Headline: "Session key needed", Detail: creditsSignedOutText(provider)}
 	case stale:
 		view.Headline = "Last known " + usd(balance.PromoRemaining)
 		view.Detail = "Last sample " + creditsAgo(now.Sub(snapshot.ObservedAt))
@@ -147,7 +167,7 @@ func creditsAgo(d time.Duration) string {
 	return fmt.Sprintf("%d %s ago", amount, unit)
 }
 
-func fillCredits(view *CreditsView, balance *decision.CreditsBalance, weeklyUnavailable bool, now time.Time) {
+func fillCredits(view *CreditsView, balance *decision.CreditsBalance, weeklyUnavailable, claude bool, now time.Time) {
 	view.NoPromo = weeklyUnavailable || balance.PromoRemaining <= 0
 	if balance.PromoGranted > 0 && !view.NoPromo {
 		view.RemainingPercent = percent(balance.PromoRemaining / balance.PromoGranted)
@@ -186,7 +206,7 @@ func fillCredits(view *CreditsView, balance *decision.CreditsBalance, weeklyUnav
 		if grant.Remaining <= 0 {
 			continue
 		}
-		item := CreditGrantView{Label: creditGrantLabel(grant.Kind), AmountLabel: usd(grant.Remaining) + " of " + usd(grant.Amount)}
+		item := CreditGrantView{Label: creditGrantLabel(grant.Kind, claude), AmountLabel: usd(grant.Remaining) + " of " + usd(grant.Amount)}
 		if grant.ExpiresAt != nil {
 			item.ExpiresAt = grant.ExpiresAt.UTC()
 		}
@@ -194,7 +214,13 @@ func fillCredits(view *CreditsView, balance *decision.CreditsBalance, weeklyUnav
 	}
 }
 
-func creditGrantLabel(kind string) string {
+func creditGrantLabel(kind string, claude bool) string {
+	switch {
+	case kind == "promo" && claude:
+		return "Claude subscription credit"
+	case kind == "other" && claude:
+		return "Other promotional credit"
+	}
 	switch kind {
 	case "promo":
 		return "ChatGPT subscription grant"

@@ -219,6 +219,15 @@ publishes a later full completion for the new head. A push or another provider
 cannot silently clear it. Dismissing a review also does not resolve its body.
 This deliberately also defers benign review prose.
 
+Codex's security review often finishes with `has_any_findings` and
+`has_unresolved_findings` both `null` (openai/codex#57326). That form counts as
+clean only when all of these hold: the security review is `completed` on the
+exact head with both keys present and literally `null`; the summary has exactly
+one `codex-security-review:v1` marker, `completed`, for this repository, PR and
+head; and the PR has no Codex security-finding comment
+(`codex-security-review-finding:v1`) at all. Real findings set both flags `true`
+and post such a comment, so they still block.
+
 One narrow exception: `claude[bot]` (user ID 209825114, type Bot) posts a
 `COMMENTED` review when it **did not review at all**, for example when the
 organization has no Claude usage left or the review was requested by a bot. Two

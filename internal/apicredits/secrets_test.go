@@ -3,6 +3,7 @@ package apicredits
 import (
 	"context"
 	"errors"
+	"github.com/croutoncreations/redline/internal/config"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -107,7 +108,7 @@ func TestResolveSecretRefusesSymlinkedKeyFiles(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ResolveSecret(context.Background(), nil, "acct", SecretSessionKey, link); err == nil {
+	if _, err := ResolveSecret(context.Background(), nil, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, link); err == nil {
 		t.Fatal("followed a symlinked key file")
 	}
 }
@@ -122,7 +123,7 @@ func TestSecretFileErrorsDoNotNameThePath(t *testing.T) {
 	if err := os.WriteFile(file, []byte("sk-x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ResolveSecret(context.Background(), nil, "acct", SecretAPIKey, file)
+	_, err := ResolveSecret(context.Background(), nil, config.APICreditsVendorOpenAI, "acct", SecretAPIKey, file)
 	if err == nil || strings.Contains(err.Error(), "private-name-xyz") {
 		t.Fatalf("err = %v", err)
 	}
@@ -138,23 +139,23 @@ func TestResolveSessionKeyPrefersConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(file, []byte("sess-FROMFILE\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ResolveSecret(ctx, store, "acct", SecretSessionKey, file)
+	got, err := ResolveSecret(ctx, store, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, file)
 	if err != nil || got != "sess-FROMFILE" {
 		t.Fatalf("file = %q, %v", got, err)
 	}
 	if err := os.WriteFile(file, []byte("sess-ROTATED"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := ResolveSecret(ctx, store, "acct", SecretSessionKey, file); got != "sess-ROTATED" {
+	if got, _ := ResolveSecret(ctx, store, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, file); got != "sess-ROTATED" {
 		t.Fatalf("rotated = %q", got)
 	}
-	got, err = ResolveSecret(ctx, store, "acct", SecretSessionKey, "")
+	got, err = ResolveSecret(ctx, store, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, "")
 	if err != nil || got != "sess-FROMSTORE" {
 		t.Fatalf("store = %q, %v", got, err)
 	}
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(file, 0o644)
-		if _, err := ResolveSecret(ctx, store, "acct", SecretSessionKey, file); err == nil {
+		if _, err := ResolveSecret(ctx, store, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, file); err == nil {
 			t.Fatal("read a world-readable key file")
 		}
 	}
@@ -175,14 +176,14 @@ func TestResolveSessionKeyFallsBackToEnvironment(t *testing.T) {
 			t.Fatalf("session key visible to child processes: %s", entry[:10])
 		}
 	}
-	got, err := ResolveSecret(context.Background(), FileSecretStore{Dir: t.TempDir()}, "acct", SecretSessionKey, "")
+	got, err := ResolveSecret(context.Background(), FileSecretStore{Dir: t.TempDir()}, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, "")
 	if err != nil || got != "sess-FROMENV" {
 		t.Fatalf("env = %q, %v", got, err)
 	}
 	// The environment never supplies the run API key: that would hand an
 	// inherited key to jobs for an organization nobody confirmed.
 	t.Setenv("OPENAI_API_KEY", "sk-inherited")
-	if _, err := ResolveSecret(context.Background(), FileSecretStore{Dir: t.TempDir()}, "acct", SecretAPIKey, ""); !errors.Is(err, ErrSecretNotFound) {
+	if _, err := ResolveSecret(context.Background(), FileSecretStore{Dir: t.TempDir()}, config.APICreditsVendorOpenAI, "acct", SecretAPIKey, ""); !errors.Is(err, ErrSecretNotFound) {
 		t.Fatalf("api key from env = %v", err)
 	}
 }
@@ -191,7 +192,7 @@ func TestResolveSessionKeyFallsBackToEnvironment(t *testing.T) {
 // the account reports signed out, and the error never names the path.
 func TestResolveSecretMissingKeyFileIsNotFound(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "private-name-xyz")
-	_, err := ResolveSecret(context.Background(), nil, "acct", SecretSessionKey, file)
+	_, err := ResolveSecret(context.Background(), nil, config.APICreditsVendorOpenAI, "acct", SecretSessionKey, file)
 	if !errors.Is(err, ErrSecretNotFound) {
 		t.Fatalf("err = %v, want ErrSecretNotFound", err)
 	}

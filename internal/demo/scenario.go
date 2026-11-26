@@ -161,6 +161,7 @@ func Scenarios() []Scenario {
 		{"decision-unknown", "The same task held because its synthetic usage sample is stale"},
 		{"multi-account", "Three synthetic Claude accounts (one stale) and Codex, for the accounts carousel"},
 		{"api-credits", "Claude and Codex plus a synthetic OpenAI API credits account two days from expiry"},
+		{"claude-credits", "Claude and Codex plus a synthetic Claude API credits account two days from expiry"},
 	}
 }
 
@@ -208,6 +209,9 @@ func CreateForProvider(ctx context.Context, scenario, provider, root string, now
 	if scenario == "api-credits" {
 		snapshots["api-credits"] = apiCreditsSnapshot(now)
 	}
+	if scenario == "claude-credits" {
+		snapshots["claude-credits"] = claudeCreditsSnapshot(now)
+	}
 	env := &Environment{Root: root, Config: cfg, Database: database, Snapshots: snapshots}
 	if err := seed(ctx, env, scenario, provider, now); err != nil {
 		database.Close()
@@ -252,6 +256,13 @@ func fixtureConfig(root, scenario, provider string) config.Config {
 		// Synthetic: nothing is fetched and no key exists.
 		providers["api-credits"] = config.Provider{Provider: config.ProviderAPICredits, Label: "Linked org",
 			WindowWeeklyCost: .05, Policy: "standard", APICredits: &config.APICredits{OrganizationID: "org-demo"}}
+	}
+	if scenario == "claude-credits" {
+		// Synthetic: a made-up Console organization UUID; nothing is fetched
+		// and no key exists.
+		providers["claude-credits"] = config.Provider{Provider: config.ProviderAnthropicAPICredits, Label: "Console org",
+			WindowWeeklyCost: .05, Policy: "standard",
+			APICredits: &config.APICredits{OrganizationID: "00000000-0000-4000-8000-00000000c1a0"}}
 	}
 	return config.Config{
 		Database: filepath.Join(root, "redline-demo.db"), RunArtifactsDir: filepath.Join(root, "runs"),
@@ -351,6 +362,19 @@ func apiCreditsSnapshot(now time.Time) decision.UsageSnapshot {
 	}
 }
 
+// claudeCreditsSnapshot is apiCreditsSnapshot's balance as the Claude
+// Console reports it: the subscription credit is the promo grant, and the
+// $7.25 left is a purchased tranche without expiry.
+func claudeCreditsSnapshot(now time.Time) decision.UsageSnapshot {
+	snapshot := apiCreditsSnapshot(now)
+	snapshot.Provider = config.ProviderAnthropicAPICredits
+	credits := *snapshot.Credits
+	purchased := now.Add(-40 * 24 * time.Hour)
+	credits.Grants = []decision.CreditGrant{credits.Grants[0], {Kind: "purchase", Amount: 10, Remaining: 7.25, EffectiveAt: &purchased}}
+	snapshot.Credits = &credits
+	return snapshot
+}
+
 func fixtureSnapshots(now time.Time) map[string]decision.UsageSnapshot {
 	shortReset := now.Add(2*time.Hour + 12*time.Minute)
 	weeklyReset := now.Add(3*24*time.Hour + 8*time.Hour)
@@ -383,14 +407,15 @@ func seed(ctx context.Context, env *Environment, scenario, provider string, now 
 	if err := seedDecisions(ctx, env.Database, now); err != nil {
 		return err
 	}
-	if scenario == "api-credits" {
+	if scenario == "api-credits" || scenario == "claude-credits" {
 		// The credits account's own decision, from the real rules.
+		account := scenario
 		policy := env.Config.Policies["standard"]
-		result := decision.Evaluate(decision.Input{Snapshot: env.Snapshots["api-credits"], WindowWeeklyCost: .05,
+		result := decision.Evaluate(decision.Input{Snapshot: env.Snapshots[account], WindowWeeklyCost: .05,
 			TriggerMargin: policy.TriggerMargin, RollingReserve: policy.RollingReserve, Now: now, MaxSnapshotAge: 15 * time.Minute})
 		result.Policy = "standard"
-		payload, _ := json.Marshal(map[string]any{"snapshot": env.Snapshots["api-credits"], "result": result})
-		if _, err := env.Database.RecordSchedulerDecision(ctx, domain.SchedulerDecision{ProviderAccountID: "api-credits", DecisionJSON: payload},
+		payload, _ := json.Marshal(map[string]any{"snapshot": env.Snapshots[account], "result": result})
+		if _, err := env.Database.RecordSchedulerDecision(ctx, domain.SchedulerDecision{ProviderAccountID: account, DecisionJSON: payload},
 			now.Add(-time.Minute)); err != nil {
 			return err
 		}
@@ -405,6 +430,10 @@ func seed(ctx context.Context, env *Environment, scenario, provider string, now 
 	if scenario == "api-credits" {
 		profiles = append(profiles, domain.ExecutionProfile{ID: "pi-credits-demo", ProviderAccountID: "api-credits", HarnessType: "pi",
 			Model: "openai/gpt-5.6", WorkspaceProvider: "git-worktree", Repository: "/Demo/Atlas", BaseBranch: "main", RequireClean: true})
+	}
+	if scenario == "claude-credits" {
+		profiles = append(profiles, domain.ExecutionProfile{ID: "claude-credits-demo", ProviderAccountID: "claude-credits", HarnessType: "claude-code",
+			Model: "claude-sonnet-4-6", WorkspaceProvider: "git-worktree", Repository: "/Demo/Atlas", BaseBranch: "main", RequireClean: true})
 	}
 	for _, profile := range profiles {
 		if err := env.Database.CreateProfile(ctx, profile, now.Add(-14*24*time.Hour)); err != nil {
@@ -421,6 +450,11 @@ func seed(ctx context.Context, env *Environment, scenario, provider string, now 
 		tasks = append(tasks, domain.Task{ID: "character-art", Name: "Generate character portraits",
 			Prompt: "Generate portraits for the next batch of story characters with the Images API.", Priority: 70,
 			ExecutionProfileID: "pi-credits-demo", Type: domain.OneOff, DispatchTier: domain.DispatchFiresale})
+	}
+	if scenario == "claude-credits" {
+		tasks = append(tasks, domain.Task{ID: "docs-sweep", Name: "Sweep stale documentation",
+			Prompt: "Find documentation that no longer matches the code and fix it in one pull request.", Priority: 70,
+			ExecutionProfileID: "claude-credits-demo", Type: domain.OneOff, DispatchTier: domain.DispatchFiresale})
 	}
 	for _, task := range tasks {
 		if err := env.Database.CreateTask(ctx, task, now.Add(-10*24*time.Hour)); err != nil {
@@ -539,7 +573,7 @@ func completedRun(ctx context.Context, env *Environment, id, task, provider stri
 }
 
 func providerName(id string) string {
-	if id == "claude-main" {
+	if id == "claude-main" || id == "claude-credits" {
 		return "claude"
 	}
 	return "codex"

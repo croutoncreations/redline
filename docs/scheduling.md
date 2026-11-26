@@ -132,6 +132,100 @@ When the session key is missing or OpenAI rejects it, work on the account holds 
 between; a service restart may repeat it once). Like `account.needs_login` it is opt-in: add it to
 `notifications.events`. The alert names the fix and never contains key material.
 
+## Claude (Anthropic) API credits
+
+Claude subscriptions can grant API credit to a linked
+[Claude Console](https://platform.claude.com) organization, as a promotional tranche that
+expires. An `anthropic-api-credits` account is the same feature as
+[OpenAI API credits](#openai-api-credits), with the same `api_credits:` settings, floor,
+in-flight reservation, pacing, firesale window, notifications and dashboards (labelled
+"Claude API credits"). The differences:
+
+- **What counts.** Only `subscription_api_credit` tranches that have started, have not
+  expired and have money left. Purchased tranches and other promotional programs are shown
+  but never scheduling capacity. A response Redline does not fully understand (another
+  currency, a tranche without a program, an unreadable date or amount) makes the balance
+  UNKNOWN, and work holds.
+- **Organization.** `organization_id` is the Console organization's UUID. Left empty,
+  Redline uses the one organization with API access; when several have it, set it. With
+  more than one Claude credits account, every one of them must set `organization_id`, even
+  if each session sees only one organization. Two accounts cannot name the same
+  organization.
+- **Which jobs.** `claude-code`, `pi` and `command` profiles. Codex, Cursor Agent and Hermes
+  profiles are refused. Each run first loses every inherited Anthropic credential, routing
+  and cloud switch: every `ANTHROPIC_*` variable, every `CLAUDE_CODE_USE_*`,
+  `CLAUDE_CODE_OAUTH_*`, `CLAUDE_CODE_API_*` and `CLAUDE_CODE_GATEWAY_*` variable, and
+  `AWS_BEARER_TOKEN_BEDROCK` (case-insensitively on Windows). It is then given the account's
+  API key as `ANTHROPIC_API_KEY` and `REDLINE_ANTHROPIC_API_CREDITS=1`. The key is never put
+  in a command line, and a profile's `harness_args` may not add pi's `--api-key`,
+  `--provider`, `-e`, `--extension`, `--model` or `--models`, or Claude Code's `--settings`
+  or `--setting-sources` (on an OpenAI credits account, pi's `--api-key`, `--model` and
+  `--models` are refused too).
+  - **Claude Code can spend these credits**, unlike Codex on OpenAI. Each run starts with a
+    fresh, empty, private `CLAUDE_CONFIG_DIR` that is removed afterwards, so a stored Claude
+    subscription login can't take precedence over the key. A Claude credits account never
+    has a Claude Code profile directory. Each run also passes `--setting-sources=`, so no
+    user, project or local settings file is loaded: a repository's `.claude/settings.json`
+    could otherwise set `ANTHROPIC_BASE_URL` and send the key to another host.
+  - **pi** profiles need an `anthropic/…` model (not empty or `default`). pi prefers a
+    stored Anthropic login over `ANTHROPIC_API_KEY`, so Redline loads a small extension of its
+    own with `-e` (written to a private run directory, never containing a key, removed
+    afterwards). It moves `anthropic` and `anthropic-cli` models onto a provider that reads
+    `$ANTHROPIC_API_KEY`, and ends the run (exit status 78) rather than let it continue on
+    any other model, or send a request on any other provider. A pi extension of your own that
+    reroutes Anthropic models should leave them alone while `REDLINE_ANTHROPIC_API_CREDITS`
+    is set.
+  - **command** jobs get the environment and, like Claude Code runs, a fresh, empty, private
+    `CLAUDE_CONFIG_DIR`, so a `claude` they start spends the key. Redline does not control
+    that command line, so a command job that starts `claude` should pass
+    `--setting-sources=` itself; without it, a `.claude/settings.json` in the workspace can
+    set `ANTHROPIC_BASE_URL` and send the key to another host. They do not get the pi
+    extension: a command job that starts pi must pass `-e` with an equivalent extension
+    itself, or use a `pi` profile instead.
+  - A run's private directories are removed when it ends; any a crashed service left behind
+    are removed at the next start once they are a day old.
+- **Hard cap.** The floor gates job starts; it does not stop a running job. For a hard
+  limit, create a dedicated `redline` workspace in the Console organization, give it a spend
+  limit, and give Redline an API key from that workspace.
+
+```yaml
+providers:
+  claude-credits:
+    provider: anthropic-api-credits
+    label: Console org
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: 00000000-0000-0000-0000-000000000000   # the Console org UUID; empty uses the only org with API access
+      min_promo_balance: 5
+      run_cost_estimate: 1
+      pacing: firesale
+      firesale_window: 72h
+```
+
+### Claude keys
+
+The Console's credit balance is only available to a signed-in browser, so Redline needs the
+**session key**: the `sessionKey` cookie (`sk-ant-sid…`) for platform.claude.com, from the
+browser's developer tools (Application or Storage › Cookies). It carries your full Console
+access. Redline sends it only to the Console's organizations and prepaid credits endpoints on
+platform.claude.com (no redirects), never logs or displays it, and never sends it to phones
+or the relay. The run **API key** is an `sk-ant-api…` key from the same linked organization.
+Each command checks the key's prefix, and an OpenAI key given to a Claude account (or the
+reverse) is refused with a message saying so.
+
+```bash
+redline account add-claude-credits claude-credits --organization-id <uuid> --label "Console org"
+pbpaste | redline account set-session-key claude-credits   # the sessionKey cookie
+pbpaste | redline account set-api-key claude-credits       # sk-ant-api… from the redline workspace
+redline account clear-keys claude-credits                  # later, to remove both
+```
+
+Storage (Keychain service `ai.redline.api-credits`, or owner-only files), the
+`session_key_file`/`api_key_file` options and the `account.session_key_needed` notification
+work as for OpenAI. The alert names platform.claude.com. `REDLINE_OPENAI_SESSION_KEY` never
+serves a Claude account, and there is no Claude equivalent: use a saved key or
+`session_key_file`.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:

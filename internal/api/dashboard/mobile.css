@@ -464,7 +464,7 @@ button { color: inherit; font: inherit; }
 /* Pages contain their children's margins, so a page measures what it shows. */
 .m-acct-page { display: flow-root; }
 
-/* OpenAI API credits: a dollar headline in place of rings, then rule, paid
+/* API credits (OpenAI and Claude): a dollar headline in place of rings, then rule, paid
    and grant rows in the detail. */
 .m-provider-logo.openai-api-credits .m-provider-fallback { color: var(--text); }
 .m-credits-headline { display: flex; flex-direction: column; align-items: flex-end; flex: 0 1 auto; min-width: 0; max-width: 52%; text-align: right; gap: 3px; }
@@ -482,7 +482,9 @@ button { color: inherit; font: inherit; }
 .m-credits-grants .m-pools-label { margin-bottom: 0; letter-spacing: .08em; }
 /* The account name is long; keep it and the status on their own lines. */
 .m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-name,
-.m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-status { display: block; }
+.m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-status,
+.m-provider-logo.anthropic-api-credits + .m-provider-summary .m-provider-name,
+.m-provider-logo.anthropic-api-credits + .m-provider-summary .m-provider-status { display: block; }
 /* Signed out: the re-paste fix wraps on its own row below the name. */
 .m-provider-header:has(.m-credits-fix) { flex-wrap: wrap; row-gap: 4px; }
 .m-credits-fix { flex-basis: 100%; padding-left: 42px; color: #ff918b; font: normal 10px/1.4 ui-monospace, monospace; }

@@ -34,6 +34,7 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/demo"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/croutoncreations/redline/internal/pairing"
@@ -180,12 +181,14 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		if len(remaining) > 1 && remaining[1] == "add-profile" {
 			return runAccountAddProfile(remaining[2:], *configPath, stdout, stderr)
 		}
-		// OpenAI API credits accounts and their keys are set up locally:
-		// keys never pass through the HTTP API.
+		// API credits accounts and their keys are set up locally: keys never
+		// pass through the HTTP API.
 		if len(remaining) > 1 {
 			switch remaining[1] {
 			case "add-openai-credits":
 				return runAccountAddOpenAICredits(remaining[2:], *configPath, stdin, stdout, stderr)
+			case "add-claude-credits":
+				return runAccountAddClaudeCredits(remaining[2:], *configPath, stdin, stdout, stderr)
 			case "set-session-key":
 				return runAccountSetKey(apicredits.SecretSessionKey, remaining[2:], *configPath, stdin, stdout, stderr)
 			case "set-api-key":
@@ -635,6 +638,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	// Runs interrupted by a crash also left their scratch directories.
+	harness.SweepRunScratch(now())
 	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

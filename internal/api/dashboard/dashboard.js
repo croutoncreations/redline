@@ -44,21 +44,28 @@ const onboardingStorage = {
 };
 
 function providerName(provider) {
-  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider === API_CREDITS ? 'OpenAI API credits' : title(provider);
+  return provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : API_CREDITS_NAMES[provider] || title(provider);
 }
-// An OpenAI API credits account: a dollar balance of promotional credit, not
-// a subscription window. Only pi and command runs are given its API key, so
-// they are the only harnesses a profile on it may use (the server enforces it).
+// An API credits account (OpenAI, or Claude via the Claude Console): a dollar
+// balance of promotional credit, not a subscription window. Only some runs
+// are given its API key, so they are the only harnesses a profile on it may
+// use (the server enforces it): pi and command on OpenAI, and Claude Code too
+// on Claude. A pi profile must name the vendor's API model prefix.
 const API_CREDITS = 'openai-api-credits';
-const API_CREDITS_HARNESSES = ['pi','command'];
-const isAPICredits = (provider) => String(provider || '').toLowerCase() === API_CREDITS;
+const CLAUDE_API_CREDITS = 'anthropic-api-credits';
+const API_CREDITS_NAMES = {[API_CREDITS]:'OpenAI API credits',[CLAUDE_API_CREDITS]:'Claude API credits'};
+const API_CREDITS_HARNESSES = {[API_CREDITS]:['pi','command'],[CLAUDE_API_CREDITS]:['claude-code','pi','command']};
+const API_CREDITS_PI_PREFIX = {[API_CREDITS]:'openai/',[CLAUDE_API_CREDITS]:'anthropic/'};
+const API_CREDITS_PI_EXAMPLE = {[API_CREDITS]:'openai/gpt-5.6-sol',[CLAUDE_API_CREDITS]:'anthropic/claude-sonnet-4-6'};
+const isAPICredits = (provider) => Object.hasOwn(API_CREDITS_NAMES, String(provider || '').toLowerCase());
+const isClaudeCredits = (provider) => String(provider || '').toLowerCase() === CLAUDE_API_CREDITS;
 
 function usageSourceName(source) {
   return String(source).toLowerCase() === 'openusage' ? 'OpenUsage' : title(source);
 }
 
 function directHarnessFor(provider) {
-  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isAPICredits(provider) ? 'pi' : '';
+  const id = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isClaudeCredits(provider) ? 'claude-code' : isAPICredits(provider) ? 'pi' : '';
   return harnessCatalog.find(item => item.id === id);
 }
 
@@ -544,7 +551,7 @@ function basePressure(item) {
   }
   return {label:'No actionable surplus',detail:normalizedReason || 'No dispatch threshold is currently active.',tone:'healthy'};
 }
-// ── OpenAI API credits ──────────────────────────────────────────────────────
+// ── API credits (OpenAI and Claude) ──────────────────────────────────────────────────────
 // Dollars, the promotional grant's expiry, the floor and pacing rules, and the
 // paid credit that is shown but never scheduled. Never a weekly, monthly or
 // 5-hour figure and no capacity evidence: the balance is not a window.
@@ -565,7 +572,7 @@ const creditsReasonText = (reason) => reason ? `${reason.charAt(0).toUpperCase()
 function creditsOnboardingAccount(item, usageReady, source) {
   const out = creditsSignedOut(item);
   const balance = usageReady && !out
-    ? '<li class="ready">Balance read from OpenAI</li>'
+    ? `<li class="ready">Balance read from ${isClaudeCredits(item.provider) ? 'the Claude Console' : 'OpenAI'}</li>`
     : `<li class="needs-action">${out ? 'Session key needed' : 'Balance not read yet'} · <code>${escapeHTML(`redline account set-session-key ${item.id}`)}</code></li>`;
   return `<article class="onboarding-account">
       <div><strong>${escapeHTML(providerName(item.provider))}</strong><span>${escapeHTML(item.id)}</span></div>
@@ -577,6 +584,13 @@ function creditsOnboardingAccount(item, usageReady, source) {
     </article>`;
 }
 const CREDIT_GRANT_KINDS = {promo:'ChatGPT subscription grant', auto_recharge:'Auto recharge', purchase:'Purchased credit', other:'Credit grant'};
+const CLAUDE_CREDIT_GRANT_KINDS = {...CREDIT_GRANT_KINDS, promo:'Claude subscription credit', other:'Other promotional credit'};
+const creditGrantKinds = (provider) => isClaudeCredits(provider) ? CLAUDE_CREDIT_GRANT_KINDS : CREDIT_GRANT_KINDS;
+// The signed-out fix: the CLI command, and on Claude where the key comes from.
+function creditsSignedOutFix(item) {
+  const command = `redline account set-session-key ${item.id}`;
+  return isClaudeCredits(item.provider) ? `Paste the sessionKey cookie from platform.claude.com: ${command}` : `Run ${command}`;
+}
 function creditsPromoFraction(credits) {
   return credits?.promo_granted > 0 ? Math.max(0, Math.min(1, credits.promo_remaining / credits.promo_granted)) : 0;
 }
@@ -600,7 +614,7 @@ function creditsSignedOut(item) {
 // describe a dollar balance; a held balance says why in the decision's words.
 function creditsPressure(item) {
   if (item.paused || item.run_login_unknown) return basePressure(item);
-  if (creditsSignedOut(item)) return {label:'Session key needed',detail:`Run redline account set-session-key ${item.id}`,tone:'near'};
+  if (creditsSignedOut(item)) return {label:'Session key needed',detail:creditsSignedOutFix(item),tone:'near'};
   if (item.snapshot_stale) return {label:'Usage unavailable',detail:'The last balance read is out of date. Jobs are held until the balance can be read.',tone:'near'};
   const current = item.latest_decision;
   if (!current) return {label:'Evaluating',detail:'Waiting for the first scheduler decision.',tone:'neutral'};
@@ -610,7 +624,10 @@ function creditsPressure(item) {
 }
 function creditsCompact(item) {
   const snap = item.snapshot, credits = snap?.credits, stale = Boolean(item.snapshot_stale), out = creditsSignedOut(item);
-  const label = String(item.label || '').trim(), name = providerName(API_CREDITS);
+  const label = String(item.label || '').trim(), name = providerName(String(item.provider).toLowerCase());
+  const kinds = creditGrantKinds(item.provider);
+  // Claude credits wear the Claude artwork; OpenAI credits keep the neutral $.
+  const logo = isClaudeCredits(item.provider) ? '<span class="provider-logo claude" aria-hidden="true"><img src="/assets/claude.svg" alt=""></span>' : '<span class="provider-logo credits" aria-hidden="true">$</span>';
   const source = item.usage_source?.active || snap?.source || 'unknown';
   const fraction = creditsPromoFraction(credits), value = Number((fraction * 100).toFixed(1));
   const noPromo = Boolean(credits) && !(credits.promo_remaining > 0);
@@ -620,7 +637,7 @@ function creditsCompact(item) {
     : stale ? `Last known ${cursorMoney(credits.promo_remaining)}`
     : noPromo ? `${cursorMoney(0)} promo`
     : `${cursorMoney(credits.promo_remaining)} left`;
-  const secondary = out ? `Run redline account set-session-key ${item.id}`
+  const secondary = out ? creditsSignedOutFix(item)
     : stale ? `Last sample ${relative(snap?.observed_at)}`
     : credits ? creditsExpiryLine(credits) : 'Waiting for the balance';
   // Stale keeps the last-known bar, muted; signed out shows none.
@@ -638,12 +655,12 @@ function creditsCompact(item) {
     const rules = `<div class="credits-rules" data-testid="credits-rules">${escapeHTML(creditsRuleLine(credits))}</div>`;
     const paid = credits.paid_available > 0 ? `<div class="credits-paid" data-testid="credits-paid"><span>Paid credit</span><b>${escapeHTML(`${cursorMoney(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
     const grants = (credits.grants || []).filter(grant => grant.remaining > 0).map(grant =>
-      `<div class="credits-grant" data-testid="credits-grant"><span>${escapeHTML(CREDIT_GRANT_KINDS[grant.kind] || CREDIT_GRANT_KINDS.other)}</span><b>${escapeHTML(`${cursorMoney(grant.remaining)} of ${cursorMoney(grant.amount)}`)}</b>${grant.expires_at ? `<i>expires ${escapeHTML(creditsGrantDate(grant.expires_at))}</i>` : ''}</div>`).join('');
+      `<div class="credits-grant" data-testid="credits-grant"><span>${escapeHTML(kinds[grant.kind] || kinds.other)}</span><b>${escapeHTML(`${cursorMoney(grant.remaining)} of ${cursorMoney(grant.amount)}`)}</b>${grant.expires_at ? `<i>expires ${escapeHTML(creditsGrantDate(grant.expires_at))}</i>` : ''}</div>`).join('');
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;
     details = `${decisionDetail}${concurrencyStatus(item)}<div class="meters">${promo}${rules}${paid}${grants ? `<div class="credits-grants"><span class="cursor-group-label">Grants</span>${grants}</div>` : ''}</div>`;
   }
   const sourceError = item.usage_source?.last_error && !out ? `<span class="source-error">${escapeHTML(item.usage_source.last_error)}</span>` : '';
-  return `<div class="provider-compact credits-compact${stale ? ' stale' : ''}${out ? ' signed-out' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([name, label].filter(Boolean).join(' '))} usage details"><span class="provider-logo credits" aria-hidden="true">$</span><span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([name, label].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(name)}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span></strong><b>${escapeHTML(headline)}</b></span><span class="provider-window-line"><span>${escapeHTML(secondary)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress credits-progress ${barTone}" max="100" value="${barValue}" aria-label="${escapeHTML(headline)}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale && !out ? `Last known balance${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(name)}${label ? ` ${escapeHTML(label)}` : ''}`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error && !out ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}</span></div>`;
+  return `<div class="provider-compact credits-compact${stale ? ' stale' : ''}${out ? ' signed-out' : ''}" data-provider-id="${escapeHTML(item.id)}"><button class="provider-trigger" type="button" aria-label="Show ${escapeHTML([name, label].filter(Boolean).join(' '))} usage details">${logo}<span class="provider-summary"><span class="provider-copy-line"><strong class="provider-name" title="${escapeHTML([name, label].filter(Boolean).join(' · '))}"><span class="provider-name-text">${escapeHTML(name)}${label ? ` <span class="provider-account">${escapeHTML(label)}</span>` : ''}</span></strong><b>${escapeHTML(headline)}</b></span><span class="provider-window-line"><span>${escapeHTML(secondary)}</span></span><span class="provider-pressure ${escapeHTML(pressure.tone)}">${escapeHTML(pressure.label)}</span><progress class="compact-progress credits-progress ${barTone}" max="100" value="${barValue}" aria-label="${escapeHTML(headline)}"></progress></span></button><span class="provider-detail"><span class="detail-head"><strong>${stale && !out ? `Last known balance${label ? ` · ${escapeHTML(label)}` : ''}` : `${escapeHTML(name)}${label ? ` ${escapeHTML(label)}` : ''}`}</strong><span>${escapeHTML(title(source))} · ${snap ? `sampled ${escapeHTML(relative(snap.observed_at))}` : 'offline'}</span></span>${item.error && !out ? `<span class="source-error">${escapeHTML(item.error)}</span>` : ''}${sourceError}${details}</span></div>`;
 }
 function providerCompact(item) {
   if (isAPICredits(item.provider)) return creditsCompact(item);
@@ -1554,21 +1571,27 @@ function modelLabel(model) {
   const identity = model.label && model.label !== model.id ? `${model.label} - ${model.id}` : model.id;
   return detail ? `${identity} · ${detail}` : identity;
 }
-// pi bills whichever provider its model names, and only openai/* models bill
-// the credits account's API key, so the server refuses anything else there.
+// pi bills whichever provider its model names, and only openai/* (or, on a
+// Claude credits account, anthropic/*) models bill the credits account's API
+// key, so the server refuses anything else there.
 function creditsPi(harness) {
   return harness === 'pi' && isAPICredits(providerKind());
 }
-const isOpenAIModel = (model) => String(model || '').startsWith('openai/');
+const creditsPiPrefix = () => API_CREDITS_PI_PREFIX[String(providerKind()).toLowerCase()] || 'openai/';
+const isCreditsPiModel = (model) => String(model || '').startsWith(creditsPiPrefix());
 function creditsPiModels() {
   const all = Object.values(harnessCatalog.find(item => item.id === 'pi')?.models || {}).flat();
-  return all.filter((model, index) => isOpenAIModel(model.id) && all.findIndex(other => other.id === model.id) === index);
+  return all.filter((model, index) => isCreditsPiModel(model.id) && all.findIndex(other => other.id === model.id) === index);
+}
+function creditsPiModelMessage() {
+  const provider = String(providerKind()).toLowerCase();
+  return `${isClaudeCredits(provider) ? 'A Claude' : 'An OpenAI'} API credits account bills only ${creditsPiPrefix()}… models: choose or enter one, for example ${API_CREDITS_PI_EXAMPLE[provider] || API_CREDITS_PI_EXAMPLE[API_CREDITS]}.`;
 }
 function suggestedModels(harness) {
   if (creditsPi(harness)) {
     const known = creditsPiModels().map(model => ({value:model.id,label:modelLabel(model)}));
     const values = new Set(known.map(option => option.value));
-    profiles.filter(profile => profile.harness_type === 'pi' && isOpenAIModel(profile.model) && !values.has(profile.model)).forEach(profile => {
+    profiles.filter(profile => profile.harness_type === 'pi' && isCreditsPiModel(profile.model) && !values.has(profile.model)).forEach(profile => {
       values.add(profile.model); known.push({value:profile.model,label:`${profile.model} · previously used`});
     });
     return known;
@@ -1584,7 +1607,8 @@ function suggestedModels(harness) {
 function setHarnessControl(selected='') {
   let options = harnessCatalog.length ? harnessCatalog : [{id:'command',label:'Custom command',installed:true}];
   if (isAPICredits(providerKind())) {
-    options = options.filter(option => API_CREDITS_HARNESSES.includes(option.id));
+    const allowed = API_CREDITS_HARNESSES[String(providerKind()).toLowerCase()];
+    options = options.filter(option => allowed.includes(option.id));
     // An existing selection the credits account cannot use is replaced, not
     // kept as an "unavailable" choice.
     if (selected && !options.some(option => option.id === selected)) selected = preferredHarness();
@@ -1605,7 +1629,9 @@ function setModelControl(harness, selected='default') {
   updateModelHint();
 }
 function updateModelHint() {
-  $('#profile-model-hint').hidden = !creditsPi($('#profile-harness').value) || isOpenAIModel(selectedModel());
+  const hint = $('#profile-model-hint');
+  hint.hidden = !creditsPi($('#profile-harness').value) || isCreditsPiModel(selectedModel());
+  if (!hint.hidden) hint.textContent = creditsPiModelMessage();
 }
 function selectedModel() {
   return $('#profile-model-choice').value === '__other__' ? $('#profile-model-custom').value.trim() : $('#profile-model-choice').value;
@@ -1617,7 +1643,7 @@ function populateRepositoryChoices(selected='') {
 }
 function preferredHarness() {
   const provider = providerCatalog.find(item => item.id === $('#profile-provider').value)?.provider;
-  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isAPICredits(provider) ? 'pi' : 'command';
+  return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isClaudeCredits(provider) ? 'claude-code' : isAPICredits(provider) ? 'pi' : 'command';
 }
 function preferredModel(harness) {
   if (creditsPi(harness)) return creditsPiModels()[0]?.id || '';
@@ -1630,7 +1656,7 @@ function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
   $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
-  if (creditsPi(harness)) setModelControl(harness, isOpenAIModel(selectedModelValue) ? selectedModelValue : preferredModel(harness));
+  if (creditsPi(harness)) setModelControl(harness, isCreditsPiModel(selectedModelValue) ? selectedModelValue : preferredModel(harness));
   else setModelControl(harness, selectedModelValue || 'default');
 }
 function resetProfileForm() {
@@ -1667,8 +1693,9 @@ async function editProfile(id) {
 }
 async function saveProfile(event) {
   event.preventDefault(); showProfileError('');
-  if (creditsPi($('#profile-harness').value) && !isOpenAIModel(selectedModel())) {
-    showProfileError('A pi profile on an OpenAI API credits account needs an openai/… model, for example openai/gpt-5.6-sol.');
+  if (creditsPi($('#profile-harness').value) && !isCreditsPiModel(selectedModel())) {
+    const provider = String(providerKind()).toLowerCase();
+    showProfileError(`A pi profile on ${isClaudeCredits(provider) ? 'a Claude' : 'an OpenAI'} API credits account needs an ${creditsPiPrefix()}… model, for example ${API_CREDITS_PI_EXAMPLE[provider] || API_CREDITS_PI_EXAMPLE[API_CREDITS]}.`);
     $('#profile-model-custom').hidden ? $('#profile-model-choice').focus() : $('#profile-model-custom').focus();
     return;
   }

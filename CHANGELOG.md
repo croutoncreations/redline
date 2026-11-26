@@ -30,6 +30,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `redline account add-openai-credits`, `set-session-key` and `set-api-key` on the machine
   running Redline and stored in the Keychain (or owner-only files elsewhere). An expired or
   missing session key sends an opt-in `account.session_key_needed` notification once.
+- Claude API credits accounts (`anthropic-api-credits`). Redline reads the API credit a Claude
+  subscription grants to a linked Claude Console organization, and shows and spends it the same
+  way as OpenAI API credits, labelled "Claude API credits" on every dashboard. Only in-effect
+  subscription credit is capacity. Purchased credit and other promotions are shown but never
+  scheduled, and an unrecognised response holds work. Queued `claude-code`, `pi` (`anthropic/…`
+  models) and `command` jobs can spend it. Claude Code runs with the account's API key in a fresh,
+  empty, run-scoped `CLAUDE_CONFIG_DIR`, so a stored subscription login is never used. pi runs load a
+  Redline extension that sends Anthropic models through `$ANTHROPIC_API_KEY`. Keys are entered with
+  `redline account add-claude-credits`, `set-session-key` (the platform.claude.com `sessionKey`
+  cookie) and `set-api-key` (`sk-ant-api…`), and are never put in a command line. For a hard
+  spending cap, use a key from a dedicated Console workspace with a spend limit.
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count

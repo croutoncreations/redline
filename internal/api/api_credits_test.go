@@ -210,8 +210,8 @@ func TestCreditsFiresaleDispatchesWithTheAccountsKey(t *testing.T) {
 	}
 	select {
 	case profile := <-fixture.ran:
-		if profile.OpenAIAPIKey != "sk-proj-SYNTHETIC" || profile.OpenAIOrganization != "org-synthetic" {
-			t.Fatalf("run profile key=%q org=%q", profile.OpenAIAPIKey, profile.OpenAIOrganization)
+		if profile.APICreditsVendor != "openai" || profile.APICreditsKey != "sk-proj-SYNTHETIC" || profile.APICreditsOrganization != "org-synthetic" {
+			t.Fatalf("run profile vendor=%q key=%q org=%q", profile.APICreditsVendor, profile.APICreditsKey, profile.APICreditsOrganization)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not start")
@@ -484,5 +484,27 @@ func TestCreditsFloorHoldsDispatch(t *testing.T) {
 	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
 	if result.Run != nil || !strings.Contains(result.Result.Reason, "$50.00 floor") {
 		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
+// openai/ alone names no model, and --api-key would put a key in argv.
+func TestCreditsAccountRefusesPiModelWithoutAnIDAndAPIKeyArgs(t *testing.T) {
+	fixture := newCreditsServer(t, 80, 24*time.Hour, nil)
+	for i, tc := range []struct {
+		model, want string
+		args        []string
+	}{
+		{"openai/", "openai/", nil},
+		{"openai/ ", "openai/", nil},
+		{"openai/gpt-5.6-sol", "unsupported", []string{"--api-key=k"}},
+	} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": fmt.Sprintf("pi-bad-%d", i), "provider_account_id": "api-credits", "harness_type": "pi", "model": tc.model,
+			"harness_args": tc.args, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, tc.want) {
+			t.Fatalf("%q %v: status = %d body = %s", tc.model, tc.args, response.StatusCode, body)
+		}
 	}
 }
