@@ -1190,8 +1190,8 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if r.URL.Query().Has("after_id") {
 		afterID, parseErr := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
-		if parseErr != nil {
-			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be an int64"})
+		if parseErr != nil || afterID < 0 {
+			writeJSON(w, http.StatusBadRequest, problem{Error: "after_id must be a nonnegative int64"})
 			return
 		}
 		deliveries, err = s.store.ListNotificationDeliveriesAfter(r.Context(), afterID, limit)

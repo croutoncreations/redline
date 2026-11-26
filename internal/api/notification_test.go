@@ -42,6 +42,7 @@ func TestListNotificationsAfterID(t *testing.T) {
 		{"?after_id=0&limit=999", 200, 200, 1, 200},
 		{"?after_id=205", 200, 0, 0, 0},
 		{"?after_id=9223372036854775807", 200, 0, 0, 0},
+		{"?after_id=-1", 400, 0, 0, 0},
 		{"?after_id=bad", 400, 0, 0, 0},
 		{"?after_id=", 400, 0, 0, 0},
 		{"?after_id=9223372036854775808", 400, 0, 0, 0},
