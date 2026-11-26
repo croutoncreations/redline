@@ -11,13 +11,28 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	if err := wf.On.Decode(&triggers); err != nil {
 		t.Fatal(err)
 	}
-	if len(triggers) != 2 {
-		t.Fatalf("live workflow must only support schedule and dispatch: %v", triggers)
+	// workflow_run always executes the default-branch workflow file at the main
+	// tip; it is only a wake-up signal. No pull_request* event may run this.
+	if len(triggers) != 3 {
+		t.Fatalf("live workflow must only support schedule, dispatch and CI completion: %v", triggers)
 	}
-	for _, name := range []string{"schedule", "workflow_dispatch"} {
+	for _, name := range []string{"schedule", "workflow_dispatch", "workflow_run"} {
 		if _, ok := triggers[name]; !ok {
 			t.Fatalf("missing trigger %s", name)
 		}
+	}
+	var on struct {
+		WorkflowRun struct {
+			Workflows []string `yaml:"workflows"`
+			Types     []string `yaml:"types"`
+		} `yaml:"workflow_run"`
+	}
+	if err := wf.On.Decode(&on); err != nil {
+		t.Fatal(err)
+	}
+	run := on.WorkflowRun
+	if len(run.Workflows) != 1 || run.Workflows[0] != "CI" || len(run.Types) != 1 || run.Types[0] != "completed" {
+		t.Fatalf("workflow_run must only follow completed CI: %+v", run)
 	}
 	if wf.Concurrency == nil || wf.Concurrency.Group != "green-lane-live-merge" || wf.Concurrency.CancelInProgress != "false" {
 		t.Fatalf("live merges must be serialized without cancellation: %+v", wf.Concurrency)
@@ -39,7 +54,9 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	if err := node.Decode(&job); err != nil {
 		t.Fatal(err)
 	}
-	for _, guard := range []string{"github.repository == 'croutoncreations/redline'", "github.ref == 'refs/heads/main'", "vars.GREEN_LANE_LIVE_ENABLED == 'true'"} {
+	for _, guard := range []string{"github.repository == 'croutoncreations/redline'", "github.ref == 'refs/heads/main'", "vars.GREEN_LANE_LIVE_ENABLED == 'true'",
+		"github.event_name != 'workflow_run' ||", "github.event.workflow_run.event == 'pull_request'",
+		"github.event.workflow_run.conclusion == 'success'", "github.event.workflow_run.head_repository.full_name == github.repository"} {
 		if !strings.Contains(job.If, guard) {
 			t.Fatalf("missing guard %s", guard)
 		}

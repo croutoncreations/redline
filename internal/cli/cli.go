@@ -25,6 +25,7 @@ import (
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/apiauth"
 	"github.com/croutoncreations/redline/internal/apiclient"
+	"github.com/croutoncreations/redline/internal/apicredits"
 	"github.com/croutoncreations/redline/internal/appdir"
 	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/calibration"
@@ -33,6 +34,7 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/demo"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/croutoncreations/redline/internal/pairing"
@@ -56,6 +58,9 @@ type schedulerResponse struct {
 	Run          *domain.Run            `json:"run,omitempty"`
 }
 
+// defaultConfigPath is the --config value when the flag is not given.
+const defaultConfigPath = "redline.yaml"
+
 func Run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 	return RunWithInput(args, os.Stdin, stdout, stderr, now)
 }
@@ -69,7 +74,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 	}
 	global := flag.NewFlagSet("redline", flag.ContinueOnError)
 	global.SetOutput(stderr)
-	configPath := global.String("config", "redline.yaml", "service configuration file")
+	configPath := global.String("config", defaultConfigPath, "service configuration file")
 	apiURL := global.String("api", "http://127.0.0.1:7436", "Redline service API URL")
 	showVersion := global.Bool("version", false, "print the Redline version and exit")
 	if err := global.Parse(args); err != nil {
@@ -175,6 +180,22 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		}
 		if len(remaining) > 1 && remaining[1] == "add-profile" {
 			return runAccountAddProfile(remaining[2:], *configPath, stdout, stderr)
+		}
+		// API credits accounts and their keys are set up locally: keys never
+		// pass through the HTTP API.
+		if len(remaining) > 1 {
+			switch remaining[1] {
+			case "add-openai-credits":
+				return runAccountAddOpenAICredits(remaining[2:], *configPath, stdin, stdout, stderr)
+			case "add-claude-credits":
+				return runAccountAddClaudeCredits(remaining[2:], *configPath, stdin, stdout, stderr)
+			case "set-session-key":
+				return runAccountSetKey(apicredits.SecretSessionKey, remaining[2:], *configPath, stdin, stdout, stderr)
+			case "set-api-key":
+				return runAccountSetKey(apicredits.SecretAPIKey, remaining[2:], *configPath, stdin, stdout, stderr)
+			case "clear-keys":
+				return runAccountClearKeys(remaining[2:], *configPath, stdout, stderr)
+			}
 		}
 		return runAccount(client, remaining[1:], stdout, stderr)
 	default:
@@ -545,6 +566,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
+	// Before anything can start a child process that would inherit it.
+	apicredits.CaptureSessionKeyEnv()
 	cfg, err := config.LoadForService(configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -615,6 +638,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	// Runs interrupted by a crash also left their scratch directories.
+	harness.SweepRunScratch(now())
 	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -742,7 +767,7 @@ func resolveTokenConfigPath(configPath string) string {
 	if _, err := apiauth.ReadToken(configPath); err == nil {
 		return configPath
 	}
-	if configPath != "redline.yaml" {
+	if configPath != defaultConfigPath {
 		return configPath
 	}
 	dataDir, err := appdir.Default()

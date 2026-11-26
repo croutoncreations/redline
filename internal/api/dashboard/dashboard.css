@@ -211,3 +211,29 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 #scheduler-setup-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#111519;border:1px solid var(--line);border-radius:6px;font-size:12px}
 #scheduler-setup-dialog a{color:var(--accent)}
 .scheduler-banner{flex-wrap:wrap}.scheduler-banner span{flex:1;min-width:180px}
+
+/* OpenAI API credits: a neutral "$" tile, then rule, paid and grant rows. */
+.provider-logo.credits{color:var(--text);font:700 13px ui-monospace,monospace}
+/* Credits small text matches the popover's 11px body text, not the 8px reset line. */
+.credits-rules{color:var(--muted);font:11px/1.5 ui-monospace,monospace}
+.credits-expiry{font-size:11px}
+.credits-paid,.credits-grant{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;column-gap:10px;row-gap:2px}
+.credits-paid span,.credits-grant span{font-size:11px}
+.credits-paid b,.credits-grant b{font:600 11px ui-monospace,monospace;white-space:nowrap}
+.credits-grant i{flex-basis:100%;color:var(--muted);font:normal 11px ui-monospace,monospace}
+.credits-grants{display:grid;gap:9px;border-top:1px solid var(--line);padding-top:12px}
+.credits-grants .cursor-group-label{margin-bottom:0}
+/* A balance is green when healthy, amber below 35% and red below 15%;
+   a stale (last-known) figure is muted. */
+.credits-progress::-webkit-progress-value{background:var(--green)}
+.credits-progress.warn::-webkit-progress-value{background:var(--amber)}
+.credits-progress.danger::-webkit-progress-value{background:#ff7b72}
+.credits-progress.muted::-webkit-progress-value{background:var(--muted)}
+.credits-progress::-moz-progress-bar{background:var(--green)}
+.credits-progress.warn::-moz-progress-bar{background:var(--amber)}
+.credits-progress.danger::-moz-progress-bar{background:#ff7b72}
+.credits-progress.muted::-moz-progress-bar{background:var(--muted)}
+/* Signed out, the account name stays readable: the headline drops below it
+   and the fix wraps. */
+.credits-compact.signed-out .provider-copy-line{flex-wrap:wrap;row-gap:2px}
+.credits-compact.signed-out .provider-window-line span{white-space:normal;overflow-wrap:anywhere}

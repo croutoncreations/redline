@@ -79,6 +79,8 @@ type Review struct {
 	Body        string
 	ID          int64
 	User        string
+	UserID      int64
+	UserType    string
 	State       string
 	CommitID    string
 	SubmittedAt time.Time

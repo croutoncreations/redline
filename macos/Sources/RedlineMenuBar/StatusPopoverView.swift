@@ -20,7 +20,7 @@ struct StatusPopoverView: View {
     let actions: StatusPopoverActions
 
     private var snapshot: DashboardSnapshot? { model.snapshot }
-    private var trayState: TrayState? { snapshot.map(TrayState.init) }
+    private var trayState: TrayState? { snapshot.map { TrayState(snapshot: $0) } }
     private var relayStatus: RelayStatus? { model.relayStatus }
 
     var body: some View {
@@ -202,9 +202,12 @@ struct StatusPopoverView: View {
 
     @ViewBuilder private var providerGrid: some View {
         let tray = claudeTray
-        let providers = (snapshot?.providers ?? [])
+        let all = (snapshot?.providers ?? [])
             .filter { tray == nil || $0.provider.lowercased() != tray!.provider }
             .sorted { providerRank($0.provider) < providerRank($1.provider) }
+        // Credits accounts are dollars, not windows: their own full-width card.
+        let providers = all.filter { !$0.isAPICredits }
+        let creditsAccounts = all.filter(\.isAPICredits)
         if let tray, let snapshot {
             AccountTraySection(
                 snapshot: snapshot,
@@ -232,7 +235,19 @@ struct StatusPopoverView: View {
                     }
                 }
             }
-        } else if tray == nil {
+        }
+        ForEach(creditsAccounts) { account in
+            APICreditsCardView(
+                account: account,
+                expanded: Binding(
+                    get: { model.expandedCreditsAccountID == account.id },
+                    set: { model.expandedCreditsAccountID = $0 ? account.id : nil }
+                ),
+                pausing: model.providersBeingControlled.contains(account.id),
+                setPaused: { paused in Task { await model.setPaused(paused, providerID: account.id) } }
+            )
+        }
+        if providers.isEmpty && creditsAccounts.isEmpty && tray == nil {
             emptyRow("Usage data is not available yet.", symbol: "chart.bar.xaxis")
         }
     }

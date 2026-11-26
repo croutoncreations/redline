@@ -121,7 +121,8 @@ informational.
 3. Add a separate opt-in merge step that repeats the current checks, verifies
    the base is still current and merges the exact evaluated head SHA. Respect
    branch protections. This can use GitHub Actions permissions without deploying
-   an issuer service or a new App. The live merge step is not implemented yet.
+   an issuer service or a new App. This is now the
+   [limited live pilot](#limited-redline-live-pilot).
 4. Port the policy to other repos after the Redline pilot is validated, changing
    the author list, required CI identity and critical paths for each repo.
 
@@ -132,8 +133,22 @@ to be provisioned for the simplified policy.
 ## Limited Redline live pilot
 
 `Green Lane Live Pilot` is a separate hourly worker (`:47`) with a manual
-workflow-dispatch option. It runs trusted `main` code only, never checks out PR
-code, and independently runs the existing evaluator. Shadow status, artifacts,
+workflow-dispatch option. It also runs when a same-repository PR's `CI` run
+completes successfully (`workflow_run`), so an eligible PR doesn't wait up to an
+hour. `workflow_run` always executes the workflow file from `main` with
+`github.sha` set to the current main tip; the payload is used only as a trigger,
+and the worker still scans and re-evaluates every open PR itself. It runs trusted
+`main` code only, never checks out PR code, and independently runs the existing
+evaluator.
+
+**Transient GitHub errors defer.** A GitHub 5xx, dropped connection or timeout
+*before* the merge call ends the run as `deferred_transient`: no merge, one
+warning line naming the cause, recorded in `live-result.json`. The next run starts
+from scratch. 4xx errors (expired audit token, missing permission) still fail the
+run. Once the merge call starts, every error, including a 5xx or a timeout, still
+fails loudly and is never retried, because GitHub may already have merged.
+
+Shadow status, artifacts,
 PR comments, and Claude's claims are not merge authorization. Claude's hourly
 maintenance task keeps its existing no-merge role. No manual approval is needed;
 the existing current-head independent review requirement still applies.
@@ -203,6 +218,24 @@ never authorizes merging. Historical review-body prose only clears after that sa
 publishes a later full completion for the new head. A push or another provider
 cannot silently clear it. Dismissing a review also does not resolve its body.
 This deliberately also defers benign review prose.
+
+Codex's security review often finishes with `has_any_findings` and
+`has_unresolved_findings` both `null` (openai/codex#57326). That form counts as
+clean only when all of these hold: the security review is `completed` on the
+exact head with both keys present and literally `null`; the summary has exactly
+one `codex-security-review:v1` marker, `completed`, for this repository, PR and
+head; and the PR has no Codex security-finding comment
+(`codex-security-review-finding:v1`) at all. Real findings set both flags `true`
+and post such a comment, so they still block.
+
+One narrow exception: `claude[bot]` (user ID 209825114, type Bot) posts a
+`COMMENTED` review when it **did not review at all**, for example when the
+organization has no Claude usage left or the review was requested by a bot. Two
+such notices are listed in `internal/greenlane/review_notices.go` and are ignored
+only when the review body matches byte for byte. Any other wording, an extra
+character, another author or another review state still blocks. These notices
+never count as a completed review. If Anthropic changes the wording, the new text
+blocks again until it is added to that list in a reviewed PR.
 All review bodies remain bound into the twice-collected and premerge-revalidated
 review snapshot, so body edits invalidate old eligibility.
 
