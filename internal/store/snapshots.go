@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/croutoncreations/redline/internal/decision"
 )
@@ -84,12 +85,61 @@ FROM (
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close usage snapshots: %w", err)
 	}
+	allowances, err := d.loadSnapshotAllowances(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	for index, id := range ids {
-		allowances, err := d.loadAllowances(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		snapshots[index].Allowances = allowances
+		snapshots[index].Allowances = allowances[id]
 	}
 	return snapshots, nil
+}
+
+// Bound each IN list below SQLite's conservative 999-variable limit. Normal
+// calibration reads 500 snapshots in two queries rather than 501; larger
+// history requests use additional bounded batches.
+func (d *DB) loadSnapshotAllowances(ctx context.Context, ids []int64) (map[int64][]decision.AllowanceWindow, error) {
+	result := make(map[int64][]decision.AllowanceWindow, len(ids))
+	for _, id := range ids {
+		result[id] = make([]decision.AllowanceWindow, 0)
+	}
+	const batchSize = 500
+	for start := 0; start < len(ids); start += batchSize {
+		batch := ids[start:min(start+batchSize, len(ids))]
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		rows, err := d.db.QueryContext(ctx, `SELECT snapshot_id, pool_key, source_label, scope, role, remaining,
+resets_at, period_duration_s, reset_inferred FROM usage_allowance_windows
+WHERE snapshot_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")+`) ORDER BY snapshot_id, pool_key`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list snapshot allowance batch: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			var allowance decision.AllowanceWindow
+			var reset string
+			if err := rows.Scan(&id, &allowance.Key, &allowance.SourceLabel, &allowance.Scope, &allowance.Role,
+				&allowance.Remaining, &reset, &allowance.PeriodDurationSeconds, &allowance.ResetInferred); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan snapshot allowance: %w", err)
+			}
+			allowance.ResetsAt, err = parseStoredTimeField("allowance reset", reset)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[id] = append(result[id], allowance)
+		}
+		err = rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("list snapshot allowance batch: %w", err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close snapshot allowance batch: %w", closeErr)
+		}
+	}
+	return result, nil
 }

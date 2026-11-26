@@ -9,6 +9,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/croutoncreations/redline/internal/decision"
@@ -20,7 +21,14 @@ var (
 	ErrConflict = errors.New("record conflicts with current state")
 )
 
-type DB struct{ db *sql.DB }
+type DB struct {
+	db               *sql.DB
+	snapshotRevision atomic.Uint64
+}
+
+// SnapshotRevision changes after this store commits usage history changes.
+// Display caches can invalidate without querying or scanning the history.
+func (d *DB) SnapshotRevision() uint64 { return d.snapshotRevision.Load() }
 
 func Open(path string) (*DB, error) {
 	if path == "" {
@@ -804,6 +812,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	if err := ensureStatusIndexes(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
@@ -1229,6 +1240,9 @@ WHERE provider_account_id = '' AND provider = ?`, accounts[0], strings.ToLower(p
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit legacy usage adoption: %w", err)
 	}
+	if adopted > 0 {
+		d.snapshotRevision.Add(1)
+	}
 	return adopted, nil
 }
 
@@ -1349,18 +1363,28 @@ banked_resets_expiries, plan, source_stale, weekly_unavailable, banked_reset_det
 		return fmt.Errorf("count saved usage snapshot: %w", err)
 	}
 	if inserted == 0 {
+		var staleChanged bool
 		// The same observation saved again can only learn that its report
 		// has since expired (a fixed fetchedAt outlives its expiresAt), so
 		// that one fact is carried onto the stored row; nothing else changes.
 		if s.SourceStale {
-			if _, err := tx.ExecContext(ctx, `UPDATE usage_snapshots SET source_stale = 1
+			result, err := tx.ExecContext(ctx, `UPDATE usage_snapshots SET source_stale = 1
 WHERE provider_account_id = ? AND provider = ? AND observed_at = ? AND source = ? AND source_stale = 0`,
-				s.Account, s.Provider, formatTime(s.ObservedAt), s.Source); err != nil {
+				s.Account, s.Provider, formatTime(s.ObservedAt), s.Source)
+			if err != nil {
 				return fmt.Errorf("mark duplicate usage snapshot stale: %w", err)
 			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count stale usage snapshots: %w", err)
+			}
+			staleChanged = changed > 0
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit duplicate snapshot save: %w", err)
+		}
+		if staleChanged {
+			d.snapshotRevision.Add(1)
 		}
 		return nil
 	}
@@ -1381,6 +1405,7 @@ snapshot_id, pool_key, source_label, scope, role, remaining, resets_at, period_d
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot save: %w", err)
 	}
+	d.snapshotRevision.Add(1)
 	return nil
 }
 
