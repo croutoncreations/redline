@@ -118,7 +118,9 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(grants.nth(1)).toContainText('Auto recharge');
     await expect(grants.nth(1)).toContainText('$7.25 of $10.00');
     await expect(grants.nth(1)).toContainText('expires Thu, Jun 10, 2027');
-    const text = await detail.innerText();
+    // textContent is document order and doesn't depend on layout, so the
+    // check can't race the popover's open animation as innerText can.
+    const text = (await detail.textContent()).replace(/\s+/g, ' ');
     const order = ['Run now · firesale', 'Promotional credit', 'Jobs start above', 'Paid credit', 'ChatGPT subscription grant'].map(part => text.indexOf(part));
     expect(order.every(index => index >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
