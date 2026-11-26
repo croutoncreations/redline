@@ -11,9 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Upgrade notes
 
 - Downgrading: older versions reject `provider: openai-api-credits` accounts and the
-  `api_credits` settings. Remove those accounts (`redline account remove <id>`, after removing or reassigning profiles
-  that use them) before running
-  an older binary. The database migration only adds a column, so 0.1.13 opens it unchanged.
+  `api_credits` settings. Remove those accounts (`redline account remove <id>`, after removing
+  or reassigning the profiles that use them) before running an older binary. The database
+  migration only adds a column, so 0.1.13 opens it unchanged.
   Keys stay in the Keychain (service `ai.redline.api-credits`) until you run
   `redline account clear-keys <id>` or delete them there.
 
