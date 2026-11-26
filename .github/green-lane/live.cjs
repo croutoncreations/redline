@@ -5,18 +5,45 @@ const {snapshotMatches} = require('./publish.cjs');
 const checks = ['actionlint','go','homebrew','dashboard','linux-smoke','windows-smoke','macos','macos-intel'];
 const sha = value => /^[a-f0-9]{40}$/.test(value || '');
 const held = pr => pr.labels?.some(label => ['green-lane-hold','maintenance:skip','do-not-touch'].includes(label.name));
+// GitHub 5xx responses, dropped connections and timeouts before any merge call
+// are transient: the run defers without merging and the next run starts fresh.
+// 4xx (auth, permissions, missing resources) stays a hard failure.
+const transientText = /GitHub API error 5\d\d|\b5\d\d (Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)\b|fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|other side closed|context deadline exceeded|Client\.Timeout|TLS handshake timeout|connection reset by peer|unexpected EOF|stream error/i;
+const transient = err => {
+  // Octokit errors carry the HTTP status; execFileSync errors carry an exit
+  // code (< 100) in the same field, so classify those by evaluator stderr.
+  if (Number.isInteger(err?.status) && err.status >= 100) return err.status >= 500 && err.status <= 599;
+  if (err?.signal === 'SIGTERM' || err?.code === 'ETIMEDOUT') return true; // evaluator exceeded its time budget
+  return transientText.test(`${err?.stderr ?? ''}\n${err?.message ?? ''}`);
+};
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
-module.exports = async function live({github, accessAudit, context, core, run=execFileSync,
+async function live({github, accessAudit, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
   const report = {state:'deferred',main_tip:context.sha,merged:[],evaluations:[]};
   const finish = async reason => { report.reason=reason; await write(report); core.info(reason); return report; };
   const repo = context.repo;
   if (`${repo.owner}/${repo.repo}` !== 'croutoncreations/redline' || context.ref !== 'refs/heads/main' ||
-      !['schedule','workflow_dispatch'].includes(context.eventName) || !sha(context.sha)) {
-    throw new Error('Live pilot is restricted to trusted Redline main schedule/dispatch');
+      !['schedule','workflow_dispatch','workflow_run'].includes(context.eventName) || !sha(context.sha)) {
+    throw new Error('Live pilot is restricted to trusted Redline main schedule/dispatch/CI completion');
   }
+  // Set immediately before the merge API call. From then on no error counts as
+  // transient: a timed-out merge may have succeeded, so it fails loudly and is
+  // never retried.
+  let mergeCalled = false;
+  try {
+    return await select();
+  } catch (err) {
+    if (mergeCalled || !transient(err)) throw err;
+    const cause = String(err?.stderr || err?.message || err).split('\n').map(l => l.trim()).filter(Boolean).at(-1) ?? 'unknown';
+    report.state = 'deferred_transient';
+    report.transient_error = cause.slice(0, 500);
+    core.warning(`Green Lane deferred after a transient GitHub error before any merge call: ${report.transient_error}`);
+    return finish('Transient GitHub error before any merge call; no merge attempted. The next run re-evaluates from scratch.');
+  }
+
+  async function select() {
   // Disabling the workflow is the kill switch. Unlike the run's cached vars
   // context, workflow state is readable live with the ordinary Actions token.
   const enabled = async () => {
@@ -113,6 +140,7 @@ module.exports = async function live({github, accessAudit, context, core, run=ex
     await write(report);
     // Disable client retries in the workflow. Never try a second PR after this
     // call, including timeouts where GitHub may already have merged the first.
+    mergeCalled = true;
     const {data:merged} = await github.rest.pulls.merge({...repo,pull_number:number,sha:result.head_sha,merge_method:'squash'});
     if (merged.merged !== true || !sha(merged.sha)) throw new Error('GitHub did not confirm the exact-head squash merge');
     report.state='merged'; report.merged.push({pr:number,head:result.head_sha,commit:merged.sha});
@@ -124,4 +152,6 @@ module.exports = async function live({github, accessAudit, context, core, run=ex
     return finish(`Merged PR #${number} at ${merged.sha}; one-merge run complete`);
   }
   return finish('No current-main, fully qualified PR; no merge attempted');
-};
+  }
+}
+module.exports = Object.assign(live, {transient});
