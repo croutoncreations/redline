@@ -573,7 +573,7 @@ func completedRun(ctx context.Context, env *Environment, id, task, provider stri
 }
 
 func providerName(id string) string {
-	if id == "claude-main" {
+	if id == "claude-main" || id == "claude-credits" {
 		return "claude"
 	}
 	return "codex"

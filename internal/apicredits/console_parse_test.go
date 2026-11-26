@@ -134,6 +134,44 @@ func TestParseConsoleCreditsSumsSubscriptionTranchesAndUsesSoonestExpiry(t *test
 	}
 }
 
+// Tranches that lapse together all count toward the amount expiring then,
+// whatever order the Console lists them in.
+func TestParseConsoleCreditsSumsSubscriptionTranchesSharingTheSoonestExpiry(t *testing.T) {
+	start := iso(fixtureNow.Add(-24 * time.Hour))
+	soon, later := iso(fixtureNow.Add(48*time.Hour)), iso(fixtureNow.Add(96*time.Hour))
+	thirty := consoleTranche("subscription_api_credit", 5000, 3000, start, soon)
+	seventyFive := consoleTranche("subscription_api_credit", 10000, 7500, start, soon)
+	late := consoleTranche("subscription_api_credit", 2000, 2000, start, later)
+	for name, promo := range map[string][]string{
+		"forward": {thirty, late, seventyFive},
+		"reverse": {seventyFive, late, thirty},
+	} {
+		report, err := ParseConsoleCredits(consoleCredits(promo, nil), fixtureNow)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if report.Promo.NextExpiring != 105 || report.Promo.Remaining != 125 {
+			t.Errorf("%s: promo = %+v, want 105 of 125 expiring first", name, report.Promo)
+		}
+	}
+}
+
+// A subscription tranche reporting more left than it granted is not a
+// balance Redline understands, so the read fails closed.
+func TestParseConsoleCreditsRefusesSubscriptionRemainingAboveGranted(t *testing.T) {
+	start, future := iso(fixtureNow.Add(-time.Hour)), iso(fixtureNow.Add(time.Hour))
+	if _, err := ParseConsoleCredits(consoleCredits([]string{
+		consoleTranche("subscription_api_credit", 10000, 20000, start, future)}, nil), fixtureNow); err == nil {
+		t.Fatal("remaining above granted was accepted")
+	}
+	for name, remaining := range map[string]int{"partly spent": 4000, "untouched": 10000, "exhausted": 0} {
+		if _, err := ParseConsoleCredits(consoleCredits([]string{
+			consoleTranche("subscription_api_credit", 10000, remaining, start, future)}, nil), fixtureNow); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // Amounts are amount_minor / 10^exponent; the legacy minor-units field (in
 // cents) is used only when the remaining object is missing.
 func TestParseConsoleCreditsMinorUnitMaths(t *testing.T) {

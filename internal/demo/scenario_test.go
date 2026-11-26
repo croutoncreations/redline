@@ -209,6 +209,38 @@ func TestExecutorCompletesDecisionTaskWithBelievableResult(t *testing.T) {
 	}
 }
 
+// A run on the Claude credits demo profile is labelled a Claude run.
+func TestExecutorLabelsClaudeCreditsRunsAsClaude(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	env, err := demo.Create(ctx, "claude-credits", root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	task, err := env.Database.GetTask(ctx, "docs-sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := env.Database.AdmitTask(ctx, "take-claude-credits", task.ID, "claude-credits", "demo-revision", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := demo.Executor{Store: env.Database, Root: root, Now: func() time.Time { return now }, Delay: time.Millisecond}
+	profile := domain.ExecutionProfile{ProviderAccountID: "claude-credits", HarnessType: "claude-code", Model: "claude-sonnet-4-6"}
+	if err := executor.Execute(ctx, run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := env.Database.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActualProvider != "claude" || got.ActualModel != "claude-sonnet-4-6" {
+		t.Fatalf("run provider/model = %q/%q", got.ActualProvider, got.ActualModel)
+	}
+}
+
 // The API launches executors with context.Background(), so a long recording
 // delay must also end when the demo process shuts down, or Ctrl-C would hang
 // for up to --run-duration.

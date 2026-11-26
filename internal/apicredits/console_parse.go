@@ -161,12 +161,18 @@ func ParseConsoleCredits(body []byte, now time.Time) (Report, error) {
 		}
 		report.Promo.Granted += grant.Amount
 		report.Promo.Remaining += grant.Remaining
-		if report.Promo.ExpiresAt == nil || grant.ExpiresAt.Before(*report.Promo.ExpiresAt) {
+		// NextExpiring is everything that lapses at ExpiresAt, so tranches
+		// sharing the soonest expiry are summed.
+		switch {
+		case report.Promo.ExpiresAt == nil || grant.ExpiresAt.Before(*report.Promo.ExpiresAt):
 			report.Promo.ExpiresAt = grant.ExpiresAt
 			report.Promo.EffectiveAt = grant.EffectiveAt
 			report.Promo.NextExpiring = grant.Remaining
+		case grant.ExpiresAt.Equal(*report.Promo.ExpiresAt):
+			report.Promo.NextExpiring += grant.Remaining
 		}
 	}
+	report.Promo.NextExpiring = roundDollars(report.Promo.NextExpiring)
 	report.Promo.Granted = roundDollars(report.Promo.Granted)
 	report.Promo.Remaining = roundDollars(report.Promo.Remaining)
 	report.PaidAvailable = roundDollars(report.PaidAvailable)
@@ -189,6 +195,11 @@ func consoleGrant(raw consoleTranchePayload, kind string, now time.Time) (Grant,
 	granted, err := consoleDollars(raw.Granted, raw.GrantedMinorUnits)
 	if err != nil {
 		return Grant{}, err
+	}
+	// Subscription credit is scheduling capacity, so more left than was
+	// granted is a balance Redline does not understand.
+	if kind == KindPromo && remaining > granted {
+		return Grant{}, errConsoleCredits
 	}
 	expires, err := consoleTime(raw.ExpiresAt)
 	if err != nil {
