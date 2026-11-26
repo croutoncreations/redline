@@ -132,8 +132,22 @@ to be provisioned for the simplified policy.
 ## Limited Redline live pilot
 
 `Green Lane Live Pilot` is a separate hourly worker (`:47`) with a manual
-workflow-dispatch option. It runs trusted `main` code only, never checks out PR
-code, and independently runs the existing evaluator. Shadow status, artifacts,
+workflow-dispatch option. It also runs when a same-repository PR's `CI` run
+completes successfully (`workflow_run`), so an eligible PR doesn't wait up to an
+hour. `workflow_run` always executes the workflow file from `main` with
+`github.sha` set to the current main tip; the payload is used only as a trigger,
+and the worker still scans and re-evaluates every open PR itself. It runs trusted
+`main` code only, never checks out PR code, and independently runs the existing
+evaluator.
+
+**Transient GitHub errors defer.** A GitHub 5xx, dropped connection or timeout
+*before* the merge call ends the run as `deferred_transient`: no merge, one
+warning line naming the cause, recorded in `live-result.json`. The next run starts
+from scratch. 4xx errors (expired audit token, missing permission) still fail the
+run. Once the merge call starts, every error, including a 5xx or a timeout, still
+fails loudly and is never retried, because GitHub may already have merged.
+
+Shadow status, artifacts,
 PR comments, and Claude's claims are not merge authorization. Claude's hourly
 maintenance task keeps its existing no-merge role. No manual approval is needed;
 the existing current-head independent review requirement still applies.
