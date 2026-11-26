@@ -371,6 +371,11 @@ func newServer(
 	// tests swap the client after construction.
 	apicredits.CaptureSessionKeyEnv()
 	server.apiCreditSecrets = apicredits.DefaultSecretStore(cfg.ConfigPath)
+	if hasAPICreditsAccount(cfg) {
+		if problem := apicredits.KeychainProblem(); problem != "" {
+			log.Printf("redline api credits: %s", problem)
+		}
+	}
 	server.apiCredits = &apicredits.UsageSource{Next: nativeWithCursor, Client: apicredits.Client{Now: now},
 		Secrets: server.apiCreditSecrets}
 	server.usageSources = usage.NewManager(openUsageWithCursor, apiCreditsSource{server}, now)
@@ -2440,6 +2445,12 @@ func (s *Server) dispatchCore(
 		response.ProviderFiresale = &firesale
 	}
 	maxConcurrent = providerDispatchCap(configuredProvider, maxConcurrent, response.Result)
+	if reason := creditsInFlightHold(configuredProvider, response.Snapshot, active); reason != "" && response.Result.Decision == decision.Admit {
+		response.Result.Decision = decision.Wait
+		response.Result.Reason = reason
+		response.Result.Firesale = false
+		return response, false, s.recordSchedulerResponse(ctx, request.ProviderAccountID, response)
+	}
 	if active >= maxConcurrent {
 		response.Result.Decision = decision.Wait
 		response.Result.Mode = decision.ModeActive
@@ -2959,6 +2970,34 @@ func (s *Server) evaluateCandidateBudget(
 		}
 	}
 	return decorateBudgetResult(result, profile.Model, routing, required, triggering, poolResults), true, ""
+}
+
+func hasAPICreditsAccount(cfg config.Config) bool {
+	for _, provider := range cfg.Providers {
+		if provider.IsAPICredits() {
+			return true
+		}
+	}
+	return false
+}
+
+// creditsInFlightHold is why an API credits account must not start another
+// run, or "". The floor is checked when a run starts, so runs already in
+// flight could each still spend; each reserves run_cost_estimate, and a new
+// run starts only while the balance after those reservations stays above the
+// floor. With nothing in flight this changes nothing.
+func creditsInFlightHold(provider config.Provider, snapshot decision.UsageSnapshot, active int) string {
+	if !provider.IsAPICredits() || active <= 0 || snapshot.Credits == nil {
+		return ""
+	}
+	settings := provider.EffectiveAPICredits()
+	reserved := float64(active) * settings.RunCostEstimate
+	left := snapshot.Credits.PromoRemaining - reserved
+	if left > settings.MinPromoBalance {
+		return ""
+	}
+	return fmt.Sprintf("$%.2f of promotional credit is reserved for %d run(s) in flight; another could reach the $%.2f floor",
+		reserved, active, settings.MinPromoBalance)
 }
 
 func providerDispatchCap(provider config.Provider, effective int, base decision.Result) int {

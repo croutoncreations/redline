@@ -218,6 +218,49 @@ func TestCreditsFiresaleDispatchesWithTheAccountsKey(t *testing.T) {
 	}
 }
 
+// The floor is a start gate, so it also counts what runs already in flight
+// may still spend: each one reserves run_cost_estimate (default $1). With
+// $6 promo left and a $5 floor, one run fits; a second would risk reaching
+// paid credit, so it waits until the first finishes.
+func TestCreditsFloorReservesRunsAlreadyInFlight(t *testing.T) {
+	fixture := newCreditsServer(t, 6, 24*time.Hour, nil)
+	fixture.saveKeys(t)
+	createCreditsCandidate(t, fixture.db, "pi")
+	if err := fixture.db.CreateTask(t.Context(), domain.Task{
+		ID: "credits-task-pi-2", Name: "Credits pi 2", Prompt: "p", ExecutionProfileID: "credits-pi",
+		Priority: 1, Type: domain.OneOff, DispatchTier: domain.DispatchFiresale,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetProviderMaxConcurrentRuns(t.Context(), "api-credits", 4); err != nil {
+		t.Fatal(err)
+	}
+	run, err := fixture.db.AdmitTask(t.Context(), "in-flight", "credits-task-pi-2", "api-credits", "", apiNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkRunRunning(t.Context(), run.ID, domain.Workspace{Directory: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || result.Result.Decision != decision.Wait || !strings.Contains(result.Result.Reason, "in flight") {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
+// With nothing in flight the same balance starts one run.
+func TestCreditsFloorStartsOneRunWhenNothingIsInFlight(t *testing.T) {
+	fixture := newCreditsServer(t, 6, 24*time.Hour, nil)
+	fixture.saveKeys(t)
+	createCreditsCandidate(t, fixture.db, "pi")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run == nil {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
 // Far from expiry, firesale pacing holds the balance.
 func TestCreditsHoldUntilNearExpiry(t *testing.T) {
 	fixture := newCreditsServer(t, 80, 10*24*time.Hour, nil)

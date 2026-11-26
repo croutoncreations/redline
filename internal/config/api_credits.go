@@ -29,6 +29,11 @@ const (
 // dollars, below which no new job starts unless configured otherwise.
 const DefaultAPICreditsMinPromoBalance = 5.0
 
+// DefaultAPICreditsRunCostEstimate is the promotional credit, in US dollars,
+// each run already in flight is assumed to still spend when deciding whether
+// another may start above the floor.
+const DefaultAPICreditsRunCostEstimate = 1.0
+
 // DefaultAPICreditsFiresaleWindow is how long before expiry firesale pacing
 // starts spending a grant.
 const DefaultAPICreditsFiresaleWindow = 72 * time.Hour
@@ -45,6 +50,12 @@ type APICredits struct {
 	// MinPromoBalance is the promotional balance (USD) a job needs before it
 	// may start. Nil is DefaultAPICreditsMinPromoBalance.
 	MinPromoBalance *float64 `yaml:"min_promo_balance,omitempty" json:"min_promo_balance,omitempty"`
+	// RunCostEstimate is the promotional credit (USD) each run already in
+	// flight is assumed to still spend: a new run starts only while the
+	// balance minus that reservation stays above the floor, so concurrent
+	// runs can't all start at the floor and spill into paid credit.
+	// Nil is DefaultAPICreditsRunCostEstimate; 0 turns the reservation off.
+	RunCostEstimate *float64 `yaml:"run_cost_estimate,omitempty" json:"run_cost_estimate,omitempty"`
 	// Pacing is firesale (default: run near expiry) or even (spread
 	// spending across the cycle).
 	Pacing string `yaml:"pacing,omitempty" json:"pacing,omitempty"`
@@ -69,6 +80,7 @@ type APICredits struct {
 type EffectiveAPICredits struct {
 	OrganizationID  string
 	MinPromoBalance float64
+	RunCostEstimate float64
 	Pacing          string
 	FiresaleWindow  time.Duration
 	SessionKeyFile  string
@@ -83,13 +95,16 @@ func (p Provider) IsAPICredits() bool {
 // EffectiveAPICredits returns the account's credits settings with defaults.
 func (p Provider) EffectiveAPICredits() EffectiveAPICredits {
 	result := EffectiveAPICredits{MinPromoBalance: DefaultAPICreditsMinPromoBalance, Pacing: APICreditsPacingFiresale,
-		FiresaleWindow: DefaultAPICreditsFiresaleWindow}
+		FiresaleWindow: DefaultAPICreditsFiresaleWindow, RunCostEstimate: DefaultAPICreditsRunCostEstimate}
 	if p.APICredits == nil {
 		return result
 	}
 	result.OrganizationID = strings.TrimSpace(p.APICredits.OrganizationID)
 	if p.APICredits.MinPromoBalance != nil {
 		result.MinPromoBalance = *p.APICredits.MinPromoBalance
+	}
+	if p.APICredits.RunCostEstimate != nil {
+		result.RunCostEstimate = *p.APICredits.RunCostEstimate
 	}
 	if pacing := strings.ToLower(strings.TrimSpace(p.APICredits.Pacing)); pacing != "" {
 		result.Pacing = pacing
@@ -148,6 +163,9 @@ func validateAPICredits(provider Provider) error {
 	}
 	if floor := settings.MinPromoBalance; floor != nil && (math.IsNaN(*floor) || math.IsInf(*floor, 0) || *floor < 0) {
 		return fmt.Errorf("api_credits min_promo_balance must be zero or more US dollars")
+	}
+	if estimate := settings.RunCostEstimate; estimate != nil && (math.IsNaN(*estimate) || math.IsInf(*estimate, 0) || *estimate < 0) {
+		return fmt.Errorf("api_credits run_cost_estimate must be zero or more US dollars")
 	}
 	switch strings.ToLower(strings.TrimSpace(settings.Pacing)) {
 	case "", APICreditsPacingFiresale, APICreditsPacingEven:
