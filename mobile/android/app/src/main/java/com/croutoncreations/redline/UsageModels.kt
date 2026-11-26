@@ -585,6 +585,19 @@ fun formatCountdown(seconds: Long): String {
     }
 }
 
+/** An overview row's placeholder where the account has no weekly or credits figure. */
+data class OverviewEmptyState(val label: String, val detail: String)
+
+/**
+ * An API credits account before its first reading has no balance yet, and
+ * never a weekly allowance; subscription providers keep the weekly wording.
+ */
+fun overviewEmptyState(account: ProviderUsage): OverviewEmptyState = when {
+    account.provider.equals("openai-api-credits", ignoreCase = true) -> OverviewEmptyState("Credits", "Balance not read yet")
+    account.weeklyNotReported -> OverviewEmptyState("Weekly", "Not reported")
+    else -> OverviewEmptyState("Weekly", "No usage reported")
+}
+
 /** The provider's name as people know it. */
 fun providerDisplayName(provider: String): String = when (provider.lowercase()) {
     "claude" -> "Claude"

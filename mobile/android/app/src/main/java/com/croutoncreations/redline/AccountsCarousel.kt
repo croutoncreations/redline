@@ -440,10 +440,9 @@ private fun OverviewRow(account: ProviderUsage, onOpen: () -> Unit) {
                 MiniCredits(credits, Modifier.weight(1f))
             } else if (weekly != null) {
                 MiniMeter(account.weeklyLabel.ifEmpty { "Weekly" }.removeSuffix(" allowance"), weekly, Modifier.weight(1f), old)
-            } else if (account.weeklyNotReported) {
-                MiniUnknown("Weekly", Modifier.weight(1f), "Not reported")
             } else {
-                MiniUnknown("Weekly", Modifier.weight(1f), "No usage reported")
+                val empty = overviewEmptyState(account)
+                MiniUnknown(empty.label, Modifier.weight(1f), empty.detail)
             }
         }
         Spacer(Modifier.height(6.dp))

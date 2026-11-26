@@ -126,4 +126,14 @@ class CreditsModelsTest {
         val claude = ProviderUsage(id = "claude-main", provider = "claude", stale = true, staleReason = "Claude Code is signed out · run claude auth login on your Mac")
         assertEquals(claude.staleReason, providerProblem(claude))
     }
+
+    @Test
+    fun `an unread credits account waits for its balance, never a weekly allowance`() {
+        val unread = ProviderUsage(id = "api-credits", provider = "openai-api-credits", accountStatus = "no_data")
+        assertEquals(OverviewEmptyState("Credits", "Balance not read yet"), overviewEmptyState(unread))
+        val claude = ProviderUsage(id = "claude-main", provider = "claude", accountStatus = "no_data")
+        assertEquals(OverviewEmptyState("Weekly", "No usage reported"), overviewEmptyState(claude))
+        val notReported = ProviderUsage(id = "cursor-main", provider = "cursor", weeklyNotReported = true)
+        assertEquals(OverviewEmptyState("Weekly", "Not reported"), overviewEmptyState(notReported))
+    }
 }

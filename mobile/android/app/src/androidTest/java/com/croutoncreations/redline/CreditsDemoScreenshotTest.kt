@@ -49,9 +49,12 @@ class CreditsDemoScreenshotTest {
 
     @Test
     fun capturesTheCreditsAccountFromTheDemo() {
-        val view = runCatching { redlineJson.decodeFromString(UsageView.serializer(), client.fetchUsage()) }.getOrNull()
-        assumeTrue("needs redline demo serve --scenario api-credits on $baseUrl", view != null)
-        val account = view!!.providers.single { it.provider == "openai-api-credits" }
+        // Skip only when the demo is unreachable; a response that no longer
+        // decodes is a failure.
+        val raw = runCatching { client.fetchUsage() }.getOrNull()
+        assumeTrue("needs redline demo serve --scenario api-credits on $baseUrl", raw != null)
+        val view = redlineJson.decodeFromString(UsageView.serializer(), raw!!)
+        val account = view.providers.single { it.provider == "openai-api-credits" }
         assertEquals("\$62.40 left", account.credits?.headline)
 
         // The credits card first, then the rest of the screen below it.
