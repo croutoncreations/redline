@@ -164,11 +164,16 @@ final class NativeNotificationController {
             content.title = "Redline job started"
         case "completed":
             content.title = "Redline job completed"
+        case "failed" where event.isUsageLimited:
+            content.title = "Redline job paused at usage limit"
         default:
             content.title = "Redline job failed"
         }
         content.body = "\(taskName) · \(event.providerAccountID)" + (event.error.map { "\n\($0)" } ?? "")
-        content.sound = event.state == "failed" ? .default : nil
+        if event.isUsageLimited {
+            content.body += "\nIt resumes automatically after the limit resets."
+        }
+        content.sound = event.state == "failed" && !event.isUsageLimited ? .default : nil
         content.userInfo = ["run_id": event.runID]
         center.add(UNNotificationRequest(identifier: "redline-run-\(event.runID)", content: content, trigger: nil))
     }

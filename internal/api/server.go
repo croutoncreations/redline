@@ -2543,6 +2543,12 @@ func (s *Server) evaluateCandidate(
 	snapshot decision.UsageSnapshot, base decision.Result, revisions map[string]profileRevision,
 ) (candidateVerdict, error) {
 	verdict := candidateVerdict{Result: base}
+	if task.ResumeAfter != nil && s.now().Before(*task.ResumeAfter) {
+		stamp := task.ResumeAfter.UTC()
+		verdict.Reason = "waiting for usage limit reset until " + stamp.Format(time.RFC3339)
+		verdict.EligibleAt = &stamp
+		return verdict, nil
+	}
 	interval := task.MinInterval
 	if base.Firesale && task.FiresaleMinInterval > 0 {
 		interval = task.FiresaleMinInterval
@@ -2621,6 +2627,11 @@ func (s *Server) selectTaskCached(
 	for _, task := range tasks {
 		if requestedTaskID != "" && task.ID != requestedTaskID {
 			continue
+		}
+		if requestedTaskID != "" {
+			// Asking for the task by id overrides a usage-limit wait;
+			// budget checks still apply.
+			task.ResumeAfter = nil
 		}
 		verdict, err := s.evaluateCandidate(ctx, provider, task, suppliedRevision, snapshot, base, revisions)
 		if err != nil {

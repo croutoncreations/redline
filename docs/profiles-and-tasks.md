@@ -190,6 +190,49 @@ Optional prepare/finalize hooks run before and after the harness. Cleanup defaul
 commands, are retained with each run for reproducibility, so pass secrets via the environment
 rather than embedding them in profile command strings.
 
+### Runs cut off by a usage limit
+
+The usage pool is shared with your interactive use, so a run can still hit the account's limit
+partway through. When Claude Code reports that its request was refused by the account's usage limit
+(five-hour, weekly, or per-model), Redline doesn't fail the task:
+
+- The run ends with outcome `usage_limited` and records Claude Code's session id.
+- The task stays queued with `resume_after` set to one minute after the reported reset (30 minutes
+  if Claude Code gave no reset time). The scheduler won't dispatch it before then, and its normal
+  usage checks still apply after.
+- With a Git worktree or DevX workspace, the next run reuses the earlier run's workspace and branch
+  and continues the same session with `claude --resume <session>`. It sends a short continuation
+  prompt in place of the task prompt. Finalize and cleanup are deferred to the run that finishes
+  the task, so partial work isn't committed, pushed, or removed in between (the earlier run shows
+  finalize state `deferred`, then `continued`).
+
+The task starts afresh instead (still after the reset) when:
+
+- the workspace is shared (existing directory, runtime-owned, or generic command); that run's
+  finalize and cleanup run as usual
+- the profile passes `--no-session-persistence`
+- the earlier workspace no longer exists
+- you edit the task's prompt, switch its profile, or edit that profile while it waits
+- Claude Code can't reopen the session
+
+Before the fresh run prepares a new workspace, the kept one is finalized (with
+`REDLINE_RUN_STATUS=failed`) and cleaned up under the id of the run that kept it. The exception is
+when Claude Code rejects the resume: the resuming run has already taken the workspace over, so it
+is finalized and cleaned up under that run's id, like any failed run. If the profile changed, the
+kept workspace's own settings (repository, branch, hooks) no longer apply, so Redline leaves it in
+place for manual recovery instead (finalize state `preserved`). It does the same when you disable
+a waiting task or the service restarts mid-run.
+
+A run that continues a kept workspace records the earlier run's source revision, not the
+revision when it was dispatched. A `require_repo_change` task therefore still runs again for
+commits that landed while it waited.
+
+A task is queued again at most three times in a row; a fourth usage-limited run fails it as before.
+Dispatching the task by id skips the wait. **Retry** on a failed task starts afresh.
+
+The `codex-cli`, `pi`, `cursor-agent`, `hermes`, and `command` harnesses are unchanged: a run that
+stops at a limit fails like any other run.
+
 For report-only tasks such as release readiness, choose a profile whose prepare/finalize hooks
 and custom harness commands do not change repository files, commit, push, open pull requests,
 publish, deploy, or release. A task prompt does not disable these commands; prepare hooks run

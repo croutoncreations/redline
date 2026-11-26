@@ -401,6 +401,12 @@ public struct RunNotificationEvent: Sendable, Equatable {
     public let providerAccountID: String
     public let state: String
     public let error: String?
+    /// "usage_limited" when the run stopped at the account's usage limit and
+    /// its task will resume after the reset.
+    public var outcome: String? = nil
+
+    /// A usage-limited run is recorded as failed but needs no action.
+    public var isUsageLimited: Bool { state == "failed" && outcome == "usage_limited" }
 }
 
 public struct RunNotificationTracker: Sendable {
@@ -420,13 +426,14 @@ public struct RunNotificationTracker: Sendable {
             hasEstablishedBaseline = true
         }
         guard hasEstablishedBaseline else {
-            guard let run = observable.first(where: { $0.state == "failed" }) else { return [] }
+            guard let run = observable.first(where: { $0.state == "failed" && $0.outcome != "usage_limited" }) else { return [] }
             return [RunNotificationEvent(
                 runID: run.id,
                 taskID: run.taskID,
                 providerAccountID: run.providerAccountID,
                 state: run.state,
-                error: run.error
+                error: run.error,
+                outcome: run.outcome
             )]
         }
         return observable.compactMap { run in
@@ -436,7 +443,8 @@ public struct RunNotificationTracker: Sendable {
                 taskID: run.taskID,
                 providerAccountID: run.providerAccountID,
                 state: run.state,
-                error: run.error
+                error: run.error,
+                outcome: run.outcome
             )
         }
     }

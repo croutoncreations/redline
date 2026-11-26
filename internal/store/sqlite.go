@@ -804,6 +804,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS manual_firesales_active ON manual_firesales(pr
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) SELECT 43 WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version=43)`); err != nil {
 		return fmt.Errorf("record manual firesales migration: %w", err)
 	}
+	// Migration 44: a task whose run stopped at a usage limit waits for the
+	// reset and then continues that run. Schema-guarded like 41–43.
+	for _, column := range []struct{ name, definition string }{
+		{"resume_after", "TEXT"},
+		{"resume_run_id", "TEXT NOT NULL DEFAULT ''"},
+		{"resume_fresh", "TEXT NOT NULL DEFAULT ''"},
+		{"resume_attempts", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := addColumnIfMissing(ctx, tx, "tasks", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if err := recordMigration(ctx, tx, 44, "usage-limit resume"); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}

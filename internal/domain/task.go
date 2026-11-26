@@ -105,8 +105,20 @@ type Task struct {
 	LastStartedAt                *time.Time    `json:"last_started_at,omitempty"`
 	LastCompletedAt              *time.Time    `json:"last_completed_at,omitempty"`
 	LastSuccessfulSourceRevision string        `json:"last_successful_source_revision,omitempty"`
-	CreatedAt                    time.Time     `json:"created_at"`
-	UpdatedAt                    time.Time     `json:"updated_at"`
+	// ResumeAfter is set when the task's last run stopped at the provider's
+	// usage limit. The task stays queued but is not dispatched before then.
+	ResumeAfter *time.Time `json:"resume_after,omitempty"`
+	// ResumeRunID is the usage-limited run whose workspace was kept for the
+	// next run. That run continues it, or finalizes and cleans it up before
+	// starting afresh. Empty when nothing was kept.
+	ResumeRunID string `json:"resume_run_id,omitempty"`
+	// ResumeFresh says why the next run starts afresh although a workspace
+	// was kept: ResumeFreshPrompt or ResumeFreshProfile. Empty to continue.
+	ResumeFresh string `json:"resume_fresh,omitempty"`
+	// ResumeAttempts counts consecutive runs that stopped at a usage limit.
+	ResumeAttempts int       `json:"resume_attempts,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type SchedulerDecision struct {
@@ -256,7 +268,49 @@ type RunCompletion struct {
 	Warnings       []string
 	ActualProvider string
 	ActualModel    string
+	// ExternalSessionID is the agent's own session id when the harness
+	// reported one. Empty leaves any recorded id unchanged.
+	ExternalSessionID string
+	// SourceRevision, when set, replaces the run's source revision: a run
+	// that continued a kept workspace worked on that workspace's checkout,
+	// not the revision resolved when it was admitted.
+	SourceRevision string
+	// Resume, on a failed run, queues the task again for after a usage limit
+	// resets instead of failing it.
+	Resume *ResumePlan
 }
+
+const (
+	// ResumeFreshPrompt: the task's prompt changed while it waited. The kept
+	// workspace is finalized and cleaned up as its profile still describes it.
+	ResumeFreshPrompt = "prompt"
+	// ResumeFreshProfile: the task's execution profile changed, so the kept
+	// workspace's own lifecycle settings are no longer known; it is left in
+	// place for manual recovery.
+	ResumeFreshProfile = "profile"
+)
+
+// ResumePlan is how a task continues after its run stopped at a usage limit.
+type ResumePlan struct {
+	After time.Time
+	// KeepWorkspace defers the run's finalize and cleanup so the next run
+	// can continue its session in the same workspace.
+	KeepWorkspace bool
+}
+
+// Finalize states specific to usage-limit resumes.
+const (
+	// FinalizeDeferred: workspace kept for the run that continues the task.
+	FinalizeDeferred = "deferred"
+	// FinalizeContinued: a later run took the kept workspace over.
+	FinalizeContinued = "continued"
+	// FinalizePreserved: workspace left in place for manual recovery.
+	FinalizePreserved = "preserved"
+)
+
+// RunOutcomeUsageLimited marks a run that stopped because the provider
+// account reached its usage limit.
+const RunOutcomeUsageLimited = "usage_limited"
 
 type RunEvent struct {
 	ID         int64           `json:"id"`
@@ -284,6 +338,8 @@ const (
 	RunEventCleanupStarted    = "cleanup.started"
 	RunEventCleanupCompleted  = "cleanup.completed"
 	RunEventCleanupFailed     = "cleanup.failed"
+	RunEventResumeScheduled   = "run.resume_scheduled"
+	RunEventResumeFallback    = "run.resume_fallback"
 	RunEventCompleted         = "run.completed"
 	RunEventFailed            = "run.failed"
 )

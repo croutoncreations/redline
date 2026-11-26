@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Claude Code jobs that stop because the account hit its usage limit now resume after the
+  limit resets. Redline recognises Claude Code's usage-limit error and keeps the task queued
+  until one minute after the reported reset. With Git worktree and DevX workspaces, the next
+  run continues the same Claude Code session (`--resume`) in the same worktree, so partial work
+  is neither lost nor redone. These runs show as `usage_limited`, not failed. They don't raise
+  "Job needs attention", send a failure notification with a sound, or pause the account. A task
+  is queued again at most three times in a row. See
+  [Runs cut off by a usage limit](docs/profiles-and-tasks.md#runs-cut-off-by-a-usage-limit).
+- Claude Code runs record Claude Code's session id on the run (`external.session_id`), so you
+  can open a run's session yourself with `claude --resume`.
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count

@@ -175,6 +175,37 @@ import Testing
     #expect(tracker.observe(snapshot.runs).map(\.runID) == ["newest-failure"])
 }
 
+@Test func runNotificationTrackerMarksUsageLimitedRunsAndSkipsThemAtStartup() throws {
+    let startup = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"limited","task_id":"task-a","provider_account_id":"claude-main","state":"failed","outcome":"usage_limited","started_at":"2026-07-21T03:00:00Z","error":"Claude Code reached the account's usage limit."}
+    ]}
+    """#.utf8))
+    var tracker = RunNotificationTracker()
+    #expect(tracker.observe(startup.runs).isEmpty)
+
+    let update = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"tasks":[],"attempts":[],"runs":[
+      {"id":"limited-2","task_id":"task-b","provider_account_id":"claude-main","state":"failed","outcome":"usage_limited","started_at":"2026-07-21T04:00:00Z"},
+      {"id":"limited","task_id":"task-a","provider_account_id":"claude-main","state":"failed","outcome":"usage_limited","started_at":"2026-07-21T03:00:00Z"}
+    ]}
+    """#.utf8))
+    let events = tracker.observe(update.runs)
+    #expect(events.map(\.runID) == ["limited-2"])
+    #expect(events.first?.isUsageLimited == true)
+}
+
+@Test func usageLimitedRunWithQueuedTaskIsNotAnUnresolvedFailure() throws {
+    let snapshot = try DashboardSnapshot.decode(Data(#"""
+    {"health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},"scheduler":{"enabled":true,"running":false},"providers":[],"attempts":[],"tasks":[
+      {"id":"waiting","name":"Waiting task","priority":80,"state":"queued","provider_account_id":"claude-main","model":"sonnet","dispatch_tier":"behind"}
+    ],"runs":[
+      {"id":"limited","task_id":"waiting","provider_account_id":"claude-main","state":"failed","outcome":"usage_limited","started_at":"2026-07-21T02:00:00Z"}
+    ]}
+    """#.utf8))
+    #expect(snapshot.unresolvedFailure == nil)
+}
+
 @Test func snapshotExposesLatestUnresolvedTaskFailure() throws {
     let snapshot = try DashboardSnapshot.decode(Data(#"""
     {"health":{"status":"degraded","window":"24h","active_runs":0,"completed_runs":0,"failed_runs":1,"dispatch_attempts":1,"dispatch_errors":0,"notification_failures":0},"scheduler":{"enabled":true,"running":false},"providers":[],"attempts":[],"tasks":[
