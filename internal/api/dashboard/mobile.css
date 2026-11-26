@@ -178,8 +178,12 @@ button { color: inherit; font: inherit; }
 .m-provider-decision b { display: block; font-size: 11px; }
 .m-provider-decision span { display: block; color: var(--muted); font-size: 9px; margin-top: 3px; }
 /* The toggle spans the box's padding so its hit area is at least 44px tall. */
-.m-provider-decision summary { min-height: 44px; margin: -9px -10px; padding: 13px 10px; cursor: pointer; }
+.m-provider-decision summary { min-height: 44px; margin: -9px -10px; padding: 13px 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .m-provider-decision[open] summary { margin-bottom: 0; padding-bottom: 6px; }
+.m-provider-decision summary::-webkit-details-marker { display: none; }
+.m-provider-decision summary::before { content: "\25B8"; font-size: 10px; color: var(--muted); }
+.m-provider-decision[open] summary::before { content: "\25BE"; }
+.m-provider-decision summary b { display: inline; }
 .m-meters { display: grid; gap: 12px; margin-bottom: 12px; }
 .m-meter-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .m-meter-head span { font-size: 11px; }
