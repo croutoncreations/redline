@@ -79,6 +79,93 @@ func TestTokenObservationsAreScopedToAccount(t *testing.T) {
 	}
 }
 
+// The supported v0.1.13 schema added provider_account_id without widening the
+// table's original UNIQUE(provider, source, source_id) identity. After an
+// upgrade, one account's observation must not make the same source identity
+// disappear from another account.
+func TestTokenObservationMigrationScopesIdentityToAccount(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "redline.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Restore the exact v0.1.13 token-observation identity while leaving the
+	// rest of its schema-43 database intact.
+	if _, err := raw.Exec(`
+DELETE FROM schema_migrations WHERE version = 44;
+DROP TABLE token_observations;
+CREATE TABLE token_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0),
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_tokens >= 0),
+    confidence TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    provider_account_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(provider, source, source_id)
+);
+CREATE INDEX idx_token_observations_provider_observed
+ON token_observations(provider, observed_at, id);
+CREATE INDEX idx_token_observations_account_observed
+ON token_observations(provider_account_id, provider, observed_at, id);
+INSERT INTO token_observations (
+    provider_account_id, provider, source, source_id, observed_at, input_tokens
+) VALUES (
+    'claude-a', 'claude', 'gatepost', 'shared-session:1',
+    '2026-11-16T10:00:00.000000000Z', 10
+);`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatalf("upgrade v0.1.13 database: %v", err)
+	}
+	observation := capacity.TokenObservation{
+		Account: "claude-b", Provider: "claude", Source: "gatepost", SourceID: "shared-session:1",
+		ObservedAt: time.Date(2026, 11, 16, 10, 1, 0, 0, time.UTC), InputTokens: 20,
+	}
+	if inserted, err := db.SaveTokenObservations(ctx, []capacity.TokenObservation{observation}); err != nil || inserted != 1 {
+		t.Fatalf("save second account's observation: inserted=%d err=%v", inserted, err)
+	}
+	// Idempotence remains account-local after widening the identity.
+	if inserted, err := db.SaveTokenObservations(ctx, []capacity.TokenObservation{observation}); err != nil || inserted != 0 {
+		t.Fatalf("repeat second account's observation: inserted=%d err=%v", inserted, err)
+	}
+	for account, wantTokens := range map[string]int64{"claude-a": 10, "claude-b": 20} {
+		got, err := db.ListTokenObservations(ctx, account, "claude", time.Time{}, time.Time{})
+		if err != nil || len(got) != 1 || got[0].InputTokens != wantTokens {
+			t.Fatalf("%s observations = %+v, %v", account, got, err)
+		}
+	}
+	db.Close()
+
+	// Reopening the upgraded fixture preserves both records and the repair.
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, err := db.ListTokenObservations(ctx, "claude-b", "claude", time.Time{}, time.Time{})
+	if err != nil || len(got) != 1 || got[0].InputTokens != 20 {
+		t.Fatalf("reopened observations = %+v, %v", got, err)
+	}
+}
+
 // Upgrading a single-account install keeps its history: rows recorded before
 // accounts existed are adopted by the provider's only account. With several
 // accounts they stay unowned, since nothing says whose they were.
@@ -159,12 +246,28 @@ func TestAccountMigrationFromPreviousSchema(t *testing.T) {
 	}
 	if _, err := raw.Exec(`DROP INDEX idx_usage_snapshots_identity;
 DROP INDEX IF EXISTS idx_usage_snapshots_account_observed;
-DROP INDEX IF EXISTS idx_token_observations_account_observed;
 ALTER TABLE usage_snapshots DROP COLUMN provider_account_id;
 ALTER TABLE usage_snapshots DROP COLUMN banked_resets_expiries;
 ALTER TABLE usage_snapshots DROP COLUMN plan;
 ALTER TABLE usage_snapshots DROP COLUMN source_stale;
-ALTER TABLE token_observations DROP COLUMN provider_account_id;
+DROP TABLE token_observations;
+CREATE TABLE token_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0),
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_creation_tokens >= 0),
+    confidence TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(provider, source, source_id)
+);
+CREATE INDEX idx_token_observations_provider_observed
+ON token_observations(provider, observed_at, id);
 CREATE UNIQUE INDEX idx_usage_snapshots_identity ON usage_snapshots(provider, observed_at, source);
 DELETE FROM schema_migrations WHERE version >= 30;`); err != nil {
 		t.Fatal(err)
