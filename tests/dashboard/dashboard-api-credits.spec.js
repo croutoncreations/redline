@@ -41,6 +41,27 @@ function promoAt(fraction) {
   };
 }
 
+// WCAG contrast of an element's text against the first opaque background
+// behind it (the element's own, else its nearest ancestor's).
+async function textContrast(locator) {
+  return locator.evaluate(node => {
+    const parse = value => (value.match(/[\d.]+/g) || []).map(Number);
+    const luminance = ([r, g, b]) => {
+      const channel = c => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    };
+    let background = [255, 255, 255];
+    for (let el = node; el; el = el.parentElement) {
+      const rgba = parse(getComputedStyle(el).backgroundColor);
+      if (rgba.length === 3 || (rgba.length === 4 && rgba[3] === 1)) { background = rgba.slice(0, 3); break; }
+    }
+    const [a, b] = [luminance(parse(getComputedStyle(node).color).slice(0, 3)), luminance(background)];
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  });
+}
+
+const fontSize = locator => locator.evaluate(node => parseFloat(getComputedStyle(node).fontSize));
+
 // Rule 10: Claude, Codex and Cursor render byte-for-byte the same with or
 // without a credits account beside them.
 async function existingCardsHTML(page, load, withAccount) {
@@ -104,6 +125,26 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(detail.locator('[data-capacity-evidence]')).toHaveCount(0);
     await expect(detail.locator('[data-provider-policy]')).toHaveCount(0);
     await expect(detail).not.toContainText(forbidden);
+  });
+
+  test('the rule line, promo expiry and grant expiries are readable small text', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits() });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
+    const detail = card.locator('.provider-detail');
+    const bodySize = await fontSize(detail.getByTestId('credits-promo').locator('.meter-head span'));
+    const small = [
+      detail.getByTestId('credits-rules'),
+      detail.getByTestId('credits-promo').locator('.reset'),
+      detail.getByTestId('credits-grant').nth(0).locator('i'),
+      detail.getByTestId('credits-grant').nth(1).locator('i'),
+    ];
+    for (const line of small) {
+      const size = await fontSize(line);
+      expect(size).toBeGreaterThanOrEqual(11);
+      expect(size).toBe(bodySize);
+      expect(await textContrast(line)).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   test('even pacing states its rule', async ({ page }) => {
@@ -380,6 +421,72 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await expect(row).toContainText('Session key needed');
     await expect(row).not.toContainText('$62.40');
     await expect(row.locator('.m-acct-cell').first()).toHaveClass(/muted/);
+  });
+
+  test('a stale account in the carousel overview shows its last-known balance muted, with no expiry', async ({ page }) => {
+    const dashboard = withCredits(staleNotSignedOut);
+    const second = apiCreditsNoPromoFixture();
+    second.id = 'credits-side'; second.label = 'Side org';
+    dashboard.providers.push(second);
+    await loadMobileDashboard(page, { dashboard });
+    const row = page.locator('[data-family="openai-api-credits"]').getByTestId('overview-row').nth(0);
+    await expect(row).toContainText('Out of date');
+    const [promo, expires] = [row.locator('.m-acct-cell').nth(0), row.locator('.m-acct-cell').nth(1)];
+    await expect(promo.locator('b')).toHaveText('$62.40');
+    await expect(promo).toHaveClass(/\bmuted\b/);
+    // A last-known balance makes no claim about when it lapses.
+    await expect(expires.locator('b')).toHaveText('—');
+    await expect(expires).toHaveClass(/\bmuted\b/);
+    await expect(row).not.toContainText(/in 2 days|expires|Wed, Jul 22/);
+    await expect(row).toHaveAttribute('aria-label', /Last known \$62\.40/);
+  });
+
+  test('the Run now status is AA-readable in light mode and unchanged in dark mode', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'light' });
+    await loadMobileDashboard(page, { dashboard: withCredits() });
+    const status = page.locator('[data-provider-id="credits-main"] .m-provider-status');
+    await expect(status).toHaveClass(/\btriggered\b/);
+    expect(await textContrast(status)).toBeGreaterThanOrEqual(4.5);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await expect(status).toHaveCSS('color', 'rgb(255, 145, 139)');
+  });
+
+  test('the credits card controls have 44px hit areas', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits() });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    const controls = [
+      card.locator('[data-provider-toggle="credits-main"]'),
+      card.getByTestId('decision-detail').locator('summary'),
+      card.getByRole('button', { name: /View queue/ }),
+      card.getByRole('button', { name: /Pause/ }),
+      card.getByRole('button', { name: /Refresh usage/ }),
+    ];
+    for (const control of controls) {
+      const box = await control.boundingBox();
+      expect(box, await control.evaluate(node => node.outerHTML.slice(0, 80))).not.toBeNull();
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  test('the credits card reads clearly in light mode', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'light' });
+    await loadMobileDashboard(page, { dashboard: withCredits() });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await expect(card.getByTestId('credits-headline')).toBeVisible();
+    await expect(card.getByTestId('credits-promo').locator('progress')).toBeVisible();
+    await expect(card.getByTestId('credits-paid')).toBeVisible();
+    await card.getByTestId('decision-detail').locator('summary').click();
+    // Every element that draws its own text, header to refresh button.
+    const texts = card.locator('*').filter({ visible: true });
+    const failures = [];
+    for (const node of await texts.all()) {
+      const own = await node.evaluate(el => [...el.childNodes].some(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim()));
+      if (!own) continue;
+      const ratio = await textContrast(node);
+      if (ratio < 4.5) failures.push(`${await node.evaluate(el => `${el.tagName.toLowerCase()}.${el.className}`)} "${(await node.textContent()).trim().slice(0, 40)}" ${ratio.toFixed(2)}`);
+    }
+    expect(failures).toEqual([]);
   });
 
   test('the queue picker names the credits account', async ({ page }) => {

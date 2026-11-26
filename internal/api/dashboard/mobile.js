@@ -835,7 +835,8 @@ function renderCreditsOverviewRow(item) {
   const signedOut = creditsSignedOut(item);
   // Signed out shows only the fix: no last-known balance or expiry.
   const promo = signedOut || !credits ? '—' : money(credits.promo_remaining || 0);
-  const expires = !signedOut && credits?.promo_remaining > 0 && credits.expires_at ? relative(credits.expires_at) : '—';
+  // A stale (last-known) balance makes no claim about when it lapses.
+  const expires = !signedOut && !item.snapshot_stale && credits?.promo_remaining > 0 && credits.expires_at ? relative(credits.expires_at) : '—';
   const compactState = accountState(item) === 'signed_out' ? 'Session key needed' : state.text;
   return `<button type="button" class="m-acct-row" data-account-open="${esc(item.id)}" data-testid="overview-row"
       aria-label="${esc([accountName(item), state.text, summary.headline, summary.secondary].join('. '))}. Open ${esc(accountName(item))}">
