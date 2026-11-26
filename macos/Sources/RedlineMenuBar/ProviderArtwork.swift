@@ -5,6 +5,10 @@ enum ProviderArtwork {
         if provider.lowercased() == "cursor" {
             return monogram("C", provider: provider, size: size)
         }
+        // A neutral dollar tile: no OpenAI trademark artwork for API credits.
+        if provider.lowercased() == "openai-api-credits" {
+            return monogram("$", provider: provider, size: size)
+        }
         if provider.lowercased() != "claude",
            let data = Data(base64Encoded: chatGPTTemplatePNG),
            let source = NSImage(data: data),

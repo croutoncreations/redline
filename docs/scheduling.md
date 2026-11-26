@@ -40,6 +40,98 @@ Manual or announcement firesales can unlock the firesale tier but cannot spend t
 session reserve. Use duration-based manual firesales; `--until-reset` requires a
 reported weekly reset. Calibration never invents a weekly number for these seats.
 
+## OpenAI API credits
+
+Eligible ChatGPT Pro and Business subscriptions grant monthly
+[API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) to one linked
+OpenAI API organization. They expire at the end of each billing cycle and do not roll over.
+An `openai-api-credits` account lets Redline show that balance and spend it on queued work
+before it lapses.
+
+- **What counts.** Only *promotional* grants (the subscription benefit) that are in effect and
+  have money left. Purchased and auto-recharge credit is shown on every dashboard but is never
+  scheduling capacity.
+- **Floor.** No job starts while the promotional balance is at or below `min_promo_balance`
+  (default $5). The floor is checked when a job starts, and a running job is not stopped, so
+  each run already in flight reserves `run_cost_estimate` (default $1): another run starts only
+  while the balance minus those reservations stays above the floor. Raise the estimate for
+  expensive jobs (a run can still spend more than it reserves), or set it to 0 to turn the
+  reservation off. For a hard cap, give Redline a key from a dedicated OpenAI project with an
+  enforced [spend limit](https://developers.openai.com/api/docs/guides/spend-limits).
+- **Pacing.** `firesale` (default) holds the balance until a single grant expiring within
+  `firesale_window` (default 72h) still holds at least `min_promo_balance` (and at least $0.01),
+  then runs queued work at the firesale tier. Smaller grants about to lapse do not trigger it on
+  their own: with a $5 floor, $1 expiring tomorrow and $100 expiring next month, work holds.
+  `even` runs work whenever a grant has more left than the share of its cycle still to go.
+  A manual firesale overrides pacing, never the floor. Stale or unreadable balances are UNKNOWN
+  and hold.
+- **Which jobs.** Only `pi` and `command` profiles can use the account: each run is given the
+  account's own API key as `OPENAI_API_KEY` (and its organization), after any inherited OpenAI
+  key, organization, project or base URL is removed. OpenAI's terms exclude Codex usage
+  through API keys, and Claude Code and Cursor bill elsewhere, so those profiles are refused.
+  With no saved API key, work holds rather than inherit whatever key the service has.
+  Such runs also get `REDLINE_OPENAI_API_CREDITS=1`, so tools inside them can tell they must
+  bill the API key: for example, a pi extension that moves `openai/*` models to a ChatGPT
+  subscription should leave them alone when it is set. Every run gets
+  `REDLINE_PROVIDER_ACCOUNT_ID`. Neither variable, nor the session key, is ever passed through from the
+  service to a run or a workspace prepare or finalize hook.
+
+```yaml
+providers:
+  api-credits:
+    provider: openai-api-credits
+    label: Linked org
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: org-…        # empty reads the session's default organization; required on every credits account when there is more than one
+      min_promo_balance: 5          # USD
+      run_cost_estimate: 1          # USD each run in flight reserves against the floor
+      pacing: firesale              # or even
+      firesale_window: 72h
+      # session_key_file: /abs/path # optional: read the session key from a private file
+      # api_key_file: /abs/path     # optional: read the run API key from a private file
+```
+
+### Keys
+
+OpenAI exposes the grant list only to the platform dashboard, so Redline needs the browser
+**session key** (`sess-…`): on platform.openai.com › Settings › Billing › Credit grants, open
+the browser's developer tools, select the `credit_grants` request and copy its `Authorization`
+value. API keys and Codex sign-ins are rejected by that endpoint. The session key carries your
+full dashboard access; Redline sends it only to the credit grants endpoint (no redirects), never
+logs or displays it, and never sends it to phones or the relay. When it expires the account
+shows "Session key needed"; paste a fresh one.
+
+Keys are entered only on the machine running Redline, from standard input:
+
+```bash
+redline account add-openai-credits api-credits --org org-… --label "Linked org"
+pbpaste | redline account set-session-key api-credits
+pbpaste | redline account set-api-key api-credits      # an sk-… key from that organization
+```
+
+To remove both saved keys later (work on the account then holds until new ones are saved):
+
+```bash
+redline account clear-keys api-credits
+```
+
+They are stored in the login Keychain on macOS (a locked or unreachable Keychain is reported,
+in the service log at start and on the account, rather than treated as "no key") and in
+owner-only files beside the config elsewhere (`REDLINE_SECRETS_DIR` overrides the directory). A headless service can instead read
+`session_key_file`/`api_key_file` (owner-only, not a symlink, re-read every poll, so a secret
+manager can rotate them) or take `REDLINE_OPENAI_SESSION_KEY`, which the service removes from
+its environment at start so no job inherits it. A configured key file takes precedence over a
+saved key: `set-session-key` and `set-api-key` still save, but warn that the file stays in use.
+On Windows, Redline does not verify a configured key file's ACL (it still refuses symlinks):
+protect the file yourself so only your user can read it. Keys Redline saves itself get an
+owner-only ACL.
+
+When the session key is missing or OpenAI rejects it, work on the account holds and an
+`account.session_key_needed` notification is sent once (again only after a successful read in
+between; a service restart may repeat it once). Like `account.needs_login` it is opt-in: add it to
+`notifications.events`. The alert names the fix and never contains key material.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:

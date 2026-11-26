@@ -24,6 +24,8 @@ final class PopoverViewModel: ObservableObject {
     /// choosing a row never refreshes usage or touches any login. Kept here
     /// so a refresh, or closing and reopening the popover, keeps it.
     @Published var expandedAccountID: String?
+    /// The OpenAI API credits card whose details are open. View state only.
+    @Published var expandedCreditsAccountID: String?
     var onSnapshot: ((DashboardSnapshot) -> Void)?
     var onError: ((String) -> Void)?
 

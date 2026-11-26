@@ -94,6 +94,8 @@ func displayProvider(provider string) string {
 		return "Codex"
 	case "cursor":
 		return "Cursor"
+	case creditsProvider:
+		return "OpenAI API credits"
 	default:
 		return provider
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -297,14 +298,27 @@ func displayHome(dir string) string {
 	return dir
 }
 
-func withoutVariable(environment []string, name string) []string {
-	kept := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		if key, _, _ := strings.Cut(entry, "="); key != name {
-			kept = append(kept, entry)
-		}
+// openAIRoutingVariables would sign a run in as another OpenAI organization
+// or project, or send its key to another host.
+var openAIRoutingVariables = []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+	"OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT"}
+
+// withOpenAICredentials gives an API credits run exactly its account's key
+// and organization, after dropping whatever the service inherited.
+func withOpenAICredentials(environment []string, key, organization string) []string {
+	for _, name := range openAIRoutingVariables {
+		environment = withoutVariable(environment, name)
 	}
-	return kept
+	environment = append(environment, "OPENAI_API_KEY="+key)
+	if organization != "" {
+		environment = append(environment, "OPENAI_ORG_ID="+organization, "OPENAI_ORGANIZATION="+organization)
+	}
+	return environment
+}
+
+// withoutVariable drops name from environment, ignoring case on Windows.
+func withoutVariable(environment []string, name string) []string {
+	return redprocess.WithoutVariables(runtime.GOOS, environment, name)
 }
 
 func splitHermesModel(value string) (provider, model string) {
@@ -325,7 +339,7 @@ func buildCommand(
 ) (redprocess.Command, error) {
 	base := redprocess.Command{
 		Dir: request.Workspace.Directory, Stdout: stdout, Stderr: stderr,
-		Env: append(os.Environ(),
+		Env: append(redprocess.ServiceEnvironment(),
 			"REDLINE_RUN_ID="+request.RunID,
 			"REDLINE_TASK_ID="+request.Task.ID,
 			"REDLINE_TASK_NAME="+request.Task.Name,
@@ -333,6 +347,21 @@ func buildCommand(
 			"REDLINE_SESSION_ID="+request.Workspace.SessionID,
 			"REDLINE_RESULT_FILE="+ResultFilePath(request.OutputDirectory, request.RunID),
 		),
+	}
+	// The platform session key carries full dashboard access; no run may
+	// see it, even if the service was started with it in its environment.
+	// The run markers below are Redline's to set, never inherited.
+	for _, name := range []string{"REDLINE_OPENAI_SESSION_KEY", "REDLINE_OPENAI_API_CREDITS", "REDLINE_PROVIDER_ACCOUNT_ID"} {
+		base.Env = withoutVariable(base.Env, name)
+	}
+	if account := request.Profile.ProviderAccountID; account != "" {
+		base.Env = append(base.Env, "REDLINE_PROVIDER_ACCOUNT_ID="+account)
+	}
+	if key := request.Profile.OpenAIAPIKey; key != "" {
+		base.Env = withOpenAICredentials(base.Env, key, request.Profile.OpenAIOrganization)
+		// Tools inside the run (such as a pi extension that moves OpenAI
+		// models to a ChatGPT subscription) use this to keep billing the key.
+		base.Env = append(base.Env, "REDLINE_OPENAI_API_CREDITS=1")
 	}
 	switch request.Profile.HarnessType {
 	case "codex-cli":

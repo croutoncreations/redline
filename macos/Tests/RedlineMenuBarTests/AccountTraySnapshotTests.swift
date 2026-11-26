@@ -189,6 +189,102 @@ struct AccountTraySnapshotTests {
                 "detail \(measured)pt > estimate \(AccountTrayDetailView.estimatedHeight(row))pt")
     }
 
+    /// A synthetic OpenAI API credits account beside Claude and Codex, in the
+    /// demo's shape: $62.40 of $100 promotional credit expiring in ~2 days.
+    static func creditsSnapshot(_ credits: String) throws -> DashboardSnapshot {
+        try DashboardSnapshot.decode(Data("""
+        {"demo":{"scenario":"api-credits","synthetic":true},
+         "health":{"status":"healthy","window":"24h","active_runs":0,"dispatch_errors":0},
+         "scheduler":{"enabled":true,"running":false},
+         "providers":[
+           \(account("claude-main", label: nil, plan: "Max 20x", decision: "RUN", short: (0.68, 2.2), weekly: (0.41, 75))),
+           {"id":"codex-main","provider":"codex","account_status":"ok","snapshot":{"weekly":{"remaining":0.43,"resets_at":"\(expiry(4))"}}},
+           \(credits)],
+         "tasks":[],"runs":[],"attempts":[]}
+        """.utf8))
+    }
+
+    static var freshCredits: String {
+        #"""
+        {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"ok",
+         "latest_decision":{"decision":"RUN","mode":"api_credits","unlocked_tier":"firesale","reason":"$62.40 of promotional credit expires in 2 days; running queued work before it lapses"},
+         "snapshot":{"observed_at":"\#(expiry(-0.001))","weekly":{"remaining":0.624,"resets_at":"\#(expiry(2.2))","period_seconds":2592000},
+           "credits":{"promo_remaining":62.4,"promo_granted":100,"next_expiring":62.4,"expires_at":"\#(expiry(2.2))",
+             "paid_available":7.25,"min_promo_balance":5,"pacing":"firesale","firesale_window_seconds":259200,
+             "grants":[{"kind":"promo","amount":100,"remaining":62.4,"expires_at":"\#(expiry(2.2))"},
+                       {"kind":"auto_recharge","amount":10,"remaining":7.25,"expires_at":"\#(expiry(325))"}]}}}
+        """#
+    }
+
+    static let signedOutCredits = #"""
+    {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"signed_out","snapshot_stale":true,
+     "usage_source":{"reason":"signed_out","last_error":"no OpenAI platform session key is saved; run `redline account set-session-key api-credits`"}}
+    """#
+
+    static var noPromoCredits: String {
+        #"""
+        {"id":"api-credits","provider":"openai-api-credits","label":"Linked org","account_status":"ok",
+         "latest_decision":{"decision":"WAIT","mode":"api_credits","reason":"no promotional API credit is available"},
+         "snapshot":{"observed_at":"\#(expiry(-0.001))","weekly_unavailable":true,
+           "credits":{"promo_remaining":0,"promo_granted":0,"paid_available":7.25,"min_promo_balance":5,"pacing":"firesale","firesale_window_seconds":259200,
+             "grants":[{"kind":"purchase","amount":10,"remaining":7.25,"expires_at":"\#(expiry(325))"}]}}}
+        """#
+    }
+
+    private func creditsModel(_ snapshot: DashboardSnapshot, expanded: Bool) -> PopoverViewModel {
+        let model = model(snapshot)
+        model.expandedCreditsAccountID = expanded ? "api-credits" : nil
+        return model
+    }
+
+    private func creditsCard(_ snapshot: DashboardSnapshot, expanded: Bool) throws -> some View {
+        let account = try #require(snapshot.providers.first { $0.isAPICredits })
+        return APICreditsCardView(account: account, expanded: .constant(expanded), pausing: false, setPaused: { _ in })
+            .frame(width: 420 - 36)
+    }
+
+    @Test func creditsCardShowsDollarsAndOpensItsDetails() throws {
+        let snapshot = try Self.creditsSnapshot(Self.freshCredits)
+        let collapsed = size(try creditsCard(snapshot, expanded: false)).height
+        let open = size(try creditsCard(snapshot, expanded: true)).height
+        #expect(collapsed < 140, "collapsed credits card took \(collapsed)pt")
+        #expect(open > collapsed + 80, "details did not open: \(collapsed) → \(open)")
+        try render(
+            StatusPopoverView(model: creditsModel(snapshot, expanded: false), actions: Self.actions)
+                .frame(width: 420, height: 640),
+            name: "10-credits-popover"
+        )
+        try render(
+            StatusPopoverView(model: creditsModel(snapshot, expanded: true), actions: Self.actions)
+                .frame(width: 420, height: 640),
+            name: "11-credits-popover-expanded"
+        )
+        try render(
+            try creditsCard(snapshot, expanded: true).padding(18).background(Color(nsColor: .windowBackgroundColor)),
+            name: "12-credits-card-expanded-light",
+            appearance: .aqua
+        )
+    }
+
+    @Test func signedOutCreditsCardNamesTheCLIFix() throws {
+        let snapshot = try Self.creditsSnapshot(Self.signedOutCredits)
+        #expect(size(try creditsCard(snapshot, expanded: false)).height < 140)
+        try render(
+            StatusPopoverView(model: creditsModel(snapshot, expanded: false), actions: Self.actions)
+                .frame(width: 420, height: 640),
+            name: "13-credits-signed-out"
+        )
+    }
+
+    @Test func noPromoCreditsCardKeepsPaidCreditVisible() throws {
+        let snapshot = try Self.creditsSnapshot(Self.noPromoCredits)
+        try render(
+            StatusPopoverView(model: creditsModel(snapshot, expanded: true), actions: Self.actions)
+                .frame(width: 420, height: 640),
+            name: "14-credits-no-promo"
+        )
+    }
+
     /// A long label is cut short in the row (which keeps its height) and
     /// given in full in the open detail; it never pushes the numbers out.
     @Test func longLabelTruncatesInTheRowAndIsWholeInTheDetail() throws {
