@@ -34,6 +34,7 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/demo"
 	"github.com/croutoncreations/redline/internal/domain"
+	"github.com/croutoncreations/redline/internal/harness"
 	"github.com/croutoncreations/redline/internal/launchmetrics"
 	"github.com/croutoncreations/redline/internal/mcpserver"
 	"github.com/croutoncreations/redline/internal/pairing"
@@ -637,6 +638,8 @@ func runServe(args []string, configPath string, stdout, stderr io.Writer, now fu
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	// Runs interrupted by a crash also left their scratch directories.
+	harness.SweepRunScratch(now())
 	if err := database.RecoverPendingNotificationDeliveries(context.Background(), now()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

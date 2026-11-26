@@ -34,16 +34,34 @@ func serviceEnvironment(goos string, environment []string) []string {
 // entry such as OpenAI_Base_URL matches OPENAI_BASE_URL; elsewhere names
 // match exactly.
 func WithoutVariables(goos string, environment []string, names ...string) []string {
-	kept := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		name, _, _ := strings.Cut(entry, "=")
-		matches := slices.ContainsFunc(names, func(drop string) bool {
+	return withoutMatching(environment, func(name string) bool {
+		return slices.ContainsFunc(names, func(drop string) bool {
 			if goos == "windows" {
 				return strings.EqualFold(name, drop)
 			}
 			return name == drop
 		})
-		if !matches {
+	})
+}
+
+// WithoutPrefixes drops every entry of environment whose name starts with
+// one of prefixes, ignoring case on goos "windows" as WithoutVariables does.
+func WithoutPrefixes(goos string, environment []string, prefixes ...string) []string {
+	return withoutMatching(environment, func(name string) bool {
+		return slices.ContainsFunc(prefixes, func(prefix string) bool {
+			if goos == "windows" {
+				return len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix)
+			}
+			return strings.HasPrefix(name, prefix)
+		})
+	})
+}
+
+func withoutMatching(environment []string, drop func(name string) bool) []string {
+	kept := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if !drop(name) {
 			kept = append(kept, entry)
 		}
 	}

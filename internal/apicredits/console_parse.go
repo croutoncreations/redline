@@ -137,6 +137,9 @@ func ParseConsoleCredits(body []byte, now time.Time) (Report, error) {
 		}
 	}
 	for _, raw := range *payload.PromoTranches {
+		// program_id is required on promo tranches only, on purpose: it is
+		// what tells subscription credit from other promo programs. A
+		// purchased tranche is purchase credit whatever its program says.
 		if raw.ProgramID == nil || strings.TrimSpace(*raw.ProgramID) == "" {
 			return Report{}, errConsoleCredits
 		}
@@ -227,11 +230,19 @@ func consoleDollars(balance *consoleBalance, minorUnits *int64) (float64, error)
 		return 0, err
 	}
 	if money := strings.TrimSpace(string(balance.Money)); money != "" && money != "null" {
-		var other consoleAmount
+		// A money object that names a currency must name USD: the same
+		// digits in another currency are not the same amount.
+		var other struct {
+			consoleAmount
+			Currency *string `json:"currency"`
+		}
 		if err := json.Unmarshal(balance.Money, &other); err != nil {
 			return 0, errConsoleCredits
 		}
-		otherAmount, err := consoleAmountDollars(other)
+		if other.Currency != nil && !strings.EqualFold(*other.Currency, "USD") {
+			return 0, errConsoleCredits
+		}
+		otherAmount, err := consoleAmountDollars(other.consoleAmount)
 		if err != nil || otherAmount != amount {
 			return 0, errConsoleCredits
 		}

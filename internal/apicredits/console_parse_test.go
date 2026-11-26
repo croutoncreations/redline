@@ -246,3 +246,38 @@ func TestSelectConsoleOrganizationRefusesMalformedUUID(t *testing.T) {
 		t.Fatal("parsed a non-list")
 	}
 }
+
+// A money object in another currency is not the same amount, whatever its
+// digits; one without a currency, or in USD, is accepted.
+func TestParseConsoleCreditsRequiresUSDMoney(t *testing.T) {
+	good := consoleTranche("subscription_api_credit", 10000, 5000, iso(fixtureNow.Add(-time.Hour)), iso(fixtureNow.Add(time.Hour)))
+	withMoney := func(money string) []byte {
+		return consoleCredits([]string{strings.Replace(good, `"remaining":{"money":null`, `"remaining":{"money":`+money, 1)}, nil)
+	}
+	for _, money := range []string{`{"amount_minor":5000,"exponent":2,"currency":"EUR"}`, `{"amount_minor":5000,"exponent":2,"currency":""}`,
+		`{"amount_minor":5000,"exponent":2,"currency":7}`} {
+		if _, err := ParseConsoleCredits(withMoney(money), fixtureNow); err == nil {
+			t.Errorf("money %s: parsed without error", money)
+		}
+	}
+	for _, money := range []string{`{"amount_minor":5000,"exponent":2,"currency":"usd"}`, `{"amount_minor":5000,"exponent":2}`} {
+		if report, err := ParseConsoleCredits(withMoney(money), fixtureNow); err != nil || report.Promo.Remaining != 50 {
+			t.Errorf("money %s: report = %+v err = %v", money, report.Promo, err)
+		}
+	}
+}
+
+// The Console's live timestamps are RFC 3339 in UTC with microseconds on
+// granted_at, for example 2026-11-01T12:34:56.123456Z.
+func TestParseConsoleCreditsReadsLiveTimestampFormat(t *testing.T) {
+	now := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	tranche := consoleTranche("subscription_api_credit", 10000, 5000, "2026-11-01T12:34:56.123456Z", "2026-12-01T00:00:00Z")
+	report, err := ParseConsoleCredits(consoleCredits([]string{tranche}, nil), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStart := time.Date(2026, 11, 1, 12, 34, 56, 123456000, time.UTC)
+	if report.Promo.EffectiveAt == nil || !report.Promo.EffectiveAt.Equal(wantStart) || report.Promo.Remaining != 50 {
+		t.Fatalf("promo = %+v", report.Promo)
+	}
+}

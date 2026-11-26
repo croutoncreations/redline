@@ -273,3 +273,42 @@ func TestClaudeCreditsFloorHoldsDispatch(t *testing.T) {
 		t.Fatalf("result = %+v", result.Result)
 	}
 }
+
+// harness_args that would put the key in argv, choose another provider, or
+// load other extensions or settings are refused with a 400.
+func TestClaudeCreditsAccountRefusesReroutingHarnessArgs(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+	for i, tc := range []struct {
+		harness, model string
+		args           []string
+	}{
+		{"pi", "anthropic/claude-sonnet-4-6", []string{"--api-key", "k"}},
+		{"pi", "anthropic/claude-sonnet-4-6", []string{"--provider", "anthropic"}},
+		{"pi", "anthropic/claude-sonnet-4-6", []string{"-e", "./mine.ts"}},
+		{"claude-code", "", []string{"--settings", "{}"}},
+		{"claude-code", "", []string{"--setting-sources=user"}},
+	} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": fmt.Sprintf("args-%d", i), "provider_account_id": "api-credits", "harness_type": tc.harness,
+			"model": tc.model, "harness_args": tc.args, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "unsupported") {
+			t.Fatalf("%s %v: status = %d body = %s", tc.harness, tc.args, response.StatusCode, body)
+		}
+	}
+}
+
+// anthropic/ alone names no model.
+func TestClaudeCreditsAccountRefusesPiModelWithoutAnID(t *testing.T) {
+	fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+	for i, model := range []string{"anthropic/", "anthropic/  "} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": fmt.Sprintf("pi-empty-%d", i), "provider_account_id": "api-credits", "harness_type": "pi", "model": model, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "anthropic/") {
+			t.Fatalf("model %q: status = %d body = %s", model, response.StatusCode, body)
+		}
+	}
+}

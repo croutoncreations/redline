@@ -2561,15 +2561,21 @@ func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.P
 	// anthropic/* on a Claude account) uses the injected key; its default
 	// model and subscription routes such as openai-codex/* or anthropic-cli/*
 	// would never touch the credits.
+	// A bare provider prefix ("anthropic/") names no model.
 	if account.IsAPICredits() && profile.HarnessType == "pi" {
 		model := strings.TrimSpace(profile.Model)
-		if anthropic && !strings.HasPrefix(model, "anthropic/") {
+		if anthropic && !piModelUnder(model, "anthropic/") {
 			return fmt.Errorf("account %q is Claude API credits: a pi profile model on it must be an anthropic/… model (for example anthropic/claude-sonnet-4-6), "+
 				"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
 		}
-		if !anthropic && !strings.HasPrefix(model, "openai/") {
+		if !anthropic && !piModelUnder(model, "openai/") {
 			return fmt.Errorf("account %q is OpenAI API credits: a pi profile model on it must be an openai/… model (for example openai/gpt-5.6-sol), "+
 				"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
+		}
+	}
+	if account.IsAPICredits() {
+		if err := harness.ValidateCreditsHarnessArgs(profile.HarnessType, account.APICreditsVendor(), profile.HarnessArgs); err != nil {
+			return fmt.Errorf("account %q: %w", profile.ProviderAccountID, err)
 		}
 	}
 	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
@@ -2577,6 +2583,13 @@ func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.P
 	}
 	return fmt.Errorf("account %q reads Claude Code profile %s, so its execution profiles must use the claude-code harness, not %q",
 		profile.ProviderAccountID, config.DisplayClaudeConfigDir(account.ClaudeConfigDir), profile.HarnessType)
+}
+
+// piModelUnder reports whether model is provider-prefixed with a non-empty
+// model id after the prefix.
+func piModelUnder(model, prefix string) bool {
+	id, ok := strings.CutPrefix(model, prefix)
+	return ok && strings.TrimSpace(id) != ""
 }
 
 // profileForAccount is the profile a run starts with: the stored profile

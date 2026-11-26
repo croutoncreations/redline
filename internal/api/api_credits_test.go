@@ -486,3 +486,25 @@ func TestCreditsFloorHoldsDispatch(t *testing.T) {
 		t.Fatalf("result = %+v", result.Result)
 	}
 }
+
+// openai/ alone names no model, and --api-key would put a key in argv.
+func TestCreditsAccountRefusesPiModelWithoutAnIDAndAPIKeyArgs(t *testing.T) {
+	fixture := newCreditsServer(t, 80, 24*time.Hour, nil)
+	for i, tc := range []struct {
+		model, want string
+		args        []string
+	}{
+		{"openai/", "openai/", nil},
+		{"openai/ ", "openai/", nil},
+		{"openai/gpt-5.6-sol", "unsupported", []string{"--api-key=k"}},
+	} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": fmt.Sprintf("pi-bad-%d", i), "provider_account_id": "api-credits", "harness_type": "pi", "model": tc.model,
+			"harness_args": tc.args, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, tc.want) {
+			t.Fatalf("%q %v: status = %d body = %s", tc.model, tc.args, response.StatusCode, body)
+		}
+	}
+}

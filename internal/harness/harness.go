@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/hermes"
@@ -121,12 +123,22 @@ func (a Adapter) Run(ctx context.Context, request Request) (Result, error) {
 		// the fix is a fresh key, not a login.
 		if request.Profile.APICreditsVendor == apiCreditsVendorAnthropic && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
 			result.Failure = "Claude Code is signed out. The Claude API key saved for this account was rejected; run " +
-				"`pbpaste | redline account set-api-key " + request.Profile.ProviderAccountID + "` with a key from the linked Console org, then retry this job."
+				"`pbpaste | redline account set-api-key " + shellWord(request.Profile.ProviderAccountID) + "` with a key from the linked Console org, then retry this job."
 		} else if dir := request.Profile.ClaudeConfigDir; dir != "" && strings.HasPrefix(result.Failure, "Claude Code is signed out.") {
 			result.Failure = "Claude Code is signed out. Run `CLAUDE_CONFIG_DIR=" + displayHome(dir) + " claude auth login`, then retry this job."
 		}
 	}
 	return result, nil
+}
+
+// shellWord returns value as one shell word for a copy-paste command:
+// unchanged when it is plain [A-Za-z0-9._-], single-quoted otherwise.
+// Config-file account ids are not limited to that alphabet.
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func diagnoseFailure(harnessType string, paths ...string) string {
@@ -330,19 +342,25 @@ const (
 	apiCreditsVendorAnthropic = "anthropic"
 )
 
-// anthropicRoutingVariables would sign a run in as another Anthropic
-// account or organization, send its key to another host, or bill a cloud
-// provider instead of the Console organization.
-var anthropicRoutingVariables = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-	"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_FEDERATION_RULE_ID",
-	"ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_WORKSPACE_ID"}
+// anthropicRoutingPrefixes and anthropicRoutingVariables would sign a run
+// in as another Anthropic account or organization, send its key to another
+// host or with another identity's headers, or bill a cloud provider instead
+// of the Console organization. Whole families are dropped by prefix, so
+// names a new CLI release adds are covered too.
+var (
+	anthropicRoutingPrefixes  = []string{"ANTHROPIC_", "CLAUDE_CODE_USE_", "CLAUDE_CODE_OAUTH_", "CLAUDE_CODE_API_", "CLAUDE_CODE_GATEWAY_"}
+	anthropicRoutingVariables = []string{"CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"}
+)
 
 // withAnthropicCredentials gives a Claude API credits run exactly its
 // account's key, after dropping whatever the service inherited.
 func withAnthropicCredentials(environment []string, key string) []string {
-	for _, name := range anthropicRoutingVariables {
-		environment = withoutVariable(environment, name)
-	}
+	return anthropicCredentialEnvironment(runtime.GOOS, environment, key)
+}
+
+func anthropicCredentialEnvironment(goos string, environment []string, key string) []string {
+	environment = redprocess.WithoutPrefixes(goos, environment, anthropicRoutingPrefixes...)
+	environment = redprocess.WithoutVariables(goos, environment, anthropicRoutingVariables...)
 	return append(environment, "ANTHROPIC_API_KEY="+key)
 }
 
@@ -353,6 +371,58 @@ var piAnthropicCreditsExtension string
 // run loads: it moves anthropic models onto a provider that reads
 // $ANTHROPIC_API_KEY, ahead of any stored Anthropic OAuth login.
 func PiAnthropicCreditsExtension() string { return piAnthropicCreditsExtension }
+
+// Run scratch directory name prefixes, under os.TempDir().
+const (
+	claudeCreditsScratchPrefix = "redline-claude-credits-"
+	piCreditsScratchPrefix     = "redline-pi-credits-"
+)
+
+// staleRunScratchAge is how old a scratch directory must be before the
+// startup sweep treats it as left behind by a crashed service rather than
+// held by a run still going.
+const staleRunScratchAge = 24 * time.Hour
+
+// SweepRunScratch removes run scratch directories a crashed or killed
+// service left in os.TempDir(): the Claude Code one may hold a run's session
+// transcript. Call it once at service start; failures are logged without
+// the directory's contents.
+func SweepRunScratch(now time.Time) {
+	removed, errs := sweepRunScratch(os.TempDir(), now)
+	if removed > 0 {
+		log.Printf("redline: removed %d stale run scratch directories", removed)
+	}
+	for _, err := range errs {
+		log.Printf("redline: could not remove stale run scratch directory: %v", err)
+	}
+}
+
+// sweepRunScratch removes Redline run scratch directories in temp that are
+// owned by this user and older than staleRunScratchAge.
+func sweepRunScratch(temp string, now time.Time) (int, []error) {
+	entries, err := os.ReadDir(temp)
+	if err != nil {
+		return 0, []error{err}
+	}
+	removed := 0
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !(strings.HasPrefix(name, claudeCreditsScratchPrefix) || strings.HasPrefix(name, piCreditsScratchPrefix)) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !ownedByCurrentUser(info) || now.Sub(info.ModTime()) < staleRunScratchAge {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(temp, name)); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		removed++
+	}
+	return removed, errs
+}
 
 // runScratch holds a run's private, run-scoped files (an empty Claude Code
 // config directory, the pi extension) and removes them when the run ends.
@@ -373,13 +443,28 @@ func (r *runScratch) dir(pattern string) (string, error) {
 
 func (r *runScratch) cleanup() {
 	for _, dir := range r.dirs {
-		_ = os.RemoveAll(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			// The path is a random temp name; the error carries no credential.
+			// The startup sweep retries it.
+			log.Printf("redline: could not remove run scratch directory: %v", err)
+		}
 	}
+}
+
+// claudeCreditsConfigDir gives a Claude credits run that may start Claude
+// Code a fresh, empty, private CLAUDE_CONFIG_DIR, after dropping any the
+// service inherited, so no stored login can take precedence over the key.
+func claudeCreditsConfigDir(environment []string, scratch *runScratch) ([]string, error) {
+	dir, err := scratch.dir(claudeCreditsScratchPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("create Claude Code config directory: %w", err)
+	}
+	return append(withoutVariable(environment, "CLAUDE_CONFIG_DIR"), "CLAUDE_CONFIG_DIR="+dir), nil
 }
 
 // writePiExtension writes the pin extension into a private run directory.
 func (r *runScratch) writePiExtension() (string, error) {
-	dir, err := r.dir("redline-pi-credits-")
+	dir, err := r.dir(piCreditsScratchPrefix)
 	if err != nil {
 		return "", fmt.Errorf("create pi extension directory: %w", err)
 	}
@@ -489,11 +574,11 @@ func buildHarnessCommand(
 			// Claude Code prefers a stored login over ANTHROPIC_API_KEY, so
 			// a credits run starts from a fresh, empty, private config
 			// directory of its own and never sees any profile's login.
-			dir, err := scratch.dir("redline-claude-credits-")
+			env, err := claudeCreditsConfigDir(base.Env, scratch)
 			if err != nil {
-				return redprocess.Command{}, fmt.Errorf("create Claude Code config directory: %w", err)
+				return redprocess.Command{}, err
 			}
-			base.Env = append(base.Env, "CLAUDE_CONFIG_DIR="+dir)
+			base.Env = env
 		} else if dir := request.Profile.ClaudeConfigDir; dir != "" {
 			// Variables that would sign Claude Code in as someone else
 			// take precedence over the profile's login; drop them so the
@@ -557,6 +642,16 @@ func buildHarnessCommand(
 		if request.Profile.HarnessCommand == "" {
 			return redprocess.Command{}, fmt.Errorf("command harness requires harness_command")
 		}
+		if anthropicCredits {
+			// The command may start claude itself; give it the same empty
+			// config directory as a claude-code run. A command that starts
+			// pi must load the pin extension itself (see docs/scheduling.md).
+			env, err := claudeCreditsConfigDir(base.Env, scratch)
+			if err != nil {
+				return redprocess.Command{}, err
+			}
+			base.Env = env
+		}
 		base.Name, base.Args = redprocess.ShellCommand(request.Profile.HarnessCommand)
 		base.Stdin = strings.NewReader(prompt)
 	default:
@@ -580,6 +675,36 @@ func ValidateHarnessArgs(harnessType string, args []string) error {
 		name, _, _ := strings.Cut(arg, "=")
 		if slices.Contains(cursorReservedArgs, name) {
 			return fmt.Errorf("harness_args may not set %s for cursor-agent: Redline sets the workspace, and the CLI uses its own `agent login`", name)
+		}
+	}
+	return nil
+}
+
+// creditsReservedArgs are flags a profile on an API credits account may not
+// pass, by vendor and harness: --api-key would put a key in argv, and the
+// rest would move a Claude credits run off the account's key (another
+// provider, another extension ahead of or instead of the pin, or Claude Code
+// settings carrying their own credentials or endpoint). pi's
+// --no-extensions is allowed: it leaves the explicit -e pin loaded.
+var creditsReservedArgs = map[string]map[string][]string{
+	"anthropic": {
+		"pi":          {"--api-key", "--provider", "-e", "--extension"},
+		"claude-code": {"--settings", "--setting-sources"},
+	},
+	"openai": {
+		"pi": {"--api-key"},
+	},
+}
+
+// ValidateCreditsHarnessArgs rejects harness arguments that would move a
+// run on an API credits account (vendor "openai" or "anthropic") off the
+// account's key, or put the key in argv. vendor "" is not a credits account.
+func ValidateCreditsHarnessArgs(harnessType, vendor string, args []string) error {
+	reserved := creditsReservedArgs[vendor][harnessType]
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		if slices.Contains(reserved, name) {
+			return fmt.Errorf("harness_args %s is unsupported for %s on an API credits account: Redline gives the run the account's key and keeps it on that key", name, harnessType)
 		}
 	}
 	return nil

@@ -151,11 +151,13 @@ in-flight reservation, pacing, firesale window, notifications and dashboards (la
   accounts cannot name the same organization.
 - **Which jobs.** `claude-code`, `pi` and `command` profiles. Codex, Cursor Agent and Hermes
   profiles are refused. Each run first loses every inherited Anthropic credential, routing
-  and cloud switch (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
-  `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, and the
-  `ANTHROPIC_*` federation, organization, identity and workspace variables). It is then given
-  the account's API key as `ANTHROPIC_API_KEY` and `REDLINE_ANTHROPIC_API_CREDITS=1`. The key
-  is never put in a command line.
+  and cloud switch: every `ANTHROPIC_*` variable, every `CLAUDE_CODE_USE_*`,
+  `CLAUDE_CODE_OAUTH_*`, `CLAUDE_CODE_API_*` and `CLAUDE_CODE_GATEWAY_*` variable, and
+  `AWS_BEARER_TOKEN_BEDROCK` (case-insensitively on Windows). It is then given the account's
+  API key as `ANTHROPIC_API_KEY` and `REDLINE_ANTHROPIC_API_CREDITS=1`. The key is never put
+  in a command line, and a profile's `harness_args` may not add pi's `--api-key`,
+  `--provider`, `-e` or `--extension`, or Claude Code's `--settings` or
+  `--setting-sources` (on an OpenAI credits account, pi's `--api-key` is refused too).
   - **Claude Code can spend these credits**, unlike Codex on OpenAI. Each run starts with a
     fresh, empty, private `CLAUDE_CONFIG_DIR` that is removed afterwards, so a stored Claude
     subscription login can't take precedence over the key. A Claude credits account never
@@ -164,9 +166,16 @@ in-flight reservation, pacing, firesale window, notifications and dashboards (la
     stored Anthropic login over `ANTHROPIC_API_KEY`, so Redline loads a small extension of its
     own with `-e` (written to a private run directory, never containing a key, removed
     afterwards). It moves `anthropic` and `anthropic-cli` models onto a provider that reads
-    `$ANTHROPIC_API_KEY`. A pi extension of your own that reroutes Anthropic models should
-    leave them alone while `REDLINE_ANTHROPIC_API_CREDITS` is set.
-  - **command** jobs get the environment only.
+    `$ANTHROPIC_API_KEY`, and ends the run (exit status 78) rather than let it continue, or
+    send a request, on `anthropic` or `anthropic-cli`. A pi extension of your own that
+    reroutes Anthropic models should leave them alone while `REDLINE_ANTHROPIC_API_CREDITS`
+    is set.
+  - **command** jobs get the environment and, like Claude Code runs, a fresh, empty, private
+    `CLAUDE_CONFIG_DIR`, so a `claude` they start spends the key. They do not get the pi
+    extension: a command job that starts pi must pass `-e` with an equivalent extension
+    itself, or use a `pi` profile instead.
+  - A run's private directories are removed when it ends; any a crashed service left behind
+    are removed at the next start once they are a day old.
 - **Hard cap.** The floor gates job starts; it does not stop a running job. For a hard
   limit, create a dedicated `redline` workspace in the Console organization, give it a spend
   limit, and give Redline an API key from that workspace.

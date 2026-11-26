@@ -42,3 +42,23 @@ func TestWithoutVariablesMatchesCaseOnlyOnWindows(t *testing.T) {
 		t.Fatalf("linux dropped %v", linux)
 	}
 }
+
+// A prefix rule drops every variable in a family, so new names a CLI release
+// adds are covered too. Windows names are case-insensitive, so there the
+// prefix matches in any case; elsewhere it is exact. Runs on every OS.
+func TestWithoutPrefixesMatchesCaseOnlyOnWindows(t *testing.T) {
+	environment := []string{"ANTHROPIC_OAUTH_TOKEN=x", "Anthropic_Base_Url=https://elsewhere.example", "CLAUDE_CODE_USE_FOUNDRY=1",
+		"claude_code_use_mantle=1", "ANTHROPIC=bare", "MY_ANTHROPIC_NOTE=keep", "KEEP=yes"}
+	for _, tc := range []struct {
+		goos string
+		want []string
+	}{
+		{"windows", []string{"ANTHROPIC=bare", "MY_ANTHROPIC_NOTE=keep", "KEEP=yes"}},
+		{"linux", []string{"Anthropic_Base_Url=https://elsewhere.example", "claude_code_use_mantle=1", "ANTHROPIC=bare", "MY_ANTHROPIC_NOTE=keep", "KEEP=yes"}},
+		{"darwin", []string{"Anthropic_Base_Url=https://elsewhere.example", "claude_code_use_mantle=1", "ANTHROPIC=bare", "MY_ANTHROPIC_NOTE=keep", "KEEP=yes"}},
+	} {
+		if got := redprocess.WithoutPrefixes(tc.goos, environment, "ANTHROPIC_", "CLAUDE_CODE_USE_"); !slices.Equal(got, tc.want) {
+			t.Errorf("%s kept %v, want %v", tc.goos, got, tc.want)
+		}
+	}
+}
