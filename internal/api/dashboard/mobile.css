@@ -153,6 +153,7 @@ button { color: inherit; font: inherit; }
 .m-provider-status.near { color: var(--amber); }
 .m-provider-status.healthy { color: var(--green); }
 .m-provider-status.paused { color: var(--muted); }
+@media (prefers-color-scheme: light) { .m-provider-status.triggered { color: #b3261e; } }
 .m-skeleton.logo { width:18px; height:18px; border-radius:50%; }
 .m-skeleton.narrow { width:80px; margin-bottom:6px; }
 .m-skeleton.wide { width:120px; height:9px; }
@@ -176,6 +177,13 @@ button { color: inherit; font: inherit; }
 .m-provider-decision.healthy { border-left-color: var(--green); }
 .m-provider-decision b { display: block; font-size: 11px; }
 .m-provider-decision span { display: block; color: var(--muted); font-size: 9px; margin-top: 3px; }
+/* The toggle spans the box's padding so its hit area is at least 44px tall. */
+.m-provider-decision summary { min-height: 44px; margin: -9px -10px; padding: 13px 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.m-provider-decision[open] summary { margin-bottom: 0; padding-bottom: 6px; }
+.m-provider-decision summary::-webkit-details-marker { display: none; }
+.m-provider-decision summary::before { content: "\25B8"; font-size: 10px; color: var(--muted); }
+.m-provider-decision[open] summary::before { content: "\25BE"; }
+.m-provider-decision summary b { display: inline; }
 .m-meters { display: grid; gap: 12px; margin-bottom: 12px; }
 .m-meter-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .m-meter-head span { font-size: 11px; }
@@ -223,6 +231,7 @@ button { color: inherit; font: inherit; }
 .m-btn:hover { opacity: .85; }
 .m-btn:disabled { opacity: .45; cursor: wait; }
 .m-view-queue-btn { font-size: 10px; color: var(--accent); }
+@media (prefers-color-scheme: light) { .m-view-queue-btn { color: #b3261e; } }
 
 /* Cursor usage (display only) */
 .m-cursor-header { cursor: default; }
@@ -454,3 +463,31 @@ button { color: inherit; font: inherit; }
 .m-acct-carousel { overflow: hidden; }
 /* Pages contain their children's margins, so a page measures what it shows. */
 .m-acct-page { display: flow-root; }
+
+/* API credits (OpenAI and Claude): a dollar headline in place of rings, then rule, paid
+   and grant rows in the detail. */
+.m-provider-logo.openai-api-credits .m-provider-fallback { color: var(--text); }
+.m-credits-headline { display: flex; flex-direction: column; align-items: flex-end; flex: 0 1 auto; min-width: 0; max-width: 52%; text-align: right; gap: 3px; }
+.m-credits-headline b { font: 600 15px ui-monospace, monospace; color: var(--green); white-space: nowrap; }
+.m-credits-headline b.warn { color: var(--amber); }
+.m-credits-headline b.danger { color: #ff7b72; }
+.m-credits-headline b.muted { color: var(--muted); font-size: 12px; }
+.m-credits-headline em { color: var(--muted); font: normal 9px/1.35 ui-monospace, monospace; }
+.m-credits-rules { color: var(--muted); font: 9px/1.5 ui-monospace, monospace; }
+.m-credits-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; column-gap: 10px; row-gap: 2px; }
+.m-credits-row span { font-size: 11px; }
+.m-credits-row b { font: 600 11px ui-monospace, monospace; white-space: nowrap; }
+.m-credits-row em { flex-basis: 100%; color: var(--muted); font: normal 8px ui-monospace, monospace; }
+.m-credits-grants { display: grid; gap: 9px; border-top: 1px solid var(--line); padding-top: 10px; }
+.m-credits-grants .m-pools-label { margin-bottom: 0; letter-spacing: .08em; }
+/* The account name is long; keep it and the status on their own lines. */
+.m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-name,
+.m-provider-logo.openai-api-credits + .m-provider-summary .m-provider-status,
+.m-provider-logo.anthropic-api-credits + .m-provider-summary .m-provider-name,
+.m-provider-logo.anthropic-api-credits + .m-provider-summary .m-provider-status { display: block; }
+/* Signed out: the re-paste fix wraps on its own row below the name. */
+.m-provider-header:has(.m-credits-fix) { flex-wrap: wrap; row-gap: 4px; }
+.m-credits-fix { flex-basis: 100%; padding-left: 42px; color: #ff918b; font: normal 10px/1.4 ui-monospace, monospace; }
+.m-credits-fix em { font-style: normal; }
+.m-meter-bar.muted::-webkit-progress-value { background: var(--muted); }
+.m-meter-bar.muted::-moz-progress-bar { background: var(--muted); }

@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '47 * * * *'
   workflow_dispatch:
+  # Re-evaluate soon after PR CI goes green instead of waiting for the hourly
+  # sweep. workflow_run always runs this file from the default branch, with
+  # github.sha = current main; it never checks out or runs PR code.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 # Exactly one serialized merge worker; no PR event or PR-controlled checkout.
 concurrency:
@@ -18,7 +24,11 @@ jobs:
     if: >-
       github.repository == 'croutoncreations/redline' &&
       github.ref == 'refs/heads/main' &&
-      (vars.GREEN_LANE_LIVE_ENABLED == 'true' || github.event_name == 'workflow_dispatch')
+      (vars.GREEN_LANE_LIVE_ENABLED == 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.event == 'pull_request' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:

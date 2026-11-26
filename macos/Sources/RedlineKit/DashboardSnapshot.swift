@@ -252,6 +252,11 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     public let accountStatus: String?
     /// The scheduler's latest decision for this account (RUN, WAIT, UNKNOWN).
     public let latestDecision: String?
+    /// The scheduler's sentence for that decision; nil when not sent.
+    public let latestDecisionReason: String?
+    /// The tier the decision unlocked ("firesale" for an expiring credits
+    /// balance); nil when not sent.
+    public let latestDecisionTier: String?
     public let weeklyPolicy: String?
 
     public init(
@@ -265,6 +270,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         label: String? = nil,
         accountStatus: String? = nil,
         latestDecision: String? = nil,
+        latestDecisionReason: String? = nil,
+        latestDecisionTier: String? = nil,
         weeklyPolicy: String? = nil
     ) {
         self.id = id
@@ -277,6 +284,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         self.label = label
         self.accountStatus = accountStatus
         self.latestDecision = latestDecision
+        self.latestDecisionReason = latestDecisionReason
+        self.latestDecisionTier = latestDecisionTier
         self.weeklyPolicy = weeklyPolicy
     }
 
@@ -291,6 +300,13 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
 
     private struct LatestDecision: Codable {
         let decision: String?
+        var reason: String? = nil
+        var unlockedTier: String? = nil
+
+        enum CodingKeys: String, CodingKey {
+            case decision, reason
+            case unlockedTier = "unlocked_tier"
+        }
     }
 
     private struct UsageSourceStatus: Codable {
@@ -309,7 +325,10 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         // Additive fields: absent from an older service, and never fatal.
         label = (try? container.decodeIfPresent(String.self, forKey: .label)).flatMap { $0 }
         accountStatus = (try? container.decodeIfPresent(String.self, forKey: .accountStatus)).flatMap { $0 }
-        latestDecision = (try? container.decodeIfPresent(LatestDecision.self, forKey: .latestDecision))?.flatMap { $0 }?.decision
+        let latest = (try? container.decodeIfPresent(LatestDecision.self, forKey: .latestDecision)) ?? nil
+        latestDecision = latest?.decision
+        latestDecisionReason = latest?.reason
+        latestDecisionTier = latest?.unlockedTier
         weeklyPolicy = try container.decodeIfPresent(String.self, forKey: .weeklyPolicy)
     }
 
@@ -327,8 +346,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         try container.encodeIfPresent(label, forKey: .label)
         try container.encodeIfPresent(accountStatus, forKey: .accountStatus)
         try container.encodeIfPresent(weeklyPolicy, forKey: .weeklyPolicy)
-        if let latestDecision {
-            try container.encode(LatestDecision(decision: latestDecision), forKey: .latestDecision)
+        if latestDecision != nil || latestDecisionReason != nil {
+            try container.encode(LatestDecision(decision: latestDecision, reason: latestDecisionReason, unlockedTier: latestDecisionTier), forKey: .latestDecision)
         }
     }
 
@@ -339,11 +358,30 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
     /// accounts, so Cursor is not scheduled until they match.
     public var accountMismatch: Bool { usageSourceReason == "account_mismatch" }
 
+    /// An API credits account (OpenAI, or Claude through the Claude
+    /// Console): a dollar balance of promotional credit, not a weekly window.
+    public var isAPICredits: Bool { ["openai-api-credits", "anthropic-api-credits"].contains(provider.lowercased()) }
+
+    /// A Claude (Anthropic) API credits account.
+    public var isClaudeAPICredits: Bool { provider.lowercased() == "anthropic-api-credits" }
+
+    /// The fix for a signed-out credits account: the CLI command, and on
+    /// Claude where the session key comes from.
+    public var apiCreditsSessionKeyFix: String {
+        let command = "redline account set-session-key \(id)"
+        return isClaudeAPICredits ? "Paste the sessionKey cookie from platform.claude.com: \(command)" : "Run \(command)"
+    }
+
     /// The line shown on a stale provider's card. A signed-out provider says
     /// so and names the fix, rather than leaving it in a hover tooltip.
     public var staleSummary: String {
         if accountMismatch {
             return "Cursor CLI and app accounts differ · sign both in to the same account"
+        }
+        if signedOut && isAPICredits {
+            // The platform session key is only ever entered through the CLI.
+            let fix = apiCreditsSessionKeyFix
+            return "Session key needed · " + fix.prefix(1).lowercased() + fix.dropFirst()
         }
         if signedOut, let login = ProviderRecovery.loginCommand(for: provider) {
             // The CLI that holds the login, which is what signed out.
@@ -362,6 +400,8 @@ public struct ProviderSummary: Codable, Sendable, Identifiable {
         case "claude": "Claude"
         case "codex": "Codex"
         case "cursor": "Cursor"
+        case "openai-api-credits": "OpenAI API credits"
+        case "anthropic-api-credits": "Claude API credits"
         default: provider.capitalized
         }
     }
@@ -470,6 +510,9 @@ public struct UsageSnapshot: Codable, Sendable {
     public let weeklyUnavailable: Bool
     /// Per-grant details, when the provider reported them.
     public let bankedResetDetails: [BankedResetDetail]
+    /// Dollar balances of an OpenAI API credits account; nil for every
+    /// other provider, and when the field is malformed.
+    public let credits: APICredits?
 
     public init(
         short: UsageWindow?,
@@ -484,8 +527,10 @@ public struct UsageSnapshot: Codable, Sendable {
         sourceStale: Bool = false,
         observedAt: String? = nil,
         weeklyUnavailable: Bool = false,
-        bankedResetDetails: [BankedResetDetail] = []
+        bankedResetDetails: [BankedResetDetail] = [],
+        credits: APICredits? = nil
     ) {
+        self.credits = credits
         self.weeklyUnavailable = weeklyUnavailable
         self.plan = plan
         self.bankedResetsExpiries = bankedResetsExpiries
@@ -512,6 +557,7 @@ public struct UsageSnapshot: Codable, Sendable {
         case observedAt = "observed_at"
         case weeklyUnavailable = "weekly_unavailable"
         case bankedResetDetails = "banked_reset_details"
+        case credits
     }
 
     /// Counts banked resets by kind ("full", "fable", ...), in display order.
@@ -550,6 +596,8 @@ public struct UsageSnapshot: Codable, Sendable {
         // Never trust a weekly value beside "not reported".
         weekly = weeklyUnavailable ? nil : try container.decodeIfPresent(UsageWindow.self, forKey: .weekly)
         bankedResetDetails = (try? container.decodeIfPresent([BankedResetDetail].self, forKey: .bankedResetDetails)) ?? []
+        // A malformed credits field must never take the whole tray offline.
+        credits = (try? container.decodeIfPresent(APICredits.self, forKey: .credits)) ?? nil
     }
 }
 
@@ -656,9 +704,12 @@ public struct TrayState: Sendable {
     public let menuBarTitle: String
     public let providerBadges: [ProviderBadge]
 
-    public init(snapshot: DashboardSnapshot) {
+    /// `now` and `locale` reach the API credits badge, which reads a lapsed
+    /// grant as out of date and formats dollars in the user's locale.
+    public init(snapshot: DashboardSnapshot, now: Date = Date(), locale: Locale = .current) {
+        // A promotional dollar balance is not weekly capacity.
         let percentages = snapshot.providers.compactMap { provider in
-            provider.snapshotStale ? nil : provider.snapshot?.weekly?.remaining
+            provider.snapshotStale || provider.isAPICredits ? nil : provider.snapshot?.weekly?.remaining
         }
         lowestWeeklyPercent = percentages.min().map { Int(($0 * 100).rounded()) }
 
@@ -718,6 +769,9 @@ public struct TrayState: Sendable {
             .map(\.element)
             .map { family in
                 let first = family.accounts[0]
+                if let card = APICreditsCard(account: first, now: now, locale: locale) {
+                    return ProviderBadge(provider: first.provider, displayName: first.displayName, credits: card)
+                }
                 return ProviderBadge(
                     provider: first.provider,
                     displayName: first.displayName,
@@ -776,8 +830,30 @@ public struct ProviderBadge: Sendable, Equatable {
     public let accounts: [Account]
     /// A single account whose source reports no weekly limit.
     public let weeklyNotReported: Bool
+    /// An API credits account's dollar balance: "$62.40" for the menu
+    /// bar, "$62.40 left" spoken. Nil for every other provider.
+    public let credits: (compact: String, spoken: String)?
+
+    public static func == (left: ProviderBadge, right: ProviderBadge) -> Bool {
+        left.provider == right.provider && left.displayName == right.displayName && left.percent == right.percent
+            && left.accountCount == right.accountCount && left.accounts == right.accounts
+            && left.weeklyNotReported == right.weeklyNotReported
+            && left.credits?.compact == right.credits?.compact && left.credits?.spoken == right.credits?.spoken
+    }
+
+    init(provider: String, displayName: String, credits card: APICreditsCard) {
+        self.provider = provider
+        self.displayName = displayName
+        self.percent = nil
+        self.accountCount = 1
+        self.accounts = []
+        self.weeklyNotReported = false
+        // Read after the name: "OpenAI API credits session key needed".
+        self.credits = (card.compact, card.headline.prefix(1).lowercased() + card.headline.dropFirst())
+    }
 
     public init(provider: String, displayName: String, percent: Int?, accountCount: Int = 1, accounts: [Account] = [], weeklyNotReported: Bool = false) {
+        self.credits = nil
         self.provider = provider
         self.displayName = displayName
         self.percent = percent
@@ -789,6 +865,7 @@ public struct ProviderBadge: Sendable, Equatable {
     /// What the menu bar shows beside the provider's icon: "41%", "—", or
     /// "×3" for several accounts.
     public var compact: String {
+        if let credits { return credits.compact }
         if accountCount > 1 { return "×\(accountCount)" }
         if let percent { return "\(percent)%" }
         return weeklyNotReported ? "n/r" : "—"
@@ -796,6 +873,7 @@ public struct ProviderBadge: Sendable, Equatable {
 
     /// "Codex 32%", "Claude 3 accounts: Personal 41%, Client 58%, Side —".
     public var spoken: String {
+        if let credits { return "\(displayName) \(credits.spoken)" }
         if accountCount > 1 {
             let each = accounts.map { "\($0.name) \($0.spokenWeekly)" }
             return "\(displayName) \(accountCount) accounts: " + each.joined(separator: ", ")

@@ -9,7 +9,7 @@ import (
 )
 
 func EventTypes() []string {
-	return []string{domain.EventRunStarted, domain.EventRunCompleted, domain.EventRunFailed, domain.EventSchedulerError, domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed, domain.EventFiresaleStarted, domain.EventFiresaleEnded, domain.EventResetAnnounced, domain.EventAccountNeedsLogin}
+	return []string{domain.EventRunStarted, domain.EventRunCompleted, domain.EventRunFailed, domain.EventSchedulerError, domain.EventResetExpiring, domain.EventResetRedeemed, domain.EventResetRedeemFailed, domain.EventFiresaleStarted, domain.EventFiresaleEnded, domain.EventResetAnnounced, domain.EventAccountNeedsLogin, domain.EventAccountSessionKeyNeeded}
 }
 
 // sampleAnnouncement uses the real announcement builder with a fake post, so
@@ -50,6 +50,8 @@ func Sample(kind, accountID, provider string, now time.Time) (domain.Notificatio
 	switch kind {
 	case domain.EventAccountNeedsLogin:
 		e.Data["claude_config_dir"] = "~/.claude-cc-sample"
+	case domain.EventAccountSessionKeyNeeded:
+		e.Data["label"] = "Sample credits account"
 	case domain.EventResetExpiring:
 		e.Data["reset_id"] = "test-reset"
 		e.Data["count"], e.Data["action"], e.Data["lead"] = "1", "redeem_now", "24h"

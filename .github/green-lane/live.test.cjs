@@ -46,6 +46,38 @@ for(const [name,edit] of Object.entries({
 }))test(`fails closed: ${name}`,async()=>{const f=fixture();edit(f);await assert.rejects(run(f));assert.equal(f.merges.length,0)});
 test('ambiguous merge failure never retries or tries next candidate',async()=>{const f=fixture();f.mergeError=true;await assert.rejects(run(f),/timeout/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merge_requested')});
 test('rejected merge never advances to second candidate',async()=>{const f=fixture();f.rejected=true;await assert.rejects(run(f));assert.equal(f.merges.length,1)});
+test('CI-completion trigger runs the same worker from trusted main',async()=>{
+ const f=fixture();f.context.eventName='workflow_run';await run(f);assert.equal(f.merges.length,1);
+});
+const httpError=(status,message)=>Object.assign(new Error(message),{status});
+for(const [name,edit] of Object.entries({
+ evaluator504:f=>f.run=()=>{throw Object.assign(new Error('Command failed: /tmp/green-lane-check\nError: failed to fetch PR: GitHub API error 504\n'),{status:1,stderr:'Error: failed to fetch PR: GitHub API error 504\n'})},
+ evaluatorTransport:f=>f.run=()=>{throw Object.assign(new Error('Command failed'),{status:1,stderr:'Error: Get "https://api.github.com/x": read tcp: connection reset by peer\n'})},
+ evaluatorTimeout:f=>f.run=()=>{throw Object.assign(new Error('spawnSync ETIMEDOUT'),{code:'ETIMEDOUT',signal:'SIGTERM'})},
+ octokit502:f=>f.github.rest.git.getRef=async()=>{throw httpError(502,'Bad Gateway')},
+ octokitFetchFailed:f=>f.github.rest.pulls.get=async()=>{throw new Error('fetch failed')},
+ audit503:f=>f.accessAudit.paginate=async()=>{throw httpError(503,'Service Unavailable')},
+ transientBeforeMerge:f=>f.onValidate=()=>{f.github.rest.repos.getBranch=async()=>{throw httpError(500,'Server Error')}},
+}))test(`transient GitHub error defers cleanly without merging: ${name}`,async()=>{
+ const f=fixture();edit(f);const warnings=[];
+ const before=process.env.LIVE_PILOT_ENABLED;process.env.LIVE_PILOT_ENABLED='true';
+ try{await live({github:f.github,accessAudit:f.accessAudit,context:f.context,core:{info:()=>{},warning:w=>warnings.push(w)},run:f.run,validate:async a=>{if(f.onValidate)f.onValidate(a.result);return f.valid},write:r=>{f.report=structuredClone(r)}})}
+ finally{if(before===undefined)delete process.env.LIVE_PILOT_ENABLED;else process.env.LIVE_PILOT_ENABLED=before}
+ assert.equal(f.merges.length,0);assert.equal(f.report.state,'deferred_transient');assert.ok(f.report.transient_error);assert.equal(warnings.length,1);
+});
+for(const [name,edit] of Object.entries({
+ evaluator401:f=>f.run=()=>{throw Object.assign(new Error('Command failed'),{status:1,stderr:'Error: failed to fetch PR: GitHub API error 401\n'})},
+ octokit403:f=>f.github.rest.git.getRef=async()=>{throw httpError(403,'Resource not accessible')},
+ badJSON:f=>f.run=()=>'not json',
+}))test(`non-transient error still fails closed: ${name}`,async()=>{const f=fixture();edit(f);await assert.rejects(run(f));assert.equal(f.merges.length,0)});
+test('5xx from the merge call itself is ambiguous: fails loudly, never deferred or retried',async()=>{
+ const f=fixture();f.github.rest.pulls.merge=async args=>{f.merges.push(args);throw httpError(504,'Gateway Timeout')};
+ await assert.rejects(run(f),/Gateway Timeout/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merge_requested');
+});
+test('5xx from post-merge CI dispatch still fails loudly after the confirmed merge',async()=>{
+ const f=fixture();f.github.rest.actions.createWorkflowDispatch=async()=>{throw httpError(502,'Bad Gateway')};
+ await assert.rejects(run(f),/Bad Gateway/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merged');
+});
 
 test('post-merge dispatch failure preserves confirmed merge and never retries merge',async()=>{const f=fixture();f.dispatchError=true;await assert.rejects(run(f),/dispatch failed/);assert.equal(f.merges.length,1);assert.equal(f.report.state,'merged');assert.equal(f.report.merged[0].commit,merged);assert.equal(f.dispatches.length,1)});
 

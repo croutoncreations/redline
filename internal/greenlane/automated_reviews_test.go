@@ -1,6 +1,7 @@
 package greenlane
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -160,4 +161,68 @@ func TestCodexSecurityReviewReadiness(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Real shape from croutoncreations/redline#275 (head swapped for the fixture).
+func nullSecuritySummary(head string, number int) AutomatedReviewComment {
+	return AutomatedReviewComment{ID: 44, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-01T00:00:00Z",
+		Body: "<!-- codex-pull-request-review-summary -->\n" +
+			"<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"" + head + "\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"},\"security_review\":{\"commit_sha\":\"" + head + "\",\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":\"completed\"}} -->\n" +
+			"<!-- codex-security-review:v1 {\"blockingSeverityThreshold\":\"P0\",\"headSha\":\"" + head + "\",\"mergeGateEnabled\":false,\"pullRequestNumber\":" + strconv.Itoa(number) + ",\"repository\":\"owner/repo\",\"status\":\"completed\"} -->\n" +
+			"<details>Codex Review Summary</details>"}
+}
+
+func TestCodexNullSecurityVerdict(t *testing.T) {
+	base := func() PRInfo {
+		p := passingPR()
+		p.HeadSHA = reviewHead
+		p.Reviews, p.ReviewThreads = nil, nil
+		p.AutomatedReviews = []AutomatedReviewComment{nullSecuritySummary(reviewHead, p.Number)}
+		return p
+	}
+	if r := liveEvaluator().checkReviewReadiness(base()); !r.Pass {
+		t.Fatalf("clean null-verdict security review rejected: %s", r.Message)
+	}
+	edit := func(old, new string) func(*PRInfo) {
+		return func(p *PRInfo) { p.AutomatedReviews[0].Body = strings.Replace(p.AutomatedReviews[0].Body, old, new, 1) }
+	}
+	for name, change := range map[string]func(*PRInfo){
+		"security still running": edit(`"has_unresolved_findings":null,"status":"completed"`, `"has_unresolved_findings":null,"status":"running"`),
+		"only findings null":     edit(`"has_any_findings":null,"has_unresolved_findings":null`, `"has_any_findings":null,"has_unresolved_findings":true`),
+		"only unresolved null":   edit(`"has_any_findings":null,"has_unresolved_findings":null`, `"has_any_findings":true,"has_unresolved_findings":null`),
+		"security on stale head": edit(`"security_review":{"commit_sha":"`+reviewHead, `"security_review":{"commit_sha":"`+strings.Repeat("c", 40)),
+		"findings key missing":   edit(`"has_any_findings":null,"has_unresolved_findings":null,"status"`, `"has_unresolved_findings":null,"status"`),
+		"security commit null":   edit(`"security_review":{"commit_sha":"`+reviewHead+`"`, `"security_review":{"commit_sha":null`),
+		"marker missing":         edit("<!-- codex-security-review:v1 ", "<!-- other:v1 "),
+		"marker not completed":   edit(`"repository":"owner/repo","status":"completed"`, `"repository":"owner/repo","status":"running"`),
+		"marker stale head":      edit(`"headSha":"`+reviewHead, `"headSha":"`+strings.Repeat("d", 40)),
+		"marker other PR":        edit(`"pullRequestNumber":1,`, `"pullRequestNumber":2,`),
+		"marker other repo":      edit(`"repository":"owner/repo"`, `"repository":"owner/other"`),
+		"marker unknown field":   edit(`"mergeGateEnabled":false,`, `"mergeGateEnabled":false,"verdict":"clean",`),
+		"marker duplicated": func(p *PRInfo) {
+			b := p.AutomatedReviews[0].Body
+			i := strings.Index(b, "<!-- codex-security-review:v1 ")
+			j := strings.Index(b[i:], "\n")
+			p.AutomatedReviews[0].Body = b + "\n" + b[i:i+j]
+		},
+		"marker inside code fence": edit("<!-- codex-security-review:v1 ", "```\n<!-- codex-security-review:v1 "),
+		"security finding comment": func(p *PRInfo) {
+			p.ReviewComments = []ReviewComment{{ID: 9, Body: "<!-- codex-security-review-finding:v1 -->\n### Codex Security Review"}}
+		},
+		"code review has findings": edit(`"code_review":{"commit_sha":"`+reviewHead+`","has_any_findings":false,"has_unresolved_findings":false`, `"code_review":{"commit_sha":"`+reviewHead+`","has_any_findings":true,"has_unresolved_findings":true`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base()
+			change(&p)
+			if liveEvaluator().checkReviewReadiness(p).Pass {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
+func liveEvaluator() *Evaluator {
+	cfg := DefaultConfig()
+	cfg.RequireAutomatedReview = true
+	return NewEvaluator(cfg)
 }
