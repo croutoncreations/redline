@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-26
+
+### Upgrade notes
+
+- Downgrading: older versions reject `provider: openai-api-credits` accounts and the
+  `api_credits` settings. Remove those accounts (`redline account remove <id>`, after removing or reassigning profiles
+  that use them) before running
+  an older binary. The database migration only adds a column, so 0.1.13 opens it unchanged.
+  Keys stay in the Keychain (service `ai.redline.api-credits`) until you run
+  `redline account clear-keys <id>` or delete them there.
+
 ### Added
 
 - OpenAI API credits accounts. Redline reads the monthly API credits an eligible ChatGPT Pro or
@@ -19,7 +30,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `redline account add-openai-credits`, `set-session-key` and `set-api-key` on the machine
   running Redline and stored in the Keychain (or owner-only files elsewhere). An expired or
   missing session key sends an opt-in `account.session_key_needed` notification once.
-
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count
