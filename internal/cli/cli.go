@@ -180,12 +180,14 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, now 
 		if len(remaining) > 1 && remaining[1] == "add-profile" {
 			return runAccountAddProfile(remaining[2:], *configPath, stdout, stderr)
 		}
-		// OpenAI API credits accounts and their keys are set up locally:
-		// keys never pass through the HTTP API.
+		// API credits accounts and their keys are set up locally: keys never
+		// pass through the HTTP API.
 		if len(remaining) > 1 {
 			switch remaining[1] {
 			case "add-openai-credits":
 				return runAccountAddOpenAICredits(remaining[2:], *configPath, stdin, stdout, stderr)
+			case "add-claude-credits":
+				return runAccountAddClaudeCredits(remaining[2:], *configPath, stdin, stdout, stderr)
 			case "set-session-key":
 				return runAccountSetKey(apicredits.SecretSessionKey, remaining[2:], *configPath, stdin, stdout, stderr)
 			case "set-api-key":

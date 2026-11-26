@@ -122,7 +122,7 @@ type Server struct {
 	// cursorUsage is display-only Cursor and Grok Bot tracking. It is kept
 	// apart from usageSources so it can never reach scheduling decisions.
 	cursorUsage *cursorusage.Tracker
-	// apiCredits reads OpenAI API credit grants for openai-api-credits
+	// apiCredits reads API credit balances for openai- and anthropic-api-credits
 	// accounts; apiCreditSecrets holds their session and API keys, which
 	// never leave this machine.
 	apiCredits       *apicredits.UsageSource
@@ -225,6 +225,11 @@ func (s *Server) SetAPICredits(client apicredits.Client, secrets apicredits.Secr
 	s.apiCredits.Client = client
 	s.apiCredits.Secrets = secrets
 	s.apiCreditSecrets = secrets
+}
+
+// SetConsoleCredits replaces the Claude Console credits client (tests).
+func (s *Server) SetConsoleCredits(client apicredits.ConsoleClient) {
+	s.apiCredits.Console = client
 }
 
 func NewServerWithHarnessDiscoverer(cfg config.Config, database *store.DB, now func() time.Time, discoverer HarnessDiscoverer) *Server {
@@ -366,9 +371,9 @@ func newServer(
 	server.cursorAccounts = cursorusage.NewLocalAccountCheck(now)
 	openUsageWithCursor, nativeWithCursor := cursorusage.NewUsageSources(openusage.Source{}, nativeSource, now,
 		cursorAccountCheck{server})
-	// openai-api-credits accounts read the OpenAI platform. They are pinned
-	// to the native source, so only it needs the wrapper; the pointer lets
-	// tests swap the client after construction.
+	// API credits accounts read the OpenAI platform or the Claude Console.
+	// They are pinned to the native source, so only it needs the wrapper;
+	// the pointer lets tests swap the clients after construction.
 	apicredits.CaptureSessionKeyEnv()
 	server.apiCreditSecrets = apicredits.DefaultSecretStore(cfg.ConfigPath)
 	if hasAPICreditsAccount(cfg) {
@@ -377,7 +382,7 @@ func newServer(
 		}
 	}
 	server.apiCredits = &apicredits.UsageSource{Next: nativeWithCursor, Client: apicredits.Client{Now: now},
-		Secrets: server.apiCreditSecrets}
+		Console: apicredits.ConsoleClient{Now: now}, Secrets: server.apiCreditSecrets}
 	server.usageSources = usage.NewManager(openUsageWithCursor, apiCreditsSource{server}, now)
 	// Wrapping hides the native source's banked-reset lookup; keep it.
 	server.usageSources.BankedResets = nativeSource
@@ -2574,7 +2579,7 @@ func profileForAccount(profile domain.ExecutionProfile, account config.Provider)
 // apiCreditsRunKey is the API key an API credits account's runs use, or a
 // reason work must hold. It never comes from the service's environment.
 func (s *Server) apiCreditsRunKey(ctx context.Context, accountID string, account config.Provider) (string, string) {
-	key, err := apicredits.ResolveSecret(ctx, s.apiCreditSecrets, accountID, apicredits.SecretAPIKey,
+	key, err := apicredits.ResolveSecret(ctx, s.apiCreditSecrets, account.APICreditsVendor(), accountID, apicredits.SecretAPIKey,
 		account.EffectiveAPICredits().APIKeyFile)
 	switch {
 	case errors.Is(err, apicredits.ErrSecretNotFound):

@@ -280,7 +280,7 @@ type Provider struct {
 	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
 	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
 	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
-	// APICredits configures an openai-api-credits account; nil elsewhere.
+	// APICredits configures an API credits account; nil elsewhere.
 	APICredits *APICredits `yaml:"api_credits,omitempty"`
 }
 
@@ -369,7 +369,7 @@ func (p Provider) EffectiveUsageSource() string {
 	if strings.TrimSpace(p.ClaudeConfigDir) != "" {
 		return "native"
 	}
-	// API credits come only from the OpenAI platform; OpenUsage has none.
+	// API credits come only from the vendor's console; OpenUsage has none.
 	if p.IsAPICredits() {
 		return "native"
 	}

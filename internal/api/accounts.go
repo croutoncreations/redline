@@ -110,6 +110,11 @@ func signInGuidance(provider, card string, profileDir ...string) string {
 			"that organization's API key. On the machine running Redline, paste the Authorization value of the credit_grants request from " +
 			"platform.openai.com › Settings › Billing › Credit grants into `redline account set-session-key ID`, and an sk-… key into " +
 			"`redline account set-api-key ID`. Keys are stored on that machine only and never sent to phones."
+	case config.ProviderAnthropicAPICredits:
+		return "Reads the Claude API credits of the linked Claude Console organization with a Console session key, and runs claude-code, pi and " +
+			"command jobs with that organization's API key. On the machine running Redline, paste the sessionKey cookie from platform.claude.com " +
+			"into `redline account set-session-key ID`, and an sk-ant-api… key from the linked Console org (ideally a dedicated redline workspace " +
+			"with a spend limit) into `redline account set-api-key ID`. Keys are stored on that machine only and never sent to phones."
 	default:
 		return "Sign in with the provider's own app or CLI on the Mac running Redline."
 	}
@@ -245,9 +250,14 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider is required"})
 		return
 	}
-	if account.Provider == config.ProviderAPICredits {
+	switch config.APICreditsVendor(account.Provider) {
+	case config.APICreditsVendorOpenAI:
 		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_account",
 			Error: "OpenAI API credits accounts are added on the machine running Redline with `redline account add-openai-credits`, so their keys never pass through the API"})
+		return
+	case config.APICreditsVendorAnthropic:
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_account",
+			Error: "Claude API credits accounts are added on the machine running Redline with `redline account add-claude-credits`, so their keys never pass through the API"})
 		return
 	}
 	if account.Provider != "claude" && account.Provider != "codex" {
