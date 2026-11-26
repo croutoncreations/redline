@@ -1516,7 +1516,7 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 		"id": "editable-profile", "provider_account_id": "codex-main", "harness_type": "codex-cli", "workspace_provider": "devx",
 	})
 	repo := onboardingRepository(t)
-	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(fmt.Sprintf(`{"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":%q}`, repo)))
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/profiles/editable-profile", strings.NewReader(fmt.Sprintf(`{"model":"gpt-5.4-mini", "workspace_provider":"git-worktree", "repository":%q, "on_usage_limit_command":"./overflow.sh"}`, repo)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1530,7 +1530,8 @@ func TestExecutionProfileCRUDOverServiceAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != repo {
+	if response.StatusCode != http.StatusOK || updated.Model != "gpt-5.4-mini" || updated.WorkspaceProvider != "git-worktree" || updated.Repository != repo ||
+		updated.OnUsageLimitCommand != "./overflow.sh" {
 		t.Fatalf("status=%d profile=%#v", response.StatusCode, updated)
 	}
 	response, err = http.Get(server.URL + "/v1/profiles/editable-profile")
@@ -4198,5 +4199,35 @@ INSERT INTO sessions VALUES ('pi:s1', 'pi', ?, 1784224800000, 1784224810000);`, 
 				t.Fatalf("observations=%d want %d err=%v", len(observations), tc.want, err)
 			}
 		})
+	}
+}
+
+func TestSchedulerHoldsUsageLimitedTaskUntilReset(t *testing.T) {
+	t.Parallel()
+	server, db := newAPIServer(t, codexPayload)
+	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
+		ID: "profile", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx", RetryAfterUsageLimit: true,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{
+		ID: "limited", Name: "Limited", Prompt: "p", Priority: 100, ExecutionProfileID: "profile", Type: domain.OneOff,
+	}, apiNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdmitTask(t.Context(), "run", "limited", "codex-main", "", apiNow.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	hold := apiNow.Add(2 * time.Hour)
+	if err := db.CompleteRun(t.Context(), "run", domain.RunCompletion{State: domain.RunFailed, ExitCode: 1, RetryAt: &hold}, apiNow.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	response := postJSON[struct {
+		Result       decision.Result `json:"result"`
+		SelectedTask *domain.Task    `json:"selected_task,omitempty"`
+	}](t, server.URL+"/v1/scheduler/evaluate", map[string]any{"provider_account_id": "codex-main"})
+	if response.SelectedTask != nil || len(response.Result.CandidateRejections) != 1 ||
+		!strings.Contains(response.Result.CandidateRejections[0].Reason, "waiting for the usage limit to reset at") {
+		t.Fatalf("response = %#v", response)
 	}
 }

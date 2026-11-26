@@ -126,7 +126,7 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 		WorkspaceProvider: "git-worktree", Repository: "/repo", BaseBranch: "main",
 		WorkspaceArgs: []string{"--target", "host"},
 		RequireClean:  true, CleanupPolicy: "on_success",
-		PrepareCommand: "setup", FinalizeCommand: "finalize",
+		PrepareCommand: "setup", FinalizeCommand: "finalize", OnUsageLimitCommand: "./overflow.sh",
 	}
 	if err := db.CreateProfile(context.Background(), want, now); err != nil {
 		t.Fatal(err)
@@ -138,8 +138,15 @@ func TestExecutionProfileRoundTripsWorkspaceAndHarnessConfiguration(t *testing.T
 	got := profiles[0]
 	if got.BudgetModelGroup != "premium" || got.HarnessCommand != want.HarnessCommand || strings.Join(got.HarnessArgs, " ") != "--strict-config" ||
 		strings.Join(got.WorkspaceArgs, " ") != "--target host" ||
-		!got.RequireClean || got.CleanupPolicy != "on_success" {
+		!got.RequireClean || got.CleanupPolicy != "on_success" || got.OnUsageLimitCommand != "./overflow.sh" {
 		t.Fatalf("profile = %#v", got)
+	}
+	got.OnUsageLimitCommand = ""
+	if err := db.UpdateProfile(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := db.GetProfile(context.Background(), "codex"); err != nil || cleared.OnUsageLimitCommand != "" {
+		t.Fatalf("cleared=%#v err=%v", cleared, err)
 	}
 }
 
@@ -1021,4 +1028,62 @@ func openTaskDB(t *testing.T) *store.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestUsageLimitHoldIsClearedByManualRetryAndSuccess(t *testing.T) {
+	t.Parallel()
+	db := openTaskDB(t)
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	profile := domain.ExecutionProfile{ID: "p", ProviderAccountID: "codex-main", HarnessType: "codex-cli", WorkspaceProvider: "devx", RetryAfterUsageLimit: true}
+	if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetProfile(t.Context(), "p"); !got.RetryAfterUsageLimit {
+		t.Fatal("retry_after_usage_limit was not stored")
+	}
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "t", Name: "T", Prompt: "p", Priority: 1, ExecutionProfileID: "p", Type: domain.OneOff}, now); err != nil {
+		t.Fatal(err)
+	}
+	hold := now.Add(3 * time.Hour)
+	complete := func(runID string, completion domain.RunCompletion) {
+		t.Helper()
+		if _, err := db.AdmitTask(t.Context(), runID, "t", "codex-main", "", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteRun(t.Context(), runID, completion, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete("r1", domain.RunCompletion{State: domain.RunFailed, ExitCode: 1, RetryAt: &hold})
+	task, _ := db.GetTask(t.Context(), "t")
+	if task.State != domain.Queued || task.RetryNotBefore == nil || !task.RetryNotBefore.Equal(hold) || task.UsageLimitRetries != 1 {
+		t.Fatalf("held task = %#v", task)
+	}
+	candidates, _ := db.DispatchCandidates(t.Context(), "codex-main")
+	if len(candidates) != 1 {
+		t.Fatalf("held task should stay visible as a candidate: %#v", candidates)
+	}
+	if err := db.SetTaskControl(t.Context(), "t", "retry", now); err != nil {
+		t.Fatalf("manual retry of a held task: %v", err)
+	}
+	task, _ = db.GetTask(t.Context(), "t")
+	if task.RetryNotBefore != nil || task.UsageLimitRetries != 0 {
+		t.Fatalf("manual retry kept the hold: %#v", task)
+	}
+	complete("r2", domain.RunCompletion{State: domain.RunFailed, ExitCode: 1, RetryAt: &hold})
+	if err := db.SetTaskControl(t.Context(), "t", "retry", now); err != nil {
+		t.Fatal(err)
+	}
+	complete("r3", domain.RunCompletion{State: domain.RunCompleted})
+	task, _ = db.GetTask(t.Context(), "t")
+	if task.State != domain.Completed || task.RetryNotBefore != nil || task.UsageLimitRetries != 0 {
+		t.Fatalf("completed task = %#v", task)
+	}
+	// An ordinary queued task is not "retried".
+	if err := db.CreateTask(t.Context(), domain.Task{ID: "q", Name: "Q", Prompt: "p", Priority: 1, ExecutionProfileID: "p", Type: domain.OneOff}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetTaskControl(t.Context(), "q", "retry", now); err == nil {
+		t.Fatal("retry of an ordinary queued task should be refused")
+	}
 }

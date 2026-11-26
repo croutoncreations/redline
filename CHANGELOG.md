@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Redline now recognizes a run that stopped because the account hit its usage limit, for
+  Claude Code, Codex CLI, and pi. This includes Claude runs that exit 0 at the limit. Such a
+  run is recorded as `usage_limited`, with the harness session ID and reset time, and its
+  workspace is kept for a resume whatever the cleanup policy. A new profile setting,
+  `on_usage_limit_command`, can pick the job up from there, for example in another harness
+  or on an OpenAI-compatible endpoint. If it exits 0, the run completes as `handed_off`.
+  The other new setting, `retry_after_usage_limit`, puts a usage-limited job back in the queue,
+  held until the limit resets, with at most three retries in a row.
+  See "When a job hits the usage limit" in `docs/profiles-and-tasks.md`.
+
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count
