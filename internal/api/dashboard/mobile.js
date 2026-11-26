@@ -832,7 +832,10 @@ function familyOverview(accounts) {
 /** A credits account's overview row: its balance and expiry, not windows. */
 function renderCreditsOverviewRow(item) {
   const state = accountStateLine(item), summary = creditsSummary(item), credits = item.snapshot?.credits;
-  const expires = !creditsSignedOut(item) && credits?.promo_remaining > 0 && credits.expires_at ? relative(credits.expires_at) : '—';
+  const signedOut = creditsSignedOut(item);
+  // Signed out shows only the fix: no last-known balance or expiry.
+  const promo = signedOut || !credits ? '—' : money(credits.promo_remaining || 0);
+  const expires = !signedOut && credits?.promo_remaining > 0 && credits.expires_at ? relative(credits.expires_at) : '—';
   const compactState = accountState(item) === 'signed_out' ? 'Session key needed' : state.text;
   return `<button type="button" class="m-acct-row" data-account-open="${esc(item.id)}" data-testid="overview-row"
       aria-label="${esc([accountName(item), state.text, summary.headline, summary.secondary].join('. '))}. Open ${esc(accountName(item))}">
@@ -840,7 +843,7 @@ function renderCreditsOverviewRow(item) {
       <span class="m-acct-title">${esc(accountName(item))}</span>
       <span class="m-acct-sub"><span class="m-acct-state ${esc(state.tone)}">${esc(compactState)}</span></span>
     </span>
-    <span class="m-acct-cell${summary.fraction == null ? ' muted' : ''}"><b>${esc(summary.fraction == null && !credits ? '—' : money(credits?.promo_remaining || 0))}</b><em>promo</em></span>
+    <span class="m-acct-cell${summary.fraction == null || promo === '—' ? ' muted' : ''}"><b>${esc(promo)}</b><em>promo</em></span>
     <span class="m-acct-cell${expires === '—' ? ' muted' : ''}"><b>${esc(expires)}</b><em>${expires === '—' ? ' ' : 'expires'}</em></span>
     <span class="m-acct-go" aria-hidden="true">›</span>
   </button>`;

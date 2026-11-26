@@ -343,7 +343,7 @@ func buildCommand(
 ) (redprocess.Command, error) {
 	base := redprocess.Command{
 		Dir: request.Workspace.Directory, Stdout: stdout, Stderr: stderr,
-		Env: append(os.Environ(),
+		Env: append(redprocess.ServiceEnvironment(),
 			"REDLINE_RUN_ID="+request.RunID,
 			"REDLINE_TASK_ID="+request.Task.ID,
 			"REDLINE_TASK_NAME="+request.Task.Name,

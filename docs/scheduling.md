@@ -69,7 +69,8 @@ before it lapses.
   Such runs also get `REDLINE_OPENAI_API_CREDITS=1`, so tools inside them can tell they must
   bill the API key: for example, a pi extension that moves `openai/*` models to a ChatGPT
   subscription should leave them alone when it is set. Every run gets
-  `REDLINE_PROVIDER_ACCOUNT_ID`; neither variable is ever inherited from the service.
+  `REDLINE_PROVIDER_ACCOUNT_ID`. Neither variable, nor the session key, is ever passed through from the
+  service to a run or a workspace prepare or finalize hook.
 
 ```yaml
 providers:
@@ -110,6 +111,11 @@ elsewhere (`REDLINE_SECRETS_DIR` overrides the directory). A headless service ca
 `session_key_file`/`api_key_file` (owner-only, not a symlink, re-read every poll, so a secret
 manager can rotate them) or take `REDLINE_OPENAI_SESSION_KEY`, which the service removes from
 its environment at start so no job inherits it.
+
+When the session key is missing or OpenAI rejects it, work on the account holds and an
+`account.session_key_needed` notification is sent once (again only after a successful read in
+between; a service restart may repeat it once). Like `account.needs_login` it is opt-in: add it to
+`notifications.events`. The alert names the fix and never contains key material.
 
 ## Manual firesales
 

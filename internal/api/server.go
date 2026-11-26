@@ -94,6 +94,7 @@ type Server struct {
 	scheduler          *autoscheduler.Loop
 	usageMonitor       *autoscheduler.Loop
 	profileLogins      *profileLogins
+	creditsSessions    creditsSessionAlerts
 	resetSignalLoop    *autoscheduler.Loop
 	resetSignalFetcher resetsignal.Fetcher
 	resetSignalSleep   func(context.Context, time.Duration) error
@@ -1467,6 +1468,7 @@ func (s *Server) monitorProvider(ctx context.Context, providerID string) error {
 	if usageErr != nil && s.renewIfExpired(ctx, providerID, usageErr) {
 		snapshot, configured, usageErr = s.fetchAndStore(ctx, providerID)
 	}
+	s.noteCreditsSession(ctx, providerID, s.config.Providers[providerID], usageErr)
 	if usageErr == nil {
 		// Redeem mode only suppresses redeem-now for resets automatic redemption
 		// will actually attempt; on error, every reset falls back to notify.
@@ -2527,6 +2529,13 @@ func profileHarnessFitsAccount(profile domain.ExecutionProfile, account config.P
 	if account.IsAPICredits() && !account.HarnessSpendsAPICredits(profile.HarnessType) {
 		return fmt.Errorf("account %q is OpenAI API credits: its harness must be pi or command, because only those runs are given its API key; %q bills elsewhere "+
 			"(Codex usage through API keys is not covered by the benefit)", profile.ProviderAccountID, profile.HarnessType)
+	}
+	// pi bills whichever provider its model names, and only openai/* uses the
+	// injected key; its default model and subscription routes such as
+	// openai-codex/* or anthropic-cli/* would never touch the credits.
+	if account.IsAPICredits() && profile.HarnessType == "pi" && !strings.HasPrefix(strings.TrimSpace(profile.Model), "openai/") {
+		return fmt.Errorf("account %q is OpenAI API credits: a pi profile model on it must be an openai/… model (for example openai/gpt-5.6-sol), "+
+			"because only those calls bill its API key; %q would bill something else", profile.ProviderAccountID, profile.Model)
 	}
 	if strings.TrimSpace(account.ClaudeConfigDir) == "" || profile.HarnessType == "claude-code" {
 		return nil

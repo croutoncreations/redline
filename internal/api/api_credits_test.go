@@ -119,7 +119,7 @@ func createCreditsCandidate(t *testing.T, db *store.DB, harness string) {
 	t.Helper()
 	if err := db.CreateProfile(t.Context(), domain.ExecutionProfile{
 		ID: "credits-" + harness, ProviderAccountID: "api-credits", HarnessType: harness, HarnessCommand: "true",
-		WorkspaceProvider: "devx",
+		Model: creditsModel(harness), WorkspaceProvider: "devx",
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +129,13 @@ func createCreditsCandidate(t *testing.T, db *store.DB, harness string) {
 	}, apiNow); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func creditsModel(harness string) string {
+	if harness == "pi" {
+		return "openai/gpt-5.6-sol"
+	}
+	return ""
 }
 
 func dashboardProviders(t *testing.T, server *httptest.Server) []map[string]any {
@@ -251,10 +258,28 @@ func TestCreditsAccountRefusesHarnessesThatCannotSpendCredits(t *testing.T) {
 		}
 	}
 	response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
-		"id": "ok-pi", "provider_account_id": "api-credits", "harness_type": "pi", "workspace_provider": "devx",
+		"id": "ok-pi", "provider_account_id": "api-credits", "harness_type": "pi", "model": "openai/gpt-5.6-sol", "workspace_provider": "devx",
 	})
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("pi profile status = %d: %s", response.StatusCode, readBody(t, response))
+	}
+}
+
+// A pi run bills whichever provider its model names; only openai/* models use
+// the injected API key. Subscription routes (openai-codex/*, anthropic-cli/*)
+// and pi's own default model would be scheduled against credits they never
+// spend, so they are refused.
+func TestCreditsAccountRefusesPiModelsThatDoNotBillTheAPIKey(t *testing.T) {
+	fixture := newCreditsServer(t, 80, 24*time.Hour, nil)
+	for _, model := range []string{"", "default", "openai-codex/gpt-5.6-sol", "anthropic-cli/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6", "gpt-5.6-sol"} {
+		response := request(t, fixture.server, http.MethodPost, "/v1/profiles", map[string]any{
+			"id": "pi-" + strings.NewReplacer("/", "-", ".", "-").Replace(model) + "x", "provider_account_id": "api-credits",
+			"harness_type": "pi", "model": model, "workspace_provider": "devx",
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "openai/") {
+			t.Fatalf("model %q: status = %d body = %s", model, response.StatusCode, body)
+		}
 	}
 }
 

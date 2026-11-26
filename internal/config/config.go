@@ -71,7 +71,7 @@ var knownNotificationEvents = map[string]bool{
 	"reset.announced": true,
 	"run.started":     true, "run.completed": true, "run.failed": true, "scheduler.error": true,
 	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
-	"account.needs_login": true,
+	"account.needs_login": true, "account.session_key_needed": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {

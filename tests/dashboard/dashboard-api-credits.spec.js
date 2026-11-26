@@ -370,6 +370,18 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await expect(carousel.getByTestId('carousel-page-1').getByTestId('credits-promo')).toContainText('$62.40 of $100.00 left');
   });
 
+  test('a signed-out account in the carousel overview shows no balance', async ({ page }) => {
+    const dashboard = withCredits(signedOutCredits);
+    const second = apiCreditsNoPromoFixture();
+    second.id = 'credits-side'; second.label = 'Side org';
+    dashboard.providers.push(second);
+    await loadMobileDashboard(page, { dashboard });
+    const row = page.locator('[data-family="openai-api-credits"]').getByTestId('overview-row').nth(0);
+    await expect(row).toContainText('Session key needed');
+    await expect(row).not.toContainText('$62.40');
+    await expect(row.locator('.m-acct-cell').first()).toHaveClass(/muted/);
+  });
+
   test('the queue picker names the credits account', async ({ page }) => {
     await loadMobileDashboard(page, { dashboard: withCredits() });
     await expect(page.locator('#m-queue-provider option[value="credits-main"]')).toHaveText('credits-main · OpenAI API credits');

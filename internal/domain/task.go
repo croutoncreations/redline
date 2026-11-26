@@ -162,6 +162,10 @@ const (
 	// EventAccountNeedsLogin: a Claude Code profile's login can no longer
 	// be renewed in the background; someone has to sign in again.
 	EventAccountNeedsLogin = "account.needs_login"
+	// EventAccountSessionKeyNeeded: an OpenAI API credits account's platform
+	// session key is missing or was rejected; its work holds until a fresh
+	// one is pasted on the machine running Redline.
+	EventAccountSessionKeyNeeded = "account.session_key_needed"
 )
 
 type NotificationEvent struct {

@@ -15,7 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   expiry by default, or even pacing), never below a dollar floor you set and never against
   purchased credit. Runs get the account's own API key. Keys are entered with
   `redline account add-openai-credits`, `set-session-key` and `set-api-key` on the machine
-  running Redline and stored in the Keychain (or owner-only files elsewhere).
+  running Redline and stored in the Keychain (or owner-only files elsewhere). An expired or
+  missing session key sends an opt-in `account.session_key_needed` notification once.
 
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
