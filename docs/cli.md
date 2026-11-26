@@ -49,6 +49,16 @@ OpenAI API credits accounts are added and keyed only on the machine running Redl
 standard input; `clear-keys <id>` removes both. Keys are never printed and never pass through
 the HTTP API. See [OpenAI API credits](scheduling.md#openai-api-credits).
 
+Claude API credits accounts (subscription credit in a linked Claude Console organization) take
+the same flags: `redline account add-claude-credits <id> [--organization-id UUID] [--label L]
+[--min-balance USD] [--pacing firesale|even] [--firesale-window 72h] [--session-key-file PATH]
+[--api-key-file PATH] [--session-key-stdin]`. `set-session-key`, `set-api-key` and `clear-keys`
+work for both vendors: the Claude session key is the `sessionKey` cookie (`sk-ant-sid…`) from
+platform.claude.com, and the API key is an `sk-ant-api…` key from the linked Console
+organization, ideally from a dedicated `redline` workspace with a spend limit. A key of the
+wrong kind or vendor is refused. See
+[Claude (Anthropic) API credits](scheduling.md#claude-anthropic-api-credits).
+
 ## Device sessions (owner only)
 
 ```bash
