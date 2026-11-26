@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const { loadDashboard, loadMobileDashboard, dashboardFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture } = require('./harness');
+const { loadDashboard, loadMobileDashboard, dashboardFixture, cursorProviderFixture, apiCreditsProviderFixture, apiCreditsNoPromoFixture, profileOptionsFixture } = require('./harness');
 
 // An openai-api-credits account is a dollar balance, not a subscription
 // window: it reads in dollars with the promotional grant's expiry, never as a
@@ -290,6 +290,60 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await page.locator('#profile-provider').selectOption('codex-main');
     const codex = await page.locator('#profile-harness option').evaluateAll(options => options.map(option => option.value));
     expect(codex).toEqual(expect.arrayContaining(['codex-cli', 'claude-code', 'pi', 'command']));
+  });
+
+  test('moving an existing Codex profile to the credits account resets it to pi with an openai model', async ({ page }) => {
+    const profileOptions = profileOptionsFixture();
+    profileOptions.harnesses.find(item => item.id === 'pi').models.codex.push({ id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol (API)', source: 'pi_catalog' });
+    await loadDashboard(page, { dashboard: withCredits(), profileOptions });
+    await page.getByRole('button', { name: 'Profiles' }).click();
+    await page.locator('[data-profile="codex-devx"]').click();
+    await expect(page.locator('#profile-harness')).toHaveValue('codex-cli');
+    await page.locator('#profile-provider').selectOption('credits-main');
+    const harnesses = await page.locator('#profile-harness option').evaluateAll(options => options.map(option => option.value));
+    expect(harnesses).toEqual(['pi', 'command']);
+    await expect(page.locator('#profile-harness')).toHaveValue('pi');
+    await expect(page.locator('#profile-model-choice')).toHaveValue('openai/gpt-5.6-sol');
+  });
+
+  test('a credits pi profile defaults to a catalog openai model and never to default', async ({ page }) => {
+    const profileOptions = profileOptionsFixture();
+    profileOptions.harnesses.find(item => item.id === 'pi').models.codex.push({ id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol (API)', source: 'pi_catalog' });
+    const state = await loadDashboard(page, { dashboard: withCredits(), profileOptions });
+    await page.getByRole('button', { name: 'Profiles' }).click();
+    await page.locator('#profile-id').fill('pi-credits');
+    await page.locator('#profile-provider').selectOption('credits-main');
+    const models = await page.locator('#profile-model-choice option').evaluateAll(options => options.map(option => option.value));
+    expect(models).toEqual(['openai/gpt-5.6-sol', '__other__']);
+    await expect(page.locator('#profile-model-choice')).toHaveValue('openai/gpt-5.6-sol');
+    await expect(page.locator('#profile-model-hint')).toBeHidden();
+    await page.locator('#profile-repository').fill('/repo/redline');
+    await page.getByRole('button', { name: 'Save profile' }).click();
+    await expect.poll(() => state.requests.filter(item => item.path === '/v1/profiles').length).toBe(1);
+    expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({ provider_account_id: 'credits-main', harness_type: 'pi', model: 'openai/gpt-5.6-sol' });
+  });
+
+  test('a credits pi profile without a catalog openai model asks for one before saving', async ({ page }) => {
+    const state = await loadDashboard(page, { dashboard: withCredits() });
+    await page.getByRole('button', { name: 'Profiles' }).click();
+    await page.locator('#profile-id').fill('pi-credits');
+    await page.locator('#profile-provider').selectOption('credits-main');
+    await expect(page.locator('#profile-harness')).toHaveValue('pi');
+    const models = await page.locator('#profile-model-choice option').evaluateAll(options => options.map(option => option.value));
+    expect(models).not.toContain('default');
+    await expect(page.locator('#profile-model-custom')).toBeVisible();
+    await expect(page.locator('#profile-model-custom')).toHaveValue('');
+    await expect(page.locator('#profile-model-hint')).toBeVisible();
+    await expect(page.locator('#profile-model-hint')).toContainText('openai/');
+    await page.locator('#profile-repository').fill('/repo/redline');
+    await page.getByRole('button', { name: 'Save profile' }).click();
+    await expect(page.locator('#profile-form-error')).toContainText('openai/');
+    expect(state.requests.filter(item => item.path === '/v1/profiles')).toHaveLength(0);
+    await page.locator('#profile-model-custom').fill('openai/gpt-5.6-sol');
+    await expect(page.locator('#profile-model-hint')).toBeHidden();
+    await page.getByRole('button', { name: 'Save profile' }).click();
+    await expect.poll(() => state.requests.filter(item => item.path === '/v1/profiles').length).toBe(1);
+    expect(state.requests.find(item => item.path === '/v1/profiles').body).toMatchObject({ harness_type: 'pi', model: 'openai/gpt-5.6-sol' });
   });
 });
 

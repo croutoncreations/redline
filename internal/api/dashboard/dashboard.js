@@ -1554,7 +1554,25 @@ function modelLabel(model) {
   const identity = model.label && model.label !== model.id ? `${model.label} - ${model.id}` : model.id;
   return detail ? `${identity} · ${detail}` : identity;
 }
+// pi bills whichever provider its model names, and only openai/* models bill
+// the credits account's API key, so the server refuses anything else there.
+function creditsPi(harness) {
+  return harness === 'pi' && isAPICredits(providerKind());
+}
+const isOpenAIModel = (model) => String(model || '').startsWith('openai/');
+function creditsPiModels() {
+  const all = Object.values(harnessCatalog.find(item => item.id === 'pi')?.models || {}).flat();
+  return all.filter((model, index) => isOpenAIModel(model.id) && all.findIndex(other => other.id === model.id) === index);
+}
 function suggestedModels(harness) {
+  if (creditsPi(harness)) {
+    const known = creditsPiModels().map(model => ({value:model.id,label:modelLabel(model)}));
+    const values = new Set(known.map(option => option.value));
+    profiles.filter(profile => profile.harness_type === 'pi' && isOpenAIModel(profile.model) && !values.has(profile.model)).forEach(profile => {
+      values.add(profile.model); known.push({value:profile.model,label:`${profile.model} · previously used`});
+    });
+    return known;
+  }
   const discovered = harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()] || [];
   const known = [{value:'default',label:'Default model (harness decides)'}, ...discovered.map(model => ({value:model.id,label:modelLabel(model)}))];
   const values = new Set(known.map(option => option.value));
@@ -1565,7 +1583,12 @@ function suggestedModels(harness) {
 }
 function setHarnessControl(selected='') {
   let options = harnessCatalog.length ? harnessCatalog : [{id:'command',label:'Custom command',installed:true}];
-  if (isAPICredits(providerKind())) options = options.filter(option => API_CREDITS_HARNESSES.includes(option.id));
+  if (isAPICredits(providerKind())) {
+    options = options.filter(option => API_CREDITS_HARNESSES.includes(option.id));
+    // An existing selection the credits account cannot use is replaced, not
+    // kept as an "unavailable" choice.
+    if (selected && !options.some(option => option.id === selected)) selected = preferredHarness();
+  }
   const hasSelected = options.some(option => option.id === selected);
   $('#profile-harness').innerHTML = options.map(option => {
     const version = option.version ? ` · v${option.version}` : '', unavailable = !option.installed ? ' · not found' : '';
@@ -1579,6 +1602,10 @@ function setModelControl(harness, selected='default') {
   $('#profile-model-choice').innerHTML = options.map(option => `<option value="${escapeHTML(option.value)}">${escapeHTML(option.label)}</option>`).join('') + '<option value="__other__">Other model…</option>';
   $('#profile-model-choice').value = known ? selected : '__other__';
   $('#profile-model-custom').hidden = known; $('#profile-model-custom').value = known ? '' : selected;
+  updateModelHint();
+}
+function updateModelHint() {
+  $('#profile-model-hint').hidden = !creditsPi($('#profile-harness').value) || isOpenAIModel(selectedModel());
 }
 function selectedModel() {
   return $('#profile-model-choice').value === '__other__' ? $('#profile-model-custom').value.trim() : $('#profile-model-choice').value;
@@ -1593,6 +1620,7 @@ function preferredHarness() {
   return provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : provider === 'cursor' ? 'cursor-agent' : isAPICredits(provider) ? 'pi' : 'command';
 }
 function preferredModel(harness) {
+  if (creditsPi(harness)) return creditsPiModels()[0]?.id || '';
   return harnessCatalog.find(item => item.id === harness)?.models?.[providerKind()]?.[0]?.id || 'default';
 }
 function updateProfileExample() {
@@ -1602,7 +1630,8 @@ function updateHarnessFields(selectedModelValue) {
   const harness = $('#profile-harness').value, custom = harness === 'command';
   $('#profile-hermes-fields').hidden = harness !== 'hermes';
   $('#profile-model-field').hidden = custom; $('#profile-command-field').hidden = !custom;
-  setModelControl(harness, selectedModelValue || 'default');
+  if (creditsPi(harness)) setModelControl(harness, isOpenAIModel(selectedModelValue) ? selectedModelValue : preferredModel(harness));
+  else setModelControl(harness, selectedModelValue || 'default');
 }
 function resetProfileForm() {
   editingProfile = ''; $('#profile-form').reset(); $('#profile-id').disabled = false; $('#profile-id').value = '';
@@ -1638,6 +1667,11 @@ async function editProfile(id) {
 }
 async function saveProfile(event) {
   event.preventDefault(); showProfileError('');
+  if (creditsPi($('#profile-harness').value) && !isOpenAIModel(selectedModel())) {
+    showProfileError('A pi profile on an OpenAI API credits account needs an openai/… model, for example openai/gpt-5.6-sol.');
+    $('#profile-model-custom').hidden ? $('#profile-model-choice').focus() : $('#profile-model-custom').focus();
+    return;
+  }
   $('#save-profile').disabled = true;
   try {
     const id=$('#profile-id').value.trim(), harness=$('#profile-harness').value;
@@ -1772,7 +1806,7 @@ $('#new-profile').addEventListener('click',resetProfileForm);
 $('#reset-profile').addEventListener('click',resetProfileForm);
 $('#delete-profile').addEventListener('click',deleteProfile);
 $('#close-profiles').addEventListener('click',() => $('#profiles-dialog').close());
-$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); else setHarnessControl(harness); updateHarnessFields(editingProfile ? model : preferredModel($('#profile-harness').value)); updateProfileExample(); });
+$('#profile-provider').addEventListener('change',() => { const model=selectedModel(), harness=$('#profile-harness').value; if (!editingProfile && harness !== 'pi' && harness !== 'command') setHarnessControl(preferredHarness()); else setHarnessControl(harness); const next=$('#profile-harness').value; updateHarnessFields(editingProfile && next === harness ? model : preferredModel(next)); updateProfileExample(); });
 $('#profile-harness').addEventListener('change',() => updateHarnessFields(preferredModel($('#profile-harness').value)));
 $('#profile-runtime-connection').addEventListener('change',() => { $('#edit-runtime-connection').disabled=!$('#profile-runtime-connection').value; discoverSelectedHermes().catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)); });
 $('#profile-runtime-profile').addEventListener('change',() => { renderHermesProjects(); installHermesModels(); setModelControl('hermes','default'); });
@@ -1785,7 +1819,8 @@ $('#close-runtime').addEventListener('click',() => $('#runtime-dialog').close())
 $('#cancel-runtime').addEventListener('click',() => $('#runtime-dialog').close());
 $('#refresh-hermes-options').addEventListener('click',() => discoverSelectedHermes($('#profile-runtime-profile').value,$('#profile-runtime-project').value,selectedModel()).catch(error => showProfileError(`Hermes discovery failed: ${error.message}`)));
 $('#refresh-profile-options').addEventListener('click',async () => { const button=$('#refresh-profile-options'), selected=$('#profile-harness').value, model=selectedModel(); button.disabled=true; try { await loadProfileOptions(true); setHarnessControl(selected); updateHarnessFields(model); } catch(error) { showProfileError(`Discovery failed: ${error.message}`); } finally { button.disabled=false; } });
-$('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); });
+$('#profile-model-choice').addEventListener('change',() => { $('#profile-model-custom').hidden = $('#profile-model-choice').value !== '__other__'; if (!$('#profile-model-custom').hidden) $('#profile-model-custom').focus(); updateModelHint(); });
+$('#profile-model-custom').addEventListener('input',updateModelHint);
 $('#profile-repository-recent').addEventListener('change',() => { if ($('#profile-repository-recent').value) $('#profile-repository').value = $('#profile-repository-recent').value; });
 $('#close-logs').addEventListener('click',() => $('#logs-dialog').close());
 document.querySelectorAll('.log-tabs button[data-stream]').forEach(button => button.addEventListener('click',async () => { document.querySelectorAll('.log-tabs button[data-stream]').forEach(b => b.classList.remove('active')); button.classList.add('active'); await loadLog(button.dataset.stream); }));
