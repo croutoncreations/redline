@@ -121,7 +121,8 @@ informational.
 3. Add a separate opt-in merge step that repeats the current checks, verifies
    the base is still current and merges the exact evaluated head SHA. Respect
    branch protections. This can use GitHub Actions permissions without deploying
-   an issuer service or a new App. The live merge step is not implemented yet.
+   an issuer service or a new App. This is now the
+   [limited live pilot](#limited-redline-live-pilot).
 4. Port the policy to other repos after the Redline pilot is validated, changing
    the author list, required CI identity and critical paths for each repo.
 
