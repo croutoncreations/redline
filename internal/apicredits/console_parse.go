@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/croutoncreations/redline/internal/openusage"
 )
 
 // Claude Console prepaid credits.
@@ -42,7 +45,50 @@ func ValidConsoleOrganizationID(id string) bool {
 // ConsoleOrganization is the part of a Console organization Redline needs.
 type ConsoleOrganization struct {
 	UUID         string   `json:"uuid"`
+	Name         string   `json:"name"`
 	Capabilities []string `json:"capabilities"`
+}
+
+// maxConsoleOrganizationName bounds a displayed organization name, in runes.
+const maxConsoleOrganizationName = 60
+
+// DisplayName is the organization's name, safe to print: a personal
+// organization is often named after its owner's email address, so anything
+// shaped like one is redacted, and control and formatting characters are
+// dropped so a name cannot rewrite the terminal.
+func (o ConsoleOrganization) DisplayName() string {
+	name := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, o.Name)
+	name = strings.TrimSpace(openusage.RedactEmails(name))
+	if runes := []rune(name); len(runes) > maxConsoleOrganizationName {
+		name = string(runes[:maxConsoleOrganizationName-1]) + "…"
+	}
+	return name
+}
+
+// SeveralConsoleOrganizationsError is ErrSeveralConsoleOrganizations with the
+// organizations that have API access, so a person can pick one.
+type SeveralConsoleOrganizationsError struct {
+	Organizations []ConsoleOrganization
+}
+
+func (e *SeveralConsoleOrganizationsError) Error() string {
+	return ErrSeveralConsoleOrganizations.Error()
+}
+
+func (e *SeveralConsoleOrganizationsError) Unwrap() error { return ErrSeveralConsoleOrganizations }
+
+func hasAPIAccess(org ConsoleOrganization) bool {
+	for _, capability := range org.Capabilities {
+		if capability == "api" {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseConsoleOrganizations decodes GET /api/organizations.
@@ -61,11 +107,8 @@ func ParseConsoleOrganizations(body []byte) ([]ConsoleOrganization, error) {
 func SelectConsoleOrganization(orgs []ConsoleOrganization) (string, error) {
 	var found []string
 	for _, org := range orgs {
-		for _, capability := range org.Capabilities {
-			if capability == "api" {
-				found = append(found, org.UUID)
-				break
-			}
+		if hasAPIAccess(org) {
+			found = append(found, org.UUID)
 		}
 	}
 	switch {

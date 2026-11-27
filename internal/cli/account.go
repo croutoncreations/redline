@@ -31,7 +31,9 @@ API credits (run on the machine running Redline; keys are read from standard inp
                                          read and spend the API credits a ChatGPT subscription grants
   add-claude-credits <id> [--organization-id UUID] [same flags]
                                          read and spend the API credits a Claude subscription grants
-                                         to a linked Claude Console organization
+                                         to a linked Claude Console organization; with the sessionKey
+                                         cookie piped and --session-key-stdin, the organization is found:
+                                         pbpaste | redline account add-claude-credits <id> --session-key-stdin
   set-session-key <id>                   session key used only to read the balance: platform.openai.com
                                          (sess-…), or the sessionKey cookie from platform.claude.com (sk-ant-sid…)
   set-api-key <id>                       API key runs are given: OpenAI sk-… (pi, command), or a Claude
