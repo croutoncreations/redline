@@ -21,7 +21,11 @@ const transient = err => {
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
 async function live({github, accessAudit, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
-  const report = {state:'deferred',main_tip:context.sha,merged:[],evaluations:[]};
+  // GREEN_LANE_MERGE_QUEUE=true: main requires GitHub's merge queue. PRs may
+  // be behind main (the queue tests each one combined with the latest main),
+  // and the worker enqueues the exact evaluated head instead of merging.
+  const queue = process.env.GREEN_LANE_MERGE_QUEUE === 'true';
+  const report = {state:'deferred',mode:queue?'merge_queue':'direct',main_tip:context.sha,merged:[],enqueued:[],evaluations:[]};
   const finish = async reason => { report.reason=reason; await write(report); core.info(reason); return report; };
   const repo = context.repo;
   if (`${repo.owner}/${repo.repo}` !== 'croutoncreations/redline' || context.ref !== 'refs/heads/main' ||
@@ -31,7 +35,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   // Set immediately before the merge API call. From then on no error counts as
   // transient: a timed-out merge may have succeeded, so it fails loudly and is
   // never retried.
-  let mergeCalled = false;
+  let mergeCalled = false; // also set before the enqueue call
   try {
     return await select();
   } catch (err) {
@@ -61,6 +65,12 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     return branch.protected === true && branch.protection?.enabled === true &&
       p?.enforcement_level === 'everyone' && checks.every(name =>
         p.checks?.some(c => c.context === name && c.app_id === 15368));
+  };
+  // Queue mode needs the queue to exist: otherwise an enqueue request fails,
+  // and if the queue were removed later, nothing would test the combination.
+  const queueReady = async () => {
+    const r = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){mergeQueue(branch:"main"){id}}}`,{owner:repo.owner,repo:repo.repo});
+    return typeof r?.repository?.mergeQueue?.id === 'string';
   };
   const trustedWriters = async () => {
     const users = await accessAudit.paginate(accessAudit.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
@@ -92,6 +102,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
+  if (queue && !await queueReady()) throw new Error('Merge-queue mode is on but main has no merge queue; no merge permitted');
 
   if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
 
@@ -103,18 +114,27 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
     if (pr.state !== 'open' || pr.draft || held(pr) || pr.base.ref !== 'main' ||
         pr.head.repo?.full_name !== 'croutoncreations/redline' || !sha(pr.head.sha) || !sha(pr.base.sha)) continue;
-    // The PR-recorded base SHA can be old even when main moved. Compare ancestry
-    // against the ACTUAL main tip: green head CI must include that exact commit.
-    const {data:comparison} = await github.rest.repos.compareCommitsWithBasehead({...repo,basehead:`${context.sha}...${pr.head.sha}`});
-    if (comparison.behind_by !== 0 || comparison.merge_base_commit?.sha !== context.sha ||
-        !['ahead','identical'].includes(comparison.status)) {
-      report.evaluations.push({pr:number,state:'needs_main_refresh',head:pr.head.sha});
-      continue;
+    if (queue) {
+      // Already queued (by us earlier, or by Jon): the queue owns it now.
+      const q = await github.graphql(`query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){isInMergeQueue}}}`,{owner:repo.owner,repo:repo.repo,n:number});
+      if (q?.repository?.pullRequest?.isInMergeQueue !== false) {
+        report.evaluations.push({pr:number,state:'already_queued',head:pr.head.sha});
+        continue;
+      }
+    } else {
+      // The PR-recorded base SHA can be old even when main moved. Compare ancestry
+      // against the ACTUAL main tip: green head CI must include that exact commit.
+      const {data:comparison} = await github.rest.repos.compareCommitsWithBasehead({...repo,basehead:`${context.sha}...${pr.head.sha}`});
+      if (comparison.behind_by !== 0 || comparison.merge_base_commit?.sha !== context.sha ||
+          !['ahead','identical'].includes(comparison.status)) {
+        report.evaluations.push({pr:number,state:'needs_main_refresh',head:pr.head.sha});
+        continue;
+      }
     }
     const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
       encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
       env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
-        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
+        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',MERGE_QUEUE:queue?'true':'',
         DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
     }));
     report.evaluations.push(result);
@@ -131,13 +151,27 @@ async function live({github, accessAudit, context, core, run=execFileSync,
         fresh.mergeable !== true || fresh.head.repo?.full_name !== 'croutoncreations/redline') continue;
     if (!await protectedMain()) throw new Error('Main protection changed during evaluation');
     if (!await trustedWriters()) throw new Error('Repository writer permissions changed during evaluation');
-    if (await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
+    // In queue mode main may move freely: the queue retests against its tip.
+    if (!queue && await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
+    if (queue && !await queueReady()) throw new Error('Merge queue disappeared during evaluation; no merge permitted');
     // Re-read live workflow state; disabling it also stops an in-flight run here.
     if (!await enabled()) return finish('Kill switch was turned off during evaluation');
     const age = Date.now() - Date.parse(result.evaluated_at);
     if (!Number.isFinite(age) || age < -60000 || age > 300000) continue;
-    report.state='merge_requested'; report.attempt={pr:number,head:result.head_sha,main_tip:context.sha};
+    report.state=queue?'enqueue_requested':'merge_requested'; report.attempt={pr:number,head:result.head_sha,main_tip:context.sha};
     await write(report);
+    if (queue) {
+      // expectedHeadOid pins the exact evaluated head: GitHub refuses the
+      // request if the branch moved. Never retried, like a merge call.
+      mergeCalled = true;
+      const r = await github.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id headCommit{oid}}}}`,{id:fresh.node_id,head:result.head_sha});
+      const entry = r?.enqueuePullRequest?.mergeQueueEntry;
+      if (typeof entry?.id !== 'string' || entry.headCommit?.oid !== result.head_sha) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
+      report.state='enqueued'; report.enqueued.push({pr:number,head:result.head_sha,entry:entry.id});
+      // The queue merges later, as github-merge-queue[bot]; its merge_group CI
+      // run and the resulting push to main run CI, so no dispatch is needed.
+      return finish(`Enqueued PR #${number} at ${result.head_sha}; one-enqueue run complete`);
+    }
     // Disable client retries in the workflow. Never try a second PR after this
     // call, including timeouts where GitHub may already have merged the first.
     mergeCalled = true;
@@ -151,7 +185,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     report.ci_dispatched=true;
     return finish(`Merged PR #${number} at ${merged.sha}; one-merge run complete`);
   }
-  return finish('No current-main, fully qualified PR; no merge attempted');
+  return finish(queue ? 'No fully qualified PR; nothing enqueued' : 'No current-main, fully qualified PR; no merge attempted');
   }
 }
 module.exports = Object.assign(live, {transient});

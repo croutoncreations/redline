@@ -118,3 +118,61 @@ for(const present of [true,false])test(`workflow isolates audit token and remove
  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
  await new AsyncFunction('github','context','core','require','process',script)(normal,{}, {},requireMock,processMock);assert.ok(called);
 });
+
+// Merge-queue mode: enqueue the exact evaluated head instead of merging.
+function queueFixture(){
+ const f=fixture();f.behind=3;f.queue={exists:true,inQueue:false,enqueues:[],headBack:null};
+ const pr=f.pr;f.pr=n=>({...pr(n),node_id:`PR_${n}`});
+ f.github.graphql=async(q,v)=>{
+  if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1'}:null}};
+  if(q.includes('isInMergeQueue'))return {repository:{pullRequest:{isInMergeQueue:typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue}}};
+  if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:{oid:f.queue.headBack ?? v.head}}}}}
+  throw new Error('unexpected graphql '+q);
+ };
+ return f;
+}
+async function runQueue(f){const before=process.env.GREEN_LANE_MERGE_QUEUE;process.env.GREEN_LANE_MERGE_QUEUE='true';try{return await run(f)}finally{if(before===undefined)delete process.env.GREEN_LANE_MERGE_QUEUE;else process.env.GREEN_LANE_MERGE_QUEUE=before}}
+test('queue mode: enqueues one exact head even when behind main; never calls merge or dispatch',async()=>{
+ const f=queueFixture();const r=await runQueue(f);
+ assert.equal(f.merges.length,0);assert.equal(f.dispatches.length,0);
+ assert.deepEqual(f.queue.enqueues,[{id:'PR_1',head}]);assert.equal(r.state,'enqueued');assert.equal(r.mode,'merge_queue');
+ assert.deepEqual(r.enqueued,[{pr:1,head,entry:'MQE_1'}]);
+});
+test('queue mode: evaluator runs with MERGE_QUEUE so the Main Drift rule applies',async()=>{
+ const f=queueFixture();const seen=[];const inner=f.run;f.run=(p,a,o)=>{seen.push(o.env.MERGE_QUEUE);return inner(p,a,o)};
+ await runQueue(f);assert.deepEqual(seen,['true']);
+});
+test('direct mode: evaluator gets no MERGE_QUEUE flag and stale PRs still need a refresh',async()=>{
+ const f=fixture();f.behind=3;const seen=[];const inner=f.run;f.run=(p,a,o)=>{seen.push(o.env.MERGE_QUEUE);return inner(p,a,o)};
+ const r=await run(f);assert.deepEqual(seen,[]);assert.equal(f.merges.length,0);assert.ok(r.evaluations.every(e=>e.state==='needs_main_refresh'));
+});
+test('queue mode: skips PRs already in the queue',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const r=await runQueue(f);
+ assert.deepEqual(f.queue.enqueues.map(e=>e.id),['PR_2']);assert.equal(r.evaluations[0].state,'already_queued');
+});
+test('queue mode: unknown queue membership is treated as queued (fail closed)',async()=>{
+ const f=queueFixture();f.queue.inQueue=null;const r=await runQueue(f);assert.equal(f.queue.enqueues.length,0);assert.equal(r.state,'deferred');
+});
+test('queue mode: no merge queue on main fails closed before evaluating',async()=>{
+ const f=queueFixture();f.queue.exists=false;await assert.rejects(runQueue(f),/no merge queue/);assert.equal(f.queue.enqueues.length,0);assert.equal(f.merges.length,0);
+});
+test('queue mode: queue removed during evaluation fails closed',async()=>{
+ const f=queueFixture();f.onValidate=()=>{f.queue.exists=false};await assert.rejects(runQueue(f),/disappeared/);assert.equal(f.queue.enqueues.length,0);
+});
+test('queue mode: main moving during evaluation does not block (the queue retests)',async()=>{
+ const f=queueFixture();f.onValidate=()=>{f.tip='e'.repeat(40)};const r=await runQueue(f);assert.equal(r.state,'enqueued');
+});
+test('queue mode: kill switch during evaluation stops the enqueue',async()=>{
+ const f=queueFixture();f.onValidate=()=>{f.state='disabled_manually'};const r=await runQueue(f);assert.equal(f.queue.enqueues.length,0);assert.match(r.reason,/Kill switch/);
+});
+test('queue mode: entry for a different head fails loudly and is never retried',async()=>{
+ const f=queueFixture();f.queue.headBack='f'.repeat(40);await assert.rejects(runQueue(f),/exact-head/);assert.equal(f.queue.enqueues.length,1);assert.equal(f.report.state,'enqueue_requested');
+});
+test('queue mode: 5xx from the enqueue call is ambiguous: fails loudly, never deferred or retried',async()=>{
+ const f=queueFixture();f.queue.enqueueError=httpError(502,'Bad Gateway');await assert.rejects(runQueue(f),/Bad Gateway/);assert.equal(f.queue.enqueues.length,1);assert.equal(f.report.state,'enqueue_requested');
+});
+test('queue mode: writer audit and protection still gate the enqueue',async()=>{
+ const f=queueFixture();f.writers.push({login:'hidden'});f.permissionResult=login=>({permission:login==='jfox85'?'admin':'write',user:{login}});
+ await assert.rejects(runQueue(f));assert.equal(f.queue.enqueues.length,0);
+ const g=queueFixture();g.protection={protected:false};await assert.rejects(runQueue(g),/protection/);assert.equal(g.queue.enqueues.length,0);
+});

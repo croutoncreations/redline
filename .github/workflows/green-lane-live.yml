@@ -52,6 +52,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LIVE_PILOT_ENABLED: ${{ vars.GREEN_LANE_LIVE_ENABLED }}
+          # "true" once main requires the merge queue: enqueue instead of merge.
+          GREEN_LANE_MERGE_QUEUE: ${{ vars.GREEN_LANE_MERGE_QUEUE }}
           GREEN_LANE_ACCESS_AUDIT_TOKEN: ${{ secrets.GREEN_LANE_ACCESS_AUDIT_TOKEN }}
         with:
           retries: 0

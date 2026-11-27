@@ -52,6 +52,10 @@ func (e *Evaluator) Evaluate(pr PRInfo, reproResult *ReproResult, openPRs []PRSu
 	pathResult := e.checkDeniedPaths(pr)
 	result.Rules = append(result.Rules, pathResult)
 
+	if e.config.MergeQueue {
+		result.Rules = append(result.Rules, e.checkMainDrift(pr))
+	}
+
 	// Determine verdict
 	allPass := true
 	result.AdvisoryCandidate = true

@@ -53,6 +53,9 @@ func run() error {
 	if os.Getenv("REQUIRE_AUTOMATED_REVIEW") == "true" {
 		config.RequireAutomatedReview = true
 	}
+	if os.Getenv("MERGE_QUEUE") == "true" {
+		config.MergeQueue = true
+	}
 
 	// Fetch PR information
 	ctx := context.Background()

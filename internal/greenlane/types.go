@@ -127,6 +127,12 @@ type PRInfo struct {
 	CheckRuns             []CheckRun
 	Reviews               []Review
 	ReviewComments        []ReviewComment
+	// Merge-queue mode only: files main changed since the PR's merge base
+	// (MainDriftKnown false when the collector could not list them all).
+	// The queue tests the combination; a fresh review is still required
+	// if main touched a denied path under the reviewed change.
+	MainDrift      []string
+	MainDriftKnown bool
 }
 
 // Config represents the green-lane configuration. cmd/green-lane-check loads
@@ -140,16 +146,20 @@ type CheckSource struct {
 
 type Config struct {
 	// Live pilot requires authenticated automated completion, never a human comment.
-	RequireAutomatedReview bool                     `json:"require_automated_review"`
-	AllowedAuthors         []string                 `json:"allowed_authors"`
-	AllowedBaseBranches    []string                 `json:"allowed_base_branches"`
-	CheckSources           map[string]CheckSource   `json:"check_sources"`
-	ProvenanceIssuers      map[string]ReceiptIssuer `json:"provenance_issuers"`
-	DeniedPaths            []string                 `yaml:"denied_paths" json:"denied_paths"`
-	MaxChangedLines        int                      `yaml:"max_changed_lines" json:"max_changed_lines"`
-	MaxLockfileChanges     int                      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
-	MaxFiles               int                      `yaml:"max_files" json:"max_files"`
-	RequiredChecks         []string                 `yaml:"required_checks" json:"required_checks"`
+	RequireAutomatedReview bool `json:"require_automated_review"`
+	// MergeQueue: PRs may be behind the base branch, because GitHub's merge
+	// queue tests each one combined with the latest base before merging.
+	// Adds the Main Drift rule.
+	MergeQueue          bool                     `json:"merge_queue"`
+	AllowedAuthors      []string                 `json:"allowed_authors"`
+	AllowedBaseBranches []string                 `json:"allowed_base_branches"`
+	CheckSources        map[string]CheckSource   `json:"check_sources"`
+	ProvenanceIssuers   map[string]ReceiptIssuer `json:"provenance_issuers"`
+	DeniedPaths         []string                 `yaml:"denied_paths" json:"denied_paths"`
+	MaxChangedLines     int                      `yaml:"max_changed_lines" json:"max_changed_lines"`
+	MaxLockfileChanges  int                      `yaml:"max_lockfile_changes" json:"max_lockfile_changes"`
+	MaxFiles            int                      `yaml:"max_files" json:"max_files"`
+	RequiredChecks      []string                 `yaml:"required_checks" json:"required_checks"`
 	// DocsDeps holds the tighter caps for the docs/changelog/dependency lane.
 	DocsDeps SizeLimits `yaml:"docs_deps" json:"docs_deps"`
 }

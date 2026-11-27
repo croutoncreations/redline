@@ -180,6 +180,45 @@ Additional live safeguards:
 - Optional `green-lane-hold`, `maintenance:skip`, or `do-not-touch` PR label defers that PR. It is an opt-out, never an
   approval or opt-in requirement.
 
+### Merge-queue mode
+
+Set the repository variable `GREEN_LANE_MERGE_QUEUE=true` once `main` requires
+GitHub's merge queue. Then:
+
+- **PRs may be behind `main`.** GitHub's queue tests each queued PR combined
+  with the latest `main` (and any PRs ahead of it) on a temporary
+  `gh-readonly-queue/main/*` branch, and merges only if the eight required
+  checks pass there. CI runs on `merge_group` for this. PRs no longer need
+  branch updates and re-reviews after other merges.
+- **The review still has to be on the PR's current head**, against the PR's
+  own base. One extra rule, **Main Drift**, closes the obvious gap: if `main`
+  changed any denied path (auth, credentials, workflows, release, the lane
+  itself) since the PR's base, the PR needs a branch update and a fresh review.
+  If the worker can't list what `main` changed, the rule is inconclusive and
+  blocks.
+- **The worker enqueues instead of merging**: at most one
+  `enqueuePullRequest` call per run, with `expectedHeadOid` pinned to the
+  evaluated head, never retried. The queue then merges as
+  `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
+  is no post-merge dispatch. PRs already in the queue are skipped. If `main`
+  has no merge queue, the worker refuses to run.
+- **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
+  already in the queue stays there. Remove it with **Remove from queue** on the
+  PR or on the branch's merge-queue page (the `gh` CLI can't), or with the
+  GraphQL `dequeuePullRequest` mutation.
+
+Owner setup, in this order:
+
+1. Merge the PR that adds `merge_group` to CI and queue mode to the worker.
+2. In `main`'s branch protection, turn on **Require merge queue**: squash,
+   build concurrency 1, minimum and maximum group size 1, **Only merge
+   non-failing pull requests** on, status-check timeout 60 minutes. The
+   queue's tested branch is always current, so the existing strict
+   ("up to date") setting can stay as it is.
+3. `gh variable set GREEN_LANE_MERGE_QUEUE -R croutoncreations/redline --body true`.
+
+To leave queue mode, delete the variable first, then remove the queue.
+
 ### Kill switch
 
 **Disable `Green Lane Live Pilot` in GitHub Actions** (or run

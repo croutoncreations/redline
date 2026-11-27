@@ -83,6 +83,9 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 			if step.Env["LIVE_PILOT_ENABLED"] != "${{ vars.GREEN_LANE_LIVE_ENABLED }}" {
 				t.Fatal("missing explicit opt-in")
 			}
+			if step.Env["GREEN_LANE_MERGE_QUEUE"] != "${{ vars.GREEN_LANE_MERGE_QUEUE }}" {
+				t.Fatal("merge-queue mode must come from the repository variable")
+			}
 		}
 	}
 	if !checkout || !runner {
