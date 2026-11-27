@@ -3,6 +3,11 @@ name: CI
 on:
   workflow_dispatch: # Post-merge CI for the live pilot (GITHUB_TOKEN suppresses push events).
   pull_request:
+  # Merge queue: GitHub tests each queued PR combined with the latest main
+  # (and any PRs ahead of it) on a temporary gh-readonly-queue/main/* branch
+  # and only merges when the required checks pass there.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
