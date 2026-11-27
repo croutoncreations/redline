@@ -277,6 +277,144 @@ func TestDispatcherSendsFollowUpWakeForDeliveryDuringInFlightWake(t *testing.T) 
 	}
 }
 
+// gatedTransport records every wake hint per token and holds the first wake
+// to the gated token until the test releases it.
+type gatedTransport struct {
+	gated    string
+	entered  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	hints    map[string][]WakeHint
+	heldOnce bool
+}
+
+func (g *gatedTransport) Wake(ctx context.Context, w Wake) error {
+	g.mu.Lock()
+	g.hints[w.Token] = append(g.hints[w.Token], w.Hint)
+	hold := w.Token == g.gated && !g.heldOnce
+	if hold {
+		g.heldOnce = true
+	}
+	g.mu.Unlock()
+	if !hold {
+		return nil
+	}
+	g.entered <- struct{}{}
+	select {
+	case <-g.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *gatedTransport) hintsFor(token string) []WakeHint {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]WakeHint(nil), g.hints[token]...)
+}
+
+// newGatedDispatcher registers devices (token = device id) and holds the
+// first wake to devices[0].
+func newGatedDispatcher(t *testing.T, devices ...string) (*Dispatcher, *gatedTransport) {
+	t.Helper()
+	g := &gatedTransport{gated: devices[0], entered: make(chan struct{}, 1), release: make(chan struct{}), hints: map[string][]WakeHint{}}
+	data := &memoryStore{}
+	for _, device := range devices {
+		data.registrations = append(data.registrations, store.PushRegistration{DeviceSessionID: device, Token: device})
+	}
+	d := NewDispatcher(data, "", g, log.New(&bytes.Buffer{}, "", 0))
+	t.Cleanup(d.Close)
+	return d, g
+}
+
+// waitCoalesced blocks until a concurrent Dispatch has finished enqueuing:
+// it counts the coalesced device under the same lock that records its jobs.
+func waitCoalesced(t *testing.T, d *Dispatcher, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for d.Stats().Coalesced != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("coalesced = %d, want %d", d.Stats().Coalesced, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Issue #276: a waited dispatch (Send test notification) must count a device
+// whose earlier wake is still in flight, and the wake it counts must carry the
+// waited delivery's hint.
+func TestWaitedDispatchCountsDeviceWithWakeInFlight(t *testing.T) {
+	d, g := newGatedDispatcher(t, "phone", "tablet")
+	d.Dispatch(t.Context(), 1, "reset.expiring", false)
+	select {
+	case <-g.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first wake did not start")
+	}
+	// tablet's first wake is not held; let it finish so only phone is pending.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.mu.Lock()
+		tabletPending := d.pending["tablet"]
+		d.mu.Unlock()
+		if !tabletPending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tablet wake did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	results := make(chan int, 1)
+	go func() { results <- d.Dispatch(t.Context(), 2, "test", true).Woken }()
+	waitCoalesced(t, d, 1)
+	close(g.release)
+	select {
+	case woken := <-results:
+		if woken != 2 {
+			t.Fatalf("woken = %d, want 2", woken)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waited dispatch never answered")
+	}
+	hints := g.hintsFor("phone")
+	if len(hints) != 2 || hints[1] != (WakeHint{DeliveryID: 2, Kind: "test"}) {
+		t.Fatalf("phone hints = %+v, want follow-up with the waited hint", hints)
+	}
+}
+
+// Two waited dispatches merged into one follow-up wake are both answered.
+func TestWaitedDispatchesCoalescedOnInFlightDeviceAreBothAnswered(t *testing.T) {
+	d, g := newGatedDispatcher(t, "phone")
+	d.Dispatch(t.Context(), 1, "reset.expiring", false)
+	select {
+	case <-g.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first wake did not start")
+	}
+	results := make(chan int, 2)
+	go func() { results <- d.Dispatch(t.Context(), 2, "test", true).Woken }()
+	waitCoalesced(t, d, 1)
+	go func() { results <- d.Dispatch(t.Context(), 3, "test", true).Woken }()
+	waitCoalesced(t, d, 2)
+	close(g.release)
+	for range 2 {
+		select {
+		case woken := <-results:
+			if woken != 1 {
+				t.Fatalf("woken = %d, want 1", woken)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a coalesced waited dispatch was never answered")
+		}
+	}
+	hints := g.hintsFor("phone")
+	if len(hints) != 2 || hints[1].DeliveryID != 3 {
+		t.Fatalf("phone hints = %+v, want one follow-up with the latest hint", hints)
+	}
+}
+
 type recordingTransport struct {
 	mu     sync.Mutex
 	tokens []string
