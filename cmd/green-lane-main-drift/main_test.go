@@ -4,8 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/croutoncreations/redline/internal/greenlane"
 )
 
 const (
@@ -52,7 +57,10 @@ func fakeGit(changed []string, fail string) gitFunc {
 			if args[len(args)-2] != base || args[len(args)-1] != landing {
 				return "", fmt.Errorf("wrong range %v", args)
 			}
-			return strings.Join(changed, "\n"), nil
+			if args[len(args)-3] != "-z" {
+				return "", fmt.Errorf("diff without -z: %v", args)
+			}
+			return strings.Join(changed, "\x00") + "\x00", nil
 		}
 		return "", fmt.Errorf("unexpected git %v", args)
 	}
@@ -86,6 +94,8 @@ func TestMainDriftCheck(t *testing.T) {
 		{"workflow drift", "merge_group", good, []string{".github/workflows/ci.yml"}, "", headOf(pr, nil), false},
 		{"lane drift", "merge_group", good, []string{"internal/greenlane/rules.go"}, "", headOf(pr, nil), false},
 		{"drift-check drift", "merge_group", good, []string{"cmd/green-lane-main-drift/main.go"}, "", headOf(pr, nil), false},
+		{"non-ASCII auth path", "merge_group", good, []string{"internal/apiauth/é.go"}, "", headOf(pr, nil), false},
+		{"auth path with newline", "merge_group", good, []string{"docs/a.md", "internal/apiauth/x\ny.go"}, "", headOf(pr, nil), false},
 		{"bad payload", "merge_group", []byte("not json"), nil, "", headOf(pr, nil), false},
 		{"short base sha", "merge_group", payload("2222", ref), nil, "", headOf(pr, nil), false},
 		{"missing base sha", "merge_group", payload("", ref), nil, "", headOf(pr, nil), false},
@@ -140,5 +150,47 @@ func TestAPIPRHead(t *testing.T) {
 	}
 	if _, err := apiPRHead("", "o/r", "tok")(12); err == nil {
 		t.Fatal("missing API URL accepted")
+	}
+}
+
+// Real git: an unusual filename under a denied directory must still match.
+func TestRealGitDiffKeepsUnusualNames(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-q")
+	run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+	first := run("rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "apiauth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "internal", "apiauth", "é.go"), []byte("package x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "auth")
+	second := run("rev-parse", "HEAD")
+	wd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out, err := git("diff", "--name-only", "--no-renames", "-z", first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	if len(files) != 1 || files[0] != "internal/apiauth/é.go" {
+		t.Fatalf("got %q", files)
+	}
+	if s := greenlane.SensitiveDrift(files, greenlane.DefaultDeniedPaths()); len(s) != 1 {
+		t.Fatalf("unusual auth path not flagged: %q", files)
 	}
 }

@@ -82,7 +82,8 @@ func apiPRHead(api, repo, token string) prHeadFunc {
 
 func git(args ...string) (string, error) {
 	out, err := exec.Command("git", args...).Output()
-	return strings.TrimSpace(string(out)), err
+	// Keep NUL-separated output intact; only trim the line ending.
+	return strings.TrimRight(string(out), "\n"), err
 }
 
 var (
@@ -128,12 +129,14 @@ func run(event string, payload []byte, git gitFunc, prHead prHeadFunc) error {
 	if err != nil || !fullSHA.MatchString(mergeBase) {
 		return fmt.Errorf("main-drift: cannot find the PR's merge base: %v", err)
 	}
-	changed, err := git("diff", "--name-only", "--no-renames", mergeBase, landing)
+	// -z: NUL-separated, unquoted paths, so unusual filenames can't slip past
+	// denied-path matching as git's quoted form ("a/\303\251.go").
+	changed, err := git("diff", "--name-only", "--no-renames", "-z", mergeBase, landing)
 	if err != nil {
 		return fmt.Errorf("main-drift: cannot list what main changed: %v", err)
 	}
 	var files []string
-	for _, f := range strings.Split(changed, "\n") {
+	for _, f := range strings.Split(changed, "\x00") {
 		if f != "" {
 			files = append(files, f)
 		}
