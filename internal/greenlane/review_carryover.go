@@ -8,9 +8,11 @@ import (
 // A branch update merges main into a PR without changing what the PR itself
 // changes. Re-running Codex and CodeRabbit after every such update is the
 // main cost of keeping branches current, so a completed review of an earlier
-// head also counts for the current head when the two heads make exactly the
-// same change: the same paths, each with the same resulting file (blob and
-// mode), on top of unchanged base versions of those paths.
+// head also counts for the current head when, path by path, the two heads
+// make the same change against their own bases: the same changed paths, each
+// with the same resulting file (blob and mode), on top of the same base
+// version of each path. Every file in the head is then either exactly what
+// the reviewer saw or main's own content for a path the PR doesn't change.
 //
 // The collector proves this from git trees, which GitHub addresses by content
 // hash, and records the earlier heads in PRInfo.ReviewEquivalentHeads. CI is

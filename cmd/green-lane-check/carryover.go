@@ -11,7 +11,7 @@ import (
 )
 
 // reviewEquivalentHeads returns the earlier heads, named by trusted review
-// summaries on this PR, whose change is byte-identical to head's (see
+// summaries on this PR, whose change is path-by-path identical to head's (see
 // internal/greenlane/review_carryover.go). Each must be an ancestor of head.
 //
 // The reviewed change is measured against the reviewed commit's FIRST-PARENT

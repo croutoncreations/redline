@@ -221,10 +221,12 @@ This deliberately also defers benign review prose.
 
 **Branch updates keep earlier reviews.** Merging `main` into a PR doesn't
 change what the PR changes, so a completed Codex or CodeRabbit review of an
-earlier head also covers the current head when the collector proves the two
-heads make *exactly* the same change. From GitHub's content-addressed git
-trees: the same set of changed paths, each with the same resulting blob and
-mode, on top of the same base version of each path. The earlier head must be
+earlier head also covers the current head when the collector proves, path by
+path, that the two heads make the same change against their own bases. From
+GitHub's content-addressed git trees: the same set of changed paths, each with
+the same resulting blob and mode, on top of the same base version of each
+path. So every file in the head is either exactly what the reviewer saw or
+`main`'s own content for a path the PR doesn't change. The earlier head must be
 an ancestor of the current head. Any doubt (truncated tree, API error, a
 conflict fix, a further commit) means no carryover and a fresh review is
 needed. Carryover is also refused when `main`, since the reviewed base,
