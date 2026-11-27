@@ -205,6 +205,17 @@ GitHub's merge queue. Then:
   `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
   is no post-merge dispatch. PRs already in the queue are skipped. If `main`
   has no merge queue, the worker refuses to run.
+- **Authorization holds until merge, not just enqueue.** Every run first
+  re-evaluates each PR this worker queued (`enqueuer` = `github-actions`) and
+  removes it from the queue (`dequeuePullRequest`) if it no longer qualifies:
+  a new review body or unresolved thread, a hold label, failing CI, Main
+  Drift, or a head that differs from the queued one. GitHub reporting a queued
+  PR as not cleanly mergeable doesn't count. PRs Jon queued by hand are left
+  alone. Removals are listed in `live-result.json` under `dequeued`. The queue
+  takes about one CI run to merge, and the worker also wakes on every CI
+  completion, so the window between new feedback and the next re-check is
+  short but not zero; add `green-lane-hold` and remove the PR from the queue
+  by hand to stop one immediately.
 - **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
   already in the queue stays there. Remove it with **Remove from queue** on the
   PR or on the branch's merge-queue page (the `gh` CLI can't), or with the

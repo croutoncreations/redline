@@ -110,6 +110,11 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
 
   const prs = await github.paginate(github.rest.pulls.list,{...repo,state:'open',base:'main',sort:'created',direction:'asc',per_page:100});
+  // Queue mode: authorization must hold until the queue merges, not just at
+  // enqueue. Every run re-evaluates each queued PR this worker enqueued and
+  // removes it from the queue if it no longer qualifies (a new review body,
+  // an unresolved thread, a hold label, a changed head...).
+  if (queue) await revalidateQueued(prs);
   for (const listed of prs) {
     if (listed.draft || held(listed) || listed.head?.repo?.full_name !== 'croutoncreations/redline') continue;
     const number = listed.number;
@@ -134,12 +139,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
         continue;
       }
     }
-    const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
-      encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
-      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
-        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',MERGE_QUEUE:queue?'true':'',
-        DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
-    }));
+    const result = await evaluate(number, pr.head.sha, pr.base.sha);
     report.evaluations.push(result);
     await write(report);
     if (result.repository !== 'croutoncreations/redline' || result.pr_number !== number ||
@@ -193,6 +193,47 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     return finish(`Merged PR #${number} at ${merged.sha}; one-merge run complete`);
   }
   return finish(queue ? 'No fully qualified PR; nothing enqueued' : 'No current-main, fully qualified PR; no merge attempted');
+
+  async function evaluate(number, head, base) {
+    return JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
+      encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
+      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
+        EXPECTED_HEAD_SHA:head,EXPECTED_BASE_SHA:base,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',MERGE_QUEUE:queue?'true':'',
+        DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
+    }));
+  }
+
+  async function revalidateQueued(open) {
+    report.dequeued = [];
+    for (const listed of open) {
+      const number = listed.number;
+      if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid PR number');
+      const q = await github.graphql(`query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){id isInMergeQueue headRefOid mergeQueueEntry{id enqueuer{login}}}}}`,{owner:repo.owner,repo:repo.repo,n:number});
+      const node = q?.repository?.pullRequest;
+      if (node?.isInMergeQueue !== true) continue;
+      // Only PRs this worker queued; a PR Jon queued by hand is his call.
+      if (node.mergeQueueEntry?.enqueuer?.login !== 'github-actions') continue;
+      const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
+      let reason = null;
+      if (held(pr)) reason = 'hold label';
+      else if (pr.state !== 'open' || pr.draft || pr.head.sha !== node.headRefOid) reason = 'PR state or head changed';
+      else {
+        const result = await evaluate(number, pr.head.sha, pr.base.sha);
+        const failed = (result.rules ?? []).filter(rule => rule.pass !== true || rule.inconclusive);
+        // PR State can fail for queued PRs only because GitHub reports them as
+        // not cleanly mergeable while queued; every other rule must still pass.
+        const blocking = failed.filter(rule => !(rule.name === 'PR State' && /mergeab/i.test(rule.message ?? '')));
+        if (result.pr_number !== number || result.head_sha !== pr.head.sha || !Array.isArray(result.rules) || result.rules.length === 0 || blocking.length)
+          reason = blocking.map(rule => `${rule.name}: ${rule.message}`).join('; ') || 'evaluation did not match the queued PR';
+      }
+      if (!reason) continue;
+      // Dequeue is the safe direction, so it is not gated on the kill switch.
+      await github.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
+      report.dequeued.push({pr:number,head:node.headRefOid,reason:String(reason).slice(0,500)});
+      await write(report);
+      core.warning(`Removed PR #${number} from the merge queue: ${reason}`);
+    }
+  }
   }
 }
 module.exports = Object.assign(live, {transient});

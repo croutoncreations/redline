@@ -21,7 +21,7 @@ function fixture() {
 }
 async function run(f) {
   const before=process.env.LIVE_PILOT_ENABLED; process.env.LIVE_PILOT_ENABLED=f.optin ?? 'true';
-  try { return await live({github:f.github,accessAudit:f.accessAudit,context:f.context,core:{info:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
+  try { return await live({github:f.github,accessAudit:f.accessAudit,context:f.context,core:{info:()=>{},warning:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
   finally {if(before===undefined)delete process.env.LIVE_PILOT_ENABLED;else process.env.LIVE_PILOT_ENABLED=before}
 }
 test('one exact-head squash merge even with multiple eligible PRs; old recorded base is not main tip',async()=>{
@@ -121,11 +121,16 @@ for(const present of [true,false])test(`workflow isolates audit token and remove
 
 // Merge-queue mode: enqueue the exact evaluated head instead of merging.
 function queueFixture(){
- const f=fixture();f.behind=3;f.protection.protection.required_status_checks.checks.push({context:'main-drift',app_id:15368});f.queue={exists:true,inQueue:false,enqueues:[],headBack:null};
+ const f=fixture();f.behind=3;f.protection.protection.required_status_checks.checks.push({context:'main-drift',app_id:15368});f.queue={exists:true,inQueue:false,enqueues:[],dequeues:[],headBack:null};
  const pr=f.pr;f.pr=n=>({...pr(n),node_id:`PR_${n}`});
  f.github.graphql=async(q,v)=>{
   if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1'}:null}};
-  if(q.includes('isInMergeQueue'))return {repository:{pullRequest:{isInMergeQueue:typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue}}};
+  if(q.includes('dequeuePullRequest')){f.queue.dequeues.push(v.id);return {dequeuePullRequest:{mergeQueueEntry:{id:'MQE_x'}}}}
+  if(q.includes('isInMergeQueue')){
+   const inQ=typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue;
+   if(!q.includes('mergeQueueEntry'))return {repository:{pullRequest:{isInMergeQueue:inQ}}};
+   return {repository:{pullRequest:{id:`PR_${v.n}`,isInMergeQueue:inQ,headRefOid:f.queue.queuedHead ?? head,mergeQueueEntry:inQ?{id:'MQE_q',enqueuer:{login:f.queue.enqueuer ?? 'github-actions'}}:null}}};
+  }
   if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:null,pullRequest:{number:Number(v.id.slice(3)),headRefOid:f.queue.headBack ?? v.head}}}}}
   throw new Error('unexpected graphql '+q);
  };
@@ -181,3 +186,38 @@ test('queue mode: main-drift must be a required check',async()=>{
  await assert.rejects(runQueue(f),/protection/);assert.equal(f.queue.enqueues.length,0);
 });
 test('direct mode does not require main-drift',async()=>{const f=fixture();await run(f);assert.equal(f.merges.length,1)});
+
+// Queue mode keeps authorization live until the queue merges.
+test('queue mode: a queued PR that still qualifies stays queued',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const r=await runQueue(f);
+ assert.deepEqual(f.queue.dequeues,[]);assert.deepEqual(r.dequeued,[]);
+});
+test('queue mode: a queued PR that no longer qualifies is removed from the queue',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;
+ f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Review Readiness',pass:false,message:'Unclassified review bodies'}]}:inner(n);
+ const r=await runQueue(f);assert.deepEqual(f.queue.dequeues,['PR_1']);assert.equal(r.dequeued[0].pr,1);assert.match(r.dequeued[0].reason,/Review Readiness/);
+});
+test('queue mode: a hold label on a queued PR removes it from the queue',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const pr=f.pr;f.pr=n=>n===1?{...pr(n),labels:[{name:'green-lane-hold'}]}:pr(n);
+ const r=await runQueue(f);assert.deepEqual(f.queue.dequeues,['PR_1']);assert.equal(r.dequeued[0].reason,'hold label');
+});
+test('queue mode: a queued head that differs from the PR head is removed',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.queuedHead='9'.repeat(40);
+ const r=await runQueue(f);assert.deepEqual(f.queue.dequeues,['PR_1']);
+});
+test('queue mode: a PR Jon queued by hand is left alone',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.enqueuer='jfox85';const inner=f.result;
+ f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+ await runQueue(f);assert.deepEqual(f.queue.dequeues,[]);
+});
+test('queue mode: GitHub reporting a queued PR as not mergeable does not dequeue it',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;
+ f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'PR State',pass:false,message:'PR mergeability is unknown or conflicted'},{pass:true}]}:inner(n);
+ await runQueue(f);assert.deepEqual(f.queue.dequeues,[]);
+});
+test('queue mode: the dequeue sweep runs before new enqueues; a mid-run kill switch only stops the enqueue',async()=>{
+ const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;
+ f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'CI',pass:false,message:'failed'}]}:inner(n);
+ f.onValidate=()=>{f.state='disabled_manually'};
+ await runQueue(f);assert.deepEqual(f.queue.dequeues,['PR_1']);assert.equal(f.queue.enqueues.length,0);
+});
