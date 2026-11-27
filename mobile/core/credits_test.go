@@ -190,3 +190,29 @@ func TestCreditsDecisionWordingMatchesTheDashboards(t *testing.T) {
 		}
 	}
 }
+
+// Grants lapse at 00:00 UTC. The view carries the instant in UTC whatever the
+// host's zone, so the phone can show the UTC date (Dec 13), never the US
+// Pacific one (Dec 12).
+func TestCreditsExpiryStaysUTCOnAPacificHost(t *testing.T) {
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skip("no tzdata:", err)
+	}
+	host := time.Local
+	time.Local = pacific
+	t.Cleanup(func() { time.Local = host })
+
+	payload := strings.ReplaceAll(creditsAccountPayload("ok", false, ""), cursorNow.Add(53*time.Hour).Format(time.RFC3339), "2026-12-13T00:00:00Z")
+	credits := renderPayload(t, `{"providers":[`+payload+`]}`).Providers[0].Credits
+	raw, err := json.Marshal(credits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"expires_at":"2026-12-13T00:00:00Z"`) || credits.ExpiresAt.Location() != time.UTC {
+		t.Fatalf("expires_at = %v in %s", credits.ExpiresAt, raw)
+	}
+	if len(credits.Grants) == 0 || credits.Grants[0].ExpiresAt.Location() != time.UTC || credits.Grants[0].ExpiresAt.Day() != 13 {
+		t.Fatalf("grant expiry = %+v", credits.Grants)
+	}
+}

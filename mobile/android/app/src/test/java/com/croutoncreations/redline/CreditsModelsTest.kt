@@ -3,17 +3,27 @@ package com.croutoncreations.redline
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
+import java.util.TimeZone
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /** OpenAI API credits accounts, as mobile/core words them. Synthetic data only. */
 class CreditsModelsTest {
 
-    private val zone = ZoneId.of("America/Los_Angeles")
     private val now = Instant.parse("2026-11-24T19:00:00Z")
+
+    // Grants lapse at 00:00 UTC; the phone's own zone is US Pacific here, where
+    // local time would show the day before. Credit dates must ignore it.
+    private val hostZone = TimeZone.getDefault()
+
+    @Before fun pacificHost() = TimeZone.setDefault(TimeZone.getTimeZone(ZoneId.of("America/Los_Angeles")))
+
+    @After fun restoreHost() = TimeZone.setDefault(hostZone)
 
     private val coreJson = """
         {"providers":[
@@ -56,7 +66,7 @@ class CreditsModelsTest {
               "credits":{"headline":"Last known ${'$'}62.40","detail":"Last sample 2 hrs ago","expires_at":"2026-11-27T00:00:00Z",
                "remaining_percent":62,"stale":true}}]}""",
         ).providers[0].credits!!
-        assertEquals("Last sample 2 hrs ago", creditsExpiryLine(credits, zone, now, Locale.US))
+        assertEquals("Last sample 2 hrs ago", creditsExpiryLine(credits, now, Locale.US))
         assertEquals("", credits.decisionLabel)
     }
 
@@ -77,17 +87,25 @@ class CreditsModelsTest {
     }
 
     @Test
-    fun `the secondary line is the relative expiry with its local date`() {
+    fun `the secondary line is the relative expiry with its UTC date`() {
         val credits = decode().providers[0].credits!!
-        assertEquals("Expires in 2 days · Thu, Nov 26", creditsExpiryLine(credits, zone, now, Locale.US))
+        assertEquals("Expires in 2 days · Fri, Nov 27", creditsExpiryLine(credits, now, Locale.US))
+    }
+
+    @Test
+    fun `a 00 00 UTC expiry shows its UTC date on a US Pacific phone`() {
+        val credits = CreditsView(detail = "Expires in 16 days", expiresAt = "2026-12-13T00:00:00Z",
+            grants = listOf(CreditGrantView(label = "Claude subscription credit", expiresAt = "2026-12-13T00:00:00Z")))
+        assertEquals("Expires in 16 days · Sun, Dec 13", creditsExpiryLine(credits, now, Locale.US))
+        assertEquals("expires Sun, Dec 13", creditGrantExpiry(credits.grants[0], now, Locale.US))
     }
 
     @Test
     fun `grants say when they expire, with the year when it is not this one`() {
         val grants = decode().providers[0].credits!!.grants
-        assertEquals("expires Thu, Nov 26", creditGrantExpiry(grants[0], zone, now, Locale.US))
-        assertEquals("expires Fri, Oct 15, 2027", creditGrantExpiry(grants[1], zone, now, Locale.US))
-        assertEquals("no expiry", creditGrantExpiry(grants[2], zone, now, Locale.US))
+        assertEquals("expires Fri, Nov 27", creditGrantExpiry(grants[0], now, Locale.US))
+        assertEquals("expires Fri, Oct 15, 2027", creditGrantExpiry(grants[1], now, Locale.US))
+        assertEquals("no expiry", creditGrantExpiry(grants[2], now, Locale.US))
     }
 
     @Test
@@ -99,7 +117,7 @@ class CreditsModelsTest {
                "paid_label":"${'$'}7.25 · shown only, never scheduled","no_promo":true}}]}""",
         ).providers[0]
         val credits = account.credits!!
-        assertEquals("No promotional credit", creditsExpiryLine(credits, zone, now, Locale.US))
+        assertEquals("No promotional credit", creditsExpiryLine(credits, now, Locale.US))
         assertEquals("dispatch held, no promotional credit", accountDispatchState(account))
         assertFalse(account.weeklyNotReported)
     }
@@ -113,7 +131,7 @@ class CreditsModelsTest {
                "expires_at":"2026-11-27T00:00:00Z","signed_out":true}}]}""",
         ).providers[0]
         val credits = account.credits!!
-        assertEquals("Session key expired · re-paste it on the computer running Redline", creditsExpiryLine(credits, zone, now, Locale.US))
+        assertEquals("Session key expired · re-paste it on the computer running Redline", creditsExpiryLine(credits, now, Locale.US))
         assertEquals("Signed out", providerStatus(account))
         assertEquals("needs sign-in", accountDispatchState(account))
         // The headline and its line already say it; no second red copy.
@@ -142,5 +160,24 @@ class CreditsModelsTest {
         assertEquals(OverviewEmptyState("Weekly", "No usage reported"), overviewEmptyState(claude))
         val notReported = ProviderUsage(id = "cursor-main", provider = "cursor", weeklyNotReported = true)
         assertEquals(OverviewEmptyState("Weekly", "Not reported"), overviewEmptyState(notReported))
+    }
+
+    // A hold is the scheduler working as configured: grey, never the red of an
+    // error. Amber only when the decision itself is unknown or the balance is
+    // out of date; green when it admits work.
+    @Test
+    fun `the credits decision dot is grey for a hold, green to run, amber when unknown`() {
+        fun account(decision: String, stale: Boolean = false, signedOut: Boolean = false) = ProviderUsage(
+            id = "claude-credits", provider = "anthropic-api-credits", accountStatus = if (signedOut) "signed_out" else "ok",
+            credits = CreditsView(decisionLabel = "x", stale = stale, signedOut = signedOut),
+            scheduling = Scheduling(decision = decision),
+        )
+        assertEquals(Good, creditsDecisionTone(account("RUN")))
+        assertEquals(Good, creditsDecisionTone(account("ADMIT")))
+        assertEquals(TextMuted, creditsDecisionTone(account("WAIT")))
+        assertEquals(TextMuted, creditsDecisionTone(account("HOLD")))
+        assertEquals(Warn, creditsDecisionTone(account("UNKNOWN")))
+        assertEquals(Warn, creditsDecisionTone(account("WAIT", stale = true)))
+        assertEquals(Warn, creditsDecisionTone(account("WAIT", signedOut = true)))
     }
 }

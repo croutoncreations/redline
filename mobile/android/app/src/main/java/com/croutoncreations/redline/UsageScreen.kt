@@ -700,7 +700,7 @@ internal fun ProviderDetails(
                         Modifier
                             .size(6.dp)
                             .clip(CircleShape)
-                            .background(if (provider.scheduling?.admits == true) Good else Accent),
+                            .background(creditsDecisionTone(provider)),
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -1261,7 +1261,20 @@ internal fun CreditsHeadline(credits: CreditsView) {
 }
 
 /**
- * Under the scheduler's line: when jobs start, paid credit (shown, never
+ * The credits decision's dot, as the accounts carousel colours dispatch: green
+ * when it admits work, amber when the decision is unknown or the balance is out
+ * of date or signed out, otherwise grey. A hold is not an error, so never red.
+ */
+internal fun creditsDecisionTone(provider: ProviderUsage): Color = when {
+    provider.scheduling?.admits == true -> Good
+    provider.scheduling?.decision == "UNKNOWN" -> Warn
+    provider.isOutOfDate || provider.accountStatus == "signed_out" -> Warn
+    provider.credits?.let { it.stale || it.signedOut } == true -> Warn
+    else -> TextMuted
+}
+
+/**
+ * Under the scheduler's line: when jobs start, other credit (shown, never
  * scheduled) and every grant with money left.
  */
 @Composable
@@ -1274,7 +1287,7 @@ internal fun CreditsBreakdown(credits: CreditsView) {
         if (credits.paidLabel.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
             Row(Modifier.semantics(mergeDescendants = true) {}) {
-                Text("Paid credit", color = TextMuted, fontSize = 11.sp)
+                Text("Other credit", color = TextMuted, fontSize = 11.sp)
                 Spacer(Modifier.width(8.dp))
                 Spacer(Modifier.weight(1f))
                 Text(credits.paidLabel, color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)

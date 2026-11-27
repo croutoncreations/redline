@@ -186,7 +186,7 @@ data class ProviderUsage(
 
 /**
  * An API credits account (OpenAI or Claude). Only promotional credit is capacity: the
- * bar and the headline are about it; paid credit is shown, never scheduled.
+ * bar and the headline are about it; other credit is shown, never scheduled.
  */
 @Serializable
 data class CreditsView(
@@ -202,7 +202,7 @@ data class CreditsView(
     @SerialName("promo_label") val promoLabel: String = "",
     /** When jobs start: the dollar floor and the pacing. */
     @SerialName("rule_line") val ruleLine: String = "",
-    /** "\$7.25 · shown only, never scheduled"; empty when there is no paid credit. */
+    /** The "Other credit" row: "\$7.25 · shown only, never scheduled"; empty when there is none. */
     @SerialName("paid_label") val paidLabel: String = "",
     val grants: List<CreditGrantView> = emptyList(),
     /**
@@ -229,42 +229,40 @@ data class CreditGrantView(
 )
 
 /**
- * A credit expiry as a calendar date in the reader's timezone: "Thu, Nov 26",
- * or "Fri, Oct 15, 2027" when it is not this year. "" when unparseable.
+ * A credit expiry as a UTC calendar date: "Thu, Nov 26", or "Fri, Oct 15,
+ * 2027" when it is not this year. "" when unparseable. Grants lapse at 00:00
+ * UTC, so the phone's own timezone would show the day before in the Americas.
  */
 fun creditDateLabel(
     at: String,
-    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
     now: java.time.Instant = java.time.Instant.now(),
     locale: java.util.Locale = java.util.Locale.getDefault(),
 ): String {
     val instant = runCatching { java.time.Instant.parse(at) }.getOrNull() ?: return ""
-    val date = instant.atZone(zone)
-    val pattern = if (date.year == now.atZone(zone).year) "EEE, MMM d" else "EEE, MMM d, yyyy"
+    val date = instant.atZone(java.time.ZoneOffset.UTC)
+    val pattern = if (date.year == now.atZone(java.time.ZoneOffset.UTC).year) "EEE, MMM d" else "EEE, MMM d, yyyy"
     return date.format(java.time.format.DateTimeFormatter.ofPattern(pattern, locale))
 }
 
 /** The line under the dollar headline: "Expires in 2 days · Thu, Nov 26". */
 fun creditsExpiryLine(
     credits: CreditsView,
-    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
     now: java.time.Instant = java.time.Instant.now(),
     locale: java.util.Locale = java.util.Locale.getDefault(),
 ): String {
     // Signed out the detail is the fix; stale it is "Last sample 2 hrs ago".
     if (credits.signedOut || credits.noPromo || credits.stale) return credits.detail
-    val date = creditDateLabel(credits.expiresAt, zone, now, locale)
+    val date = creditDateLabel(credits.expiresAt, now, locale)
     return listOf(credits.detail, date).filter { it.isNotEmpty() }.joinToString(" · ")
 }
 
 /** A grant's expiry for the grants list: "expires Thu, Nov 26", or "no expiry". */
 fun creditGrantExpiry(
     grant: CreditGrantView,
-    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
     now: java.time.Instant = java.time.Instant.now(),
     locale: java.util.Locale = java.util.Locale.getDefault(),
 ): String {
-    val date = creditDateLabel(grant.expiresAt, zone, now, locale)
+    val date = creditDateLabel(grant.expiresAt, now, locale)
     return if (date.isEmpty()) "no expiry" else "expires $date"
 }
 
