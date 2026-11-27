@@ -165,3 +165,28 @@ func TestCarryoverNeverClearsReviewProse(t *testing.T) {
 		t.Fatalf("fresh exact-head review no longer clears old prose: %s", r.Message)
 	}
 }
+
+// CodeRabbit's case on #284: PR history O -> P -> R, reviewed at R with main
+// at O. main later fast-forwards through P to Q, and the PR merges Q. The
+// collector then measures R against P, not O. That is still safe: every
+// path in the merged head is either R's reviewed content or main's content,
+// and if main moved any path the PR touches after P, carryover is refused.
+func TestCarryoverWhenMainAbsorbedAnEarlierPRCommit(t *testing.T) {
+	P := Tree{"f": blob("f1"), "g": blob("g0")} // PR commit, later on main
+	R := Tree{"f": blob("f2"), "g": blob("g0")} // reviewed head; main was at O (f0, g0)
+	Q := Tree{"f": blob("f1"), "g": blob("g1")} // main after P, f untouched
+	head := Tree{"f": blob("f2"), "g": blob("g1")}
+	if !SameChange(head, Q, R, P) {
+		t.Fatal("clean update after main absorbed P rejected")
+	}
+	for p, e := range head {
+		if e != R[p] && e != Q[p] {
+			t.Fatalf("path %s is neither reviewed nor from main", p)
+		}
+	}
+	// If main changed f again after P, the base versions differ: refused.
+	Q2 := Tree{"f": blob("f1b"), "g": blob("g1")}
+	if SameChange(Tree{"f": blob("f2"), "g": blob("g1")}, Q2, R, P) {
+		t.Fatal("carried over although main changed a PR file after P")
+	}
+}
