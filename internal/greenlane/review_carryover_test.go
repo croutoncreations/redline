@@ -3,6 +3,7 @@ package greenlane
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func blob(sha string) TreeEntry { return TreeEntry{Mode: "100644", Type: "blob", SHA: sha} }
@@ -138,5 +139,29 @@ func TestReviewedCommitsDiscovery(t *testing.T) {
 	n := nullSecuritySummary(earlierHead, 1)
 	if got := ReviewedCommits(n); len(got) != 2 {
 		t.Fatalf("codex: %v", got)
+	}
+}
+
+// Prose a bot posted on the reviewed head must keep blocking after a branch
+// update; carryover alone must not supersede it (only a fresh exact-head
+// review can).
+func TestCarryoverNeverClearsReviewProse(t *testing.T) {
+	summary := AutomatedReviewComment{ID: 50, UserID: 199175422, User: "chatgpt-codex-connector[bot]", UserType: "Bot", AppID: 1144995, UpdatedAt: "2026-01-02T00:00:00Z",
+		Body: "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"" + earlierHead + "\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"},\"security_review\":{\"commit_sha\":\"" + earlierHead + "\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"}} -->"}
+	p := passingPR()
+	p.HeadSHA = reviewHead
+	p.ReviewThreads = nil
+	p.ReviewEquivalentHeads = []string{earlierHead}
+	p.AutomatedReviews = []AutomatedReviewComment{summary}
+	p.Reviews = []Review{{ID: 7, User: "chatgpt-codex-connector[bot]", UserType: "Bot", State: "COMMENTED", CommitID: earlierHead, Body: "Outside-diff finding: also fix X", SubmittedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}}
+	if r := liveEvaluator().checkReviewReadiness(p); r.Pass {
+		t.Fatalf("carried-over review cleared prose: %s", r.Message)
+	}
+	// A fresh exact-head review after the prose still clears it, as before.
+	fresh := summary
+	fresh.Body = strings.ReplaceAll(summary.Body, earlierHead, reviewHead)
+	p.AutomatedReviews = []AutomatedReviewComment{fresh}
+	if r := liveEvaluator().checkReviewReadiness(p); !r.Pass {
+		t.Fatalf("fresh exact-head review no longer clears old prose: %s", r.Message)
 	}
 }

@@ -156,12 +156,17 @@ func (e *Evaluator) checkAuthor(pr PRInfo) RuleResult {
 
 // Historical review prose is not silently cleared by a push or by another
 // provider. Its own authenticated provider must finish a later full review of
-// the new head. Current-head bodies always block, even with such a summary.
+// the exact new head; a review carried over from an equivalent earlier head
+// (review_carryover.go) does not count. Current-head bodies always block, even with such a summary.
 func reviewBodySuperseded(pr PRInfo, review Review) bool {
 	if review.CommitID == "" || review.SubmittedAt.IsZero() {
 		return false
 	}
 	fresh := pr
+	// Only a review of the exact current head can clear old prose. A review
+	// carried over from an equivalent earlier head may be the very review
+	// that posted this prose, so carryover never clears it.
+	fresh.ReviewEquivalentHeads = nil
 	fresh.AutomatedReviews = nil
 	for _, summary := range pr.AutomatedReviews {
 		if strings.EqualFold(summary.User, review.User) {
