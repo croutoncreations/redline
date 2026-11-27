@@ -88,6 +88,10 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 	if err != nil {
 		return pr, err
 	}
+	equivalent, err := c.reviewEquivalentHeads(ctx, before.Base.Ref, before.Head.SHA, automated)
+	if err != nil {
+		return pr, err
+	}
 	after, err := c.metadata(ctx, n)
 	if err != nil {
 		return pr, err
@@ -98,7 +102,7 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 		State: before.State, UpdatedAt: before.UpdatedAt, HeadSHA: before.Head.SHA, BaseSHA: before.Base.SHA,
 		BaseBranch: before.Base.Ref, Draft: before.Draft, Mergeable: before.Mergeable != nil && *before.Mergeable,
 		Author: before.User.Login, Files: files, CheckRuns: checks, Reviews: reviews, ReviewComments: comments,
-		ReviewThreads: threads, ReviewThreadsComplete: true, Provenance: receipts, ProvenanceError: provenanceError,
+		ReviewThreads: threads, ReviewThreadsComplete: true, ReviewEquivalentHeads: equivalent, Provenance: receipts, ProvenanceError: provenanceError,
 		SnapshotConsistent: reflect.DeepEqual(before, after),
 	}
 	if !pr.SnapshotConsistent {

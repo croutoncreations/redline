@@ -96,7 +96,7 @@ func completedAutomatedReview(pr PRInfo) bool {
 				Covered string `json:"coveredCommitId"`
 				Kind    string `json:"kind"`
 			}
-			if summaryJSON(summaryPayload(c.Body, "<!-- final_review_risk_coverage:"), &state) == nil && state.Source == pr.HeadSHA && state.Covered == pr.HeadSHA && state.Kind == "reviewed" {
+			if summaryJSON(summaryPayload(c.Body, "<!-- final_review_risk_coverage:"), &state) == nil && state.Source == state.Covered && reviewCovers(pr, state.Source) && state.Kind == "reviewed" {
 				return true
 			}
 		} else {
@@ -104,8 +104,8 @@ func completedAutomatedReview(pr PRInfo) bool {
 				Code     json.RawMessage `json:"code_review"`
 				Security json.RawMessage `json:"security_review"`
 			}
-			if summaryJSON(summaryPayload(c.Body, "<!-- codex-review-state:v1 "), &state) == nil && completedCodexComponent(state.Code, pr.HeadSHA) &&
-				(len(state.Security) == 0 || bytes.Equal(bytes.TrimSpace(state.Security), []byte("null")) || completedCodexComponent(state.Security, pr.HeadSHA) ||
+			if summaryJSON(summaryPayload(c.Body, "<!-- codex-review-state:v1 "), &state) == nil && completedCodexComponent(state.Code, pr) &&
+				(len(state.Security) == 0 || bytes.Equal(bytes.TrimSpace(state.Security), []byte("null")) || completedCodexComponent(state.Security, pr) ||
 					cleanNullSecurityReview(state.Security, c.Body, pr)) {
 				return true
 			}
@@ -114,16 +114,17 @@ func completedAutomatedReview(pr PRInfo) bool {
 	return false
 }
 
-// Both review types use the same exact-head completion protocol. A populated
+// Both review types use the same completion protocol, on the exact head or a
+// proven-identical earlier head (review_carryover.go). A populated
 // security review must finish and clear findings even without inline threads.
-func completedCodexComponent(raw json.RawMessage, head string) bool {
+func completedCodexComponent(raw json.RawMessage, pr PRInfo) bool {
 	var review struct {
 		Commit     string `json:"commit_sha"`
 		Status     string `json:"status"`
 		Findings   *bool  `json:"has_any_findings"`
 		Unresolved *bool  `json:"has_unresolved_findings"`
 	}
-	return summaryJSON(raw, &review) == nil && review.Commit == head && review.Status == "completed" && review.Findings != nil && review.Unresolved != nil && !*review.Unresolved
+	return summaryJSON(raw, &review) == nil && reviewCovers(pr, review.Commit) && review.Status == "completed" && review.Findings != nil && review.Unresolved != nil && !*review.Unresolved
 }
 
 // Codex's security review often finishes with both findings flags null
@@ -132,9 +133,10 @@ func completedCodexComponent(raw json.RawMessage, head string) bool {
 // "codex-security-review-finding" inline comment and a COMMENTED review.
 // Accept the null form only when all of these hold, so an unknown verdict is
 // never read as clean on its own:
-//   - status "completed" on the exact head, with both flags exactly null;
+//   - status "completed" on the head (or a proven-identical earlier head),
+//     with both flags exactly null;
 //   - exactly one codex-security-review:v1 marker, status "completed", for
-//     this repository, PR and head;
+//     this repository, PR and that same reviewed commit;
 //   - no Codex security-finding comment on the PR at all, resolved or not.
 func cleanNullSecurityReview(raw json.RawMessage, body string, pr PRInfo) bool {
 	// encoding/json maps JSON null and a missing key to the same nil
@@ -147,7 +149,7 @@ func cleanNullSecurityReview(raw json.RawMessage, body string, pr PRInfo) bool {
 		Unresolved json.RawMessage `json:"has_unresolved_findings"`
 	}
 	var keys map[string]json.RawMessage
-	if summaryJSON(raw, &review) != nil || json.Unmarshal(raw, &keys) != nil || review.Commit != pr.HeadSHA || review.Status != "completed" {
+	if summaryJSON(raw, &review) != nil || json.Unmarshal(raw, &keys) != nil || !reviewCovers(pr, review.Commit) || review.Status != "completed" {
 		return false
 	}
 	for _, k := range []string{"has_any_findings", "has_unresolved_findings"} {
@@ -164,7 +166,7 @@ func cleanNullSecurityReview(raw json.RawMessage, body string, pr PRInfo) bool {
 		Status     string `json:"status"`
 	}
 	if summaryJSON(summaryPayload(body, "<!-- codex-security-review:v1 "), &marker) != nil ||
-		marker.Status != "completed" || marker.Head != pr.HeadSHA || marker.PR != pr.Number || marker.Repository != pr.Repository {
+		marker.Status != "completed" || marker.Head != review.Commit || marker.PR != pr.Number || marker.Repository != pr.Repository {
 		return false
 	}
 	for _, c := range pr.ReviewComments {

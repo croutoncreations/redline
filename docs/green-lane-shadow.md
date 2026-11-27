@@ -219,6 +219,16 @@ publishes a later full completion for the new head. A push or another provider
 cannot silently clear it. Dismissing a review also does not resolve its body.
 This deliberately also defers benign review prose.
 
+**Branch updates keep earlier reviews.** Merging `main` into a PR doesn't
+change what the PR changes, so a completed Codex or CodeRabbit review of an
+earlier head also covers the current head when the collector proves the two
+heads make *exactly* the same change. From GitHub's content-addressed git
+trees: the same set of changed paths, each with the same resulting blob and
+mode, on top of the same base version of each path. The earlier head must be
+an ancestor of the current head. Any doubt (truncated tree, API error, a
+conflict fix, a further commit) means no carryover and a fresh review is
+needed. CI still has to pass on the exact current head.
+
 Codex's security review often finishes with `has_any_findings` and
 `has_unresolved_findings` both `null` (openai/codex#57326). That form counts as
 clean only when all of these hold: the security review is `completed` on the

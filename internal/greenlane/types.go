@@ -127,6 +127,10 @@ type PRInfo struct {
 	CheckRuns             []CheckRun
 	Reviews               []Review
 	ReviewComments        []ReviewComment
+	// Earlier heads of this PR whose change is identical to HeadSHA's
+	// (see review_carryover.go). A completed review of one of them also
+	// covers HeadSHA. Set only by the collector from git trees.
+	ReviewEquivalentHeads []string
 }
 
 // Config represents the green-lane configuration. cmd/green-lane-check loads
