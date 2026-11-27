@@ -40,7 +40,7 @@ var creditsVendors = map[string]creditsVendorText{
 		command: "add-claude-credits", provider: config.ProviderAnthropicAPICredits, name: "Claude API credits", platform: "Claude Console",
 		orgHelp:            "Claude Console organization UUID; with --session-key-stdin and none given, the login's one organization with API access is looked up and saved",
 		sessionHelp:        "the sessionKey cookie (sk-ant-sid…) from platform.claude.com",
-		apiKeyHelp:         "an sk-ant-api… key from the linked Console org (ideally a dedicated redline workspace with a spend limit), used by claude-code, pi and command jobs",
+		apiKeyHelp:         "a Claude API key (sk-ant-usr… personal or sk-ant-svc… service account key, or a legacy sk-ant-api… workspace key) from the linked Console org, scoped to one workspace (ideally a dedicated redline workspace with a spend limit), used by claude-code, pi and command jobs",
 		sessionKeyEndpoint: "the Claude Console credits endpoints on platform.claude.com",
 	},
 }
@@ -362,7 +362,8 @@ const (
 	openAISessionKeyPrefix = "sess-"
 	openAIAPIKeyPrefix     = "sk-"
 	claudeSessionKeyPrefix = apicredits.ConsoleSessionKeyPrefix
-	claudeAPIKeyPrefix     = "sk-ant-api"
+	claudeOAuthTokenPrefix = "sk-ant-oat"
+	claudeAdminKeyPrefix   = "sk-ant-admin"
 	claudeKeyPrefix        = "sk-ant-"
 )
 
@@ -397,19 +398,27 @@ func checkCreditsKey(key, vendor, kind string) error {
 	what := keyDescription(vendor, kind)
 	claude := strings.HasPrefix(key, claudeKeyPrefix)
 	if vendor == config.APICreditsVendorAnthropic {
-		want, other, otherKind := claudeSessionKeyPrefix, claudeAPIKeyPrefix, "a Claude API key; save it with set-api-key"
+		session := strings.HasPrefix(key, claudeSessionKeyPrefix)
+		apiKey := apicredits.IsClaudeAPIKey(key)
+		want := claudeSessionKeyPrefix + "…"
 		if kind == apicredits.SecretAPIKey {
-			want, other, otherKind = claudeAPIKeyPrefix, claudeSessionKeyPrefix, "a Claude Console session key; save it with set-session-key"
+			want = apicredits.ClaudeAPIKeyPrefixesText()
 		}
 		switch {
-		case strings.HasPrefix(key, want):
+		case kind == apicredits.SecretSessionKey && session, kind == apicredits.SecretAPIKey && apiKey:
 			return nil
-		case strings.HasPrefix(key, other):
-			return fmt.Errorf("that is %s, not %s (expected %s…)", otherKind, what, want)
+		case kind == apicredits.SecretSessionKey && apiKey:
+			return errors.New("that is a Claude API key; save it with set-api-key")
+		case kind == apicredits.SecretAPIKey && session:
+			return errors.New("that is a Claude Console session key; save it with set-session-key")
+		case kind == apicredits.SecretAPIKey && strings.HasPrefix(key, claudeOAuthTokenPrefix):
+			return errors.New("that is a Claude subscription (OAuth) token, not an API key; create an API key at platform.claude.com/settings/keys")
+		case kind == apicredits.SecretAPIKey && strings.HasPrefix(key, claudeAdminKeyPrefix):
+			return errors.New("that is an Admin API key; runs need a personal or service account key")
 		case !claude && (strings.HasPrefix(key, openAISessionKeyPrefix) || strings.HasPrefix(key, openAIAPIKeyPrefix)):
-			return fmt.Errorf("that looks like an OpenAI key, but this is a Claude API credits account: it needs %s (%s…)", what, want)
+			return fmt.Errorf("that looks like an OpenAI key, but this is a Claude API credits account: it needs %s (%s)", what, want)
 		}
-		return fmt.Errorf("that is not %s (expected %s…)", what, want)
+		return fmt.Errorf("that is not %s (expected %s)", what, want)
 	}
 	want := openAISessionKeyPrefix
 	if kind == apicredits.SecretAPIKey {

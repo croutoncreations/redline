@@ -37,8 +37,10 @@ API credits (run on the machine running Redline; keys are read from standard inp
   set-session-key <id>                   session key used only to read the balance: platform.openai.com
                                          (sess-…), or the sessionKey cookie from platform.claude.com (sk-ant-sid…)
   set-api-key <id>                       API key runs are given: OpenAI sk-… (pi, command), or a Claude
-                                         sk-ant-api… key from the linked Console org (claude-code, pi, command;
-                                         ideally from a dedicated redline workspace with a spend limit)
+                                         personal (sk-ant-usr…), service account (sk-ant-svc…) or legacy
+                                         workspace (sk-ant-api…) key from the linked Console org, scoped to
+                                         one workspace (claude-code, pi, command; ideally a dedicated
+                                         redline workspace with a spend limit)
   clear-keys <id>                        remove both keys
 
 add, edit and add-profile also accept --weekly-policy session_only and --session-reserve 0.50

@@ -331,6 +331,20 @@ func TestCreditsWithoutAPIKeyHoldsWork(t *testing.T) {
 	}
 }
 
+// A Claude personal key (sk-ant-usr…) saved on an OpenAI account holds work:
+// it starts with sk- but is not an OpenAI key.
+func TestCreditsWithClaudePersonalKeyHoldsWork(t *testing.T) {
+	fixture := newCreditsServer(t, 80, 24*time.Hour, nil)
+	fixture.saveKeys(t)
+	fixture.secrets.items["api-credits/"+apicredits.SecretAPIKey] = "sk-ant-usr01-SYNTHETICPERSONAL"
+	createCreditsCandidate(t, fixture.db, "pi")
+	var result schedulerResponseForTest
+	decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+	if result.Run != nil || !strings.Contains(result.Result.Reason, "is a Claude (Anthropic) key") || strings.Contains(result.Result.Reason, "SYNTHETIC") {
+		t.Fatalf("result = %+v", result.Result)
+	}
+}
+
 // Codex and Claude cannot spend API credits; their profiles are refused on a
 // credits account, so a job can never be scheduled against a balance it
 // does not draw on.

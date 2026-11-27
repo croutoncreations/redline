@@ -21,6 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Adding a second API credits account without an organization now says how to give it one:
   for Claude, the one-command form above; for OpenAI, `--org org-…` (Settings › Organization ›
   General on platform.openai.com).
+- A Claude API credits account's run key can now be a personal (`sk-ant-usr…`) or service
+  account (`sk-ant-svc…`) key, as well as a legacy `sk-ant-api…` workspace key. It must be
+  scoped to one workspace, because Redline can't send `anthropic-workspace-id` for an unscoped
+  key. `set-api-key` names a Console session key, a subscription (OAuth) token or an Admin key
+  when given one, and `set-session-key` refuses all three kinds of API key.
 
 ### Fixed
 
