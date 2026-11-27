@@ -129,6 +129,51 @@ func TestClaudeCreditsKeysAreValidatedPerVendor(t *testing.T) {
 	}
 }
 
+// set-api-key takes any identity-backed or legacy Claude API key: personal
+// (sk-ant-usr…), service account (sk-ant-svc…) or workspace (sk-ant-api…).
+// Session cookies, OAuth tokens, Admin keys and OpenAI keys are refused,
+// each naming what it is, and set-session-key refuses all three API keys.
+func TestClaudeCreditsSetAPIKeyAcceptsPersonalServiceAndWorkspaceKeys(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	if code, _, stderr := runCLI(t, "", "--config", configPath, "account", "add-claude-credits", "claude-credits"); code != 0 {
+		t.Fatalf("add: %s", stderr)
+	}
+	store := apicredits.FileSecretStore{Dir: secretsDir}
+	for _, key := range []string{"sk-ant-usr01-SYNTHETICPERSONAL", "sk-ant-svc01-SYNTHETICSERVICE", "sk-ant-api03-SYNTHETICWORKSPACE"} {
+		if code, stdout, stderr := runCLI(t, key+"\n", "--config", configPath, "account", "set-api-key", "claude-credits"); code != 0 ||
+			strings.Contains(stdout+stderr, "SYNTHETIC") {
+			t.Fatalf("set-api-key %s: code %d stdout %s stderr %s", key[:10], code, stdout, stderr)
+		}
+		if got, _ := store.Load(t.Context(), "claude-credits", apicredits.SecretAPIKey); got != key {
+			t.Fatalf("api key = %q, want %q", got, key)
+		}
+		code, _, stderr := runCLI(t, key+"\n", "--config", configPath, "account", "set-session-key", "claude-credits")
+		if code == 0 || !strings.Contains(stderr, "that is a Claude API key; save it with set-api-key") || strings.Contains(stderr, "SYNTHETIC") {
+			t.Errorf("set-session-key %s: code %d stderr %s", key[:10], code, stderr)
+		}
+	}
+	if _, err := store.Load(t.Context(), "claude-credits", apicredits.SecretSessionKey); err == nil {
+		t.Fatal("an API key was saved as the session key")
+	}
+	for _, tc := range []struct{ key, want string }{
+		{"sk-ant-sid01-SYNTHETICSESSION", "that is a Claude Console session key; save it with set-session-key"},
+		{"sk-ant-oat01-SYNTHETICOAUTH", "that is a Claude subscription (OAuth) token, not an API key; create an API key at platform.claude.com/settings/keys"},
+		{"sk-ant-admin01-SYNTHETICADMIN", "that is an Admin API key; runs need a personal or service account key"},
+		{"sk-proj-SYNTHETICOPENAI", "that looks like an OpenAI key"},
+		{"sess-SYNTHETICOPENAI", "that looks like an OpenAI key"},
+		{"sk-ant-xyz01-SYNTHETICOTHER", "that is not a Claude API key"},
+		{"SYNTHETICGARBAGE", "that is not a Claude API key"},
+	} {
+		code, _, stderr := runCLI(t, tc.key+"\n", "--config", configPath, "account", "set-api-key", "claude-credits")
+		if code == 0 || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, "SYNTHETIC") {
+			t.Errorf("set-api-key %s: code %d stderr %s", tc.key[:10], code, stderr)
+		}
+	}
+	if got, _ := store.Load(t.Context(), "claude-credits", apicredits.SecretAPIKey); got != "sk-ant-api03-SYNTHETICWORKSPACE" {
+		t.Fatalf("a refused key replaced the saved one: %q", got)
+	}
+}
+
 const syntheticLookupSessionKey = "sk-ant-sid01-SYNTHETICLOOKUPKEY"
 
 // fakeConsoleOrganizations serves GET /api/organizations to the CLI's

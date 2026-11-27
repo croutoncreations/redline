@@ -60,8 +60,10 @@ is refused with what to do, and nothing is saved. The command takes the same fla
 [--firesale-window 72h] [--session-key-file PATH] [--api-key-file PATH]`; with
 `--organization-id` there is no lookup. `set-session-key`, `set-api-key` and `clear-keys`
 work for both vendors: the Claude session key is the `sessionKey` cookie (`sk-ant-sid…`) from
-platform.claude.com, and the API key is an `sk-ant-api…` key from the linked Console
-organization, ideally from a dedicated `redline` workspace with a spend limit. A key of the
+platform.claude.com, and the API key is a personal (`sk-ant-usr…`) or service account
+(`sk-ant-svc…`) key, or a legacy workspace key (`sk-ant-api…`), from the linked Console
+organization. It must be scoped to one workspace, ideally a dedicated `redline` workspace with a
+spend limit. A key of the
 wrong kind or vendor is refused. See
 [Claude (Anthropic) API credits](scheduling.md#claude-anthropic-api-credits).
 

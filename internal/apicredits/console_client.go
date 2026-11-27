@@ -17,6 +17,28 @@ const consoleOrigin = "https://platform.claude.com"
 // sessionKey cookie).
 const ConsoleSessionKeyPrefix = "sk-ant-sid"
 
+// ClaudeAPIKeyPrefixes start the Claude API keys runs can use: a personal
+// key, a service account key, or a legacy workspace key. All three are sent
+// as ANTHROPIC_API_KEY and billed to the organization.
+var ClaudeAPIKeyPrefixes = []string{"sk-ant-usr", "sk-ant-svc", "sk-ant-api"}
+
+// IsClaudeAPIKey reports whether key starts with one of ClaudeAPIKeyPrefixes.
+func IsClaudeAPIKey(key string) bool {
+	for _, prefix := range ClaudeAPIKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClaudeAPIKeyPrefixesText lists ClaudeAPIKeyPrefixes for messages:
+// "sk-ant-usr…, sk-ant-svc… or sk-ant-api…".
+func ClaudeAPIKeyPrefixesText() string {
+	last := len(ClaudeAPIKeyPrefixes) - 1
+	return strings.Join(ClaudeAPIKeyPrefixes[:last], "…, ") + "… or " + ClaudeAPIKeyPrefixes[last] + "…"
+}
+
 // consoleUserAgent is a browser-like User-Agent: the Console serves its
 // own web app and may refuse obviously non-browser clients.
 const consoleUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

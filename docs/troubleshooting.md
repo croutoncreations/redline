@@ -77,7 +77,10 @@ An API credits account says why it is holding on its card:
 - **Held · no promotional credit** means there is no subscription grant in effect. Purchased
   and other credit is shown as **Other credit** but is never spent.
 - With no saved API key, work holds rather than run with another key:
-  `pbpaste | redline account set-api-key <account>`.
+  `pbpaste | redline account set-api-key <account>`. On a Claude account the key is a personal
+  (`sk-ant-usr…`) or service account (`sk-ant-svc…`) key, or a legacy `sk-ant-api…` workspace
+  key, scoped to one workspace: Redline can't send the `anthropic-workspace-id` header an
+  unscoped key needs.
 
 ## A Claude API credits pi job exits with status 78
 
