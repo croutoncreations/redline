@@ -257,6 +257,14 @@ test.describe('OpenAI API credits account (desktop)', () => {
     }
   });
 
+  test('a Run now decision reads green on the desktop, not red', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits() });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await expect(card.locator('.provider-pressure')).toHaveText(/^Run now/);
+    await expect(card.locator('.provider-pressure')).toHaveCSS('color', 'rgb(114, 217, 164)');
+    await expect(card.locator('.decision-detail')).toHaveCSS('border-left-color', 'rgb(114, 217, 164)');
+  });
+
   // Grants lapse at 00:00 UTC; in the Americas the local date is the day
   // before, so the date is the UTC one (test timezone: Los Angeles).
   test('a 00:00 UTC expiry shows its UTC date in Los Angeles', async ({ page }) => {
@@ -554,14 +562,21 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await expect(row).toHaveAttribute('aria-label', /Last known \$62\.40/);
   });
 
-  test('the Run now status is AA-readable in light mode and unchanged in dark mode', async ({ page }) => {
+  // "Run now" means work can start: green like the phone's Dispatching dot,
+  // never the red that marks failures and errors.
+  test('the Run now status is green and AA-readable in light and dark mode', async ({ page }) => {
     await page.emulateMedia({ colorScheme: 'light' });
     await loadMobileDashboard(page, { dashboard: withCredits() });
     const status = page.locator('[data-provider-id="credits-main"] .m-provider-status');
+    const decision = page.locator('[data-provider-id="credits-main"]').getByTestId('decision-detail');
     await expect(status).toHaveClass(/\btriggered\b/);
+    await expect(status).toHaveCSS('color', 'rgb(42, 122, 85)');
+    await expect(decision).toHaveCSS('border-left-color', 'rgb(42, 122, 85)');
     expect(await textContrast(status)).toBeGreaterThanOrEqual(4.5);
     await page.emulateMedia({ colorScheme: 'dark' });
-    await expect(status).toHaveCSS('color', 'rgb(255, 145, 139)');
+    await expect(status).toHaveCSS('color', 'rgb(114, 217, 164)');
+    await expect(decision).toHaveCSS('border-left-color', 'rgb(114, 217, 164)');
+    expect(await textContrast(status)).toBeGreaterThanOrEqual(4.5);
   });
 
   test('the credits card controls have 44px hit areas', async ({ page }) => {
