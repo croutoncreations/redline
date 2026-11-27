@@ -63,8 +63,8 @@ plausible syntax or URLs do not suffice.
 There is **no** requirement for signed author receipts, model-provider
 independence, an issuer service, a new GitHub App, a human approval, a new
 fails-before/passes-after repro test or a `Root-Cause` trailer. Required CI is
-the test gate. The older repro/provenance helpers remain available as legacy
-tooling but do not participate in this policy. Duplicate scanning is no longer
+the test gate. The older provenance helpers remain available as legacy tooling but do not
+participate in this policy. Duplicate scanning is no longer
 an eligibility prerequisite.
 
 ## Workflows

@@ -28,11 +28,7 @@ func run() error {
 
 	repoOwner := os.Getenv("REPO_OWNER")
 	repoName := os.Getenv("REPO_NAME")
-	listOnly := os.Getenv("LIST_OPEN_PRS") == "true"
 	prNumberStr := os.Getenv("PR_NUMBER")
-	if listOnly {
-		prNumberStr = "0"
-	}
 	configPath := os.Getenv("CONFIG_PATH")
 
 	if repoOwner == "" || repoName == "" || prNumberStr == "" {
@@ -40,7 +36,7 @@ func run() error {
 	}
 
 	prNumber, err := strconv.Atoi(prNumberStr)
-	if err != nil || (!listOnly && prNumber <= 0) {
+	if err != nil || prNumber <= 0 {
 		return fmt.Errorf("invalid PR_NUMBER")
 	}
 
@@ -63,14 +59,6 @@ func run() error {
 		apiBase: "https://api.github.com",
 		client:  &http.Client{Timeout: 30 * time.Second},
 		config:  config,
-	}
-
-	if listOnly {
-		prs, err := client.GetOpenPRs(ctx)
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(os.Stdout).Encode(duplicateSnapshot{Repository: repoOwner + "/" + repoName, CollectedAt: time.Now().UTC(), PRs: prs})
 	}
 
 	pr, err := client.GetPR(ctx, prNumber)
@@ -99,7 +87,7 @@ func run() error {
 
 	// Run evaluation
 	evaluator := greenlane.NewEvaluator(config)
-	result := evaluator.Evaluate(pr, nil, nil)
+	result := evaluator.Evaluate(pr)
 
 	// Output results
 	jsonOut, err := json.MarshalIndent(result, "", "  ")

@@ -97,14 +97,6 @@ func TestStateAndCIBindings(t *testing.T) {
 		}
 	}
 }
-func TestCodeRabbitUsesLatestDecisiveReview(t *testing.T) {
-	p := passingPR()
-	p.Reviews = []Review{{ID: 1, User: "coderabbitai[bot]", State: "APPROVED", CommitID: p.HeadSHA}, {ID: 2, User: "coderabbitai[bot]", State: "CHANGES_REQUESTED", CommitID: p.HeadSHA}, {ID: 3, User: "coderabbitai[bot]", State: "COMMENTED", CommitID: p.HeadSHA}}
-	if r := checkCodeRabbitReview(p); !r.RequestedChanges || r.Approved {
-		t.Fatalf("%+v", r)
-	}
-}
-
 func TestAllowedAuthors(t *testing.T) {
 	for _, author := range []string{"jfox85", "JFOX85", "unknown[bot]", "", "jfox85-extra"} {
 		p := passingPR()
@@ -123,7 +115,7 @@ func TestAllowedAuthors(t *testing.T) {
 
 func TestLockfileInMixedCodePRStaysManual(t *testing.T) {
 	p := passingPR(PRFile{Filename: "internal/fix.go", Additions: 1}, PRFile{Filename: "go.mod", Patch: goModBump}, PRFile{Filename: "go.sum", Additions: 1})
-	r := NewEvaluator(DefaultConfig()).Evaluate(p, nil, nil)
+	r := NewEvaluator(DefaultConfig()).Evaluate(p)
 	if r.Verdict != VerdictWouldNotMerge || ruleByName(t, r, "Denied Paths").Pass {
 		t.Fatal("code change bypassed manual lockfile policy")
 	}

@@ -9,10 +9,10 @@ function fixture(count=2) {
  run:(_file,_args,options)=>{calls.push(options.env);return JSON.stringify({pr_number:Number(options.env.PR_NUMBER)})},publishReport:async args=>published.push(args.result.pr_number)}};
 }
 
-test('reconciliation evaluates only selected PRs with no repro or duplicate scan',async()=>{
+test('reconciliation evaluates only selected PRs with no duplicate scan',async()=>{
  const f=fixture();await reconcile(f.args);
  assert.deepEqual(f.published,[1,2]);assert.equal(f.calls.length,2);
- for(const call of f.calls){assert.equal(call.REPRO_PASS,'');assert.equal(call.EXPECTED_BASE_SHA,'base')}
+ for(const call of f.calls){assert.equal(call.EXPECTED_BASE_SHA,'base')}
 });
 
 test('unsharded oversized sweep fails instead of omitting PRs',async()=>{
