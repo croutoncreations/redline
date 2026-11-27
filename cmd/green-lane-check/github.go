@@ -88,9 +88,11 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 	if err != nil {
 		return pr, err
 	}
+	// Carryover can only add coverage, so failing to prove it means none:
+	// the PR is judged on exact-head reviews alone, as before carryover.
 	equivalent, err := c.reviewEquivalentHeads(ctx, before.Base.Ref, before.Head.SHA, automated)
 	if err != nil {
-		return pr, err
+		equivalent = nil
 	}
 	after, err := c.metadata(ctx, n)
 	if err != nil {
