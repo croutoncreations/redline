@@ -42,6 +42,9 @@ jobs:
   # events pass immediately. Required on main once the merge queue is on.
   main-drift:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: read # reads the queued PR's head
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +57,8 @@ jobs:
           cache: true
       - name: Check main drift under the queued PR
         if: github.event_name == 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: go run ./cmd/green-lane-main-drift
       - name: Not a merge-queue run
         if: github.event_name != 'merge_group'
