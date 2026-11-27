@@ -43,8 +43,9 @@ Jobs are called *tasks* in the CLI and API; the dashboard and this page say *job
   redemption uses expiring banked resets before they lapse.
 - **Spends expiring API credits too.** The monthly API credit a ChatGPT Pro/Business or Claude
   subscription grants to a linked API organization expires unused. Redline shows the balance and
-  its expiry, and spends it on queued jobs before it lapses, never below a floor you set and never
-  on purchased credit. See [API credits](docs/scheduling.md#openai-api-credits).
+  its expiry, and starts queued jobs on it before it lapses, only while it is above a floor you
+  set; purchased credit is never counted. A running job isn't stopped, so use a spend-limited
+  project or workspace key as the hard cap. See [API credits](docs/scheduling.md#openai-api-credits).
 - **Works with your agents.** Codex CLI, Claude Code, Pi, Hermes, or any command. Redline does
   not replace your harness; it decides when to launch it.
 - **Isolated by design.** Jobs run in Git worktrees or DevX sessions, and completed runs keep
