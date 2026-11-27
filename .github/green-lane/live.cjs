@@ -62,8 +62,11 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     // remain configured and enforced natively; no admin credential is granted.
     const {data:branch} = await github.rest.repos.getBranch({...repo,branch:'main'});
     const p = branch.protection?.required_status_checks;
+    // Queue mode also needs main-drift required: it re-applies Main Drift to
+    // the exact main each queued PR lands on.
+    const required = queue ? [...checks,'main-drift'] : checks;
     return branch.protected === true && branch.protection?.enabled === true &&
-      p?.enforcement_level === 'everyone' && checks.every(name =>
+      p?.enforcement_level === 'everyone' && required.every(name =>
         p.checks?.some(c => c.context === name && c.app_id === 15368));
   };
   // Queue mode needs the queue to exist: otherwise an enqueue request fails,
@@ -164,12 +167,16 @@ async function live({github, accessAudit, context, core, run=execFileSync,
       // expectedHeadOid pins the exact evaluated head: GitHub refuses the
       // request if the branch moved. Never retried, like a merge call.
       mergeCalled = true;
-      const r = await github.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id headCommit{oid}}}}`,{id:fresh.node_id,head:result.head_sha});
+      // Verify through the entry's pull request: headCommit is the queue's
+      // own (possibly not yet built) merge-group commit, not the PR head.
+      const r = await github.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id pullRequest{number headRefOid}}}}`,{id:fresh.node_id,head:result.head_sha});
       const entry = r?.enqueuePullRequest?.mergeQueueEntry;
-      if (typeof entry?.id !== 'string' || entry.headCommit?.oid !== result.head_sha) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
+      if (typeof entry?.id !== 'string' || entry.pullRequest?.number !== number || entry.pullRequest?.headRefOid !== result.head_sha) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
       report.state='enqueued'; report.enqueued.push({pr:number,head:result.head_sha,entry:entry.id});
-      // The queue merges later, as github-merge-queue[bot]; its merge_group CI
-      // run and the resulting push to main run CI, so no dispatch is needed.
+      // The queue merges later, as github-merge-queue[bot], once the required
+      // checks pass on its merge-group commit. That includes main-drift
+      // (ci.yml), which re-applies Main Drift to the exact main the PR lands
+      // on, so main changing while the PR waits is still caught.
       return finish(`Enqueued PR #${number} at ${result.head_sha}; one-enqueue run complete`);
     }
     // Disable client retries in the workflow. Never try a second PR after this

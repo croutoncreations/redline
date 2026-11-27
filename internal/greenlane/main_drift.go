@@ -20,14 +20,8 @@ func (e *Evaluator) checkMainDrift(pr PRInfo) RuleResult {
 		r.Message = "Could not list what main changed since this PR's base"
 		return r
 	}
-	var sensitive []string
-	for _, p := range pr.MainDrift {
-		if matchesAnyPattern(p, e.config.DeniedPaths) {
-			sensitive = append(sensitive, p)
-		}
-	}
+	sensitive := SensitiveDrift(pr.MainDrift, e.config.DeniedPaths)
 	if len(sensitive) > 0 {
-		sort.Strings(sensitive)
 		if len(sensitive) > 5 {
 			sensitive = append(sensitive[:5], fmt.Sprintf("and %d more", len(sensitive)-5))
 		}
@@ -41,4 +35,17 @@ func (e *Evaluator) checkMainDrift(pr PRInfo) RuleResult {
 		r.Message = fmt.Sprintf("OK: main changed %d files since this PR's base, none sensitive; the merge queue tests the combination", len(pr.MainDrift))
 	}
 	return r
+}
+
+// SensitiveDrift returns the paths in changed that match a denied pattern.
+// Shared by the evaluator's Main Drift rule and the merge-group check.
+func SensitiveDrift(changed, denied []string) []string {
+	var out []string
+	for _, p := range changed {
+		if matchesAnyPattern(p, denied) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

@@ -37,6 +37,28 @@ jobs:
       - name: Run actionlint
         run: actionlint
 
+  # Green Lane merge-queue mode: on merge_group runs, fail if main changed a
+  # denied path since the queued PR's base (cmd/green-lane-main-drift). Other
+  # events pass immediately. Required on main once the merge queue is on.
+  main-drift:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        if: github.event_name == 'merge_group'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check main drift under the queued PR
+        if: github.event_name == 'merge_group'
+        run: go run ./cmd/green-lane-main-drift
+      - name: Not a merge-queue run
+        if: github.event_name != 'merge_group'
+        run: echo "main-drift only checks merge_group runs"
+
   go:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:

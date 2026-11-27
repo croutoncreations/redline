@@ -121,12 +121,12 @@ for(const present of [true,false])test(`workflow isolates audit token and remove
 
 // Merge-queue mode: enqueue the exact evaluated head instead of merging.
 function queueFixture(){
- const f=fixture();f.behind=3;f.queue={exists:true,inQueue:false,enqueues:[],headBack:null};
+ const f=fixture();f.behind=3;f.protection.protection.required_status_checks.checks.push({context:'main-drift',app_id:15368});f.queue={exists:true,inQueue:false,enqueues:[],headBack:null};
  const pr=f.pr;f.pr=n=>({...pr(n),node_id:`PR_${n}`});
  f.github.graphql=async(q,v)=>{
   if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1'}:null}};
   if(q.includes('isInMergeQueue'))return {repository:{pullRequest:{isInMergeQueue:typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue}}};
-  if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:{oid:f.queue.headBack ?? v.head}}}}}
+  if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:null,pullRequest:{number:Number(v.id.slice(3)),headRefOid:f.queue.headBack ?? v.head}}}}}
   throw new Error('unexpected graphql '+q);
  };
  return f;
@@ -176,3 +176,8 @@ test('queue mode: writer audit and protection still gate the enqueue',async()=>{
  await assert.rejects(runQueue(f));assert.equal(f.queue.enqueues.length,0);
  const g=queueFixture();g.protection={protected:false};await assert.rejects(runQueue(g),/protection/);assert.equal(g.queue.enqueues.length,0);
 });
+test('queue mode: main-drift must be a required check',async()=>{
+ const f=queueFixture();f.protection.protection.required_status_checks.checks=f.protection.protection.required_status_checks.checks.filter(c=>c.context!=='main-drift');
+ await assert.rejects(runQueue(f),/protection/);assert.equal(f.queue.enqueues.length,0);
+});
+test('direct mode does not require main-drift',async()=>{const f=fixture();await run(f);assert.equal(f.merges.length,1)});

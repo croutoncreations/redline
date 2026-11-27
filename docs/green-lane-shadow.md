@@ -195,10 +195,13 @@ GitHub's merge queue. Then:
   changed any denied path (auth, credentials, workflows, release, the lane
   itself) since the PR's base, the PR needs a branch update and a fresh review.
   If the worker can't list what `main` changed, the rule is inconclusive and
-  blocks.
+  blocks. The same rule runs again as the required `main-drift` CI job on
+  every merge-queue run, against the exact `main` the PR lands on, so a
+  sensitive change that merges while a PR waits in the queue still stops it.
 - **The worker enqueues instead of merging**: at most one
   `enqueuePullRequest` call per run, with `expectedHeadOid` pinned to the
-  evaluated head, never retried. The queue then merges as
+  evaluated head, never retried. It also requires `main-drift` to be a
+  required check before it enqueues anything. The queue then merges as
   `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
   is no post-merge dispatch. PRs already in the queue are skipped. If `main`
   has no merge queue, the worker refuses to run.
@@ -210,7 +213,8 @@ GitHub's merge queue. Then:
 Owner setup, in this order:
 
 1. Merge the PR that adds `merge_group` to CI and queue mode to the worker.
-2. In `main`'s branch protection, turn on **Require merge queue**: squash,
+2. In `main`'s branch protection, add `main-drift` (GitHub Actions) to the
+   required checks, then turn on **Require merge queue**: squash,
    build concurrency 1, minimum and maximum group size 1, **Only merge
    non-failing pull requests** on, status-check timeout 60 minutes. The
    queue's tested branch is always current, so the existing strict
