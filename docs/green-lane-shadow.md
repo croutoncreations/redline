@@ -195,27 +195,38 @@ GitHub's merge queue. Then:
   changed any denied path (auth, credentials, workflows, release, the lane
   itself) since the PR's base, the PR needs a branch update and a fresh review.
   If the worker can't list what `main` changed, the rule is inconclusive and
-  blocks. The same rule runs again as the required `main-drift` CI job on
-  every merge-queue run, against the exact `main` the PR lands on, so a
-  sensitive change that merges while a PR waits in the queue still stops it.
+  blocks.
 - **The worker enqueues instead of merging**: at most one
   `enqueuePullRequest` call per run, with `expectedHeadOid` pinned to the
-  evaluated head, never retried. It also requires `main-drift` to be a
+  evaluated head, never retried. It also requires `green-lane-queue` to be a
   required check before it enqueues anything. The queue then merges as
   `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
   is no post-merge dispatch. PRs already in the queue are skipped. If `main`
   has no merge queue, the worker refuses to run.
-- **Authorization holds until merge, not just enqueue.** Every run first
-  re-evaluates each PR this worker queued (`enqueuer` = `github-actions`) and
-  removes it from the queue (`dequeuePullRequest`) if it no longer qualifies:
-  a new review body or unresolved thread, a hold label, failing CI, Main
-  Drift, or a head that differs from the queued one. GitHub reporting a queued
-  PR as not cleanly mergeable doesn't count. PRs Jon queued by hand are left
-  alone. Removals are listed in `live-result.json` under `dequeued`. The queue
-  takes about one CI run to merge, and the worker also wakes on every CI
-  completion, so the window between new feedback and the next re-check is
-  short but not zero; add `green-lane-hold` and remove the PR from the queue
-  by hand to stop one immediately.
+- **Authorization holds until the merge, not just the enqueue.** The required
+  `green-lane-queue` CI job re-decides every queued PR on its merge-queue run.
+  It waits for the other eight required jobs (so its verdict is as late as
+  possible) and always runs. It is built from the merge group's base (trusted
+  `main`), never from the merge group, so a queued PR can't change the code
+  that judges it. It fails unless:
+  - the queue is squash, only-merge-non-failing (ALLGREEN), one entry at a
+    time;
+  - the merge-group commit is this PR's current queue entry: one squash commit
+    directly on the base;
+  - `main`, as the PR lands on it, changed no denied path since the PR's base
+    (Main Drift on the exact landing commit), and the merge commit itself
+    touches no denied path;
+  - for any PR not queued by Jon by hand: no hold label, the full Green Lane
+    evaluation of the head passes every rule, and the merge commit changes
+    exactly the evaluated PR's files.
+
+  A PR Jon queued himself gets only the path and binding checks: his enqueue
+  is the authorization. The remaining window is the few seconds between the
+  gate's verdict and the queue's merge.
+- **The worker also cleans up early.** Every run re-evaluates each PR it
+  queued and removes it from the queue (`dequeuePullRequest`) if it no longer
+  qualifies, so a stale entry doesn't hold up the queue until its CI fails.
+  Removals are listed in `live-result.json` under `dequeued`.
 - **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
   already in the queue stays there. Remove it with **Remove from queue** on the
   PR or on the branch's merge-queue page (the `gh` CLI can't), or with the
@@ -224,10 +235,11 @@ GitHub's merge queue. Then:
 Owner setup, in this order:
 
 1. Merge the PR that adds `merge_group` to CI and queue mode to the worker.
-2. In `main`'s branch protection, add `main-drift` (GitHub Actions) to the
-   required checks, then turn on **Require merge queue**: squash,
+2. In `main`'s branch protection, add `green-lane-queue` (GitHub Actions) to
+   the required checks, then turn on **Require merge queue**: squash,
    build concurrency 1, minimum and maximum group size 1, **Only merge
    non-failing pull requests** on, status-check timeout 60 minutes. The
+   worker and the gate both refuse to work with any other queue settings. The
    queue's tested branch is always current, so the existing strict
    ("up to date") setting can stay as it is.
 3. `gh variable set GREEN_LANE_MERGE_QUEUE -R croutoncreations/redline --body true`.

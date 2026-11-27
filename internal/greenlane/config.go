@@ -64,7 +64,6 @@ func DefaultDeniedPaths() []string {
 		".github/green-lane/**",
 		".github/prompts/**",
 		"cmd/green-lane-check/**",
-		"cmd/green-lane-main-drift/**",
 		"cmd/green-lane-provenance/**",
 		"cmd/green-lane-repro-analyze/**",
 		"internal/greenlane/**",

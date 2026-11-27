@@ -37,32 +37,53 @@ jobs:
       - name: Run actionlint
         run: actionlint
 
-  # Green Lane merge-queue mode: on merge_group runs, fail if main changed a
-  # denied path since the queued PR's base (cmd/green-lane-main-drift). Other
-  # events pass immediately. Required on main once the merge queue is on.
-  main-drift:
+  # Green Lane merge-queue gate (required once the merge queue is on). On
+  # merge_group runs it re-decides whether the queued PR may land: full Green
+  # Lane evaluation of the PR head, Main Drift against the exact landing
+  # commit, and a check that the merge commit is this PR's queue entry. It is
+  # built from the merge group's base (trusted main), never from the merge
+  # group, so a queued PR can't change the code that judges it. It waits for
+  # the other required jobs so its verdict is as late as possible, and runs
+  # even if they fail (a skipped required check would count as passing).
+  green-lane-queue:
+    needs: [actionlint, go, homebrew, dashboard, linux-smoke, windows-smoke, macos, macos-intel]
+    if: ${{ always() }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
-      pull-requests: read # reads the queued PR's head
+      pull-requests: read
+      checks: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group'
         with:
+          ref: ${{ github.event.merge_group.base_sha }}
           persist-credentials: false
-          fetch-depth: 0
       - uses: actions/setup-go@v6
         if: github.event_name == 'merge_group'
         with:
           go-version-file: go.mod
-          cache: true
-      - name: Check main drift under the queued PR
+          cache: false
+      - name: Build the gate from main
+        if: github.event_name == 'merge_group'
+        run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      - name: Re-decide the queued PR
         if: github.event_name == 'merge_group'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: go run ./cmd/green-lane-main-drift
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          QUEUE_GATE: 'true'
+        run: '"$RUNNER_TEMP/green-lane-check"'
       - name: Not a merge-queue run
         if: github.event_name != 'merge_group'
-        run: echo "main-drift only checks merge_group runs"
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          # A manual run on a queue branch must not post a passing check.
+          case "$REF" in refs/heads/gh-readonly-queue/*) echo "::error::green-lane-queue only passes on merge_group events"; exit 1;; esac
+          echo "green-lane-queue only checks merge_group runs"
 
   go:
     runs-on: blacksmith-2vcpu-ubuntu-2404

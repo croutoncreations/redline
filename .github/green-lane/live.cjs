@@ -62,18 +62,21 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     // remain configured and enforced natively; no admin credential is granted.
     const {data:branch} = await github.rest.repos.getBranch({...repo,branch:'main'});
     const p = branch.protection?.required_status_checks;
-    // Queue mode also needs main-drift required: it re-applies Main Drift to
-    // the exact main each queued PR lands on.
-    const required = queue ? [...checks,'main-drift'] : checks;
+    // Queue mode also needs green-lane-queue required: it re-decides each
+    // queued PR at merge time, so authorization holds until the merge.
+    const required = queue ? [...checks,'green-lane-queue'] : checks;
     return branch.protected === true && branch.protection?.enabled === true &&
       p?.enforcement_level === 'everyone' && required.every(name =>
         p.checks?.some(c => c.context === name && c.app_id === 15368));
   };
   // Queue mode needs the queue to exist: otherwise an enqueue request fails,
   // and if the queue were removed later, nothing would test the combination.
+  // The queue gate's guarantees assume a squash queue that builds one entry
+  // at a time and only merges entries whose own checks passed (ALLGREEN).
   const queueReady = async () => {
-    const r = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){mergeQueue(branch:"main"){id}}}`,{owner:repo.owner,repo:repo.repo});
-    return typeof r?.repository?.mergeQueue?.id === 'string';
+    const r = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){mergeQueue(branch:"main"){id configuration{mergeMethod mergingStrategy maximumEntriesToBuild}}}}`,{owner:repo.owner,repo:repo.repo});
+    const q = r?.repository?.mergeQueue, c = q?.configuration;
+    return typeof q?.id === 'string' && c?.mergeMethod === 'SQUASH' && c?.mergingStrategy === 'ALLGREEN' && c?.maximumEntriesToBuild === 1;
   };
   const trustedWriters = async () => {
     const users = await accessAudit.paginate(accessAudit.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
@@ -105,7 +108,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
-  if (queue && !await queueReady()) throw new Error('Merge-queue mode is on but main has no merge queue; no merge permitted');
+  if (queue && !await queueReady()) throw new Error('Merge-queue mode is on but main has no merge queue configured as squash, ALLGREEN, one entry at a time; no merge permitted');
 
   if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
 
@@ -174,9 +177,8 @@ async function live({github, accessAudit, context, core, run=execFileSync,
       if (typeof entry?.id !== 'string' || entry.pullRequest?.number !== number || entry.pullRequest?.headRefOid !== result.head_sha) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
       report.state='enqueued'; report.enqueued.push({pr:number,head:result.head_sha,entry:entry.id});
       // The queue merges later, as github-merge-queue[bot], once the required
-      // checks pass on its merge-group commit. That includes main-drift
-      // (ci.yml), which re-applies Main Drift to the exact main the PR lands
-      // on, so main changing while the PR waits is still caught.
+      // checks pass on its merge-group commit. That includes green-lane-queue
+      // (ci.yml), which re-runs this evaluation and Main Drift at merge time.
       return finish(`Enqueued PR #${number} at ${result.head_sha}; one-enqueue run complete`);
     }
     // Disable client retries in the workflow. Never try a second PR after this

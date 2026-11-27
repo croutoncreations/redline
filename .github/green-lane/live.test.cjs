@@ -121,10 +121,10 @@ for(const present of [true,false])test(`workflow isolates audit token and remove
 
 // Merge-queue mode: enqueue the exact evaluated head instead of merging.
 function queueFixture(){
- const f=fixture();f.behind=3;f.protection.protection.required_status_checks.checks.push({context:'main-drift',app_id:15368});f.queue={exists:true,inQueue:false,enqueues:[],dequeues:[],headBack:null};
+ const f=fixture();f.behind=3;f.protection.protection.required_status_checks.checks.push({context:'green-lane-queue',app_id:15368});f.queue={exists:true,inQueue:false,enqueues:[],dequeues:[],headBack:null};
  const pr=f.pr;f.pr=n=>({...pr(n),node_id:`PR_${n}`});
  f.github.graphql=async(q,v)=>{
-  if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1'}:null}};
+  if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1',configuration:{mergeMethod:'SQUASH',mergingStrategy:'ALLGREEN',maximumEntriesToBuild:1,...f.queue.config}}:null}};
   if(q.includes('dequeuePullRequest')){f.queue.dequeues.push(v.id);return {dequeuePullRequest:{mergeQueueEntry:{id:'MQE_x'}}}}
   if(q.includes('isInMergeQueue')){
    const inQ=typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue;
@@ -161,6 +161,11 @@ test('queue mode: unknown queue membership is treated as queued (fail closed)',a
 test('queue mode: no merge queue on main fails closed before evaluating',async()=>{
  const f=queueFixture();f.queue.exists=false;await assert.rejects(runQueue(f),/no merge queue/);assert.equal(f.queue.enqueues.length,0);assert.equal(f.merges.length,0);
 });
+test('queue mode: a queue not configured as squash/ALLGREEN/one-at-a-time fails closed',async()=>{
+ for(const config of [{mergeMethod:'MERGE'},{mergingStrategy:'HEADGREEN'},{maximumEntriesToBuild:5},{mergeMethod:null}]){
+  const f=queueFixture();f.queue.config=config;await assert.rejects(runQueue(f),/no merge queue configured/);assert.equal(f.queue.enqueues.length,0);
+ }
+});
 test('queue mode: queue removed during evaluation fails closed',async()=>{
  const f=queueFixture();f.onValidate=()=>{f.queue.exists=false};await assert.rejects(runQueue(f),/disappeared/);assert.equal(f.queue.enqueues.length,0);
 });
@@ -181,11 +186,11 @@ test('queue mode: writer audit and protection still gate the enqueue',async()=>{
  await assert.rejects(runQueue(f));assert.equal(f.queue.enqueues.length,0);
  const g=queueFixture();g.protection={protected:false};await assert.rejects(runQueue(g),/protection/);assert.equal(g.queue.enqueues.length,0);
 });
-test('queue mode: main-drift must be a required check',async()=>{
- const f=queueFixture();f.protection.protection.required_status_checks.checks=f.protection.protection.required_status_checks.checks.filter(c=>c.context!=='main-drift');
+test('queue mode: green-lane-queue must be a required check',async()=>{
+ const f=queueFixture();f.protection.protection.required_status_checks.checks=f.protection.protection.required_status_checks.checks.filter(c=>c.context!=='green-lane-queue');
  await assert.rejects(runQueue(f),/protection/);assert.equal(f.queue.enqueues.length,0);
 });
-test('direct mode does not require main-drift',async()=>{const f=fixture();await run(f);assert.equal(f.merges.length,1)});
+test('direct mode does not require green-lane-queue',async()=>{const f=fixture();await run(f);assert.equal(f.merges.length,1)});
 
 // Queue mode keeps authorization live until the queue merges.
 test('queue mode: a queued PR that still qualifies stays queued',async()=>{

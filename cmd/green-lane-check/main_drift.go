@@ -15,34 +15,7 @@ func (c *GitHubClient) mainDrift(ctx context.Context, baseBranch, head string) (
 	if err != nil {
 		return nil, false
 	}
-	// compare/<mergeBase>...<baseBranch> lists what main changed since then.
-	// GitHub returns at most 300 files for a comparison, so a list that long
-	// may be truncated and is reported as unknown.
-	data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", c.apiBase, c.owner, c.repo, url.PathEscape(base), url.PathEscape(baseBranch)))
-	if err != nil {
-		return nil, false
-	}
-	var r struct {
-		Status string `json:"status"`
-		Files  []struct {
-			Filename string `json:"filename"`
-			Previous string `json:"previous_filename"`
-		} `json:"files"`
-	}
-	if json.Unmarshal(data, &r) != nil || (r.Status != "ahead" && r.Status != "identical") || len(r.Files) >= 300 {
-		return nil, false
-	}
-	var files []string
-	for _, f := range r.Files {
-		if f.Filename == "" {
-			return nil, false
-		}
-		files = append(files, f.Filename)
-		if f.Previous != "" {
-			files = append(files, f.Previous)
-		}
-	}
-	return files, true
+	return c.changedFiles(ctx, base, baseBranch)
 }
 
 func (c *GitHubClient) mergeBaseOf(ctx context.Context, baseBranch, head string) (string, error) {
