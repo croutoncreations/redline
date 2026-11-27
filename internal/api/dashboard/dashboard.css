@@ -55,12 +55,12 @@ dialog{width:min(880px,calc(100vw - 32px));height:min(620px,calc(100vh - 80px));
 .provider-window-line span+span{padding-left:9px;border-left:1px solid var(--line)}
 .provider-pressure{display:block;color:#b8bec2;font:8px ui-monospace,monospace;margin-bottom:4px}
 .provider-pressure.near{color:var(--amber)}
-.provider-pressure.triggered{color:#ff918b}
+.provider-pressure.triggered{color:var(--green)}
 .provider-pressure.healthy{color:var(--green)}
 .provider-pressure.paused,.provider-pressure.protected{color:var(--muted)}
 .decision-detail{display:block;border:1px solid var(--line);border-left:3px solid #59636b;border-radius:7px;padding:9px 10px;margin-bottom:12px}
 .decision-detail.near{border-left-color:var(--amber)}
-.decision-detail.triggered{border-left-color:var(--accent)}
+.decision-detail.triggered{border-left-color:var(--green)}
 .decision-detail.healthy{border-left-color:var(--green)}
 .decision-detail b,.decision-detail span{display:block}
 .decision-detail b{font-size:10px}
