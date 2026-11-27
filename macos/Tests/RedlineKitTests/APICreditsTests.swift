@@ -128,7 +128,9 @@ private enum CreditsFixture {
 @Test func apiCreditsPaidCreditIsDisplayOnly() throws {
     let card = try CreditsFixture.card(CreditsFixture.fresh)
     #expect(card.paid == "$7.25 · shown only, never scheduled")
-    // Paid credit never enters the headline or the bar.
+    // Mostly another promotional program, not purchased money.
+    #expect(APICreditsCard.otherCreditLabel == "Other credit")
+    // Other credit never enters the headline or the bar.
     #expect(card.headline == "$62.40 left")
     #expect(card.progress == 0.624)
     let zeroPaid = CreditsFixture.fresh.replacingOccurrences(of: #""paid_available":7.25"#, with: #""paid_available":0"#)
@@ -256,4 +258,22 @@ private enum CreditsFixture {
     #expect(label("WAIT", nil, "$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another") == "Held · run in flight")
     #expect(label("WAIT", nil, "holding promotional credit until it is within 3 days of expiring") == "Holding credit")
     #expect(label("UNKNOWN", nil, "usage unavailable") == "Dispatch held")
+}
+
+/// Grants lapse at 00:00 UTC. On a US Pacific Mac the local date is the day
+/// before, so credit dates are the UTC ones; the countdown is unchanged.
+@Test func apiCreditsExpiryDatesAreUTCOnAPacificMac() throws {
+    var pacific = Calendar(identifier: .gregorian)
+    pacific.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    let json = CreditsFixture.fresh.replacingOccurrences(of: "2026-11-27T00:00:00Z", with: "2026-12-13T00:00:00Z")
+    let account = try #require(try CreditsFixture.snapshot(json).providers.first)
+    let card = try #require(APICreditsCard(account: account, now: CreditsFixture.now, calendar: pacific, locale: CreditsFixture.locale))
+    #expect(card.secondary == "Expires in 18 days · Sun, Dec 13")
+    #expect(card.grants.first?.expires == "expires Sun, Dec 13")
+    // A grant lapsing at 00:00 UTC on Jan 1 is next year's, even where it is
+    // still Dec 31 locally.
+    let newYear = CreditsFixture.fresh.replacingOccurrences(of: "2026-11-27T00:00:00Z", with: "2027-01-01T00:00:00Z")
+    let next = try #require(try CreditsFixture.snapshot(newYear).providers.first)
+    let nextCard = try #require(APICreditsCard(account: next, now: CreditsFixture.now, calendar: pacific, locale: CreditsFixture.locale))
+    #expect(nextCard.grants.first?.expires == "expires Fri, Jan 1, 2027")
 }

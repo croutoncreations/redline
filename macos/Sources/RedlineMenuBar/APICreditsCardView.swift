@@ -132,7 +132,7 @@ struct APICreditsCardView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let paid = card.paid {
-                detailRow("Paid credit", paid)
+                detailRow(APICreditsCard.otherCreditLabel, paid)
             }
             if !card.grants.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {

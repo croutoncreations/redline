@@ -4,7 +4,7 @@ const { loadDashboard, loadMobileDashboard, dashboardFixture, cursorProviderFixt
 // An openai-api-credits account is a dollar balance, not a subscription
 // window: it reads in dollars with the promotional grant's expiry, never as a
 // weekly, monthly or 5-hour figure. Synthetic fixtures (FIXTURE_NOW + 2d5h
-// expiry is Wed, Jul 22 in Los Angeles).
+// expiry is 00:00 UTC on Thu, Jul 23, shown as that UTC date even in Los Angeles).
 
 function withCredits(mutate, fixture = apiCreditsProviderFixture) {
   const dashboard = dashboardFixture();
@@ -89,7 +89,7 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await expect(card.locator('.provider-name')).toContainText('Linked org');
     await expect(card.locator('.provider-logo')).toHaveText('$');
     await expect(card.locator('.provider-copy-line b')).toHaveText('$62.40 left');
-    await expect(card.locator('.provider-window-line')).toHaveText('Expires in 2 days · Wed, Jul 22');
+    await expect(card.locator('.provider-window-line')).toHaveText('Expires in 2 days · Thu, Jul 23');
     await expect(card.locator('.compact-progress')).toHaveAttribute('value', '62.4');
     await expect(card.locator('.provider-trigger')).not.toContainText(forbidden);
   });
@@ -105,23 +105,23 @@ test.describe('OpenAI API credits account (desktop)', () => {
     const promo = detail.getByTestId('credits-promo');
     await expect(promo).toContainText('Promotional credit');
     await expect(promo).toContainText('$62.40 of $100.00 left');
-    await expect(promo).toContainText('Expires in 2 days · Wed, Jul 22');
+    await expect(promo).toContainText('Expires in 2 days · Thu, Jul 23');
     await expect(promo.locator('progress')).toHaveAttribute('value', '62.4');
     await expect(detail.getByTestId('credits-rules')).toHaveText('Jobs start above $5.00 · Firesale: runs within 3 days of expiry');
-    await expect(detail.getByTestId('credits-paid')).toContainText('Paid credit');
+    await expect(detail.getByTestId('credits-paid')).toContainText('Other credit');
     await expect(detail.getByTestId('credits-paid')).toContainText('$7.25 · shown only, never scheduled');
     const grants = detail.getByTestId('credits-grant');
     await expect(grants).toHaveCount(2);
     await expect(grants.nth(0)).toContainText('ChatGPT subscription grant');
     await expect(grants.nth(0)).toContainText('$62.40 of $100.00');
-    await expect(grants.nth(0)).toContainText('expires Wed, Jul 22');
+    await expect(grants.nth(0)).toContainText('expires Thu, Jul 23');
     await expect(grants.nth(1)).toContainText('Auto recharge');
     await expect(grants.nth(1)).toContainText('$7.25 of $10.00');
     await expect(grants.nth(1)).toContainText('expires Thu, Jun 10, 2027');
     // textContent is document order and doesn't depend on layout, so the
     // check can't race the popover's open animation as innerText can.
     const text = (await detail.textContent()).replace(/\s+/g, ' ');
-    const order = ['Run now · firesale', 'Promotional credit', 'Jobs start above', 'Paid credit', 'ChatGPT subscription grant'].map(part => text.indexOf(part));
+    const order = ['Run now · firesale', 'Promotional credit', 'Jobs start above', 'Other credit', 'ChatGPT subscription grant'].map(part => text.indexOf(part));
     expect(order.every(index => index >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     await expect(detail.locator('[data-capacity-evidence]')).toHaveCount(0);
@@ -191,7 +191,7 @@ test.describe('OpenAI API credits account (desktop)', () => {
     await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
     const detail = card.locator('.provider-detail');
     await expect(detail.getByTestId('credits-signed-out')).toHaveText(/Session key needed\s*Run redline account set-session-key credits-main/);
-    await expect(detail).not.toContainText(/Run now|running queued work|Last known|Promotional credit|Paid credit|Grants/);
+    await expect(detail).not.toContainText(/Run now|running queued work|Last known|Promotional credit|Other credit|Grants/);
     await expect(detail.locator('progress')).toHaveCount(0);
     await expect(detail.getByTestId('credits-promo')).toHaveCount(0);
     await expect(detail.getByTestId('credits-paid')).toHaveCount(0);
@@ -238,6 +238,36 @@ test.describe('OpenAI API credits account (desktop)', () => {
     }
     await loadDashboard(page, { dashboard: withCredits(null, apiCreditsNoPromoFixture) });
     await expect(page.locator('[data-provider-id="credits-main"] .provider-pressure')).toHaveText('Held · no promotional credit');
+  });
+
+  // A hold is the scheduler working as configured, not an error: grey, never
+  // the red of a failure or the amber of a balance that cannot be read.
+  test('held decisions read as neutral grey, not red', async ({ page }) => {
+    const reasons = [
+      'promotional credit is at or below the $5.00 floor',
+      '$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another',
+      'holding promotional credit until it is within 3 days of expiring',
+      'no promotional API credit is available',
+    ];
+    for (const reason of reasons) {
+      await loadDashboard(page, { dashboard: withCredits(credits => { credits.latest_decision = { decision: 'WAIT', mode: 'api_credits', reason }; }) });
+      const card = page.locator('[data-provider-id="credits-main"]');
+      await expect(card.locator('.provider-pressure')).toHaveCSS('color', 'rgb(184, 190, 194)');
+      await expect(card.locator('.decision-detail')).toHaveCSS('border-left-color', 'rgb(89, 99, 107)');
+    }
+  });
+
+  // Grants lapse at 00:00 UTC; in the Americas the local date is the day
+  // before, so the date is the UTC one (test timezone: Los Angeles).
+  test('a 00:00 UTC expiry shows its UTC date in Los Angeles', async ({ page }) => {
+    await loadDashboard(page, { dashboard: withCredits(credits => {
+      credits.snapshot.credits.expires_at = '2026-12-13T00:00:00Z';
+      credits.snapshot.credits.grants[0].expires_at = '2026-12-13T00:00:00Z';
+    }) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await expect(card.locator('.provider-window-line')).toHaveText(/^Expires in .+ · Sun, Dec 13$/);
+    await page.getByRole('button', { name: 'Show OpenAI API credits Linked org usage details' }).click();
+    await expect(card.getByTestId('credits-grant').nth(0)).toContainText('expires Sun, Dec 13');
   });
 
   test('onboarding speaks of the balance, not installs or subscriptions', async ({ page }) => {
@@ -357,7 +387,7 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await expect(card.locator('.m-provider-name')).toHaveText('OpenAI API credits · Linked org');
     await expect(card.locator('.m-provider-logo')).toHaveText('$');
     await expect(card.getByTestId('credits-headline')).toHaveText('$62.40 left');
-    await expect(card.getByTestId('credits-secondary')).toHaveText('Expires in 2 days · Wed, Jul 22');
+    await expect(card.getByTestId('credits-secondary')).toHaveText('Expires in 2 days · Thu, Jul 23');
     await expect(card.locator('.m-rings')).toHaveCount(0);
     await expect(card.locator('.m-provider-header')).not.toContainText(forbidden);
     await expect(card.locator('.m-provider-header')).not.toContainText('Session');
@@ -367,9 +397,9 @@ test.describe('OpenAI API credits account (mobile)', () => {
     await loadMobileDashboard(page, { dashboard: withCredits() });
     const detail = page.getByTestId('provider-detail-credits-main');
     await expect(detail.getByTestId('credits-promo')).toContainText('$62.40 of $100.00 left');
-    await expect(detail.getByTestId('credits-promo')).toContainText('Expires in 2 days · Wed, Jul 22');
+    await expect(detail.getByTestId('credits-promo')).toContainText('Expires in 2 days · Thu, Jul 23');
     await expect(detail.getByTestId('credits-rules')).toHaveText('Jobs start above $5.00 · Firesale: runs within 3 days of expiry');
-    await expect(detail.getByTestId('credits-paid')).toContainText('$7.25 · shown only, never scheduled');
+    await expect(detail.getByTestId('credits-paid')).toHaveText(/^\s*Other credit\s*\$7\.25 · shown only, never scheduled\s*$/);
     await expect(detail.getByTestId('credits-grant')).toHaveCount(2);
     await expect(detail.getByTestId('credits-grant').nth(0)).toContainText('ChatGPT subscription grant');
     await expect(detail.getByTestId('credits-grant').nth(1)).toContainText('Auto recharge');
@@ -428,6 +458,32 @@ test.describe('OpenAI API credits account (mobile)', () => {
     const card = page.locator('[data-provider-id="credits-main"]');
     await expect(card.locator('.m-provider-status')).toHaveText('Held · no promotional credit');
     await expect(card.getByTestId('decision-detail').locator('span')).toHaveText('No promotional API credit is available');
+  });
+
+  test('held decisions read as neutral grey, not red', async ({ page }) => {
+    const reasons = [
+      'promotional credit is at or below the $5.00 floor',
+      '$2.00 of promotional credit is reserved for 2 run(s) in flight; waiting for one to finish before starting another',
+      'holding promotional credit until it is within 3 days of expiring',
+      'no promotional API credit is available',
+    ];
+    await page.emulateMedia({ colorScheme: 'dark' });
+    for (const reason of reasons) {
+      await loadMobileDashboard(page, { dashboard: withCredits(credits => { credits.latest_decision = { decision: 'WAIT', mode: 'api_credits', reason }; }) });
+      const card = page.locator('[data-provider-id="credits-main"]');
+      await expect(card.locator('.m-provider-status')).toHaveCSS('color', 'rgb(145, 152, 158)');
+      await expect(card.getByTestId('decision-detail')).toHaveCSS('border-left-color', 'rgb(89, 99, 107)');
+    }
+  });
+
+  test('a 00:00 UTC expiry shows its UTC date in Los Angeles', async ({ page }) => {
+    await loadMobileDashboard(page, { dashboard: withCredits(credits => {
+      credits.snapshot.credits.expires_at = '2026-12-13T00:00:00Z';
+      credits.snapshot.credits.grants[0].expires_at = '2026-12-13T00:00:00Z';
+    }) });
+    const card = page.locator('[data-provider-id="credits-main"]');
+    await expect(card.getByTestId('credits-secondary')).toHaveText(/^Expires in .+ · Sun, Dec 13$/);
+    await expect(page.getByTestId('provider-detail-credits-main').getByTestId('credits-grant').nth(0)).toContainText('expires Sun, Dec 13');
   });
 
   test('even pacing states its rule', async ({ page }) => {
@@ -494,7 +550,7 @@ test.describe('OpenAI API credits account (mobile)', () => {
     // A last-known balance makes no claim about when it lapses.
     await expect(expires.locator('b')).toHaveText('—');
     await expect(expires).toHaveClass(/\bmuted\b/);
-    await expect(row).not.toContainText(/in 2 days|expires|Wed, Jul 22/);
+    await expect(row).not.toContainText(/in 2 days|expires|Thu, Jul 23/);
     await expect(row).toHaveAttribute('aria-label', /Last known \$62\.40/);
   });
 

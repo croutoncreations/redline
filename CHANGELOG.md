@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- API credits cards on every surface (desktop and mobile web dashboards, menu bar, Android): the
+  summary row for credit that is shown but never scheduled is now "Other credit" instead of
+  "Paid credit", since for Claude it is mostly another promotional program. Credit expiry dates
+  are shown in UTC, because grants end at 00:00 UTC and local time showed the previous day
+  in the Americas. On Android a normal hold ("Holding credit", "Held · at the floor", …) now has
+  a grey dot instead of a red one; amber is kept for an unknown decision or an out-of-date or
+  signed-out balance.
+
+## [0.1.14] - 2026-11-26
+
+### Upgrade notes
+
+- Downgrading: older versions reject `provider: openai-api-credits` accounts and the
+  `api_credits` settings. Before running an older binary, run
+  `redline account clear-keys <id>` to delete the account's keys from the Keychain, then
+  `redline account remove <id>` (after removing or reassigning the profiles that use it).
+  `clear-keys` needs the account to exist, so run it first. The database migration only adds
+  a column, so 0.1.13 opens it unchanged.
+
 ### Added
 
 - OpenAI API credits accounts. Redline reads the monthly API credits an eligible ChatGPT Pro or
@@ -30,7 +51,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `redline account add-claude-credits`, `set-session-key` (the platform.claude.com `sessionKey`
   cookie) and `set-api-key` (`sk-ant-api…`), and are never put in a command line. For a hard
   spending cap, use a key from a dedicated Console workspace with a spend limit.
-
 - The Android app shows banked resets by kind ("Full 1 · Fable 3"), tappable to list each
   kind's deadlines and why any can't be spent now (paused, not active yet), matching the
   desktop and the mobile web page. A phone talking to an older desktop shows the plain count

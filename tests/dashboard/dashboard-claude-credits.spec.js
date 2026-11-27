@@ -4,7 +4,7 @@ const { loadDashboard, loadMobileDashboard, dashboardFixture, apiCreditsProvider
 // An anthropic-api-credits account reuses the credits card everywhere; only
 // the vendor wording changes: "Claude API credits", the Claude artwork, and a
 // signed-out fix that names platform.claude.com. Synthetic fixtures
-// (FIXTURE_NOW + 2d5h expiry is Wed, Jul 22 in Los Angeles).
+// (FIXTURE_NOW + 2d5h expiry is 00:00 UTC on Thu, Jul 23, shown as that UTC date even in Los Angeles).
 
 function withClaudeCredits(mutate) {
   const dashboard = dashboardFixture();
@@ -39,7 +39,7 @@ test.describe('Claude API credits account (desktop)', () => {
     await expect(card.locator('.provider-name')).toContainText('Console org');
     await expect(card.locator('.provider-logo img')).toHaveAttribute('src', '/assets/claude.svg');
     await expect(card.locator('.provider-copy-line b')).toHaveText('$62.40 left');
-    await expect(card.locator('.provider-window-line')).toHaveText('Expires in 2 days · Wed, Jul 22');
+    await expect(card.locator('.provider-window-line')).toHaveText('Expires in 2 days · Thu, Jul 23');
     await expect(card.locator('.provider-trigger')).not.toContainText(forbidden);
   });
 
@@ -149,7 +149,7 @@ test.describe('Claude API credits account (mobile)', () => {
     await expect(card.locator('.m-provider-name')).toHaveText('Claude API credits · Console org');
     await expect(card.locator('.m-provider-logo img')).toHaveAttribute('src', '/assets/claude.svg');
     await expect(card.getByTestId('credits-headline')).toHaveText('$62.40 left');
-    await expect(card.getByTestId('credits-secondary')).toHaveText('Expires in 2 days · Wed, Jul 22');
+    await expect(card.getByTestId('credits-secondary')).toHaveText('Expires in 2 days · Thu, Jul 23');
     await expect(card.locator('.m-rings')).toHaveCount(0);
   });
 
