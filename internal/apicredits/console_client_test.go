@@ -177,3 +177,93 @@ func TestConsoleClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("session key was forwarded to the redirect target")
 	}
 }
+
+// consoleOrganizations serves only GET /api/organizations with the given
+// status and body.
+func consoleOrganizations(t *testing.T, status int, body string) (*httptest.Server, *[]*http.Request) {
+	t.Helper()
+	var seen []*http.Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Clone(context.Background()))
+		if r.URL.Path != "/api/organizations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server, &seen
+}
+
+func TestConsoleClientAPIOrganizationFindsTheOneAPIOrganization(t *testing.T) {
+	server, seen := fakeConsole(t, http.StatusOK, "{}")
+	org, err := testConsoleClient(server).APIOrganization(context.Background(), fakeConsoleSessionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.UUID != fakeConsoleOrg || org.DisplayName() != "Synthetic Org" {
+		t.Fatalf("org = %+v", org)
+	}
+	if len(*seen) != 1 || (*seen)[0].URL.Path != "/api/organizations" ||
+		(*seen)[0].Header.Get("Cookie") != "sessionKey="+fakeConsoleSessionKey {
+		t.Fatalf("requests = %d", len(*seen))
+	}
+}
+
+func TestConsoleClientAPIOrganizationErrors(t *testing.T) {
+	server, _ := consoleOrganizations(t, http.StatusUnauthorized, `{"error":"`+fakeConsoleSessionKey+`"}`)
+	if _, err := testConsoleClient(server).APIOrganization(context.Background(), fakeConsoleSessionKey); !errors.Is(err, ErrConsoleSessionExpired) {
+		t.Fatalf("401: err = %v", err)
+	}
+	server, _ = consoleOrganizations(t, http.StatusOK, `[{"uuid":"11111111-1111-4111-8111-111111111111","name":"Chat","capabilities":["chat"]}]`)
+	if _, err := testConsoleClient(server).APIOrganization(context.Background(), fakeConsoleSessionKey); !errors.Is(err, ErrNoConsoleAPIOrganization) {
+		t.Fatalf("none: err = %v", err)
+	}
+	server, _ = consoleOrganizations(t, http.StatusOK, `[{"uuid":"11111111-1111-4111-8111-111111111111","name":"One","capabilities":["api"]},`+
+		`{"uuid":"22222222-2222-4222-8222-22222222222A","name":"Two","capabilities":["api"]},{"uuid":"33333333-3333-4333-8333-333333333333","name":"Chat","capabilities":["chat"]}]`)
+	_, err := testConsoleClient(server).APIOrganization(context.Background(), fakeConsoleSessionKey)
+	var several *SeveralConsoleOrganizationsError
+	if !errors.Is(err, ErrSeveralConsoleOrganizations) || !errors.As(err, &several) || len(several.Organizations) != 2 ||
+		several.Organizations[1].UUID != "22222222-2222-4222-8222-22222222222a" || several.Organizations[0].DisplayName() != "One" {
+		t.Fatalf("several: err = %v", err)
+	}
+	server, _ = consoleOrganizations(t, http.StatusOK, `[{"uuid":"../../steal","name":"Bad","capabilities":["api"]},{"uuid":"`+fakeConsoleOrg+`","capabilities":["api"]}]`)
+	if _, err := testConsoleClient(server).APIOrganization(context.Background(), fakeConsoleSessionKey); err == nil || errors.Is(err, ErrSeveralConsoleOrganizations) {
+		t.Fatalf("malformed: err = %v", err)
+	}
+	// Another kind of key is refused before any request.
+	server, seen := consoleOrganizations(t, http.StatusOK, `[]`)
+	if _, err := testConsoleClient(server).APIOrganization(context.Background(), "sk-ant-api03-abc"); !errors.Is(err, ErrNotConsoleSessionKey) || len(*seen) != 0 {
+		t.Fatalf("api key: err = %v requests = %d", err, len(*seen))
+	}
+}
+
+func TestConsoleClientAPIOrganizationDoesNotFollowRedirects(t *testing.T) {
+	target, targetSeen := fakeConsole(t, http.StatusOK, "{}")
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(redirect.Close)
+	if _, err := (ConsoleClient{BaseURL: redirect.URL}).APIOrganization(context.Background(), fakeConsoleSessionKey); err == nil {
+		t.Fatal("followed a redirect")
+	}
+	if len(*targetSeen) != 0 {
+		t.Fatal("session key was forwarded to the redirect target")
+	}
+}
+
+// A personal organization is often named after its owner's email; the
+// display name never repeats an address or a terminal control sequence.
+func TestConsoleOrganizationDisplayNameIsSafeToPrint(t *testing.T) {
+	for name, want := range map[string]string{
+		"someone@example.invalid's Organization": "[account]'s Organization",
+		"Acme\x1b[31m Team\u202e":                "Acme[31m Team",
+		"  Padded  ":                             "Padded",
+		strings.Repeat("x", 70):                  strings.Repeat("x", 59) + "…",
+	} {
+		if got := (ConsoleOrganization{Name: name}).DisplayName(); got != want {
+			t.Errorf("DisplayName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}

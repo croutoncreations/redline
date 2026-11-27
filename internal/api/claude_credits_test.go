@@ -190,6 +190,48 @@ func TestClaudeCreditsWithWrongAPIKeyHoldsWork(t *testing.T) {
 	}
 }
 
+// Runs take a personal (sk-ant-usr…), service account (sk-ant-svc…) or
+// legacy workspace (sk-ant-api…) key; an OAuth token or Admin key holds work.
+func TestClaudeCreditsRunKeyAcceptsPersonalServiceAndWorkspaceKeys(t *testing.T) {
+	for _, tc := range []struct {
+		key string
+		ok  bool
+	}{
+		{"sk-ant-usr01-SYNTHETICPERSONAL", true},
+		{"sk-ant-svc01-SYNTHETICSERVICE", true},
+		{"sk-ant-api03-SYNTHETICWORKSPACE", true},
+		{"sk-ant-oat01-SYNTHETICOAUTH", false},
+		{"sk-ant-admin01-SYNTHETICADMIN", false},
+	} {
+		fixture := newClaudeCreditsServer(t, 80, 24*time.Hour, nil)
+		fixture.saveClaudeKeys(t)
+		fixture.secrets.items["api-credits/"+apicredits.SecretAPIKey] = tc.key
+		createClaudeCreditsCandidate(t, fixture.db, "command", "")
+		var result schedulerResponseForTest
+		decodeResponse(t, request(t, fixture.server, http.MethodPost, "/v1/scheduler/execute", map[string]any{"provider_account_id": "api-credits"}), &result)
+		if strings.Contains(result.Result.Reason, "SYNTHETIC") {
+			t.Fatalf("%s: reason echoes the key: %q", tc.key[:10], result.Result.Reason)
+		}
+		if !tc.ok {
+			if result.Run != nil || !strings.Contains(result.Result.Reason, "does not look like an API key") {
+				t.Fatalf("%s: result = %+v", tc.key[:10], result.Result)
+			}
+			continue
+		}
+		if result.Run == nil {
+			t.Fatalf("%s: result = %+v", tc.key[:10], result.Result)
+		}
+		select {
+		case profile := <-fixture.ran:
+			if profile.APICreditsKey != tc.key {
+				t.Fatalf("%s: run got a different key", tc.key[:10])
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: run did not start", tc.key[:10])
+		}
+	}
+}
+
 // Codex, Cursor and Hermes cannot spend Claude API credits; claude-code,
 // pi and command can.
 func TestClaudeCreditsAccountRefusesHarnessesThatCannotSpendCredits(t *testing.T) {

@@ -1,12 +1,15 @@
 package cli_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/croutoncreations/redline/internal/apicredits"
+	"github.com/croutoncreations/redline/internal/cli"
 	"github.com/croutoncreations/redline/internal/config"
 )
 
@@ -123,5 +126,252 @@ func TestClaudeCreditsKeysAreValidatedPerVendor(t *testing.T) {
 		if _, err := store.Load(t.Context(), "claude-credits", kind); err == nil {
 			t.Fatalf("%s survived clear-keys", kind)
 		}
+	}
+}
+
+// set-api-key takes any identity-backed or legacy Claude API key: personal
+// (sk-ant-usr…), service account (sk-ant-svc…) or workspace (sk-ant-api…).
+// Session cookies, OAuth tokens, Admin keys and OpenAI keys are refused,
+// each naming what it is, and set-session-key refuses all three API keys.
+func TestClaudeCreditsSetAPIKeyAcceptsPersonalServiceAndWorkspaceKeys(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	if code, _, stderr := runCLI(t, "", "--config", configPath, "account", "add-claude-credits", "claude-credits"); code != 0 {
+		t.Fatalf("add: %s", stderr)
+	}
+	store := apicredits.FileSecretStore{Dir: secretsDir}
+	for _, key := range []string{"sk-ant-usr01-SYNTHETICPERSONAL", "sk-ant-svc01-SYNTHETICSERVICE", "sk-ant-api03-SYNTHETICWORKSPACE"} {
+		if code, stdout, stderr := runCLI(t, key+"\n", "--config", configPath, "account", "set-api-key", "claude-credits"); code != 0 ||
+			strings.Contains(stdout+stderr, "SYNTHETIC") {
+			t.Fatalf("set-api-key %s: code %d stdout %s stderr %s", key[:10], code, stdout, stderr)
+		}
+		if got, _ := store.Load(t.Context(), "claude-credits", apicredits.SecretAPIKey); got != key {
+			t.Fatalf("api key = %q, want %q", got, key)
+		}
+		code, _, stderr := runCLI(t, key+"\n", "--config", configPath, "account", "set-session-key", "claude-credits")
+		if code == 0 || !strings.Contains(stderr, "that is a Claude API key; save it with set-api-key") || strings.Contains(stderr, "SYNTHETIC") {
+			t.Errorf("set-session-key %s: code %d stderr %s", key[:10], code, stderr)
+		}
+	}
+	if _, err := store.Load(t.Context(), "claude-credits", apicredits.SecretSessionKey); err == nil {
+		t.Fatal("an API key was saved as the session key")
+	}
+	for _, tc := range []struct{ key, want string }{
+		{"sk-ant-sid01-SYNTHETICSESSION", "that is a Claude Console session key; save it with set-session-key"},
+		{"sk-ant-oat01-SYNTHETICOAUTH", "that is a Claude subscription (OAuth) token, not an API key; create an API key at platform.claude.com/settings/keys"},
+		{"sk-ant-admin01-SYNTHETICADMIN", "that is an Admin API key; runs need a personal or service account key"},
+		{"sk-proj-SYNTHETICOPENAI", "that looks like an OpenAI key"},
+		{"sess-SYNTHETICOPENAI", "that looks like an OpenAI key"},
+		{"sk-ant-xyz01-SYNTHETICOTHER", "that is not a Claude API key"},
+		{"SYNTHETICGARBAGE", "that is not a Claude API key"},
+	} {
+		code, _, stderr := runCLI(t, tc.key+"\n", "--config", configPath, "account", "set-api-key", "claude-credits")
+		if code == 0 || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, "SYNTHETIC") {
+			t.Errorf("set-api-key %s: code %d stderr %s", tc.key[:10], code, stderr)
+		}
+	}
+	if got, _ := store.Load(t.Context(), "claude-credits", apicredits.SecretAPIKey); got != "sk-ant-api03-SYNTHETICWORKSPACE" {
+		t.Fatalf("a refused key replaced the saved one: %q", got)
+	}
+}
+
+const syntheticLookupSessionKey = "sk-ant-sid01-SYNTHETICLOOKUPKEY"
+
+// fakeConsoleOrganizations serves GET /api/organizations to the CLI's
+// organization lookup and counts every request it receives.
+func fakeConsoleOrganizations(t *testing.T, status int, body string) *int {
+	t.Helper()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/organizations" || r.Header.Get("Cookie") != "sessionKey="+syntheticLookupSessionKey {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	cli.UseConsoleForTest(t, server.URL, server.Client())
+	return &requests
+}
+
+const syntheticOrganizations = `[{"uuid":"11111111-1111-4111-8111-111111111111","name":"Synthetic Chat","capabilities":["chat"]},
+{"uuid":"` + syntheticConsoleOrg + `","name":"Personal Console","capabilities":["api","api_individual"]}]`
+
+// addExistingClaudeCredits saves a first Claude credits account so a second
+// one needs its own organization.
+func addExistingClaudeCredits(t *testing.T, configPath, org string) {
+	t.Helper()
+	if code, _, stderr := runCLI(t, "", "--config", configPath, "account", "add-claude-credits", "claude-credits",
+		"--organization-id", org); code != 0 {
+		t.Fatalf("add first: %s", stderr)
+	}
+}
+
+func readAccounts(t *testing.T, configPath string) []config.ManagedAccount {
+	t.Helper()
+	accounts, err := config.ReadManagedAccounts(filepath.Join(filepath.Dir(configPath), "accounts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return accounts
+}
+
+func assertNoSessionKeySaved(t *testing.T, secretsDir, id string) {
+	t.Helper()
+	if _, err := (apicredits.FileSecretStore{Dir: secretsDir}).Load(t.Context(), id, apicredits.SecretSessionKey); err == nil {
+		t.Fatalf("a session key was saved for %s", id)
+	}
+}
+
+// With an existing Claude credits account, piping the new login's session
+// key finds its Console organization: one command adds the account.
+func TestAddClaudeCreditsFindsTheOrganizationFromTheSessionKey(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	addExistingClaudeCredits(t, configPath, "33333333-3333-4333-8333-333333333333")
+	requests := fakeConsoleOrganizations(t, http.StatusOK, syntheticOrganizations)
+	code, stdout, stderr := runCLI(t, syntheticLookupSessionKey+"\n", "--config", configPath,
+		"account", "add-claude-credits", "claude-credits-2", "--session-key-stdin", "--label", "Personal")
+	if code != 0 {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if *requests != 1 {
+		t.Fatalf("requests = %d", *requests)
+	}
+	if !strings.Contains(stdout, "added account claude-credits-2 reading Claude API credits for "+syntheticConsoleOrg+" (Personal Console)") {
+		t.Fatalf("stdout = %s", stdout)
+	}
+	if strings.Contains(stdout, "set-session-key") || !strings.Contains(stdout, "set-api-key claude-credits-2") {
+		t.Fatalf("next steps = %s", stdout)
+	}
+	if strings.Contains(stdout+stderr, "SYNTHETICLOOKUPKEY") {
+		t.Fatal("output echoes the session key")
+	}
+	accounts := readAccounts(t, configPath)
+	if len(accounts) != 2 || accounts[1].ID != "claude-credits-2" || accounts[1].Label != "Personal" ||
+		accounts[1].APICredits == nil || accounts[1].APICredits.OrganizationID != syntheticConsoleOrg {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	stored, err := apicredits.FileSecretStore{Dir: secretsDir}.Load(t.Context(), "claude-credits-2", apicredits.SecretSessionKey)
+	if err != nil || stored != syntheticLookupSessionKey {
+		t.Fatalf("stored = %q, %v", stored, err)
+	}
+}
+
+// Every failed lookup says what to do, and saves neither the account nor
+// the key.
+func TestAddClaudeCreditsLookupFailuresSaveNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		want       []string
+	}{
+		{"rejected session", `{"error":"` + syntheticLookupSessionKey + `"}`, http.StatusUnauthorized,
+			[]string{"rejected the session key", "fresh sessionKey cookie"}},
+		{"forbidden session", `{}`, http.StatusForbidden, []string{"rejected the session key"}},
+		{"no API organization", `[{"uuid":"11111111-1111-4111-8111-111111111111","name":"Synthetic Chat","capabilities":["chat"]}]`, http.StatusOK,
+			[]string{"no organization on that Claude login has API access", "Settings › Billing"}},
+		{"several API organizations", `[{"uuid":"11111111-1111-4111-8111-111111111111","name":"Team One","capabilities":["api"]},
+			{"uuid":"` + syntheticConsoleOrg + `","name":"Team Two","capabilities":["api"]}]`, http.StatusOK,
+			[]string{"11111111-1111-4111-8111-111111111111  Team One", syntheticConsoleOrg + "  Team Two", "--organization-id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, secretsDir := creditsHome(t)
+			addExistingClaudeCredits(t, configPath, "33333333-3333-4333-8333-333333333333")
+			fakeConsoleOrganizations(t, tc.status, tc.body)
+			code, stdout, stderr := runCLI(t, syntheticLookupSessionKey+"\n", "--config", configPath,
+				"account", "add-claude-credits", "claude-credits-2", "--session-key-stdin")
+			if code == 0 {
+				t.Fatalf("accepted: %s", stdout)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stdout+stderr, "SYNTHETICLOOKUPKEY") {
+				t.Fatal("output echoes the session key")
+			}
+			if accounts := readAccounts(t, configPath); len(accounts) != 1 {
+				t.Fatalf("accounts = %+v", accounts)
+			}
+			assertNoSessionKeySaved(t, secretsDir, "claude-credits-2")
+		})
+	}
+}
+
+func TestAddClaudeCreditsLookupNetworkErrorSavesNothing(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	cli.UseConsoleForTest(t, server.URL, nil)
+	code, _, stderr := runCLI(t, syntheticLookupSessionKey+"\n", "--config", configPath,
+		"account", "add-claude-credits", "claude-credits", "--session-key-stdin")
+	if code == 0 || !strings.Contains(stderr, "could not reach platform.claude.com") || !strings.Contains(stderr, "--organization-id") {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if accounts := readAccounts(t, configPath); len(accounts) != 0 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	assertNoSessionKeySaved(t, secretsDir, "claude-credits")
+}
+
+// The discovered organization is checked like a typed one: one already
+// read by another account is refused, naming that account.
+func TestAddClaudeCreditsRefusesADiscoveredOrganizationAlreadyRead(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	addExistingClaudeCredits(t, configPath, syntheticConsoleOrg)
+	fakeConsoleOrganizations(t, http.StatusOK, syntheticOrganizations)
+	code, _, stderr := runCLI(t, syntheticLookupSessionKey+"\n", "--config", configPath,
+		"account", "add-claude-credits", "claude-credits-2", "--session-key-stdin")
+	if code == 0 || !strings.Contains(stderr, `"claude-credits"`) || !strings.Contains(stderr, syntheticConsoleOrg) {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if accounts := readAccounts(t, configPath); len(accounts) != 1 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	assertNoSessionKeySaved(t, secretsDir, "claude-credits-2")
+}
+
+// A typed --organization-id is used as given: no lookup, and the piped key
+// is still saved.
+func TestAddClaudeCreditsWithOrganizationIDSkipsTheLookup(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	addExistingClaudeCredits(t, configPath, "33333333-3333-4333-8333-333333333333")
+	requests := fakeConsoleOrganizations(t, http.StatusOK, syntheticOrganizations)
+	code, stdout, stderr := runCLI(t, syntheticLookupSessionKey+"\n", "--config", configPath,
+		"account", "add-claude-credits", "claude-credits-2", "--organization-id", syntheticConsoleOrg, "--session-key-stdin")
+	if code != 0 {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if *requests != 0 {
+		t.Fatalf("requests = %d, want no lookup", *requests)
+	}
+	if !strings.Contains(stdout, "for "+syntheticConsoleOrg+"\n") {
+		t.Fatalf("stdout = %s", stdout)
+	}
+	stored, err := apicredits.FileSecretStore{Dir: secretsDir}.Load(t.Context(), "claude-credits-2", apicredits.SecretSessionKey)
+	if err != nil || stored != syntheticLookupSessionKey {
+		t.Fatalf("stored = %q, %v", stored, err)
+	}
+}
+
+// Without a key or an organization, a second account is refused with the
+// one-command form.
+func TestAddClaudeCreditsRefusalShowsTheOneCommandForm(t *testing.T) {
+	configPath, _ := creditsHome(t)
+	addExistingClaudeCredits(t, configPath, syntheticConsoleOrg)
+	requests := fakeConsoleOrganizations(t, http.StatusOK, syntheticOrganizations)
+	code, _, stderr := runCLI(t, "", "--config", configPath, "account", "add-claude-credits", "claude-credits-2", "--label", "Personal")
+	want := "pbpaste | redline --config '" + configPath + "' account add-claude-credits claude-credits-2 --session-key-stdin"
+	if code == 0 || !strings.Contains(stderr, want) || !strings.Contains(stderr, `"claude-credits"`) ||
+		!strings.Contains(stderr, "--organization-id") {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if *requests != 0 {
+		t.Fatalf("requests = %d", *requests)
+	}
+	if accounts := readAccounts(t, configPath); len(accounts) != 1 {
+		t.Fatalf("accounts = %+v", accounts)
 	}
 }

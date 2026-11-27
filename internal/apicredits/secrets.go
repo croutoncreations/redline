@@ -25,7 +25,8 @@ const (
 	// sessionKey cookie (sk-ant-sid…).
 	SecretSessionKey = "session-key"
 	// SecretAPIKey is the organization API key runs are given, as
-	// OPENAI_API_KEY (sk-…) or ANTHROPIC_API_KEY (sk-ant-api…).
+	// OPENAI_API_KEY (sk-…) or ANTHROPIC_API_KEY (ClaudeAPIKeyPrefixes:
+	// sk-ant-usr…, sk-ant-svc… or sk-ant-api…).
 	SecretAPIKey = "api-key"
 )
 
