@@ -49,10 +49,16 @@ OpenAI API credits accounts are added and keyed only on the machine running Redl
 standard input; `clear-keys <id>` removes both. Keys are never printed and never pass through
 the HTTP API. See [OpenAI API credits](scheduling.md#openai-api-credits).
 
-Claude API credits accounts (subscription credit in a linked Claude Console organization) take
-the same flags: `redline account add-claude-credits <id> [--organization-id UUID] [--label L]
-[--min-balance USD] [--pacing firesale|even] [--firesale-window 72h] [--session-key-file PATH]
-[--api-key-file PATH] [--session-key-stdin]`. `set-session-key`, `set-api-key` and `clear-keys`
+Claude API credits accounts (subscription credit in a linked Claude Console organization) are
+added in one command from the login's `sessionKey` cookie:
+`pbpaste | redline account add-claude-credits <id> --session-key-stdin [--label L]`. Redline
+looks up the one Console organization with API access on that login, saves it as the account's
+organization and the key in the secret store, and prints the organization's UUID and name; a
+rejected key, a login with no API organization, or one with several (listed by UUID and name)
+is refused with what to do, and nothing is saved. The command takes the same flags as
+`add-openai-credits`: `[--organization-id UUID] [--min-balance USD] [--pacing firesale|even]
+[--firesale-window 72h] [--session-key-file PATH] [--api-key-file PATH]`; with
+`--organization-id` there is no lookup. `set-session-key`, `set-api-key` and `clear-keys`
 work for both vendors: the Claude session key is the `sessionKey` cookie (`sk-ant-sid…`) from
 platform.claude.com, and the API key is an `sk-ant-api…` key from the linked Console
 organization, ideally from a dedicated `redline` workspace with a spend limit. A key of the

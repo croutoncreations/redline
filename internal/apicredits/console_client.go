@@ -28,6 +28,9 @@ var (
 	ErrConsoleSessionExpired       = errors.New("Claude Console rejected the saved session key; paste a fresh sessionKey cookie from platform.claude.com")
 	ErrConsoleOrganizationNotFound = errors.New("the Claude Console organization was not found or has no API access (HTTP 404); check organization_id")
 	ErrConsoleRateLimited          = errors.New("Claude Console rate-limited the credits request (HTTP 429)")
+	// ErrConsoleConnectionFailed is wrapped by a request that never got a
+	// response.
+	ErrConsoleConnectionFailed = errors.New("connection failed")
 )
 
 // ConsoleClient reads prepaid credits from the Claude Console.
@@ -112,6 +115,53 @@ func (c ConsoleClient) Fetch(ctx context.Context, credential Credential) (Fetche
 	return FetchedReport{Report: report, FetchedAt: &now}, nil
 }
 
+// APIOrganization finds the one organization with API access that the
+// session key can see. Several are a *SeveralConsoleOrganizationsError
+// listing them; none is ErrNoConsoleAPIOrganization. The returned UUID is
+// lower case and valid.
+func (c ConsoleClient) APIOrganization(ctx context.Context, sessionKey string) (ConsoleOrganization, error) {
+	key := strings.TrimSpace(sessionKey)
+	if key == "" {
+		return ConsoleOrganization{}, ErrNoConsoleSessionKey
+	}
+	if !strings.HasPrefix(key, ConsoleSessionKeyPrefix) || strings.ContainsAny(key, " \t\r\n;") {
+		return ConsoleOrganization{}, ErrNotConsoleSessionKey
+	}
+	body, err := c.get(ctx, c.organizationsURL(), key, "organizations")
+	if err != nil {
+		return ConsoleOrganization{}, err
+	}
+	orgs, err := ParseConsoleOrganizations(body)
+	if err != nil {
+		return ConsoleOrganization{}, err
+	}
+	uuid, err := SelectConsoleOrganization(orgs)
+	if errors.Is(err, ErrSeveralConsoleOrganizations) {
+		several := &SeveralConsoleOrganizationsError{}
+		for _, org := range orgs {
+			if !hasAPIAccess(org) {
+				continue
+			}
+			if !ValidConsoleOrganizationID(org.UUID) {
+				return ConsoleOrganization{}, fmt.Errorf("invalid Console organizations response")
+			}
+			org.UUID = strings.ToLower(org.UUID)
+			several.Organizations = append(several.Organizations, org)
+		}
+		return ConsoleOrganization{}, several
+	}
+	if err != nil {
+		return ConsoleOrganization{}, err
+	}
+	for _, org := range orgs {
+		if hasAPIAccess(org) && strings.EqualFold(org.UUID, uuid) {
+			org.UUID = uuid
+			return org, nil
+		}
+	}
+	return ConsoleOrganization{}, fmt.Errorf("invalid Console organizations response")
+}
+
 // get sends one Console GET with only the session cookie. The status is
 // classified before the body is read, so a truncated error body cannot
 // hide a rejected session or a rate limit; no body is ever echoed.
@@ -128,7 +178,7 @@ func (c ConsoleClient) get(ctx context.Context, url, key, what string) ([]byte, 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("Claude Console %s request failed: connection failed", what)
+		return nil, fmt.Errorf("Claude Console %s request failed: %w", what, ErrConsoleConnectionFailed)
 	}
 	defer resp.Body.Close()
 	switch {

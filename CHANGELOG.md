@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `pbpaste | redline account add-claude-credits <id> --session-key-stdin` adds a Claude API
+  credits account in one command, even beside an existing one: Redline finds the login's one
+  Console organization with API access from the session key, saves it as `organization_id`,
+  and prints its UUID and name. A rejected session key, a login with no API organization, or
+  one with several (listed by UUID and name, to rerun with `--organization-id`) is refused with
+  what to do, and neither the account nor the key is saved. `--organization-id` still skips
+  the lookup.
+
+### Changed
+
+- Adding a second API credits account without an organization now says how to give it one:
+  for Claude, the one-command form above; for OpenAI, `--org org-…` (Settings › Organization ›
+  General on platform.openai.com).
+
 ### Fixed
 
 - API credits cards on every surface (desktop and mobile web dashboards, menu bar, Android): the
