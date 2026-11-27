@@ -129,7 +129,9 @@ function queueFixture(){
   if(q.includes('isInMergeQueue')){
    const inQ=typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue;
    if(!q.includes('mergeQueueEntry'))return {repository:{pullRequest:{isInMergeQueue:inQ}}};
-   return {repository:{pullRequest:{id:`PR_${v.n}`,isInMergeQueue:inQ,headRefOid:f.queue.queuedHead ?? head,mergeQueueEntry:inQ?{id:'MQE_q',enqueuer:{login:f.queue.enqueuer ?? 'github-actions'}}:null}}};
+   f.queue.entryReads=(f.queue.entryReads??0)+1;
+   const entry=f.queue.entry?.(f.queue.entryReads) ?? {id:'MQE_q',enqueuer:{login:f.queue.enqueuer ?? 'github-actions'}};
+   return {repository:{pullRequest:{id:`PR_${v.n}`,isInMergeQueue:inQ,headRefOid:f.queue.queuedHead ?? head,mergeQueueEntry:inQ?entry:null}}};
   }
   if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:null,pullRequest:{number:Number(v.id.slice(3)),headRefOid:f.queue.headBack ?? v.head}}}}}
   throw new Error('unexpected graphql '+q);
@@ -214,6 +216,13 @@ test('queue mode: a PR Jon queued by hand is left alone',async()=>{
  const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.enqueuer='jfox85';const inner=f.result;
  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
  await runQueue(f);assert.deepEqual(f.queue.dequeues,[]);
+});
+test('queue mode: an entry re-queued by hand during the evaluation is left alone',async()=>{
+ for(const later of [{id:'MQE_new',enqueuer:{login:'jfox85'}},{id:'MQE_new',enqueuer:{login:'github-actions'}},{id:'MQE_q',enqueuer:{login:'jfox85'}}]){
+  const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.entry=i=>i>1?later:undefined;const inner=f.result;
+  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+  await runQueue(f);assert.deepEqual(f.queue.dequeues,[],JSON.stringify(later));
+ }
 });
 test('queue mode: GitHub reporting a queued PR as not mergeable does not dequeue it',async()=>{
  const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;

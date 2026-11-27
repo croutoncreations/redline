@@ -223,10 +223,14 @@ GitHub's merge queue. Then:
   A PR Jon queued himself gets only the path and binding checks: his enqueue
   is the authorization. The remaining window is the few seconds between the
   gate's verdict and the queue's merge.
-- **The worker also cleans up early.** Every run re-evaluates each PR it
-  queued and removes it from the queue (`dequeuePullRequest`) if it no longer
-  qualifies, so a stale entry doesn't hold up the queue until its CI fails.
-  Removals are listed in `live-result.json` under `dequeued`.
+- **The worker also cleans up early.** Every run (hourly at :47, and after
+  each successful same-repository `pull_request` CI run; not after
+  merge-queue CI) re-evaluates each PR it queued and removes it from the
+  queue (`dequeuePullRequest`) if it no longer qualifies, so a stale entry
+  doesn't hold up the queue until its CI fails. This is housekeeping: the
+  `green-lane-queue` gate, not the sweep, is what blocks the merge. An entry
+  Jon removed and re-queued by hand meanwhile is left alone. Removals are
+  listed in `live-result.json` under `dequeued`.
 - **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
   already in the queue stays there. Remove it with **Remove from queue** on the
   PR or on the branch's merge-queue page (the `gh` CLI can't), or with the
