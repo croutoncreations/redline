@@ -227,7 +227,11 @@ trees: the same set of changed paths, each with the same resulting blob and
 mode, on top of the same base version of each path. The earlier head must be
 an ancestor of the current head. Any doubt (truncated tree, API error, a
 conflict fix, a further commit) means no carryover and a fresh review is
-needed. CI still has to pass on the exact current head.
+needed. Carryover is also refused when `main`, since the reviewed base,
+changed any denied path (auth, credentials, workflows, release, the lane
+itself) or any file in a directory the PR touches, so a reviewer's judgment
+of a change never silently extends to new neighbouring code. CI still has to
+pass on the exact current head.
 
 Codex's security review often finishes with `has_any_findings` and
 `has_unresolved_findings` both `null` (openai/codex#57326). That form counts as

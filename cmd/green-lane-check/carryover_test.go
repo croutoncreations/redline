@@ -25,13 +25,17 @@ func carryoverClient(t *testing.T, mode string) *GitHubClient {
 		return map[string]string{"path": path, "mode": "100644", "type": "blob", "sha": sha}
 	}
 	trees := map[string][]map[string]string{
-		oldBaseSHA:  {entry("a.go", "a1"), entry("docs.md", "d1")},
-		reviewedSHA: {entry("a.go", "a2"), entry("docs.md", "d1")},
-		newBaseSHA:  {entry("a.go", "a1"), entry("docs.md", "d2")},
-		headSHA:     {entry("a.go", "a2"), entry("docs.md", "d2")},
+		oldBaseSHA:  {entry("a.go", "a1"), entry("docs/guide.md", "d1")},
+		reviewedSHA: {entry("a.go", "a2"), entry("docs/guide.md", "d1")},
+		newBaseSHA:  {entry("a.go", "a1"), entry("docs/guide.md", "d2")},
+		headSHA:     {entry("a.go", "a2"), entry("docs/guide.md", "d2")},
+	}
+	if mode == "main changed a neighbouring file" {
+		trees[newBaseSHA] = []map[string]string{entry("a.go", "a1"), entry("b.go", "b2"), entry("docs/guide.md", "d2")}
+		trees[headSHA] = []map[string]string{entry("a.go", "a2"), entry("b.go", "b2"), entry("docs/guide.md", "d2")}
 	}
 	if mode == "PR changed after review" {
-		trees[headSHA] = []map[string]string{entry("a.go", "a3"), entry("docs.md", "d2")}
+		trees[headSHA] = []map[string]string{entry("a.go", "a3"), entry("docs/guide.md", "d2")}
 	}
 	// Graph: main is oldBase -> newBase. The PR commit "reviewed" has parent
 	// oldBase; head merges newBase into it. "stranger" is unrelated.
@@ -161,7 +165,7 @@ func TestReviewEquivalentHeads(t *testing.T) {
 	if err != nil || len(got) != 0 {
 		t.Fatalf("untrusted summary used: %v %v", got, err)
 	}
-	for _, mode := range []string{"reviewed commit merged another branch", "main absorbed a merge"} {
+	for _, mode := range []string{"reviewed commit merged another branch", "main absorbed a merge", "main changed a neighbouring file"} {
 		got, err := carryoverClient(t, mode).reviewEquivalentHeads(ctx, "main", headSHA, []greenlane.AutomatedReviewComment{rabbitSummary(reviewedSHA)})
 		if err != nil || len(got) != 0 {
 			t.Fatalf("%s: carried over a non-linear history: %v %v", mode, got, err)

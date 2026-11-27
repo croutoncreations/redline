@@ -83,7 +83,8 @@ func (c *GitHubClient) reviewEquivalentHeads(ctx context.Context, baseBranch, he
 		if err != nil {
 			return nil, err
 		}
-		if greenlane.SameChange(headTree, headBaseTree, reviewedTree, reviewedBaseTree) {
+		if greenlane.SameChange(headTree, headBaseTree, reviewedTree, reviewedBaseTree) &&
+			greenlane.BaseDriftAllowed(headTree, headBaseTree, reviewedBaseTree, c.config.DeniedPaths) {
 			out = append(out, sha)
 		}
 	}

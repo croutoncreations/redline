@@ -190,3 +190,54 @@ func TestCarryoverWhenMainAbsorbedAnEarlierPRCommit(t *testing.T) {
 		t.Fatal("carried over although main changed a PR file after P")
 	}
 }
+
+func TestBaseDriftAllowed(t *testing.T) {
+	denied := []string{"internal/apiauth/**", ".github/workflows/**"}
+	reviewedBase := Tree{"internal/api/handler.go": blob("h1"), "internal/api/util.go": blob("u1"), "internal/apiauth/check.go": blob("c1"), "docs/x.md": blob("x1"), "internal/other/o.go": blob("o1")}
+	headBase := func(change map[string]string) Tree {
+		t := Tree{}
+		for k, v := range reviewedBase {
+			t[k] = v
+		}
+		for k, v := range change {
+			if v == "" {
+				delete(t, k)
+			} else {
+				t[k] = blob(v)
+			}
+		}
+		return t
+	}
+	head := func(base Tree) Tree {
+		t := Tree{}
+		for k, v := range base {
+			t[k] = v
+		}
+		t["internal/api/handler.go"] = blob("h2") // the PR's change
+		return t
+	}
+	for _, tc := range []struct {
+		name   string
+		change map[string]string
+		ok     bool
+	}{
+		{"main changed nothing", nil, true},
+		{"main changed docs elsewhere", map[string]string{"docs/x.md": "x2"}, true},
+		{"main changed another package", map[string]string{"internal/other/o.go": "o2"}, true},
+		{"main changed a helper next to the PR's file", map[string]string{"internal/api/util.go": "u2"}, false},
+		{"main added a file next to the PR's file", map[string]string{"internal/api/new.go": "n1"}, false},
+		{"main deleted a file next to the PR's file", map[string]string{"internal/api/util.go": ""}, false},
+		{"main changed an auth helper elsewhere", map[string]string{"internal/apiauth/check.go": "c2"}, false},
+		{"main added a workflow", map[string]string{".github/workflows/x.yml": "w1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hb := headBase(tc.change)
+			if got := BaseDriftAllowed(head(hb), hb, reviewedBase, denied); got != tc.ok {
+				t.Fatalf("got %v want %v", got, tc.ok)
+			}
+		})
+	}
+	if BaseDriftAllowed(head(reviewedBase), nil, reviewedBase, denied) || BaseDriftAllowed(head(reviewedBase), reviewedBase, nil, denied) {
+		t.Fatal("missing tree accepted")
+	}
+}

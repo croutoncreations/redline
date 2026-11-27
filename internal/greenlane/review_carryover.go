@@ -1,6 +1,9 @@
 package greenlane
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"path"
+)
 
 // A branch update merges main into a PR without changing what the PR itself
 // changes. Re-running Codex and CodeRabbit after every such update is the
@@ -56,6 +59,46 @@ func SameChange(head, headBase, reviewed, reviewedBase Tree) bool {
 	}
 	for p := range reviewedPaths {
 		if !headPaths[p] || !same(head, reviewed, p) || !same(headBase, reviewedBase, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// BaseDriftAllowed limits how far main may have moved under a carried-over
+// review. Same-change equality covers the PR's own files, but a review also
+// judged them against the code around them. Carryover is refused when main
+// changed, since the reviewed base, any denied path (auth, credentials,
+// workflows, release, the lane itself) or any file in a directory the PR
+// touches, where same-package helpers live. Changes elsewhere are left to CI.
+func BaseDriftAllowed(head, headBase, reviewedBase Tree, denied []string) bool {
+	if headBase == nil || reviewedBase == nil {
+		return false
+	}
+	dirs := map[string]bool{}
+	for p, e := range head {
+		if old, ok := headBase[p]; !ok || old != e {
+			dirs[path.Dir(p)] = true
+		}
+	}
+	for p := range headBase {
+		if _, ok := head[p]; !ok {
+			dirs[path.Dir(p)] = true
+		}
+	}
+	drifted := func(p string) bool {
+		if matchesAnyPattern(p, denied) {
+			return true
+		}
+		return dirs[path.Dir(p)]
+	}
+	for p, e := range headBase {
+		if old, ok := reviewedBase[p]; (!ok || old != e) && drifted(p) {
+			return false
+		}
+	}
+	for p := range reviewedBase {
+		if _, ok := headBase[p]; !ok && drifted(p) {
 			return false
 		}
 	}
