@@ -29,8 +29,18 @@ type outcome struct {
 type job struct {
 	registration store.PushRegistration
 	hint         WakeHint
-	done         chan outcome
+	// waiters receive this wake's outcome exactly once. A follow-up wake can
+	// carry several, one per waited dispatch merged into it.
+	waiters []chan outcome
 }
+
+// answer reports the wake's outcome to every waited dispatch counting on it.
+func (j job) answer(result outcome) {
+	for _, done := range j.waiters {
+		done <- result
+	}
+}
+
 type Dispatcher struct {
 	store     Store
 	issuer    string
@@ -43,7 +53,9 @@ type Dispatcher struct {
 	pending   map[string]bool
 	// inFlight marks devices whose wake is being sent. A delivery that
 	// arrives then may postdate the device's fetch, so it records one
-	// follow-up wake instead of being dropped. Guarded by mu.
+	// follow-up wake instead of being dropped. A waited dispatch always
+	// records the follow-up for a pending device, so the wake it counts
+	// carries its hint. Guarded by mu.
 	inFlight map[string]bool
 	followUp map[string]job
 	closed   bool
@@ -132,22 +144,30 @@ func (d *Dispatcher) Dispatch(ctx context.Context, id int64, event string, wait 
 		}
 	}
 	for _, registration := range registrations {
+		device := registration.DeviceSessionID
 		item := job{registration: registration, hint: WakeHint{DeliveryID: id, Kind: kind(event)}}
-		if d.pending[registration.DeviceSessionID] {
+		var done chan outcome
+		if wait {
+			done = make(chan outcome, 1)
+			item.waiters = []chan outcome{done}
+		}
+		if d.pending[device] {
 			d.stats.Coalesced++
-			if d.inFlight[registration.DeviceSessionID] {
-				d.followUp[registration.DeviceSessionID] = item
+			if wait || d.inFlight[device] {
+				// The latest hint wins; earlier waiters still get an answer.
+				item.waiters = append(d.followUp[device].waiters, item.waiters...)
+				d.followUp[device] = item
+				if done != nil {
+					completions = append(completions, done)
+				}
 			}
 			continue
 		}
-		if wait {
-			item.done = make(chan outcome, 1)
-		}
 		select {
 		case d.queue <- item:
-			d.pending[registration.DeviceSessionID] = true
-			if item.done != nil {
-				completions = append(completions, item.done)
+			d.pending[device] = true
+			if done != nil {
+				completions = append(completions, done)
 			}
 		default:
 			d.stats.Dropped++
@@ -207,14 +227,13 @@ func (d *Dispatcher) worker() {
 			cancel()
 		}
 		d.finish(item.registration.DeviceSessionID)
-		if item.done != nil {
-			item.done <- outcome{woken: ok, configured: configured}
-		}
+		item.answer(outcome{woken: ok, configured: configured})
 	}
 }
 
 // finish releases a device after its wake and queues the follow-up wake
-// recorded while that wake was in flight, if any.
+// recorded while that wake was pending, if any. A follow-up that cannot be
+// queued answers its waiters as not woken.
 func (d *Dispatcher) finish(device string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -229,6 +248,9 @@ func (d *Dispatcher) finish(device string) {
 			d.stats.Dropped++
 			d.logger.Print("push queue full; wake dropped")
 		}
+	}
+	if ok {
+		next.answer(outcome{configured: true})
 	}
 	delete(d.pending, device)
 }

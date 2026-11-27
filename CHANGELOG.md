@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   in the Americas. On Android a normal hold ("Holding credit", "Held · at the floor", …) now has
   a grey dot instead of a red one; amber is kept for an unknown decision or an out-of-date or
   signed-out balance.
+- "Send test notification" could report fewer phones woken than were, when an earlier wake to
+  a phone was still being sent. The test now waits for the follow-up wake that carries it and
+  counts every phone it wakes (#276).
 
 ## [0.1.14] - 2026-11-26
 
