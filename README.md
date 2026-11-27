@@ -41,6 +41,10 @@ Jobs are called *tasks* in the CLI and API; the dashboard and this page say *job
   work, and stale telemetry means *wait*, never *run*.
 - **Use it before you lose it.** Firesale accelerates queued work near a reset, and opt-in
   redemption uses expiring banked resets before they lapse.
+- **Spends expiring API credits too.** The monthly API credit a ChatGPT Pro/Business or Claude
+  subscription grants to a linked API organization expires unused. Redline shows the balance and
+  its expiry, and spends it on queued jobs before it lapses, never below a floor you set and never
+  on purchased credit. See [API credits](docs/scheduling.md#openai-api-credits).
 - **Works with your agents.** Codex CLI, Claude Code, Pi, Hermes, or any command. Redline does
   not replace your harness; it decides when to launch it.
 - **Isolated by design.** Jobs run in Git worktrees or DevX sessions, and completed runs keep
