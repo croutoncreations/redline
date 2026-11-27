@@ -228,9 +228,14 @@ GitHub's merge queue. Then:
   merge-queue CI) re-evaluates each PR it queued and removes it from the
   queue (`dequeuePullRequest`) if it no longer qualifies, so a stale entry
   doesn't hold up the queue until its CI fails. This is housekeeping: the
-  `green-lane-queue` gate, not the sweep, is what blocks the merge. An entry
-  Jon removed and re-queued by hand meanwhile is left alone. Removals are
-  listed in `live-result.json` under `dequeued`.
+  `green-lane-queue` gate, not the sweep, is what blocks the merge. Just
+  before removing an entry the sweep re-reads it and skips it if it is no
+  longer the same entry queued by Green Lane, so an entry Jon removed and
+  re-queued by hand during the evaluation is left alone. GitHub's removal
+  call names the PR, not the entry, so a hand re-queue in the instant between
+  that re-read and the removal could still be removed. That is accepted: it
+  fails safe (nothing merges), and Jon can re-queue. Removals are listed in
+  `live-result.json` under `dequeued`.
 - **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
   already in the queue stays there. Remove it with **Remove from queue** on the
   PR or on the branch's merge-queue page (the `gh` CLI can't), or with the
