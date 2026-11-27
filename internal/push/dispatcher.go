@@ -29,7 +29,7 @@ type outcome struct {
 type job struct {
 	registration store.PushRegistration
 	hint         WakeHint
-	done         chan outcome
+	done         []chan outcome
 }
 type Dispatcher struct {
 	store     Store
@@ -133,21 +133,27 @@ func (d *Dispatcher) Dispatch(ctx context.Context, id int64, event string, wait 
 	}
 	for _, registration := range registrations {
 		item := job{registration: registration, hint: WakeHint{DeliveryID: id, Kind: kind(event)}}
+		var completion chan outcome
+		if wait {
+			completion = make(chan outcome, 1)
+			item.done = append(item.done, completion)
+		}
 		if d.pending[registration.DeviceSessionID] {
 			d.stats.Coalesced++
 			if d.inFlight[registration.DeviceSessionID] {
+				item.done = append(d.followUp[registration.DeviceSessionID].done, item.done...)
 				d.followUp[registration.DeviceSessionID] = item
+				if completion != nil {
+					completions = append(completions, completion)
+				}
 			}
 			continue
-		}
-		if wait {
-			item.done = make(chan outcome, 1)
 		}
 		select {
 		case d.queue <- item:
 			d.pending[registration.DeviceSessionID] = true
-			if item.done != nil {
-				completions = append(completions, item.done)
+			if completion != nil {
+				completions = append(completions, completion)
 			}
 		default:
 			d.stats.Dropped++
@@ -207,8 +213,8 @@ func (d *Dispatcher) worker() {
 			cancel()
 		}
 		d.finish(item.registration.DeviceSessionID)
-		if item.done != nil {
-			item.done <- outcome{woken: ok, configured: configured}
+		for _, done := range item.done {
+			done <- outcome{woken: ok, configured: configured}
 		}
 	}
 }
@@ -228,6 +234,11 @@ func (d *Dispatcher) finish(device string) {
 		default:
 			d.stats.Dropped++
 			d.logger.Print("push queue full; wake dropped")
+		}
+	}
+	if ok {
+		for _, done := range next.done {
+			done <- outcome{configured: true}
 		}
 	}
 	delete(d.pending, device)

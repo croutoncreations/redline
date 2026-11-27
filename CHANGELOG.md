@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- A waited push, including the send-test-notification path, now counts a wake that was coalesced
+  behind an in-flight wake instead of returning before the follow-up was sent with `Woken: 0`.
 - API credits cards on every surface (desktop and mobile web dashboards, menu bar, Android): the
   summary row for credit that is shown but never scheduled is now "Other credit" instead of
   "Paid credit", since for Claude it is mostly another promotional program. Credit expiry dates

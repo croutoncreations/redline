@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
 )
 
@@ -274,6 +275,60 @@ func TestDispatcherSendsFollowUpWakeForDeliveryDuringInFlightWake(t *testing.T) 
 	}
 	if got := d.Stats().Coalesced; got != 2 {
 		t.Fatalf("coalesced = %d, want 2", got)
+	}
+}
+
+// A waited dispatch that arrives during an in-flight wake must wait for the
+// follow-up wake and report its outcome, rather than returning Woken: 0 while
+// that wake is still queued.
+func TestWaitedDispatchCountsFollowUpWake(t *testing.T) {
+	h := hintTransport{make(chan WakeHint, 2), make(chan struct{})}
+	data := &memoryStore{registrations: []store.PushRegistration{{DeviceSessionID: "phone"}}}
+	d := NewDispatcher(data, "", h, log.New(&bytes.Buffer{}, "", 0))
+	defer d.Close()
+
+	d.Dispatch(t.Context(), 1, "run.started", false)
+	select {
+	case <-h.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first wake did not start")
+	}
+
+	result := make(chan domain.PushResult, 1)
+	go func() {
+		result <- d.Dispatch(t.Context(), 2, "test", true)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.mu.Lock()
+		_, queued := d.followUp["phone"]
+		d.mu.Unlock()
+		if queued {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("follow-up wake was not queued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	h.release <- struct{}{}
+	select {
+	case hint := <-h.entered:
+		if hint.DeliveryID != 2 || hint.Kind != "test" {
+			t.Fatalf("follow-up wake hint = %+v", hint)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("follow-up wake did not start")
+	}
+	h.release <- struct{}{}
+	select {
+	case got := <-result:
+		if got.Woken != 1 {
+			t.Fatalf("waited dispatch result = %+v, want Woken: 1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waited dispatch did not finish")
 	}
 }
 
