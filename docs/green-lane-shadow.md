@@ -203,6 +203,15 @@ GitHub's merge queue. Then:
   `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
   is no post-merge dispatch. PRs already in the queue are skipped. If `main`
   has no merge queue, the worker refuses to run.
+- **It enqueues and dequeues as the Green Lane Merge App**
+  (`green-lane-merge[bot]`, installed on redline only, with Contents,
+  Pull requests and Merge queues write). Queue entries created with the
+  workflow's `GITHUB_TOKEN` start no `merge_group` CI, so they would sit until
+  the queue timed out. The job mints a short-lived installation token
+  (`actions/create-github-app-token`, pinned) only in queue mode, from secrets
+  `GREEN_LANE_APP_ID` and `GREEN_LANE_APP_KEY`, and uses it only for the two
+  queue mutations; everything else stays on `GITHUB_TOKEN`. Without the token
+  the worker refuses to run. The sweep only touches entries this App queued.
 - **Authorization holds until the merge, not just the enqueue.** The required
   `green-lane-queue` CI job re-decides every queued PR on its merge-queue run.
   It waits for the other eight required jobs (so its verdict is as late as
@@ -243,7 +252,9 @@ GitHub's merge queue. Then:
 
 Owner setup, in this order:
 
-1. Merge the PR that adds `merge_group` to CI and queue mode to the worker.
+1. Create the Green Lane Merge App and set `GREEN_LANE_APP_ID` and
+   `GREEN_LANE_APP_KEY` (done Nov 27 2026), then merge the PR that adds
+   `merge_group` to CI and queue mode to the worker.
 2. In `main`'s branch protection, add `green-lane-queue` (GitHub Actions) to
    the required checks, then turn on **Require merge queue**: squash,
    build concurrency 1, minimum and maximum group size 1, **Only merge

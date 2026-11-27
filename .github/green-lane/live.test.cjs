@@ -21,7 +21,7 @@ function fixture() {
 }
 async function run(f) {
   const before=process.env.LIVE_PILOT_ENABLED; process.env.LIVE_PILOT_ENABLED=f.optin ?? 'true';
-  try { return await live({github:f.github,accessAudit:f.accessAudit,context:f.context,core:{info:()=>{},warning:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
+  try { return await live({github:f.github,accessAudit:f.accessAudit,queueClient:f.queueClient,context:f.context,core:{info:()=>{},warning:()=>{}},run:f.run,validate:async args=>{if(f.onValidate)f.onValidate(args.result);return f.valid},write:r=>{f.report=structuredClone(r)}}); }
   finally {if(before===undefined)delete process.env.LIVE_PILOT_ENABLED;else process.env.LIVE_PILOT_ENABLED=before}
 }
 test('one exact-head squash merge even with multiple eligible PRs; old recorded base is not main tip',async()=>{
@@ -108,12 +108,14 @@ for(const present of [true,false])test(`workflow isolates audit token and remove
  const fs=require('node:fs');
  const yaml=fs.readFileSync(require('node:path').join(__dirname,'../workflows/green-lane-live.yml'),'utf8');
  const script=yaml.match(/          script: \|\n((?:            .*\n)+)/)[1].replace(/^            /gm,'');
- const processMock={env:present?{GREEN_LANE_ACCESS_AUDIT_TOKEN:'test-only-audit-credential'}:{}};
- const normal={constructor:class AuditClient{constructor(opts){assert.equal(opts.auth,'test-only-audit-credential');assert.equal(opts.request.retries,0)}}};
+ const processMock={env:present?{GREEN_LANE_ACCESS_AUDIT_TOKEN:'test-only-audit-credential',GREEN_LANE_QUEUE_TOKEN:'test-only-queue-credential'}:{}};
+ const normal={constructor:class Client{constructor(opts){assert.ok(['test-only-audit-credential','test-only-queue-credential'].includes(opts.auth));assert.equal(opts.request.retries,0);this.auth=opts.auth}}};
  let called=false;
  const requireMock=path=>{assert.equal(path,'./.github/green-lane/live.cjs');return async args=>{
   called=true;assert.equal(args.github,normal);assert.equal(processMock.env.GREEN_LANE_ACCESS_AUDIT_TOKEN,undefined);
-  if(present)assert.notEqual(args.accessAudit,normal);else assert.equal(args.accessAudit,undefined);
+  assert.equal(processMock.env.GREEN_LANE_QUEUE_TOKEN,undefined,'the App token must not reach the evaluator environment');
+  if(present){assert.equal(args.accessAudit.auth,'test-only-audit-credential');assert.equal(args.queueClient.auth,'test-only-queue-credential')}
+  else{assert.equal(args.accessAudit,undefined);assert.equal(args.queueClient,undefined)}
  }};
  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
  await new AsyncFunction('github','context','core','require','process',script)(normal,{}, {},requireMock,processMock);assert.ok(called);
@@ -125,17 +127,23 @@ function queueFixture(){
  const pr=f.pr;f.pr=n=>({...pr(n),node_id:`PR_${n}`});
  f.github.graphql=async(q,v)=>{
   if(q.includes('mergeQueue(branch:"main")'))return {repository:{mergeQueue:f.queue.exists?{id:'MQ_1',configuration:{mergeMethod:'SQUASH',mergingStrategy:'ALLGREEN',maximumEntriesToBuild:1,...f.queue.config}}:null}};
-  if(q.includes('dequeuePullRequest')){f.queue.dequeues.push(v.id);return {dequeuePullRequest:{mergeQueueEntry:{id:'MQE_x'}}}}
   if(q.includes('isInMergeQueue')){
    const inQ=typeof f.queue.inQueue==='function'?f.queue.inQueue(v.n):f.queue.inQueue;
    if(!q.includes('mergeQueueEntry'))return {repository:{pullRequest:{isInMergeQueue:inQ}}};
    f.queue.entryReads=(f.queue.entryReads??0)+1;
-   const entry=f.queue.entry?.(f.queue.entryReads) ?? {id:'MQE_q',enqueuer:{login:f.queue.enqueuer ?? 'github-actions'}};
+   const entry=f.queue.entry?.(f.queue.entryReads) ?? {id:'MQE_q',enqueuer:f.queue.enqueuer ?? {__typename:'Bot',login:'green-lane-merge'}};
    return {repository:{pullRequest:{id:`PR_${v.n}`,isInMergeQueue:inQ,headRefOid:f.queue.queuedHead ?? head,mergeQueueEntry:inQ?entry:null}}};
   }
-  if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:null,pullRequest:{number:Number(v.id.slice(3)),headRefOid:f.queue.headBack ?? v.head}}}}}
+  if(q.includes('mutation'))throw new Error('queue mutations must use the App token, not GITHUB_TOKEN');
   throw new Error('unexpected graphql '+q);
  };
+ // The Green Lane Merge App client: queue mutations only.
+ f.queueClient={graphql:async(q,v)=>{
+  if(q.includes('dequeuePullRequest')){f.queue.dequeues.push(v.id);return {dequeuePullRequest:{mergeQueueEntry:{id:'MQE_x'}}}}
+  if(q.includes('enqueuePullRequest')){assert.match(q,/expectedHeadOid:\$head/,'enqueue must pin the evaluated head');f.queue.enqueues.push(v);if(f.queue.enqueueError)throw f.queue.enqueueError;
+   return {enqueuePullRequest:{mergeQueueEntry:{id:'MQE_1',headCommit:null,enqueuer:'enqueuedBy' in f.queue?f.queue.enqueuedBy:{__typename:'Bot',login:'green-lane-merge'},pullRequest:{number:Number(v.id.slice(3)),headRefOid:f.queue.headBack ?? v.head}}}}}
+  throw new Error('the App token is only for queue mutations: '+q);
+ }};
  return f;
 }
 async function runQueue(f){const before=process.env.GREEN_LANE_MERGE_QUEUE;process.env.GREEN_LANE_MERGE_QUEUE='true';try{return await run(f)}finally{if(before===undefined)delete process.env.GREEN_LANE_MERGE_QUEUE;else process.env.GREEN_LANE_MERGE_QUEUE=before}}
@@ -212,13 +220,36 @@ test('queue mode: a queued head that differs from the PR head is removed',async(
  const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.queuedHead='9'.repeat(40);
  const r=await runQueue(f);assert.deepEqual(f.queue.dequeues,['PR_1']);
 });
+test('queue mode: without the App token nothing is evaluated or enqueued',async()=>{
+ const f=queueFixture();delete f.queueClient;let evaluated=false;const inner=f.run;f.run=(...a)=>{evaluated=true;return inner(...a)};
+ await assert.rejects(runQueue(f),/needs the Green Lane Merge App token/);assert.equal(evaluated,false);assert.equal(f.queue.enqueues.length,0);
+});
+test('queue mode: the App is recognised with or without the [bot] suffix',async()=>{
+ const f=queueFixture();f.queue.enqueuedBy={__typename:'Bot',login:'green-lane-merge[bot]'};const r=await runQueue(f);assert.equal(r.state,'enqueued');
+ const g=queueFixture();g.queue.inQueue=n=>n===1;g.queue.enqueuer={__typename:'Bot',login:'green-lane-merge[bot]'};const inner=g.result;
+ g.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+ await runQueue(g);assert.deepEqual(g.queue.dequeues,['PR_1']);
+});
+test('queue mode: an enqueue not confirmed as the App is a hard failure',async()=>{
+ for(const by of [{__typename:'Bot',login:'github-actions'},{__typename:'User',login:'green-lane-merge'},null]){
+  const f=queueFixture();f.queue.enqueuedBy=by;await assert.rejects(runQueue(f),/did not confirm/);assert.equal(f.queue.enqueues.length,1);
+ }
+});
+test('queue mode: entries queued by others are never swept, even github-actions or a same-named user',async()=>{
+ for(const who of [{__typename:'Bot',login:'github-actions'},{__typename:'User',login:'green-lane-merge'},{__typename:'User',login:'green-lane-merge[bot]'},{__typename:'Bot',login:'cursor'}]){
+  const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.enqueuer=who;const inner=f.result;
+  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+  const seen=[];const run=f.run;f.run=(p,a,o)=>{seen.push(o.env.PR_NUMBER);return run(p,a,o)};
+  await runQueue(f);assert.deepEqual(f.queue.dequeues,[],JSON.stringify(who));assert.ok(!seen.includes('1'),'entries queued by others are not even evaluated');
+ }
+});
 test('queue mode: a PR Jon queued by hand is left alone',async()=>{
- const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.enqueuer='jfox85';const inner=f.result;
+ const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.enqueuer={__typename:'User',login:'jfox85'};const inner=f.result;
  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
  await runQueue(f);assert.deepEqual(f.queue.dequeues,[]);
 });
 test('queue mode: an entry re-queued by hand during the evaluation is left alone',async()=>{
- for(const later of [{id:'MQE_new',enqueuer:{login:'jfox85'}},{id:'MQE_new',enqueuer:{login:'github-actions'}},{id:'MQE_q',enqueuer:{login:'jfox85'}}]){
+ for(const later of [{id:'MQE_new',enqueuer:{__typename:'User',login:'jfox85'}},{id:'MQE_new',enqueuer:{__typename:'Bot',login:'green-lane-merge'}},{id:'MQE_q',enqueuer:{__typename:'User',login:'jfox85'}}]){
   const f=queueFixture();f.queue.inQueue=n=>n===1;f.queue.entry=i=>i>1?later:undefined;const inner=f.result;
   f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
   await runQueue(f);assert.deepEqual(f.queue.dequeues,[],JSON.stringify(later));

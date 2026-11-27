@@ -19,9 +19,14 @@ const transient = err => {
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
-const entryQuery = `query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){id isInMergeQueue headRefOid mergeQueueEntry{id enqueuer{login}}}}}`;
+const entryQuery = `query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){id isInMergeQueue headRefOid mergeQueueEntry{id enqueuer{__typename login}}}}}`;
+// Queue mode enqueues as the Green Lane Merge App (green-lane-merge[bot]).
+// GraphQL reports bot logins with or without the [bot] suffix depending on the
+// field; the Bot type is what a person can't spoof.
+const QUEUE_BOT_LOGINS = ['green-lane-merge','green-lane-merge[bot]'];
+const queuedByGreenLane = entry => entry?.enqueuer?.__typename === 'Bot' && QUEUE_BOT_LOGINS.includes(entry.enqueuer.login);
 
-async function live({github, accessAudit, context, core, run=execFileSync,
+async function live({github, accessAudit, queueClient, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
   // GREEN_LANE_MERGE_QUEUE=true: main requires GitHub's merge queue. PRs may
   // be behind main (the queue tests each one combined with the latest main),
@@ -110,6 +115,8 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
+  // Queue entries made with GITHUB_TOKEN start no merge_group CI; only the App can enqueue.
+  if (queue && typeof queueClient?.graphql !== 'function') throw new Error('Merge-queue mode needs the Green Lane Merge App token; no merge permitted');
   if (queue && !await queueReady()) throw new Error('Merge-queue mode is on but main has no merge queue configured as squash, ALLGREEN, one entry at a time; no merge permitted');
 
   if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
@@ -174,9 +181,9 @@ async function live({github, accessAudit, context, core, run=execFileSync,
       mergeCalled = true;
       // Verify through the entry's pull request: headCommit is the queue's
       // own (possibly not yet built) merge-group commit, not the PR head.
-      const r = await github.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id pullRequest{number headRefOid}}}}`,{id:fresh.node_id,head:result.head_sha});
+      const r = await queueClient.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id enqueuer{__typename login} pullRequest{number headRefOid}}}}`,{id:fresh.node_id,head:result.head_sha});
       const entry = r?.enqueuePullRequest?.mergeQueueEntry;
-      if (typeof entry?.id !== 'string' || entry.pullRequest?.number !== number || entry.pullRequest?.headRefOid !== result.head_sha) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
+      if (typeof entry?.id !== 'string' || entry.pullRequest?.number !== number || entry.pullRequest?.headRefOid !== result.head_sha || !queuedByGreenLane(entry)) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
       report.state='enqueued'; report.enqueued.push({pr:number,head:result.head_sha,entry:entry.id});
       // The queue merges later, as github-merge-queue[bot], once the required
       // checks pass on its merge-group commit. That includes green-lane-queue
@@ -216,7 +223,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
       const node = q?.repository?.pullRequest;
       if (node?.isInMergeQueue !== true) continue;
       // Only PRs this worker queued; a PR Jon queued by hand is his call.
-      if (node.mergeQueueEntry?.enqueuer?.login !== 'github-actions') continue;
+      if (!queuedByGreenLane(node.mergeQueueEntry)) continue;
       const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
       let reason = null;
       if (held(pr)) reason = 'hold label';
@@ -235,9 +242,9 @@ async function live({github, accessAudit, context, core, run=execFileSync,
       // PR by hand meanwhile; leave his entry alone. The mutation takes the PR
       // id, not the entry id, so re-read the entry just before removing it.
       const again = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest;
-      if (again?.isInMergeQueue !== true || again.mergeQueueEntry?.id !== node.mergeQueueEntry.id || again.mergeQueueEntry?.enqueuer?.login !== 'github-actions') continue;
+      if (again?.isInMergeQueue !== true || again.mergeQueueEntry?.id !== node.mergeQueueEntry.id || !queuedByGreenLane(again.mergeQueueEntry)) continue;
       // Dequeue is the safe direction, so it is not gated on the kill switch.
-      await github.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
+      await queueClient.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
       report.dequeued.push({pr:number,head:node.headRefOid,reason:String(reason).slice(0,500)});
       await write(report);
       core.warning(`Removed PR #${number} from the merge queue: ${reason}`);
