@@ -16,9 +16,12 @@ import (
 //
 // The reviewed change is measured against the reviewed commit's FIRST-PARENT
 // base: walking first parents from the reviewed commit back to the first
-// commit that is also on the base branch. That is the base the reviewer saw,
-// and it does not move when main later absorbs PR commits (a merge base
-// computed against today's main would). Only plain PR histories qualify:
+// commit that is also on the base branch. If main later absorbed earlier PR
+// commits, that walk stops at the newest absorbed one, not the review-time
+// base. That is still safe because the comparison is per path: every file in
+// the head is then either the reviewed content or main's own content, and
+// BaseDriftAllowed refuses carryover if main changed a PR path since that
+// base. Only plain PR histories qualify:
 // every commit on that walk must have one parent, apart from merges of the
 // base branch itself, so a branch built by merging other branches gets no
 // carryover. Any API doubt is an error, so the caller treats it as no
