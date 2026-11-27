@@ -2,6 +2,8 @@ package cli_test
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,5 +188,34 @@ func TestSetKeyWarnsWhenAConfiguredFileTakesPrecedence(t *testing.T) {
 	_, _, stderr = runCLI(t, "sess-SAVED\n", "--config", configPath, "account", "set-session-key", "api-credits")
 	if strings.Contains(stderr, "takes precedence") {
 		t.Fatalf("warned without a session key file: %s", stderr)
+	}
+}
+
+// OpenAI has no organization lookup: a piped session key with no --org is
+// saved as before, and a second account without --org is refused with
+// where to find the org ID.
+func TestAddOpenAICreditsNeverLooksUpAnOrganization(t *testing.T) {
+	configPath, secretsDir := creditsHome(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
+	t.Cleanup(server.Close)
+	cli.UseConsoleForTest(t, server.URL, server.Client())
+	if code, _, stderr := runCLI(t, "sess-SYNTHETIC\n", "--config", configPath, "account", "add-openai-credits", "api-credits",
+		"--session-key-stdin"); code != 0 {
+		t.Fatalf("add: %s", stderr)
+	}
+	if got, _ := (apicredits.FileSecretStore{Dir: secretsDir}).Load(t.Context(), "api-credits", apicredits.SecretSessionKey); got != "sess-SYNTHETIC" {
+		t.Fatalf("stored = %q", got)
+	}
+	code, _, stderr := runCLI(t, "sess-SECOND\n", "--config", configPath, "account", "add-openai-credits", "api-credits-2", "--session-key-stdin")
+	if code == 0 || !strings.Contains(stderr, "pass --org org-… (Settings › Organization › General on platform.openai.com)") ||
+		!strings.Contains(stderr, `"api-credits"`) {
+		t.Fatalf("code = %d stderr = %s", code, stderr)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d", requests)
+	}
+	if _, err := (apicredits.FileSecretStore{Dir: secretsDir}).Load(t.Context(), "api-credits-2", apicredits.SecretSessionKey); err == nil {
+		t.Fatal("saved a key for a refused account")
 	}
 }

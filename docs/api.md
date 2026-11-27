@@ -111,6 +111,30 @@ on-demand spend and credits. A separate `provider: cursor` account is scheduled 
 monthly subscription pools; see [Cursor](profiles-and-tasks.md#cursor). A monthly account window
 carries `snapshot.weekly.period_seconds` (about 2592000); clients should label it monthly.
 
+An API credits account (`provider` is `openai-api-credits` or `anthropic-api-credits`) carries
+its dollar balance in `snapshot.credits`. Its `snapshot.weekly` window mirrors the promotional
+balance as a fraction so generic clients keep working, but clients should show dollars:
+
+```json
+{"promo_remaining":62.40,"promo_granted":100,"next_expiring":62.40,
+ "effective_at":"2026-11-01T00:00:00Z","expires_at":"2026-12-01T00:00:00Z",
+ "paid_available":7.25,"min_promo_balance":5,"pacing":"firesale","firesale_window_seconds":259200,
+ "grants":[{"kind":"promo","amount":100,"remaining":62.40,"expires_at":"2026-12-01T00:00:00Z"},
+           {"kind":"other","amount":10,"remaining":7.25}]}
+```
+
+- Only the promotional balance (`promo_*`, `next_expiring`, `expires_at`) is scheduling
+  capacity. `paid_available` is purchased and other credit, shown but never scheduled; the
+  dashboards label it "Other credit".
+- `grants` lists grants that still hold money, soonest expiry first. `kind` is `promo`,
+  `purchase`, `auto_recharge` or `other`.
+- Grants end at 00:00 UTC, so show expiry dates in UTC.
+- An account whose session key is missing or rejected has `account_status: "signed_out"`; show
+  the fix (`redline account set-session-key <account>`), not the last balance.
+
+Keys are never accepted or returned over HTTP; they are set only with the CLI on the machine
+running Redline, and the API refuses to create API credits accounts.
+
 A provider with `run_login_unknown` set never dispatches work, whatever its latest decision
 says: it reads a non-default OpenUsage card, and a run would start as the default login. The
 field is the sentence to show. Its scheduler decisions have mode `login_unknown`. See

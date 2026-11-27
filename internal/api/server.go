@@ -2609,18 +2609,19 @@ func profileForAccount(profile domain.ExecutionProfile, account config.Provider)
 func (s *Server) apiCreditsRunKey(ctx context.Context, accountID string, account config.Provider) (string, string) {
 	key, err := apicredits.ResolveSecret(ctx, s.apiCreditSecrets, account.APICreditsVendor(), accountID, apicredits.SecretAPIKey,
 		account.EffectiveAPICredits().APIKeyFile)
-	what, prefix := "OpenAI API key", "sk-"
-	if account.APICreditsVendor() == config.APICreditsVendorAnthropic {
-		what, prefix = "Claude API key", "sk-ant-api"
+	claude := account.APICreditsVendor() == config.APICreditsVendorAnthropic
+	what, prefix, looksRight := "OpenAI API key", "sk-…", strings.HasPrefix(key, "sk-")
+	if claude {
+		what, prefix, looksRight = "Claude API key", apicredits.ClaudeAPIKeyPrefixesText(), apicredits.IsClaudeAPIKey(key)
 	}
 	switch {
 	case errors.Is(err, apicredits.ErrSecretNotFound):
 		return "", fmt.Sprintf("no %s is saved for runs on this account; run `redline account set-api-key %s`", what, accountID)
 	case err != nil:
 		return "", "the " + what + " for runs could not be read: " + err.Error()
-	case !strings.HasPrefix(key, prefix):
-		return "", "the saved " + what + " does not look like an API key (" + prefix + "…)"
-	case prefix == "sk-" && strings.HasPrefix(key, "sk-ant-"):
+	case !looksRight:
+		return "", "the saved " + what + " does not look like an API key (" + prefix + ")"
+	case !claude && strings.HasPrefix(key, "sk-ant-"):
 		return "", "the saved OpenAI API key is a Claude (Anthropic) key; save an OpenAI sk-… key with `redline account set-api-key " + accountID + "`"
 	}
 	return key, ""

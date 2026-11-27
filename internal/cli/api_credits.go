@@ -3,9 +3,11 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/croutoncreations/redline/internal/apicredits"
@@ -36,12 +38,16 @@ var creditsVendors = map[string]creditsVendorText{
 	},
 	config.APICreditsVendorAnthropic: {
 		command: "add-claude-credits", provider: config.ProviderAnthropicAPICredits, name: "Claude API credits", platform: "Claude Console",
-		orgHelp:            "Claude Console organization UUID; empty reads the one organization with API access",
+		orgHelp:            "Claude Console organization UUID; with --session-key-stdin and none given, the login's one organization with API access is looked up and saved",
 		sessionHelp:        "the sessionKey cookie (sk-ant-sid…) from platform.claude.com",
-		apiKeyHelp:         "an sk-ant-api… key from the linked Console org (ideally a dedicated redline workspace with a spend limit), used by claude-code, pi and command jobs",
+		apiKeyHelp:         "a Claude API key (sk-ant-usr… personal or sk-ant-svc… service account key, or a legacy sk-ant-api… workspace key) from the linked Console org, scoped to one workspace (ideally a dedicated redline workspace with a spend limit), used by claude-code, pi and command jobs",
 		sessionKeyEndpoint: "the Claude Console credits endpoints on platform.claude.com",
 	},
 }
+
+// consoleClient looks up a Claude login's Console organization when an
+// account is added. Production uses its defaults; tests point it at a fake.
+var consoleClient apicredits.ConsoleClient
 
 func runAccountAddOpenAICredits(args []string, configPath string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return runAccountAddCredits(config.APICreditsVendorOpenAI, args, configPath, stdin, stdout, stderr)
@@ -94,15 +100,6 @@ func runAccountAddCredits(vendor string, args []string, configPath string, stdin
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	settings := &config.APICredits{OrganizationID: organization, Pacing: strings.TrimSpace(*pacing),
-		FiresaleWindow: strings.TrimSpace(*firesaleWindow), SessionKeyFile: strings.TrimSpace(*sessionKeyFile),
-		APIKeyFile: strings.TrimSpace(*apiKeyFile)}
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "min-balance" {
-			settings.MinPromoBalance = minBalance
-		}
-	})
-	account := config.ManagedAccount{ID: id, Provider: text.provider, Label: strings.TrimSpace(*label), APICredits: settings}
 	saved, err := config.ReadManagedAccounts(path)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -118,17 +115,42 @@ func runAccountAddCredits(vendor string, args []string, configPath string, stdin
 			return 1
 		}
 	}
-	next := append(append([]config.ManagedAccount(nil), saved...), account)
-	if _, err := cfg.WithManagedAccounts(next); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	redline := "redline"
+	if configPath != defaultConfigPath {
+		redline = "redline --config " + shellQuote(configPath)
 	}
-	var sessionKey string
+	var sessionKey, organizationName string
 	if *sessionKeyStdin {
 		if sessionKey, err = readCreditsKey(stdin, vendor, apicredits.SecretSessionKey); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
+	}
+	if sessionKey != "" && organization == "" && vendor == config.APICreditsVendorAnthropic {
+		found, err := consoleClient.APIOrganization(context.Background(), sessionKey)
+		if err != nil {
+			fmt.Fprintln(stderr, consoleLookupMessage(err, redline, id))
+			return 1
+		}
+		organization, organizationName = found.UUID, found.DisplayName()
+	}
+	settings := &config.APICredits{OrganizationID: organization, Pacing: strings.TrimSpace(*pacing),
+		FiresaleWindow: strings.TrimSpace(*firesaleWindow), SessionKeyFile: strings.TrimSpace(*sessionKeyFile),
+		APIKeyFile: strings.TrimSpace(*apiKeyFile)}
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "min-balance" {
+			settings.MinPromoBalance = minBalance
+		}
+	})
+	account := config.ManagedAccount{ID: id, Provider: text.provider, Label: strings.TrimSpace(*label), APICredits: settings}
+	next := append(append([]config.ManagedAccount(nil), saved...), account)
+	if _, err := cfg.WithManagedAccounts(next); err != nil {
+		if other := otherCreditsAccount(cfg, saved, vendor, id); organization == "" && other != "" && errors.Is(err, config.ErrAccountConflict) {
+			fmt.Fprintln(stderr, needsOrganizationMessage(vendor, other, redline, id, account.Label))
+			return 1
+		}
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	if err := config.WriteManagedAccounts(path, next); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -148,12 +170,11 @@ func runAccountAddCredits(vendor string, args []string, configPath string, stdin
 	if settings.OrganizationID != "" {
 		fmt.Fprintf(stdout, " for %s", settings.OrganizationID)
 	}
+	if organizationName != "" {
+		fmt.Fprintf(stdout, " (%s)", organizationName)
+	}
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "\nNext:")
-	redline := "redline"
-	if configPath != defaultConfigPath {
-		redline = "redline --config " + shellQuote(configPath)
-	}
 	if sessionKey == "" && settings.SessionKeyFile == "" {
 		fmt.Fprintf(stdout, "  pbpaste | %s account set-session-key %s   # %s\n", redline, id, text.sessionHelp)
 	}
@@ -168,6 +189,70 @@ func runAccountAddCredits(vendor string, args []string, configPath string, stdin
 		fmt.Fprintln(stdout, "spend limit: the limit is the hard cap if anything ever spills past the promotional credit.")
 	}
 	return 0
+}
+
+// consoleLookupMessage turns a failed Console organization lookup into what
+// to do next. Its errors are fixed text and never carry the key.
+func consoleLookupMessage(err error, redline, id string) string {
+	retry := fmt.Sprintf("rerun with --organization-id UUID: %s account add-claude-credits %s --organization-id UUID --session-key-stdin", redline, id)
+	var several *apicredits.SeveralConsoleOrganizationsError
+	switch {
+	case errors.Is(err, apicredits.ErrConsoleSessionExpired):
+		return "Claude Console rejected the session key; copy a fresh sessionKey cookie from platform.claude.com (developer tools › Application or Storage › Cookies) and try again"
+	case errors.Is(err, apicredits.ErrNoConsoleAPIOrganization):
+		return "no organization on that Claude login has API access; link the subscription's API credit in claude.ai Settings › Billing, then try again"
+	case errors.As(err, &several):
+		var b strings.Builder
+		b.WriteString("several organizations on that Claude login have API access:\n")
+		for _, org := range several.Organizations {
+			b.WriteString("  " + org.UUID)
+			if name := org.DisplayName(); name != "" {
+				b.WriteString("  " + name)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("Pick the one with the subscription's API credit and " + retry)
+		return b.String()
+	case errors.Is(err, apicredits.ErrConsoleConnectionFailed):
+		return "could not reach platform.claude.com to find the Console organization; check the connection and try again, or " + retry
+	}
+	return fmt.Sprintf("could not find the Console organization (%v); try again, or %s", err, retry)
+}
+
+// otherCreditsAccount names another API credits account of the same vendor,
+// enabled or saved, or "" when there is none.
+func otherCreditsAccount(cfg config.Config, saved []config.ManagedAccount, vendor, id string) string {
+	var ids []string
+	for other, provider := range cfg.Providers {
+		if other != id && provider.APICreditsVendor() == vendor {
+			ids = append(ids, other)
+		}
+	}
+	for _, account := range saved {
+		if account.ID != id && account.ProviderConfig().APICreditsVendor() == vendor {
+			ids = append(ids, account.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	slices.Sort(ids)
+	return ids[0]
+}
+
+// needsOrganizationMessage refuses a second credits account of a vendor that
+// names no organization, with how to give it one.
+func needsOrganizationMessage(vendor, other, redline, id, label string) string {
+	if vendor == config.APICreditsVendorOpenAI {
+		return fmt.Sprintf("account %q already reads OpenAI API credits, so %s needs its own organization: pass --org org-… (Settings › Organization › General on platform.openai.com)", other, id)
+	}
+	command := fmt.Sprintf("pbpaste | %s account add-claude-credits %s --session-key-stdin", redline, id)
+	if label != "" {
+		command += " --label " + shellQuote(label)
+	}
+	return fmt.Sprintf("account %q already reads Claude API credits, so %s needs its own Console organization.\n"+
+		"Copy that login's sessionKey cookie from platform.claude.com and Redline finds the organization:\n  %s\n"+
+		"or pass --organization-id UUID.", other, id, command)
 }
 
 // runAccountSetKey saves one key for an existing API credits account of
@@ -277,7 +362,8 @@ const (
 	openAISessionKeyPrefix = "sess-"
 	openAIAPIKeyPrefix     = "sk-"
 	claudeSessionKeyPrefix = apicredits.ConsoleSessionKeyPrefix
-	claudeAPIKeyPrefix     = "sk-ant-api"
+	claudeOAuthTokenPrefix = "sk-ant-oat"
+	claudeAdminKeyPrefix   = "sk-ant-admin"
 	claudeKeyPrefix        = "sk-ant-"
 )
 
@@ -312,19 +398,27 @@ func checkCreditsKey(key, vendor, kind string) error {
 	what := keyDescription(vendor, kind)
 	claude := strings.HasPrefix(key, claudeKeyPrefix)
 	if vendor == config.APICreditsVendorAnthropic {
-		want, other, otherKind := claudeSessionKeyPrefix, claudeAPIKeyPrefix, "a Claude API key; save it with set-api-key"
+		session := strings.HasPrefix(key, claudeSessionKeyPrefix)
+		apiKey := apicredits.IsClaudeAPIKey(key)
+		want := claudeSessionKeyPrefix + "…"
 		if kind == apicredits.SecretAPIKey {
-			want, other, otherKind = claudeAPIKeyPrefix, claudeSessionKeyPrefix, "a Claude Console session key; save it with set-session-key"
+			want = apicredits.ClaudeAPIKeyPrefixesText()
 		}
 		switch {
-		case strings.HasPrefix(key, want):
+		case kind == apicredits.SecretSessionKey && session, kind == apicredits.SecretAPIKey && apiKey:
 			return nil
-		case strings.HasPrefix(key, other):
-			return fmt.Errorf("that is %s, not %s (expected %s…)", otherKind, what, want)
+		case kind == apicredits.SecretSessionKey && apiKey:
+			return errors.New("that is a Claude API key; save it with set-api-key")
+		case kind == apicredits.SecretAPIKey && session:
+			return errors.New("that is a Claude Console session key; save it with set-session-key")
+		case kind == apicredits.SecretAPIKey && strings.HasPrefix(key, claudeOAuthTokenPrefix):
+			return errors.New("that is a Claude subscription (OAuth) token, not an API key; create an API key at platform.claude.com/settings/keys")
+		case kind == apicredits.SecretAPIKey && strings.HasPrefix(key, claudeAdminKeyPrefix):
+			return errors.New("that is an Admin API key; runs need a personal or service account key")
 		case !claude && (strings.HasPrefix(key, openAISessionKeyPrefix) || strings.HasPrefix(key, openAIAPIKeyPrefix)):
-			return fmt.Errorf("that looks like an OpenAI key, but this is a Claude API credits account: it needs %s (%s…)", what, want)
+			return fmt.Errorf("that looks like an OpenAI key, but this is a Claude API credits account: it needs %s (%s)", what, want)
 		}
-		return fmt.Errorf("that is not %s (expected %s…)", what, want)
+		return fmt.Errorf("that is not %s (expected %s)", what, want)
 	}
 	want := openAISessionKeyPrefix
 	if kind == apicredits.SecretAPIKey {

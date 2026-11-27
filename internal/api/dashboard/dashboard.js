@@ -555,8 +555,10 @@ function basePressure(item) {
 // Dollars, the promotional grant's expiry, the floor and pacing rules, and the
 // paid credit that is shown but never scheduled. Never a weekly, monthly or
 // 5-hour figure and no capacity evidence: the balance is not a window.
-const creditsDate = (value, year = false) => new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',...(year ? {year:'numeric'} : {})}).format(new Date(value));
-const creditsGrantDate = (value) => creditsDate(value, new Date(value).getFullYear() !== new Date().getFullYear());
+// Grants lapse at 00:00 UTC, so the date is the UTC one: local time would
+// show the day before everywhere west of Greenwich.
+const creditsDate = (value, year = false) => new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',timeZone:'UTC',...(year ? {year:'numeric'} : {})}).format(new Date(value));
+const creditsGrantDate = (value) => creditsDate(value, new Date(value).getUTCFullYear() !== new Date().getUTCFullYear());
 // The credits decision label and its reason, worded the same on every surface
 // (mobile.js, macOS and the phone core keep the same map).
 function creditsDecisionLabel(decision) {
@@ -653,7 +655,7 @@ function creditsCompact(item) {
       ? `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}romotional credit</span><b>${escapeHTML(cursorMoney(0))}</b></div><progress class="meter-progress credits-progress" max="100" value="0" aria-label="No promotional credit"></progress><div class="reset credits-expiry">No promotional credit</div></div>`
       : `<div data-testid="credits-promo"><div class="meter-head"><span>${lastKnown}romotional credit</span><b>${escapeHTML(`${cursorMoney(credits.promo_remaining)} of ${cursorMoney(credits.promo_granted)} left`)}</b></div><progress class="meter-progress credits-progress ${tone}" max="100" value="${value}" aria-label="${value}% of promotional credit left"></progress><div class="reset credits-expiry">${escapeHTML(creditsExpiryLine(credits))}</div></div>`;
     const rules = `<div class="credits-rules" data-testid="credits-rules">${escapeHTML(creditsRuleLine(credits))}</div>`;
-    const paid = credits.paid_available > 0 ? `<div class="credits-paid" data-testid="credits-paid"><span>Paid credit</span><b>${escapeHTML(`${cursorMoney(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
+    const paid = credits.paid_available > 0 ? `<div class="credits-paid" data-testid="credits-paid"><span>Other credit</span><b>${escapeHTML(`${cursorMoney(credits.paid_available)} · shown only, never scheduled`)}</b></div>` : '';
     const grants = (credits.grants || []).filter(grant => grant.remaining > 0).map(grant =>
       `<div class="credits-grant" data-testid="credits-grant"><span>${escapeHTML(kinds[grant.kind] || kinds.other)}</span><b>${escapeHTML(`${cursorMoney(grant.remaining)} of ${cursorMoney(grant.amount)}`)}</b>${grant.expires_at ? `<i>expires ${escapeHTML(creditsGrantDate(grant.expires_at))}</i>` : ''}</div>`).join('');
     const decisionDetail = `<span class="decision-detail ${escapeHTML(pressure.tone)}"><b>${escapeHTML(pressure.label)}</b><span>${escapeHTML(pressure.detail)}${item.latest_decision_at ? ` · checked ${escapeHTML(relative(item.latest_decision_at))}` : ''}</span></span>`;

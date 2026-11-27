@@ -209,15 +209,38 @@ The Console's credit balance is only available to a signed-in browser, so Redlin
 browser's developer tools (Application or Storage › Cookies). It carries your full Console
 access. Redline sends it only to the Console's organizations and prepaid credits endpoints on
 platform.claude.com (no redirects), never logs or displays it, and never sends it to phones
-or the relay. The run **API key** is an `sk-ant-api…` key from the same linked organization.
+or the relay. The run **API key** is a personal key (`sk-ant-usr…`) or service account key
+(`sk-ant-svc…`), or a legacy workspace key (`sk-ant-api…`), from the same linked organization.
+It **must be scoped to one workspace**: an unscoped personal or service account key needs an
+`anthropic-workspace-id` header on every request, which Redline can't add inside Claude Code or
+pi. Use a personal key scoped to a dedicated `redline` workspace with a spend limit. Session
+cookies, subscription (OAuth, `sk-ant-oat…`) tokens and Admin keys (`sk-ant-admin…`) are refused.
 Each command checks the key's prefix, and an OpenAI key given to a Claude account (or the
 reverse) is refused with a message saying so.
 
+Copy the session key, then add the account in one command:
+
 ```bash
-redline account add-claude-credits claude-credits --organization-id <uuid> --label "Console org"
-pbpaste | redline account set-session-key claude-credits   # the sessionKey cookie
-pbpaste | redline account set-api-key claude-credits       # sk-ant-api… from the redline workspace
+pbpaste | redline account add-claude-credits claude-credits --session-key-stdin --label "Personal"
+pbpaste | redline account set-api-key claude-credits       # sk-ant-usr… scoped to the redline workspace
 redline account clear-keys claude-credits                  # later, to remove both
+```
+
+With the session key piped and no `--organization-id`, Redline asks the Console which
+organizations that login belongs to, saves the one with API access as `organization_id`, and
+prints its UUID and name. Nothing is saved if the lookup fails: a rejected session key asks for
+a fresh `sessionKey` cookie; a login with no API organization needs the subscription's API
+credit linked in claude.ai Settings › Billing; a login with several lists each UUID and name so
+you can rerun with `--organization-id <uuid>`. An organization another account already reads
+is refused, naming that account. Every Claude credits account needs its own organization once
+there is more than one.
+
+To give the organization yourself (no lookup), pass it, with or without the piped key:
+
+```bash
+pbpaste | redline account add-claude-credits claude-credits --organization-id <uuid> --session-key-stdin
+redline account add-claude-credits claude-credits --organization-id <uuid>
+pbpaste | redline account set-session-key claude-credits   # the sessionKey cookie, if not piped above
 ```
 
 Storage (Keychain service `ai.redline.api-credits`, or owner-only files), the

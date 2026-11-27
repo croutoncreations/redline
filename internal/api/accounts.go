@@ -113,7 +113,8 @@ func signInGuidance(provider, card string, profileDir ...string) string {
 	case config.ProviderAnthropicAPICredits:
 		return "Reads the Claude API credits of the linked Claude Console organization with a Console session key, and runs claude-code, pi and " +
 			"command jobs with that organization's API key. On the machine running Redline, paste the sessionKey cookie from platform.claude.com " +
-			"into `redline account set-session-key ID`, and an sk-ant-api… key from the linked Console org (ideally a dedicated redline workspace " +
+			"into `redline account set-session-key ID`, and a personal (sk-ant-usr…) or service account (sk-ant-svc…) key, or a legacy " +
+			"sk-ant-api… workspace key, from the linked Console org and scoped to one workspace (ideally a dedicated redline workspace " +
 			"with a spend limit) into `redline account set-api-key ID`. Keys are stored on that machine only and never sent to phones."
 	default:
 		return "Sign in with the provider's own app or CLI on the Mac running Redline."

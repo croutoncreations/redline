@@ -170,6 +170,21 @@ claude: 5-hour 100.0% remaining, 73.0% weekly remaining (...)
   Fable: 48.0% remaining (...)
 ```
 
+### API credits accounts
+
+An `openai-api-credits` or `anthropic-api-credits` account runs only the harnesses that bill its
+API key:
+
+| Account | Harnesses | Model |
+|---|---|---|
+| OpenAI API credits | `pi`, `command` | pi needs an `openai/…` model |
+| Claude API credits | `claude-code`, `pi`, `command` | pi needs an `anthropic/…` model |
+
+Other harnesses are refused when the profile is saved, and so are `harness_args` that would
+move a run off the key (such as pi's `--api-key`, `--model` or `--provider`). See
+[OpenAI API credits](scheduling.md#openai-api-credits) and
+[Claude API credits](scheduling.md#claude-anthropic-api-credits).
+
 ## Workspaces
 
 Redline supports these workspace providers:

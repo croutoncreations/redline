@@ -7,6 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,5 +86,43 @@ func TestDashboardCommandUsesLoopbackForWildcardListeners(t *testing.T) {
 		if got := dashboardOrigin(tt.listen); got != tt.want {
 			t.Errorf("dashboardOrigin(%q)=%q, want %q", tt.listen, got, tt.want)
 		}
+	}
+}
+
+func TestShellQuoteRoundTripsUntrustedConfigPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell behavior is not applicable on Windows")
+	}
+	for _, test := range []struct {
+		name  string
+		value func(string) string
+	}{
+		{
+			name: "shell metacharacters",
+			value: func(marker string) string {
+				return "config path; touch " + marker + "; printf injected $(uname) $HOME"
+			},
+		},
+		{
+			name: "embedded single quote",
+			value: func(marker string) string {
+				return "config'; touch " + marker + "; #"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "injected")
+			value := test.value(marker)
+			output, err := exec.Command("/bin/sh", "-c", "printf '%s' "+shellQuote(value)).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute quoted value: %v: %s", err, output)
+			}
+			if string(output) != value {
+				t.Fatalf("shell round trip = %q, want %q", output, value)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("untrusted value executed shell commands: %v", err)
+			}
+		})
 	}
 }

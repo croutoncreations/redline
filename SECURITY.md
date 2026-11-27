@@ -65,9 +65,13 @@ are especially security-sensitive:
   prepares, or cleans up a workspace, resolves a task's `prompt_file`, or stores
   run artifacts and logs, such as path traversal outside the intended location.
 - **Credential handling.** Leaking Codex or Claude credentials, the API token,
-  or Hermes runtime and Gateway credentials (passwords, cookies, and session
-  tokens) through logs, the dashboard, the API, or run artifacts, and flaws in
-  how Redline reads those credentials or authenticates to Hermes.
+  Hermes runtime and Gateway credentials (passwords, cookies, and session
+  tokens), or an API credits account's platform session key or run API key
+  through logs, the dashboard, the API, phones, the relay, or run artifacts;
+  sending an API credits session key anywhere but its vendor's credit
+  endpoint; a run on an API credits account billing anything other than that
+  account's API key; and flaws in how Redline reads those credentials or
+  authenticates to Hermes.
 - **Releases and updates.** Anything that could make an official distribution
   channel deliver tampered code, or bypass the protection that channel relies on:
   - the macOS app, its Sparkle update feed, and the Homebrew cask, which are

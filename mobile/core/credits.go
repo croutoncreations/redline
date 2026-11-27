@@ -48,7 +48,8 @@ type CreditsView struct {
 	Headline string `json:"headline"`
 	// Detail is the line under the headline: "Expires in 2 days", "No
 	// promotional credit", "Expired", or the signed-out fix. The screen adds
-	// the local date of ExpiresAt, which depends on the phone's timezone.
+	// the UTC date of ExpiresAt: grants lapse at 00:00 UTC, so a local date
+	// would be the day before in the Americas.
 	Detail string `json:"detail"`
 	// ExpiresAt is the soonest promotional grant's expiry; zero when no
 	// promotional credit is left.
@@ -60,8 +61,8 @@ type CreditsView struct {
 	PromoLabel string `json:"promo_label"`
 	// RuleLine says when jobs start: the floor and the pacing.
 	RuleLine string `json:"rule_line"`
-	// PaidLabel is "$7.25 · shown only, never scheduled", or "" when there is
-	// no paid credit and the row is omitted.
+	// PaidLabel is the "Other credit" row's value, "$7.25 · shown only, never
+	// scheduled", or "" when there is none and the row is omitted.
 	PaidLabel string            `json:"paid_label,omitempty"`
 	Grants    []CreditGrantView `json:"grants,omitempty"`
 	// DecisionLabel is the scheduler's decision in the dashboards' words:
