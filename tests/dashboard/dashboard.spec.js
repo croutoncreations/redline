@@ -1456,3 +1456,17 @@ test('scheduler instructions safely render unknown paths and support Windows hos
   await expect(page.locator('#scheduler-restart-command')).toContainText("tester's".replace("'", "''"));
   await expect(page.locator('#scheduler-config-fallback')).toBeHidden();
 });
+
+// A meter shows how much allowance is left: green while healthy, amber below
+// 35% and red below 15%. Red is for trouble, so a healthy bar is never red.
+test('allowance bars are green when healthy, amber when low and red when nearly gone', async ({ page }) => {
+  await loadDashboard(page);
+  const fill = await page.evaluate(() => Object.fromEntries([...document.styleSheets].flatMap(sheet => [...sheet.cssRules])
+    .filter(rule => rule.selectorText && /progress-value/.test(rule.selectorText))
+    .flatMap(rule => rule.selectorText.split(',').map(selector => [selector.trim(), rule.style.background || rule.style.backgroundColor]))));
+  for (const bar of ['.compact-progress', '.meter-progress']) {
+    expect(fill[`${bar}::-webkit-progress-value`]).toBe('var(--green)');
+    expect(fill[`${bar}.warn::-webkit-progress-value`]).toBe('var(--amber)');
+  }
+  expect(fill['.meter-progress.danger::-webkit-progress-value']).toBe('rgb(255, 123, 114)');
+});
