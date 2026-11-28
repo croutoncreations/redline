@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -159,5 +160,118 @@ func TestBankedResetRedemptionsPersistPendingRetryAndHistory(t *testing.T) {
 	c, err := db.BeginBankedResetRedemption(ctx, a)
 	if err != nil || c.ID != a.ID || c.State != "done" {
 		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestBankedResetRedemptionAmbiguousErrorPreservesPendingRetry(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redemptions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := t.Context()
+	now := time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
+	attempt, err := db.BeginBankedResetRedemption(ctx, store.BankedResetRedemption{
+		ProviderAccountID: "main",
+		ResetID:           "weekly-reset",
+		RequestID:         "original-key",
+		Trigger:           "manual",
+		CreatedAt:         now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordBankedResetRedemptionError(ctx, attempt.ID, "response lost"); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := db.PendingBankedResetRedemption(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.ID != attempt.ID || pending.State != "pending" || pending.Outcome != "failed" || pending.Reason != "response lost" {
+		t.Fatalf("pending=%+v", pending)
+	}
+
+	retry, err := db.BeginBankedResetRedemption(ctx, store.BankedResetRedemption{
+		ProviderAccountID: "main",
+		ResetID:           "weekly-reset",
+		RequestID:         "replacement-key",
+		Trigger:           "manual",
+		CreatedAt:         now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.ID != attempt.ID || retry.RequestID != "original-key" {
+		t.Fatalf("retry=%+v, want persisted id=%d request_id=original-key", retry, attempt.ID)
+	}
+
+	completedAt := now.Add(2 * time.Minute)
+	if err := db.CompleteBankedResetRedemption(ctx, attempt.ID, "redeemed", "reset", "confirmed", completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordBankedResetRedemptionError(ctx, attempt.ID, "late transport error"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PendingBankedResetRedemption(ctx, "main"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pending lookup error=%v, want ErrNotFound", err)
+	}
+
+	rows, err := db.BankedResetRedemptions(ctx, "main", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Outcome != "redeemed" || rows[0].Reason != "confirmed" || rows[0].CompletedAt == nil || !rows[0].CompletedAt.Equal(completedAt) {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+func TestBankedResetRedemptionQueriesExcludeDryRunsAndFailures(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "redemptions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := t.Context()
+	now := time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
+	begin := func(resetID, trigger string, offset time.Duration) store.BankedResetRedemption {
+		t.Helper()
+		attempt, err := db.BeginBankedResetRedemption(ctx, store.BankedResetRedemption{
+			ProviderAccountID: "main",
+			ResetID:           resetID,
+			RequestID:         resetID + "-key",
+			Trigger:           trigger,
+			CreatedAt:         now.Add(offset),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	complete := func(attempt store.BankedResetRedemption, outcome string, offset time.Duration) {
+		t.Helper()
+		if err := db.CompleteBankedResetRedemption(ctx, attempt.ID, outcome, "", "", now.Add(offset)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dryRun := begin("dry-run", "dry_run", 0)
+	if _, err := db.PendingBankedResetRedemption(ctx, "main"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("dry-run pending lookup error=%v, want ErrNotFound", err)
+	}
+	complete(dryRun, "redeemed", time.Minute)
+	complete(begin("failed-real", "manual", 2*time.Minute), "failed", 3*time.Minute)
+	complete(begin("older-real", "manual", 4*time.Minute), "redeemed", 5*time.Minute)
+	complete(begin("newer-real", "automatic", 6*time.Minute), "redeemed", 7*time.Minute)
+
+	redeemed, err := db.RedeemedBankedResetRedemptions(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(redeemed) != 2 || redeemed[0].ResetID != "newer-real" || redeemed[1].ResetID != "older-real" {
+		t.Fatalf("redeemed=%+v, want only successful real attempts newest first", redeemed)
 	}
 }
