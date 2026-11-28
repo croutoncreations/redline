@@ -72,7 +72,7 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 			// The App token is minted only in queue mode, from a pinned
 			// action, scoped to redline and the three queue permissions.
 			appToken = true
-			want := map[string]string{"app-id": "${{ secrets.GREEN_LANE_APP_ID }}", "private-key": "${{ secrets.GREEN_LANE_APP_KEY }}",
+			want := map[string]string{"client-id": "Iv23liacFMBI2LgjEpL2", "private-key": "${{ secrets.GREEN_LANE_APP_KEY }}",
 				"repositories": "redline", "permission-contents": "write", "permission-pull-requests": "write", "permission-merge-queues": "write"}
 			if step.Uses != "actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc" || step.ID != "queue-token" ||
 				step.If != "vars.GREEN_LANE_MERGE_QUEUE == 'true'" || len(step.With) != len(want) {

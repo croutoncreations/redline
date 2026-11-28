@@ -56,7 +56,8 @@ jobs:
         if: vars.GREEN_LANE_MERGE_QUEUE == 'true'
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
-          app-id: ${{ secrets.GREEN_LANE_APP_ID }}
+          # Green Lane Merge App's Client ID (public; app id 5959567).
+          client-id: Iv23liacFMBI2LgjEpL2
           private-key: ${{ secrets.GREEN_LANE_APP_KEY }}
           repositories: redline
           permission-contents: write
