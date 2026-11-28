@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,8 @@ func gateClient(t *testing.T, pr map[string]any, compare func(spec string) map[s
 		switch {
 		case r.URL.Path == "/graphql":
 			send(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": pr}}})
+		case strings.Contains(r.URL.Path, "/rules/branches/"):
+			_ = json.NewEncoder(w).Encode(realQueueRules)
 		case strings.Contains(r.URL.Path, "/commits/"):
 			sha := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 			send(map[string]any{"sha": sha, "parents": []any{map[string]any{"sha": qBase}}})
@@ -46,19 +49,17 @@ func gateClient(t *testing.T, pr map[string]any, compare func(spec string) map[s
 }
 
 func queuedNode() map[string]any {
-	return map[string]any{"number": 12, "headRefOid": qPR, "isInMergeQueue": true,
+	return map[string]any{"number": 12, "headRefOid": qPR, "baseRefName": "main", "isInMergeQueue": true,
 		"mergeQueueEntry": map[string]any{
 			"headCommit": map[string]any{"oid": qHead}, "baseCommit": map[string]any{"oid": qBase},
-			"enqueuer":   map[string]any{"__typename": "User", "login": "jfox85", "databaseId": 441017},
-			"mergeQueue": map[string]any{"configuration": map[string]any{"mergeMethod": "SQUASH", "mergingStrategy": "ALLGREEN", "maximumEntriesToBuild": 1}}},
+			"enqueuer": map[string]any{"__typename": "User", "login": "jfox85", "databaseId": 441017}},
 		"labels": map[string]any{"totalCount": 1, "nodes": []any{map[string]any{"name": "docs"}}}}
 }
 
 func TestQueueEntry(t *testing.T) {
 	ctx := context.Background()
 	q, err := gateClient(t, queuedNode(), nil).queueEntry(ctx, 12)
-	want := greenlane.QueueConfig{MergeMethod: "SQUASH", MergingStrategy: "ALLGREEN", MaxEntriesBuild: 1}
-	if err != nil || q.head != qPR || q.entryHead != qHead || q.entryBase != qBase || q.enqueuerType != "User" || q.enqueuerID != 441017 || q.config != want || len(q.labels) != 1 {
+	if err != nil || q.head != qPR || q.base != "main" || q.entryHead != qHead || q.entryBase != qBase || q.enqueuerType != "User" || q.enqueuerID != 441017 || len(q.labels) != 1 {
 		t.Fatalf("got %+v %v", q, err)
 	}
 	entry := func(n map[string]any) map[string]any { return n["mergeQueueEntry"].(map[string]any) }
@@ -68,7 +69,7 @@ func TestQueueEntry(t *testing.T) {
 		"no head commit":   func(n map[string]any) { entry(n)["headCommit"] = nil },
 		"no base commit":   func(n map[string]any) { entry(n)["baseCommit"] = nil },
 		"no enqueuer":      func(n map[string]any) { entry(n)["enqueuer"] = nil },
-		"no queue config":  func(n map[string]any) { entry(n)["mergeQueue"] = map[string]any{"configuration": nil} },
+		"no base branch":   func(n map[string]any) { delete(n, "baseRefName") },
 		"other PR":         func(n map[string]any) { n["number"] = 13 },
 		"short head":       func(n map[string]any) { n["headRefOid"] = "abc" },
 		"labels truncated": func(n map[string]any) { n["labels"].(map[string]any)["totalCount"] = 101 },
@@ -170,6 +171,8 @@ func fullGateServer(t *testing.T, entries func(read int) map[string]any) (*GitHu
 		case r.URL.Path == "/graphql":
 			reads++
 			send(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": entries(reads)}}})
+		case strings.Contains(r.URL.Path, "/rules/branches/"):
+			_ = json.NewEncoder(w).Encode(realQueueRules)
 		case strings.Contains(r.URL.Path, "/commits/"):
 			send(map[string]any{"sha": qHead, "parents": []any{map[string]any{"sha": qBase}}})
 		case strings.HasSuffix(r.URL.Path, "/compare/"+qBase+"..."+qHead):
@@ -268,6 +271,8 @@ func TestQueueGateRereadsEntry(t *testing.T) {
 				case r.URL.Path == "/graphql":
 					reads++
 					send(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": entry()}}})
+				case strings.Contains(r.URL.Path, "/rules/branches/"):
+					_ = json.NewEncoder(w).Encode(realQueueRules)
 				case strings.Contains(r.URL.Path, "/commits/"):
 					send(map[string]any{"sha": qHead, "parents": []any{map[string]any{"sha": qBase}}})
 				case strings.HasSuffix(r.URL.Path, "/compare/"+qBase+"..."+qPR):
@@ -293,5 +298,83 @@ func TestQueueGateRereadsEntry(t *testing.T) {
 				t.Fatal("entry was not re-read")
 			}
 		})
+	}
+}
+
+// realQueueRules is GET /repos/croutoncreations/redline/rules/branches/main as
+// returned to a contents-read GITHUB_TOKEN on Nov 28 2026.
+var realQueueRules = []any{map[string]any{"type": "merge_queue", "parameters": map[string]any{
+	"merge_method": "SQUASH", "max_entries_to_build": 1, "min_entries_to_merge": 1, "max_entries_to_merge": 1,
+	"min_entries_to_merge_wait_minutes": 0, "grouping_strategy": "ALLGREEN", "check_response_timeout_minutes": 60},
+	"ruleset_source_type": "Repository", "ruleset_source": "croutoncreations/redline", "ruleset_id": 28272269}}
+
+func TestQueueConfig(t *testing.T) {
+	ctx := context.Background()
+	serve := func(v any, status int) *GitHubClient {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/repos/o/r/rules/branches/main" {
+				t.Errorf("unexpected %s", r.URL)
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(v)
+		}))
+		t.Cleanup(server.Close)
+		return &GitHubClient{token: "t", owner: "o", repo: "r", apiBase: server.URL, client: server.Client()}
+	}
+	got, err := serve(realQueueRules, 200).queueConfig(ctx, "main")
+	if want := (greenlane.QueueConfig{MergeMethod: "SQUASH", MergingStrategy: "ALLGREEN", MaxEntriesBuild: 1}); err != nil || got != want {
+		t.Fatalf("got %+v %v", got, err)
+	}
+	other := map[string]any{"type": "required_signatures"}
+	if got, err := serve(append([]any{other}, realQueueRules...), 200).queueConfig(ctx, "main"); err != nil || got.MergeMethod != "SQUASH" {
+		t.Fatalf("other rules must be ignored: %+v %v", got, err)
+	}
+	// Pagination: the queue rule on page 2 behind 100 unrelated rules is
+	// found, and a second queue rule on a later page is still counted.
+	filler := make([]any, 100)
+	for i := range filler {
+		filler[i] = other
+	}
+	paged := func(pages ...[]any) (*GitHubClient, *[]string) {
+		var seen []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen = append(seen, r.URL.Query().Get("page"))
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("per_page = %q", r.URL.Query().Get("per_page"))
+			}
+			i := 0
+			fmt.Sscanf(r.URL.Query().Get("page"), "%d", &i)
+			if i < 1 || i > len(pages) {
+				_ = json.NewEncoder(w).Encode([]any{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pages[i-1])
+		}))
+		t.Cleanup(server.Close)
+		return &GitHubClient{token: "t", owner: "o", repo: "r", apiBase: server.URL, client: server.Client()}, &seen
+	}
+	c, seen := paged(filler, realQueueRules)
+	if got, err := c.queueConfig(ctx, "main"); err != nil || got.MergeMethod != "SQUASH" || len(*seen) != 2 {
+		t.Fatalf("queue rule on page 2: %+v %v pages=%v", got, err, *seen)
+	}
+	withQueue := append(append([]any{}, filler[:99]...), realQueueRules...)
+	if c, _ := paged(withQueue, realQueueRules); func() error { _, err := c.queueConfig(ctx, "main"); return err }() == nil {
+		t.Fatal("second queue rule on page 2 not counted")
+	}
+	// Exactly 100 rules on the last page: one more (empty) page is read.
+	c, seen = paged(withQueue)
+	if _, err := c.queueConfig(ctx, "main"); err != nil || len(*seen) != 2 {
+		t.Fatalf("full last page: %v pages=%v", err, *seen)
+	}
+
+	for name, c := range map[string]*GitHubClient{
+		"no queue rule": serve([]any{other}, 200),
+		"two queues":    serve(append(append([]any{}, realQueueRules...), realQueueRules...), 200),
+		"API error":     serve(map[string]any{"message": "nope"}, 403),
+		"not a list":    serve(map[string]any{"type": "merge_queue"}, 200),
+	} {
+		if _, err := c.queueConfig(ctx, "main"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

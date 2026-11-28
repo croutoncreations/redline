@@ -67,7 +67,12 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 	if err != nil {
 		return in, err
 	}
-	in.PRHead, in.EntryHead, in.EntryBase, in.Queue = q.head, q.entryHead, q.entryBase, q.config
+	in.PRHead, in.EntryHead, in.EntryBase = q.head, q.entryHead, q.entryBase
+	// The queue's settings come from the branch rules (REST, readable with
+	// contents: read); GraphQL's mergeQueue.configuration needs write access.
+	if in.Queue, err = c.queueConfig(ctx, q.base); err != nil {
+		return in, err
+	}
 	in.EnqueuerType, in.EnqueuerLogin, in.EnqueuerID, in.Labels = q.enqueuerType, q.enqueuerLogin, q.enqueuerID, q.labels
 	if in.GroupParent, err = c.parentsOf(ctx, mg.HeadSHA); err != nil {
 		return in, err
@@ -149,17 +154,15 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 var getPR = (*GitHubClient).GetPR
 
 type queuedPR struct {
-	head, entryHead, entryBase  string
-	enqueuerType, enqueuerLogin string
-	enqueuerID                  int64
-	labels                      []string
-	config                      greenlane.QueueConfig
+	head, base, entryHead, entryBase string
+	enqueuerType, enqueuerLogin      string
+	enqueuerID                       int64
+	labels                           []string
 }
 
 func (c *GitHubClient) queueEntry(ctx context.Context, n int) (queuedPR, error) {
 	const query = `query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){number headRefOid isInMergeQueue
-mergeQueueEntry{headCommit{oid} baseCommit{oid} enqueuer{__typename login ... on User{databaseId}}
- mergeQueue{configuration{mergeMethod mergingStrategy maximumEntriesToBuild}}}
+baseRefName mergeQueueEntry{headCommit{oid} baseCommit{oid} enqueuer{__typename login ... on User{databaseId}}}
 labels(first:100){totalCount nodes{name}}}}}`
 	body, err := json.Marshal(map[string]any{"query": query, "variables": map[string]any{"owner": c.owner, "repo": c.repo, "n": n}})
 	if err != nil {
@@ -179,6 +182,7 @@ labels(first:100){totalCount nodes{name}}}}}`
 				PullRequest *struct {
 					Number         int    `json:"number"`
 					HeadRefOid     string `json:"headRefOid"`
+					BaseRefName    string `json:"baseRefName"`
 					IsInMergeQueue bool   `json:"isInMergeQueue"`
 					Entry          *struct {
 						HeadCommit *oid `json:"headCommit"`
@@ -188,13 +192,6 @@ labels(first:100){totalCount nodes{name}}}}}`
 							Login      string `json:"login"`
 							DatabaseID int64  `json:"databaseId"`
 						} `json:"enqueuer"`
-						MergeQueue *struct {
-							Configuration *struct {
-								MergeMethod     string `json:"mergeMethod"`
-								MergingStrategy string `json:"mergingStrategy"`
-								MaxBuild        int    `json:"maximumEntriesToBuild"`
-							} `json:"configuration"`
-						} `json:"mergeQueue"`
 					} `json:"mergeQueueEntry"`
 					Labels struct {
 						TotalCount int `json:"totalCount"`
@@ -214,18 +211,54 @@ labels(first:100){totalCount nodes{name}}}}}`
 		return queuedPR{}, fmt.Errorf("incomplete merge-queue data for PR #%d", n)
 	}
 	e := p.Entry
-	if !p.IsInMergeQueue || e == nil || e.HeadCommit == nil || e.BaseCommit == nil || e.Enqueuer == nil ||
-		e.MergeQueue == nil || e.MergeQueue.Configuration == nil {
+	if !p.IsInMergeQueue || e == nil || e.HeadCommit == nil || e.BaseCommit == nil || e.Enqueuer == nil || p.BaseRefName == "" {
 		return queuedPR{}, fmt.Errorf("PR #%d has no readable merge-queue entry", n)
 	}
-	cfg := e.MergeQueue.Configuration
-	out := queuedPR{head: p.HeadRefOid, entryHead: e.HeadCommit.OID, entryBase: e.BaseCommit.OID,
-		enqueuerType: e.Enqueuer.Type, enqueuerLogin: e.Enqueuer.Login, enqueuerID: e.Enqueuer.DatabaseID,
-		config: greenlane.QueueConfig{MergeMethod: cfg.MergeMethod, MergingStrategy: cfg.MergingStrategy, MaxEntriesBuild: cfg.MaxBuild}}
+	out := queuedPR{head: p.HeadRefOid, base: p.BaseRefName, entryHead: e.HeadCommit.OID, entryBase: e.BaseCommit.OID,
+		enqueuerType: e.Enqueuer.Type, enqueuerLogin: e.Enqueuer.Login, enqueuerID: e.Enqueuer.DatabaseID}
 	for _, l := range p.Labels.Nodes {
 		out.labels = append(out.labels, l.Name)
 	}
 	return out, nil
+}
+
+// queueConfig reads the merge-queue rule that applies to branch, across every
+// page of the branch rules. More than one merge_queue rule (several
+// rulesets) is treated as unreadable.
+func (c *GitHubClient) queueConfig(ctx context.Context, branch string) (greenlane.QueueConfig, error) {
+	var found []greenlane.QueueConfig
+	for page := 1; ; page++ {
+		if page > 10 {
+			return greenlane.QueueConfig{}, fmt.Errorf("branch rules for %s exceed 10 pages", branch)
+		}
+		data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/rules/branches/%s?per_page=100&page=%d", c.apiBase, c.owner, c.repo, url.PathEscape(branch), page))
+		if err != nil {
+			return greenlane.QueueConfig{}, err
+		}
+		var rules []struct {
+			Type       string `json:"type"`
+			Parameters struct {
+				MergeMethod      string `json:"merge_method"`
+				GroupingStrategy string `json:"grouping_strategy"`
+				MaxBuild         int    `json:"max_entries_to_build"`
+			} `json:"parameters"`
+		}
+		if err := json.Unmarshal(data, &rules); err != nil {
+			return greenlane.QueueConfig{}, err
+		}
+		for _, r := range rules {
+			if r.Type == "merge_queue" {
+				found = append(found, greenlane.QueueConfig{MergeMethod: r.Parameters.MergeMethod, MergingStrategy: r.Parameters.GroupingStrategy, MaxEntriesBuild: r.Parameters.MaxBuild})
+			}
+		}
+		if len(rules) < 100 {
+			break
+		}
+	}
+	if len(found) != 1 {
+		return greenlane.QueueConfig{}, fmt.Errorf("expected exactly one merge_queue rule on %s, found %d", branch, len(found))
+	}
+	return found[0], nil
 }
 
 // changedFiles lists files changed between two commits (both paths of a
