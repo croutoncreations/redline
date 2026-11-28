@@ -178,3 +178,86 @@ func TestRuntimeConnectionAndAgentContextUpdateAndDelete(t *testing.T) {
 		t.Fatalf("deleted connection error = %v", err)
 	}
 }
+
+func TestUpdateRunExternalOnlyMutatesActiveRuns(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	original := domain.ExternalRun{
+		RuntimeConnectionID: "hermes-primary", RunID: "external-original", SessionID: "session-original",
+	}
+	late := domain.ExternalRun{
+		RuntimeConnectionID: "hermes-late", RunID: "external-late", SessionID: "session-late",
+	}
+
+	for _, tc := range []struct {
+		name   string
+		state  domain.RunState
+		active bool
+	}{
+		{name: "preparing", state: domain.RunPreparing, active: true},
+		{name: "running", state: domain.RunRunning, active: true},
+		{name: "completed", state: domain.RunCompleted},
+		{name: "failed", state: domain.RunFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTaskDB(t)
+			profile := domain.ExecutionProfile{
+				ID: "profile", ProviderAccountID: "codex-main",
+				HarnessType: "codex-cli", WorkspaceProvider: "existing-directory",
+			}
+			if err := db.CreateProfile(t.Context(), profile, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.CreateTask(t.Context(), domain.Task{
+				ID: "task", Name: "external identity", ExecutionProfileID: profile.ID, Type: domain.OneOff,
+			}, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AdmitTask(t.Context(), "run", "task", "codex-main", "", now); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpdateRunExternal(t.Context(), "run", original); err != nil {
+				t.Fatal(err)
+			}
+			if tc.state != domain.RunPreparing {
+				if err := db.MarkRunRunning(t.Context(), "run", domain.Workspace{Directory: "/repo"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.active {
+				if err := db.CompleteRun(t.Context(), "run", domain.RunCompletion{
+					State: tc.state, FinalizeState: "completed",
+				}, now.Add(time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := db.UpdateRunExternal(t.Context(), "run", late)
+			if tc.active && err != nil {
+				t.Fatalf("UpdateRunExternal() error = %v", err)
+			}
+			if !tc.active && !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("UpdateRunExternal() error = %v, want ErrNotFound", err)
+			}
+
+			got, err := db.GetRun(t.Context(), "run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := original
+			if tc.active {
+				want = late
+			}
+			if got.External != want {
+				t.Fatalf("external identity = %#v, want %#v", got.External, want)
+			}
+		})
+	}
+
+	t.Run("missing", func(t *testing.T) {
+		db := openTaskDB(t)
+		if err := db.UpdateRunExternal(t.Context(), "missing", late); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("UpdateRunExternal() error = %v, want ErrNotFound", err)
+		}
+	})
+}
