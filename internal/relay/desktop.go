@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -474,15 +476,34 @@ func EncodeRequestParts(method, path string, header http.Header, body []byte) ([
 // The file is written with mode 0600 so only the owner can read the private
 // key. Parent directories are created with mode 0700 for the same reason.
 func LoadOrCreateKeypair(path string) (noise.DHKey, error) {
-	// Check whether the file exists. os.IsNotExist is the right predicate;
-	// any other error (permissions, IO) is surfaced so the caller can act.
-	data, err := os.ReadFile(path)
+	// Open first and inspect that exact file descriptor before reading it. The
+	// private key must never be accepted from a file another local account can
+	// read; creation already guarantees this, but configured and legacy paths
+	// may point at files Redline did not create.
+	file, err := os.Open(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return noise.DHKey{}, fmt.Errorf("read keypair file: %w", err)
 		}
 		// File does not exist: generate a fresh keypair and persist it.
 		return generateAndSaveKeypair(path)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return noise.DHKey{}, fmt.Errorf("inspect keypair file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return noise.DHKey{}, fmt.Errorf("keypair file must be a regular file")
+	}
+	// Windows reports synthetic POSIX bits, so confidentiality there is governed
+	// by the file's DACL rather than this Unix mode check.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return noise.DHKey{}, fmt.Errorf("keypair file permissions must not allow group or other access")
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return noise.DHKey{}, fmt.Errorf("read keypair file: %w", err)
 	}
 
 	// File exists: parse it. A parse failure is always an error; we do not

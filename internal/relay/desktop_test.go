@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -364,6 +366,26 @@ func TestKeypairFileIsNotWorldReadable(t *testing.T) {
 	}
 	if mode&0o077 != 0 {
 		t.Fatalf("keypair file mode %#o allows access beyond the owner", mode)
+	}
+}
+
+// Creation is not the only path into this loader: operators can configure an
+// existing identity file, and older installations can carry one forward. A
+// private key already exposed to another local account must be rejected rather
+// than silently trusted for authenticated phone sessions.
+func TestKeypairRejectsExistingBroadPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file confidentiality is enforced by DACL, not POSIX mode bits")
+	}
+	path := t.TempDir() + "/relay-key.json"
+	if _, err := LoadOrCreateKeypair(path); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("make keypair broadly readable: %v", err)
+	}
+	if _, err := LoadOrCreateKeypair(path); err == nil || !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("broadly readable keypair was accepted: %v", err)
 	}
 }
 
