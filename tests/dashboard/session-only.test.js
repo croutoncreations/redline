@@ -13,7 +13,7 @@ for (const [file, name, next, field] of [
     const start = source.indexOf(`function ${name}(`);
     assert.ok(start >= 0, `${name} exists`);
     const end = source.indexOf(`\n${next} `, start + 1);
-    const context = vm.createContext({accountState: () => 'ok', accountMismatch: () => false, signedOut: () => false});
+    const context = vm.createContext({accountState: () => 'ok', accountMismatch: () => false, signedOut: () => false, isAPICredits: () => false});
     vm.runInContext(source.slice(start, end), context);
     const item = {snapshot: {weekly_unavailable: true}, weekly_policy: 'session_only', latest_decision: {decision: 'WAIT'}};
     assert.equal(context[name](item)[field], 'Weekly not reported · session-only scheduling');

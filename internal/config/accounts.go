@@ -42,6 +42,10 @@ type ManagedAccount struct {
 	ClaudeConfigDir  string  `yaml:"claude_config_dir,omitempty" json:"claude_config_dir,omitempty"`
 	WindowWeeklyCost float64 `yaml:"window_weekly_cost,omitempty" json:"window_weekly_cost,omitempty"`
 	Policy           string  `yaml:"policy,omitempty" json:"policy,omitempty"`
+	// APICredits holds an API credits account's settings. The
+	// platform session key is never one of them: it stays in the platform
+	// secret store (or the file the settings name).
+	APICredits *APICredits `yaml:"api_credits,omitempty" json:"api_credits,omitempty"`
 	// Disabled keeps the account on file but out of scheduling, monitoring
 	// and the usage screens. It is the safe alternative to removing an
 	// account that tasks still reference.
@@ -123,6 +127,9 @@ func validateLabel(label string) error {
 // must not do.
 func MeteringIdentity(provider Provider) string {
 	family := strings.ToLower(strings.TrimSpace(provider.Provider))
+	if provider.IsAPICredits() {
+		return apiCreditsIdentity(provider)
+	}
 	// A Claude Code profile directory is its own login, keyed by Claude Code
 	// on the directory's path, so the cleaned absolute path is the identity.
 	if dir := NormalizeClaudeConfigDir(provider.ClaudeConfigDir); dir != "" {
@@ -149,7 +156,7 @@ func MeteringIdentity(provider Provider) string {
 // its own single-account guard.
 func RunLoginUnknown(provider Provider) string {
 	family := strings.ToLower(strings.TrimSpace(provider.Provider))
-	if family == "cursor" {
+	if family == "cursor" || provider.IsAPICredits() {
 		return ""
 	}
 	card := strings.ToLower(strings.TrimSpace(provider.OpenUsageCard))
@@ -212,7 +219,11 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 		identity := MeteringIdentity(provider)
 		if other, taken := owners[identity]; taken {
 			var err error
-			if strings.HasPrefix(identity, "default:") {
+			if org, isCredits := strings.CutPrefix(identity, "openai-org:"); isCredits {
+				err = fmt.Errorf("%w: accounts %q and %q both read API credits for organization %s", ErrAccountConflict, other, id, org)
+			} else if org, isCredits := strings.CutPrefix(identity, "anthropic-org:"); isCredits {
+				err = fmt.Errorf("%w: accounts %q and %q both read Claude API credits for Console organization %s", ErrAccountConflict, other, id, org)
+			} else if strings.HasPrefix(identity, "default:") {
 				err = fmt.Errorf("%w: accounts %q and %q would both read the default %s login on this Mac; give each extra account its own openusage_card or claude_config_dir",
 					ErrAccountConflict, other, id, provider.Provider)
 			} else if dir, isProfile := strings.CutPrefix(identity, "claude-profile:"); isProfile {
@@ -220,7 +231,10 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 			} else {
 				err = fmt.Errorf("%w: accounts %q and %q both read OpenUsage card %q", ErrAccountConflict, other, id, provider.OpenUsageCard)
 			}
-			if managed != nil && !managed[id] && !managed[other] {
+			// The leniency is for configs accepted before accounts were
+			// isolated; credits accounts are newer than that and are
+			// always refused, since a doubled balance would be spent twice.
+			if managed != nil && !managed[id] && !managed[other] && !provider.IsAPICredits() {
 				warnings = append(warnings, err.Error()+" (both show the same numbers)")
 				continue
 			}
@@ -228,10 +242,53 @@ func accountIdentityConflicts(providers map[string]Provider, managed map[string]
 		}
 		owners[identity] = id
 	}
+	if err := apiCreditsDefaultOrganizationAlias(providers, ids); err != nil {
+		return warnings, err
+	}
 	if err := mixedClaudeSources(providers, ids); err != nil {
 		return warnings, err
 	}
 	return warnings, nil
+}
+
+// apiCreditsDefaultOrganizationAlias refuses a credits account without
+// organization_id beside any other credits account. Without one it reads
+// the session's default organization, which the grants response does not
+// name, so it could be the organization another account reads and the same
+// promotional balance would be spent twice.
+func apiCreditsDefaultOrganizationAlias(providers map[string]Provider, ids []string) error {
+	for _, vendor := range []string{APICreditsVendorOpenAI, APICreditsVendorAnthropic} {
+		if err := apiCreditsDefaultOrganizationAliasFor(vendor, providers, ids); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// apiCreditsDefaultOrganizationAliasFor applies the rule within one vendor:
+// an OpenAI and a Console organization are never the same balance.
+func apiCreditsDefaultOrganizationAliasFor(vendor string, providers map[string]Provider, ids []string) error {
+	var credits []string
+	unnamed := ""
+	for _, id := range ids {
+		provider := providers[id]
+		if provider.APICreditsVendor() != vendor {
+			continue
+		}
+		credits = append(credits, id)
+		if unnamed == "" && provider.EffectiveAPICredits().OrganizationID == "" {
+			unnamed = id
+		}
+	}
+	if unnamed == "" || len(credits) < 2 {
+		return nil
+	}
+	other := credits[0]
+	if other == unnamed {
+		other = credits[1]
+	}
+	return fmt.Errorf("%w: account %q has no api_credits organization_id, so it reads the session's default organization, which may be the one account %q reads; set organization_id on every API credits account when there is more than one",
+		ErrAccountConflict, unnamed, other)
 }
 
 // mixedClaudeSources refuses Claude accounts read from both non-default
@@ -411,6 +468,7 @@ func (a ManagedAccount) ProviderConfig() Provider {
 		OpenUsageURL: openUsageURL, OpenUsageCard: a.OpenUsageCard, ClaudeConfigDir: a.ClaudeConfigDir, Label: a.Label,
 		WindowWeeklyCost: cost, Policy: a.Policy,
 		WeeklyPolicy: a.WeeklyPolicy, SessionReserve: a.SessionReserve,
+		APICredits: a.APICredits,
 	}
 }
 

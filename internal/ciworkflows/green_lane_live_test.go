@@ -11,13 +11,28 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	if err := wf.On.Decode(&triggers); err != nil {
 		t.Fatal(err)
 	}
-	if len(triggers) != 2 {
-		t.Fatalf("live workflow must only support schedule and dispatch: %v", triggers)
+	// workflow_run always executes the default-branch workflow file at the main
+	// tip; it is only a wake-up signal. No pull_request* event may run this.
+	if len(triggers) != 3 {
+		t.Fatalf("live workflow must only support schedule, dispatch and CI completion: %v", triggers)
 	}
-	for _, name := range []string{"schedule", "workflow_dispatch"} {
+	for _, name := range []string{"schedule", "workflow_dispatch", "workflow_run"} {
 		if _, ok := triggers[name]; !ok {
 			t.Fatalf("missing trigger %s", name)
 		}
+	}
+	var on struct {
+		WorkflowRun struct {
+			Workflows []string `yaml:"workflows"`
+			Types     []string `yaml:"types"`
+		} `yaml:"workflow_run"`
+	}
+	if err := wf.On.Decode(&on); err != nil {
+		t.Fatal(err)
+	}
+	run := on.WorkflowRun
+	if len(run.Workflows) != 1 || run.Workflows[0] != "CI" || len(run.Types) != 1 || run.Types[0] != "completed" {
+		t.Fatalf("workflow_run must only follow completed CI: %+v", run)
 	}
 	if wf.Concurrency == nil || wf.Concurrency.Group != "green-lane-live-merge" || wf.Concurrency.CancelInProgress != "false" {
 		t.Fatalf("live merges must be serialized without cancellation: %+v", wf.Concurrency)
@@ -29,6 +44,8 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 		If          string            `yaml:"if"`
 		Permissions map[string]string `yaml:"permissions"`
 		Steps       []struct {
+			ID   string            `yaml:"id"`
+			If   string            `yaml:"if"`
 			Uses string            `yaml:"uses"`
 			Run  string            `yaml:"run"`
 			Env  map[string]string `yaml:"env"`
@@ -39,7 +56,9 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	if err := node.Decode(&job); err != nil {
 		t.Fatal(err)
 	}
-	for _, guard := range []string{"github.repository == 'croutoncreations/redline'", "github.ref == 'refs/heads/main'", "vars.GREEN_LANE_LIVE_ENABLED == 'true'"} {
+	for _, guard := range []string{"github.repository == 'croutoncreations/redline'", "github.ref == 'refs/heads/main'", "vars.GREEN_LANE_LIVE_ENABLED == 'true'",
+		"github.event_name != 'workflow_run' ||", "github.event.workflow_run.event == 'pull_request'",
+		"github.event.workflow_run.conclusion == 'success'", "github.event.workflow_run.head_repository.full_name == github.repository"} {
 		if !strings.Contains(job.If, guard) {
 			t.Fatalf("missing guard %s", guard)
 		}
@@ -47,8 +66,24 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 	if len(job.Permissions) != 4 || job.Permissions["contents"] != "write" || job.Permissions["pull-requests"] != "write" || job.Permissions["checks"] != "read" || job.Permissions["actions"] != "write" {
 		t.Fatalf("unexpected permissions: %v", job.Permissions)
 	}
-	checkout, runner := false, false
+	checkout, runner, appToken := false, false, false
 	for _, step := range job.Steps {
+		if strings.Contains(step.Uses, "create-github-app-token") {
+			// The App token is minted only in queue mode, from a pinned
+			// action, scoped to redline and the three queue permissions.
+			appToken = true
+			want := map[string]string{"app-id": "${{ secrets.GREEN_LANE_APP_ID }}", "private-key": "${{ secrets.GREEN_LANE_APP_KEY }}",
+				"repositories": "redline", "permission-contents": "write", "permission-pull-requests": "write", "permission-merge-queues": "write"}
+			if step.Uses != "actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc" || step.ID != "queue-token" ||
+				step.If != "vars.GREEN_LANE_MERGE_QUEUE == 'true'" || len(step.With) != len(want) {
+				t.Fatalf("unexpected App token step: %+v", step)
+			}
+			for k, v := range want {
+				if step.With[k] != v {
+					t.Fatalf("App token %s = %q, want %q", k, step.With[k], v)
+				}
+			}
+		}
 		if step.Uses == "actions/checkout@v4" {
 			checkout = true
 			if step.With["ref"] != "${{ github.sha }}" || step.With["persist-credentials"] != "false" {
@@ -57,7 +92,7 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 		}
 		if step.Uses == "actions/github-script@v7" {
 			runner = true
-			if step.With["retries"] != "0" || step.With["script"] != "const auditToken = process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\ndelete process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\nconst accessAudit = auditToken ? new github.constructor({auth:auditToken,request:{retries:0}}) : undefined;\nawait require('./.github/green-lane/live.cjs')({github,accessAudit,context,core});\n" {
+			if step.With["retries"] != "0" || step.With["script"] != "const auditToken = process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\ndelete process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;\nconst accessAudit = auditToken ? new github.constructor({auth:auditToken,request:{retries:0}}) : undefined;\nconst queueToken = process.env.GREEN_LANE_QUEUE_TOKEN;\ndelete process.env.GREEN_LANE_QUEUE_TOKEN;\nconst queueClient = queueToken ? new github.constructor({auth:queueToken,request:{retries:0}}) : undefined;\nawait require('./.github/green-lane/live.cjs')({github,accessAudit,queueClient,context,core});\n" {
 				t.Fatal("unexpected merge entry point or retry configuration")
 			}
 			if step.Env["GREEN_LANE_ACCESS_AUDIT_TOKEN"] != "${{ secrets.GREEN_LANE_ACCESS_AUDIT_TOKEN }}" {
@@ -66,9 +101,15 @@ func TestGreenLaneLiveTrustBoundary(t *testing.T) {
 			if step.Env["LIVE_PILOT_ENABLED"] != "${{ vars.GREEN_LANE_LIVE_ENABLED }}" {
 				t.Fatal("missing explicit opt-in")
 			}
+			if step.Env["GREEN_LANE_MERGE_QUEUE"] != "${{ vars.GREEN_LANE_MERGE_QUEUE }}" {
+				t.Fatal("merge-queue mode must come from the repository variable")
+			}
+			if step.Env["GREEN_LANE_QUEUE_TOKEN"] != "${{ steps.queue-token.outputs.token }}" || !appToken {
+				t.Fatal("the queue client must use the App token minted earlier in this job")
+			}
 		}
 	}
-	if !checkout || !runner {
+	if !checkout || !runner || !appToken {
 		t.Fatal("missing trusted checkout or live runner")
 	}
 }

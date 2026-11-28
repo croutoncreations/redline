@@ -46,6 +46,10 @@ reset time. When a five-hour limit exists, Redline shows that too.
 
 Usage monitoring does not enable automatic dispatch.
 
+If a ChatGPT Pro/Business or Claude subscription grants you monthly API credit, you can add it
+as its own account with `redline account add-openai-credits` or `add-claude-credits`; see
+[API credits](scheduling.md#openai-api-credits).
+
 ## 3. Create an execution profile
 
 Continue to **Workspace** in the first-run guide. Redline preselects the account, directly

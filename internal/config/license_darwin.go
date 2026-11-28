@@ -141,6 +141,17 @@ func newKeychainLicenseStore(service, account string) LicenseStore {
 	return keychainLicenseStore{service: service, account: account}
 }
 
+// KeychainItem is one Redline-owned generic-password item in the login
+// Keychain, with the same Load/Replace/Clear contract as the relay license.
+// A missing item loads as ErrLicenseNotFound; an inaccessible Keychain as
+// ErrLicenseStoreUnavailable.
+func KeychainItem(service, account string) (LicenseStore, bool) {
+	if service == "" || account == "" {
+		return nil, false
+	}
+	return keychainLicenseStore{service: service, account: account}, true
+}
+
 func keychainStatusError(operation string, status C.OSStatus) error {
 	if status == C.errSecItemNotFound {
 		return ErrLicenseNotFound
