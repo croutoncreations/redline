@@ -88,11 +88,17 @@ func (c *GitHubClient) GetPR(ctx context.Context, n int) (greenlane.PRInfo, erro
 	if err != nil {
 		return pr, err
 	}
+	var drift []string
+	driftKnown := false
+	if c.config.MergeQueue {
+		drift, driftKnown = c.mainDrift(ctx, before.Base.Ref, before.Head.SHA)
+	}
 	after, err := c.metadata(ctx, n)
 	if err != nil {
 		return pr, err
 	}
 	pr = greenlane.PRInfo{
+		MainDrift: drift, MainDriftKnown: driftKnown,
 		CheckEvidence: checkEvidence, AutomatedReviews: automated,
 		Repository: c.owner + "/" + c.repo, Number: before.Number, Title: before.Title, Body: before.Body,
 		State: before.State, UpdatedAt: before.UpdatedAt, HeadSHA: before.Head.SHA, BaseSHA: before.Base.SHA,

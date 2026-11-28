@@ -180,6 +180,97 @@ Additional live safeguards:
 - Optional `green-lane-hold`, `maintenance:skip`, or `do-not-touch` PR label defers that PR. It is an opt-out, never an
   approval or opt-in requirement.
 
+### Merge-queue mode
+
+Set the repository variable `GREEN_LANE_MERGE_QUEUE=true` once `main` requires
+GitHub's merge queue. Then:
+
+- **PRs may be behind `main`.** GitHub's queue tests each queued PR combined
+  with the latest `main` (and any PRs ahead of it) on a temporary
+  `gh-readonly-queue/main/*` branch, and merges only if the eight required
+  checks pass there. CI runs on `merge_group` for this. PRs no longer need
+  branch updates and re-reviews after other merges.
+- **The review still has to be on the PR's current head**, against the PR's
+  own base. One extra rule, **Main Drift**, closes the obvious gap: if `main`
+  changed any denied path (auth, credentials, workflows, release, the lane
+  itself) since the PR's base, the PR needs a branch update and a fresh review.
+  If the worker can't list what `main` changed, the rule is inconclusive and
+  blocks.
+- **The worker enqueues instead of merging**: at most one
+  `enqueuePullRequest` call per run, with `expectedHeadOid` pinned to the
+  evaluated head, never retried. It also requires `green-lane-queue` to be a
+  required check before it enqueues anything. The queue then merges as
+  `github-merge-queue[bot]`, and that push to `main` runs CI normally, so there
+  is no post-merge dispatch. PRs already in the queue are skipped. If `main`
+  has no merge queue, the worker refuses to run.
+- **It enqueues and dequeues as the Green Lane Merge App**
+  (`green-lane-merge[bot]`, installed on redline only, with Contents,
+  Pull requests and Merge queues write). Queue entries created with the
+  workflow's `GITHUB_TOKEN` start no `merge_group` CI, so they would sit until
+  the queue timed out. The job mints a short-lived installation token
+  (`actions/create-github-app-token`, pinned) only in queue mode, from secrets
+  `GREEN_LANE_APP_ID` and `GREEN_LANE_APP_KEY`, and uses it only for the two
+  queue mutations; everything else stays on `GITHUB_TOKEN`. Without the token
+  the worker refuses to run. The sweep only touches entries this App queued.
+- **Authorization holds until the merge, not just the enqueue.** The required
+  `green-lane-queue` CI job re-decides every queued PR on its merge-queue run.
+  It waits for the other eight required jobs (so its verdict is as late as
+  possible) and always runs. It is built from the merge group's base (trusted
+  `main`), never from the merge group, so a queued PR can't change the code
+  that judges it. It fails unless:
+  - the queue is squash, only-merge-non-failing (ALLGREEN), one entry at a
+    time;
+  - the merge-group commit is this PR's current queue entry: one squash commit
+    directly on the base;
+  - `main`, as the PR lands on it, changed no denied path since the PR's base
+    (Main Drift on the exact landing commit), and the merge commit itself
+    touches no denied path;
+  - the PR was queued by Jon by hand (his user id) or by the Green Lane Merge
+    App, and nobody else. The App audits repository writers before it
+    enqueues, so this keeps the single-owner rule for queued PRs too;
+  - for the App's entries: no hold label (re-read at the end of the gate),
+    the full Green Lane evaluation of the head passes every rule, and the
+    merge commit makes the same file changes as the evaluated head, with the
+    same content for every file `main` hasn't also changed.
+
+  A PR Jon queued himself gets only the path and binding checks: his enqueue
+  is the authorization, and the gate doesn't read the PR's review evidence for
+  it. The remaining window is the few seconds between the
+  gate's verdict and the queue's merge.
+- **The worker also cleans up early.** Every run (hourly at :47, and after
+  each successful same-repository `pull_request` CI run; not after
+  merge-queue CI) re-evaluates each PR it queued and removes it from the
+  queue (`dequeuePullRequest`) if it no longer qualifies, so a stale entry
+  doesn't hold up the queue until its CI fails. This is housekeeping: the
+  `green-lane-queue` gate, not the sweep, is what blocks the merge. Just
+  before removing an entry the sweep re-reads it and skips it if it is no
+  longer the same entry queued by Green Lane, so an entry Jon removed and
+  re-queued by hand during the evaluation is left alone. GitHub's removal
+  call names the PR, not the entry, so a hand re-queue in the instant between
+  that re-read and the removal could still be removed. That is accepted: it
+  fails safe (nothing merges), and Jon can re-queue. Removals are listed in
+  `live-result.json` under `dequeued`.
+- **Kill switch in queue mode:** disabling the workflow stops new enqueues. A PR
+  already in the queue stays there. Remove it with **Remove from queue** on the
+  PR or on the branch's merge-queue page (the `gh` CLI can't), or with the
+  GraphQL `dequeuePullRequest` mutation.
+
+Owner setup, in this order:
+
+1. Create the Green Lane Merge App and set `GREEN_LANE_APP_ID` and
+   `GREEN_LANE_APP_KEY` (done Nov 27 2026), then merge the PR that adds
+   `merge_group` to CI and queue mode to the worker.
+2. In `main`'s branch protection, add `green-lane-queue` (GitHub Actions) to
+   the required checks, then turn on **Require merge queue**: squash,
+   build concurrency 1, minimum and maximum group size 1, **Only merge
+   non-failing pull requests** on, status-check timeout 60 minutes. The
+   worker and the gate both refuse to work with any other queue settings. The
+   queue's tested branch is always current, so the existing strict
+   ("up to date") setting can stay as it is.
+3. `gh variable set GREEN_LANE_MERGE_QUEUE -R croutoncreations/redline --body true`.
+
+To leave queue mode, delete the variable first, then remove the queue.
+
 ### Kill switch
 
 **Disable `Green Lane Live Pilot` in GitHub Actions** (or run

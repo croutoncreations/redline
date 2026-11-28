@@ -19,9 +19,20 @@ const transient = err => {
 
 // Only trusted default-branch code calls this entry point. Shadow checks and
 // downloaded artifacts are never inputs. A failed/ambiguous merge is not retried.
-async function live({github, accessAudit, context, core, run=execFileSync,
+const entryQuery = `query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){id isInMergeQueue headRefOid mergeQueueEntry{id enqueuer{__typename login}}}}}`;
+// Queue mode enqueues as the Green Lane Merge App (green-lane-merge[bot]).
+// GraphQL reports bot logins with or without the [bot] suffix depending on the
+// field; the Bot type is what a person can't spoof.
+const QUEUE_BOT_LOGINS = ['green-lane-merge','green-lane-merge[bot]'];
+const queuedByGreenLane = entry => entry?.enqueuer?.__typename === 'Bot' && QUEUE_BOT_LOGINS.includes(entry.enqueuer.login);
+
+async function live({github, accessAudit, queueClient, context, core, run=execFileSync,
   validate=snapshotMatches, write=r=>fs.writeFileSync('live-result.json',JSON.stringify(r,null,2))}) {
-  const report = {state:'deferred',main_tip:context.sha,merged:[],evaluations:[]};
+  // GREEN_LANE_MERGE_QUEUE=true: main requires GitHub's merge queue. PRs may
+  // be behind main (the queue tests each one combined with the latest main),
+  // and the worker enqueues the exact evaluated head instead of merging.
+  const queue = process.env.GREEN_LANE_MERGE_QUEUE === 'true';
+  const report = {state:'deferred',mode:queue?'merge_queue':'direct',main_tip:context.sha,merged:[],enqueued:[],evaluations:[]};
   const finish = async reason => { report.reason=reason; await write(report); core.info(reason); return report; };
   const repo = context.repo;
   if (`${repo.owner}/${repo.repo}` !== 'croutoncreations/redline' || context.ref !== 'refs/heads/main' ||
@@ -31,7 +42,7 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   // Set immediately before the merge API call. From then on no error counts as
   // transient: a timed-out merge may have succeeded, so it fails loudly and is
   // never retried.
-  let mergeCalled = false;
+  let mergeCalled = false; // also set before the enqueue call
   try {
     return await select();
   } catch (err) {
@@ -58,9 +69,21 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     // remain configured and enforced natively; no admin credential is granted.
     const {data:branch} = await github.rest.repos.getBranch({...repo,branch:'main'});
     const p = branch.protection?.required_status_checks;
+    // Queue mode also needs green-lane-queue required: it re-decides each
+    // queued PR at merge time, so authorization holds until the merge.
+    const required = queue ? [...checks,'green-lane-queue'] : checks;
     return branch.protected === true && branch.protection?.enabled === true &&
-      p?.enforcement_level === 'everyone' && checks.every(name =>
+      p?.enforcement_level === 'everyone' && required.every(name =>
         p.checks?.some(c => c.context === name && c.app_id === 15368));
+  };
+  // Queue mode needs the queue to exist: otherwise an enqueue request fails,
+  // and if the queue were removed later, nothing would test the combination.
+  // The queue gate's guarantees assume a squash queue that builds one entry
+  // at a time and only merges entries whose own checks passed (ALLGREEN).
+  const queueReady = async () => {
+    const r = await github.graphql(`query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){mergeQueue(branch:"main"){id configuration{mergeMethod mergingStrategy maximumEntriesToBuild}}}}`,{owner:repo.owner,repo:repo.repo});
+    const q = r?.repository?.mergeQueue, c = q?.configuration;
+    return typeof q?.id === 'string' && c?.mergeMethod === 'SQUASH' && c?.mergingStrategy === 'ALLGREEN' && c?.maximumEntriesToBuild === 1;
   };
   const trustedWriters = async () => {
     const users = await accessAudit.paginate(accessAudit.rest.repos.listCollaborators,{...repo,affiliation:'all',per_page:100});
@@ -92,10 +115,18 @@ async function live({github, accessAudit, context, core, run=execFileSync,
   if (!accessAudit) throw new Error('Missing read-only repository access audit credential; no merge permitted');
   if (await tip() !== context.sha) return finish('Main moved since this workflow was selected; wait for a fresh run');
   if (!await protectedMain()) throw new Error('Required main protection is missing; no merge permitted');
+  // Queue entries made with GITHUB_TOKEN start no merge_group CI; only the App can enqueue.
+  if (queue && typeof queueClient?.graphql !== 'function') throw new Error('Merge-queue mode needs the Green Lane Merge App token; no merge permitted');
+  if (queue && !await queueReady()) throw new Error('Merge-queue mode is on but main has no merge queue configured as squash, ALLGREEN, one entry at a time; no merge permitted');
 
   if (!await trustedWriters()) throw new Error('Repository writers changed; Redline single-owner pilot is paused');
 
   const prs = await github.paginate(github.rest.pulls.list,{...repo,state:'open',base:'main',sort:'created',direction:'asc',per_page:100});
+  // Queue mode: authorization must hold until the queue merges, not just at
+  // enqueue. Every run re-evaluates each queued PR this worker enqueued and
+  // removes it from the queue if it no longer qualifies (a new review body,
+  // an unresolved thread, a hold label, a changed head...).
+  if (queue) await revalidateQueued(prs);
   for (const listed of prs) {
     if (listed.draft || held(listed) || listed.head?.repo?.full_name !== 'croutoncreations/redline') continue;
     const number = listed.number;
@@ -103,20 +134,24 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
     if (pr.state !== 'open' || pr.draft || held(pr) || pr.base.ref !== 'main' ||
         pr.head.repo?.full_name !== 'croutoncreations/redline' || !sha(pr.head.sha) || !sha(pr.base.sha)) continue;
-    // The PR-recorded base SHA can be old even when main moved. Compare ancestry
-    // against the ACTUAL main tip: green head CI must include that exact commit.
-    const {data:comparison} = await github.rest.repos.compareCommitsWithBasehead({...repo,basehead:`${context.sha}...${pr.head.sha}`});
-    if (comparison.behind_by !== 0 || comparison.merge_base_commit?.sha !== context.sha ||
-        !['ahead','identical'].includes(comparison.status)) {
-      report.evaluations.push({pr:number,state:'needs_main_refresh',head:pr.head.sha});
-      continue;
+    if (queue) {
+      // Already queued (by us earlier, or by Jon): the queue owns it now.
+      const q = await github.graphql(`query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){isInMergeQueue}}}`,{owner:repo.owner,repo:repo.repo,n:number});
+      if (q?.repository?.pullRequest?.isInMergeQueue !== false) {
+        report.evaluations.push({pr:number,state:'already_queued',head:pr.head.sha});
+        continue;
+      }
+    } else {
+      // The PR-recorded base SHA can be old even when main moved. Compare ancestry
+      // against the ACTUAL main tip: green head CI must include that exact commit.
+      const {data:comparison} = await github.rest.repos.compareCommitsWithBasehead({...repo,basehead:`${context.sha}...${pr.head.sha}`});
+      if (comparison.behind_by !== 0 || comparison.merge_base_commit?.sha !== context.sha ||
+          !['ahead','identical'].includes(comparison.status)) {
+        report.evaluations.push({pr:number,state:'needs_main_refresh',head:pr.head.sha});
+        continue;
+      }
     }
-    const result = JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
-      encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
-      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
-        EXPECTED_HEAD_SHA:pr.head.sha,EXPECTED_BASE_SHA:pr.base.sha,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',
-        DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
-    }));
+    const result = await evaluate(number, pr.head.sha, pr.base.sha);
     report.evaluations.push(result);
     await write(report);
     if (result.repository !== 'croutoncreations/redline' || result.pr_number !== number ||
@@ -131,13 +166,30 @@ async function live({github, accessAudit, context, core, run=execFileSync,
         fresh.mergeable !== true || fresh.head.repo?.full_name !== 'croutoncreations/redline') continue;
     if (!await protectedMain()) throw new Error('Main protection changed during evaluation');
     if (!await trustedWriters()) throw new Error('Repository writer permissions changed during evaluation');
-    if (await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
+    // In queue mode main may move freely: the queue retests against its tip.
+    if (!queue && await tip() !== context.sha) return finish('Main moved during evaluation; fresh evidence required');
+    if (queue && !await queueReady()) throw new Error('Merge queue disappeared during evaluation; no merge permitted');
     // Re-read live workflow state; disabling it also stops an in-flight run here.
     if (!await enabled()) return finish('Kill switch was turned off during evaluation');
     const age = Date.now() - Date.parse(result.evaluated_at);
     if (!Number.isFinite(age) || age < -60000 || age > 300000) continue;
-    report.state='merge_requested'; report.attempt={pr:number,head:result.head_sha,main_tip:context.sha};
+    report.state=queue?'enqueue_requested':'merge_requested'; report.attempt={pr:number,head:result.head_sha,main_tip:context.sha};
     await write(report);
+    if (queue) {
+      // expectedHeadOid pins the exact evaluated head: GitHub refuses the
+      // request if the branch moved. Never retried, like a merge call.
+      mergeCalled = true;
+      // Verify through the entry's pull request: headCommit is the queue's
+      // own (possibly not yet built) merge-group commit, not the PR head.
+      const r = await queueClient.graphql(`mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id enqueuer{__typename login} pullRequest{number headRefOid}}}}`,{id:fresh.node_id,head:result.head_sha});
+      const entry = r?.enqueuePullRequest?.mergeQueueEntry;
+      if (typeof entry?.id !== 'string' || entry.pullRequest?.number !== number || entry.pullRequest?.headRefOid !== result.head_sha || !queuedByGreenLane(entry)) throw new Error('GitHub did not confirm the exact-head merge-queue entry');
+      report.state='enqueued'; report.enqueued.push({pr:number,head:result.head_sha,entry:entry.id});
+      // The queue merges later, as github-merge-queue[bot], once the required
+      // checks pass on its merge-group commit. That includes green-lane-queue
+      // (ci.yml), which re-runs this evaluation and Main Drift at merge time.
+      return finish(`Enqueued PR #${number} at ${result.head_sha}; one-enqueue run complete`);
+    }
     // Disable client retries in the workflow. Never try a second PR after this
     // call, including timeouts where GitHub may already have merged the first.
     mergeCalled = true;
@@ -151,7 +203,70 @@ async function live({github, accessAudit, context, core, run=execFileSync,
     report.ci_dispatched=true;
     return finish(`Merged PR #${number} at ${merged.sha}; one-merge run complete`);
   }
-  return finish('No current-main, fully qualified PR; no merge attempted');
+  return finish(queue ? 'No fully qualified PR; nothing enqueued' : 'No current-main, fully qualified PR; no merge attempted');
+
+  async function evaluate(number, head, base) {
+    return JSON.parse(run(`${process.env.RUNNER_TEMP}/green-lane-check`,[],{
+      encoding:'utf8',timeout:180000,maxBuffer:2*1024*1024,
+      env:{...process.env,GREEN_LANE_ACCESS_AUDIT_TOKEN:'',REPO_OWNER:repo.owner,REPO_NAME:repo.repo,PR_NUMBER:String(number),
+        EXPECTED_HEAD_SHA:head,EXPECTED_BASE_SHA:base,CONFIG_PATH:'',LIST_OPEN_PRS:'',REQUIRE_AUTOMATED_REVIEW:'true',MERGE_QUEUE:queue?'true':'',
+        DUPLICATE_SNAPSHOT_PATH:'',REPRO_PASS:'',REPRO_INCONCLUSIVE:'',REPRO_HEAD_SHA:'',REPRO_BASE_SHA:''}
+    }));
+  }
+
+  function sweepError(pr, step, error) {
+    const message = String(error?.message ?? error).slice(0,300);
+    (report.sweep_errors ??= []).push({pr,step,error:message});
+    core.warning(`Queue sweep could not ${step} PR #${pr}: ${message}`);
+  }
+  async function revalidateQueued(open) {
+    report.dequeued = [];
+    for (const listed of open) {
+      const number = listed.number;
+      if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid PR number');
+      // A failed read can't prove who owns the entry, so it is recorded and
+      // the entry left alone (the required green-lane-queue gate still
+      // decides its merge); the sweep moves on to the next PR.
+      let node;
+      try { node = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest; }
+      catch (error) { sweepError(number, 'read', error); continue; }
+      if (node?.isInMergeQueue !== true) continue;
+      // Only PRs this worker queued; a PR Jon queued by hand is his call.
+      if (!queuedByGreenLane(node.mergeQueueEntry)) continue;
+      let reason = null;
+      // A failure re-checking one entry must not stop the sweep, and an entry
+      // that can't be re-checked is removed (the safe direction).
+      try {
+        const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
+        if (held(pr)) reason = 'hold label';
+        else if (pr.state !== 'open' || pr.draft || pr.head.sha !== node.headRefOid) reason = 'PR state or head changed';
+        else {
+          const result = await evaluate(number, pr.head.sha, pr.base.sha);
+          const failed = (result.rules ?? []).filter(rule => rule.pass !== true || rule.inconclusive);
+          // PR State can fail for queued PRs only because GitHub reports them as
+          // not cleanly mergeable while queued; every other rule must still pass.
+          const blocking = failed.filter(rule => !(rule.name === 'PR State' && /mergeab/i.test(rule.message ?? '')));
+          if (result.pr_number !== number || result.head_sha !== pr.head.sha || !Array.isArray(result.rules) || result.rules.length === 0 || blocking.length)
+            reason = blocking.map(rule => `${rule.name}: ${rule.message}`).join('; ') || 'evaluation did not match the queued PR';
+        }
+      } catch (error) {
+        reason = `re-check failed: ${String(error?.message ?? error).slice(0,300)}`;
+      }
+      if (!reason) continue;
+      // The evaluation can take minutes. Jon may have removed and re-queued the
+      // PR by hand meanwhile; leave his entry alone. The mutation takes the PR
+      // id, not the entry id, so re-read the entry just before removing it.
+      try {
+        const again = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest;
+        if (again?.isInMergeQueue !== true || again.mergeQueueEntry?.id !== node.mergeQueueEntry.id || !queuedByGreenLane(again.mergeQueueEntry)) continue;
+        // Dequeue is the safe direction, so it is not gated on the kill switch.
+        await queueClient.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
+      } catch (error) { sweepError(number, 'dequeue', error); continue; }
+      report.dequeued.push({pr:number,head:node.headRefOid,reason:String(reason).slice(0,500)});
+      await write(report);
+      core.warning(`Removed PR #${number} from the merge queue: ${reason}`);
+    }
+  }
   }
 }
 module.exports = Object.assign(live, {transient});

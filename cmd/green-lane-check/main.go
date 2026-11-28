@@ -29,9 +29,10 @@ func run() error {
 	repoOwner := os.Getenv("REPO_OWNER")
 	repoName := os.Getenv("REPO_NAME")
 	listOnly := os.Getenv("LIST_OPEN_PRS") == "true"
+	queueGate := os.Getenv("QUEUE_GATE") == "true"
 	prNumberStr := os.Getenv("PR_NUMBER")
-	if listOnly {
-		prNumberStr = "0"
+	if listOnly || queueGate {
+		prNumberStr = "0" // the gate reads the PR from the merge_group payload
 	}
 	configPath := os.Getenv("CONFIG_PATH")
 
@@ -40,7 +41,7 @@ func run() error {
 	}
 
 	prNumber, err := strconv.Atoi(prNumberStr)
-	if err != nil || (!listOnly && prNumber <= 0) {
+	if err != nil || (!listOnly && !queueGate && prNumber <= 0) {
 		return fmt.Errorf("invalid PR_NUMBER")
 	}
 
@@ -53,6 +54,9 @@ func run() error {
 	if os.Getenv("REQUIRE_AUTOMATED_REVIEW") == "true" {
 		config.RequireAutomatedReview = true
 	}
+	if os.Getenv("MERGE_QUEUE") == "true" {
+		config.EnableMergeQueue()
+	}
 
 	// Fetch PR information
 	ctx := context.Background()
@@ -63,6 +67,10 @@ func run() error {
 		apiBase: "https://api.github.com",
 		client:  &http.Client{Timeout: 30 * time.Second},
 		config:  config,
+	}
+
+	if queueGate {
+		return runQueueGate(ctx, client, config, os.Getenv("GITHUB_EVENT_PATH"))
 	}
 
 	if listOnly {
