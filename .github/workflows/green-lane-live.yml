@@ -47,19 +47,40 @@ jobs:
           cache: false
       - name: Build trusted evaluator
         run: go build -o "$RUNNER_TEMP/green-lane-check" ./cmd/green-lane-check
+      # Queue mode enqueues and dequeues as the Green Lane Merge App. Queue
+      # entries created with GITHUB_TOKEN start no merge_group CI, so they
+      # would sit until the queue timed out. Minted only from main, only in
+      # queue mode, with just the permissions the queue calls need.
+      - name: Mint Green Lane Merge App token
+        id: queue-token
+        if: vars.GREEN_LANE_MERGE_QUEUE == 'true'
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.GREEN_LANE_APP_ID }}
+          private-key: ${{ secrets.GREEN_LANE_APP_KEY }}
+          repositories: redline
+          permission-contents: write
+          permission-pull-requests: write
+          permission-merge-queues: write
       - name: Evaluate and merge at most one PR
         uses: actions/github-script@v7
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LIVE_PILOT_ENABLED: ${{ vars.GREEN_LANE_LIVE_ENABLED }}
+          # "true" once main requires the merge queue: enqueue instead of merge.
+          GREEN_LANE_MERGE_QUEUE: ${{ vars.GREEN_LANE_MERGE_QUEUE }}
           GREEN_LANE_ACCESS_AUDIT_TOKEN: ${{ secrets.GREEN_LANE_ACCESS_AUDIT_TOKEN }}
+          GREEN_LANE_QUEUE_TOKEN: ${{ steps.queue-token.outputs.token }}
         with:
           retries: 0
           script: |
             const auditToken = process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;
             delete process.env.GREEN_LANE_ACCESS_AUDIT_TOKEN;
             const accessAudit = auditToken ? new github.constructor({auth:auditToken,request:{retries:0}}) : undefined;
-            await require('./.github/green-lane/live.cjs')({github,accessAudit,context,core});
+            const queueToken = process.env.GREEN_LANE_QUEUE_TOKEN;
+            delete process.env.GREEN_LANE_QUEUE_TOKEN;
+            const queueClient = queueToken ? new github.constructor({auth:queueToken,request:{retries:0}}) : undefined;
+            await require('./.github/green-lane/live.cjs')({github,accessAudit,queueClient,context,core});
       - uses: actions/upload-artifact@v4
         if: always()
         with:
