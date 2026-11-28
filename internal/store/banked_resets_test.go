@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/decision"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 	_ "modernc.org/sqlite"
 )
 
@@ -17,7 +17,7 @@ import (
 // unless it is written and read on every path. This happened to banked resets
 // once already on the mobile branch.
 func TestBankedResetsSurviveEveryReadPath(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestBankedResetsSurviveEveryReadPath(t *testing.T) {
 }
 
 func TestBankedResetDetailsSurviveEveryReadPath(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestBankedResetDetailsSurviveEveryReadPath(t *testing.T) {
 
 func TestCorruptBankedResetDetailsDoNotBlockSnapshotReads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestCorruptBankedResetDetailsDoNotBlockSnapshotReads(t *testing.T) {
 // schema 24/25; migrating must add only what is missing.
 func TestBankedResetsMigrationToleratesMobileBranchSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "redline.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestBankedResetsMigrationToleratesMobileBranchSchema(t *testing.T) {
 		}
 	}
 	raw.Close()
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatalf("reopen after mobile-branch schema: %v", err)
 	}

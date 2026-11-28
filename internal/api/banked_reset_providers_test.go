@@ -9,7 +9,7 @@ import (
 
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestBankedResetLookupsSkipOnlyAmbiguousProviderType(t *testing.T) {
@@ -21,7 +21,7 @@ func TestBankedResetLookupsSkipOnlyAmbiguousProviderType(t *testing.T) {
 		{"multiple Codex", 1, 2}, {"multiple both", 2, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 			if err != nil {
 				t.Fatal(err)
 			}

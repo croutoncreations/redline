@@ -14,10 +14,11 @@ import (
 	"github.com/croutoncreations/redline/internal/notification"
 	"github.com/croutoncreations/redline/internal/push"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestRecordedDeliveryWakesRegisteredDevicesWithoutContent(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

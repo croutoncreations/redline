@@ -14,6 +14,7 @@ import (
 	"github.com/croutoncreations/redline/internal/execution"
 	"github.com/croutoncreations/redline/internal/harness"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 	"github.com/croutoncreations/redline/internal/workspace"
 )
 
@@ -305,7 +306,7 @@ func admittedRun(
 	taskType domain.TaskType,
 ) (*store.DB, domain.Run, domain.Task, domain.ExecutionProfile) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

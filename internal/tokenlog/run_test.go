@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 	"github.com/croutoncreations/redline/internal/tokenlog"
 )
 
@@ -38,7 +38,7 @@ func TestRunUsageRecorderPersistsOwnedRunExactlyOnce(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"type":"result","usage":{"input_tokens":12,"output_tokens":3}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

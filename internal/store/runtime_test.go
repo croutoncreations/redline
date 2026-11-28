@@ -7,11 +7,12 @@ import (
 
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestRuntimeConnectionAndAgentContextRoundTrip(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(t.TempDir() + "/redline.db")
+	db, err := storetest.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestRuntimeConnectionAndAgentContextRoundTrip(t *testing.T) {
 
 func TestRuntimeConnectionValidationRejectsUnreachableGatewayDefinition(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(t.TempDir() + "/redline.db")
+	db, err := storetest.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestRuntimeConnectionValidationRejectsUnreachableGatewayDefinition(t *testi
 // surfaces at dispatch time.
 func TestRuntimeConnectionValidationRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(t.TempDir() + "/redline.db")
+	db, err := storetest.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestRuntimeConnectionValidationRejectsInvalidInputs(t *testing.T) {
 
 func TestRuntimeConnectionAndAgentContextUpdateAndDelete(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(t.TempDir() + "/redline.db")
+	db, err := storetest.Open(t.TempDir() + "/redline.db")
 	if err != nil {
 		t.Fatal(err)
 	}

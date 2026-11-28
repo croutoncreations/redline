@@ -11,6 +11,7 @@ import (
 	"github.com/croutoncreations/redline/internal/config"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestBankedResetHorizon(t *testing.T) {
@@ -35,7 +36,7 @@ func TestBankedResetHorizon(t *testing.T) {
 		{"action due", "redeem", "claude", time.Hour, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "test.db"))
 			if err != nil {
 				t.Fatal(err)
 			}

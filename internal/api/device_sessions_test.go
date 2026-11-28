@@ -16,11 +16,11 @@ import (
 	"github.com/croutoncreations/redline/internal/api"
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func TestPairedDeviceCreatesTaskAndStartsRun(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestDeviceSessionPermissionsAndRevocation(t *testing.T) {
 	for _, allow := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "redemption enabled"}[allow], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "redline.db")
-			db, err := store.Open(path)
+			db, err := storetest.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}

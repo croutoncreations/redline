@@ -11,7 +11,7 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/resetreminder"
-	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 type resetNotifier struct {
@@ -29,7 +29,7 @@ func (n *resetNotifier) Notify(_ context.Context, e domain.NotificationEvent) er
 }
 
 func TestBankedResetRemindersSkipsMissedLeads(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestBankedResetRemindersSkipsMissedLeads(t *testing.T) {
 func TestBankedResetRemindersExpiryAction(t *testing.T) {
 	for _, action := range []string{"notify", "off"} {
 		t.Run(action, func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,7 +87,7 @@ func TestBankedResetRemindersExpiryAction(t *testing.T) {
 }
 
 func TestBankedResetRedeemModeRemindersOnlyBeforeAction(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestBankedResetRedeemModeRemindersOnlyBeforeAction(t *testing.T) {
 func TestBankedResetRemindersAggregateFallback(t *testing.T) {
 	for _, itemized := range []bool{false, true} {
 		t.Run(fmt.Sprint(itemized), func(t *testing.T) {
-			db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+			db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -139,7 +139,7 @@ func TestBankedResetRemindersAggregateFallback(t *testing.T) {
 }
 
 func TestBankedResetRemindersDisabledDoesNotClaimNotices(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestBankedResetRemindersDisabledDoesNotClaimNotices(t *testing.T) {
 
 func TestBankedResetRemindersClaimsBeforeNotifyAndSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "notices.db")
-	db, err := store.Open(path)
+	db, err := storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestBankedResetRemindersClaimsBeforeNotifyAndSurvivesRestart(t *testing.T) 
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = store.Open(path)
+	db, err = storetest.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestBankedResetRemindersClaimsBeforeNotifyAndSurvivesRestart(t *testing.T) 
 }
 
 func TestBankedResetRemindersIgnoresUnknownAndExpiredDeadlines(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestBankedResetRemindersIgnoresUnknownAndExpiredDeadlines(t *testing.T) {
 }
 
 func TestBankedResetRemindersDeadlineAndPayload(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notices.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "notices.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

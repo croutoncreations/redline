@@ -18,6 +18,7 @@ import (
 	"github.com/croutoncreations/redline/internal/nativeusage"
 	"github.com/croutoncreations/redline/internal/resetreminder"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 	"github.com/croutoncreations/redline/internal/usage"
 )
 
@@ -42,7 +43,7 @@ func (n *redemptionNotifier) Notify(_ context.Context, e domain.NotificationEven
 
 func redemptionServer(t *testing.T, provider string) (*Server, *store.DB, decision.UsageSnapshot) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

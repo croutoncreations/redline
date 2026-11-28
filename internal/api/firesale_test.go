@@ -17,13 +17,14 @@ import (
 	"github.com/croutoncreations/redline/internal/decision"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/store"
+	"github.com/croutoncreations/redline/internal/store/storetest"
 )
 
 func newFiresaleServer(t *testing.T, firesale bool, executor api.Executor) (*api.Server, *httptest.Server, *store.DB) {
 	t.Helper()
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, codexPayload) }))
 	t.Cleanup(usage.Close)
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +296,7 @@ func TestFiresaleCompletionTriggersPromptRedispatch(t *testing.T) {
 }
 
 func TestModelPoolFiresaleUnlocksTierWithoutProviderOverrides(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +363,7 @@ func (b *firesaleRevisionBarrier) Resolve(ctx context.Context, _ domain.Executio
 func TestFiresaleAdmissionConflictRemainsWait(t *testing.T) {
 	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, codexPayload) }))
 	defer usage.Close()
-	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	db, err := storetest.Open(filepath.Join(t.TempDir(), "redline.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
