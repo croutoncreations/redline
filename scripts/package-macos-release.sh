@@ -122,7 +122,7 @@ create_dmg "${dmg_path}" "${staging_path}"
 if [[ "${sign_identity}" != "-" ]]; then
   codesign --force --sign "${sign_identity}" --timestamp "${dmg_path}"
 fi
-hdiutil verify "${dmg_path}" >/dev/null
+verify_dmg "${dmg_path}"
 
 if [[ -n "${notary_profile}" ]]; then
   notarize "${dmg_path}" dmg

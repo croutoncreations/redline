@@ -108,3 +108,33 @@ create_dmg() {
   printf '%s\n' "${output}" >&2
   return 1
 }
+
+# verify_dmg wraps hdiutil verify, retrying the transient "Resource temporarily
+# unavailable" (EAGAIN) failure. Right after hdiutil create (and codesign), the
+# new image can still be held briefly, and verify then reports that it can't
+# recognize the file as a disk image. That flake failed CI's macos job several
+# times in Nov 2026, including inside merge-queue runs.
+#
+# As with create_dmg, the match is deliberately narrow: only that exact errno
+# text retries. A corrupt image or a bad checksum fails immediately.
+verify_dmg() {
+  local dmg_path="$1"
+  local attempt
+  local output
+
+  for attempt in 1 2 3; do
+    if output="$(hdiutil verify "${dmg_path}" 2>&1)"; then
+      return 0
+    fi
+    if ! printf '%s\n' "${output}" | grep -q 'Resource temporarily unavailable'; then
+      printf '%s\n' "${output}" >&2
+      return 1
+    fi
+    printf 'hdiutil verify hit a temporarily unavailable resource; retrying (attempt %d)\n' "${attempt}" >&2
+    sleep $((attempt * 2))
+  done
+
+  printf 'hdiutil verify still reported a temporarily unavailable resource after retries\n' >&2
+  printf '%s\n' "${output}" >&2
+  return 1
+}
