@@ -147,9 +147,21 @@ func TestQueueGateHumanEnqueue(t *testing.T) {
 	if err := QueueGate(jon()); err != nil {
 		t.Fatalf("Jon's enqueue blocked by Green Lane rules: %v", err)
 	}
+	// Denied-path PRs are exactly the ones only Jon merges, so his own
+	// enqueue of one must pass (this blocked #295 and #296 on Nov 28).
+	denied := jon()
+	denied.LandedFiles, denied.LandedFilesKnown = []string{".github/workflows/green-lane-live.yml", "internal/greenlane/queue_gate.go"}, false
+	if err := QueueGate(denied); err != nil {
+		t.Fatalf("Jon's enqueue of a denied-path PR blocked: %v", err)
+	}
+	// The App's enqueue of the same merge is still refused.
+	app := cloneGate(gateInput())
+	app.LandedFiles = append(app.LandedFiles, ".github/workflows/green-lane-live.yml")
+	if QueueGate(app) == nil {
+		t.Fatal("App enqueue of a denied-path merge accepted")
+	}
 	for name, edit := range map[string]func(*QueueGateInput){
 		"main drift":           func(in *QueueGateInput) { in.LandingDrift = []string{".github/workflows/ci.yml"} },
-		"sensitive merge":      func(in *QueueGateInput) { in.LandedFiles = []string{".github/workflows/ci.yml"} },
 		"wrong group":          func(in *QueueGateInput) { in.EntryHead = gateHead },
 		"bot with Jon's id":    func(in *QueueGateInput) { in.EnqueuerType = "Bot" },
 		"other user":           func(in *QueueGateInput) { in.EnqueuerID = 1 },
