@@ -3,6 +3,7 @@ package apiauth_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,13 +33,53 @@ func TestEnsureTokenCreatesAndReusesProtectedCredential(t *testing.T) {
 }
 
 func TestReadTokenRejectsBroadPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
 	configPath := filepath.Join(t.TempDir(), "redline.yaml")
 	path := apiauth.TokenPath(configPath)
 	if err := os.WriteFile(path, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apiauth.ReadToken(configPath); err == nil {
+	// WriteFile applies the umask; set the mode explicitly so the test does
+	// not depend on it.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := apiauth.ReadToken(configPath)
+	if err == nil {
 		t.Fatal("expected insecure permission error")
+	}
+	for _, want := range []string{path, "0644", "chmod 600 '" + path + "'"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestReadTokenPermissionHintQuotesShellMetacharacters(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "it's $(touch pwned)")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "redline.yaml")
+	path := apiauth.TokenPath(configPath)
+	if err := os.WriteFile(path, []byte("abcdefghijklmnopqrstuvwxyz1234567890\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := apiauth.ReadToken(configPath)
+	if err == nil {
+		t.Fatal("expected insecure permission error")
+	}
+	want := "chmod 600 '" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
 	}
 }
 
