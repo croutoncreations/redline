@@ -6,10 +6,10 @@ running the test suites, and packaging the macOS app. End-user installation is c
 
 ## Prerequisites
 
-- Go with automatic toolchain downloads enabled (`go.mod` declares the required version, and Go
-  downloads a compatible toolchain when the installed one is too old)
+- Go 1.21 or later with automatic toolchain downloads enabled (`go.mod` declares the required
+  version, and Go downloads a compatible toolchain when the installed one is too old)
 - Node.js 20 or later and npm (dashboard tests only)
-- Xcode command-line tools with a recent Swift toolchain (macOS app only)
+- Xcode 16 or later (Swift 6.0+; `macos/Package.swift` requires it), for the macOS app only
 - Network access on the first run so Go, npm, Playwright, and SwiftPM can fetch pinned dependencies
 
 Building the service and running its tests do not require provider credentials or spend provider
