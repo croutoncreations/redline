@@ -233,11 +233,15 @@ func chooseDirect(trustedHosts []string, options Options, hasRelay bool) (host s
 	}
 	if options.Host != "" {
 		wanted := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(options.Host), "."))
+		_, wantedPort := splitHostPort(wanted)
+		if wantedPort < 0 || wantedPort > 65535 {
+			return "", 0, "", &CallerError{Err: errors.New("pairing host port must be between 1 and 65535")}
+		}
 		trustedHost, trustedPort, ok := trusted(trustedHosts, wanted)
 		if !ok {
 			return "", 0, "", &CallerError{Err: errors.New("host " + strconv.Quote(wanted) + " is not listed in api.trusted_hosts")}
 		}
-		return trustedHost, portOr(trustedPort, port), "", nil
+		return trustedHost, portOr(trustedPort, portOr(wantedPort, port)), "", nil
 	}
 	if options.DetectHost != nil {
 		detected, detectErr := options.DetectHost()

@@ -37,6 +37,19 @@ func TestPlanPortErrorDocumentsZeroAsTheDefault(t *testing.T) {
 	}
 }
 
+func TestPlanUsesPortFromExplicitHost(t *testing.T) {
+	plan, err := PlanRoutes([]string{"mac.example.ts.net"}, config.ResolvedRelay{
+		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeOff},
+		Readiness:         config.RelayReadinessOff,
+	}, Options{Host: "mac.example.ts.net:8443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Endpoint != "mac.example.ts.net:8443" {
+		t.Fatalf("endpoint = %q, want mac.example.ts.net:8443", plan.Endpoint)
+	}
+}
+
 func TestPlanRefusesRelayOnlyWhenRuntimeIsUnavailable(t *testing.T) {
 	runtime := config.ResolvedRelay{
 		RelayManagedState: config.RelayManagedState{Mode: config.RelayModeHosted, URL: config.DefaultHostedRelayURL, SessionID: "managed-session-abcdefghij"},
