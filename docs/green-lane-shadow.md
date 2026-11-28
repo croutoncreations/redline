@@ -269,7 +269,11 @@ Owner setup, in this order:
    ("up to date") setting can stay as it is.
 3. `gh variable set GREEN_LANE_MERGE_QUEUE -R croutoncreations/redline --body true`.
 
-To leave queue mode, delete the variable first, then remove the queue.
+Redline has run in queue mode since Nov 28 2026. The queue is the repository
+ruleset "main merge queue (Green Lane)", and `green-lane-queue` is the ninth
+required check in `main`'s branch protection.
+
+To leave queue mode, delete the variable first, then disable that ruleset.
 
 ### Kill switch
 
