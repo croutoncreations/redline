@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croutoncreations/redline/internal/artifacts"
 	"github.com/croutoncreations/redline/internal/domain"
 	"github.com/croutoncreations/redline/internal/hermes"
 	redprocess "github.com/croutoncreations/redline/internal/process"
@@ -151,7 +152,7 @@ func diagnoseFailure(harnessType string, paths ...string) string {
 	}
 	var evidence strings.Builder
 	for _, path := range paths {
-		data, err := readTail(path, 64*1024)
+		data, err := artifacts.ReadFileTail(path, 64*1024)
 		if err == nil {
 			evidence.Write(data)
 			evidence.WriteByte('\n')
@@ -178,25 +179,6 @@ func diagnoseFailure(harnessType string, paths ...string) string {
 		}
 	}
 	return ""
-}
-
-func readTail(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	offset := max(int64(0), info.Size()-limit)
-	data := make([]byte, info.Size()-offset)
-	_, err = file.ReadAt(data, offset)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	return data, nil
 }
 
 func (a Adapter) runHermesJob(
