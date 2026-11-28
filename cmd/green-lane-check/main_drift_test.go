@@ -30,10 +30,10 @@ func driftClient(t *testing.T, mode string) *GitHubClient {
 				n = 300
 			}
 			for i := 0; i < n; i++ {
-				files = append(files, map[string]string{"filename": fmt.Sprintf("f%d.go", i)})
+				files = append(files, map[string]string{"filename": fmt.Sprintf("f%d.go", i), "status": "modified"})
 			}
 			if mode == "rename" {
-				files = []any{map[string]string{"filename": "new.go", "previous_filename": "internal/apiauth/old.go"}}
+				files = []any{map[string]string{"filename": "new.go", "previous_filename": "internal/apiauth/old.go", "status": "renamed"}}
 			}
 			status := "ahead"
 			if mode == "diverged" {

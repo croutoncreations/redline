@@ -255,6 +255,14 @@ test('queue mode: an entry re-queued by hand during the evaluation is left alone
   await runQueue(f);assert.deepEqual(f.queue.dequeues,[],JSON.stringify(later));
  }
 });
+test('queue mode: a re-check error on one queued PR removes it and the sweep carries on',async()=>{
+ const f=queueFixture();f.prs=[1,2,3];f.queue.inQueue=n=>n<=2;const run=f.run;
+ f.run=(p,a,o)=>{if(o.env.PR_NUMBER==='1')throw new Error('evaluator crashed');return run(p,a,o)};
+ const inner=f.result;f.result=n=>n===2?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+ const r=await runQueue(f);
+ assert.deepEqual(f.queue.dequeues,['PR_1','PR_2']);assert.match(r.dequeued[0].reason,/re-check failed: evaluator crashed/);
+ assert.equal(f.queue.enqueues.length,1,'the enqueue pass still runs');
+});
 test('queue mode: GitHub reporting a queued PR as not mergeable does not dequeue it',async()=>{
  const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;
  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'PR State',pass:false,message:'PR mergeability is unknown or conflicted'},{pass:true}]}:inner(n);

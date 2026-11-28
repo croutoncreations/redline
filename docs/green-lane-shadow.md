@@ -225,12 +225,17 @@ GitHub's merge queue. Then:
   - `main`, as the PR lands on it, changed no denied path since the PR's base
     (Main Drift on the exact landing commit), and the merge commit itself
     touches no denied path;
-  - for any PR not queued by Jon by hand: no hold label, the full Green Lane
-    evaluation of the head passes every rule, and the merge commit changes
-    exactly the evaluated PR's files.
+  - the PR was queued by Jon by hand (his user id) or by the Green Lane Merge
+    App, and nobody else. The App audits repository writers before it
+    enqueues, so this keeps the single-owner rule for queued PRs too;
+  - for the App's entries: no hold label (re-read at the end of the gate),
+    the full Green Lane evaluation of the head passes every rule, and the
+    merge commit makes the same file changes as the evaluated head, with the
+    same content for every file `main` hasn't also changed.
 
   A PR Jon queued himself gets only the path and binding checks: his enqueue
-  is the authorization. The remaining window is the few seconds between the
+  is the authorization, and the gate doesn't read the PR's review evidence for
+  it. The remaining window is the few seconds between the
   gate's verdict and the queue's merge.
 - **The worker also cleans up early.** Every run (hourly at :47, and after
   each successful same-repository `pull_request` CI run; not after

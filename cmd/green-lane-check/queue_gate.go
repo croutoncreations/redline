@@ -12,8 +12,11 @@ import (
 )
 
 // GitHub user IDs whose own hand-enqueue is the authorization (jfox85).
-// Every other enqueuer, Green Lane's App included, must pass every rule.
 var humanEnqueuerIDs = []int64{441017}
+
+// The Green Lane Merge App's bot login, in both forms GraphQL uses. Its
+// enqueues must pass every rule; any other enqueuer is rejected.
+var greenLaneBots = []string{"green-lane-merge", "green-lane-merge[bot]"}
 
 var holdLabels = []string{"green-lane-hold", "maintenance:skip", "do-not-touch"}
 
@@ -53,7 +56,7 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 	}
 	mg := payload.MergeGroup
 	in := greenlane.QueueGateInput{BaseSHA: mg.BaseSHA, GroupHeadSHA: mg.HeadSHA, HeadRef: mg.HeadRef,
-		HumanEnqueuerIDs: humanEnqueuerIDs, HoldLabels: holdLabels, DeniedPaths: config.DeniedPaths}
+		HumanEnqueuerIDs: humanEnqueuerIDs, GreenLaneBots: greenLaneBots, HoldLabels: holdLabels, DeniedPaths: config.DeniedPaths}
 	n, ok := greenlane.QueueRefPR(mg.HeadRef)
 	if !ok || !fullSHA(mg.BaseSHA) || !fullSHA(mg.HeadSHA) {
 		return in, fmt.Errorf("unexpected merge_group payload (base_sha %q, head_sha %q, head_ref %q)", mg.BaseSHA, mg.HeadSHA, mg.HeadRef)
@@ -65,16 +68,22 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 		return in, err
 	}
 	in.PRHead, in.EntryHead, in.EntryBase, in.Queue = q.head, q.entryHead, q.entryBase, q.config
-	in.EnqueuerType, in.EnqueuerID, in.Labels = q.enqueuerType, q.enqueuerID, q.labels
+	in.EnqueuerType, in.EnqueuerLogin, in.EnqueuerID, in.Labels = q.enqueuerType, q.enqueuerLogin, q.enqueuerID, q.labels
 	if in.GroupParent, err = c.parentsOf(ctx, mg.HeadSHA); err != nil {
 		return in, err
 	}
 	if q.entryHead != mg.HeadSHA || q.entryBase != mg.BaseSHA {
 		return in, nil // QueueGate rejects a group that isn't this entry's
 	}
-	// What the merge commit changes on the base: compared with the PR's own
-	// file list after evaluation, so what lands is what was evaluated.
-	in.LandedFiles, in.LandedFilesKnown = c.changedFiles(ctx, mg.BaseSHA, mg.HeadSHA)
+	// What the merge commit changes on the base, file by file with blobs.
+	landed, landedKnown := c.compareFiles(ctx, mg.BaseSHA, mg.HeadSHA)
+	in.Landed, in.LandedFilesKnown = landed, landedKnown
+	for _, f := range landed {
+		in.LandedFiles = append(in.LandedFiles, f.Path)
+		if f.Previous != "" {
+			in.LandedFiles = append(in.LandedFiles, f.Previous)
+		}
+	}
 
 	// Main Drift against the exact commit the PR lands on.
 	mergeBase, err := c.mergeBaseOf(ctx, mg.BaseSHA, q.head)
@@ -82,17 +91,27 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 		return in, err
 	}
 	in.LandingDrift, in.LandingDriftKnown = c.changedFiles(ctx, mergeBase, mg.BaseSHA)
+	// The PR's own changes at its current head, with blobs, so the gate can
+	// prove the merge commit lands exactly that content.
+	in.PRChanges, in.PRChangesKnown = c.compareFiles(ctx, mergeBase, q.head)
+
+	// Jon's own enqueue needs only the checks above; an API hiccup in the
+	// full evaluation must not block it. Anyone else other than the App is
+	// rejected by QueueGate without an evaluation.
+	if in.HumanEnqueue() || !in.GreenLaneEnqueue() {
+		return in, nil
+	}
 
 	// Full evaluation of the PR head with the live worker's rules and the
 	// same double read the evaluator uses to catch changes mid-collection.
 	config.RequireAutomatedReview = true
 	config.EnableMergeQueue()
 	c.config = config
-	first, err := c.GetPR(ctx, n)
+	first, err := getPR(c, ctx, n)
 	if err != nil {
 		return in, err
 	}
-	pr, err := c.GetPR(ctx, n)
+	pr, err := getPR(c, ctx, n)
 	if err != nil {
 		return in, err
 	}
@@ -109,16 +128,32 @@ func (c *GitHubClient) queueGateInput(ctx context.Context, config greenlane.Conf
 	// PR as mergeable rather than exempting the whole PR State rule.
 	pr.Mergeable = true
 	result := greenlane.NewEvaluator(config).Evaluate(pr, nil, nil)
-	in.Evaluation, in.PRFiles = &result, pr.Files
+	in.Evaluation = &result
+
+	// Labels come from the queue read, before the evaluation. Re-read the
+	// entry last so a hold label added meanwhile is seen, and confirm the
+	// entry is still the one validated above.
+	again, err := c.queueEntry(ctx, n)
+	if err != nil {
+		return in, err
+	}
+	if again.head != q.head || again.entryHead != q.entryHead || again.entryBase != q.entryBase ||
+		again.enqueuerType != q.enqueuerType || again.enqueuerLogin != q.enqueuerLogin || again.enqueuerID != q.enqueuerID {
+		return in, fmt.Errorf("PR #%d's queue entry changed while the gate was running", n)
+	}
+	in.Labels = again.labels
 	return in, nil
 }
 
+// getPR is the PR evidence collector; a variable so tests can stub it.
+var getPR = (*GitHubClient).GetPR
+
 type queuedPR struct {
-	head, entryHead, entryBase string
-	enqueuerType               string
-	enqueuerID                 int64
-	labels                     []string
-	config                     greenlane.QueueConfig
+	head, entryHead, entryBase  string
+	enqueuerType, enqueuerLogin string
+	enqueuerID                  int64
+	labels                      []string
+	config                      greenlane.QueueConfig
 }
 
 func (c *GitHubClient) queueEntry(ctx context.Context, n int) (queuedPR, error) {
@@ -150,6 +185,7 @@ labels(first:100){totalCount nodes{name}}}}}`
 						BaseCommit *oid `json:"baseCommit"`
 						Enqueuer   *struct {
 							Type       string `json:"__typename"`
+							Login      string `json:"login"`
 							DatabaseID int64  `json:"databaseId"`
 						} `json:"enqueuer"`
 						MergeQueue *struct {
@@ -184,7 +220,7 @@ labels(first:100){totalCount nodes{name}}}}}`
 	}
 	cfg := e.MergeQueue.Configuration
 	out := queuedPR{head: p.HeadRefOid, entryHead: e.HeadCommit.OID, entryBase: e.BaseCommit.OID,
-		enqueuerType: e.Enqueuer.Type, enqueuerID: e.Enqueuer.DatabaseID,
+		enqueuerType: e.Enqueuer.Type, enqueuerLogin: e.Enqueuer.Login, enqueuerID: e.Enqueuer.DatabaseID,
 		config: greenlane.QueueConfig{MergeMethod: cfg.MergeMethod, MergingStrategy: cfg.MergingStrategy, MaxEntriesBuild: cfg.MaxBuild}}
 	for _, l := range p.Labels.Nodes {
 		out.labels = append(out.labels, l.Name)
@@ -195,6 +231,22 @@ labels(first:100){totalCount nodes{name}}}}}`
 // changedFiles lists files changed between two commits (both paths of a
 // rename). 300+ files may be truncated by GitHub and are reported unknown.
 func (c *GitHubClient) changedFiles(ctx context.Context, from, to string) ([]string, bool) {
+	files, ok := c.compareFiles(ctx, from, to)
+	if !ok {
+		return nil, false
+	}
+	var out []string
+	for _, f := range files {
+		out = append(out, f.Path)
+		if f.Previous != "" {
+			out = append(out, f.Previous)
+		}
+	}
+	return out, true
+}
+
+// compareFiles returns each changed file with its status and resulting blob.
+func (c *GitHubClient) compareFiles(ctx context.Context, from, to string) ([]greenlane.FileChange, bool) {
 	data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", c.apiBase, c.owner, c.repo, url.PathEscape(from), url.PathEscape(to)))
 	if err != nil {
 		return nil, false
@@ -204,20 +256,19 @@ func (c *GitHubClient) changedFiles(ctx context.Context, from, to string) ([]str
 		Files  []struct {
 			Filename string `json:"filename"`
 			Previous string `json:"previous_filename"`
+			Status   string `json:"status"`
+			SHA      string `json:"sha"`
 		} `json:"files"`
 	}
 	if json.Unmarshal(data, &r) != nil || (r.Status != "ahead" && r.Status != "identical") || len(r.Files) >= 300 {
 		return nil, false
 	}
-	var files []string
+	var files []greenlane.FileChange
 	for _, f := range r.Files {
-		if strings.TrimSpace(f.Filename) == "" {
+		if strings.TrimSpace(f.Filename) == "" || f.Status == "" {
 			return nil, false
 		}
-		files = append(files, f.Filename)
-		if f.Previous != "" {
-			files = append(files, f.Previous)
-		}
+		files = append(files, greenlane.FileChange{Path: f.Filename, Previous: f.Previous, Status: f.Status, Blob: f.SHA})
 	}
 	return files, true
 }

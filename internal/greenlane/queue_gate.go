@@ -3,7 +3,6 @@ package greenlane
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -38,22 +37,31 @@ type QueueGateInput struct {
 	EntryBase   string   // the queue entry's base commit
 	GroupParent []string // parents of GroupHeadSHA
 	Queue       QueueConfig
-	// The files the group commit changes on BaseSHA (both paths of renames).
+	// What the group commit changes on BaseSHA: paths (both sides of
+	// renames) for the denied-path check, and per-file blobs.
 	LandedFiles      []string
+	Landed           []FileChange
 	LandedFilesKnown bool
-	// Who added the PR to the queue. A hand enqueue by one of
-	// HumanEnqueuerIDs is itself the authorization; anyone else, Green
-	// Lane's App included, must pass every Green Lane rule.
+	// Who added the PR to the queue. Only two enqueuers are accepted: a
+	// person in HumanEnqueuerIDs, whose hand enqueue is the authorization,
+	// or the Green Lane App (a Bot in GreenLaneBots), which audits
+	// repository writers before it enqueues and must pass every rule here.
+	// Anyone else is rejected: a newly added writer could otherwise queue a
+	// PR and pass the rules, which don't re-audit writers.
 	EnqueuerType     string // GraphQL __typename
-	EnqueuerID       int64  // User databaseId
+	EnqueuerLogin    string
+	EnqueuerID       int64 // User databaseId
 	HumanEnqueuerIDs []int64
+	GreenLaneBots    []string
 	Labels           []string
 	HoldLabels       []string
 
-	// The full evaluator run on PRHead (with its file list), and Main Drift
-	// from the PR's merge base to BaseSHA.
+	// The full evaluator run on PRHead, the PR's own changes from its merge
+	// base to PRHead (with blobs), and Main Drift from that merge base to
+	// BaseSHA.
 	Evaluation        *EvaluationResult
-	PRFiles           []PRFile
+	PRChanges         []FileChange
+	PRChangesKnown    bool
 	LandingDrift      []string
 	LandingDriftKnown bool
 	DeniedPaths       []string
@@ -66,11 +74,6 @@ var queueRefPattern = regexp.MustCompile(`^refs/heads/gh-readonly-queue/.+/pr-([
 // would refuse); requiring it here skips such PRs cleanly instead.
 func (c *Config) EnableMergeQueue() {
 	c.MergeQueue = true
-	for _, name := range c.RequiredChecks {
-		if name == QueueGateCheck {
-			return
-		}
-	}
 	if src, ok := c.CheckSources["go"]; ok {
 		sources := map[string]CheckSource{}
 		for k, v := range c.CheckSources {
@@ -78,6 +81,11 @@ func (c *Config) EnableMergeQueue() {
 		}
 		sources[QueueGateCheck] = src
 		c.CheckSources = sources
+	}
+	for _, name := range c.RequiredChecks {
+		if name == QueueGateCheck {
+			return
+		}
 	}
 	c.RequiredChecks = append(append([]string(nil), c.RequiredChecks...), QueueGateCheck)
 }
@@ -131,15 +139,14 @@ func QueueGate(in QueueGateInput) error {
 	if sensitive := SensitiveDrift(in.LandedFiles, in.DeniedPaths); len(sensitive) > 0 {
 		return fmt.Errorf("PR #%d's merge commit changes sensitive paths: %s", in.PRNumber, strings.Join(sensitive, ", "))
 	}
-	if in.EnqueuerType == "" {
+	switch {
+	case in.HumanEnqueue():
+		return nil // queued by hand: only the path and binding guards apply
+	case in.GreenLaneEnqueue():
+	case in.EnqueuerType == "":
 		return fmt.Errorf("could not tell who queued PR #%d", in.PRNumber)
-	}
-	if in.EnqueuerType == "User" {
-		for _, id := range in.HumanEnqueuerIDs {
-			if id > 0 && id == in.EnqueuerID {
-				return nil // queued by hand: only the path guards apply
-			}
-		}
+	default:
+		return fmt.Errorf("PR #%d was queued by %s %q, which is neither Jon nor Green Lane", in.PRNumber, in.EnqueuerType, in.EnqueuerLogin)
 	}
 	for _, l := range in.Labels {
 		for _, h := range in.HoldLabels {
@@ -161,34 +168,72 @@ func QueueGate(in QueueGateInput) error {
 	if len(failed) > 0 {
 		return fmt.Errorf("PR #%d no longer qualifies for Green Lane: %s", in.PRNumber, strings.Join(failed, "; "))
 	}
-	// What lands must be what was evaluated: the group commit changes
-	// exactly the PR's files.
-	if want, got := fileSet(prPaths(in.PRFiles)), fileSet(in.LandedFiles); len(want) == 0 || want != got {
-		return fmt.Errorf("PR #%d's merge commit changes different files from the evaluated PR", in.PRNumber)
+	// What lands must be what was evaluated: the merge commit changes the
+	// same files, the same way, as the PR's current head, and for every file
+	// main hasn't also changed since the PR's base, to the same content. That
+	// catches a queue entry built from an older head. Files both sides
+	// changed are merged by the queue, as for any reviewed PR on a moved main.
+	if !in.PRChangesKnown || len(in.PRChanges) == 0 || !landsEvaluated(in.PRChanges, in.Landed, in.LandingDrift) {
+		return fmt.Errorf("PR #%d's merge commit does not land the evaluated head's changes", in.PRNumber)
 	}
 	return nil
 }
 
-func prPaths(files []PRFile) []string {
-	var out []string
-	for _, f := range files {
-		out = append(out, f.Filename)
-		if f.PreviousFilename != "" {
-			out = append(out, f.PreviousFilename)
+// HumanEnqueue reports whether a listed person queued the PR by hand.
+func (in QueueGateInput) HumanEnqueue() bool {
+	if in.EnqueuerType != "User" {
+		return false
+	}
+	for _, id := range in.HumanEnqueuerIDs {
+		if id > 0 && id == in.EnqueuerID {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
-func fileSet(paths []string) string {
-	seen := map[string]bool{}
-	var out []string
-	for _, p := range paths {
-		if !seen[p] {
-			seen[p] = true
-			out = append(out, p)
+// GreenLaneEnqueue reports whether the Green Lane App queued the PR.
+func (in QueueGateInput) GreenLaneEnqueue() bool {
+	if in.EnqueuerType != "Bot" {
+		return false
+	}
+	for _, login := range in.GreenLaneBots {
+		if login != "" && login == in.EnqueuerLogin {
+			return true
 		}
 	}
-	sort.Strings(out)
-	return strings.Join(out, "\x00")
+	return false
+}
+
+// FileChange is one file in a GitHub compare: path, rename source, status
+// and resulting blob.
+type FileChange struct {
+	Path, Previous, Status, Blob string
+}
+
+func landsEvaluated(pr, landed []FileChange, drift []string) bool {
+	if len(pr) != len(landed) {
+		return false
+	}
+	moved := map[string]bool{}
+	for _, p := range drift {
+		moved[p] = true
+	}
+	got := map[string]FileChange{}
+	for _, f := range landed {
+		if _, dup := got[f.Path]; dup {
+			return false
+		}
+		got[f.Path] = f
+	}
+	for _, want := range pr {
+		f, ok := got[want.Path]
+		if !ok || f.Previous != want.Previous || f.Status != want.Status {
+			return false
+		}
+		if !moved[want.Path] && (want.Previous == "" || !moved[want.Previous]) && f.Blob != want.Blob {
+			return false
+		}
+	}
+	return true
 }

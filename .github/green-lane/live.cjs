@@ -224,18 +224,24 @@ async function live({github, accessAudit, queueClient, context, core, run=execFi
       if (node?.isInMergeQueue !== true) continue;
       // Only PRs this worker queued; a PR Jon queued by hand is his call.
       if (!queuedByGreenLane(node.mergeQueueEntry)) continue;
-      const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
       let reason = null;
-      if (held(pr)) reason = 'hold label';
-      else if (pr.state !== 'open' || pr.draft || pr.head.sha !== node.headRefOid) reason = 'PR state or head changed';
-      else {
-        const result = await evaluate(number, pr.head.sha, pr.base.sha);
-        const failed = (result.rules ?? []).filter(rule => rule.pass !== true || rule.inconclusive);
-        // PR State can fail for queued PRs only because GitHub reports them as
-        // not cleanly mergeable while queued; every other rule must still pass.
-        const blocking = failed.filter(rule => !(rule.name === 'PR State' && /mergeab/i.test(rule.message ?? '')));
-        if (result.pr_number !== number || result.head_sha !== pr.head.sha || !Array.isArray(result.rules) || result.rules.length === 0 || blocking.length)
-          reason = blocking.map(rule => `${rule.name}: ${rule.message}`).join('; ') || 'evaluation did not match the queued PR';
+      // A failure re-checking one entry must not stop the sweep, and an entry
+      // that can't be re-checked is removed (the safe direction).
+      try {
+        const {data:pr} = await github.rest.pulls.get({...repo,pull_number:number});
+        if (held(pr)) reason = 'hold label';
+        else if (pr.state !== 'open' || pr.draft || pr.head.sha !== node.headRefOid) reason = 'PR state or head changed';
+        else {
+          const result = await evaluate(number, pr.head.sha, pr.base.sha);
+          const failed = (result.rules ?? []).filter(rule => rule.pass !== true || rule.inconclusive);
+          // PR State can fail for queued PRs only because GitHub reports them as
+          // not cleanly mergeable while queued; every other rule must still pass.
+          const blocking = failed.filter(rule => !(rule.name === 'PR State' && /mergeab/i.test(rule.message ?? '')));
+          if (result.pr_number !== number || result.head_sha !== pr.head.sha || !Array.isArray(result.rules) || result.rules.length === 0 || blocking.length)
+            reason = blocking.map(rule => `${rule.name}: ${rule.message}`).join('; ') || 'evaluation did not match the queued PR';
+        }
+      } catch (error) {
+        reason = `re-check failed: ${String(error?.message ?? error).slice(0,300)}`;
       }
       if (!reason) continue;
       // The evaluation can take minutes. Jon may have removed and re-queued the
